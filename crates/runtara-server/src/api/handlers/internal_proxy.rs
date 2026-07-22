@@ -201,6 +201,15 @@ pub struct ProxyRequest {
     /// generic `aws_credentials` connection serve any AWS service.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub aws_service: Option<String>,
+    /// Opaque, tenant+connection-bound endpoint reference (a signed token
+    /// minted after the inbound activity that produced it was authenticated).
+    /// When present and valid, it supplies the request's base URL — used for
+    /// providers whose base is per-request (e.g. a Teams conversation's
+    /// serviceUrl) rather than a static connection base. The ref must belong
+    /// to the current tenant and the request's connection, or the request is
+    /// rejected. See [`crate::api::services::endpoint_ref`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endpoint_ref: Option<String>,
     /// Request timeout in milliseconds (default: 30 000)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
@@ -256,6 +265,89 @@ fn apply_aws_service_override(aws_service: Option<&str>, resolved: &mut Resolved
             );
         }
     }
+}
+
+/// Resolve an agent-declared endpoint ref into the request's base URL.
+///
+/// The ref is a signed token binding a validated base URL to a specific
+/// `(tenant, connection)`. This verifies the signature and enforces that the
+/// ref belongs to the current tenant and the request's connection, then pins
+/// `resolved.base_url` to the ref's URL. As defense in depth, when the ref
+/// carries a conversation id it must appear in the request path (the ref for
+/// conversation A cannot be used to POST to conversation B). Any failure is a
+/// hard reject (mapped to 403) — the credential must not egress.
+///
+/// No-op when no ref is supplied. A connection with no static base (e.g.
+/// `teams_bot`) then reaches `pin_url_to_base` with `base_url = None` and is
+/// rejected there (fail-closed): such a connection cannot egress without a ref.
+fn apply_endpoint_ref_override(
+    endpoint_ref: Option<&str>,
+    tenant_id: &str,
+    connection_id: &str,
+    agent_url: &str,
+    resolved: &mut ResolvedConnectionAuth,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    let Some(token) = endpoint_ref else {
+        return Ok(());
+    };
+    let reject = |msg: &str| {
+        tracing::warn!(
+            target: "proxy",
+            connection_id,
+            reason = msg,
+            "proxy.endpoint_ref.rejected"
+        );
+        (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": format!("Endpoint reference rejected: {msg}") })),
+        )
+    };
+
+    let keyring =
+        crate::api::services::endpoint_ref::EndpointRefKeyring::from_env().map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": format!("Endpoint reference key unavailable: {e}") })),
+            )
+        })?;
+    let binding = crate::api::services::endpoint_ref::verify(keyring, token)
+        .map_err(|e| reject(&e.to_string()))?;
+
+    if binding.tenant_id != tenant_id {
+        return Err(reject("tenant mismatch"));
+    }
+    if binding.connection_id != connection_id {
+        return Err(reject("connection mismatch"));
+    }
+
+    // Defense in depth: the ref's conversation must be the one being targeted.
+    if let Some(conversation_id) = binding.conversation_id.as_deref() {
+        let decoded_path = percent_decode_path(agent_url);
+        if !decoded_path.contains(conversation_id) {
+            return Err(reject("conversation id not present in request path"));
+        }
+    }
+
+    resolved.base_url = Some(binding.base_url);
+    Ok(())
+}
+
+/// Percent-decode the path portion of an agent URL for containment checks.
+/// Best-effort: on any parse/decode failure returns the input unchanged (the
+/// caller only uses this for a substring presence check, never for routing).
+fn percent_decode_path(agent_url: &str) -> String {
+    let path = match url::Url::parse(agent_url) {
+        Ok(u) => u.path().to_string(),
+        // Relative path-only agent URL (the Teams agent sends these).
+        Err(_) => agent_url
+            .split(['?', '#'])
+            .next()
+            .unwrap_or(agent_url)
+            .to_string(),
+    };
+    urlencoding::decode(&path)
+        .map(|s| s.into_owned())
+        .unwrap_or(path)
 }
 
 /// Core proxy logic shared between internal and authenticated debug endpoints
@@ -320,6 +412,17 @@ pub async fn execute_proxy_request(
         // Agent-declared AWS service (generic AWS credentials) — see
         // `apply_aws_service_override`.
         apply_aws_service_override(request.aws_service.as_deref(), &mut resolved);
+
+        // Agent-declared endpoint ref (generic per-request base URL binding) —
+        // see `apply_endpoint_ref_override`. Runs before the pin so the ref's
+        // validated URL becomes the pin base.
+        apply_endpoint_ref_override(
+            request.endpoint_ref.as_deref(),
+            tenant_id,
+            connection_id,
+            &request.url,
+            &mut resolved,
+        )?;
 
         // Record analytics off the request path. This can hit Redis and
         // PostgreSQL, and should not delay the upstream call.
@@ -902,5 +1005,173 @@ mod tests {
             resolved.base_url.as_deref(),
             Some("https://api.example.com")
         );
+    }
+
+    // ── Endpoint-ref override ────────────────────────────────────────────
+    use crate::api::services::endpoint_ref::{EndpointBinding, EndpointRefKeyring, sign};
+
+    const CONV_ID: &str = "19:abc@thread.tacv2;messageid=1";
+    const SVC_URL: &str = "https://smba.trafficmanager.net/amer/";
+
+    fn ref_keyring() -> EndpointRefKeyring {
+        EndpointRefKeyring::new("1", b"internal-proxy-test-secret".to_vec())
+    }
+
+    fn teams_binding(tenant: &str, connection: &str) -> EndpointBinding {
+        EndpointBinding {
+            v: EndpointBinding::CURRENT_VERSION,
+            tenant_id: tenant.into(),
+            connection_id: connection.into(),
+            base_url: SVC_URL.into(),
+            conversation_id: Some(CONV_ID.into()),
+            conversation_type: Some("channel".into()),
+            ms_tenant_id: Some("ms-tenant".into()),
+            iat: 1_700_000_000,
+        }
+    }
+
+    /// The Teams agent percent-encodes the conversation id into a relative path.
+    fn teams_agent_url() -> String {
+        format!(
+            "/v3/conversations/{}/activities",
+            urlencoding::encode(CONV_ID)
+        )
+    }
+
+    fn empty_resolved() -> ResolvedConnectionAuth {
+        ResolvedConnectionAuth {
+            base_url: None,
+            aws_signing: None,
+            azure_signing: None,
+            rotated_credentials: None,
+        }
+    }
+
+    fn set_ref_secret() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| unsafe {
+            std::env::set_var("RUNTARA_ENDPOINT_REF_SECRET", "internal-proxy-test-secret");
+        });
+    }
+
+    #[test]
+    fn endpoint_ref_noop_without_ref() {
+        let mut resolved = empty_resolved();
+        apply_endpoint_ref_override(None, "tenant-a", "conn-1", "/v3/x", &mut resolved).unwrap();
+        assert_eq!(resolved.base_url, None);
+    }
+
+    #[test]
+    fn endpoint_ref_pins_base_url_and_then_joins_under_service_url() {
+        set_ref_secret();
+        let token = sign(&ref_keyring(), &teams_binding("tenant-a", "conn-1"));
+        let agent_url = teams_agent_url();
+        let mut resolved = empty_resolved();
+        apply_endpoint_ref_override(
+            Some(&token),
+            "tenant-a",
+            "conn-1",
+            &agent_url,
+            &mut resolved,
+        )
+        .expect("valid ref accepted");
+        assert_eq!(resolved.base_url.as_deref(), Some(SVC_URL));
+
+        // The full pin must place the request UNDER the serviceUrl base path
+        // (/amer/), not replace it, and stay contained there.
+        let pinned = proxy_url::pin_url_to_base(
+            &agent_url,
+            resolved.base_url.as_deref(),
+            true,
+            &proxy_url::PinOptions::strict(),
+        )
+        .expect("relative agent path pins under the service url");
+        assert!(
+            pinned.starts_with("https://smba.trafficmanager.net/amer/v3/conversations/"),
+            "unexpected pinned url: {pinned}"
+        );
+        assert!(pinned.ends_with("/activities"));
+    }
+
+    #[test]
+    fn endpoint_ref_rejects_tenant_mismatch() {
+        set_ref_secret();
+        let token = sign(&ref_keyring(), &teams_binding("tenant-a", "conn-1"));
+        let mut resolved = empty_resolved();
+        let err = apply_endpoint_ref_override(
+            Some(&token),
+            "tenant-B",
+            "conn-1",
+            &teams_agent_url(),
+            &mut resolved,
+        )
+        .expect_err("foreign tenant rejected");
+        assert_eq!(err.0, StatusCode::FORBIDDEN);
+        assert_eq!(resolved.base_url, None);
+    }
+
+    #[test]
+    fn endpoint_ref_rejects_connection_mismatch() {
+        set_ref_secret();
+        let token = sign(&ref_keyring(), &teams_binding("tenant-a", "conn-1"));
+        let mut resolved = empty_resolved();
+        let err = apply_endpoint_ref_override(
+            Some(&token),
+            "tenant-a",
+            "conn-OTHER",
+            &teams_agent_url(),
+            &mut resolved,
+        )
+        .expect_err("foreign connection rejected");
+        assert_eq!(err.0, StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn endpoint_ref_rejects_forged_signature() {
+        set_ref_secret();
+        let forged = EndpointRefKeyring::new("1", b"attacker-secret".to_vec());
+        let token = sign(&forged, &teams_binding("tenant-a", "conn-1"));
+        let mut resolved = empty_resolved();
+        let err = apply_endpoint_ref_override(
+            Some(&token),
+            "tenant-a",
+            "conn-1",
+            &teams_agent_url(),
+            &mut resolved,
+        )
+        .expect_err("forged signature rejected");
+        assert_eq!(err.0, StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn endpoint_ref_rejects_conversation_id_not_in_path() {
+        set_ref_secret();
+        let token = sign(&ref_keyring(), &teams_binding("tenant-a", "conn-1"));
+        let mut resolved = empty_resolved();
+        // A ref for CONV_ID used to POST to a different conversation.
+        let wrong_path = "/v3/conversations/19:zzz@thread.tacv2/activities";
+        let err = apply_endpoint_ref_override(
+            Some(&token),
+            "tenant-a",
+            "conn-1",
+            wrong_path,
+            &mut resolved,
+        )
+        .expect_err("conversation-path mismatch rejected");
+        assert_eq!(err.0, StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn teams_connection_without_ref_fails_closed_at_pin() {
+        // teams_bot resolves base_url = None; with no endpoint ref the pin must
+        // reject (the injected Bearer token cannot egress to an unpinned host).
+        let resolved = empty_resolved();
+        let result = proxy_url::pin_url_to_base(
+            &teams_agent_url(),
+            resolved.base_url.as_deref(),
+            true,
+            &proxy_url::PinOptions::strict(),
+        );
+        assert!(matches!(result, Err(proxy_url::ProxyReject::NoBaseUrl)));
     }
 }

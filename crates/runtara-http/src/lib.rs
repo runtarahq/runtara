@@ -207,6 +207,14 @@ impl RequestBuilder {
             .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case("x-runtara-aws-service"))
             .map(|(_, v)| v.clone());
+        // Opaque, tenant+connection-bound endpoint reference (a signed token).
+        // Lets a connection reach a validated per-request base URL (e.g. a
+        // Teams conversation's serviceUrl) the connection itself did not pin.
+        let endpoint_ref = self
+            .headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("x-runtara-endpoint-ref"))
+            .map(|(_, v)| v.clone());
 
         // Remove X-Runtara-* headers from forwarded headers
         let clean_headers: Vec<(String, String)> = self
@@ -236,6 +244,7 @@ impl RequestBuilder {
             "connection_id": connection_id,
             "ai_provider": ai_provider,
             "aws_service": aws_service,
+            "endpoint_ref": endpoint_ref,
             "timeout_ms": self.timeout.map(|t| t.as_millis() as u64),
         });
 
