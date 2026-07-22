@@ -104,6 +104,26 @@ fn validate_connection_parameters(
                     .to_string(),
             ));
         }
+        // MVP is scoped to the public Microsoft cloud. Government/GCC clouds
+        // use different token bases and Bot Connector serviceUrl hosts and are
+        // not yet supported; reject a non-public authority host explicitly
+        // rather than silently misbehaving.
+        if let Some(host) = get("authority_host") {
+            let lowered = host.to_ascii_lowercase();
+            let is_public = lowered.starts_with("https://login.microsoftonline.com")
+                // Allow a loopback/mock authority for local testing only.
+                || lowered.starts_with("http://127.0.0.1")
+                || lowered.starts_with("http://localhost")
+                || lowered.starts_with("https://127.0.0.1")
+                || lowered.starts_with("https://localhost");
+            if !is_public {
+                return Err(ServiceError::ValidationError(
+                    "Only the public Microsoft cloud is supported for Teams bots. \
+                     Government/GCC authority hosts are not yet supported."
+                        .to_string(),
+                ));
+            }
+        }
     }
     Ok(())
 }

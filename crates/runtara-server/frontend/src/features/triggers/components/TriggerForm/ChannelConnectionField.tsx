@@ -48,8 +48,8 @@ export function ChannelConnectionField({
         </div>
       ) : channelConnections.length === 0 ? (
         <p className="text-sm text-muted-foreground">
-          No channel connections found. Create a Telegram Bot or other messaging
-          connection first.
+          No channel connections found. Create a Telegram, Slack, or Microsoft
+          Teams messaging connection first.
         </p>
       ) : (
         <Select

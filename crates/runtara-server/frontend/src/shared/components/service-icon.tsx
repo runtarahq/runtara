@@ -37,6 +37,8 @@ const SERVICE_ICONS: Record<string, { icon: LucideIcon; gradient: string }> = {
   shopify: { icon: ShoppingCart, gradient: 'from-green-500 to-lime-600' },
   stripe: { icon: CreditCard, gradient: 'from-violet-500 to-indigo-600' },
   slack: { icon: MessageSquare, gradient: 'from-pink-500 to-rose-600' },
+  teams: { icon: MessageSquare, gradient: 'from-indigo-500 to-purple-600' },
+  teams_bot: { icon: MessageSquare, gradient: 'from-indigo-500 to-purple-600' },
   webhook: { icon: Link2, gradient: 'from-cyan-500 to-blue-600' },
 };
 

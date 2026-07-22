@@ -1,0 +1,36 @@
+{
+  "$schema": "https://developer.microsoft.com/en-us/json-schemas/teams/v1.16/MicrosoftTeams.schema.json",
+  "manifestVersion": "1.16",
+  "version": "1.0.0",
+  "id": "REPLACE_WITH_AZURE_BOT_APP_ID",
+  "packageName": "com.example.runtara.teamsbot",
+  "developer": {
+    "name": "Your Company",
+    "websiteUrl": "https://example.com",
+    "privacyUrl": "https://example.com/privacy",
+    "termsOfUseUrl": "https://example.com/terms"
+  },
+  "name": {
+    "short": "Runtara Bot",
+    "full": "Runtara Teams Bot"
+  },
+  "description": {
+    "short": "Runtara workflow bot for Teams.",
+    "full": "Triggers Runtara workflows from Teams messages and posts replies via the Bot Framework Connector."
+  },
+  "icons": {
+    "color": "color.png",
+    "outline": "outline.png"
+  },
+  "accentColor": "#5B5FC7",
+  "bots": [
+    {
+      "botId": "REPLACE_WITH_AZURE_BOT_APP_ID",
+      "scopes": ["personal", "team", "groupChat"],
+      "supportsFiles": false,
+      "isNotificationOnly": false
+    }
+  ],
+  "permissions": ["identity", "messageTeamMembers"],
+  "validDomains": []
+}
