@@ -148,6 +148,7 @@ fn bot_connector_post(
     connection: &RawConnection,
     endpoint_ref: &str,
     body: &Value,
+    timeout_ms: u64,
 ) -> Result<BotConnectorResponse, AgentError> {
     let body_bytes = serde_json::to_vec(body).map_err(|e| {
         AgentError::permanent(
@@ -157,7 +158,7 @@ fn bot_connector_post(
         .with_attr("integration", "TEAMS")
     })?;
 
-    let client = runtara_http::HttpClient::with_timeout(Duration::from_millis(DEFAULT_TIMEOUT_MS));
+    let client = runtara_http::HttpClient::with_timeout(Duration::from_millis(timeout_ms));
     let response = client
         .request("POST", path)
         .header("Content-Type", "application/json; charset=utf-8")
@@ -284,15 +285,7 @@ fn map_bot_connector_error(
         }
     }
 
-    let retry_after_ms = headers
-        .get("retry-after-ms")
-        .and_then(|v| v.parse::<u64>().ok())
-        .or_else(|| {
-            headers
-                .get("retry-after")
-                .and_then(|v| v.parse::<u64>().ok())
-                .map(|s| s * 1000)
-        });
+    let retry_after_ms = parse_retry_after_ms(headers);
 
     // Blocked-target markers: Teams reports an uninstalled/blocked bot as 403
     // with `errorCode: 209` / subCode `MessageWritesBlocked`, in several body
@@ -393,6 +386,14 @@ pub struct SendMessageInput {
     )]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply_to_activity_id: Option<String>,
+
+    #[field(
+        display_name = "Timeout (ms)",
+        description = "Optional per-request timeout in milliseconds for each Bot Connector call. Defaults to 30000; clamped to 1000..=120000.",
+        example = "30000"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Serialize, Deserialize, CapabilityOutput)]
@@ -409,10 +410,17 @@ pub struct SendMessageOutput {
 
     #[field(
         display_name = "Activity ID",
-        description = "The Bot Connector activity id of the sent message (from ResourceResponse.id), when returned"
+        description = "The Bot Connector activity id of the LAST sent activity (from ResourceResponse.id), when returned. See activityIds for all of them."
     )]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activity_id: Option<String>,
+
+    #[field(
+        display_name = "Activity IDs",
+        description = "All Bot Connector activity ids created by this send, in order. Long text is split into multiple activities, so this can hold more than one."
+    )]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub activity_ids: Vec<String>,
 }
 
 #[capability(
@@ -483,15 +491,26 @@ pub fn send_message(input: SendMessageInput) -> Result<SendMessageOutput, AgentE
         .as_ref()
         .map(|card| json!([{ "contentType": ADAPTIVE_CARD_CONTENT_TYPE, "content": card }]));
 
-    // Split only the plain-text case; a card is sent once.
+    // Split the text even when a card is present: a card + long text used to be
+    // sent as one activity and could blow past Teams' ~28KB activity limit. The
+    // card attaches to the FIRST activity; remaining text chunks follow. A
+    // card-only send is a single activity carrying just the attachment.
     let text = input.text.clone().unwrap_or_default();
-    let chunks: Vec<String> = if card_attachment.is_some() || text.trim().is_empty() {
-        vec![text.clone()]
+    let chunks: Vec<String> = if text.trim().is_empty() {
+        vec![String::new()]
     } else {
         split_message(&text, TEXT_CHUNK_CHARS)
     };
 
-    let mut last_activity_id = None;
+    let timeout_ms = clamp_timeout_ms(input.timeout_ms);
+
+    // NOTE: this capability is at-least-once, not exactly-once (idempotent =
+    // false). A network error AFTER the Bot Connector accepted an activity is
+    // classified transient and the step may retry, re-sending that activity —
+    // the caller can see a duplicate. There is no Bot Connector idempotency key
+    // to dedupe on; a workflow needing strict once-only delivery should treat a
+    // transient TEAMS_NETWORK_ERROR as possibly-delivered.
+    let mut activity_ids: Vec<String> = Vec::with_capacity(chunks.len());
     for (i, chunk) in chunks.iter().enumerate() {
         let mut activity = json!({ "type": "message" });
         // Signal that the bot accepts further input, so Teams keeps the
@@ -513,15 +532,28 @@ pub fn send_message(input: SendMessageInput) -> Result<SendMessageOutput, AgentE
             activity["attachments"] = attachments.clone();
         }
 
-        let resp = bot_connector_post(&base_path, connection, &input.target, &activity)?;
-        last_activity_id = resp.activity_id.or(last_activity_id);
+        let resp =
+            bot_connector_post(&base_path, connection, &input.target, &activity, timeout_ms)?;
+        if let Some(id) = resp.activity_id {
+            activity_ids.push(id);
+        }
     }
 
     Ok(SendMessageOutput {
         ok: true,
         conversation_id: input.conversation_id.clone(),
-        activity_id: last_activity_id,
+        activity_id: activity_ids.last().cloned(),
+        activity_ids,
     })
+}
+
+/// Clamp a caller-supplied per-request timeout to a sane range, defaulting to
+/// [`DEFAULT_TIMEOUT_MS`] when unset.
+fn clamp_timeout_ms(requested: Option<u64>) -> u64 {
+    match requested {
+        Some(ms) => ms.clamp(1_000, 120_000),
+        None => DEFAULT_TIMEOUT_MS,
+    }
 }
 
 // ============================================================================
@@ -561,6 +593,34 @@ fn percent_encode_path_segment(segment: &str) -> String {
         }
     }
     out
+}
+
+/// Non-numeric `Retry-After` (HTTP-date form) fallback delay. See
+/// [`parse_retry_after_ms`].
+const RETRY_AFTER_HTTP_DATE_FALLBACK_MS: u64 = 10_000;
+
+/// Parse a Bot Connector retry hint into milliseconds, in preference order:
+/// 1. `retry-after-ms` — millisecond integer (Bot Connector's own header).
+/// 2. `retry-after` as RFC 7231 delta-seconds (the common form).
+/// 3. `retry-after` as an HTTP-date. The guest has no wall clock it can trust
+///    to compute the exact delta, so rather than drop the back-off signal we
+///    return a conservative fixed delay — the goal is to stop hammering, and a
+///    fixed pause achieves that.
+fn parse_retry_after_ms(headers: &HashMap<String, String>) -> Option<u64> {
+    if let Some(ms) = headers
+        .get("retry-after-ms")
+        .and_then(|v| v.trim().parse::<u64>().ok())
+    {
+        return Some(ms);
+    }
+    let raw = headers.get("retry-after")?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    if let Ok(secs) = raw.parse::<u64>() {
+        return Some(secs.saturating_mul(1000));
+    }
+    Some(RETRY_AFTER_HTTP_DATE_FALLBACK_MS)
 }
 
 /// Split `text` into chunks of at most `max_chars` characters, never splitting
@@ -753,7 +813,8 @@ mod tests {
                 "conversation_id",
                 "text",
                 "card",
-                "reply_to_activity_id"
+                "reply_to_activity_id",
+                "timeout_ms"
             ]
         );
     }
@@ -767,6 +828,7 @@ mod tests {
             text: Some("hi".into()),
             card: None,
             reply_to_activity_id: None,
+            timeout_ms: None,
         })
         .expect_err("connection required");
         assert_eq!(err.code, "TEAMS_MISSING_CONNECTION");
@@ -791,6 +853,7 @@ mod tests {
             text: Some("hi".into()),
             card: None,
             reply_to_activity_id: None,
+            timeout_ms: None,
         })
         .expect_err("target required");
         assert_eq!(missing_target.code, "TEAMS_MISSING_TARGET");
@@ -802,6 +865,7 @@ mod tests {
             text: Some("hi".into()),
             card: None,
             reply_to_activity_id: None,
+            timeout_ms: None,
         })
         .expect_err("conversation required");
         assert_eq!(missing_conv.code, "TEAMS_MISSING_CONVERSATION");
@@ -816,6 +880,7 @@ mod tests {
             text: None,
             card: None,
             reply_to_activity_id: None,
+            timeout_ms: None,
         })
         .expect_err("text or card required");
         assert_eq!(err.code, "TEAMS_EMPTY_MESSAGE");
@@ -963,5 +1028,47 @@ mod tests {
         let err = map_bot_connector_error(404, &HashMap::new(), &raw, Some(body));
         assert_eq!(err.code, "TEAMS_MISSING_CONNECTION");
         assert_eq!(err.category, "permanent");
+    }
+
+    #[test]
+    fn retry_after_prefers_ms_then_seconds_then_httpdate() {
+        let mut h = HashMap::new();
+        h.insert("retry-after-ms".to_string(), "1500".to_string());
+        h.insert("retry-after".to_string(), "3".to_string());
+        assert_eq!(parse_retry_after_ms(&h), Some(1500));
+
+        let mut h = HashMap::new();
+        h.insert("retry-after".to_string(), "3".to_string());
+        assert_eq!(parse_retry_after_ms(&h), Some(3000));
+
+        // HTTP-date form: no trustworthy guest clock, fall back to a fixed delay.
+        let mut h = HashMap::new();
+        h.insert(
+            "retry-after".to_string(),
+            "Wed, 21 Oct 2026 07:28:00 GMT".to_string(),
+        );
+        assert_eq!(
+            parse_retry_after_ms(&h),
+            Some(RETRY_AFTER_HTTP_DATE_FALLBACK_MS)
+        );
+
+        assert_eq!(parse_retry_after_ms(&HashMap::new()), None);
+    }
+
+    #[test]
+    fn retry_after_surfaces_on_rate_limit_error() {
+        let mut h = HashMap::new();
+        h.insert("retry-after".to_string(), "5".to_string());
+        let err = map_bot_connector_error(429, &h, b"{}", Some(json!({})));
+        assert_eq!(err.code, "TEAMS_RATE_LIMITED");
+        assert_eq!(err.retry_after_ms, Some(5000));
+    }
+
+    #[test]
+    fn timeout_is_clamped() {
+        assert_eq!(clamp_timeout_ms(None), DEFAULT_TIMEOUT_MS);
+        assert_eq!(clamp_timeout_ms(Some(50)), 1_000); // floor
+        assert_eq!(clamp_timeout_ms(Some(999_999)), 120_000); // ceiling
+        assert_eq!(clamp_timeout_ms(Some(15_000)), 15_000); // in range
     }
 }
