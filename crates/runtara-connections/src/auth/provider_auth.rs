@@ -71,7 +71,7 @@ pub async fn resolve_connection_auth(
     params: &Value,
     headers: &mut HashMap<String, String>,
     events: &crate::events::ConnectionEvents,
-) -> Result<ResolvedConnectionAuth, String> {
+) -> Result<ResolvedConnectionAuth, token_cache::AuthResolutionError> {
     let descriptor = describe_connection_auth(connection_id, integration_id, params, headers);
 
     let mut rotated_credentials = None;

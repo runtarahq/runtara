@@ -15,6 +15,57 @@ pub(crate) const DEFAULT_CLIENT_CREDENTIALS_TTL_SECONDS: i64 = 24 * 60 * 60;
 /// re-hammering the provider under a persistent outage.
 const REFRESH_ERROR_COOLDOWN_SECS: i64 = 5;
 
+/// Classified credential-resolution failure.
+///
+/// `permanent` means the identity provider itself rejected the credentials or
+/// grant (a token-endpoint 4xx other than 429 — `invalid_client`,
+/// `unauthorized_client`, `invalid_grant`, …): retrying cannot succeed until
+/// the connection is reconfigured. Transient covers transport failures and
+/// provider 5xx/429, where a retry is meaningful. The proxy maps this onto its
+/// HTTP contract (401 + `permanent: true` vs 502) so agents stop
+/// durable-retrying permanent auth misconfigurations.
+#[derive(Debug, Clone)]
+pub struct AuthResolutionError {
+    pub permanent: bool,
+    pub message: String,
+}
+
+impl AuthResolutionError {
+    pub fn transient(message: impl Into<String>) -> Self {
+        Self {
+            permanent: false,
+            message: message.into(),
+        }
+    }
+
+    pub fn permanent(message: impl Into<String>) -> Self {
+        Self {
+            permanent: true,
+            message: message.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for AuthResolutionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+/// Legacy interop: plain-string errors (resource discovery, etc.) classify as
+/// transient — only the token-endpoint parser asserts permanence.
+impl From<String> for AuthResolutionError {
+    fn from(message: String) -> Self {
+        Self::transient(message)
+    }
+}
+
+impl From<&str> for AuthResolutionError {
+    fn from(message: &str) -> Self {
+        Self::transient(message)
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct CachedAccessToken {
     pub access_token: String,
@@ -90,7 +141,7 @@ pub(crate) async fn resolve_deferred_auth(
     events: &crate::events::ConnectionEvents,
     connection_id: &str,
     integration: &str,
-) -> Result<ResolvedDeferredAuth, String> {
+) -> Result<ResolvedDeferredAuth, AuthResolutionError> {
     match auth {
         DeferredAuth::OAuth2ClientCredentials {
             cache_key,
@@ -227,10 +278,13 @@ pub(crate) async fn resolve_deferred_auth(
     }
 }
 
-async fn resolve_cached_token<F, Fut>(cache_key: &str, fetch: F) -> Result<String, String>
+async fn resolve_cached_token<F, Fut>(
+    cache_key: &str,
+    fetch: F,
+) -> Result<String, AuthResolutionError>
 where
     F: FnOnce() -> Fut,
-    Fut: std::future::Future<Output = Result<CachedAccessToken, String>>,
+    Fut: std::future::Future<Output = Result<CachedAccessToken, AuthResolutionError>>,
 {
     if let Some(token) = get_fresh_cached_token(cache_key) {
         return Ok(token);
@@ -248,7 +302,7 @@ async fn exchange_client_credentials_token(
     request_body: TokenRequestBody,
     basic_auth: Option<(String, String)>,
     default_ttl_seconds: i64,
-) -> Result<CachedAccessToken, String> {
+) -> Result<CachedAccessToken, AuthResolutionError> {
     let mut request = match request_body {
         TokenRequestBody::Json(body) => client
             .post(token_url)
@@ -269,7 +323,9 @@ async fn exchange_client_credentials_token(
         .timeout(std::time::Duration::from_secs(10))
         .send()
         .await
-        .map_err(|e| format!("Token exchange request failed: {}", e))?;
+        .map_err(|e| {
+            AuthResolutionError::transient(format!("Token exchange request failed: {}", e))
+        })?;
 
     // Client credentials has no refresh token to carry forward — drop it.
     let tr = parse_token_response(response, default_ttl_seconds).await?;
@@ -286,7 +342,7 @@ async fn refresh_oauth_access_token(
     client_secret: &str,
     refresh_token: &str,
     token_endpoint_auth: TokenEndpointAuth,
-) -> Result<TokenResponse, String> {
+) -> Result<TokenResponse, AuthResolutionError> {
     let (basic_auth, body) = token_request_parts(
         token_endpoint_auth,
         vec![
@@ -306,10 +362,9 @@ async fn refresh_oauth_access_token(
         request = request.header("Authorization", header);
     }
 
-    let response = request
-        .send()
-        .await
-        .map_err(|e| format!("OAuth token refresh request failed: {}", e))?;
+    let response = request.send().await.map_err(|e| {
+        AuthResolutionError::transient(format!("OAuth token refresh request failed: {}", e))
+    })?;
 
     parse_token_response(response, DEFAULT_CLIENT_CREDENTIALS_TTL_SECONDS).await
 }
@@ -346,12 +401,11 @@ pub(crate) fn token_request_parts(
 async fn parse_token_response(
     response: reqwest::Response,
     default_ttl_seconds: i64,
-) -> Result<TokenResponse, String> {
+) -> Result<TokenResponse, AuthResolutionError> {
     let status = response.status();
-    let body: Value = response
-        .json()
-        .await
-        .map_err(|e| format!("Failed to parse token response: {}", e))?;
+    let body: Value = response.json().await.map_err(|e| {
+        AuthResolutionError::transient(format!("Failed to parse token response: {}", e))
+    })?;
 
     if !status.is_success() {
         // NEVER echo the full response body upward — it flows through the proxy to the
@@ -360,16 +414,26 @@ async fn parse_token_response(
         tracing::debug!(status = %status, body = %body, "token endpoint returned non-success");
         let code = body["error"].as_str().unwrap_or("unknown_error");
         let desc = body["error_description"].as_str().unwrap_or("");
-        return Err(format!("Token endpoint returned {status}: {code} {desc}")
+        let message = format!("Token endpoint returned {status}: {code} {desc}")
             .trim()
-            .to_string());
+            .to_string();
+        // A token-endpoint 4xx (other than 429) means the provider rejected the
+        // credentials/grant itself — permanent until the connection is fixed.
+        // 429 and 5xx are the provider having a moment — transient.
+        return Err(
+            if status.is_client_error() && status != reqwest::StatusCode::TOO_MANY_REQUESTS {
+                AuthResolutionError::permanent(message)
+            } else {
+                AuthResolutionError::transient(message)
+            },
+        );
     }
 
     let access_token = body["access_token"]
         .as_str()
         .ok_or_else(|| {
             tracing::debug!(body = %body, "token response missing access_token");
-            "Token response missing access_token field".to_string()
+            AuthResolutionError::transient("Token response missing access_token field")
         })?
         .to_string();
 
@@ -447,13 +511,14 @@ fn refresh_lock(cache_key: &str) -> Arc<AsyncMutex<()>> {
 }
 
 // ── Negative cache for recent refresh failures ───────────────────────────────
-static REFRESH_ERRORS: OnceLock<DashMap<String, (DateTime<Utc>, String)>> = OnceLock::new();
+static REFRESH_ERRORS: OnceLock<DashMap<String, (DateTime<Utc>, AuthResolutionError)>> =
+    OnceLock::new();
 
-fn refresh_errors() -> &'static DashMap<String, (DateTime<Utc>, String)> {
+fn refresh_errors() -> &'static DashMap<String, (DateTime<Utc>, AuthResolutionError)> {
     REFRESH_ERRORS.get_or_init(DashMap::new)
 }
 
-fn recent_refresh_error(cache_key: &str) -> Option<String> {
+fn recent_refresh_error(cache_key: &str) -> Option<AuthResolutionError> {
     refresh_errors().get(cache_key).and_then(|entry| {
         let (at, msg) = entry.value();
         if *at + Duration::seconds(REFRESH_ERROR_COOLDOWN_SECS) > Utc::now() {
@@ -464,8 +529,8 @@ fn recent_refresh_error(cache_key: &str) -> Option<String> {
     })
 }
 
-fn record_refresh_error(cache_key: &str, msg: &str) {
-    refresh_errors().insert(cache_key.to_string(), (Utc::now(), msg.to_string()));
+fn record_refresh_error(cache_key: &str, msg: &AuthResolutionError) {
+    refresh_errors().insert(cache_key.to_string(), (Utc::now(), msg.clone()));
 }
 
 fn clear_refresh_error(cache_key: &str) {
@@ -521,7 +586,9 @@ mod tests {
         let second_counter = Arc::clone(&call_count);
         let second = resolve_cached_token("cache-key", move || async move {
             second_counter.fetch_add(1, Ordering::SeqCst);
-            Err("should not be called when cache is fresh".to_string())
+            Err(AuthResolutionError::transient(
+                "should not be called when cache is fresh",
+            ))
         })
         .await
         .unwrap();
@@ -551,6 +618,101 @@ mod tests {
         assert_eq!(resolved.header_value, "Bearer existing-token");
         // Fresh fallback → no refresh happened → nothing to persist.
         assert!(resolved.rotated.is_none());
+    }
+
+    /// One-shot mock token endpoint returning a canned HTTP response.
+    async fn mock_token_endpoint(status_line: &'static str, body: &'static str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = [0u8; 8192];
+                let _ = sock.read(&mut buf).await;
+                let resp = format!(
+                    "HTTP/1.1 {status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+            }
+        });
+        format!("http://{addr}/token")
+    }
+
+    fn client_credentials_auth(cache_key: &str, token_url: String) -> DeferredAuth {
+        DeferredAuth::OAuth2ClientCredentials {
+            cache_key: cache_key.to_string(),
+            token_url,
+            header_name: "Authorization".to_string(),
+            header_value_prefix: Some("Bearer ".to_string()),
+            request_body: TokenRequestBody::FormUrlEncoded(vec![(
+                "grant_type".to_string(),
+                "client_credentials".to_string(),
+            )]),
+            basic_auth: None,
+            default_ttl_seconds: DEFAULT_CLIENT_CREDENTIALS_TTL_SECONDS,
+        }
+    }
+
+    #[tokio::test]
+    async fn token_endpoint_401_is_a_permanent_auth_failure() {
+        // The live-observed case: wrong client secret → invalid_client. Retrying
+        // cannot succeed; the error must carry permanent=true so the proxy maps
+        // it to 401 and agents stop durable-retrying.
+        let url = mock_token_endpoint(
+            "401 Unauthorized",
+            r#"{"error":"invalid_client","error_description":"AADSTS7000215"}"#,
+        )
+        .await;
+        let err = resolve_deferred_auth(
+            &Client::new(),
+            client_credentials_auth("perm-401-cache", url),
+            &None,
+            "conn-p1",
+            "teams_bot",
+        )
+        .await;
+        let Err(err) = err else {
+            panic!("401 mint must fail")
+        };
+        assert!(err.permanent, "token-endpoint 401 is permanent: {err}");
+        assert!(err.message.contains("invalid_client"), "message: {err}");
+    }
+
+    #[tokio::test]
+    async fn token_endpoint_5xx_and_429_are_transient() {
+        let url =
+            mock_token_endpoint("503 Service Unavailable", r#"{"error":"server_error"}"#).await;
+        let err = resolve_deferred_auth(
+            &Client::new(),
+            client_credentials_auth("trans-503-cache", url),
+            &None,
+            "conn-t1",
+            "teams_bot",
+        )
+        .await;
+        let Err(err) = err else {
+            panic!("503 mint must fail")
+        };
+        assert!(!err.permanent, "provider 5xx is transient: {err}");
+
+        let url = mock_token_endpoint(
+            "429 Too Many Requests",
+            r#"{"error":"temporarily_throttled"}"#,
+        )
+        .await;
+        let err = resolve_deferred_auth(
+            &Client::new(),
+            client_credentials_auth("trans-429-cache", url),
+            &None,
+            "conn-t2",
+            "teams_bot",
+        )
+        .await;
+        let Err(err) = err else {
+            panic!("429 mint must fail")
+        };
+        assert!(!err.permanent, "429 is transient: {err}");
     }
 
     #[test]

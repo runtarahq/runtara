@@ -116,9 +116,9 @@ fn parse_parameters<T: serde::de::DeserializeOwned>(
     parameters: &Value,
 ) -> Result<T, ConnectionsError> {
     serde_json::from_value(parameters.clone()).map_err(|error| {
-        ConnectionsError::AuthResolution(format!(
-            "Invalid {integration_id} connection parameters: {error}"
-        ))
+        ConnectionsError::AuthResolution(
+            format!("Invalid {integration_id} connection parameters: {error}").into(),
+        )
     })
 }
 
@@ -172,19 +172,21 @@ async fn response_json(
 ) -> Result<Value, ConnectionsError> {
     let status = response.status();
     let bytes = response.bytes().await.map_err(|error| {
-        ConnectionsError::AuthResolution(format!("Failed to read {provider} response: {error}"))
+        ConnectionsError::AuthResolution(
+            format!("Failed to read {provider} response: {error}").into(),
+        )
     })?;
     if !status.is_success() {
         let detail = String::from_utf8_lossy(&bytes);
         let detail: String = detail.chars().take(512).collect();
-        return Err(ConnectionsError::AuthResolution(format!(
-            "{provider} resource discovery failed with HTTP {status}: {detail}"
-        )));
+        return Err(ConnectionsError::AuthResolution(
+            format!("{provider} resource discovery failed with HTTP {status}: {detail}").into(),
+        ));
     }
     serde_json::from_slice(&bytes).map_err(|error| {
-        ConnectionsError::AuthResolution(format!(
-            "{provider} resource discovery returned invalid JSON: {error}"
-        ))
+        ConnectionsError::AuthResolution(
+            format!("{provider} resource discovery returned invalid JSON: {error}").into(),
+        )
     })
 }
 
@@ -231,7 +233,7 @@ async fn resolve_openai_models(
         builder = builder.header("OpenAI-Organization", organization_id);
     }
     let response = builder.send().await.map_err(|error| {
-        ConnectionsError::AuthResolution(format!("OpenAI model discovery failed: {error}"))
+        ConnectionsError::AuthResolution(format!("OpenAI model discovery failed: {error}").into())
     })?;
     let body = response_json(response, "OpenAI").await?;
     let mut models: Vec<&Value> = body
@@ -328,7 +330,7 @@ async fn signed_aws_json(
         builder = builder.header(name, value);
     }
     let response = builder.send().await.map_err(|error| {
-        ConnectionsError::AuthResolution(format!("AWS resource discovery failed: {error}"))
+        ConnectionsError::AuthResolution(format!("AWS resource discovery failed: {error}").into())
     })?;
     response_json(response, "AWS").await
 }

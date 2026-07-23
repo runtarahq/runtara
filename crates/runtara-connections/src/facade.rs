@@ -391,8 +391,10 @@ impl ConnectionsFacade {
         Ok(resolved)
     }
 
-    /// If the auth-resolution error carries an OAuth error code the provider's
-    /// descriptor flags as terminal (e.g. `invalid_grant`), flip the connection to
+    /// If the auth-resolution error is terminal — an OAuth error code the
+    /// provider's descriptor flags as reauth-worthy (e.g. `invalid_grant`), or a
+    /// PERMANENT credential failure on a client-credentials connection (wrong
+    /// secret → token-endpoint 4xx) — flip the connection to
     /// `REQUIRES_RECONNECTION`. Best-effort: a failed status write is logged, not
     /// propagated (the original auth error is what the caller sees).
     async fn maybe_flip_needs_reauth(
@@ -400,13 +402,23 @@ impl ConnectionsFacade {
         connection_id: &str,
         tenant_id: &str,
         integration_id: &str,
-        error: &str,
+        error: &crate::auth::token_cache::AuthResolutionError,
     ) {
-        let codes = runtara_agents::registry::find_connection_type(integration_id)
+        let meta = runtara_agents::registry::find_connection_type(integration_id);
+        let codes = meta
             .and_then(|meta| meta.oauth_config)
             .map(|cfg| cfg.reauth_on_error_codes)
             .unwrap_or(&[]);
-        if !is_reauth_error(error, codes) {
+        // Client-credentials types declare no oauth_config/reauth codes; for
+        // them, permanence of the mint failure IS the terminal signal.
+        let client_credentials_permanent = error.permanent
+            && meta.is_some_and(|m| {
+                matches!(
+                    m.auth_type,
+                    Some(runtara_dsl::agent_meta::ConnectionAuthType::Oauth2ClientCredentials)
+                )
+            });
+        if !client_credentials_permanent && !is_reauth_error(&error.message, codes) {
             return;
         }
         match self

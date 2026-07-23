@@ -213,11 +213,76 @@ fn map_bot_connector_error(
         .and_then(|v| v.pointer("/error/code"))
         .and_then(|v| v.as_str())
         .map(str::to_string);
-    let error_subcode = parsed
+
+    // ── Proxy-plane errors (the request never reached the Bot Connector) ──
+    // The credential proxy reports its own failures with a machine-readable
+    // `code` (plus `permanent` for credential resolution). Classify these
+    // BEFORE any status-based mapping: a permanent auth misconfiguration
+    // (wrong client secret → token-endpoint 401) must not be durable-retried,
+    // and a proxy 404 is a missing CONNECTION, not a missing conversation.
+    let proxy_code = parsed
         .as_ref()
-        .and_then(|v| v.pointer("/error/innerHttpError/statusCode"))
-        .and_then(|v| v.as_i64());
-    let _ = error_subcode;
+        .and_then(|v| v.get("code"))
+        .and_then(|v| v.as_str());
+    match proxy_code {
+        Some("CREDENTIAL_RESOLUTION_FAILED") => {
+            let permanent = parsed
+                .as_ref()
+                .and_then(|v| v.get("permanent"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+            let msg = format!(
+                "Teams credential resolution failed (HTTP {status}): {}",
+                truncate(&body_str, 512)
+            );
+            let err = if permanent {
+                AgentError::permanent("TEAMS_AUTH_ERROR", msg)
+            } else {
+                AgentError::transient("TEAMS_AUTH_UNAVAILABLE", msg)
+            };
+            return err
+                .with_attr("integration", "TEAMS")
+                .with_attr("status_code", status.to_string());
+        }
+        Some("CONNECTION_NOT_FOUND") => {
+            return AgentError::permanent(
+                "TEAMS_MISSING_CONNECTION",
+                format!(
+                    "The proxy could not find the Teams connection (HTTP {status}): {}",
+                    truncate(&body_str, 512)
+                ),
+            )
+            .with_attr("integration", "TEAMS")
+            .with_attr("status_code", status.to_string());
+        }
+        _ => {}
+    }
+    // Legacy servers (pre-typed contract) surface credential failures as a
+    // plain 502 string body; classify permanent when the embedded
+    // token-endpoint failure is a non-429 4xx / a terminal OAuth error code.
+    if body_str.contains("Credential resolution failed") {
+        let permanent_marker = [
+            "invalid_client",
+            "unauthorized_client",
+            "invalid_grant",
+            "access_denied",
+        ]
+        .iter()
+        .any(|m| body_str.contains(m))
+            || (body_str.contains("Token endpoint returned 4")
+                && !body_str.contains("Token endpoint returned 429"));
+        if permanent_marker {
+            return AgentError::permanent(
+                "TEAMS_AUTH_ERROR",
+                format!(
+                    "Teams credential resolution failed (HTTP {status}): {}",
+                    truncate(&body_str, 512)
+                ),
+            )
+            .with_attr("integration", "TEAMS")
+            .with_attr("status_code", status.to_string());
+        }
+    }
 
     let retry_after_ms = headers
         .get("retry-after-ms")
@@ -229,14 +294,27 @@ fn map_bot_connector_error(
                 .map(|s| s * 1000)
         });
 
+    // Blocked-target markers: Teams reports an uninstalled/blocked bot as 403
+    // with `errorCode: 209` / subCode `MessageWritesBlocked`, in several body
+    // shapes (top-level numeric errorCode, /error/code string or number).
+    let blocked_target = error_code.as_deref() == Some("MessageWritesBlocked")
+        || error_code.as_deref() == Some("209")
+        || parsed
+            .as_ref()
+            .and_then(|v| v.pointer("/error/code"))
+            .and_then(|v| v.as_i64())
+            == Some(209)
+        || parsed
+            .as_ref()
+            .and_then(|v| v.get("errorCode"))
+            .and_then(|v| v.as_i64())
+            == Some(209)
+        || body_str.contains("MessageWritesBlocked");
+
     // (code, retryable)
     let (code, retryable): (String, bool) = match status {
         401 => ("TEAMS_AUTH_ERROR".into(), false),
-        403 if error_code.as_deref() == Some("MessageWritesBlocked")
-            || body_str.contains("MessageWritesBlocked") =>
-        {
-            ("TEAMS_TARGET_BLOCKED".into(), false)
-        }
+        403 if blocked_target => ("TEAMS_TARGET_BLOCKED".into(), false),
         403 => ("TEAMS_PERMISSION_ERROR".into(), false),
         404 => ("TEAMS_TARGET_NOT_FOUND".into(), false),
         429 => ("TEAMS_RATE_LIMITED".into(), true),
@@ -809,5 +887,81 @@ mod tests {
         let err = map_bot_connector_error(429, &headers, b"{}", Some(json!({})));
         assert_eq!(err.code, "TEAMS_RATE_LIMITED");
         assert_eq!(err.retry_after_ms, Some(3000));
+    }
+
+    #[test]
+    fn maps_blocked_target_numeric_shapes() {
+        // Top-level numeric errorCode: {"errorCode": 209, ...}
+        let body = json!({ "errorCode": 209, "message": "Message writes are blocked" });
+        let raw = serde_json::to_vec(&body).unwrap();
+        let err = map_bot_connector_error(403, &HashMap::new(), &raw, Some(body));
+        assert_eq!(err.code, "TEAMS_TARGET_BLOCKED");
+        assert_eq!(err.category, "permanent");
+
+        // Numeric /error/code: {"error": {"code": 209}}
+        let body = json!({ "error": { "code": 209 } });
+        let raw = serde_json::to_vec(&body).unwrap();
+        let err = map_bot_connector_error(403, &HashMap::new(), &raw, Some(body));
+        assert_eq!(err.code, "TEAMS_TARGET_BLOCKED");
+    }
+
+    #[test]
+    fn proxy_credential_resolution_permanent_is_not_retried() {
+        // The typed proxy contract: permanent credential failure → 401 with
+        // code + permanent:true. Must classify permanent regardless of status.
+        let body = json!({
+            "error": "Credential resolution failed: Auth resolution error: Token endpoint returned 401 Unauthorized: invalid_client AADSTS7000215",
+            "code": "CREDENTIAL_RESOLUTION_FAILED",
+            "permanent": true,
+        });
+        let raw = serde_json::to_vec(&body).unwrap();
+        let err = map_bot_connector_error(401, &HashMap::new(), &raw, Some(body));
+        assert_eq!(err.code, "TEAMS_AUTH_ERROR");
+        assert_eq!(err.category, "permanent");
+    }
+
+    #[test]
+    fn proxy_credential_resolution_transient_stays_retryable() {
+        let body = json!({
+            "error": "Credential resolution failed: Auth resolution error: Token exchange request failed: connect timeout",
+            "code": "CREDENTIAL_RESOLUTION_FAILED",
+            "permanent": false,
+        });
+        let raw = serde_json::to_vec(&body).unwrap();
+        let err = map_bot_connector_error(502, &HashMap::new(), &raw, Some(body));
+        assert_eq!(err.code, "TEAMS_AUTH_UNAVAILABLE");
+        assert_eq!(err.category, "transient");
+    }
+
+    #[test]
+    fn legacy_502_credential_body_with_terminal_oauth_code_is_permanent() {
+        // The EXACT live-observed pre-typed-contract shape: a plain-string
+        // "error" on a 502. Must be classified permanent, not durable-retried.
+        let body = json!({
+            "error": "Credential resolution failed: Auth resolution error: Token endpoint returned 401 Unauthorized: invalid_client AADSTS7000215: Invalid client secret provided.",
+        });
+        let raw = serde_json::to_vec(&body).unwrap();
+        let err = map_bot_connector_error(502, &HashMap::new(), &raw, Some(body));
+        assert_eq!(err.code, "TEAMS_AUTH_ERROR");
+        assert_eq!(err.category, "permanent");
+    }
+
+    #[test]
+    fn plain_upstream_502_remains_transient() {
+        // A genuine Bot Connector 502 (no proxy envelope) must keep retrying.
+        let err = map_bot_connector_error(502, &HashMap::new(), b"{}", Some(json!({})));
+        assert_eq!(err.category, "transient");
+    }
+
+    #[test]
+    fn proxy_connection_not_found_is_a_missing_connection() {
+        let body = json!({
+            "error": "Connection 'abc' not found",
+            "code": "CONNECTION_NOT_FOUND",
+        });
+        let raw = serde_json::to_vec(&body).unwrap();
+        let err = map_bot_connector_error(404, &HashMap::new(), &raw, Some(body));
+        assert_eq!(err.code, "TEAMS_MISSING_CONNECTION");
+        assert_eq!(err.category, "permanent");
     }
 }

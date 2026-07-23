@@ -19,6 +19,7 @@ pub mod util;
 pub use auth::aws_signing::AwsSigningParams;
 pub use auth::azure_signing::AzureSigningParams;
 pub use auth::provider_auth::{ResolvedConnectionAuth, resolve_connection_auth};
+pub use auth::token_cache::AuthResolutionError;
 pub use config::{ConnectionsConfig, ConnectionsState};
 pub use crypto::{
     CipherError, CredentialCipher, ENCRYPTION_KEY_ENV, ENVELOPE_ALG, ENVELOPE_VERSION,

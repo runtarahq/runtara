@@ -267,6 +267,36 @@ fn apply_aws_service_override(aws_service: Option<&str>, resolved: &mut Resolved
     }
 }
 
+/// Map a credential-resolution failure onto the proxy's HTTP error contract.
+///
+/// A PERMANENT failure (the identity provider rejected the credentials/grant —
+/// wrong client secret, dead refresh token) becomes **401** with
+/// `{"code": "CREDENTIAL_RESOLUTION_FAILED", "permanent": true}` so agents
+/// classify it permanent and stop durable-retrying; a transient failure
+/// (transport, provider 5xx/429) keeps the legacy **502**. The `error` string
+/// shape is preserved for compatibility with existing consumers.
+fn map_credential_resolution_error(
+    e: &runtara_connections::ConnectionsError,
+) -> (StatusCode, Json<Value>) {
+    let permanent = matches!(
+        e,
+        runtara_connections::ConnectionsError::AuthResolution(err) if err.permanent
+    );
+    let status = if permanent {
+        StatusCode::UNAUTHORIZED
+    } else {
+        StatusCode::BAD_GATEWAY
+    };
+    (
+        status,
+        Json(json!({
+            "error": format!("Credential resolution failed: {}", e),
+            "code": "CREDENTIAL_RESOLUTION_FAILED",
+            "permanent": permanent,
+        })),
+    )
+}
+
 /// Resolve an agent-declared endpoint ref into the request's base URL.
 ///
 /// The ref is a signed token binding a validated base URL to a specific
@@ -377,7 +407,10 @@ pub async fn execute_proxy_request(
             .ok_or_else(|| {
                 (
                     StatusCode::NOT_FOUND,
-                    Json(json!({"error": format!("Connection '{}' not found", connection_id)})),
+                    Json(json!({
+                        "error": format!("Connection '{}' not found", connection_id),
+                        "code": "CONNECTION_NOT_FOUND",
+                    })),
                 )
             })?;
 
@@ -402,12 +435,7 @@ pub async fn execute_proxy_request(
                 &mut final_headers,
             )
             .await
-            .map_err(|e| {
-                (
-                    StatusCode::BAD_GATEWAY,
-                    Json(json!({"error": format!("Credential resolution failed: {}", e)})),
-                )
-            })?;
+            .map_err(|e| map_credential_resolution_error(&e))?;
 
         // Agent-declared AWS service (generic AWS credentials) — see
         // `apply_aws_service_override`.

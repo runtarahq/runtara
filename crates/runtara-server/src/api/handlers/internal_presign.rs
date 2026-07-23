@@ -86,9 +86,23 @@ pub async fn presign_handler(
         )
         .await
         .map_err(|e| {
+            // Same typed contract as the proxy: permanent credential failures
+            // are 401 + permanent:true so agents don't durable-retry them.
+            let permanent = matches!(
+                &e,
+                runtara_connections::ConnectionsError::AuthResolution(err) if err.permanent
+            );
             (
-                StatusCode::BAD_GATEWAY,
-                Json(json!({"error": format!("Credential resolution failed: {}", e)})),
+                if permanent {
+                    StatusCode::UNAUTHORIZED
+                } else {
+                    StatusCode::BAD_GATEWAY
+                },
+                Json(json!({
+                    "error": format!("Credential resolution failed: {}", e),
+                    "code": "CREDENTIAL_RESOLUTION_FAILED",
+                    "permanent": permanent,
+                })),
             )
         })?;
 

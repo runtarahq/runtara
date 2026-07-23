@@ -20,7 +20,7 @@ pub enum ConnectionsError {
     OAuth(String),
 
     #[error("Auth resolution error: {0}")]
-    AuthResolution(String),
+    AuthResolution(crate::auth::token_cache::AuthResolutionError),
 
     #[error("Internal error: {0}")]
     Internal(String),
