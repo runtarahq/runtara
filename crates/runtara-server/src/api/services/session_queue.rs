@@ -13,6 +13,10 @@ fn meta_key(org_id: &str, session_id: &str) -> String {
     format!("session_meta:{}:{}", org_id, session_id)
 }
 
+fn activity_dedup_key(identity: &str) -> String {
+    format!("channel_activity_dedup:{identity}")
+}
+
 /// Reserve a one-time dedup key for an inbound activity (SET NX EX).
 ///
 /// Returns `true` when the key was newly reserved (process this delivery) and
@@ -25,7 +29,7 @@ pub async fn reserve_activity_dedup(
     identity: &str,
     ttl_secs: i64,
 ) -> bool {
-    let key = format!("channel_activity_dedup:{identity}");
+    let key = activity_dedup_key(identity);
     let set: redis::RedisResult<Option<String>> = redis::cmd("SET")
         .arg(&key)
         .arg("1")
@@ -40,6 +44,18 @@ pub async fn reserve_activity_dedup(
         Ok(None) => false,
         Err(_) => true,
     }
+}
+
+/// Release a previously reserved dedup key so a genuine redelivery can retry.
+///
+/// Called when processing a reserved activity FAILED: with ack-fast the webhook
+/// has already returned 200, but if Teams redelivers for any other reason
+/// (e.g. it never saw our ack) the tombstone would otherwise drop a message we
+/// never actually handled. Best-effort — a lost DEL just falls back to the
+/// natural TTL expiry.
+pub async fn release_activity_dedup(conn: &mut ConnectionManager, identity: &str) {
+    let key = activity_dedup_key(identity);
+    let _: redis::RedisResult<i64> = redis::cmd("DEL").arg(&key).query_async(conn).await;
 }
 
 /// Push an event to the session queue (RPUSH + EXPIRE).

@@ -2321,6 +2321,13 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
                     post(channels::mailgun_webhook::mailgun_webhook),
                 )
                 .with_state(channel_router)
+                // Defense in depth: these public, unauthenticated channel-ingest
+                // routes buffer the whole body (Bytes extractor) before auth, so
+                // cap it. Bot Framework / chat activities are a few KB; the
+                // shared webhook cap is generous enough for mailgun payloads.
+                .layer(DefaultBodyLimit::max(
+                    api::handlers::events::webhook_max_body_bytes(),
+                ))
         } else {
             Router::new()
         };

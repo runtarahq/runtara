@@ -21,7 +21,8 @@
 //! Framework metadata advertises) — the attacker-controlled JWT header `alg`
 //! is never consulted. Rejections map to HTTP 403 per the spec.
 
-use std::time::Instant;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use axum::http::HeaderMap;
 use base64::Engine;
@@ -30,6 +31,7 @@ use dashmap::DashMap;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use serde::Deserialize;
 use serde_json::Value;
+use tokio::sync::Mutex;
 
 /// Teams' Bot Framework channel id, as endorsed on JWKS signing keys.
 pub const TEAMS_CHANNEL_ID: &str = "msteams";
@@ -45,9 +47,22 @@ const DEFAULT_ENTRA_OPENID_URL_TEMPLATE: &str =
 /// Spec: "Industry-standard clock-skew is 5 minutes."
 const CLOCK_SKEW_SECS: u64 = 300;
 /// Keys are stable and cacheable; the spec requires refreshing at least once
-/// every 24 hours. A miss on an unknown `kid` always triggers a refetch, so
-/// key additions propagate immediately.
+/// every 24 hours. A miss on an unknown `kid` still triggers a refetch (so key
+/// additions propagate immediately), but at most once per `JWKS_NEG_CACHE_SECS`
+/// per kid — see the negative cache below.
 const JWKS_REFRESH_SECS: u64 = 6 * 3600;
+/// Hard ceiling on a single OpenID-metadata or JWKS fetch. Without it a hung
+/// Microsoft endpoint would pin an inbound-validation task indefinitely.
+const JWKS_FETCH_TIMEOUT_SECS: u64 = 5;
+/// After a fresh fetch that still lacks a requested `kid`, suppress refetches
+/// for that kid this long. Legitimate key rotation propagates on the first
+/// unknown-kid request; a flood of bogus-kid tokens can no longer hammer the
+/// upstream JWKS endpoint (once per minute per distinct kid at most).
+const JWKS_NEG_CACHE_SECS: u64 = 60;
+/// Cap on the negative-cache map so a flood of random kids cannot grow it
+/// without bound; on overflow the whole map is dropped (correctness-neutral —
+/// entries only rate-limit refetches).
+const JWKS_NEG_CACHE_MAX: usize = 10_000;
 
 /// Where to fetch OpenID metadata from. Injectable so tests (and mock-based
 /// e2e) can point validation at a local mock authority instead of Microsoft.
@@ -110,6 +125,18 @@ struct JwksCacheEntry {
 /// tenant). Process-global; entries refresh after [`JWKS_REFRESH_SECS`] or on
 /// an unknown-`kid` miss.
 static JWKS_CACHES: std::sync::LazyLock<DashMap<String, JwksCacheEntry>> =
+    std::sync::LazyLock::new(DashMap::new);
+
+/// Recently-confirmed-absent `(metadata_url, kid)` pairs → the instant we
+/// confirmed absence. Rate-limits refetches for a kid the upstream keyset does
+/// not contain (see [`JWKS_NEG_CACHE_SECS`]).
+static JWKS_NEG_CACHE: std::sync::LazyLock<DashMap<(String, String), Instant>> =
+    std::sync::LazyLock::new(DashMap::new);
+
+/// Per-metadata-URL fetch locks: a cold cache or unknown kid must trigger at
+/// most ONE upstream fetch even under a burst of concurrent inbound requests
+/// (single-flight). Losers re-check the cache after the winner populates it.
+static JWKS_FETCH_LOCKS: std::sync::LazyLock<DashMap<String, Arc<Mutex<()>>>> =
     std::sync::LazyLock::new(DashMap::new);
 
 /// Which issuer domain a token claims to come from, decided by the token's
@@ -195,6 +222,9 @@ pub async fn validate_teams_request(
 
     let mut validation = Validation::new(Algorithm::RS256);
     validation.leeway = CLOCK_SKEW_SECS;
+    // Enforce `nbf` in addition to the default `exp`: a token minted for a
+    // future window must not be accepted early (replay-ahead defense).
+    validation.validate_nbf = true;
     validation.set_audience(&[ctx.app_id]);
     validation.set_issuer(&[issuer.as_str()]);
 
@@ -220,6 +250,21 @@ pub async fn validate_teams_request(
         }
         (None, TrustDomain::ConnectionTenant) => {}
     }
+
+    // Success path: leave a breadcrumb of WHICH trust domain and issuer proved
+    // the token, so a misrouted/misconfigured tenant is diagnosable without
+    // turning on trace for the whole crate. serviceUrl is logged only as
+    // present/absent (it is not a secret, but keep logs terse).
+    tracing::debug!(
+        target: "teams_auth",
+        issuer = %issuer,
+        trust_domain = match domain {
+            TrustDomain::BotFramework => "botframework",
+            TrustDomain::ConnectionTenant => "connection_tenant",
+        },
+        has_serviceurl_claim = claim_service_url.is_some(),
+        "Teams inbound JWT validated"
+    );
 
     Ok(())
 }
@@ -253,28 +298,55 @@ fn unverified_issuer(token: &str) -> anyhow::Result<String> {
 /// process cache. Fetches go through the hardened egress client (no
 /// redirects, DNS-guarded).
 async fn get_jwk(metadata_url: &str, kid: &str) -> anyhow::Result<JwkKey> {
-    if let Some(entry) = JWKS_CACHES.get(metadata_url)
-        && entry.fetched_at.elapsed().as_secs() < JWKS_REFRESH_SECS
-        && let Some(key) = entry.keys.iter().find(|k| k.kid == kid)
-    {
-        return Ok(key.clone());
+    // 1. Fresh positive cache with the kid present — the common path, lock-free.
+    if let Some(key) = cached_fresh_key(metadata_url, kid) {
+        return Ok(key);
+    }
+    // 2. Recently confirmed absent — refuse without hammering the upstream.
+    if neg_cached(metadata_url, kid) {
+        anyhow::bail!("JWK not found for kid: {kid} (negative-cached)");
     }
 
+    // 3. Single-flight: only one task per metadata URL performs the fetch.
+    let lock = JWKS_FETCH_LOCKS
+        .entry(metadata_url.to_string())
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone();
+    let _guard = lock.lock().await;
+
+    // 4. Re-check after acquiring — the winner may have just populated things.
+    if let Some(key) = cached_fresh_key(metadata_url, kid) {
+        return Ok(key);
+    }
+    if neg_cached(metadata_url, kid) {
+        anyhow::bail!("JWK not found for kid: {kid} (negative-cached)");
+    }
+
+    // 5. Fetch OpenID metadata + JWKS, each bounded by a hard timeout.
     let client = runtara_connections::net::shared_hardened_client();
-    let openid: OpenIdConfig = client
-        .get(metadata_url)
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
-    let jwks: JwksResponse = client
-        .get(&openid.jwks_uri)
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
+    let timeout = Duration::from_secs(JWKS_FETCH_TIMEOUT_SECS);
+    let openid: OpenIdConfig = tokio::time::timeout(timeout, async {
+        client
+            .get(metadata_url)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await
+    })
+    .await
+    .map_err(|_| anyhow::anyhow!("Timed out fetching OpenID metadata"))??;
+    let jwks: JwksResponse = tokio::time::timeout(timeout, async {
+        client
+            .get(&openid.jwks_uri)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await
+    })
+    .await
+    .map_err(|_| anyhow::anyhow!("Timed out fetching JWKS"))??;
 
     let key = jwks.keys.iter().find(|k| k.kid == kid).cloned();
     JWKS_CACHES.insert(
@@ -285,7 +357,43 @@ async fn get_jwk(metadata_url: &str, kid: &str) -> anyhow::Result<JwkKey> {
         },
     );
 
-    key.ok_or_else(|| anyhow::anyhow!("JWK not found for kid: {kid}"))
+    match key {
+        Some(k) => {
+            // A rotation may have re-introduced a kid we'd negatively cached.
+            JWKS_NEG_CACHE.remove(&(metadata_url.to_string(), kid.to_string()));
+            Ok(k)
+        }
+        None => {
+            record_neg_cache(metadata_url, kid);
+            anyhow::bail!("JWK not found for kid: {kid}")
+        }
+    }
+}
+
+/// Return the key for `kid` iff the positive cache for `metadata_url` is fresh
+/// and contains it.
+fn cached_fresh_key(metadata_url: &str, kid: &str) -> Option<JwkKey> {
+    let entry = JWKS_CACHES.get(metadata_url)?;
+    if entry.fetched_at.elapsed().as_secs() >= JWKS_REFRESH_SECS {
+        return None;
+    }
+    entry.keys.iter().find(|k| k.kid == kid).cloned()
+}
+
+/// Whether `(metadata_url, kid)` was confirmed absent within the negative TTL.
+fn neg_cached(metadata_url: &str, kid: &str) -> bool {
+    JWKS_NEG_CACHE
+        .get(&(metadata_url.to_string(), kid.to_string()))
+        .map(|at| at.elapsed().as_secs() < JWKS_NEG_CACHE_SECS)
+        .unwrap_or(false)
+}
+
+/// Record `(metadata_url, kid)` as absent, bounding the map size.
+fn record_neg_cache(metadata_url: &str, kid: &str) {
+    if JWKS_NEG_CACHE.len() >= JWKS_NEG_CACHE_MAX {
+        JWKS_NEG_CACHE.clear();
+    }
+    JWKS_NEG_CACHE.insert((metadata_url.to_string(), kid.to_string()), Instant::now());
 }
 
 #[cfg(test)]
@@ -676,5 +784,56 @@ sup34c5zDvmwEupkUwyybA==
         )
         .await;
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn neg_cache_rate_limits_unknown_kid() {
+        // Unique url/kid so the process-global maps can't collide with siblings.
+        let url = "https://neg-cache-test.example/openid";
+        let kid = "kid-does-not-exist-xyz";
+        assert!(!neg_cached(url, kid), "fresh pair must not be neg-cached");
+        record_neg_cache(url, kid);
+        assert!(neg_cached(url, kid), "recorded pair must be neg-cached");
+        // A different kid on the same url is independent.
+        assert!(!neg_cached(url, "some-other-kid"));
+    }
+
+    #[test]
+    fn cached_fresh_key_respects_refresh_window() {
+        let url = "https://fresh-key-test.example/openid";
+        let kid = "fresh-kid";
+        // Insert a stale entry: it must NOT be treated as a hit.
+        JWKS_CACHES.insert(
+            url.to_string(),
+            JwksCacheEntry {
+                keys: vec![JwkKey {
+                    kid: kid.to_string(),
+                    n: TEST_RSA_N.to_string(),
+                    e: TEST_RSA_E.to_string(),
+                    endorsements: None,
+                }],
+                fetched_at: Instant::now() - Duration::from_secs(JWKS_REFRESH_SECS + 1),
+            },
+        );
+        assert!(
+            cached_fresh_key(url, kid).is_none(),
+            "stale cache is a miss"
+        );
+
+        // Fresh entry with the kid present is a hit; an absent kid is a miss.
+        JWKS_CACHES.insert(
+            url.to_string(),
+            JwksCacheEntry {
+                keys: vec![JwkKey {
+                    kid: kid.to_string(),
+                    n: TEST_RSA_N.to_string(),
+                    e: TEST_RSA_E.to_string(),
+                    endorsements: None,
+                }],
+                fetched_at: Instant::now(),
+            },
+        );
+        assert!(cached_fresh_key(url, kid).is_some());
+        assert!(cached_fresh_key(url, "absent-kid").is_none());
     }
 }

@@ -142,68 +142,106 @@ async fn handle_message_activity(
         return StatusCode::OK.into_response();
     }
 
-    // Deduplicate at-least-once redeliveries by activity id. Teams retries the
-    // webhook if processing exceeds ~15s; a genuine redelivery within the Bot
-    // Framework token lifetime would otherwise start a second session.
-    let activity_id = payload.get("id").and_then(|v| v.as_str());
-    if let Some(activity_id) = activity_id
-        && !router.reserve_activity(connection_id, activity_id).await
-    {
-        debug!(
-            connection_id = %connection_id,
-            activity_id = %activity_id,
-            "Dropping duplicate Teams activity"
-        );
-        return StatusCode::OK.into_response();
-    }
-
-    // The serviceUrl is stored only now: after full JWT validation, which
-    // includes the serviceurl-claim cross-check where the token carries one.
-    if let Some(svc_url) = service_url {
-        router.set_teams_service_url(conversation_id, svc_url);
-    }
-
-    // Strip bot mentions from text (Teams includes <at>BotName</at> in text).
-    let clean_text = strip_teams_mentions(text);
-    let clean_text = clean_text.trim();
+    // Strip @mentions using the activity's `entities` (exact markup), with the
+    // `<at>…</at>` scanner as a fallback. Done before the ack so a mention-only
+    // message is acknowledged without spinning up any work.
+    let clean_text = strip_teams_mentions_with_entities(text, payload);
+    let clean_text = clean_text.trim().to_string();
     if clean_text.is_empty() {
         return StatusCode::OK.into_response();
     }
 
+    let activity_id = payload.get("id").and_then(|v| v.as_str());
     let sender_id = from_id.unwrap_or(conversation_id).to_string();
 
-    // Build the curated, credential-free reply target (an opaque signed
-    // endpoint ref + conversation identifiers) for the workflow's data.target.
-    let target = service_url.and_then(|svc_url| {
-        build_conversation_target(connection_id, conversation_id, svc_url, payload)
+    // Ack-fast: Teams retries the webhook if it does not receive a 2xx within
+    // ~15s, and every DB lookup + workflow enqueue happens below. Move all of
+    // that OFF the response path and return 200 now; the redelivery dedup then
+    // runs INSIDE the task (SET NX still serializes concurrent redeliveries).
+    let router = router.clone();
+    let connection_id = connection_id.to_string();
+    let conversation_id = conversation_id.to_string();
+    let service_url = service_url.map(str::to_string);
+    let activity_id = activity_id.map(str::to_string);
+    let payload = payload.clone();
+
+    tokio::spawn(async move {
+        if let Some(activity_id) = activity_id.as_deref()
+            && !router.reserve_activity(&connection_id, activity_id).await
+        {
+            debug!(
+                connection_id = %connection_id,
+                activity_id = %activity_id,
+                "Dropping duplicate Teams activity"
+            );
+            return;
+        }
+
+        // The serviceUrl is stored only now: after full JWT validation, which
+        // includes the serviceurl-claim cross-check where the token carries one.
+        if let Some(svc_url) = service_url.as_deref() {
+            router.set_teams_service_url(&conversation_id, svc_url);
+        }
+
+        // Curated, credential-free reply target (opaque signed endpoint ref +
+        // conversation identifiers) for the workflow's data.target.
+        let target = service_url.as_deref().and_then(|svc_url| {
+            build_conversation_target(&connection_id, &conversation_id, svc_url, &payload)
+        });
+
+        let msg = InboundMessage {
+            text: clean_text,
+            sender_id,
+            conv_id: conversation_id.clone(),
+            channel: "teams".into(),
+            attachments: vec![],
+            original_message: payload,
+            target,
+            activity_id: activity_id.clone(),
+        };
+
+        debug!(
+            connection_id = %connection_id,
+            conversation = %conversation_id,
+            "Teams message received"
+        );
+
+        if let Err(e) = router.handle_message(&connection_id, &msg).await {
+            warn!(
+                connection_id = %connection_id,
+                error = %e,
+                "Failed to handle Teams message"
+            );
+            // Release the reservation: with ack-fast we already returned 200,
+            // so a message we failed to handle must not be tombstoned against a
+            // future redelivery.
+            if let Some(activity_id) = activity_id.as_deref() {
+                router.release_activity(&connection_id, activity_id).await;
+            }
+        }
     });
 
-    let msg = InboundMessage {
-        text: clean_text.to_string(),
-        sender_id,
-        conv_id: conversation_id.to_string(),
-        channel: "teams".into(),
-        attachments: vec![],
-        original_message: payload.clone(),
-        target,
-        activity_id: activity_id.map(str::to_string),
-    };
-
-    debug!(
-        connection_id = %connection_id,
-        conversation = %conversation_id,
-        "Teams message received"
-    );
-
-    if let Err(e) = router.handle_message(connection_id, &msg).await {
-        warn!(
-            connection_id = %connection_id,
-            error = %e,
-            "Failed to handle Teams message"
-        );
-    }
-
     StatusCode::OK.into_response()
+}
+
+/// Strip Teams @mention markup from `text`, preferring the activity's
+/// `entities` array — each `mention` entity carries the exact `text` markup as
+/// it appears in the message, so removing it is precise. The `<at>…</at>`
+/// scanner then mops up any residual/malformed markup (or a mention entity that
+/// carried no `text`).
+fn strip_teams_mentions_with_entities(text: &str, payload: &Value) -> String {
+    let mut out = text.to_string();
+    if let Some(entities) = payload.get("entities").and_then(|e| e.as_array()) {
+        for entity in entities {
+            if entity.get("type").and_then(|t| t.as_str()) == Some("mention")
+                && let Some(mention_text) = entity.get("text").and_then(|t| t.as_str())
+                && !mention_text.is_empty()
+            {
+                out = out.replace(mention_text, "");
+            }
+        }
+    }
+    strip_teams_mentions(&out)
 }
 
 /// Mint the opaque endpoint ref and assemble the workflow-visible `data.target`
@@ -494,6 +532,45 @@ mod tests {
         assert_eq!(
             strip_teams_mentions("a <b>bold</b> claim"),
             "a <b>bold</b> claim"
+        );
+    }
+
+    #[test]
+    fn entities_strip_uses_exact_mention_text() {
+        let payload = serde_json::json!({
+            "text": "<at>My Bot</at> what's the weather?",
+            "entities": [{
+                "type": "mention",
+                "text": "<at>My Bot</at>",
+                "mentioned": { "id": "28:bot", "name": "My Bot" }
+            }],
+        });
+        let text = payload.get("text").and_then(|t| t.as_str()).unwrap();
+        assert_eq!(
+            strip_teams_mentions_with_entities(text, &payload).trim(),
+            "what's the weather?"
+        );
+    }
+
+    #[test]
+    fn entities_strip_falls_back_to_at_scanner() {
+        // No entities array at all — the <at> scanner still cleans the markup.
+        let payload = serde_json::json!({ "text": "<at>Bot</at> hi" });
+        let text = payload.get("text").and_then(|t| t.as_str()).unwrap();
+        assert_eq!(
+            strip_teams_mentions_with_entities(text, &payload).trim(),
+            "hi"
+        );
+
+        // Mention entity with no `text` — fallback scanner handles residual markup.
+        let payload = serde_json::json!({
+            "text": "<at>Bot</at> ping",
+            "entities": [{ "type": "mention", "mentioned": { "id": "28:bot" } }],
+        });
+        let text = payload.get("text").and_then(|t| t.as_str()).unwrap();
+        assert_eq!(
+            strip_teams_mentions_with_entities(text, &payload).trim(),
+            "ping"
         );
     }
 

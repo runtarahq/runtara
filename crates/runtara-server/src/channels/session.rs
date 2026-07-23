@@ -144,12 +144,26 @@ impl ChannelRouter {
         // 10-minute window comfortably covers Teams' ~15s retry and a valid
         // Bot Framework token's ~1h life for genuine redeliveries.
         const DEDUP_TTL_SECS: i64 = 600;
-        let identity = format!(
-            "{}:{connection_id}:{activity_id}",
-            crate::config::tenant_id()
-        );
+        let identity = Self::activity_identity(connection_id, activity_id);
         let mut valkey = self.valkey.clone();
         session_queue::reserve_activity_dedup(&mut valkey, &identity, DEDUP_TTL_SECS).await
+    }
+
+    /// Release a dedup reservation after processing FAILED, so a redelivery of
+    /// the same activity is not silently dropped as a duplicate. Best-effort.
+    pub async fn release_activity(&self, connection_id: &str, activity_id: &str) {
+        let identity = Self::activity_identity(connection_id, activity_id);
+        let mut valkey = self.valkey.clone();
+        session_queue::release_activity_dedup(&mut valkey, &identity).await;
+    }
+
+    /// The dedup identity for an inbound activity. Reserve and release MUST
+    /// agree on this format.
+    fn activity_identity(connection_id: &str, activity_id: &str) -> String {
+        format!(
+            "{}:{connection_id}:{activity_id}",
+            crate::config::tenant_id()
+        )
     }
 
     /// Validate the webhook secret from the request header against the
