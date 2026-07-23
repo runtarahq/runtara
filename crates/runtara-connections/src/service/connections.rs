@@ -106,23 +106,22 @@ fn validate_connection_parameters(
         }
         // MVP is scoped to the public Microsoft cloud. Government/GCC clouds
         // use different token bases and Bot Connector serviceUrl hosts and are
-        // not yet supported; reject a non-public authority host explicitly
-        // rather than silently misbehaving.
-        if let Some(host) = get("authority_host") {
-            let lowered = host.to_ascii_lowercase();
-            let is_public = lowered.starts_with("https://login.microsoftonline.com")
-                // Allow a loopback/mock authority for local testing only.
-                || lowered.starts_with("http://127.0.0.1")
-                || lowered.starts_with("http://localhost")
-                || lowered.starts_with("https://127.0.0.1")
-                || lowered.starts_with("https://localhost");
-            if !is_public {
-                return Err(ServiceError::ValidationError(
-                    "Only the public Microsoft cloud is supported for Teams bots. \
-                     Government/GCC authority hosts are not yet supported."
-                        .to_string(),
-                ));
-            }
+        // not yet supported. This is also a CREDENTIAL-EXFILTRATION gate: the
+        // client_secret is POSTed to `{authority_host}/{tenant}/oauth2/...`, so
+        // a prefix check (starts_with) is unsafe — `login.microsoftonline.com.
+        // attacker.example` and `login.microsoftonline.com@attacker.example`
+        // both pass a prefix test but resolve to an attacker host. Parse the
+        // URL and require the HOST to EXACTLY equal an allowlisted authority,
+        // with no userinfo.
+        if let Some(host) = get("authority_host")
+            && !is_allowed_teams_authority(host)
+        {
+            return Err(ServiceError::ValidationError(
+                "Authority Host must be the public Microsoft cloud \
+                 (https://login.microsoftonline.com). Government/GCC authorities \
+                 are not yet supported; a custom host is not permitted."
+                    .to_string(),
+            ));
         }
     }
     Ok(())
@@ -448,6 +447,38 @@ fn connection_http_allowed(host: &str) -> bool {
     });
     let h = host.to_ascii_lowercase();
     list.iter().any(|entry| entry == &h)
+}
+
+/// Validate a Teams `authority_host` for the credential-exfiltration gate.
+///
+/// The Teams bot's `client_secret` is POSTed to
+/// `{authority_host}/{tenant}/oauth2/v2.0/token`, so this host must be trusted.
+/// A prefix match is NOT safe: `https://login.microsoftonline.com.evil.example`
+/// and `https://login.microsoftonline.com@evil.example` both begin with the
+/// public authority string but resolve to an attacker-controlled host. We parse
+/// the URL and require:
+///   * an `https` scheme for the real cloud (loopback may be `http`),
+///   * NO userinfo (`user:pass@` — the `@evil.example` trick),
+///   * the host to EXACTLY equal an allowlisted authority.
+fn is_allowed_teams_authority(raw: &str) -> bool {
+    let Ok(url) = url::Url::parse(raw.trim()) else {
+        return false;
+    };
+    // Reject `user[:pass]@host` — the classic prefix-check bypass.
+    if !url.username().is_empty() || url.password().is_some() {
+        return false;
+    }
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let host = host.to_ascii_lowercase();
+    match url.scheme() {
+        // Public Microsoft cloud: only the exact login host over https.
+        "https" if host == "login.microsoftonline.com" => true,
+        // Loopback authorities for local testing / mock token endpoints only.
+        "http" | "https" if host == "localhost" || host == "127.0.0.1" => true,
+        _ => false,
+    }
 }
 
 pub struct ConnectionService {
@@ -1013,9 +1044,9 @@ pub enum ServiceError {
 mod tests {
     use super::{
         ServiceError, apply_connection_parameter_patch, apply_connection_parameter_patch_to_meta,
-        build_edit_projection, build_grant_state, requires_interactive_oauth,
-        validate_connection_parameters, validate_create_connection_parameters,
-        validate_rate_limit_config, validate_url_field,
+        build_edit_projection, build_grant_state, is_allowed_teams_authority,
+        requires_interactive_oauth, validate_connection_parameters,
+        validate_create_connection_parameters, validate_rate_limit_config, validate_url_field,
     };
     use crate::types::{ConnectionParameterPatch, RateLimitConfigDto, UpdateConnectionRequest};
     use serde_json::json;
@@ -1671,5 +1702,51 @@ mod tests {
         let mut cfg = valid();
         cfg.max_wait_ms = 7_200_000;
         assert_rejected(&cfg);
+    }
+
+    #[test]
+    fn teams_authority_accepts_only_exact_public_host() {
+        assert!(is_allowed_teams_authority(
+            "https://login.microsoftonline.com"
+        ));
+        assert!(is_allowed_teams_authority(
+            "https://login.microsoftonline.com/"
+        ));
+        // Loopback authorities for local/mock testing.
+        assert!(is_allowed_teams_authority("http://localhost:3999"));
+        assert!(is_allowed_teams_authority("http://127.0.0.1:8080"));
+        assert!(is_allowed_teams_authority("https://localhost"));
+    }
+
+    #[test]
+    fn teams_authority_rejects_prefix_and_userinfo_bypasses() {
+        // The bugs the exact-host check exists to close:
+        assert!(!is_allowed_teams_authority(
+            "https://login.microsoftonline.com.attacker.example"
+        ));
+        assert!(!is_allowed_teams_authority(
+            "https://login.microsoftonline.com@attacker.example"
+        ));
+        assert!(!is_allowed_teams_authority(
+            "https://login.microsoftonline.com.attacker.example/tenant/oauth2/v2.0/token"
+        ));
+        // Sub-host and unrelated hosts.
+        assert!(!is_allowed_teams_authority(
+            "https://evil.login.microsoftonline.com"
+        ));
+        assert!(!is_allowed_teams_authority("https://attacker.example"));
+        // Government cloud is not yet supported — must be rejected, not silently
+        // accepted by a broad match.
+        assert!(!is_allowed_teams_authority(
+            "https://login.microsoftonline.us"
+        ));
+        // Plain-http public cloud is rejected (creds would go over cleartext).
+        assert!(!is_allowed_teams_authority(
+            "http://login.microsoftonline.com"
+        ));
+        // Non-loopback http and garbage.
+        assert!(!is_allowed_teams_authority("http://attacker.example"));
+        assert!(!is_allowed_teams_authority("not a url"));
+        assert!(!is_allowed_teams_authority(""));
     }
 }

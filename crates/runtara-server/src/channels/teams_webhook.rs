@@ -230,7 +230,39 @@ fn build_conversation_target(
         .and_then(|v| v.as_str())
         .map(str::to_string);
 
-    let keyring = EndpointRefKeyring::from_env().ok()?;
+    // Defense in depth: the endpoint ref pins the outbound Bearer token to this
+    // serviceUrl. The inbound JWT already cross-checks the `serviceurl` claim,
+    // but Entra tenant-issued tokens may omit that claim (the check is skipped),
+    // so a bad serviceUrl could otherwise slip through to token egress. Refuse
+    // to mint a ref for a host that is not a public Bot Connector endpoint.
+    if let Err(reason) = validate_teams_service_url(service_url) {
+        warn!(
+            connection_id = %connection_id,
+            service_url = %service_url,
+            reason,
+            "Refusing to mint a Teams endpoint ref for a non-Bot-Connector serviceUrl"
+        );
+        return None;
+    }
+
+    let keyring = match EndpointRefKeyring::from_env() {
+        Ok(k) => k,
+        Err(e) => {
+            // The signing secret is unconfigured. Server-side session replies
+            // still work via the in-process serviceUrl map, but a workflow that
+            // wants to reply via the teams agent cannot (no ref to pin the
+            // token). Surface this once so it is diagnosable in production.
+            static WARNED: std::sync::Once = std::sync::Once::new();
+            WARNED.call_once(|| {
+                warn!(
+                    error = %e,
+                    "RUNTARA_ENDPOINT_REF_SECRET is not configured; Teams workflows \
+                     cannot mint reply refs (set it to enable agent-driven replies)"
+                );
+            });
+            return None;
+        }
+    };
     let binding = EndpointBinding {
         v: EndpointBinding::CURRENT_VERSION,
         tenant_id: crate::config::tenant_id().to_string(),
@@ -252,6 +284,51 @@ fn build_conversation_target(
         "channelId": payload.pointer("/channelData/channel/id").and_then(|v| v.as_str()),
         "msTenantId": ms_tenant_id,
     }))
+}
+
+/// Validate an inbound Teams `serviceUrl` before it is pinned into an endpoint
+/// ref. Public-cloud Bot Connector serviceUrls are always `https` on a
+/// Microsoft-owned host — the regional traffic-manager fronts
+/// (`smba.trafficmanager.net`, `<region>.smba.trafficmanager.net`) or the
+/// global connector (`*.botframework.com`). Anything else is refused so the
+/// pinned Bearer token can never egress to an attacker-chosen host.
+///
+/// Loopback hosts are accepted only when
+/// `RUNTARA_TEAMS_ALLOW_INSECURE_SERVICE_URL` is set, for local mock testing.
+fn validate_teams_service_url(service_url: &str) -> Result<(), &'static str> {
+    let url = url::Url::parse(service_url).map_err(|_| "serviceUrl is not a valid URL")?;
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err("serviceUrl must not contain userinfo");
+    }
+    let host = url
+        .host_str()
+        .ok_or("serviceUrl has no host")?
+        .to_ascii_lowercase();
+
+    let loopback = host == "localhost" || host == "127.0.0.1";
+    if loopback {
+        let allowed = std::env::var("RUNTARA_TEAMS_ALLOW_INSECURE_SERVICE_URL")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        return if allowed {
+            Ok(())
+        } else {
+            Err("loopback serviceUrl requires RUNTARA_TEAMS_ALLOW_INSECURE_SERVICE_URL")
+        };
+    }
+
+    if url.scheme() != "https" {
+        return Err("serviceUrl must use https");
+    }
+    let is_bot_connector = host == "smba.trafficmanager.net"
+        || host.ends_with(".smba.trafficmanager.net")
+        || host == "botframework.com"
+        || host.ends_with(".botframework.com");
+    if is_bot_connector {
+        Ok(())
+    } else {
+        Err("serviceUrl host is not a public Bot Connector endpoint")
+    }
 }
 
 /// Auth-relevant fields of a teams_bot connection.
@@ -357,6 +434,55 @@ fn strip_teams_mentions(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn service_url_allows_public_bot_connector_hosts() {
+        for ok in [
+            "https://smba.trafficmanager.net/amer/",
+            "https://smba.trafficmanager.net/emea/",
+            "https://uk.smba.trafficmanager.net/uk/",
+            "https://api.botframework.com",
+            "https://europe.botframework.com/v3",
+        ] {
+            assert!(
+                validate_teams_service_url(ok).is_ok(),
+                "expected {ok} to be allowed"
+            );
+        }
+    }
+
+    #[test]
+    fn service_url_rejects_non_connector_and_tricks() {
+        for bad in [
+            // Attacker host with a connector-looking prefix/suffix.
+            "https://smba.trafficmanager.net.attacker.example/amer/",
+            "https://botframework.com.evil.example/",
+            "https://smba.trafficmanager.net@attacker.example/amer/",
+            // Plain http on the real host (would leak the token in cleartext).
+            "http://smba.trafficmanager.net/amer/",
+            // Government cloud, not yet supported.
+            "https://smba.infra.gcc.teams.microsoft.com/",
+            // Totally unrelated.
+            "https://attacker.example/",
+            "not a url",
+        ] {
+            assert!(
+                validate_teams_service_url(bad).is_err(),
+                "expected {bad} to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn service_url_loopback_gated_by_env() {
+        // SAFETY: single-threaded test; we set then clear the flag.
+        unsafe { std::env::remove_var("RUNTARA_TEAMS_ALLOW_INSECURE_SERVICE_URL") };
+        assert!(validate_teams_service_url("http://127.0.0.1:3999/amer/").is_err());
+        unsafe { std::env::set_var("RUNTARA_TEAMS_ALLOW_INSECURE_SERVICE_URL", "1") };
+        assert!(validate_teams_service_url("http://127.0.0.1:3999/amer/").is_ok());
+        assert!(validate_teams_service_url("http://localhost:3999/amer/").is_ok());
+        unsafe { std::env::remove_var("RUNTARA_TEAMS_ALLOW_INSECURE_SERVICE_URL") };
+    }
 
     #[test]
     fn strips_at_mentions() {

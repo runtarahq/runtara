@@ -351,22 +351,36 @@ fn apply_endpoint_ref_override(
     }
 
     // Defense in depth: the ref's conversation must be the one being targeted.
-    if let Some(conversation_id) = binding.conversation_id.as_deref() {
-        let decoded_path = percent_decode_path(agent_url);
-        if !decoded_path.contains(conversation_id) {
-            return Err(reject("conversation id not present in request path"));
-        }
+    // A substring check is NOT enough — an attacker who controls the agent URL
+    // could stuff the bound conversation id anywhere in the path (a query-like
+    // tail, a sibling resource, a different conversation whose id is a prefix)
+    // while actually addressing a different `conversations/{id}`. Bot Connector
+    // reply URLs are `.../v3/conversations/{conversationId}/activities...`, so
+    // we require the segment immediately after `conversations` to EXACTLY equal
+    // the bound conversation id.
+    if let Some(conversation_id) = binding.conversation_id.as_deref()
+        && !path_targets_conversation(agent_url, conversation_id)
+    {
+        return Err(reject(
+            "request path does not target the bound conversation",
+        ));
     }
 
     resolved.base_url = Some(binding.base_url);
     Ok(())
 }
 
-/// Percent-decode the path portion of an agent URL for containment checks.
-/// Best-effort: on any parse/decode failure returns the input unchanged (the
-/// caller only uses this for a substring presence check, never for routing).
-fn percent_decode_path(agent_url: &str) -> String {
-    let path = match url::Url::parse(agent_url) {
+/// True iff `agent_url`'s path addresses the Bot Connector conversation
+/// `conversation_id` — i.e. the path segment right after a `conversations`
+/// segment, percent-decoded, is exactly `conversation_id`.
+///
+/// The agent encodes the conversation id as a single RFC-3986 path segment
+/// (any `/` inside becomes `%2F`), so splitting the RAW path on `/` keeps the
+/// whole encoded id in one segment; decoding that one segment recovers the
+/// exact original id. There is no `conversations` segment ⇒ not a
+/// conversation-scoped call ⇒ rejected (the ref exists to pin a reply).
+fn path_targets_conversation(agent_url: &str, conversation_id: &str) -> bool {
+    let raw_path = match url::Url::parse(agent_url) {
         Ok(u) => u.path().to_string(),
         // Relative path-only agent URL (the Teams agent sends these).
         Err(_) => agent_url
@@ -375,9 +389,19 @@ fn percent_decode_path(agent_url: &str) -> String {
             .unwrap_or(agent_url)
             .to_string(),
     };
-    urlencoding::decode(&path)
-        .map(|s| s.into_owned())
-        .unwrap_or(path)
+    let mut segments = raw_path.split('/');
+    while let Some(seg) = segments.next() {
+        if seg == "conversations" {
+            let Some(next) = segments.next() else {
+                return false;
+            };
+            let decoded = urlencoding::decode(next)
+                .map(|s| s.into_owned())
+                .unwrap_or_else(|_| next.to_string());
+            return decoded == conversation_id;
+        }
+    }
+    false
 }
 
 /// Core proxy logic shared between internal and authenticated debug endpoints
@@ -1187,6 +1211,71 @@ mod tests {
         )
         .expect_err("conversation-path mismatch rejected");
         assert_eq!(err.0, StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn endpoint_ref_rejects_conversation_id_as_non_target_segment() {
+        // The substring-check bypass: address a DIFFERENT conversation but slip
+        // the bound id into the activity-id position so the old `contains` test
+        // passed. The exact-segment check must reject this.
+        set_ref_secret();
+        let token = sign(&ref_keyring(), &teams_binding("tenant-a", "conn-1"));
+        let mut resolved = empty_resolved();
+        let evil = urlencoding::encode("19:evil@thread.tacv2");
+        let bound = urlencoding::encode(CONV_ID);
+        let sneaky_path = format!("/v3/conversations/{evil}/activities/{bound}");
+        let err = apply_endpoint_ref_override(
+            Some(&token),
+            "tenant-a",
+            "conn-1",
+            &sneaky_path,
+            &mut resolved,
+        )
+        .expect_err("bound id in a non-conversation segment must be rejected");
+        assert_eq!(err.0, StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn endpoint_ref_rejects_prefix_conversation_id() {
+        // A conversation whose id merely has the bound id as a prefix must not
+        // be accepted (exact match, not prefix/substring).
+        set_ref_secret();
+        let token = sign(&ref_keyring(), &teams_binding("tenant-a", "conn-1"));
+        let mut resolved = empty_resolved();
+        let longer = urlencoding::encode(&format!("{CONV_ID}-attacker")).into_owned();
+        let path = format!("/v3/conversations/{longer}/activities");
+        let err =
+            apply_endpoint_ref_override(Some(&token), "tenant-a", "conn-1", &path, &mut resolved)
+                .expect_err("prefix conversation id must be rejected");
+        assert_eq!(err.0, StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn path_targets_conversation_matches_only_exact_segment() {
+        let enc = urlencoding::encode(CONV_ID).into_owned();
+        // Exact target segment (with and without an activity id).
+        assert!(path_targets_conversation(
+            &format!("/v3/conversations/{enc}/activities"),
+            CONV_ID
+        ));
+        assert!(path_targets_conversation(
+            &format!("/v3/conversations/{enc}/activities/1:2:3"),
+            CONV_ID
+        ));
+        // Absolute URL form.
+        assert!(path_targets_conversation(
+            &format!("https://smba.trafficmanager.net/amer/v3/conversations/{enc}/activities"),
+            CONV_ID
+        ));
+        // Bound id present but not as the conversation segment.
+        assert!(!path_targets_conversation(
+            &format!("/v3/conversations/19%3Aevil/activities/{enc}"),
+            CONV_ID
+        ));
+        // No conversations segment at all.
+        assert!(!path_targets_conversation("/v3/attachments/xyz", CONV_ID));
+        // Trailing conversations with nothing after it.
+        assert!(!path_targets_conversation("/v3/conversations", CONV_ID));
     }
 
     #[test]
