@@ -81,7 +81,11 @@ pub async fn teams_webhook(
         // message. No session is started. (Proactive send itself is a later
         // slice; this only persists the reference.)
         "conversationUpdate" | "installationUpdate" => {
-            capture_conversation_reference(&router, &connection_id, &payload);
+            if is_bot_removal(&conn.app_id, &payload) {
+                clear_conversation_reference(&router, &connection_id, &payload);
+            } else {
+                capture_conversation_reference(&router, &connection_id, &payload);
+            }
             StatusCode::OK.into_response()
         }
         // Authenticated but not yet handled (messageReaction, invoke,
@@ -109,13 +113,55 @@ fn capture_conversation_reference(
     let conversation_id = payload.pointer("/conversation/id").and_then(|v| v.as_str());
     let service_url = payload.get("serviceUrl").and_then(|v| v.as_str());
     if let (Some(conversation_id), Some(service_url)) = (conversation_id, service_url) {
-        router.set_teams_service_url(conversation_id, service_url);
+        router.set_teams_service_url(connection_id, conversation_id, service_url);
         debug!(
             connection_id = %connection_id,
             conversation = %conversation_id,
             "Captured Teams conversation reference from installation/membership event"
         );
     }
+}
+
+/// Drop the stored serviceUrl for a conversation the bot was just removed from,
+/// so a stale reference is not left behind after uninstall.
+fn clear_conversation_reference(router: &Arc<ChannelRouter>, connection_id: &str, payload: &Value) {
+    if let Some(conversation_id) = payload.pointer("/conversation/id").and_then(|v| v.as_str()) {
+        router.remove_teams_service_url(connection_id, conversation_id);
+        debug!(
+            connection_id = %connection_id,
+            conversation = %conversation_id,
+            "Cleared Teams conversation reference after bot removal"
+        );
+    }
+}
+
+/// Whether this conversationUpdate/installationUpdate signals the BOT being
+/// removed from the conversation — either an `installationUpdate` with
+/// `action: "remove"`, or a `conversationUpdate` whose `membersRemoved` list
+/// contains the bot's own id (`recipient.id`).
+fn is_bot_removal(bot_app_id: &str, payload: &Value) -> bool {
+    if payload.get("type").and_then(|t| t.as_str()) == Some("installationUpdate") {
+        let action = payload.get("action").and_then(|a| a.as_str()).unwrap_or("");
+        if action.eq_ignore_ascii_case("remove") || action.eq_ignore_ascii_case("remove-upgrade") {
+            return true;
+        }
+    }
+    // The bot's channel account id is `28:{app_id}`; recipient.id is the most
+    // reliable self-identifier on the activity.
+    let self_id = payload
+        .pointer("/recipient/id")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("28:{bot_app_id}"));
+    payload
+        .get("membersRemoved")
+        .and_then(|m| m.as_array())
+        .is_some_and(|members| {
+            members.iter().any(|m| {
+                m.get("id").and_then(|v| v.as_str()) == Some(self_id.as_str())
+                    || m.get("id").and_then(|v| v.as_str()) == Some(&format!("28:{bot_app_id}"))
+            })
+        })
 }
 
 /// Handle an authenticated `message` activity: normalize and route it into
@@ -180,7 +226,7 @@ async fn handle_message_activity(
         // The serviceUrl is stored only now: after full JWT validation, which
         // includes the serviceurl-claim cross-check where the token carries one.
         if let Some(svc_url) = service_url.as_deref() {
-            router.set_teams_service_url(&conversation_id, svc_url);
+            router.set_teams_service_url(&connection_id, &conversation_id, svc_url);
         }
 
         // Curated, credential-free reply target (opaque signed endpoint ref +
@@ -472,6 +518,59 @@ fn strip_teams_mentions(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detects_bot_removal_events() {
+        let app_id = "11111111-2222-3333-4444-555555555555";
+        let self_id = format!("28:{app_id}");
+
+        // installationUpdate remove.
+        assert!(is_bot_removal(
+            app_id,
+            &serde_json::json!({ "type": "installationUpdate", "action": "remove" })
+        ));
+        // conversationUpdate with the bot in membersRemoved.
+        assert!(is_bot_removal(
+            app_id,
+            &serde_json::json!({
+                "type": "conversationUpdate",
+                "recipient": { "id": self_id },
+                "membersRemoved": [{ "id": self_id }],
+            })
+        ));
+        // membersRemoved by 28:{app_id} even without recipient.
+        assert!(is_bot_removal(
+            app_id,
+            &serde_json::json!({
+                "type": "conversationUpdate",
+                "membersRemoved": [{ "id": self_id }],
+            })
+        ));
+
+        // Not a removal: install add.
+        assert!(!is_bot_removal(
+            app_id,
+            &serde_json::json!({ "type": "installationUpdate", "action": "add" })
+        ));
+        // A different member removed — not the bot.
+        assert!(!is_bot_removal(
+            app_id,
+            &serde_json::json!({
+                "type": "conversationUpdate",
+                "recipient": { "id": self_id },
+                "membersRemoved": [{ "id": "29:some-user" }],
+            })
+        ));
+        // membersAdded is not a removal.
+        assert!(!is_bot_removal(
+            app_id,
+            &serde_json::json!({
+                "type": "conversationUpdate",
+                "recipient": { "id": self_id },
+                "membersAdded": [{ "id": self_id }],
+            })
+        ));
+    }
 
     #[test]
     fn service_url_allows_public_bot_connector_hosts() {

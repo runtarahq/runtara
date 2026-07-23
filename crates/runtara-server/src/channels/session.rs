@@ -91,8 +91,11 @@ pub struct ChannelRouter {
     /// Hardened egress client (no redirects + DNS guard) for credentialed
     /// channel replies (Teams).
     hardened_client: reqwest::Client,
-    /// Shared service URL map for Teams (conversation_id → serviceUrl).
-    teams_service_urls: Arc<DashMap<String, String>>,
+    /// Shared, live service-URL map for Teams, keyed by
+    /// `(connection_id, conversation_id)`. Handed to every `TeamsChannel` by
+    /// Arc clone (not snapshot) so replies can always resolve a serviceUrl that
+    /// arrived after the session started.
+    teams_service_urls: Arc<DashMap<(String, String), String>>,
 }
 
 impl ChannelRouter {
@@ -131,19 +134,36 @@ impl ChannelRouter {
         &self.http_client
     }
 
-    /// Store a Teams service URL for a conversation.
-    pub fn set_teams_service_url(&self, conversation_id: &str, service_url: &str) {
+    /// Store a Teams service URL for a `(connection, conversation)`.
+    pub fn set_teams_service_url(
+        &self,
+        connection_id: &str,
+        conversation_id: &str,
+        service_url: &str,
+    ) {
+        self.teams_service_urls.insert(
+            (connection_id.to_string(), conversation_id.to_string()),
+            service_url.to_string(),
+        );
+    }
+
+    /// Drop a Teams service URL, e.g. when the bot is uninstalled/removed from a
+    /// conversation so a stale reference is not left behind.
+    pub fn remove_teams_service_url(&self, connection_id: &str, conversation_id: &str) {
         self.teams_service_urls
-            .insert(conversation_id.to_string(), service_url.to_string());
+            .remove(&(connection_id.to_string(), conversation_id.to_string()));
     }
 
     /// Reserve an inbound activity for processing, deduplicating at-least-once
     /// redeliveries. Returns `true` when this delivery is fresh and should be
     /// processed, `false` when it is a duplicate. Fails open on Valkey errors.
     pub async fn reserve_activity(&self, connection_id: &str, activity_id: &str) -> bool {
-        // 10-minute window comfortably covers Teams' ~15s retry and a valid
-        // Bot Framework token's ~1h life for genuine redeliveries.
-        const DEDUP_TTL_SECS: i64 = 600;
+        // 4-hour window: covers Teams' ~15s retry, a valid Bot Framework token's
+        // ~1h life, AND slower out-of-band redeliveries. The key is one small
+        // Valkey entry per activity, so a generous TTL is cheap insurance
+        // against a duplicate session; it comfortably outlives any legitimate
+        // redelivery of the same activity id.
+        const DEDUP_TTL_SECS: i64 = 4 * 3600;
         let identity = Self::activity_identity(connection_id, activity_id);
         let mut valkey = self.valkey.clone();
         session_queue::reserve_activity_dedup(&mut valkey, &identity, DEDUP_TTL_SECS).await
@@ -323,18 +343,17 @@ impl ChannelRouter {
             "teams_bot" => {
                 // The adapter mints its token through the facade (correct
                 // single-tenant authority + shared token cache) and egresses
-                // via the hardened client — no raw secret handling here.
-                let teams = Arc::new(super::channel::TeamsChannel::new(
+                // via the hardened client — no raw secret handling here. It gets
+                // an Arc clone of the LIVE serviceUrl map (not a snapshot) so a
+                // serviceUrl that arrives after session start still resolves.
+                Arc::new(super::channel::TeamsChannel::new(
                     tenant_id.clone(),
                     connection_id.to_string(),
                     params.clone(),
                     self.connections.clone(),
                     self.hardened_client.clone(),
-                ));
-                for entry in self.teams_service_urls.iter() {
-                    teams.set_service_url(entry.key(), entry.value());
-                }
-                teams
+                    self.teams_service_urls.clone(),
+                ))
             }
             "mailgun" => {
                 let api_key = params["api_key"]
@@ -447,11 +466,17 @@ async fn session_loop(
 
     // Deterministic instance id from the provider activity id: if the same
     // activity is redelivered after the Valkey dedup window is lost, the
-    // environment dedups the start by instance id and won't double-fire.
+    // environment dedups the start by instance id and won't double-fire. The
+    // namespace is parameterized by channel so activity ids from different
+    // channels can never collide into the same instance id.
     let deterministic_instance_id = initial_message.activity_id.as_deref().map(|activity_id| {
         Uuid::new_v5(
             &Uuid::NAMESPACE_URL,
-            format!("teams-activity:{org_id}:{activity_id}").as_bytes(),
+            format!(
+                "channel-activity:{}:{org_id}:{activity_id}",
+                initial_message.channel
+            )
+            .as_bytes(),
         )
     });
 
@@ -806,7 +831,9 @@ async fn dispatch_event(
     for chat_event in chat_events {
         match &chat_event {
             ChatEvent::Message { content, .. } if !content.is_empty() => {
-                let _ = channel.send_text(conv_id, content).await;
+                if let Err(e) = channel.send_text(conv_id, content).await {
+                    warn!(conv_id = %conv_id, error = %e, "Failed to send channel reply");
+                }
             }
 
             ChatEvent::WaitingForInput {
@@ -823,8 +850,8 @@ async fn dispatch_event(
                 // Only send the prompt message for structured schemas.
                 // For simple/null schemas, the user's message is auto-delivered
                 // from the queue — no need to prompt.
-                if needs_prompting {
-                    let _ = channel.send_text(conv_id, message).await;
+                if needs_prompting && let Err(e) = channel.send_text(conv_id, message).await {
+                    warn!(conv_id = %conv_id, error = %e, "Failed to send input prompt");
                 }
 
                 if let Some(schema) = response_schema
@@ -862,9 +889,12 @@ async fn dispatch_event(
 
             ChatEvent::Error { message } => {
                 warn!(conv_id = %conv_id, error = %message, "Workflow error");
-                let _ = channel
+                if let Err(e) = channel
                     .send_text(conv_id, "Sorry, something went wrong. Please try again.")
-                    .await;
+                    .await
+                {
+                    warn!(conv_id = %conv_id, error = %e, "Failed to send error notice");
+                }
             }
 
             _ => {

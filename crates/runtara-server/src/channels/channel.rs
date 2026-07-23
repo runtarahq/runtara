@@ -164,8 +164,12 @@ pub struct TeamsChannel {
     facade: std::sync::Arc<runtara_connections::ConnectionsFacade>,
     /// Hardened egress client (no redirects + DNS guard).
     client: reqwest::Client,
-    /// Per-conversation service URL (set from authenticated inbound activities).
-    service_urls: dashmap::DashMap<String, String>,
+    /// SHARED, live `(connection_id, conversation_id) → serviceUrl` map owned by
+    /// the router. Sharing (not snapshotting) closes the reply-loss window where
+    /// a serviceUrl arrives — or a new conversation appears — after the session
+    /// has already started. Keyed by connection too so conversations from
+    /// different connections cannot alias.
+    service_urls: std::sync::Arc<dashmap::DashMap<(String, String), String>>,
 }
 
 impl TeamsChannel {
@@ -175,6 +179,7 @@ impl TeamsChannel {
         params: serde_json::Value,
         facade: std::sync::Arc<runtara_connections::ConnectionsFacade>,
         client: reqwest::Client,
+        service_urls: std::sync::Arc<dashmap::DashMap<(String, String), String>>,
     ) -> Self {
         Self {
             tenant_id,
@@ -182,14 +187,8 @@ impl TeamsChannel {
             params,
             facade,
             client,
-            service_urls: dashmap::DashMap::new(),
+            service_urls,
         }
-    }
-
-    /// Store the service URL for a conversation (called from the webhook handler).
-    pub fn set_service_url(&self, conversation_id: &str, service_url: &str) {
-        self.service_urls
-            .insert(conversation_id.to_string(), service_url.to_string());
     }
 }
 
@@ -208,7 +207,7 @@ impl Channel for TeamsChannel {
 
             let service_url = self
                 .service_urls
-                .get(&conversation_id)
+                .get(&(self.connection_id.clone(), conversation_id.clone()))
                 .map(|v| v.clone())
                 .ok_or_else(|| {
                     anyhow::anyhow!("No service URL for conversation {}", conversation_id)
