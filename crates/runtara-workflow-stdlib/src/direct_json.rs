@@ -21,7 +21,7 @@ use crate::agent_input_validation::{
 };
 use crate::conditions::{is_truthy, to_number, values_equal};
 use crate::switch_helpers::process_switch_output;
-use crate::template::render_template;
+use crate::template::{CompiledTemplate, render_template};
 
 // ===========================================================================
 // Value interning ("scope handles").
@@ -6310,12 +6310,14 @@ fn path_to_json_pointer(path: &str) -> String {
 // Compiled expressions
 //
 // A condition/mapping/reference is parsed ONCE into a reusable evaluable form
-// and evaluated per element/iteration with no JSON re-walk and no path
-// re-parse. This is a structural mirror of the interpreter
+// and evaluated per element/iteration with no JSON re-walk, no path re-parse,
+// and no template re-parse. This is a structural mirror of the interpreter
 // (`eval_condition_expression` / `apply_mapping_value` / `apply_reference` /
 // `lookup_source_path`); leaf comparison/coercion delegate to the SAME helpers
-// (`values_equal` / `is_truthy` / `to_number` / `apply_type_hint` /
-// `render_template`), so results are bit-identical. Compilation is infallible:
+// (`values_equal` / `is_truthy` / `to_number` / `apply_type_hint`), and a
+// template leaf renders through a pre-parsed `CompiledTemplate` that shares
+// minijinja's render path and error text with `render_template`, so results are
+// bit-identical. Compilation is infallible:
 // any error the interpreter would raise at eval time is carried as an
 // `Error(String)` node holding the exact message and re-raised on eval, so
 // error parity (incl. message text) is preserved.
@@ -6393,9 +6395,15 @@ enum CompiledMapping {
     Reference(CompiledReference),
     Immediate(Value),
     Composite(Box<CompiledComposite>),
-    Template(String),
+    /// Template lexed and parsed once at compile time, then rendered per
+    /// evaluation with no re-parse (see `CompiledTemplate`). Boxed because a
+    /// `CompiledTemplate` owns a minijinja `Environment` (~200 bytes); boxing
+    /// keeps `CompiledMapping` (held in every `Vec<CompiledMapping>` and
+    /// condition node) small for the common non-template variants.
+    Template(Box<CompiledTemplate>),
     /// Deferred error (not an object / missing valueType / bad reference path /
-    /// non-string template / unsupported valueType / bad composite).
+    /// non-string template / template parse error / unsupported valueType /
+    /// bad composite).
     Error(String),
 }
 
@@ -6544,7 +6552,12 @@ fn compile_mapping(value: &Value) -> CompiledMapping {
         "immediate" => CompiledMapping::Immediate(map.get("value").cloned().unwrap_or(Value::Null)),
         "composite" => compile_composite(map.get("value").unwrap_or(&Value::Null)),
         "template" => match map.get("value").and_then(Value::as_str) {
-            Some(template) => CompiledMapping::Template(template.to_string()),
+            // Parse once here; a syntax error is deferred as an `Error` node
+            // carrying the same message the interpreter raises at eval time.
+            Some(template) => match CompiledTemplate::parse(template) {
+                Ok(compiled) => CompiledMapping::Template(Box::new(compiled)),
+                Err(err) => CompiledMapping::Error(err),
+            },
             None => CompiledMapping::Error("template mapping value must be a string".to_string()),
         },
         other => CompiledMapping::Error(format!("unsupported mapping valueType '{other}'")),
@@ -6721,7 +6734,13 @@ impl CompiledMapping {
             CompiledMapping::Immediate(value) => Ok(value.clone()),
             CompiledMapping::Composite(composite) => composite.eval(source),
             CompiledMapping::Template(template) => {
-                render_template(template, &materialize(source.clone())).map(Value::String)
+                // Reuse the pre-parsed template; only `materialize` + render run
+                // per evaluation. `materialize` hands minijinja a handle-free
+                // view of the source (see the interpreter arm in
+                // `apply_mapping_value` for why).
+                template
+                    .render(&materialize(source.clone()))
+                    .map(Value::String)
             }
             CompiledMapping::Error(message) => Err(message.clone()),
         }
@@ -7230,6 +7249,62 @@ mod tests {
             compile_mapping(&reference).eval(&source).unwrap(),
             json!("c"),
             "compiled reference must resolve -1 to the last element"
+        );
+    }
+
+    /// A `template` mapping is parsed once by `compile_mapping` and rendered per
+    /// eval with no re-parse. It must match the interpreter (`apply_mapping_value`)
+    /// and stay correct across repeated evals with different sources — the
+    /// Split/While/Filter per-element shape the compiled node exists to serve.
+    #[test]
+    fn template_mapping_compiled_once_matches_interpreter() {
+        reset_value_store();
+        let mapping = json!({
+            "valueType": "template",
+            "value": "Hi {{ data.name | upper }}",
+        });
+        // Compiled once, reused for every element below.
+        let compiled = compile_mapping(&mapping);
+
+        for name in ["ada", "grace"] {
+            let source = json!({ "data": { "name": name } });
+            let expected = json!(format!("Hi {}", name.to_uppercase()));
+            // Interpreter path.
+            assert_eq!(
+                apply_mapping_value(&mapping, &source).unwrap(),
+                expected,
+                "interpreter template render mismatch"
+            );
+            // Compiled path, reusing the pre-parsed template.
+            assert_eq!(
+                compiled.eval(&source).unwrap(),
+                expected,
+                "compiled template render mismatch"
+            );
+        }
+    }
+
+    /// A malformed template keeps compilation infallible: `compile_mapping`
+    /// produces an `Error` node, and eval re-raises the exact `Template parse
+    /// error` message the interpreter raises at eval time.
+    #[test]
+    fn template_mapping_parse_error_deferred_to_error_node() {
+        reset_value_store();
+        let mapping = json!({
+            "valueType": "template",
+            "value": "{{ unclosed",
+        });
+        let source = json!({});
+
+        let interpreter_err = apply_mapping_value(&mapping, &source).unwrap_err();
+        let compiled_err = compile_mapping(&mapping).eval(&source).unwrap_err();
+        assert!(
+            interpreter_err.contains("Template parse error"),
+            "{interpreter_err}"
+        );
+        assert_eq!(
+            compiled_err, interpreter_err,
+            "compiled path must re-raise the identical parse-error message"
         );
     }
 

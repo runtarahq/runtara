@@ -6,11 +6,21 @@
 
 use minijinja::{Environment, ErrorKind};
 
+/// Name under which the single inline template is registered in the
+/// environment. Shared by [`render_template`] and [`CompiledTemplate`] so both
+/// paths key on the same name.
+const INLINE_TEMPLATE_NAME: &str = "__inline";
+
 /// Render a minijinja template string with the given JSON context.
 ///
 /// The context should be a JSON object containing the execution state
 /// (data, variables, steps, workflow). Template expressions can reference
 /// any path in this context using dot notation.
+///
+/// This parses the template from scratch on every call. Callers that render the
+/// same template repeatedly (e.g. a compiled mapping evaluated per element of a
+/// Split/While/Filter body) should parse it once with [`CompiledTemplate::parse`]
+/// and reuse the result instead.
 ///
 /// # Examples
 ///
@@ -24,13 +34,61 @@ use minijinja::{Environment, ErrorKind};
 /// ```
 pub fn render_template(template_str: &str, context: &serde_json::Value) -> Result<String, String> {
     let mut env = Environment::new();
-    env.add_template("__inline", template_str)
+    env.add_template(INLINE_TEMPLATE_NAME, template_str)
         .map_err(|e| format!("Template parse error: {e}"))?;
     let tmpl = env
-        .get_template("__inline")
+        .get_template(INLINE_TEMPLATE_NAME)
         .map_err(|e| format!("Template retrieval error: {e}"))?;
     tmpl.render(context)
         .map_err(|e| format!("Template render error: {e}{}", unknown_helper_hint(&e)))
+}
+
+/// A minijinja template lexed and compiled once, ready to render many times
+/// without re-parsing the source.
+///
+/// [`render_template`] rebuilds an [`Environment`] and re-parses the template on
+/// every call. Where the same template is rendered repeatedly — the compiled
+/// mapping fast path evaluates one per element/iteration of a Split/While/Filter
+/// body — that parse cost is paid on every element. `CompiledTemplate` hoists the
+/// parse out of the hot loop: [`parse`](CompiledTemplate::parse) compiles the
+/// template once (minijinja compiles eagerly at `add_template_owned` time), and
+/// each [`render`](CompiledTemplate::render) reuses the pre-compiled instructions.
+///
+/// Rendering is byte-identical to [`render_template`]: same engine, same error
+/// text (including the unknown-helper hint).
+#[derive(Debug, Clone)]
+pub struct CompiledTemplate {
+    /// Owns the single compiled template, registered under
+    /// [`INLINE_TEMPLATE_NAME`]. `'static` because the source is owned (via
+    /// `add_template_owned`), so no borrow ties the environment to the caller.
+    env: Environment<'static>,
+}
+
+impl CompiledTemplate {
+    /// Parse and compile `template_str` up front.
+    ///
+    /// On a syntax error this returns the same `"Template parse error: …"`
+    /// message [`render_template`] would produce at render time, so callers that
+    /// defer parse failures keep identical error text.
+    pub fn parse(template_str: &str) -> Result<Self, String> {
+        let mut env = Environment::new();
+        env.add_template_owned(INLINE_TEMPLATE_NAME, template_str.to_owned())
+            .map_err(|e| format!("Template parse error: {e}"))?;
+        Ok(Self { env })
+    }
+
+    /// Render the pre-compiled template with `context`.
+    ///
+    /// Reuses the instructions compiled by [`parse`](CompiledTemplate::parse) —
+    /// no re-lex, no re-parse. Errors match [`render_template`].
+    pub fn render(&self, context: &serde_json::Value) -> Result<String, String> {
+        let tmpl = self
+            .env
+            .get_template(INLINE_TEMPLATE_NAME)
+            .map_err(|e| format!("Template retrieval error: {e}"))?;
+        tmpl.render(context)
+            .map_err(|e| format!("Template render error: {e}{}", unknown_helper_hint(&e)))
+    }
 }
 
 /// When a render fails because the template referenced a filter/function/test/
@@ -143,6 +201,76 @@ mod tests {
     fn test_unknown_function_error_mentions_docs() {
         let ctx = json!({});
         let err = render_template("{{ now() }}", &ctx).unwrap_err();
+        assert!(err.contains("unknown function"), "{err}");
+        assert!(err.contains("docs/templating.md"), "{err}");
+    }
+
+    /// A `CompiledTemplate` parses once and renders many times, producing a fresh
+    /// result for each distinct context.
+    #[test]
+    fn test_compiled_template_renders_repeatedly() {
+        let tmpl = CompiledTemplate::parse("Hello {{ data.name }}").unwrap();
+        assert_eq!(
+            tmpl.render(&json!({"data": {"name": "World"}})).unwrap(),
+            "Hello World"
+        );
+        assert_eq!(
+            tmpl.render(&json!({"data": {"name": "Ada"}})).unwrap(),
+            "Hello Ada"
+        );
+        // Re-rendering the original context still works (no per-render mutation).
+        assert_eq!(
+            tmpl.render(&json!({"data": {"name": "World"}})).unwrap(),
+            "Hello World"
+        );
+    }
+
+    /// The pre-parsed path is byte-identical to `render_template` — same engine,
+    /// same filters, same output.
+    #[test]
+    fn test_compiled_template_matches_render_template() {
+        let cases = [
+            ("{{ data.name | upper }}", json!({"data": {"name": "hi"}})),
+            (
+                "{{ data.obj | tojson }}",
+                json!({"data": {"obj": {"a": 1}}}),
+            ),
+            (
+                "{% if data.active %}yes{% else %}no{% endif %}",
+                json!({"data": {"active": false}}),
+            ),
+            ("Hello {{ data.missing }}", json!({"data": {}})),
+        ];
+        for (src, ctx) in cases {
+            let compiled = CompiledTemplate::parse(src).unwrap();
+            assert_eq!(
+                compiled.render(&ctx).unwrap(),
+                render_template(src, &ctx).unwrap(),
+                "mismatch for template {src:?}"
+            );
+        }
+    }
+
+    /// A syntax error surfaces at `parse` time with the same `Template parse
+    /// error` message `render_template` produces, so callers that defer the
+    /// failure keep identical text.
+    #[test]
+    fn test_compiled_template_parse_error() {
+        let err = CompiledTemplate::parse("{{ unclosed").unwrap_err();
+        assert!(err.contains("Template parse error"), "{err}");
+        assert_eq!(
+            err,
+            render_template("{{ unclosed", &json!({})).unwrap_err(),
+            "parse-time error text must match render_template"
+        );
+    }
+
+    /// An unknown helper parses fine but fails at render time, and the compiled
+    /// path still appends the supported-helper hint.
+    #[test]
+    fn test_compiled_template_render_error_mentions_docs() {
+        let tmpl = CompiledTemplate::parse("{{ now() }}").unwrap();
+        let err = tmpl.render(&json!({})).unwrap_err();
         assert!(err.contains("unknown function"), "{err}");
         assert!(err.contains("docs/templating.md"), "{err}");
     }
