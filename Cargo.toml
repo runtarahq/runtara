@@ -98,3 +98,11 @@ openssl = { version = "0.10", features = ["vendored"] }
 [profile.release.package.runtara-report-dsl]
 opt-level = "z"
 codegen-units = 1
+
+# Build dependency crates at opt-level=2 in the dev/test profile. The WASM test
+# suites (e.g. direct_wasm_execute) drive wasmtime's Cranelift JIT and wac-graph
+# composition — both dependency crates — for every case; left unoptimized they
+# dominate test wall-clock. Optimizing only dependencies keeps first-party crate
+# rebuilds fast for incremental dev; the one-time dep build is cached in CI.
+[profile.dev.package."*"]
+opt-level = 2
