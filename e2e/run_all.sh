@@ -69,6 +69,12 @@ run_test "Object-model raw SQL (query-sql / execute-sql)" "${SCRIPT_DIR}/test_ob
 run_test "Negative duration on suspend/relaunch (regression)" "${SCRIPT_DIR}/test_negative_duration_on_resume.sh"
 run_test "Stale artifact + trigger replay idempotency (regression)" "${SCRIPT_DIR}/test_trigger_replay_idempotency.sh"
 
+# Microsoft Teams. These boot their OWN isolated runtara-server + Valkey (docker)
+# on dedicated high ports and mock the Bot Framework, so they are self-contained
+# and do not depend on ./start.sh. They need docker + python3 + openssl.
+run_test "Teams outbound send-message (mock Bot Connector)" "${SCRIPT_DIR}/test_teams_send_message.sh"
+run_test "Teams inbound webhook JWT + dedup (mock authority)" "${SCRIPT_DIR}/test_teams_inbound_webhook.sh"
+
 # Summary
 echo "=========================================="
 echo "Test Results"

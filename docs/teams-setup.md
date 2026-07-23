@@ -55,21 +55,38 @@ receipt is not part of this release).
 ## Security model (how it works)
 
 - **Inbound**: every activity's Bot Framework JWT is validated (RS256 pinned,
-  issuer/audience/expiry, `serviceurl` claim vs the activity, `msteams` channel
-  endorsement for Bot Framework tokens, and the connection's tenant). Failures
-  return HTTP 403. Nothing from an unauthenticated activity is stored.
+  issuer/audience/`exp`+`nbf`, `serviceurl` claim vs the activity, `msteams`
+  channel endorsement for Bot Framework tokens, and the connection's tenant).
+  Failures return HTTP 403. Nothing from an unauthenticated activity is stored.
+  The webhook **acks fast**: it validates, returns 200 within Teams' ~15s retry
+  window, then processes on a background task where the redelivery dedup runs
+  (a failed handoff releases the reservation so the redelivery is not lost). The
+  JWKS fetch is bounded by a timeout, single-flighted per authority, and
+  negative-caches unknown `kid`s so a bogus-token flood cannot hammer Microsoft.
 - **Outbound**: the bot token is minted through Runtara's connection-auth token
   cache (single-tenant authority) — the workflow/agent never sees the secret.
   The per-conversation serviceUrl is delivered to the `teams.send-message`
   capability as an opaque signed *endpoint ref* in the trigger's `data.target`;
-  the credential proxy verifies it and pins egress to that serviceUrl.
+  the credential proxy verifies it (tenant + connection match, exact
+  conversation path segment) and pins egress to that serviceUrl. A ref is only
+  minted for a serviceUrl on a public Bot Connector host, and the connection's
+  `authority_host` must be exactly the public Microsoft cloud — both close
+  credential-exfiltration paths.
 
 ## Environment
 
 - `RUNTARA_ENDPOINT_REF_SECRET` — HMAC key that signs conversation targets.
   Required for the `teams.send-message` workflow path (server-side session
   replies work without it). Rotate by moving the old value to
-  `RUNTARA_ENDPOINT_REF_SECRET_PREV`.
+  `RUNTARA_ENDPOINT_REF_SECRET_PREV`. The webhook logs a one-time warning if it
+  is unset while Teams activities arrive.
+- `RUNTARA_TEAMS_OPENID_CONFIG_URL` / `RUNTARA_TEAMS_ENTRA_OPENID_URL_TEMPLATE`
+  — override the Bot Framework / Entra OpenID metadata endpoints. Production
+  defaults to Microsoft; tests point these at a mock authority.
+- `RUNTARA_TEAMS_ALLOW_INSECURE_SERVICE_URL` — **testing only.** Permits an
+  endpoint ref to be minted for a `127.0.0.1`/`localhost` serviceUrl (a mock Bot
+  Connector). Never set in production; real serviceUrls are always public Bot
+  Connector hosts.
 
 ## Not in this release
 
