@@ -66,6 +66,14 @@ pub async fn slack_webhook(
         return StatusCode::OK.into_response();
     };
 
+    // Deduplicate at-least-once redeliveries (Slack retries the same event_id).
+    if let Some(event_id) = msg.activity_id.as_deref()
+        && !router.reserve_activity(&connection_id, event_id).await
+    {
+        debug!(connection_id = %connection_id, event_id, "Dropping duplicate Slack event");
+        return StatusCode::OK.into_response();
+    }
+
     if !msg.attachments.is_empty() {
         upload_slack_attachments_to_storage(&router, &connection_id, &mut msg.attachments).await;
     }
@@ -141,7 +149,12 @@ fn normalize_text_event(payload: &Value, event: &Value) -> Option<InboundMessage
         attachments: extract_slack_files(event),
         original_message: payload.clone(),
         target: None,
-        activity_id: None,
+        // Slack redelivers the SAME event_id (with an X-Slack-Retry-Num header)
+        // when it does not see a fast 200; use it as the dedup id.
+        activity_id: payload
+            .get("event_id")
+            .and_then(Value::as_str)
+            .map(str::to_string),
     })
 }
 
@@ -177,7 +190,12 @@ fn normalize_reaction_event(payload: &Value, event: &Value) -> Option<InboundMes
         attachments: vec![],
         original_message: payload.clone(),
         target: None,
-        activity_id: None,
+        // Slack redelivers the SAME event_id (with an X-Slack-Retry-Num header)
+        // when it does not see a fast 200; use it as the dedup id.
+        activity_id: payload
+            .get("event_id")
+            .and_then(Value::as_str)
+            .map(str::to_string),
     })
 }
 

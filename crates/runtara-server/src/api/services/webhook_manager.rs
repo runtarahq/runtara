@@ -156,13 +156,31 @@ impl WebhookManager {
             WebhookError::InvalidConnection("Connection has no parameters".into())
         })?;
 
-        if integration_id == "telegram_bot" {
-            let bot_token = params["bot_token"]
-                .as_str()
-                .ok_or_else(|| WebhookError::InvalidConnection("Missing bot_token".into()))?;
-
-            self.telegram_delete_webhook(bot_token).await?;
-            info!(connection_id = %connection_id, "Telegram webhook unregistered");
+        // Mirror register(): every channel type has an explicit arm so the
+        // unregister contract is visible. Only Telegram auto-registers, so the
+        // others are deliberate no-ops (their inbound endpoint is configured by
+        // the user in the provider's dashboard and cannot be revoked from here).
+        match integration_id {
+            "telegram_bot" => {
+                let bot_token = params["bot_token"]
+                    .as_str()
+                    .ok_or_else(|| WebhookError::InvalidConnection("Missing bot_token".into()))?;
+                self.telegram_delete_webhook(bot_token).await?;
+                info!(connection_id = %connection_id, "Telegram webhook unregistered");
+            }
+            "slack_bot" | "teams_bot" | "mailgun" => {
+                tracing::debug!(
+                    connection_id = %connection_id,
+                    integration_id,
+                    "Channel type has no auto-registered webhook to remove (configured in the provider dashboard)"
+                );
+            }
+            other => {
+                tracing::debug!(
+                    integration_id = %other,
+                    "Connection type does not support webhook unregistration"
+                );
+            }
         }
 
         Ok(())

@@ -192,6 +192,14 @@ pub async fn mailgun_webhook(
         .map(|(k, v)| (k.clone(), Value::String(v.clone())))
         .collect();
 
+    // Mailgun redelivers on non-200 with the same email Message-Id; the
+    // one-time `token` is also unique per delivery. Use Message-Id, falling back
+    // to the token, as the dedup id.
+    let activity_id = fields
+        .get("Message-Id")
+        .or_else(|| fields.get("token"))
+        .cloned();
+
     let msg = InboundMessage {
         text,
         sender_id: sender_email.clone(),
@@ -200,8 +208,16 @@ pub async fn mailgun_webhook(
         attachments,
         original_message: Value::Object(original),
         target: None,
-        activity_id: None,
+        activity_id: activity_id.clone(),
     };
+
+    // Deduplicate at-least-once redeliveries.
+    if let Some(dedup_id) = activity_id.as_deref()
+        && !router.reserve_activity(&connection_id, dedup_id).await
+    {
+        debug!(connection_id = %connection_id, "Dropping duplicate Mailgun delivery");
+        return StatusCode::OK.into_response();
+    }
 
     debug!(
         connection_id = %connection_id,

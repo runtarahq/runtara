@@ -65,6 +65,10 @@ pub async fn telegram_webhook(
         .map(|id| id.to_string())
         .unwrap_or_else(|| conv_id.clone());
 
+    // Telegram redelivers the SAME update_id if the webhook does not 200 in
+    // time; use it as the dedup id.
+    let activity_id = update.get("update_id").map(|v| v.to_string());
+
     let msg = InboundMessage {
         text: text.to_string(),
         sender_id,
@@ -73,8 +77,16 @@ pub async fn telegram_webhook(
         attachments: vec![],
         original_message: update.clone(),
         target: None,
-        activity_id: None,
+        activity_id: activity_id.clone(),
     };
+
+    // Deduplicate at-least-once redeliveries by update_id.
+    if let Some(update_id) = activity_id.as_deref()
+        && !router.reserve_activity(&connection_id, update_id).await
+    {
+        debug!(connection_id = %connection_id, update_id, "Dropping duplicate Telegram update");
+        return StatusCode::OK;
+    }
 
     debug!(connection_id = %connection_id, chat_id = %msg.conv_id, "Telegram message received");
 
