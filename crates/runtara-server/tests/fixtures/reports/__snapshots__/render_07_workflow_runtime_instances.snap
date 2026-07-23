@@ -22,6 +22,7 @@ expression: snapshot_body
       "message": "Workflow runtime report sources require the execution engine"
     }
   ],
+  "navigation": {},
   "report": {
     "definitionVersion": 1,
     "id": "rep_07_workflow_runtime_instances"

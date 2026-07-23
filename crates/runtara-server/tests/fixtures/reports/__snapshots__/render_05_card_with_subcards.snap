@@ -22,6 +22,7 @@ expression: snapshot_body
       "message": "Schema not found: Customer"
     }
   ],
+  "navigation": {},
   "report": {
     "definitionVersion": 1,
     "id": "rep_05_card_with_subcards"

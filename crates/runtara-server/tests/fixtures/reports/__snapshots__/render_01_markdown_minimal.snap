@@ -13,6 +13,7 @@ expression: snapshot_body
     }
   },
   "errors": [],
+  "navigation": {},
   "report": {
     "definitionVersion": 1,
     "id": "rep_01_markdown_minimal"
