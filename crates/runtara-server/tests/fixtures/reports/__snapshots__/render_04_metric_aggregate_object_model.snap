@@ -37,6 +37,7 @@ expression: snapshot_body
       "message": "Schema not found: Order"
     }
   ],
+  "navigation": {},
   "report": {
     "definitionVersion": 1,
     "id": "rep_04_metric_aggregate_object_model"

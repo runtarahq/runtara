@@ -22,6 +22,7 @@ expression: snapshot_body
       "message": "Schema not found: Order"
     }
   ],
+  "navigation": {},
   "report": {
     "definitionVersion": 1,
     "id": "rep_09_table_with_cross_schema_join"

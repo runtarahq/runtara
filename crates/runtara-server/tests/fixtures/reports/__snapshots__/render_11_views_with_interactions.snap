@@ -4,26 +4,6 @@ expression: snapshot_body
 ---
 {
   "blocks": {
-    "order_header": {
-      "error": {
-        "blockId": "order_header",
-        "code": "BLOCK_RENDER_FAILED",
-        "message": "Schema not found: Order"
-      },
-      "status": "error",
-      "title": "Order",
-      "type": "card"
-    },
-    "order_lines": {
-      "error": {
-        "blockId": "order_lines",
-        "code": "BLOCK_RENDER_FAILED",
-        "message": "Schema not found: OrderLine"
-      },
-      "status": "error",
-      "title": "Order lines",
-      "type": "table"
-    },
     "orders_overview": {
       "error": {
         "blockId": "orders_overview",
@@ -40,18 +20,11 @@ expression: snapshot_body
       "blockId": "orders_overview",
       "code": "BLOCK_RENDER_FAILED",
       "message": "Schema not found: Order"
-    },
-    {
-      "blockId": "order_header",
-      "code": "BLOCK_RENDER_FAILED",
-      "message": "Schema not found: Order"
-    },
-    {
-      "blockId": "order_lines",
-      "code": "BLOCK_RENDER_FAILED",
-      "message": "Schema not found: OrderLine"
     }
   ],
+  "navigation": {
+    "activeViewId": "default"
+  },
   "report": {
     "definitionVersion": 1,
     "id": "rep_11_views_with_interactions"
