@@ -255,6 +255,8 @@ impl Channel for TeamsChannel {
                     .json(&json!({
                         "type": "message",
                         "text": chunk,
+                        // Keep the Teams compose box enabled after replies.
+                        "inputHint": "acceptingInput",
                     }))
                     .send()
                     .await?;

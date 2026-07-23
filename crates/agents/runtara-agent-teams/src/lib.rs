@@ -416,6 +416,10 @@ pub fn send_message(input: SendMessageInput) -> Result<SendMessageOutput, AgentE
     let mut last_activity_id = None;
     for (i, chunk) in chunks.iter().enumerate() {
         let mut activity = json!({ "type": "message" });
+        // Signal that the bot accepts further input, so Teams keeps the
+        // conversation's compose box enabled after the reply. Without this,
+        // Teams can lock input with "You can't send messages to this bot".
+        activity["inputHint"] = json!("acceptingInput");
         if !chunk.is_empty() {
             activity["text"] = json!(chunk);
         }
