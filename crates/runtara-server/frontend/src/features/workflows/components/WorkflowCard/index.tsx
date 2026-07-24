@@ -1,4 +1,3 @@
-import { CSSProperties } from 'react';
 import {
   Loader2,
   Play,
@@ -27,7 +26,6 @@ interface WorkflowCardProps {
   pendingActionId?: string;
   pendingActionType?: 'schedule' | 'clone' | 'delete' | 'move';
   className?: string;
-  style?: CSSProperties;
   /** Whether to show the move to folder button */
   showMoveAction?: boolean;
 }
@@ -60,7 +58,6 @@ export function WorkflowCard({
   pendingActionId,
   pendingActionType,
   className,
-  style,
   showMoveAction = false,
 }: WorkflowCardProps) {
   const version = workflow.currentVersionNumber;
@@ -77,7 +74,7 @@ export function WorkflowCard({
   const hasInputs = parseSchema(rawSchema).length > 0;
 
   return (
-    <TableRow className={cn('group', className)} style={style}>
+    <TableRow className={cn('group', className)}>
       <TableCell className="font-medium text-foreground">
         <div className="flex items-center gap-2">
           <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">

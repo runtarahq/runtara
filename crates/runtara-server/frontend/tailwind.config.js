@@ -34,27 +34,6 @@ export default {
           'monospace',
         ],
       },
-      spacing: {
-        'safe-top': 'env(safe-area-inset-top)',
-        'safe-bottom': 'env(safe-area-inset-bottom)',
-        'safe-left': 'env(safe-area-inset-left)',
-        'safe-right': 'env(safe-area-inset-right)',
-      },
-      height: {
-        dvh: '100dvh',
-        svh: '100svh',
-        lvh: '100lvh',
-      },
-      minHeight: {
-        dvh: '100dvh',
-        svh: '100svh',
-        lvh: '100lvh',
-      },
-      maxHeight: {
-        dvh: '100dvh',
-        svh: '100svh',
-        lvh: '100lvh',
-      },
       borderRadius: {
         lg: 'var(--radius)',
         md: 'calc(var(--radius) - 2px)',
@@ -112,43 +91,21 @@ export default {
         sidebar: {
           DEFAULT: 'hsl(var(--sidebar-background))',
           foreground: 'hsl(var(--sidebar-foreground))',
-          primary: 'hsl(var(--sidebar-primary))',
-          'primary-foreground': 'hsl(var(--sidebar-primary-foreground))',
           accent: 'hsl(var(--sidebar-accent))',
           'accent-foreground': 'hsl(var(--sidebar-accent-foreground))',
           border: 'hsl(var(--sidebar-border))',
           ring: 'hsl(var(--sidebar-ring))',
         },
       },
+      /* animate-in/animate-out (and their enter/exit keyframes) are owned by
+         the tailwindcss-animate plugin — do not redefine them here. */
       animation: {
-        in: 'animate-in 0.5s ease-out',
-        'fade-in-slide-up': 'fade-in-slide-up 0.5s ease-out',
         loading: 'loading 1.5s ease-in-out infinite',
       },
       keyframes: {
         loading: {
           '0%': { transform: 'translateX(-100%)' },
           '100%': { transform: 'translateX(200%)' },
-        },
-        'fade-in-slide-up': {
-          '0%': {
-            opacity: '0',
-            transform: 'translateY(10px)',
-          },
-          '100%': {
-            opacity: '1',
-            transform: 'translateY(0)',
-          },
-        },
-        'animate-in': {
-          from: {
-            opacity: '0',
-            transform: 'translateY(10px)',
-          },
-          to: {
-            opacity: '1',
-            transform: 'translateY(0)',
-          },
         },
       },
     },

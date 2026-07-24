@@ -34,9 +34,7 @@
   :root {
     /* Safe area insets for iOS */
     --safe-area-inset-top: env(safe-area-inset-top, 0px);
-    --safe-area-inset-right: env(safe-area-inset-right, 0px);
     --safe-area-inset-bottom: env(safe-area-inset-bottom, 0px);
-    --safe-area-inset-left: env(safe-area-inset-left, 0px);
 
     --background: 0 0% 100%; /* white */
     --foreground: 214 32% 20%; /* deep blue-gray */
@@ -61,7 +59,6 @@
     --success-foreground: 0 0% 100%; /* white */
     --warning: 38 92% 50%; /* amber */
     --warning-foreground: 0 0% 100%; /* white */
-    --error: 0 84% 60%; /* soft red */
     --chart-1: 217 91% 60%; /* vibrant blue */
     --chart-2: 174 77% 50%; /* teal */
     --chart-3: 142 71% 45%; /* green */
@@ -70,15 +67,10 @@
     --radius: 0.375rem; /* utilitarian: tight corners (controls ~4px, cards ~6px) */
     --sidebar-background: 210 40% 98%; /* very light blue */
     --sidebar-foreground: 214 32% 20%; /* deep blue-gray */
-    --sidebar-primary: 217 91% 60%; /* vibrant blue */
-    --sidebar-primary-foreground: 0 0% 100%; /* white */
     --sidebar-accent: 199 89% 94%; /* very light cyan */
     --sidebar-accent-foreground: 199 89% 25%; /* dark cyan */
     --sidebar-border: 214 32% 91%; /* light blue-gray border */
     --sidebar-ring: 217 91% 60%; /* vibrant blue */
-  }
-  .scrollbar-gutter-stable {
-    scrollbar-gutter: stable both-edges;
   }
   .dark {
     /* Based on docs/dark-color-theme.md with softer contrast. */
@@ -105,7 +97,6 @@
     --success-foreground: 0 0% 100%; /* white */
     --warning: 38 92% 50%; /* amber */
     --warning-foreground: 0 0% 100%; /* white */
-    --error: 0 84% 60%; /* #ef4444 - Red for errors */
     --chart-1: 217 91% 60%; /* #3b82f6 */
     --chart-2: 174 77% 50%; /* teal */
     --chart-3: 142 71% 45%; /* #22c55e */
@@ -113,17 +104,10 @@
     --chart-5: 0 84% 60%; /* red */
     --sidebar-background: 0 0% 7%; /* #111111 - Secondary background */
     --sidebar-foreground: 0 0% 64%; /* #a3a3a3 - Medium gray */
-    --sidebar-primary: 217 91% 60%; /* #3b82f6 */
-    --sidebar-primary-foreground: 0 0% 100%; /* white */
     --sidebar-accent: 217 91% 60%; /* #3b82f6 */
     --sidebar-accent-foreground: 0 0% 100%; /* white */
     --sidebar-border: 0 0% 15%; /* #262626 */
     --sidebar-ring: 217 91% 60%; /* #3b82f6 */
-
-    /* Additional theme variables from dark-color-theme.md */
-    --accent-hover: 219 91% 69%; /* #60a5fa - Lighter blue for hover */
-    --accent-dark: 226 73% 40%; /* #1e40af - Darker blue for pressed states */
-    --border-light: 0 0% 25%; /* #404040 - More prominent border */
   }
 }
 @layer base {
@@ -405,28 +389,12 @@
   min-height: 132px !important;
 }
 
-/* Safe area utilities */
+/* Safe area utilities (h-dvh/min-h-dvh & friends come from Tailwind core) */
 @layer utilities {
   .pt-safe {
     padding-top: var(--safe-area-inset-top);
   }
   .pb-safe {
     padding-bottom: var(--safe-area-inset-bottom);
-  }
-  .pl-safe {
-    padding-left: var(--safe-area-inset-left);
-  }
-  .pr-safe {
-    padding-right: var(--safe-area-inset-right);
-  }
-  .p-safe {
-    padding: var(--safe-area-inset-top) var(--safe-area-inset-right)
-      var(--safe-area-inset-bottom) var(--safe-area-inset-left);
-  }
-  .min-h-dvh {
-    min-height: 100dvh;
-  }
-  .h-dvh {
-    height: 100dvh;
   }
 }

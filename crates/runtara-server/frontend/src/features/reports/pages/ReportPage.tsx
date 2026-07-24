@@ -26,6 +26,7 @@ import {
 import { Button } from '@/shared/components/ui/button';
 import { Can } from '@/shared/components/Can';
 import { TilesPage } from '@/shared/components/tiles-page';
+import RuntaraLogo from '@/assets/logo/runtara-logo-icon.svg';
 import { usePageTitle } from '@/shared/hooks/usePageTitle';
 import { useObjectSchemaDtosByConnectionIds } from '@/features/objects/hooks/useObjectSchemas';
 import { ObjectModelConnectionSelector } from '@/features/objects/components/ObjectModelConnectionSelector';
@@ -713,6 +714,12 @@ export function ReportPage() {
       ) : null}
       {saveError ? (
         <p className="mt-3 text-sm text-destructive">{saveError}</p>
+      ) : null}
+      {!editing ? (
+        <div className="report-print-brand">
+          <img src={RuntaraLogo} alt="" />
+          <span>Generated in Runtara</span>
+        </div>
       ) : null}
     </TilesPage>
   );

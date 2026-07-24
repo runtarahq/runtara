@@ -48,7 +48,7 @@ function HeaderMenu() {
   return (
     <SidebarMenuButton size="lg" asChild>
       <Link className="flex items-center gap-2" to="/">
-        <div className="flex aspect-square size-8 items-center justify-center rounded-sm text-sidebar-primary-foreground">
+        <div className="flex aspect-square size-8 items-center justify-center rounded-sm">
           <img src={Logo} alt="Runtara logo" />
         </div>
         <div className="grid flex-1 text-left leading-tight group-data-[collapsible=icon]:hidden">
