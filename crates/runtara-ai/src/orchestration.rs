@@ -93,10 +93,8 @@ pub fn run_completion(req: CompletionInvokeRequest) -> Result<CompletionResponse
         builder = builder.max_tokens(mt);
     }
     // Inject structured output via additional_params when output_schema is set.
-    if let Some(ref schema_str) = req.output_schema_json
-        && let Ok(schema_val) = serde_json::from_str::<Value>(schema_str)
-        && let Some(params) =
-            crate::provider::structured_output_params(&req.integration_id, schema_val)
+    if let Some(params) =
+        resolve_structured_output_params(&req.integration_id, req.output_schema_json.as_deref())?
     {
         builder = builder.additional_params(params);
     }
@@ -110,6 +108,29 @@ pub fn run_completion(req: CompletionInvokeRequest) -> Result<CompletionResponse
     model
         .completion(builder.build())
         .map_err(|e| format!("LLM call failed: {e}"))
+}
+
+/// Resolve the provider-specific structured-output `additional_params` for a
+/// declared output schema.
+///
+/// An unparseable schema is an error rather than a silent skip: swallowing it
+/// would drop structured output from the request while the caller still expects
+/// a schema-conforming response. `None` means either no schema was declared, or
+/// the provider has no structured-output mode (best-effort via the prompt, as
+/// documented on [`crate::provider::structured_output_params`]).
+fn resolve_structured_output_params(
+    integration_id: &str,
+    output_schema_json: Option<&str>,
+) -> Result<Option<Value>, String> {
+    let Some(schema_str) = output_schema_json else {
+        return Ok(None);
+    };
+    let schema_val = serde_json::from_str::<Value>(schema_str)
+        .map_err(|e| format!("invalid output schema: {e}"))?;
+    Ok(crate::provider::structured_output_params(
+        integration_id,
+        schema_val,
+    ))
 }
 
 #[cfg(test)]
@@ -139,5 +160,46 @@ mod tests {
         )
         .expect("deserialize");
         assert_eq!(req.timeout_ms, Some(4321));
+    }
+
+    #[test]
+    fn structured_output_params_absent_without_a_schema() {
+        assert_eq!(
+            resolve_structured_output_params(crate::provider::PROVIDER_OPENAI, None),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn unparseable_output_schema_is_an_error() {
+        // The empty string is what the capabilities' old
+        // `to_string(..).unwrap_or_default()` produced on a serialization
+        // failure — it used to silently disable structured output.
+        for schema in ["", "{not json}"] {
+            let err =
+                resolve_structured_output_params(crate::provider::PROVIDER_OPENAI, Some(schema))
+                    .expect_err("unparseable schema must not be swallowed");
+            assert!(err.starts_with("invalid output schema:"), "{err}");
+        }
+    }
+
+    #[test]
+    fn valid_output_schema_yields_provider_params() {
+        let params = resolve_structured_output_params(
+            crate::provider::PROVIDER_OPENAI,
+            Some(r#"{"type":"object"}"#),
+        )
+        .expect("valid schema")
+        .expect("openai supports structured output");
+        assert_eq!(params["response_format"]["type"], "json_schema");
+    }
+
+    #[test]
+    fn unsupported_provider_stays_best_effort() {
+        // No structured-output mode for this provider — still not an error.
+        assert_eq!(
+            resolve_structured_output_params("some_other_provider", Some(r#"{"type":"object"}"#)),
+            Ok(None)
+        );
     }
 }

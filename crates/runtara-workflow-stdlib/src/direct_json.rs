@@ -1648,9 +1648,10 @@ impl DirectJsonManifest {
             .get(&agent_id)
             .ok_or_else(|| format!("unknown direct Agent id {agent_id}"))?;
 
-        // With a structured output schema the capability parses the response as
-        // JSON and returns it under `structured_output`; use it as the response.
-        // Otherwise the response is the final assistant text (a JSON string).
+        // With a structured output schema the capability parses and validates the
+        // response, returning it under `structured_output` (and failing the step
+        // if it doesn't conform); use it as the response. Otherwise — no schema —
+        // the response is the final assistant text (a JSON string).
         let response = match output.get("structured_output") {
             Some(value) if !value.is_null() => value.clone(),
             _ => Value::String(extract_ai_final_text(
