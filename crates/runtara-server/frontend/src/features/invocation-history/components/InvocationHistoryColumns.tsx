@@ -26,15 +26,15 @@ const formatDuration = (seconds: number | null | undefined): string => {
 };
 
 // Helper to get duration color based on time. Negatives are neutral, never the
-// emerald "fast run" branch.
+// success "fast run" branch.
 const getDurationColorClass = (seconds: number | null | undefined): string => {
   if (seconds === null || seconds === undefined || seconds < 0)
     return 'text-muted-foreground';
   const ms = seconds * 1000;
-  if (ms < 100) return 'text-emerald-600 dark:text-emerald-400';
+  if (ms < 100) return 'text-success';
   if (ms < 1000) return 'text-muted-foreground';
-  if (ms < 5000) return 'text-amber-600 dark:text-amber-400';
-  return 'text-red-600 dark:text-red-400';
+  if (ms < 5000) return 'text-warning';
+  return 'text-destructive';
 };
 
 // Status badge — delegates to the shared console StatusPill with a consistent width
@@ -67,10 +67,10 @@ export const invocationHistoryColumns: ColumnDef<ExecutionHistoryItem>[] = [
           {workflowName ? (
             <Link
               to={`/workflows/${workflowId}`}
-              className="group/link inline-flex items-center gap-1.5 text-sm font-medium text-foreground hover:text-blue-600 dark:hover:text-blue-400"
+              className="group/link inline-flex items-center gap-1.5 text-sm font-medium text-foreground hover:text-primary"
             >
               {workflowName}
-              <ExternalLink className="h-3 w-3 text-muted-foreground transition-colors group-hover/link:text-blue-500 dark:group-hover/link:text-blue-400" />
+              <ExternalLink className="h-3 w-3 text-muted-foreground transition-colors group-hover/link:text-primary" />
             </Link>
           ) : (
             <span className="text-sm font-medium italic text-muted-foreground">
@@ -193,7 +193,7 @@ export const invocationHistoryColumns: ColumnDef<ExecutionHistoryItem>[] = [
               <Button
                 variant="ghost"
                 size="icon"
-                className="h-auto w-auto rounded-lg p-2 text-orange-500 transition-colors hover:bg-orange-50 hover:text-orange-600 dark:hover:bg-orange-900/30 dark:hover:text-orange-400"
+                className="h-auto w-auto rounded-lg p-2 text-warning transition-colors hover:bg-warning/10 hover:text-warning"
                 title="Open in editor — resume debugging"
               >
                 <Bug className="h-4 w-4" />
@@ -205,7 +205,7 @@ export const invocationHistoryColumns: ColumnDef<ExecutionHistoryItem>[] = [
               <Button
                 variant="ghost"
                 size="icon"
-                className="h-auto w-auto rounded-lg p-2 text-amber-500 transition-colors hover:bg-amber-50 hover:text-amber-600 dark:hover:bg-amber-900/30 dark:hover:text-amber-400"
+                className="h-auto w-auto rounded-lg p-2 text-warning transition-colors hover:bg-warning/10 hover:text-warning"
                 title="Continue chat"
               >
                 <MessageSquare className="h-4 w-4" />
@@ -216,7 +216,7 @@ export const invocationHistoryColumns: ColumnDef<ExecutionHistoryItem>[] = [
             <Button
               variant="ghost"
               size="icon"
-              className="h-auto w-auto rounded-lg p-2 text-muted-foreground transition-colors hover:bg-blue-50 hover:text-blue-600 dark:hover:bg-blue-900/30 dark:hover:text-blue-400"
+              className="h-auto w-auto rounded-lg p-2 text-muted-foreground transition-colors hover:bg-primary/10 hover:text-primary"
               title="View details"
             >
               <Eye className="h-4 w-4" />
@@ -227,7 +227,7 @@ export const invocationHistoryColumns: ColumnDef<ExecutionHistoryItem>[] = [
               instanceId={instanceId}
               variant="ghost"
               size="icon"
-              className="h-auto w-auto rounded-lg p-2 text-muted-foreground transition-colors hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-900/30 dark:hover:text-red-400"
+              className="h-auto w-auto rounded-lg p-2 text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive"
             />
           ) : (
             <>
@@ -236,14 +236,14 @@ export const invocationHistoryColumns: ColumnDef<ExecutionHistoryItem>[] = [
                   instanceId={instanceId}
                   variant="ghost"
                   size="icon"
-                  className="h-auto w-auto rounded-lg p-2 text-muted-foreground transition-colors hover:bg-blue-50 hover:text-blue-600 dark:hover:bg-blue-900/30 dark:hover:text-blue-400"
+                  className="h-auto w-auto rounded-lg p-2 text-muted-foreground transition-colors hover:bg-primary/10 hover:text-primary"
                 />
               )}
               <ReplayButton
                 instanceId={instanceId}
                 variant="ghost"
                 size="icon"
-                className="h-auto w-auto rounded-lg p-2 text-muted-foreground transition-colors hover:bg-emerald-50 hover:text-emerald-600 dark:hover:bg-emerald-900/30 dark:hover:text-emerald-400"
+                className="h-auto w-auto rounded-lg p-2 text-muted-foreground transition-colors hover:bg-success/10 hover:text-success"
               />
             </>
           )}

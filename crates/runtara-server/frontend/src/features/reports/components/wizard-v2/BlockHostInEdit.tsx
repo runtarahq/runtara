@@ -57,7 +57,7 @@ export function BlockHostInEdit({
             <p className="truncate text-xs font-medium text-muted-foreground">
               {block.title || block.id}
             </p>
-            <p className="text-[10px] uppercase tracking-wider text-muted-foreground/70">
+            <p className="text-3xs uppercase tracking-wider text-muted-foreground/70">
               {block.type}
             </p>
           </div>

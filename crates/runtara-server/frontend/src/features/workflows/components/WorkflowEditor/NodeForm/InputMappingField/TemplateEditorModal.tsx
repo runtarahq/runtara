@@ -412,7 +412,7 @@ export function TemplateEditorModal({
               type="button"
               variant="ghost"
               size="sm"
-              className="h-7 px-2 font-mono text-xs text-blue-600 hover:bg-blue-50 dark:text-blue-400 dark:hover:bg-blue-950"
+              className="h-7 px-2 font-mono text-xs text-primary hover:bg-primary/10"
               onClick={() => insertSnippet('{{ value | default("") }}')}
             >
               default
@@ -551,7 +551,7 @@ export function TemplateEditorModal({
                   <Icons.variable className="h-3.5 w-3.5" />
                   Template Variables
                 </h3>
-                <p className="text-[11px] text-muted-foreground">
+                <p className="text-2xs text-muted-foreground">
                   {templateVariables.length > 0
                     ? 'Click to insert at cursor'
                     : 'Define variables in the "variables" field'}
@@ -578,7 +578,7 @@ export function TemplateEditorModal({
                       <div className="space-y-2">
                         <Icons.inbox className="mx-auto h-8 w-8 opacity-50" />
                         <p>No variables defined</p>
-                        <p className="text-[11px]">
+                        <p className="text-2xs">
                           Add variables using the
                           <br />
                           "variables" field above
@@ -605,13 +605,13 @@ export function TemplateEditorModal({
                             {variable.label}
                           </code>
                           {variable.type && (
-                            <span className="ml-auto text-[10px] text-muted-foreground">
+                            <span className="ml-auto text-3xs text-muted-foreground">
                               {variable.type}
                             </span>
                           )}
                         </div>
                         {variable.description && (
-                          <div className="mt-0.5 truncate pl-5 text-[10px] text-muted-foreground">
+                          <div className="mt-0.5 truncate pl-5 text-3xs text-muted-foreground">
                             {variable.description}
                           </div>
                         )}

@@ -240,10 +240,8 @@ export function FinishStepField({ name }: FinishStepFieldProps) {
 
       {/* Warning for missing required fields */}
       {missingRequiredFields.length > 0 && (
-        <div className="rounded-md border border-yellow-500/50 bg-yellow-500/10 p-3 text-sm">
-          <p className="font-medium text-yellow-600 dark:text-yellow-400">
-            Missing required fields:
-          </p>
+        <div className="rounded-md border border-warning/50 bg-warning/10 p-3 text-sm">
+          <p className="font-medium text-warning">Missing required fields:</p>
           <p className="text-muted-foreground">
             {missingRequiredFields.map((f) => f.name).join(', ')}
           </p>
@@ -358,7 +356,7 @@ export function FinishStepField({ name }: FinishStepFieldProps) {
                       <span
                         className={`cursor-help font-bold ${
                           isSchemaField
-                            ? 'text-green-600/70 dark:text-green-500/50'
+                            ? 'text-success/70'
                             : 'text-muted-foreground'
                         }`}
                         title={
@@ -390,9 +388,7 @@ export function FinishStepField({ name }: FinishStepFieldProps) {
                                 readOnly={isSchemaField}
                               />
                               {isRequired && (
-                                <span className="text-xs text-yellow-500">
-                                  *
-                                </span>
+                                <span className="text-xs text-warning">*</span>
                               )}
                             </div>
                           </FormControl>

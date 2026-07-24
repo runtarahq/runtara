@@ -670,7 +670,7 @@ function CapabilitySearchSection({
                   {result.capability.displayName || result.capability.name}
                 </span>
                 {!result.isSupported && (
-                  <span className="rounded bg-yellow-100 px-1.5 py-0.5 text-[10px] font-medium text-yellow-700">
+                  <span className="rounded bg-warning/10 px-1.5 py-0.5 text-3xs font-medium text-warning">
                     Coming Soon
                   </span>
                 )}

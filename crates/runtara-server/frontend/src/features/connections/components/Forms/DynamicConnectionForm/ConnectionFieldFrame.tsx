@@ -28,9 +28,9 @@ export function ConnectionFieldFrame({
         <p
           className={
             cleared
-              ? 'font-medium text-amber-700 dark:text-amber-400'
+              ? 'font-medium text-warning'
               : configured
-                ? 'text-emerald-700 dark:text-emerald-400'
+                ? 'text-success'
                 : 'text-muted-foreground'
           }
         >

@@ -91,7 +91,7 @@ export function SourceAggregatesEditor({
       <header className="flex items-center justify-between">
         <div className="grid">
           <Label className="text-xs font-semibold">Source aggregates</Label>
-          <span className="text-[10px] text-muted-foreground">
+          <span className="text-3xs text-muted-foreground">
             Required for chart and metric blocks. Each row produces one column
             you can reference by alias.
           </span>

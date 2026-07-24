@@ -223,7 +223,7 @@ export const EditableCell = memo(function EditableCell({
         }}
         onBlur={onBlur}
         onKeyDown={handleKeyDown}
-        className="box-border h-10 w-full rounded-none border-0 bg-blue-50 px-2 py-2 ring-2 ring-inset ring-blue-500 focus-visible:ring-0 dark:bg-blue-950/30 dark:ring-blue-600"
+        className="box-border h-10 w-full rounded-none border-0 bg-info/10 px-2 py-2 ring-2 ring-inset ring-info focus-visible:ring-0"
         type={
           dataType === 'integer' || dataType === 'decimal' ? 'number' : 'text'
         }
@@ -323,7 +323,7 @@ function renderValue(value: any, dataType: string) {
     case 'boolean':
       return String(value).toLowerCase() === 'true' ||
         (typeof value === 'boolean' && value === true) ? (
-        <span className="text-green-600 dark:text-green-400">True</span>
+        <span className="text-success">True</span>
       ) : (
         <span className="text-muted-foreground">False</span>
       );

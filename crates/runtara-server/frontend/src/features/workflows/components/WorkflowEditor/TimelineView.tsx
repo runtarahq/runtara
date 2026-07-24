@@ -386,16 +386,16 @@ function getExecutionBorderClass(status?: ExecutionStatus) {
   switch (status) {
     case 'running':
     case 'compiling':
-      return 'border-blue-500';
+      return 'border-info';
     case 'completed':
-      return 'border-green-500';
+      return 'border-success';
     case 'failed':
     case 'timeout':
-      return 'border-red-500';
+      return 'border-destructive';
     case 'queued':
-      return 'border-yellow-500';
+      return 'border-warning';
     case 'suspended':
-      return 'border-blue-400';
+      return 'border-info/70';
     case 'cancelled':
       return 'border-muted-foreground/60';
     default:
@@ -412,16 +412,16 @@ function getExecutionIconClass(
   switch (status) {
     case 'running':
     case 'compiling':
-      return 'border-blue-500 bg-blue-50 text-blue-700 dark:bg-blue-950 dark:text-blue-300';
+      return 'border-info bg-info/10 text-info';
     case 'completed':
-      return 'border-green-500 bg-green-50 text-green-700 dark:bg-green-950 dark:text-green-300';
+      return 'border-success bg-success/10 text-success';
     case 'failed':
     case 'timeout':
-      return 'border-red-500 bg-red-50 text-red-700 dark:bg-red-950 dark:text-red-300';
+      return 'border-destructive bg-destructive/10 text-destructive';
     case 'queued':
-      return 'border-yellow-500 bg-yellow-50 text-yellow-700 dark:bg-yellow-950 dark:text-yellow-300';
+      return 'border-warning bg-warning/10 text-warning';
     case 'suspended':
-      return 'border-blue-400 bg-muted/50 text-foreground';
+      return 'border-info/70 bg-muted/50 text-foreground';
     case 'cancelled':
       return 'border-muted-foreground/60 bg-muted/50 text-muted-foreground';
     default:
@@ -2162,7 +2162,7 @@ function BranchLaneGroups({
             <div className="relative flex min-h-10 flex-col items-start">
               <span
                 className={cn(
-                  'relative ml-1 mt-2 inline-flex items-center rounded-sm bg-background px-0.5 py-1 text-[10px] font-semibold uppercase leading-none text-muted-foreground',
+                  'relative ml-1 mt-2 inline-flex items-center rounded-sm bg-background px-0.5 py-1 text-3xs font-semibold uppercase leading-none text-muted-foreground',
                   isErrorRoute && 'text-destructive'
                 )}
                 style={{ writingMode: 'vertical-rl' }}

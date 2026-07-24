@@ -252,8 +252,8 @@ export function ErrorStepField({ name }: ErrorStepFieldProps) {
         />
       </FormItem>
 
-      <div className="rounded-md border border-blue-500/50 bg-blue-500/10 p-3 text-sm">
-        <p className="text-blue-600 dark:text-blue-400">
+      <div className="rounded-md border border-info/50 bg-info/10 p-3 text-sm">
+        <p className="text-info">
           Error steps are typically added as error handlers on other steps. They
           define structured error information that will be thrown when
           triggered.

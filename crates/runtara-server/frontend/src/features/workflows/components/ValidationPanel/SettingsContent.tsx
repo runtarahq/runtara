@@ -152,7 +152,7 @@ export function SettingsContent({
                 </div>
                 <div className="min-w-0 flex-1">
                   <div className="text-sm font-medium">{section.label}</div>
-                  <div className="truncate text-[10px] text-muted-foreground">
+                  <div className="truncate text-3xs text-muted-foreground">
                     {section.description}
                   </div>
                 </div>

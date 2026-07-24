@@ -142,7 +142,7 @@ export function ReplayInspector({
           <span className="truncate text-xs font-semibold text-foreground">
             {node?.name ?? nodeId}
           </span>
-          <span className="text-[10px] text-muted-foreground">
+          <span className="text-3xs text-muted-foreground">
             {node?.stepType}
             {' · '}
             {STATE_LABEL[state]}

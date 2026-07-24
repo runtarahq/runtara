@@ -81,7 +81,7 @@ export function NavigationBlocker() {
           </AlertDialogCancel>
           <AlertDialogAction
             onClick={confirmNavigation}
-            className="bg-orange-600 hover:bg-orange-700"
+            className="bg-warning text-warning-foreground hover:bg-warning/90"
           >
             Discard changes
           </AlertDialogAction>

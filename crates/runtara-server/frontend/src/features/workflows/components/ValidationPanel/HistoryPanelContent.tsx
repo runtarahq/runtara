@@ -210,10 +210,7 @@ export function HistoryPanelContent({ workflowId }: HistoryPanelContentProps) {
                     {formatDate(instance.createdAt)}
                   </div>
                   <div className="mt-0.5 flex items-center gap-1.5 text-xs text-muted-foreground">
-                    <Badge
-                      variant="outline"
-                      className="h-4 px-1 py-0 text-[10px]"
-                    >
+                    <Badge variant="outline" className="h-4 px-1 py-0 text-3xs">
                       v{instance.version}
                     </Badge>
                     {instance.executionDurationSeconds !== null &&
@@ -229,7 +226,7 @@ export function HistoryPanelContent({ workflowId }: HistoryPanelContentProps) {
                   {instance.status === 'suspended' && (
                     <button
                       type="button"
-                      className="inline-flex h-5 w-5 items-center justify-center rounded text-orange-600 hover:bg-orange-100 hover:text-orange-700"
+                      className="inline-flex h-5 w-5 items-center justify-center rounded text-warning hover:bg-warning/10 hover:text-warning"
                       title="Reattach — resume debugging"
                       onClick={(e) => {
                         e.stopPropagation();
@@ -247,7 +244,7 @@ export function HistoryPanelContent({ workflowId }: HistoryPanelContentProps) {
                       <Bug className="h-3 w-3" />
                     </button>
                   )}
-                  <Badge variant={statusInfo.variant} className="text-[10px]">
+                  <Badge variant={statusInfo.variant} className="text-3xs">
                     {isActive && statusInfo.showSpinner && (
                       <Spinner className="mr-1 h-2.5 w-2.5" />
                     )}
@@ -265,12 +262,12 @@ export function HistoryPanelContent({ workflowId }: HistoryPanelContentProps) {
         {/* Events header */}
         <div className="flex items-center justify-between border-b bg-muted/20 px-3 py-1.5">
           <div className="flex items-center gap-2">
-            <div className="rounded bg-amber-500/10 p-1">
-              <Zap className="h-3.5 w-3.5 text-amber-600" />
+            <div className="rounded bg-warning/10 p-1">
+              <Zap className="h-3.5 w-3.5 text-warning" />
             </div>
             <span className="text-xs font-medium">Events</span>
             {stepSummaries.length > 0 && (
-              <span className="text-[10px] text-muted-foreground">
+              <span className="text-3xs text-muted-foreground">
                 ({stepSummaries.length} steps)
               </span>
             )}
@@ -360,7 +357,7 @@ function EventRow({ step, sequence }: { step: StepSummary; sequence: number }) {
 
   const getRowClass = () => {
     if (isFailed) return 'bg-destructive/5';
-    if (isRunning) return 'bg-blue-500/5';
+    if (isRunning) return 'bg-info/5';
     return '';
   };
 
@@ -406,10 +403,7 @@ function EventRow({ step, sequence }: { step: StepSummary; sequence: number }) {
             : '-'}
         </td>
         <td className="px-3 py-1.5 text-right">
-          <Badge
-            variant={getBadgeVariant()}
-            className="px-1.5 py-0 text-[10px]"
-          >
+          <Badge variant={getBadgeVariant()} className="px-1.5 py-0 text-3xs">
             {isRunning && <Spinner className="mr-0.5 h-2.5 w-2.5" />}
             {getStatusLabel()}
           </Badge>
@@ -428,14 +422,14 @@ function EventRow({ step, sequence }: { step: StepSummary; sequence: number }) {
               {hasInputs && (
                 <div>
                   <div className="mb-1 flex items-center justify-between">
-                    <span className="flex items-center gap-1 text-[10px] font-semibold text-muted-foreground">
+                    <span className="flex items-center gap-1 text-3xs font-semibold text-muted-foreground">
                       <Database className="h-2.5 w-2.5" />
                       Inputs
                     </span>
                     <Button
                       variant="ghost"
                       size="sm"
-                      className="h-5 px-1 text-[10px]"
+                      className="h-5 px-1 text-3xs"
                       onClick={(e) => {
                         e.stopPropagation();
                         handleCopy(step.inputs, 'Inputs');
@@ -448,7 +442,7 @@ function EventRow({ step, sequence }: { step: StepSummary; sequence: number }) {
                   <PayloadPreBlock
                     data={step.inputs}
                     className="max-h-24"
-                    textClassName="text-[10px]"
+                    textClassName="text-3xs"
                   />
                 </div>
               )}
@@ -456,14 +450,14 @@ function EventRow({ step, sequence }: { step: StepSummary; sequence: number }) {
               {hasOutputs && (
                 <div>
                   <div className="mb-1 flex items-center justify-between">
-                    <span className="flex items-center gap-1 text-[10px] font-semibold text-muted-foreground">
+                    <span className="flex items-center gap-1 text-3xs font-semibold text-muted-foreground">
                       <Sparkles className="h-2.5 w-2.5" />
                       Outputs
                     </span>
                     <Button
                       variant="ghost"
                       size="sm"
-                      className="h-5 px-1 text-[10px]"
+                      className="h-5 px-1 text-3xs"
                       onClick={(e) => {
                         e.stopPropagation();
                         handleCopy(step.outputs, 'Outputs');
@@ -476,13 +470,13 @@ function EventRow({ step, sequence }: { step: StepSummary; sequence: number }) {
                   <PayloadPreBlock
                     data={step.outputs}
                     className="max-h-24"
-                    textClassName="text-[10px]"
+                    textClassName="text-3xs"
                   />
                 </div>
               )}
 
               {!hasInputs && !hasOutputs && !hasError && (
-                <p className="text-[10px] text-muted-foreground">
+                <p className="text-3xs text-muted-foreground">
                   No input/output data available.
                 </p>
               )}

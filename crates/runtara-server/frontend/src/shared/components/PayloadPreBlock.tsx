@@ -24,10 +24,7 @@ export function PayloadPreBlock({
       </pre>
       {truncated && (
         <div className="mt-1">
-          <Badge
-            variant="outline"
-            className="text-[10px] text-muted-foreground"
-          >
+          <Badge variant="outline" className="text-3xs text-muted-foreground">
             Truncated — original: {originalSizeFormatted}
           </Badge>
         </div>

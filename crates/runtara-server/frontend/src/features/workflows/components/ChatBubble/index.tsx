@@ -46,13 +46,13 @@ function EventDetails({ events }: { events: ChatSSEEvent[] }) {
         )}
         <span className="flex items-center gap-1.5">
           {llmEvents.length > 0 && (
-            <Badge variant="outline" className="gap-1 py-0 text-[10px]">
+            <Badge variant="outline" className="gap-1 py-0 text-3xs">
               <Brain className="h-2.5 w-2.5" />
               LLM
             </Badge>
           )}
           {toolCalls.length > 0 && (
-            <Badge variant="outline" className="gap-1 py-0 text-[10px]">
+            <Badge variant="outline" className="gap-1 py-0 text-3xs">
               <Wrench className="h-2.5 w-2.5" />
               {toolCalls.filter((e) => e.type === 'tool_call').length} tool call
               {toolCalls.filter((e) => e.type === 'tool_call').length !== 1
@@ -61,7 +61,7 @@ function EventDetails({ events }: { events: ChatSSEEvent[] }) {
             </Badge>
           )}
           {memoryEvents.length > 0 && (
-            <Badge variant="outline" className="gap-1 py-0 text-[10px]">
+            <Badge variant="outline" className="gap-1 py-0 text-3xs">
               <Database className="h-2.5 w-2.5" />
               Memory saved
             </Badge>
@@ -85,10 +85,10 @@ function EventItem({ event }: { event: ChatSSEEvent }) {
     case 'tool_call':
       return (
         <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-          <Wrench className="h-3 w-3 text-blue-500" />
+          <Wrench className="h-3 w-3 text-primary" />
           <span>
             Calling{' '}
-            <code className="rounded bg-muted px-1 py-0.5 text-[10px]">
+            <code className="rounded bg-muted px-1 py-0.5 text-3xs">
               {(event.data.tool_name as string) ?? 'tool'}
             </code>
           </span>
@@ -98,9 +98,9 @@ function EventItem({ event }: { event: ChatSSEEvent }) {
       const duration = event.data.duration_ms as number | undefined;
       return (
         <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-          <Check className="h-3 w-3 text-green-500" />
+          <Check className="h-3 w-3 text-success" />
           <span>
-            <code className="rounded bg-muted px-1 py-0.5 text-[10px]">
+            <code className="rounded bg-muted px-1 py-0.5 text-3xs">
               {(event.data.tool_name as string) ?? 'tool'}
             </code>
             {duration != null && (
@@ -136,7 +136,7 @@ function EventItem({ event }: { event: ChatSSEEvent }) {
     case 'memory_saved':
       return (
         <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-          <Database className="h-3 w-3 text-emerald-500" />
+          <Database className="h-3 w-3 text-success" />
           <span>
             Memory saved ({(event.data.message_count as number) ?? '?'}{' '}
             messages)
@@ -166,7 +166,7 @@ export function ChatBubble({ message }: ChatBubbleProps) {
       <div className="flex justify-center">
         <div className="flex items-center gap-1.5 rounded-full bg-muted/50 px-3 py-1 text-xs text-muted-foreground">
           {events.some((e) => e.type === 'waiting_for_input') && (
-            <AlertCircle className="h-3 w-3 text-amber-500" />
+            <AlertCircle className="h-3 w-3 text-warning" />
           )}
           <span>{content}</span>
         </div>

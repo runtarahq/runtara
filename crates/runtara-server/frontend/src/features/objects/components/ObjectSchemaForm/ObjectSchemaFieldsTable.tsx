@@ -108,7 +108,7 @@ function FieldRow({ field, onUpdate, onRemove }: FieldRowProps) {
       {/* Type column */}
       <TableCell className="align-middle">
         <span
-          className="cursor-default rounded bg-muted/40 px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground"
+          className="cursor-default rounded bg-muted/40 px-1.5 py-0.5 font-mono text-2xs text-muted-foreground"
           title={getTypeLabel(field.dataType)}
         >
           {getTypeAbbreviation(field.dataType)}
@@ -224,7 +224,7 @@ function FieldRow({ field, onUpdate, onRemove }: FieldRowProps) {
                           }
                           className="h-9"
                         />
-                        <p className="text-[10px] text-muted-foreground">
+                        <p className="text-3xs text-muted-foreground">
                           Total digits (1-1000)
                         </p>
                       </div>
@@ -242,7 +242,7 @@ function FieldRow({ field, onUpdate, onRemove }: FieldRowProps) {
                           }
                           className="h-9"
                         />
-                        <p className="text-[10px] text-muted-foreground">
+                        <p className="text-3xs text-muted-foreground">
                           Decimal places
                         </p>
                       </div>
@@ -285,7 +285,7 @@ function FieldRow({ field, onUpdate, onRemove }: FieldRowProps) {
                         placeholder="title"
                         className="h-9"
                       />
-                      <p className="text-[10px] text-muted-foreground">
+                      <p className="text-3xs text-muted-foreground">
                         String or enum column used to build the search vector.
                       </p>
                     </div>
@@ -326,7 +326,7 @@ function FieldRow({ field, onUpdate, onRemove }: FieldRowProps) {
                         }
                         className="h-9"
                       />
-                      <p className="text-[10px] text-muted-foreground">
+                      <p className="text-3xs text-muted-foreground">
                         Embedding length (1-16000).
                       </p>
                     </div>

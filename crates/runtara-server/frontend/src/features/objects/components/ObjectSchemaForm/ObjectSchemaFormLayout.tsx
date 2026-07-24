@@ -47,7 +47,7 @@ export function ObjectSchemaFormLayout(props: ObjectSchemaFormLayoutProps) {
                 <ArrowLeft className="h-5 w-5" />
               </Link>
               <div>
-                <p className="text-xs font-semibold uppercase tracking-wider text-blue-600">
+                <p className="text-xs font-semibold uppercase tracking-wider text-primary">
                   Objects
                 </p>
                 <h1 className="text-lg font-semibold text-foreground">
@@ -68,7 +68,7 @@ export function ObjectSchemaFormLayout(props: ObjectSchemaFormLayoutProps) {
                   size="sm"
                   onClick={onDelete}
                   disabled={isDeleting}
-                  className="text-red-600 hover:bg-red-50 hover:text-red-700 dark:hover:bg-red-900/30"
+                  className="text-destructive hover:bg-destructive/10 hover:text-destructive"
                 >
                   {isDeleting ? (
                     <Spinner className="mr-1.5 h-4 w-4" />
@@ -92,7 +92,7 @@ export function ObjectSchemaFormLayout(props: ObjectSchemaFormLayoutProps) {
                 type="submit"
                 size="sm"
                 disabled={isLoading}
-                className="shadow-sm shadow-blue-600/20"
+                className="shadow-sm shadow-primary/20"
               >
                 {isLoading ? (
                   <>

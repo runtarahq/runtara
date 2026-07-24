@@ -21,10 +21,10 @@ export function HumanInputCard({
   isSubmitting,
 }: HumanInputCardProps) {
   return (
-    <Card className="border-amber-500/50 bg-amber-500/5">
+    <Card className="border-warning/50 bg-warning/5">
       <CardHeader className="pb-3">
         <CardTitle className="flex items-center gap-2 text-sm font-medium">
-          <MessageSquare className="h-4 w-4 text-amber-600" />
+          <MessageSquare className="h-4 w-4 text-warning" />
           Human Input Required
         </CardTitle>
         <div className="flex items-center gap-2 text-xs text-muted-foreground">

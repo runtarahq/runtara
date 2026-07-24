@@ -235,7 +235,7 @@ export function TriggersGrid({
                         </div>
                         {syncEndpoint && (
                           <div className="flex items-center gap-1">
-                            <span className="shrink-0 text-[10px] font-medium uppercase tracking-wide text-muted-foreground/70">
+                            <span className="shrink-0 text-3xs font-medium uppercase tracking-wide text-muted-foreground/70">
                               Sync (30s, no history)
                             </span>
                             <Tooltip>

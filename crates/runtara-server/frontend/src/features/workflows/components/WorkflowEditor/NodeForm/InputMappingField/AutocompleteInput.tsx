@@ -143,9 +143,7 @@ export function AutocompleteInput({
 
   // Add visual styling for raw mode
   const rawModeClass =
-    typeHint === 'raw'
-      ? 'bg-amber-50/50 dark:bg-amber-950/20 border-amber-200 dark:border-amber-900/50'
-      : '';
+    typeHint === 'raw' ? 'bg-warning/5 border-warning/30' : '';
 
   const inputProps = {
     ref: inputRef as any,

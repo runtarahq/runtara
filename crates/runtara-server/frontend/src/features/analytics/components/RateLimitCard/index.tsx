@@ -21,12 +21,12 @@ function getCapacityColor(capacityPercent: number | null | undefined): string {
     return 'bg-muted';
   }
   if (capacityPercent > 50) {
-    return 'bg-green-500';
+    return 'bg-success';
   }
   if (capacityPercent >= 20) {
-    return 'bg-yellow-500';
+    return 'bg-warning';
   }
-  return 'bg-red-500';
+  return 'bg-destructive';
 }
 
 function getCapacityTextColor(
@@ -36,12 +36,12 @@ function getCapacityTextColor(
     return 'text-muted-foreground';
   }
   if (capacityPercent > 50) {
-    return 'text-green-600 dark:text-green-400';
+    return 'text-success';
   }
   if (capacityPercent >= 20) {
-    return 'text-yellow-600 dark:text-yellow-400';
+    return 'text-warning';
   }
-  return 'text-red-600 dark:text-red-400';
+  return 'text-destructive';
 }
 
 function formatNumber(num: number): string {
@@ -128,7 +128,7 @@ export function RateLimitCard({
 
         {/* Redis Unavailable Warning */}
         {!isRedisAvailable && (
-          <div className="flex items-center gap-2 rounded-md bg-yellow-500/10 p-2 text-yellow-600 dark:text-yellow-400">
+          <div className="flex items-center gap-2 rounded-md bg-warning/10 p-2 text-warning">
             <AlertTriangle className="h-4 w-4 shrink-0" />
             <span className="text-xs font-medium">Redis Unavailable</span>
           </div>
@@ -186,7 +186,7 @@ export function RateLimitCard({
               <div className="flex items-center gap-1.5">
                 <Clock className="h-3.5 w-3.5 text-muted-foreground" />
                 <span className="text-muted-foreground">Limited:</span>
-                <span className="font-medium text-yellow-600 dark:text-yellow-400">
+                <span className="font-medium text-warning">
                   {formatNumber(periodStats.rateLimitedCount)}
                 </span>
               </div>
@@ -222,7 +222,7 @@ export function RateLimitCard({
 
         {/* Learned Limit Warning */}
         {showLearnedLimitWarning && (
-          <div className="flex items-center gap-2 rounded-md bg-blue-500/10 p-2 text-blue-600 dark:text-blue-400">
+          <div className="flex items-center gap-2 rounded-md bg-info/10 p-2 text-info">
             <AlertTriangle className="h-4 w-4 shrink-0" />
             <span className="text-xs">
               API reports limit: {state.learnedLimit}

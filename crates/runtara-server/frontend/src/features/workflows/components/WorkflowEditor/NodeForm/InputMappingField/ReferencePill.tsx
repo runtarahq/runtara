@@ -72,8 +72,7 @@ export function ReferencePill({
     <div
       className={cn(
         'inline-flex items-center gap-1.5 rounded-full px-2 py-1 text-xs',
-        'border border-blue-200 bg-blue-50 text-blue-600',
-        'dark:border-blue-800 dark:bg-blue-950 dark:text-blue-400',
+        'border border-primary/30 bg-primary/10 text-primary',
         disabled && 'opacity-50',
         className
       )}
@@ -96,7 +95,7 @@ export function ReferencePill({
         )}
       </span>
       {type && (
-        <span className="shrink-0 rounded bg-blue-100 px-1 py-0.5 font-mono text-[10px] leading-none text-blue-700 dark:bg-blue-900 dark:text-blue-300">
+        <span className="shrink-0 rounded bg-primary/20 px-1 py-0.5 font-mono text-3xs leading-none text-primary">
           {type}
         </span>
       )}
@@ -107,7 +106,7 @@ export function ReferencePill({
             e.stopPropagation();
             onRemove();
           }}
-          className="ml-0.5 rounded-full p-0.5 transition-colors hover:bg-blue-100 dark:hover:bg-blue-900"
+          className="ml-0.5 rounded-full p-0.5 transition-colors hover:bg-primary/20"
           aria-label="Remove reference"
         >
           <Icons.x className="h-3 w-3" />

@@ -102,12 +102,12 @@ export function DebugStepInspector() {
               {stepName}
             </span>
             {isSuspendedStep && (
-              <span className="rounded bg-blue-50 px-1 text-[9px] font-medium text-blue-600">
+              <span className="rounded bg-info/10 px-1 text-[9px] font-medium text-info">
                 breakpoint
               </span>
             )}
           </div>
-          <span className="text-[10px] text-muted-foreground">
+          <span className="text-3xs text-muted-foreground">
             {stepType}
             {nodeStatus?.executionTime !== undefined &&
               ` \u00b7 ${nodeStatus.executionTime < 1000 ? `${nodeStatus.executionTime}ms` : `${(nodeStatus.executionTime / 1000).toFixed(2)}s`}`}

@@ -168,7 +168,7 @@ const NoteNodeComponent = ({ id, data, selected, dragging }: NodeProps) => {
       )}
 
       {/* Content area */}
-      <div className="h-full w-full overflow-hidden rounded-md p-3 text-[10px] leading-snug">
+      <div className="h-full w-full overflow-hidden rounded-md p-3 text-3xs leading-snug">
         {isEditing ? (
           <Textarea
             ref={textareaRef}
@@ -182,7 +182,7 @@ const NoteNodeComponent = ({ id, data, selected, dragging }: NodeProps) => {
               'text-yellow-900 dark:text-yellow-100',
               'placeholder:text-yellow-500 dark:placeholder:text-yellow-600',
               'focus:outline-none focus:ring-0',
-              'text-[10px] leading-snug',
+              'text-3xs leading-snug',
               'select-text'
             )}
             placeholder="Type your note... (Markdown supported)"
@@ -194,8 +194,8 @@ const NoteNodeComponent = ({ id, data, selected, dragging }: NodeProps) => {
               'cursor-text select-text',
               // Custom markdown styling
               '[&>h1]:mb-1 [&>h1]:text-[12px] [&>h1]:font-bold',
-              '[&>h2]:mb-1 [&>h2]:text-[11px] [&>h2]:font-bold',
-              '[&>h3]:mb-1 [&>h3]:text-[10px] [&>h3]:font-semibold',
+              '[&>h2]:mb-1 [&>h2]:text-2xs [&>h2]:font-bold',
+              '[&>h3]:mb-1 [&>h3]:text-3xs [&>h3]:font-semibold',
               '[&>p:last-child]:mb-0 [&>p]:mb-1',
               '[&>ul]:mb-1 [&>ul]:ml-3 [&>ul]:list-disc',
               '[&>ol]:mb-1 [&>ol]:ml-3 [&>ol]:list-decimal',
@@ -217,7 +217,7 @@ const NoteNodeComponent = ({ id, data, selected, dragging }: NodeProps) => {
                 {content}
               </ReactMarkdown>
             ) : (
-              <p className="text-[10px] italic text-yellow-500 dark:text-yellow-600">
+              <p className="text-3xs italic text-yellow-500 dark:text-yellow-600">
                 Click to add note...
               </p>
             )}

@@ -13,6 +13,7 @@ import { useExecutionStore } from '@/features/workflows/stores/executionStore';
 import { useEdgeContext } from './EdgeContext';
 import { shouldHideDuplicateEdgeLabel } from '../CustomNodes/layout';
 import { useIsDarkTheme } from '@/shared/stores/themeStore';
+import { CANVAS_Z } from '@/features/workflows/components/WorkflowEditor/canvas-z';
 
 interface ImprovedEdgeProps extends EdgeProps {
   pathType?: 'bezier' | 'smoothstep' | 'straight';
@@ -394,7 +395,7 @@ export function ImprovedEdge({
               position: 'absolute',
               transform: `translate(0, -50%) translate(${sourceSegLabel.x}px,${sourceSegLabel.y + labelYOffset}px)`,
               pointerEvents: 'all',
-              zIndex: 1002,
+              zIndex: CANVAS_Z.edgeLabel,
             }}
             className="nodrag nopan flex items-center gap-0.5 rounded bg-background/80 px-1 py-px text-[9px] font-normal text-muted-foreground/60 backdrop-blur-sm"
           >
@@ -414,7 +415,7 @@ export function ImprovedEdge({
                 position: 'absolute',
                 transform: `translate(-50%, -50%) translate(${labelX}px,${labelY + (label ? 20 : 0)}px)`,
                 pointerEvents: 'all',
-                zIndex: 9999,
+                zIndex: CANVAS_Z.edgeControls,
               }}
               className="nodrag nopan"
               onMouseEnter={() => setIsHovered(true)}

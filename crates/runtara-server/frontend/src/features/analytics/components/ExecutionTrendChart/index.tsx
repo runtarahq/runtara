@@ -162,7 +162,7 @@ export function ExecutionTrendChart({
                   yAxisId="right"
                   type="monotone"
                   dataKey="successRate"
-                  stroke="#22c55e"
+                  stroke="hsl(var(--success))"
                   strokeWidth={2}
                   name="Success Rate"
                   dot={false}
@@ -215,7 +215,7 @@ export function ExecutionTrendChart({
                 <Line
                   type="monotone"
                   dataKey="avgMemory"
-                  stroke="#8b5cf6"
+                  stroke="hsl(var(--chart-6))"
                   strokeWidth={2}
                   name="Avg Memory (MB)"
                   dot={false}

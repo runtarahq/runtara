@@ -69,7 +69,7 @@ export function InlineBlockEditor({
             <p className="truncate text-xs font-medium text-foreground">
               Editing {block.title || block.id}
             </p>
-            <p className="text-[10px] uppercase tracking-wider text-muted-foreground/70">
+            <p className="text-3xs uppercase tracking-wider text-muted-foreground/70">
               {block.type}
             </p>
           </div>

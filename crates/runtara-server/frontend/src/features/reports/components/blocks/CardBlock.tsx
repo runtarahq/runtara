@@ -695,7 +695,7 @@ function SubtableCell({
       return (
         <Badge
           variant={asBadgeVariant(column.pillVariants?.[key])}
-          className="rounded-full px-2 py-0.5 text-[10px]"
+          className="rounded-full px-2 py-0.5 text-3xs"
         >
           {humanizePillLabel(value)}
         </Badge>
@@ -705,7 +705,7 @@ function SubtableCell({
   if (typeof value === 'boolean') return <>{value ? 'Yes' : 'No'}</>;
   if (typeof value === 'object') {
     return (
-      <code className="rounded bg-muted/50 px-1 py-0.5 text-[10px]">
+      <code className="rounded bg-muted/50 px-1 py-0.5 text-3xs">
         {JSON.stringify(value)}
       </code>
     );

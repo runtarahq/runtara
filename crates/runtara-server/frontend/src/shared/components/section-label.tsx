@@ -19,7 +19,7 @@ export interface SectionLabelProps extends HTMLAttributes<HTMLElement> {
 /**
  * The uppercase muted micro-label used above sections, tables, and panels.
  * One canonical spelling per tier — don't hand-roll
- * `text-[10px] font-semibold uppercase tracking-…` variants.
+ * `text-3xs font-semibold uppercase tracking-…` variants.
  */
 export function SectionLabel({
   size = 'default',

@@ -254,7 +254,7 @@ export function TestAgentInline() {
               </>
             ) : (
               <>
-                <CheckCircle className="h-5 w-5 text-green-600" />
+                <CheckCircle className="h-5 w-5 text-success" />
                 <h3 className="text-sm font-semibold">Test Successful</h3>
               </>
             )}

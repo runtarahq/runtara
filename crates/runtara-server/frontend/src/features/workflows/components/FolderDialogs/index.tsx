@@ -75,7 +75,7 @@ export function RenameFolderDialog({
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
-            <Pencil className="h-5 w-5 text-blue-500" />
+            <Pencil className="h-5 w-5 text-primary" />
             Rename folder
           </DialogTitle>
           <DialogDescription>
@@ -93,7 +93,7 @@ export function RenameFolderDialog({
                 setError(null);
               }}
               placeholder="Enter new folder name"
-              className={error ? 'border-red-500' : ''}
+              className={error ? 'border-destructive' : ''}
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && !isLoading) {
                   handleConfirm();
@@ -101,7 +101,7 @@ export function RenameFolderDialog({
               }}
               autoFocus
             />
-            {error && <p className="text-xs text-red-500">{error}</p>}
+            {error && <p className="text-xs text-destructive">{error}</p>}
           </div>
         </div>
         <DialogFooter>
@@ -157,7 +157,7 @@ export function DeleteFolderDialog({
       <AlertDialogContent>
         <AlertDialogHeader>
           <AlertDialogTitle className="flex items-center gap-2">
-            <Trash2 className="h-5 w-5 text-red-500" />
+            <Trash2 className="h-5 w-5 text-destructive" />
             Delete folder "{folderName}"?
           </AlertDialogTitle>
           <AlertDialogDescription>
@@ -177,7 +177,7 @@ export function DeleteFolderDialog({
           <AlertDialogAction
             onClick={() => onConfirm(folderPath)}
             disabled={isLoading}
-            className="bg-red-600 hover:bg-red-700 focus:ring-red-600"
+            className="bg-destructive hover:bg-destructive/90 focus:ring-destructive"
           >
             {isLoading ? (
               <>
@@ -310,7 +310,7 @@ export function MoveToFolderDialog({
                   setError(null);
                 }}
                 placeholder="Enter folder name..."
-                className={cn('h-9', error ? 'border-red-500' : '')}
+                className={cn('h-9', error ? 'border-destructive' : '')}
                 autoFocus
                 onKeyDown={(e) => {
                   if (e.key === 'Enter' && !isLoading) {
@@ -323,7 +323,9 @@ export function MoveToFolderDialog({
                   }
                 }}
               />
-              {error && <p className="mt-1 text-xs text-red-500">{error}</p>}
+              {error && (
+                <p className="mt-1 text-xs text-destructive">{error}</p>
+              )}
             </div>
           )}
 
@@ -340,7 +342,7 @@ export function MoveToFolderDialog({
             className={cn(
               'flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left transition-colors',
               selectedPath === '/' && !isCreatingNew
-                ? 'border border-blue-200 bg-blue-50 dark:border-blue-700 dark:bg-blue-900/30'
+                ? 'border border-primary/30 bg-primary/10'
                 : 'hover:bg-muted'
             )}
           >
@@ -348,7 +350,7 @@ export function MoveToFolderDialog({
               className={cn(
                 'h-5 w-5',
                 selectedPath === '/' && !isCreatingNew
-                  ? 'text-blue-600'
+                  ? 'text-primary'
                   : 'text-muted-foreground'
               )}
             />
@@ -357,7 +359,7 @@ export function MoveToFolderDialog({
                 className={cn(
                   'text-sm font-medium',
                   selectedPath === '/' && !isCreatingNew
-                    ? 'text-blue-600'
+                    ? 'text-primary'
                     : 'text-foreground'
                 )}
               >
@@ -385,7 +387,7 @@ export function MoveToFolderDialog({
               className={cn(
                 'flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left transition-colors',
                 selectedPath === folder.path && !isCreatingNew
-                  ? 'border border-blue-200 bg-blue-50 dark:border-blue-700 dark:bg-blue-900/30'
+                  ? 'border border-primary/30 bg-primary/10'
                   : 'hover:bg-muted'
               )}
               style={{ paddingLeft: `${12 + (folder.depth - 1) * 16}px` }}
@@ -394,7 +396,7 @@ export function MoveToFolderDialog({
                 className={cn(
                   'h-5 w-5',
                   selectedPath === folder.path && !isCreatingNew
-                    ? 'text-blue-600'
+                    ? 'text-primary'
                     : 'text-amber-500'
                 )}
               />
@@ -403,7 +405,7 @@ export function MoveToFolderDialog({
                   className={cn(
                     'text-sm font-medium',
                     selectedPath === folder.path && !isCreatingNew
-                      ? 'text-blue-600'
+                      ? 'text-primary'
                       : 'text-foreground'
                   )}
                 >

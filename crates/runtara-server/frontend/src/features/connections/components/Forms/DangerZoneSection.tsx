@@ -14,10 +14,8 @@ export function DangerZoneSection({
   onRequestDelete,
 }: DangerZoneSectionProps) {
   return (
-    <section className="rounded-lg border border-red-200/70 bg-card px-4 py-4 dark:border-red-900/40">
-      <h3 className="font-medium text-red-700 dark:text-red-400">
-        Danger zone
-      </h3>
+    <section className="rounded-lg border border-destructive/30 bg-card px-4 py-4">
+      <h3 className="font-medium text-destructive">Danger zone</h3>
       <div className="mt-3 flex items-center gap-4">
         <div className="min-w-0 flex-1">
           <p className="text-sm font-medium">Delete this connection</p>
@@ -33,7 +31,7 @@ export function DangerZoneSection({
           size="sm"
           onClick={onRequestDelete}
           disabled={isDeleting}
-          className="flex-shrink-0 border-red-300 text-red-700 hover:bg-red-50 hover:text-red-800 dark:border-red-800 dark:text-red-400 dark:hover:bg-red-900/30"
+          className="flex-shrink-0 border-destructive/40 text-destructive hover:bg-destructive/10 hover:text-destructive"
         >
           Delete…
         </Button>

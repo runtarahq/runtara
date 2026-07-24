@@ -30,6 +30,27 @@
   }
 }
 
+/* Respect OS-level reduced-motion: stop decorative infinite animations and
+   shorten transitions. Spinners (animate-spin) stay — they communicate
+   loading state, which WCAG treats as essential motion. */
+@media (prefers-reduced-motion: reduce) {
+  .animate-glow-pulse,
+  .animate-parked-pulse,
+  .animate-pulse,
+  .animate-loading,
+  .animate-row-flash,
+  .animate-ping {
+    animation: none;
+  }
+
+  *,
+  ::before,
+  ::after {
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
 @layer base {
   :root {
     /* Native UI (scrollbars, form controls, <select> popups) follows the theme */
@@ -64,11 +85,18 @@
     --warning-foreground: 0 0% 100%; /* white */
     --info: 217 91% 60%; /* blue (matches the informational blues in use) */
     --info-foreground: 0 0% 100%; /* white */
-    --chart-1: 217 91% 60%; /* vibrant blue */
-    --chart-2: 174 77% 50%; /* teal */
-    --chart-3: 142 71% 45%; /* green */
-    --chart-4: 38 92% 50%; /* amber */
-    --chart-5: 0 84% 60%; /* soft red */
+    /* Categorical chart palette (reports dataviz set): alternating hue
+       families, CVD-safe adjacency, >=3:1 on light and dark cards; slot 1
+       stays on brand primary. Consumed as hsl(var(--chart-N)). */
+    --chart-1: 217 91% 60%; /* brand blue */
+    --chart-2: 26 90% 44%; /* amber-600 */
+    --chart-3: 175 84% 32%; /* teal-600 */
+    --chart-4: 293 69% 49%; /* fuchsia-600 */
+    --chart-5: 142 76% 36%; /* green-600 */
+    --chart-6: 262 83% 58%; /* violet-600 */
+    --chart-7: 20 90% 48%; /* orange-600 */
+    --chart-8: 200 98% 39%; /* sky-600 */
+    --chart-9: 0 74% 42%; /* red-600 */
     --radius: 0.375rem; /* utilitarian: tight corners (controls ~4px, cards ~6px) */
     --sidebar-background: 210 40% 98%; /* very light blue */
     --sidebar-foreground: 214 32% 20%; /* deep blue-gray */
@@ -110,11 +138,19 @@
     --warning-foreground: 0 0% 100%; /* white */
     --info: 217 91% 60%; /* #3b82f6 */
     --info-foreground: 0 0% 100%; /* white */
-    --chart-1: 217 91% 60%; /* #3b82f6 */
-    --chart-2: 174 77% 50%; /* teal */
-    --chart-3: 142 71% 45%; /* #22c55e */
-    --chart-4: 38 92% 50%; /* amber */
-    --chart-5: 0 84% 60%; /* red */
+    /* Same palette in dark (chosen to read on both surfaces). */
+    /* Categorical chart palette (reports dataviz set): alternating hue
+       families, CVD-safe adjacency, >=3:1 on light and dark cards; slot 1
+       stays on brand primary. Consumed as hsl(var(--chart-N)). */
+    --chart-1: 217 91% 60%; /* brand blue */
+    --chart-2: 26 90% 44%; /* amber-600 */
+    --chart-3: 175 84% 32%; /* teal-600 */
+    --chart-4: 293 69% 49%; /* fuchsia-600 */
+    --chart-5: 142 76% 36%; /* green-600 */
+    --chart-6: 262 83% 58%; /* violet-600 */
+    --chart-7: 20 90% 48%; /* orange-600 */
+    --chart-8: 200 98% 39%; /* sky-600 */
+    --chart-9: 0 74% 42%; /* red-600 */
     --sidebar-background: 0 0% 7%; /* #111111 - Secondary background */
     --sidebar-foreground: 0 0% 64%; /* #a3a3a3 - Medium gray */
     --sidebar-accent: 217 91% 60%; /* #3b82f6 */

@@ -72,6 +72,7 @@ import {
   WorkflowTimelineView,
 } from './TimelineView';
 import { TimelineNodeConfigPanel } from './TimelineNodeConfigPanel';
+import { CANVAS_Z } from '@/features/workflows/components/WorkflowEditor/canvas-z';
 import {
   validateNodeEditWithRust,
   type PendingNodeCandidate,
@@ -768,7 +769,7 @@ function WorkflowEditorContent({
           targetHandle: edge.targetHandle || 'target',
           selected: edge.id === selectedEdgeId,
           // Edges inside containers need higher zIndex to appear above the container background
-          zIndex: isInsideContainer ? 1001 : 1,
+          zIndex: isInsideContainer ? CANVAS_Z.edgeInContainer : CANVAS_Z.edge,
         };
       });
 
@@ -2029,7 +2030,7 @@ function WorkflowEditorContent({
                   onConnectEnd={readOnly ? undefined : onConnectEnd}
                   isValidConnection={readOnly ? undefined : isValidConnection}
                   proOptions={{ hideAttribution: true }}
-                  defaultEdgeOptions={{ zIndex: 1 }}
+                  defaultEdgeOptions={{ zIndex: CANVAS_Z.edge }}
                   onNodeDoubleClick={(_event, node) => {
                     // Don't open dialog for special nodes
                     if (

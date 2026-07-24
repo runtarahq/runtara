@@ -10,6 +10,7 @@ import { Button } from '@/shared/components/ui/button';
 import { useExecutionStore } from '@/features/workflows/stores/executionStore';
 import { useEdgeContext } from './EdgeContext';
 import { useIsDarkTheme } from '@/shared/stores/themeStore';
+import { CANVAS_Z } from '@/features/workflows/components/WorkflowEditor/canvas-z';
 
 export function AnimatedSVGEdge({
   id,
@@ -153,7 +154,7 @@ export function AnimatedSVGEdge({
               position: 'absolute',
               transform: `translate(-50%, -50%) translate(${labelX}px,${labelY}px)`,
               pointerEvents: 'all',
-              zIndex: 1002,
+              zIndex: CANVAS_Z.edgeLabel,
             }}
             className="nodrag nopan rounded bg-background/80 px-1 py-px text-[9px] font-normal text-muted-foreground/60 backdrop-blur-sm"
           >
@@ -167,7 +168,7 @@ export function AnimatedSVGEdge({
               position: 'absolute',
               transform: `translate(-50%, -50%) translate(${labelX}px,${labelY + (label ? 20 : 0)}px)`,
               pointerEvents: 'all',
-              zIndex: 1000,
+              zIndex: CANVAS_Z.edgeLabel,
             }}
             className="nodrag nopan"
             onMouseEnter={() => setIsHovered(true)}

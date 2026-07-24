@@ -385,7 +385,7 @@ function CompensationField() {
     <div className="space-y-3">
       <div className="space-y-0.5">
         <Label className="text-sm">Compensation</Label>
-        <p className="text-xs text-amber-600">
+        <p className="text-xs text-warning">
           Accepted by the DSL; runtime validation reports compensation as
           warning-only (W070) — it is not enforced at runtime.
         </p>

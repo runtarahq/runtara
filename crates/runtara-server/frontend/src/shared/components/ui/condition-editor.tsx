@@ -187,9 +187,7 @@ const ArgumentValueTypeSelector = ({
             <p className="text-xs font-semibold text-foreground">
               {selectedOption.label}
             </p>
-            <p className="text-[10px] opacity-80">
-              {selectedOption.description}
-            </p>
+            <p className="text-3xs opacity-80">{selectedOption.description}</p>
           </TooltipContent>
           <DropdownMenuContent align="end" className="w-56 p-1">
             {ARGUMENT_VALUE_TYPE_OPTIONS.map((option) => {
@@ -217,7 +215,7 @@ const ArgumentValueTypeSelector = ({
                         {option.label}
                         {isSelected && ' ✓'}
                       </span>
-                      <span className="truncate text-[10px] leading-tight text-muted-foreground">
+                      <span className="truncate text-3xs leading-tight text-muted-foreground">
                         {option.description}
                       </span>
                     </div>
@@ -566,7 +564,7 @@ const ReferencePill = ({
   const displayValue = formatReferenceForDisplay(value, suggestions);
 
   return (
-    <span className="inline-flex items-center gap-1.5 rounded border border-emerald-200 bg-emerald-50 px-2 py-1 text-xs text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950 dark:text-emerald-300">
+    <span className="inline-flex items-center gap-1.5 rounded border border-success/30 bg-success/10 px-2 py-1 text-xs text-success">
       <button
         type="button"
         onClick={onClick}
@@ -583,7 +581,7 @@ const ReferencePill = ({
             e.stopPropagation();
             onRemove();
           }}
-          className="text-emerald-400 hover:text-emerald-600 dark:hover:text-emerald-200"
+          className="text-success/60 hover:text-success"
         >
           <X className="h-3 w-3" />
         </button>
@@ -841,7 +839,7 @@ export const ConditionEditor = ({
       />
       {/* Expression preview */}
       {readableExpression && (
-        <div className="mt-3 break-words rounded bg-muted px-2 py-1.5 font-mono text-[11px] text-muted-foreground">
+        <div className="mt-3 break-words rounded bg-muted px-2 py-1.5 font-mono text-2xs text-muted-foreground">
           {readableExpression}
         </div>
       )}
@@ -1089,7 +1087,7 @@ const ConditionBuilder = ({
             <SelectValue placeholder="Op" />
           </SelectTrigger>
           <SelectContent>
-            <div className="px-2 py-1 text-[10px] font-semibold text-muted-foreground">
+            <div className="px-2 py-1 text-3xs font-semibold text-muted-foreground">
               Logic
             </div>
             {OPERATORS.filter((o) => ['AND', 'OR', 'NOT'].includes(o.key)).map(
@@ -1099,7 +1097,7 @@ const ConditionBuilder = ({
                 </SelectItem>
               )
             )}
-            <div className="mt-1 px-2 py-1 text-[10px] font-semibold text-muted-foreground">
+            <div className="mt-1 px-2 py-1 text-3xs font-semibold text-muted-foreground">
               Compare
             </div>
             {OPERATORS.filter((o) =>
@@ -1109,7 +1107,7 @@ const ConditionBuilder = ({
                 {o.key} ({o.label})
               </SelectItem>
             ))}
-            <div className="mt-1 px-2 py-1 text-[10px] font-semibold text-muted-foreground">
+            <div className="mt-1 px-2 py-1 text-3xs font-semibold text-muted-foreground">
               Check
             </div>
             {OPERATORS.filter((o) =>
@@ -1121,7 +1119,7 @@ const ConditionBuilder = ({
                 {o.label}
               </SelectItem>
             ))}
-            <div className="mt-1 px-2 py-1 text-[10px] font-semibold text-muted-foreground">
+            <div className="mt-1 px-2 py-1 text-3xs font-semibold text-muted-foreground">
               List/String
             </div>
             {OPERATORS.filter((o) =>
@@ -1284,7 +1282,7 @@ const ConditionBuilder = ({
               e.stopPropagation();
               handleAddArgument();
             }}
-            className="self-start rounded border border-dashed border-input px-2 py-1 text-[11px] text-muted-foreground transition-colors hover:border-muted-foreground/50 hover:bg-muted/50"
+            className="self-start rounded border border-dashed border-input px-2 py-1 text-2xs text-muted-foreground transition-colors hover:border-muted-foreground/50 hover:bg-muted/50"
             disabled={disabled}
           >
             + Add

@@ -113,7 +113,7 @@ export function ReplayTransport({
               return (
                 <div
                   key={i}
-                  className="absolute top-0 h-full bg-amber-400/50"
+                  className="absolute top-0 h-full bg-warning/50"
                   style={{
                     left: `${left}%`,
                     width: `${Math.max(width, 0.6)}%`,
@@ -137,14 +137,14 @@ export function ReplayTransport({
         </div>
 
         {/* Elapsed / total */}
-        <div className="whitespace-nowrap text-[11px] tabular-nums text-muted-foreground">
+        <div className="whitespace-nowrap text-2xs tabular-nums text-muted-foreground">
           {formatMs(modelT)} / {formatMs(totalModelMs)}
         </div>
 
         {/* Concurrency indicator */}
         {runningCount > 1 && (
           <span
-            className="inline-flex items-center gap-1 rounded-full bg-blue-100 px-1.5 py-0.5 text-[10px] font-medium text-blue-700 dark:bg-blue-900 dark:text-blue-300"
+            className="inline-flex items-center gap-1 rounded-full bg-info/10 px-1.5 py-0.5 text-3xs font-medium text-info"
             data-testid="replay-running-count"
             title={`${runningCount} branches running concurrently`}
           >
@@ -166,7 +166,7 @@ export function ReplayTransport({
               onClick={() => clock.setSpeed(s as ReplaySpeed)}
               data-testid={`replay-speed-${s}`}
               className={cn(
-                'rounded px-1.5 py-0.5 text-[10px] font-medium transition-colors',
+                'rounded px-1.5 py-0.5 text-3xs font-medium transition-colors',
                 clock.speed === s
                   ? 'bg-primary text-primary-foreground'
                   : 'text-muted-foreground hover:bg-muted'
@@ -191,7 +191,7 @@ export function ReplayTransport({
                   onClick={() => onPacingChange(p)}
                   data-testid={`replay-pacing-${p}`}
                   className={cn(
-                    'rounded px-1.5 py-0.5 text-[10px] font-medium transition-colors',
+                    'rounded px-1.5 py-0.5 text-3xs font-medium transition-colors',
                     pacing === p
                       ? 'bg-primary text-primary-foreground'
                       : 'text-muted-foreground hover:bg-muted'
@@ -219,7 +219,7 @@ export function ReplayTransport({
                 data-testid="replay-compress-idle"
                 aria-pressed={compressIdle}
                 className={cn(
-                  'rounded-md border px-1.5 py-0.5 text-[10px] font-medium transition-colors',
+                  'rounded-md border px-1.5 py-0.5 text-3xs font-medium transition-colors',
                   compressIdle
                     ? 'bg-primary text-primary-foreground'
                     : 'text-muted-foreground hover:bg-muted'

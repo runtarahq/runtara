@@ -151,14 +151,14 @@ export function CustomFieldRow({
   };
 
   return (
-    <TableRow className="bg-amber-50/30 hover:bg-muted/30 dark:bg-amber-950/10">
+    <TableRow className="bg-warning/5 hover:bg-muted/30">
       {/* Type column - editable with dropdown */}
       <TableCell className="pt-3 align-top">
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <button
               type="button"
-              className="flex cursor-pointer items-center gap-1 rounded bg-muted/40 px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground transition-colors hover:bg-muted/60"
+              className="flex cursor-pointer items-center gap-1 rounded bg-muted/40 px-1.5 py-0.5 font-mono text-2xs text-muted-foreground transition-colors hover:bg-muted/60"
             >
               <span>{getTypeLabel()}</span>
               <Icons.chevronDown className="h-3 w-3" />

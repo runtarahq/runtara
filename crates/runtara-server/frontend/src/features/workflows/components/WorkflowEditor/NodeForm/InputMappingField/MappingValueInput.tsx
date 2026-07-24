@@ -265,16 +265,14 @@ export function MappingValueInput({
             </div>
             {referenceError && (
               <p
-                className="mt-0.5 text-[11px] text-destructive"
+                className="mt-0.5 text-2xs text-destructive"
                 data-testid="reference-error"
               >
                 {referenceError}
               </p>
             )}
             {typeMismatch && (
-              <p className="mt-0.5 text-[11px] text-amber-600 dark:text-amber-500">
-                {typeMismatch}
-              </p>
+              <p className="mt-0.5 text-2xs text-warning">{typeMismatch}</p>
             )}
             {onDefaultValueChange && (
               <div className="mt-1">
@@ -290,7 +288,7 @@ export function MappingValueInput({
                   disabled={disabled}
                   className="h-7 font-mono text-xs"
                 />
-                <p className="mt-0.5 text-[11px] text-muted-foreground">
+                <p className="mt-0.5 text-2xs text-muted-foreground">
                   Used when the referenced path is missing or null
                 </p>
               </div>

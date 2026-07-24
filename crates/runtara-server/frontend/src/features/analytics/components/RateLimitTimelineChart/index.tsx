@@ -47,8 +47,8 @@ function TimelineSummary({ buckets }: { buckets: RateLimitTimelineBucket[] }) {
   return (
     <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
       <div className="flex items-center gap-3 rounded-lg bg-muted/30 p-3">
-        <div className="rounded-full bg-blue-500/10 p-2">
-          <Activity className="h-4 w-4 text-blue-500" />
+        <div className="rounded-full bg-info/10 p-2">
+          <Activity className="h-4 w-4 text-info" />
         </div>
         <div>
           <p className="text-xs text-muted-foreground">Requests</p>
@@ -59,8 +59,8 @@ function TimelineSummary({ buckets }: { buckets: RateLimitTimelineBucket[] }) {
       </div>
 
       <div className="flex items-center gap-3 rounded-lg bg-muted/30 p-3">
-        <div className="rounded-full bg-red-500/10 p-2">
-          <AlertCircle className="h-4 w-4 text-red-500" />
+        <div className="rounded-full bg-destructive/10 p-2">
+          <AlertCircle className="h-4 w-4 text-destructive" />
         </div>
         <div>
           <p className="text-xs text-muted-foreground">Rate Limited</p>
@@ -71,8 +71,8 @@ function TimelineSummary({ buckets }: { buckets: RateLimitTimelineBucket[] }) {
       </div>
 
       <div className="flex items-center gap-3 rounded-lg bg-muted/30 p-3">
-        <div className="rounded-full bg-yellow-500/10 p-2">
-          <RefreshCw className="h-4 w-4 text-yellow-500" />
+        <div className="rounded-full bg-warning/10 p-2">
+          <RefreshCw className="h-4 w-4 text-warning" />
         </div>
         <div>
           <p className="text-xs text-muted-foreground">Retries</p>
@@ -83,8 +83,8 @@ function TimelineSummary({ buckets }: { buckets: RateLimitTimelineBucket[] }) {
       </div>
 
       <div className="flex items-center gap-3 rounded-lg bg-muted/30 p-3">
-        <div className="rounded-full bg-green-500/10 p-2">
-          <CheckCircle className="h-4 w-4 text-green-500" />
+        <div className="rounded-full bg-success/10 p-2">
+          <CheckCircle className="h-4 w-4 text-success" />
         </div>
         <div>
           <p className="text-xs text-muted-foreground">Rate Limit %</p>
@@ -167,14 +167,14 @@ export function RateLimitTimelineChart({
               <Bar
                 dataKey="rateLimitedCount"
                 name="Rate Limited"
-                fill="#ef4444"
+                fill="hsl(var(--destructive))"
                 stackId="b"
                 radius={[4, 4, 0, 0]}
               />
               <Bar
                 dataKey="retryCount"
                 name="Retries"
-                fill="#eab308"
+                fill="hsl(var(--warning))"
                 stackId="b"
                 radius={[4, 4, 0, 0]}
               />

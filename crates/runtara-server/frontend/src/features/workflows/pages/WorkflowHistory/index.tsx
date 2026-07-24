@@ -555,8 +555,8 @@ export function WorkflowHistory() {
 
                 {data.metadata?.startedAt && (
                   <div className="flex items-start gap-3">
-                    <div className="mt-0.5 rounded-full bg-blue-500/10 p-2">
-                      <Zap className="h-4 w-4 text-blue-600" />
+                    <div className="mt-0.5 rounded-full bg-info/10 p-2">
+                      <Zap className="h-4 w-4 text-info" />
                     </div>
                     <div className="flex-1 space-y-1">
                       <p className="text-sm font-medium">Started Execution</p>
@@ -572,8 +572,8 @@ export function WorkflowHistory() {
 
                 {data.metadata?.completedAt && (
                   <div className="flex items-start gap-3">
-                    <div className="mt-0.5 rounded-full bg-green-500/10 p-2">
-                      <Flag className="h-4 w-4 text-green-600" />
+                    <div className="mt-0.5 rounded-full bg-success/10 p-2">
+                      <Flag className="h-4 w-4 text-success" />
                     </div>
                     <div className="flex-1 space-y-1">
                       <p className="text-sm font-medium">Completed</p>
@@ -674,11 +674,11 @@ export function WorkflowHistory() {
         {/* Inputs & Outputs */}
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
           <Card className="overflow-hidden">
-            <CardHeader className="border-b bg-gradient-to-r from-blue-500/10 to-blue-500/5">
+            <CardHeader className="border-b bg-gradient-to-r from-info/10 to-info/5">
               <div className="flex items-center justify-between">
                 <CardTitle className="flex items-center gap-2 text-lg">
-                  <div className="rounded-lg bg-blue-500/10 p-2">
-                    <Database className="h-5 w-5 text-blue-600" />
+                  <div className="rounded-lg bg-info/10 p-2">
+                    <Database className="h-5 w-5 text-info" />
                   </div>
                   Input Data
                 </CardTitle>
@@ -715,7 +715,7 @@ export function WorkflowHistory() {
                     <div className="px-6 pb-3">
                       <Badge
                         variant="outline"
-                        className="text-[10px] text-muted-foreground"
+                        className="text-3xs text-muted-foreground"
                       >
                         Large values elided — use Copy for the full value
                       </Badge>
@@ -739,11 +739,11 @@ export function WorkflowHistory() {
           </Card>
 
           <Card className="overflow-hidden">
-            <CardHeader className="border-b bg-gradient-to-r from-green-500/10 to-green-500/5">
+            <CardHeader className="border-b bg-gradient-to-r from-success/10 to-success/5">
               <div className="flex items-center justify-between">
                 <CardTitle className="flex items-center gap-2 text-lg">
-                  <div className="rounded-lg bg-green-500/10 p-2">
-                    <Sparkles className="h-5 w-5 text-green-600" />
+                  <div className="rounded-lg bg-success/10 p-2">
+                    <Sparkles className="h-5 w-5 text-success" />
                   </div>
                   Output Data
                 </CardTitle>
@@ -797,7 +797,7 @@ export function WorkflowHistory() {
                     <div className="px-6 pb-3">
                       <Badge
                         variant="outline"
-                        className="text-[10px] text-muted-foreground"
+                        className="text-3xs text-muted-foreground"
                       >
                         Large values elided — use Copy for the full value
                       </Badge>
@@ -901,9 +901,8 @@ export function WorkflowHistory() {
                   const getBorderClass = () => {
                     if (isFailed)
                       return 'border-destructive/50 bg-destructive/5';
-                    if (isCompleted)
-                      return 'border-green-500/50 bg-green-500/5';
-                    if (isRunning) return 'border-blue-500/50 bg-blue-500/5';
+                    if (isCompleted) return 'border-success/50 bg-success/5';
+                    if (isRunning) return 'border-info/50 bg-info/5';
                     return 'border-border';
                   };
 

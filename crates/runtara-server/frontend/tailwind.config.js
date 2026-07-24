@@ -34,6 +34,11 @@ export default {
           'monospace',
         ],
       },
+      zIndex: {
+        // Popup content (menus/selects/popovers/tooltips) renders above
+        // z-50 dialogs; one named step instead of ad-hoc arbitrary values.
+        60: '60',
+      },
       fontSize: {
         // Micro sizes below text-xs — use these instead of text-[10px]/[11px]
         // and the rem near-duplicates (0.65/0.7rem).
@@ -97,6 +102,10 @@ export default {
           3: 'hsl(var(--chart-3))',
           4: 'hsl(var(--chart-4))',
           5: 'hsl(var(--chart-5))',
+          6: 'hsl(var(--chart-6))',
+          7: 'hsl(var(--chart-7))',
+          8: 'hsl(var(--chart-8))',
+          9: 'hsl(var(--chart-9))',
         },
         sidebar: {
           DEFAULT: 'hsl(var(--sidebar-background))',

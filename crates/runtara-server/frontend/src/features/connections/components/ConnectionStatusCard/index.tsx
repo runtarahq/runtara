@@ -169,7 +169,7 @@ export function ConnectionStatusCard({
       variant={isConnected ? 'outline' : 'default'}
       onClick={handleReconnectClick}
       disabled={isReconnecting}
-      className={!isConnected ? 'shadow-sm shadow-blue-600/20' : undefined}
+      className={!isConnected ? 'shadow-sm shadow-primary/20' : undefined}
     >
       {isReconnecting ? (
         <Spinner className="mr-1.5 h-4 w-4" />

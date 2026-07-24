@@ -475,12 +475,12 @@ export function ObjectSchemaDtoForm({
                     placeholder="e.g., Product, Customer, Order"
                     className={
                       touched.name && errors.name
-                        ? 'border-red-500 focus-visible:ring-red-500'
+                        ? 'border-destructive focus-visible:ring-destructive'
                         : ''
                     }
                   />
                   {touched.name && errors.name ? (
-                    <p className="text-xs text-red-500">{errors.name}</p>
+                    <p className="text-xs text-destructive">{errors.name}</p>
                   ) : (
                     <p className="text-xs text-muted-foreground">
                       Letters, numbers, underscores only. Must start with
@@ -518,12 +518,14 @@ export function ObjectSchemaDtoForm({
                     placeholder="e.g., products, customers, orders"
                     className={
                       touched.tableName && errors.tableName
-                        ? 'border-red-500 focus-visible:ring-red-500'
+                        ? 'border-destructive focus-visible:ring-destructive'
                         : ''
                     }
                   />
                   {touched.tableName && errors.tableName ? (
-                    <p className="text-xs text-red-500">{errors.tableName}</p>
+                    <p className="text-xs text-destructive">
+                      {errors.tableName}
+                    </p>
                   ) : (
                     <p className="text-xs text-muted-foreground">
                       Internal database table name (will be prefixed with tenant
@@ -570,7 +572,7 @@ export function ObjectSchemaDtoForm({
               onAddField={addField}
             />
             {touched.fields && errors.fields && (
-              <p className="mt-2 text-xs text-red-500">{errors.fields}</p>
+              <p className="mt-2 text-xs text-destructive">{errors.fields}</p>
             )}
           </FormSection>
 

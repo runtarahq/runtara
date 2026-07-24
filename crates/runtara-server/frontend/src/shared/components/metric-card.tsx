@@ -26,17 +26,17 @@ export function MetricCard({
       title.toLowerCase().includes('rate')
     ) {
       return trend === 'up'
-        ? 'text-green-600'
+        ? 'text-success'
         : trend === 'down'
-          ? 'text-red-600'
+          ? 'text-destructive'
           : 'text-muted-foreground';
     }
 
     if (title.toLowerCase().includes('error')) {
       return trend === 'up'
-        ? 'text-red-600'
+        ? 'text-destructive'
         : trend === 'down'
-          ? 'text-green-600'
+          ? 'text-success'
           : 'text-muted-foreground';
     }
 
@@ -45,16 +45,16 @@ export function MetricCard({
       title.toLowerCase().includes('time')
     ) {
       return trend === 'up'
-        ? 'text-red-600'
+        ? 'text-destructive'
         : trend === 'down'
-          ? 'text-green-600'
+          ? 'text-success'
           : 'text-muted-foreground';
     }
 
     return trend === 'up'
-      ? 'text-green-600'
+      ? 'text-success'
       : trend === 'down'
-        ? 'text-red-600'
+        ? 'text-destructive'
         : 'text-muted-foreground';
   };
 

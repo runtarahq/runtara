@@ -86,7 +86,7 @@ export function UnsavedChangesDialog({
           <AlertDialogAction
             onClick={handleConfirmClick}
             onPointerDown={handleButtonPointerDown}
-            className="bg-orange-600 hover:bg-orange-700"
+            className="bg-warning text-warning-foreground hover:bg-warning/90"
           >
             {confirmLabel}
           </AlertDialogAction>

@@ -53,7 +53,7 @@ export function FilterPopover({
         >
           <Filter className="h-4 w-4" />
           {active && (
-            <span className="absolute -right-1.5 -top-1.5 flex h-4 min-w-[16px] items-center justify-center rounded-full bg-primary px-1 text-[10px] font-semibold leading-none text-primary-foreground">
+            <span className="absolute -right-1.5 -top-1.5 flex h-4 min-w-[16px] items-center justify-center rounded-full bg-primary px-1 text-3xs font-semibold leading-none text-primary-foreground">
               {activeCount}
             </span>
           )}

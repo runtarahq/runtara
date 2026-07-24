@@ -448,7 +448,7 @@ function AiAgentNodeComponent({
               </div>
             )}
             <span
-              className="flex-1 truncate text-[11px] font-medium text-foreground"
+              className="flex-1 truncate text-2xs font-medium text-foreground"
               title={data.name || undefined}
             >
               {data.name || (
@@ -496,7 +496,7 @@ function AiAgentNodeComponent({
                       'bg-violet-500 dark:bg-violet-400'
                     )}
                   />
-                  <span className="flex-1 truncate text-[10px] text-foreground">
+                  <span className="flex-1 truncate text-3xs text-foreground">
                     {toolName}
                   </span>
                   {typeLabel && (
@@ -517,7 +517,7 @@ function AiAgentNodeComponent({
                 }}
               >
                 <div className="h-1.5 w-1.5 flex-shrink-0" />
-                <span className="flex-1 text-[10px] italic text-muted-foreground/60">
+                <span className="flex-1 text-3xs italic text-muted-foreground/60">
                   Add tool…
                 </span>
                 <Button
@@ -552,7 +552,7 @@ function AiAgentNodeComponent({
                     'bg-blue-500 dark:bg-blue-400'
                   )}
                 />
-                <span className="flex-1 truncate text-[10px] text-foreground">
+                <span className="flex-1 truncate text-3xs text-foreground">
                   Conversation
                 </span>
                 <span className="flex-shrink-0 text-[9px] text-muted-foreground">
@@ -570,7 +570,7 @@ function AiAgentNodeComponent({
                 }}
               >
                 <div className="h-1.5 w-1.5 flex-shrink-0" />
-                <span className="flex-1 text-[10px] italic text-muted-foreground/60">
+                <span className="flex-1 text-3xs italic text-muted-foreground/60">
                   Add memory…
                 </span>
                 <Button

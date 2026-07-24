@@ -26,13 +26,13 @@ import type {
 function getReplayNodeClass(state: ReplayNodeState): string {
   switch (state) {
     case 'running':
-      return 'border-blue-500 ring-2 ring-blue-500/40 animate-glow-pulse border-2';
+      return 'border-info ring-2 ring-info/40 animate-glow-pulse border-2';
     case 'done':
-      return 'border-green-500 ring-1 ring-green-500/30';
+      return 'border-success ring-1 ring-success/30';
     case 'failed':
-      return 'border-red-500 ring-2 ring-red-500/30 border-2';
+      return 'border-destructive ring-2 ring-destructive/30 border-2';
     case 'suspended':
-      return 'border-amber-500 ring-2 ring-amber-500/40 animate-parked-pulse border-2';
+      return 'border-warning ring-2 ring-warning/40 animate-parked-pulse border-2';
     case 'skipped':
       return 'border-dashed border-muted-foreground/40 opacity-50';
     case 'idle':
@@ -114,16 +114,16 @@ export const BaseNode = forwardRef<
       switch (status) {
         case 'running':
         case 'compiling':
-          return 'border-blue-500';
+          return 'border-info';
         case 'completed':
-          return 'border-green-500';
+          return 'border-success';
         case 'failed':
         case 'timeout':
-          return 'border-red-500';
+          return 'border-destructive';
         case 'queued':
-          return 'border-yellow-500';
+          return 'border-warning';
         case 'suspended':
-          return 'border-blue-400';
+          return 'border-info/70';
         case 'cancelled':
           return 'border-muted-foreground/60';
         default:
@@ -132,19 +132,19 @@ export const BaseNode = forwardRef<
     };
 
     const getIconTintClass = () => {
-      if (hasValidationError) return 'bg-red-100 dark:bg-red-950';
+      if (hasValidationError) return 'bg-destructive/10';
       if (executionStatus) {
         switch (executionStatus.status) {
           case 'running':
           case 'compiling':
-            return 'bg-blue-100 dark:bg-blue-950';
+            return 'bg-info/10';
           case 'completed':
-            return 'bg-green-100 dark:bg-green-950';
+            return 'bg-success/10';
           case 'failed':
           case 'timeout':
-            return 'bg-red-100 dark:bg-red-950';
+            return 'bg-destructive/10';
           case 'queued':
-            return 'bg-yellow-100 dark:bg-yellow-950';
+            return 'bg-warning/10';
           case 'suspended':
             return 'bg-muted';
           default:
@@ -180,14 +180,14 @@ export const BaseNode = forwardRef<
       switch (status) {
         case 'running':
         case 'compiling':
-          return 'bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300';
+          return 'bg-info/10 text-info';
         case 'completed':
-          return 'bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300';
+          return 'bg-success/10 text-success';
         case 'failed':
         case 'timeout':
-          return 'bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300';
+          return 'bg-destructive/10 text-destructive';
         case 'queued':
-          return 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900 dark:text-yellow-300';
+          return 'bg-warning/10 text-warning';
         case 'suspended':
           return 'bg-muted text-muted-foreground';
         case 'cancelled':
@@ -207,12 +207,12 @@ export const BaseNode = forwardRef<
     // validation error > execution error > agent name > custom subtitle
     const getSubtitleContent = () => {
       if (validationMessage) {
-        return { text: validationMessage, className: 'text-red-500' };
+        return { text: validationMessage, className: 'text-destructive' };
       }
       if (executionStatus?.error) {
         const structured = parseStructuredError(executionStatus.error);
         const msg = structured?.message || executionStatus.error;
-        return { text: msg, className: 'text-red-500' };
+        return { text: msg, className: 'text-destructive' };
       }
       if (agentName) {
         return { text: agentName, className: 'text-muted-foreground' };
@@ -232,22 +232,22 @@ export const BaseNode = forwardRef<
         case 'running':
           return {
             icon: <Spinner className="h-2.5 w-2.5" />,
-            cls: 'bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300',
+            cls: 'bg-info/10 text-info',
           };
         case 'done':
           return {
             icon: <CheckCircle2 className="h-2.5 w-2.5" />,
-            cls: 'bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300',
+            cls: 'bg-success/10 text-success',
           };
         case 'failed':
           return {
             icon: <XCircle className="h-2.5 w-2.5" />,
-            cls: 'bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300',
+            cls: 'bg-destructive/10 text-destructive',
           };
         case 'suspended':
           return {
             icon: <Pause className="h-2.5 w-2.5" />,
-            cls: 'bg-amber-100 text-amber-700 dark:bg-amber-900 dark:text-amber-300',
+            cls: 'bg-warning/10 text-warning',
           };
         default:
           return null;
@@ -292,15 +292,15 @@ export const BaseNode = forwardRef<
           replayState
             ? getReplayNodeClass(replayState)
             : hasValidationError
-              ? 'border-2 border-red-500 ring-2 ring-red-500/30'
+              ? 'border-2 border-destructive ring-2 ring-destructive/30'
               : hasValidationWarning
-                ? 'border-2 border-amber-500 ring-2 ring-amber-500/30'
+                ? 'border-2 border-warning ring-2 ring-warning/30'
                 : executionStatus
                   ? getExecutionBorderClass(executionStatus.status)
                   : selected
                     ? 'border-primary shadow-md ring-1 ring-primary/20'
                     : hasUnsavedChanges
-                      ? 'border-dashed border-orange-500 ring-1 ring-orange-500/20'
+                      ? 'border-dashed border-warning ring-1 ring-warning/20'
                       : 'border-border',
           // Subtle glow for suspended (breakpoint hit) nodes
           executionStatus?.status === 'suspended' &&
@@ -325,14 +325,14 @@ export const BaseNode = forwardRef<
         {breakpoint && (
           <button
             type="button"
-            className="absolute -left-1.5 top-1/2 z-10 flex h-3 w-3 -translate-y-1/2 cursor-pointer items-center justify-center rounded-full border border-red-600 bg-red-500 transition-colors hover:bg-red-600"
+            className="absolute -left-1.5 top-1/2 z-10 flex h-3 w-3 -translate-y-1/2 cursor-pointer items-center justify-center rounded-full border border-destructive bg-destructive transition-colors hover:bg-destructive/80"
             onClick={(e) => {
               e.stopPropagation();
               onToggleBreakpoint?.();
             }}
             title="Remove breakpoint"
           >
-            <Circle className="h-1.5 w-1.5 fill-red-200 text-red-200" />
+            <Circle className="h-1.5 w-1.5 fill-destructive-foreground/80 text-destructive-foreground/80" />
           </button>
         )}
 
@@ -340,14 +340,14 @@ export const BaseNode = forwardRef<
         {!breakpoint && onToggleBreakpoint && !isExecutionReadOnly && (
           <button
             type="button"
-            className="absolute -left-1.5 top-1/2 z-10 flex h-3 w-3 -translate-y-1/2 cursor-pointer items-center justify-center rounded-full border border-red-500/50 bg-red-400 opacity-0 transition-all hover:bg-red-500 hover:!opacity-100 group-hover:opacity-40"
+            className="absolute -left-1.5 top-1/2 z-10 flex h-3 w-3 -translate-y-1/2 cursor-pointer items-center justify-center rounded-full border border-destructive/50 bg-destructive/70 opacity-0 transition-all hover:bg-destructive hover:!opacity-100 group-hover:opacity-40"
             onClick={(e) => {
               e.stopPropagation();
               onToggleBreakpoint?.();
             }}
             title="Set breakpoint"
           >
-            <Circle className="h-1.5 w-1.5 fill-red-200 text-red-200" />
+            <Circle className="h-1.5 w-1.5 fill-destructive-foreground/80 text-destructive-foreground/80" />
           </button>
         )}
 
@@ -379,7 +379,7 @@ export const BaseNode = forwardRef<
 
         {/* Unsaved changes corner dot */}
         {hasUnsavedChanges && !hasValidationError && !hasValidationWarning && (
-          <div className="absolute right-0.5 top-0.5 z-10 h-1 w-1 rounded-full bg-orange-500" />
+          <div className="absolute right-0.5 top-0.5 z-10 h-1 w-1 rounded-full bg-warning" />
         )}
 
         {/* Horizontal pill layout: icon left, name + status center/right */}
@@ -412,11 +412,11 @@ export const BaseNode = forwardRef<
               {/* Row 1: Name + status pill */}
               <div className="flex min-w-0 items-center gap-0.5">
                 {name ? (
-                  <span className="flex-1 truncate text-[11px] font-normal leading-tight text-foreground">
+                  <span className="flex-1 truncate text-2xs font-normal leading-tight text-foreground">
                     {name}
                   </span>
                 ) : (
-                  <span className="flex-1 text-[11px] font-normal italic leading-tight text-muted-foreground">
+                  <span className="flex-1 text-2xs font-normal italic leading-tight text-muted-foreground">
                     Unnamed step
                   </span>
                 )}
@@ -428,7 +428,7 @@ export const BaseNode = forwardRef<
                     title="Agent disabled — workflow can't be saved"
                     aria-label="Agent disabled"
                     data-testid="stale-agent-badge"
-                    className="flex shrink-0 items-center gap-0.5 rounded bg-amber-100 px-1 py-0.5 text-[9px] font-medium leading-none text-amber-700 dark:bg-amber-950/60 dark:text-amber-300"
+                    className="flex shrink-0 items-center gap-0.5 rounded bg-warning/10 px-1 py-0.5 text-[9px] font-medium leading-none text-warning"
                   >
                     <AlertTriangle className="h-2.5 w-2.5" />
                     <span className="hidden md:inline">Agent disabled</span>

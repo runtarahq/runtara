@@ -506,7 +506,7 @@ export function CompositeValueItem({
               />
               {referenceError && (
                 <p
-                  className="mt-0.5 text-[11px] text-destructive"
+                  className="mt-0.5 text-2xs text-destructive"
                   data-testid="reference-error"
                 >
                   {referenceError}

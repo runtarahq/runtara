@@ -23,6 +23,7 @@ import {
 import { NodeFormProvider } from '../NodeForm/NodeFormProvider';
 import { StepPickerModal, StepPickerResult } from '../NodeForm/StepPickerModal';
 import { SWITCH_FIRST_HANDLE_TOP, SWITCH_HANDLE_SPACING } from './layout';
+import { CANVAS_Z } from '@/features/workflows/components/WorkflowEditor/canvas-z';
 
 type SwitchNodeProps = Node<form.SchemaType>;
 
@@ -341,7 +342,7 @@ function SwitchNodeComponent({
                     id={handleId}
                     type="source"
                     position={Position.Right}
-                    className="!h-2 !w-2 !rounded-full !border-0 !bg-blue-500/60 dark:!bg-blue-500/40"
+                    className="!h-2 !w-2 !rounded-full !border-0 !bg-primary/60"
                     style={{ top: `${topPosition}px` }}
                     isConnectable={isConnectable && !isExecuting}
                   />
@@ -352,7 +353,7 @@ function SwitchNodeComponent({
                         right: '-40px',
                         top: `${topPosition}px`,
                         transform: 'translateY(-50%)',
-                        zIndex: -1,
+                        zIndex: CANVAS_Z.behindNode,
                       }}
                     >
                       <div className="ml-1 h-px w-6 bg-border" />

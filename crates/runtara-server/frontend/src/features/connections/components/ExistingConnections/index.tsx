@@ -166,7 +166,7 @@ export function ExistingConnections({ toolbar }: ExistingConnectionsProps) {
                           <Button
                             variant="ghost"
                             size="icon-sm"
-                            className="text-amber-600 hover:text-amber-700 dark:text-amber-500"
+                            className="text-warning hover:text-warning"
                             title="Reconnect (re-authorize with saved credentials)"
                             disabled={isAuthorizing(connection.id)}
                             onClick={() => authorize(connection.id)}

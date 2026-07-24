@@ -131,7 +131,7 @@ export function ReplayView({ workflowId, instanceId }: ReplayViewProps) {
       />
 
       {truncated && (
-        <p className="text-[11px] text-amber-600 dark:text-amber-400">
+        <p className="text-2xs text-warning">
           This run has a very large number of steps — the replay shows the first
           batch only.
         </p>

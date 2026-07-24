@@ -170,7 +170,7 @@ export function ReportViewNavigation({
                   </span>
                   <span
                     className={cn(
-                      'rounded-full px-2 py-0.5 text-[11px] font-medium leading-none',
+                      'rounded-full px-2 py-0.5 text-2xs font-medium leading-none',
                       isCurrent && 'bg-primary/10 text-primary',
                       isComplete && 'bg-muted text-muted-foreground',
                       isAccessible &&

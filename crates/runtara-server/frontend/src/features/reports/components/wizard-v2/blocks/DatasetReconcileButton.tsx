@@ -61,7 +61,7 @@ export function DatasetReconcileButton({
             <pre className="max-h-[40vh] overflow-auto rounded bg-muted/30 p-2 text-xs">
               {JSON.stringify(block, null, 2)}
             </pre>
-            <pre className="max-h-[40vh] overflow-auto rounded bg-emerald-50 p-2 text-xs dark:bg-emerald-950/30">
+            <pre className="max-h-[40vh] overflow-auto rounded bg-success/10 p-2 text-xs">
               {JSON.stringify(proposed, null, 2)}
             </pre>
           </div>

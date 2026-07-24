@@ -25,17 +25,11 @@ import { BlockFrame } from './BlockFrame';
 // sequence alternates hue families so adjacent series stay distinguishable
 // under protan/deutan/tritan vision, every step reads against both the light
 // and the dark card surface (>= 3:1), and slot 1 stays on brand primary.
-const COLORS = [
-  'hsl(var(--primary))',
-  '#d97706',
-  '#0d9488',
-  '#c026d3',
-  '#16a34a',
-  '#7c3aed',
-  '#ea580c',
-  '#0284c7',
-  '#dc2626',
-];
+// The palette itself lives in the --chart-N theme variables (index.css).
+const COLORS = Array.from(
+  { length: 9 },
+  (_, i) => `hsl(var(--chart-${i + 1}))`
+);
 const GRID_COLOR = 'hsl(var(--border))';
 const AXIS_COLOR = 'hsl(var(--muted-foreground))';
 const SURFACE_COLOR = 'hsl(var(--card))';

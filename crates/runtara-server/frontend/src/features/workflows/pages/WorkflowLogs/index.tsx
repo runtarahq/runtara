@@ -48,13 +48,13 @@ const getLogLevelIcon = (level: string) => {
     case 'error':
       return <AlertCircle className="h-4 w-4 text-destructive" />;
     case 'systemerror':
-      return <AlertCircle className="h-4 w-4 text-red-700" />;
+      return <AlertCircle className="h-4 w-4 text-destructive" />;
     case 'warning':
     case 'warn':
-      return <AlertTriangle className="h-4 w-4 text-yellow-500" />;
+      return <AlertTriangle className="h-4 w-4 text-warning" />;
     case 'success':
     case 'info':
-      return <CheckCircle className="h-4 w-4 text-green-500" />;
+      return <CheckCircle className="h-4 w-4 text-success" />;
     default:
       return <Info className="h-4 w-4 text-muted-foreground" />;
   }
@@ -530,7 +530,7 @@ export function WorkflowLogs() {
                                   log.contextData,
                                   searchTerm
                                 )
-                                  ? 'font-semibold text-yellow-600 dark:text-yellow-400'
+                                  ? 'font-semibold text-warning'
                                   : 'text-muted-foreground'
                               } hover:text-foreground`}
                             >

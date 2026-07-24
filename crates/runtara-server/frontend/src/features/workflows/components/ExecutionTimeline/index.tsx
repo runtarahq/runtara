@@ -52,91 +52,129 @@ interface ExecutionTimelineProps {
   instanceId: string;
 }
 
+// Categorical step-type IDENTITY colors (raw palette classes are intentional
+// here — these are not status colors). text/bg/border/dot are Tailwind class
+// equivalents of the previous hex + rgba inline styles.
 const stepTypeConfig: Record<
   string,
-  { color: string; bg: string; label: string; icon: React.ElementType }
+  {
+    text: string;
+    bg: string;
+    border: string;
+    dot: string;
+    label: string;
+    icon: React.ElementType;
+  }
 > = {
   Agent: {
-    color: '#3B82F6',
-    bg: 'rgba(59, 130, 246, 0.1)',
+    text: 'text-blue-500',
+    bg: 'bg-blue-500/10',
+    border: 'border-blue-500',
+    dot: 'bg-blue-500',
     label: 'Agent',
     icon: Globe,
   },
   Connection: {
-    color: '#8B5CF6',
-    bg: 'rgba(139, 92, 246, 0.1)',
+    text: 'text-violet-500',
+    bg: 'bg-violet-500/10',
+    border: 'border-violet-500',
+    dot: 'bg-violet-500',
     label: 'Connection',
     icon: Zap,
   },
   Finish: {
-    color: '#22C55E',
-    bg: 'rgba(34, 197, 94, 0.1)',
+    text: 'text-green-500',
+    bg: 'bg-green-500/10',
+    border: 'border-green-500',
+    dot: 'bg-green-500',
     label: 'Finish',
     icon: Flag,
   },
   Conditional: {
-    color: '#EC4899',
-    bg: 'rgba(236, 72, 153, 0.1)',
+    text: 'text-pink-500',
+    bg: 'bg-pink-500/10',
+    border: 'border-pink-500',
+    dot: 'bg-pink-500',
     label: 'Conditional',
     icon: GitBranch,
   },
   While: {
-    color: '#F97316',
-    bg: 'rgba(249, 115, 22, 0.1)',
+    text: 'text-orange-500',
+    bg: 'bg-orange-500/10',
+    border: 'border-orange-500',
+    dot: 'bg-orange-500',
     label: 'While',
     icon: Repeat,
   },
   Log: {
-    color: '#6366F1',
-    bg: 'rgba(99, 102, 241, 0.1)',
+    text: 'text-indigo-500',
+    bg: 'bg-indigo-500/10',
+    border: 'border-indigo-500',
+    dot: 'bg-indigo-500',
     label: 'Log',
     icon: MessageSquare,
   },
   Split: {
-    color: '#14B8A6',
-    bg: 'rgba(20, 184, 166, 0.1)',
+    text: 'text-teal-500',
+    bg: 'bg-teal-500/10',
+    border: 'border-teal-500',
+    dot: 'bg-teal-500',
     label: 'Split',
     icon: Split,
   },
   Switch: {
-    color: '#A855F7',
-    bg: 'rgba(168, 85, 247, 0.1)',
+    text: 'text-purple-500',
+    bg: 'bg-purple-500/10',
+    border: 'border-purple-500',
+    dot: 'bg-purple-500',
     label: 'Switch',
     icon: ToggleLeft,
   },
   EmbedWorkflow: {
-    color: '#F59E0B',
-    bg: 'rgba(245, 158, 11, 0.1)',
+    text: 'text-amber-500',
+    bg: 'bg-amber-500/10',
+    border: 'border-amber-500',
+    dot: 'bg-amber-500',
     label: 'Start Workflow',
     icon: Zap,
   },
   AiAgent: {
-    color: '#8B5CF6',
-    bg: 'rgba(139, 92, 246, 0.1)',
+    text: 'text-violet-500',
+    bg: 'bg-violet-500/10',
+    border: 'border-violet-500',
+    dot: 'bg-violet-500',
     label: 'AI Agent',
     icon: Sparkles,
   },
   AiAgentToolCall: {
-    color: '#6366F1',
-    bg: 'rgba(99, 102, 241, 0.1)',
+    text: 'text-indigo-500',
+    bg: 'bg-indigo-500/10',
+    border: 'border-indigo-500',
+    dot: 'bg-indigo-500',
     label: 'Tool Call',
     icon: Wrench,
   },
   AiAgentMemoryCompaction: {
-    color: '#3B82F6',
-    bg: 'rgba(59, 130, 246, 0.1)',
+    text: 'text-blue-500',
+    bg: 'bg-blue-500/10',
+    border: 'border-blue-500',
+    dot: 'bg-blue-500',
     label: 'Memory Compaction',
     icon: Brain,
   },
   WaitForSignal: {
-    color: '#F59E0B',
-    bg: 'rgba(245, 158, 11, 0.1)',
+    text: 'text-amber-500',
+    bg: 'bg-amber-500/10',
+    border: 'border-amber-500',
+    dot: 'bg-amber-500',
     label: 'Wait For Signal',
     icon: Hand,
   },
   Default: {
-    color: '#6B7280',
-    bg: 'rgba(107, 114, 128, 0.1)',
+    text: 'text-gray-500',
+    bg: 'bg-gray-500/10',
+    border: 'border-gray-500',
+    dot: 'bg-gray-500',
     label: 'Step',
     icon: Cpu,
   },
@@ -479,10 +517,9 @@ export function ExecutionTimeline({
 
                   {/* Step Icon */}
                   <div
-                    className="flex h-6 w-6 shrink-0 items-center justify-center rounded"
-                    style={{ backgroundColor: config.bg }}
+                    className={`flex h-6 w-6 shrink-0 items-center justify-center rounded ${config.bg}`}
                   >
-                    <Icon size={14} style={{ color: config.color }} />
+                    <Icon size={14} className={config.text} />
                   </div>
 
                   {/* Step Name */}
@@ -521,15 +558,12 @@ export function ExecutionTimeline({
 
                   {/* Step Bar */}
                   <div
-                    className={`absolute bottom-2 top-2 flex cursor-pointer items-center gap-2 overflow-hidden rounded px-2 transition-all duration-150 ${
+                    className={`absolute bottom-2 top-2 flex min-w-[60px] cursor-pointer items-center gap-2 overflow-hidden rounded border-l-[3px] px-2 transition-all duration-150 ${config.bg} ${config.border} ${
                       isActive ? 'z-10 ring-2 ring-foreground/50' : ''
                     } ${isHovered || isSelected ? 'z-10 ring-2 ring-purple-500/50' : ''}`}
                     style={{
                       left: pos.left,
                       width: pos.width,
-                      minWidth: '60px',
-                      backgroundColor: config.bg,
-                      borderLeft: `3px solid ${config.color}`,
                       opacity: isCompleted ? 0.7 : 1,
                     }}
                     onClick={() =>
@@ -541,8 +575,7 @@ export function ExecutionTimeline({
                     onMouseLeave={() => setHoveredStep(null)}
                   >
                     <span
-                      className="whitespace-nowrap text-xs font-medium"
-                      style={{ color: config.color }}
+                      className={`whitespace-nowrap text-xs font-medium ${config.text}`}
                     >
                       {formatTime(step.durationMs)}
                     </span>
@@ -556,7 +589,7 @@ export function ExecutionTimeline({
                               ? 'secondary'
                               : 'destructive'
                       }
-                      className={`px-1.5 py-0 text-xs ${displayStatus === 'waiting' ? 'border-amber-500 text-amber-600' : ''}`}
+                      className={`px-1.5 py-0 text-xs ${displayStatus === 'waiting' ? 'border-warning text-warning' : ''}`}
                     >
                       {displayStatus === 'running' && (
                         <Spinner className="mr-1 h-3 w-3" />
@@ -594,13 +627,9 @@ export function ExecutionTimeline({
             return (
               <div key={key} className="flex items-center gap-2 text-sm">
                 <div
-                  className="flex h-5 w-5 items-center justify-center rounded"
-                  style={{
-                    backgroundColor: value.bg,
-                    border: `1px solid ${value.color}`,
-                  }}
+                  className={`flex h-5 w-5 items-center justify-center rounded border ${value.bg} ${value.border}`}
                 >
-                  <Icon size={12} style={{ color: value.color }} />
+                  <Icon size={12} className={value.text} />
                 </div>
                 <span className="text-muted-foreground">{value.label}</span>
               </div>
@@ -652,10 +681,9 @@ export function ExecutionTimeline({
                 <div>
                   <div className="mb-4 flex items-start gap-4">
                     <div
-                      className="flex h-12 w-12 shrink-0 items-center justify-center rounded-lg"
-                      style={{ backgroundColor: config.bg }}
+                      className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-lg ${config.bg}`}
                     >
-                      <Icon size={24} style={{ color: config.color }} />
+                      <Icon size={24} className={config.text} />
                     </div>
                     <div className="min-w-0 flex-1">
                       <h3 className="text-lg font-semibold">
@@ -664,9 +692,7 @@ export function ExecutionTimeline({
                       <div className="mt-1 flex flex-wrap gap-x-6 gap-y-1 text-sm">
                         <div>
                           <span className="text-muted-foreground">Type:</span>{' '}
-                          <span style={{ color: config.color }}>
-                            {step.stepType}
-                          </span>
+                          <span className={config.text}>{step.stepType}</span>
                         </div>
                         <div>
                           <span className="text-muted-foreground">Status:</span>{' '}
@@ -782,10 +808,7 @@ export function ExecutionTimeline({
                 : '0';
               return (
                 <div key={type} className="flex items-center gap-2">
-                  <div
-                    className="h-3 w-3 rounded-sm"
-                    style={{ backgroundColor: config.color }}
-                  />
+                  <div className={`h-3 w-3 rounded-sm ${config.dot}`} />
                   <span className="text-muted-foreground">{type}:</span>
                   <span className="font-mono">{formatTime(duration)}</span>
                   <span className="text-muted-foreground">({percentage}%)</span>

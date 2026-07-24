@@ -167,9 +167,9 @@ export function WorkflowActionsForm(props: Props) {
                   {compilationStatus.status === 'failed' ? (
                     <XCircle className="h-3.5 w-3.5 text-destructive" />
                   ) : compilationStatus.status === 'success' ? (
-                    <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600" />
+                    <CheckCircle2 className="h-3.5 w-3.5 text-success" />
                   ) : (
-                    <Spinner className="h-3.5 w-3.5 text-blue-600" />
+                    <Spinner className="h-3.5 w-3.5 text-info" />
                   )}
                   <span className="text-xs font-medium text-foreground">
                     {compilationStatus.status === 'success'
@@ -217,7 +217,7 @@ export function WorkflowActionsForm(props: Props) {
               <>
                 <div className="flex items-center gap-2 px-1">
                   {isSuspended ? (
-                    <Pause className="h-3.5 w-3.5 text-amber-600" />
+                    <Pause className="h-3.5 w-3.5 text-warning" />
                   ) : (
                     <Lock className="h-3.5 w-3.5 text-muted-foreground" />
                   )}
@@ -253,7 +253,7 @@ export function WorkflowActionsForm(props: Props) {
                 type="button"
                 variant="ghost"
                 size="icon-sm"
-                className="rounded text-blue-600 hover:bg-blue-50 hover:text-blue-700"
+                className="rounded text-primary hover:bg-primary/10 hover:text-primary"
                 disabled={isLoading || isExecuting || isDirty}
                 onClick={onSchedule}
                 title={
@@ -270,7 +270,7 @@ export function WorkflowActionsForm(props: Props) {
                 type="button"
                 variant="ghost"
                 size="icon-sm"
-                className="rounded text-orange-600 hover:bg-orange-50 hover:text-orange-700"
+                className="rounded text-warning hover:bg-warning/10 hover:text-warning"
                 disabled={
                   isLoading || isExecuting || isDirty || !hasBreakpoints
                 }
@@ -292,7 +292,7 @@ export function WorkflowActionsForm(props: Props) {
                   type="button"
                   variant="ghost"
                   size="icon-sm"
-                  className="rounded text-green-600 hover:bg-green-50 hover:text-green-700"
+                  className="rounded text-success hover:bg-success/10 hover:text-success"
                   disabled={isLoading || isResuming}
                   onClick={onResume}
                   title="Continue execution to next breakpoint"
@@ -307,7 +307,7 @@ export function WorkflowActionsForm(props: Props) {
                   type="button"
                   variant="ghost"
                   size="icon-sm"
-                  className="rounded text-red-600 hover:bg-red-50 hover:text-red-700"
+                  className="rounded text-destructive hover:bg-destructive/10 hover:text-destructive"
                   disabled={isLoading}
                   onClick={onStop}
                   title="Stop execution"

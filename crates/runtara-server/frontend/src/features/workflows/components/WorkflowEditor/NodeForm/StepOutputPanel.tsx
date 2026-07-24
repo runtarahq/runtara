@@ -54,18 +54,18 @@ function FieldRow({
         <div className="flex min-w-0 flex-col">
           <span className="truncate font-mono text-xs">{field.name}</span>
           {field.description && (
-            <span className="truncate text-[11px] text-muted-foreground">
+            <span className="truncate text-2xs text-muted-foreground">
               {field.description}
             </span>
           )}
         </div>
         <div className="flex shrink-0 items-center gap-1">
           {field.nullable && (
-            <Badge variant="secondary" className="h-5 rounded text-[10px]">
+            <Badge variant="secondary" className="h-5 rounded text-3xs">
               nullable
             </Badge>
           )}
-          <Badge variant="outline" className="h-5 rounded px-2 text-[10px]">
+          <Badge variant="outline" className="h-5 rounded px-2 text-3xs">
             {field.type && field.type !== 'dynamic' ? field.type : 'unknown'}
           </Badge>
         </div>
@@ -130,7 +130,7 @@ function AgentOutputBody({ stepId }: { stepId?: string }) {
     <div className="space-y-2">
       <div className="flex items-center gap-2 text-xs text-muted-foreground">
         <span className="font-mono">{referenceHint(stepId, '.outputs')}</span>
-        <Badge variant="outline" className="h-5 rounded px-2 text-[10px]">
+        <Badge variant="outline" className="h-5 rounded px-2 text-3xs">
           {containerType}
         </Badge>
       </div>
@@ -142,7 +142,7 @@ function AgentOutputBody({ stepId }: { stepId?: string }) {
         </div>
       ) : itemFields.length > 0 ? (
         <div className="space-y-1">
-          <p className="text-[11px] text-muted-foreground">
+          <p className="text-2xs text-muted-foreground">
             Each element (address by index, e.g.{' '}
             <span className="font-mono">
               {referenceHint(stepId, '.outputs.0')}
@@ -257,7 +257,7 @@ function ShapeOutputBody({
       <div className="flex items-center gap-2 text-xs text-muted-foreground">
         <span className="font-mono">{referenceHint(stepId, '.outputs')}</span>
         {kind && (
-          <Badge variant="outline" className="h-5 rounded px-2 text-[10px]">
+          <Badge variant="outline" className="h-5 rounded px-2 text-3xs">
             {kind === 'dynamic' ? 'runtime-dependent' : kind}
           </Badge>
         )}
@@ -278,7 +278,7 @@ function ShapeOutputBody({
       )}
       {(shape.siblingFields?.length ?? 0) > 0 && (
         <div className="space-y-1">
-          <p className="pt-1 text-[11px] uppercase tracking-wide text-muted-foreground">
+          <p className="pt-1 text-2xs uppercase tracking-wide text-muted-foreground">
             Also written under steps.{stepId || '<id>'}
           </p>
           {shape.siblingFields!.map((field) => (

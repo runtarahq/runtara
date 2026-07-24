@@ -147,14 +147,14 @@ export function VersionsPanelContent({
                   <Badge
                     variant="outline"
                     className={cn(
-                      'h-4 px-1.5 py-0 text-[10px]',
+                      'h-4 px-1.5 py-0 text-3xs',
                       isRebuilding
-                        ? 'border-blue-500 bg-blue-50 text-blue-600 dark:bg-blue-950/30'
+                        ? 'border-info bg-info/10 text-info'
                         : version.compiled
-                          ? 'border-green-500 bg-green-50 text-green-600 dark:bg-green-950/30'
+                          ? 'border-success bg-success/10 text-success'
                           : isFailed
                             ? 'border-destructive/60 bg-destructive/5 text-destructive'
-                            : 'border-amber-500 bg-amber-50 text-amber-600 dark:bg-amber-950/30'
+                            : 'border-warning bg-warning/10 text-warning'
                     )}
                     title={
                       isFailed && version.errorMessage
@@ -178,7 +178,7 @@ export function VersionsPanelContent({
                       until the new compile lands. */}
                   {isCompiled && version.wasmSize != null && (
                     <span
-                      className="text-[10px] tabular-nums text-muted-foreground"
+                      className="text-3xs tabular-nums text-muted-foreground"
                       title={`Binary: ${formatBytes(version.wasmSize)} · Package source: ${formatBytes(version.packageSize)}`}
                     >
                       wasm {formatBytes(version.wasmSize)} · pkg{' '}
@@ -206,7 +206,7 @@ export function VersionsPanelContent({
                     <Button
                       variant="outline"
                       size="sm"
-                      className="h-6 gap-1 px-2.5 text-[10px]"
+                      className="h-6 gap-1 px-2.5 text-3xs"
                       onClick={() => {
                         if (version.versionNumber) {
                           onVersionRebuild(version.versionNumber);
@@ -230,9 +230,9 @@ export function VersionsPanelContent({
                     variant={isActive ? 'outline' : 'default'}
                     size="sm"
                     className={cn(
-                      'h-6 gap-1 px-2.5 text-[10px]',
+                      'h-6 gap-1 px-2.5 text-3xs',
                       isActive &&
-                        'border-green-200 bg-green-50 text-green-700 hover:bg-green-50 dark:border-green-800 dark:bg-green-900/20 dark:text-green-400'
+                        'border-success/30 bg-success/10 text-success hover:bg-success/10'
                     )}
                     onClick={() => {
                       if (!isActive && version.versionNumber) {

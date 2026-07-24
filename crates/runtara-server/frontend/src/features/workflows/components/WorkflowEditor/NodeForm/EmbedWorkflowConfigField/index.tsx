@@ -123,7 +123,7 @@ export function EmbedWorkflowConfigField({
               disabled={disabled}
             >
               <SelectTrigger
-                className={cn(!workflowExists && 'border-orange-500')}
+                className={cn(!workflowExists && 'border-warning')}
               >
                 <SelectValue placeholder="Select a workflow" />
               </SelectTrigger>
@@ -139,7 +139,7 @@ export function EmbedWorkflowConfigField({
             </Select>
           </div>
           {!workflowExists && (
-            <div className="text-orange-500" title="Workflow not found">
+            <div className="text-warning" title="Workflow not found">
               <Icons.warning className="h-4 w-4" />
             </div>
           )}

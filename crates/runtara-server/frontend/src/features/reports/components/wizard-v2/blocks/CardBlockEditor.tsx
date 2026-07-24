@@ -320,7 +320,7 @@ function FieldEditor({
         </Button>
       </div>
       {hasNested ? (
-        <p className="text-xs text-amber-700 dark:text-amber-300">
+        <p className="text-xs text-warning">
           Subcard / subtable nested config is preserved on save; edit advanced
           structure via the legacy wizard until v2 exposes the recursive form.
         </p>

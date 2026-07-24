@@ -34,6 +34,7 @@ import {
   Condition,
 } from '@/shared/components/ui/condition-editor';
 import { getConditionFromInputMapping } from '@/shared/utils/condition-utils';
+import { CANVAS_Z } from '@/features/workflows/components/WorkflowEditor/canvas-z';
 
 type ConditionalNodeProps = Node<form.SchemaType>;
 
@@ -231,7 +232,7 @@ function ConditionalNodeComponent({
           id={SOURCE_TRUE}
           type="source"
           position={Position.Right}
-          className="!h-2 !w-2 !rounded-full !border-0 !bg-green-500 dark:!bg-green-400"
+          className="!h-2 !w-2 !rounded-full !border-0 !bg-success"
           style={{ top: '30%', right: '-4px', transform: 'translateY(-50%)' }}
           isConnectable={isConnectable && !isExecuting}
         />
@@ -242,7 +243,7 @@ function ConditionalNodeComponent({
               right: '-32px',
               top: '30%',
               transform: 'translateY(-50%)',
-              zIndex: -1,
+              zIndex: CANVAS_Z.behindNode,
             }}
           >
             <div className="ml-0.5 h-px w-4 bg-border" />
@@ -267,7 +268,7 @@ function ConditionalNodeComponent({
           id={SOURCE_FALSE}
           type="source"
           position={Position.Right}
-          className="!h-2 !w-2 !rounded-full !border-0 !bg-red-500 dark:!bg-red-400"
+          className="!h-2 !w-2 !rounded-full !border-0 !bg-destructive"
           style={{ top: '70%', right: '-4px', transform: 'translateY(-50%)' }}
           isConnectable={isConnectable && !isExecuting}
         />
@@ -278,7 +279,7 @@ function ConditionalNodeComponent({
               right: '-32px',
               top: '70%',
               transform: 'translateY(-50%)',
-              zIndex: -1,
+              zIndex: CANVAS_Z.behindNode,
             }}
           >
             <div className="ml-0.5 h-px w-4 bg-border" />

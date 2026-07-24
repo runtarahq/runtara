@@ -307,7 +307,7 @@ function FieldRow({
     <TableRow className="hover:bg-muted/30">
       {/* Type column */}
       <TableCell className="pt-3 align-top">
-        <span className="block truncate rounded bg-muted/40 px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground">
+        <span className="block truncate rounded bg-muted/40 px-1.5 py-0.5 font-mono text-2xs text-muted-foreground">
           {field.type || 'any'}
         </span>
       </TableCell>
@@ -1055,7 +1055,7 @@ export function SimpleInputMappingEditor({
                     </span>
                   )}
                 </div>
-                <span className="ml-2 shrink-0 rounded bg-muted/40 px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
+                <span className="ml-2 shrink-0 rounded bg-muted/40 px-1.5 py-0.5 font-mono text-3xs text-muted-foreground">
                   {field.type || 'any'}
                 </span>
               </DropdownMenuItem>

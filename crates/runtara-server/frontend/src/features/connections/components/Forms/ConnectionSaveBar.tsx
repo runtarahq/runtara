@@ -48,7 +48,7 @@ export function ConnectionSaveBar({
         {summary && (
           <div className="flex min-w-0 items-center gap-2 text-sm text-muted-foreground">
             <span
-              className="h-1.5 w-1.5 flex-shrink-0 rounded-full bg-amber-500"
+              className="h-1.5 w-1.5 flex-shrink-0 rounded-full bg-warning"
               aria-hidden
             />
             <span className="truncate">{summary}</span>
@@ -71,7 +71,7 @@ export function ConnectionSaveBar({
             type="submit"
             size="sm"
             disabled={isLoading || isSubmitDisabled}
-            className="shadow-sm shadow-blue-600/20"
+            className="shadow-sm shadow-primary/20"
           >
             {isLoading ? (
               <>

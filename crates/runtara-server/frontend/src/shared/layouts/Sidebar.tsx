@@ -61,7 +61,7 @@ function HeaderMenu() {
           <span
             role="link"
             tabIndex={0}
-            className="cursor-pointer text-[11px] text-muted-foreground no-underline hover:text-foreground"
+            className="cursor-pointer text-2xs text-muted-foreground no-underline hover:text-foreground"
             onClick={(e) => {
               e.preventDefault();
               e.stopPropagation();
@@ -201,7 +201,7 @@ function FooterMenu() {
         <SidebarTrigger className="mx-0 w-min shrink-0 px-0" />
       </div>
       <div
-        className="min-w-0 px-1 text-center text-[11px] font-medium text-muted-foreground/80 group-data-[state=collapsed]:hidden"
+        className="min-w-0 px-1 text-center text-2xs font-medium text-muted-foreground/80 group-data-[state=collapsed]:hidden"
         title={versionTitle}
         aria-label={`Runtara version ${versionLabel}`}
       >

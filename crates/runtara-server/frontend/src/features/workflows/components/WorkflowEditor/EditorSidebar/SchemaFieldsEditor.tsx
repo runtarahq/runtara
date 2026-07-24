@@ -701,7 +701,7 @@ function AdvancedSchemaFieldDialog({
                     spellCheck={false}
                   />
                   {patternWarning && (
-                    <p className="text-xs text-amber-600">{patternWarning}</p>
+                    <p className="text-xs text-warning">{patternWarning}</p>
                   )}
                 </div>
                 <div className="col-span-2 space-y-1">

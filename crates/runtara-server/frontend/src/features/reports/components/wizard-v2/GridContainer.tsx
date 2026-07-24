@@ -567,7 +567,7 @@ function GridNodeEditor({
           ))}
         </div>
       </SortableContext>
-      <p className="mt-2 text-[11px] text-muted-foreground">
+      <p className="mt-2 text-2xs text-muted-foreground">
         Tip: drag the{' '}
         <GripVertical className="inline h-3 w-3 align-text-bottom" /> grip on
         any block to reorder.

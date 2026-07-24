@@ -1313,7 +1313,7 @@ function AvatarLabelCell({
     <div className="flex min-w-0 items-center gap-2">
       <span
         className={cn(
-          'flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[10px] font-semibold uppercase tracking-wide',
+          'flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-3xs font-semibold uppercase tracking-wide',
           colorClass
         )}
         aria-hidden

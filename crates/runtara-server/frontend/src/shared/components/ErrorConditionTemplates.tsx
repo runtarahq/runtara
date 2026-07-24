@@ -63,7 +63,7 @@ export function ErrorConditionTemplates({
             className="cursor-pointer flex-col items-start gap-0.5 py-2"
           >
             <div className="text-sm font-medium">{template.label}</div>
-            <div className="text-[11px] leading-snug text-muted-foreground">
+            <div className="text-2xs leading-snug text-muted-foreground">
               {template.description}
             </div>
           </DropdownMenuItem>

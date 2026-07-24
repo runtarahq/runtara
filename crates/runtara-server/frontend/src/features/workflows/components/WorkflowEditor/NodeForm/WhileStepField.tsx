@@ -144,7 +144,7 @@ export function WhileStepField({ name }: WhileStepFieldProps) {
           className="w-32"
         />
         {whileMaxIterations === 0 && (
-          <p className="text-xs text-amber-600">
+          <p className="text-xs text-warning">
             With 0 the loop body never runs — there is no &quot;unlimited&quot;
             mode. Use a high value instead.
           </p>

@@ -413,8 +413,8 @@ export function WaitForSignalStepField({ name }: WaitForSignalStepFieldProps) {
         )}
       </div>
 
-      <div className="rounded-md border border-blue-500/50 bg-blue-500/10 p-3 text-sm">
-        <p className="text-blue-600 dark:text-blue-400">
+      <div className="rounded-md border border-info/50 bg-info/10 p-3 text-sm">
+        <p className="text-info">
           Wire this step as an AI Agent tool to enable human-in-the-loop
           workflows. When the LLM calls this tool, execution suspends until a
           human provides input matching the response schema.
