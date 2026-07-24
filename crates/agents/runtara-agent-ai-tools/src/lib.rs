@@ -1710,7 +1710,11 @@ fn vision_to_text_openai(
     let text = openai_extract_content(&resp)?;
     let model_used = resp["model"].as_str().unwrap_or("unknown").to_string();
     let usage = extract_openai_usage(&resp);
-    let structured_output = parse_structured_output(&text, &input.output_schema);
+    let structured_output = input
+        .output_schema
+        .as_ref()
+        .map(|schema| structured_response(&text, schema))
+        .transpose()?;
 
     Ok(VisionToTextOutput {
         text,
@@ -1785,7 +1789,11 @@ fn vision_to_text_bedrock(
 
     let prompt_tokens = resp["usage"]["input_tokens"].as_i64().unwrap_or(0) as i32;
     let completion_tokens = resp["usage"]["output_tokens"].as_i64().unwrap_or(0) as i32;
-    let structured_output = parse_structured_output(&text, &input.output_schema);
+    let structured_output = input
+        .output_schema
+        .as_ref()
+        .map(|schema| structured_response(&text, schema))
+        .transpose()?;
 
     Ok(VisionToTextOutput {
         text,
@@ -2412,11 +2420,6 @@ fn bedrock_vision_model_supported(model: &str) -> bool {
 
 /// Try to parse text as JSON when output_schema was provided. Returns None if
 /// no schema was provided or if parsing fails.
-fn parse_structured_output(text: &str, schema: &Option<Value>) -> Option<Value> {
-    schema.as_ref()?;
-    serde_json::from_str(text).ok()
-}
-
 /// Serialize a declared output schema for `runtara_ai::CompletionInvokeRequest`.
 ///
 /// A schema that can't be serialized would otherwise degrade to an empty string
@@ -2762,6 +2765,23 @@ mod tests {
         let err = structured_response(&"x".repeat(5_000), &sentiment_schema())
             .expect_err("non-JSON response");
         assert!(err.message.len() < 1_000, "{}", err.message.len());
+    }
+
+    /// `vision-to-text` shares `structured_response` with the Ai Agent
+    /// capabilities: declaring an `output_schema` and getting back prose (a
+    /// common vision-model behaviour) used to yield `structured_output: None`
+    /// with no error at all.
+    #[test]
+    fn vision_structured_output_follows_the_same_contract() {
+        let schema = sentiment_schema();
+
+        let value = structured_response(r#"{"sentiment": "negative", "confidence": 0.4}"#, &schema)
+            .expect("conforming response");
+        assert_eq!(value["sentiment"], "negative");
+
+        let err = structured_response("The image shows a negative sentiment.", &schema)
+            .expect_err("prose must fail rather than silently vanish");
+        assert_eq!(err.code, "AI_STRUCTURED_OUTPUT_INVALID");
     }
 
     #[test]
