@@ -10,15 +10,21 @@
 //!
 //! Note: the SDK cancellation flag is process-global, so tests that mutate
 //! it (via `trigger_cancellation` / `acknowledge_cancellation`) pollute
-//! subsequent tests running in the same process. Every test in this file
-//! that expects `!is_cancelled()` calls `reset_cancellation()` first, and
-//! tests that leave the flag set reset it before returning.
+//! subsequent tests running in the same process. Calling
+//! `reset_cancellation()` first is not enough on its own — libtest runs these
+//! on parallel threads, so another test can set the flag between the reset and
+//! the assertion. Every test that touches the global flag is therefore
+//! `#[serial]`, and tests that leave the flag set reset it before returning.
+//!
+//! The tests that build their own `CancellationToken` hold no global state and
+//! stay parallel.
 //!
 //! Run with:
 //! ```bash
 //! cargo test -p runtara-sdk --test cancellation_test
 //! ```
 
+use serial_test::serial;
 use std::time::{Duration, Instant};
 
 // ============================================================================
@@ -27,6 +33,7 @@ use std::time::{Duration, Instant};
 
 /// Test that with_cancellation completes normally when not cancelled.
 #[test]
+#[serial]
 fn test_with_cancellation_no_registry_succeeds() {
     runtara_sdk::reset_cancellation();
     // When not cancelled, with_cancellation should return Ok(value)
@@ -38,6 +45,7 @@ fn test_with_cancellation_no_registry_succeeds() {
 
 /// Test that with_cancellation handles operations that return Result.
 #[test]
+#[serial]
 fn test_with_cancellation_result_operation() {
     runtara_sdk::reset_cancellation();
     let result = runtara_sdk::with_cancellation(Ok::<i32, String>(100));
@@ -48,6 +56,7 @@ fn test_with_cancellation_result_operation() {
 
 /// Test that with_cancellation handles operations that return Err.
 #[test]
+#[serial]
 fn test_with_cancellation_error_operation() {
     runtara_sdk::reset_cancellation();
     let result = runtara_sdk::with_cancellation(Err::<i32, String>("operation failed".into()));
@@ -58,6 +67,7 @@ fn test_with_cancellation_error_operation() {
 
 /// Test that is_cancelled returns false after an explicit reset.
 #[test]
+#[serial]
 fn test_is_cancelled_no_registry() {
     runtara_sdk::reset_cancellation();
     assert!(!runtara_sdk::is_cancelled());
@@ -69,6 +79,7 @@ fn test_is_cancelled_no_registry() {
 
 /// Test that a fast operation completes quickly.
 #[test]
+#[serial]
 fn test_with_cancellation_fast_operation() {
     runtara_sdk::reset_cancellation();
     let start = Instant::now();
@@ -86,6 +97,7 @@ fn test_with_cancellation_fast_operation() {
 
 /// Test with_cancellation_err variant with custom error.
 #[test]
+#[serial]
 fn test_with_cancellation_err_variant() {
     runtara_sdk::reset_cancellation();
     #[derive(Debug, PartialEq)]
@@ -261,6 +273,7 @@ async fn test_cancel_after_completion() {
 
 /// Test that trigger_cancellation doesn't panic when no SDK is registered.
 #[test]
+#[serial]
 fn test_trigger_cancellation_no_registry() {
     // This should not panic even if no SDK is registered
     runtara_sdk::trigger_cancellation();
@@ -274,12 +287,12 @@ fn test_trigger_cancellation_no_registry() {
 
 /// Test with_cancellation with a result value.
 #[test]
+#[serial]
 fn test_with_cancellation_value_completes() {
+    runtara_sdk::reset_cancellation();
     let result = runtara_sdk::with_cancellation("slow operation done");
 
-    // Note: Due to global state, cancellation may have been triggered by other tests.
-    // We just verify no panic occurs.
-    let _ = result;
+    assert_eq!(result, Ok("slow operation done"));
 }
 
 // ============================================================================
@@ -371,29 +384,35 @@ async fn test_simulated_workflow_cancellation_pattern() {
 
 /// Test that acknowledge_cancellation doesn't panic when no SDK is registered.
 #[test]
+#[serial]
 fn test_acknowledge_cancellation_no_registry() {
+    runtara_sdk::reset_cancellation();
+
     // This should not panic even if no SDK is registered
     runtara_sdk::acknowledge_cancellation();
 
-    // Verify we can still call other cancellation functions
-    let cancelled = runtara_sdk::is_cancelled();
-    // Note: may or may not be cancelled depending on test order
-    let _ = cancelled;
+    // It flips the local flag before trying to reach core, so the ack is
+    // observable even with no SDK registered.
+    assert!(runtara_sdk::is_cancelled());
+
+    // Clean up the process-global flag so other tests aren't polluted.
+    runtara_sdk::reset_cancellation();
 }
 
 /// Test that acknowledge_cancellation triggers the local cancellation token.
-/// Note: This test may affect other tests due to global state.
 #[test]
+#[serial]
 fn test_acknowledge_cancellation_triggers_token() {
-    // If a token exists from previous tests, check initial state
-    let initial_state = runtara_sdk::is_cancelled();
-    let _ = initial_state;
+    runtara_sdk::reset_cancellation();
+    assert!(!runtara_sdk::is_cancelled(), "reset clears the flag");
 
     // Call acknowledge_cancellation - this should trigger local cancellation
     runtara_sdk::acknowledge_cancellation();
 
-    // After calling acknowledge_cancellation, is_cancelled should be true
-    // The key behavior is that it doesn't panic and completes successfully
+    assert!(
+        runtara_sdk::is_cancelled(),
+        "acknowledge_cancellation must set the local flag"
+    );
 
     // Clean up the process-global flag so other tests aren't polluted.
     runtara_sdk::reset_cancellation();
@@ -401,14 +420,17 @@ fn test_acknowledge_cancellation_triggers_token() {
 
 /// Test that acknowledge_cancellation is idempotent (safe to call multiple times).
 #[test]
+#[serial]
 fn test_acknowledge_cancellation_idempotent() {
+    runtara_sdk::reset_cancellation();
+
     // Call multiple times - should not panic
     runtara_sdk::acknowledge_cancellation();
     runtara_sdk::acknowledge_cancellation();
     runtara_sdk::acknowledge_cancellation();
 
-    // Should still work after multiple calls
-    let _ = runtara_sdk::is_cancelled();
+    // Repeated acks land on the same terminal state.
+    assert!(runtara_sdk::is_cancelled());
 
     // Clean up the process-global flag so other tests aren't polluted.
     runtara_sdk::reset_cancellation();
@@ -482,41 +504,47 @@ async fn test_parallel_split_cancellation_pattern() {
 
 /// Test that acknowledge_pause doesn't panic when no SDK is registered.
 #[test]
+#[serial]
 fn test_acknowledge_pause_no_registry() {
+    runtara_sdk::reset_cancellation();
+
     // This should not panic even if no SDK is registered
     runtara_sdk::acknowledge_pause();
 
     // Verify we can still call other functions
-    let _ = runtara_sdk::is_cancelled();
+    assert!(!runtara_sdk::is_cancelled());
 }
 
 /// Test that acknowledge_pause is idempotent (safe to call multiple times).
 #[test]
+#[serial]
 fn test_acknowledge_pause_idempotent() {
+    runtara_sdk::reset_cancellation();
+
     // Call multiple times - should not panic
     runtara_sdk::acknowledge_pause();
     runtara_sdk::acknowledge_pause();
     runtara_sdk::acknowledge_pause();
 
     // Should still work after multiple calls
-    let _ = runtara_sdk::is_cancelled();
+    assert!(!runtara_sdk::is_cancelled());
 }
 
 /// Test that acknowledge_pause does NOT trigger local cancellation token.
 /// (Unlike acknowledge_cancellation which does trigger it)
 #[test]
+#[serial]
 fn test_acknowledge_pause_does_not_cancel() {
-    // Record initial state
-    let was_cancelled_before = runtara_sdk::is_cancelled();
+    runtara_sdk::reset_cancellation();
+    assert!(!runtara_sdk::is_cancelled());
 
     // Acknowledge pause
     runtara_sdk::acknowledge_pause();
 
-    // Pause acknowledgment should NOT change cancellation state
-    // (cancellation state may have changed from other tests, but pause shouldn't affect it)
-    let is_cancelled_after = runtara_sdk::is_cancelled();
-
-    // The key invariant: if we weren't cancelled before pause ack, we shouldn't be after
-    // Note: This may fail if another test triggered cancellation, so we just verify no panic
-    let _ = (was_cancelled_before, is_cancelled_after);
+    // The key invariant: unlike acknowledge_cancellation, a pause ack must not
+    // touch the cancellation flag.
+    assert!(
+        !runtara_sdk::is_cancelled(),
+        "acknowledge_pause must not cancel"
+    );
 }
