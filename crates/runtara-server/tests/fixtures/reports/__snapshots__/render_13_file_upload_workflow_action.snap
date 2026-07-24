@@ -1,0 +1,58 @@
+---
+source: crates/runtara-server/tests/reports_render_corpus.rs
+expression: snapshot_body
+---
+{
+  "blocks": {
+    "csv_import": {
+      "data": {
+        "accept": [
+          ".csv",
+          "text/csv"
+        ],
+        "action": {
+          "id": "upload",
+          "inputKey": "file",
+          "label": "Import",
+          "reloadBlock": true,
+          "runningLabel": "Importing…",
+          "successMessage": "Price list imported."
+        },
+        "description": "Drop a CSV here — rows are upserted into Products.",
+        "maxSizeBytes": 10485760,
+        "title": "Import price list",
+        "trigger": "button"
+      },
+      "status": "ready",
+      "title": "Import price list",
+      "type": "file_upload"
+    },
+    "receipts": {
+      "data": {
+        "accept": [],
+        "action": {
+          "id": "upload",
+          "inputKey": "file",
+          "label": null,
+          "reloadBlock": false,
+          "runningLabel": null,
+          "successMessage": null
+        },
+        "description": "Receipts are processed as soon as they are dropped.",
+        "maxSizeBytes": null,
+        "title": null,
+        "trigger": "automatic"
+      },
+      "status": "ready",
+      "type": "file_upload"
+    }
+  },
+  "errors": [],
+  "navigation": {},
+  "report": {
+    "definitionVersion": 1,
+    "id": "rep_13_file_upload_workflow_action"
+  },
+  "resolvedFilters": {},
+  "success": true
+}
