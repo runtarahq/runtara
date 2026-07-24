@@ -537,22 +537,59 @@ async fn session_loop(
         let mut instance_done = false;
         let mut waiting_for_input = false;
         let mut first_signal_handled = false;
+        // Whether THIS session owns the instance it is polling. Decided once, on
+        // the first poll that carries the instance's persisted input, by
+        // comparing its `data.sessionId` to ours (see `classify_ownership`).
+        // Reset per instance-loop iteration so an idle-requeued instance (which
+        // reuses our session_id) re-derives ownership. A foreign owner means a
+        // duplicate session landed on a redelivered activity's instance; it must
+        // suppress dispatch instead of re-flushing the owner's transcript.
+        let mut owns_instance: Option<bool> = None;
 
         while !instance_done && !session_ended && start_time.elapsed() < max_duration {
             tokio::select! {
                 _ = sleep(poll_interval) => {
-                    match client.get_instance_info(&instance_id).await {
-                        Ok(info) if info.status.is_terminal() => {
-                            flush_events(
-                                &client, &channel, &conv_id, &instance_id,
-                                &mut event_offset, &mut user_rx,
-                            ).await;
+                    let info_result = client.get_instance_info(&instance_id).await;
 
-                            if let runtara_management_sdk::InstanceStatus::Failed = info.status {
-                                let msg = info.error.or(info.stderr)
-                                    .unwrap_or_else(|| "Execution failed".to_string());
-                                warn!(conv_id = %conv_id, error = %msg, "Instance failed");
-                                let _ = channel.send_text(&conv_id, "Sorry, something went wrong. Please try again.").await;
+                    // Decide ownership once, on the first poll that carries the
+                    // instance's persisted input. Never decide on the
+                    // pre-registration NotFound ticks (no input, no events yet).
+                    if owns_instance.is_none()
+                        && let Ok(info) = &info_result
+                        && let Some(input) = info.input.as_ref()
+                    {
+                        let owned = classify_ownership(Some(input), &session_id);
+                        owns_instance = Some(owned);
+                        if !owned {
+                            debug!(
+                                instance_id = %instance_id,
+                                session_id = %session_id,
+                                "Foreign-owned instance (redelivery); suppressing channel dispatch"
+                            );
+                        }
+                    }
+                    let foreign = owns_instance == Some(false);
+
+                    match info_result {
+                        Ok(info) if info.status.is_terminal() => {
+                            // A foreign-owned instance was already flushed by its
+                            // owning session; re-flushing from offset 0 would
+                            // re-send the entire reply transcript. Suppress both
+                            // the flush and the Failed notice, and drop to the
+                            // idle phase so per_sender/per_trigger sessions stay
+                            // alive for genuinely new turns.
+                            if !foreign {
+                                flush_events(
+                                    &client, &channel, &conv_id, &instance_id,
+                                    &mut event_offset, &mut user_rx,
+                                ).await;
+
+                                if let runtara_management_sdk::InstanceStatus::Failed = info.status {
+                                    let msg = info.error.or(info.stderr)
+                                        .unwrap_or_else(|| "Execution failed".to_string());
+                                    warn!(conv_id = %conv_id, error = %msg, "Instance failed");
+                                    let _ = channel.send_text(&conv_id, "Sorry, something went wrong. Please try again.").await;
+                                }
                             }
 
                             instance_done = true;
@@ -565,6 +602,14 @@ async fn session_loop(
                             continue;
                         }
                         _ => {}
+                    }
+
+                    // Running/streaming dispatch only when we OWN the instance.
+                    // Undecided (input not yet readable) or foreign ⇒ skip this
+                    // tick rather than streaming a foreign instance's events (or
+                    // dispatching from offset 0 before ownership is known).
+                    if owns_instance != Some(true) {
+                        continue;
                     }
 
                     let options = ListEventsOptions {
@@ -939,4 +984,75 @@ fn is_simple_schema(schema: &Value) -> bool {
             && field.get("format").is_none();
     }
     false
+}
+
+/// Decide whether THIS session owns the instance it is polling, by comparing the
+/// instance's persisted start input against the session's own id.
+///
+/// A channel session embeds `data.sessionId` into its workflow start inputs, and
+/// the runtime persists the input of the ONE session that won the
+/// (deterministic-instance-id) start-or-attach race. A duplicate session — one
+/// that spawned for a redelivered activity after the Valkey dedup was lost —
+/// lands on that same instance and reads a *foreign* `data.sessionId`; it must
+/// suppress dispatch instead of re-flushing the owner's whole reply transcript.
+///
+/// Returns `true` (own → dispatch) when the input carries no `data.sessionId`
+/// (fail-open — never drop a legitimate first reply on malformed/absent input)
+/// or one that equals `session_id`; `false` (foreign → suppress) only when a
+/// *differing* non-empty string `sessionId` is present.
+fn classify_ownership(input: Option<&Value>, session_id: &str) -> bool {
+    let owner = input
+        .and_then(|i| i.get("data"))
+        .and_then(|d| d.get("sessionId"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
+    match owner {
+        Some(owner) => owner == session_id,
+        None => true, // fail-open: no owner recorded ⇒ treat as ours
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::classify_ownership;
+    use serde_json::json;
+
+    const SID: &str = "11111111-1111-1111-1111-111111111111";
+
+    #[test]
+    fn owns_when_session_id_matches() {
+        let input = json!({ "data": { "sessionId": SID, "userMessage": "hi" } });
+        assert!(classify_ownership(Some(&input), SID));
+    }
+
+    #[test]
+    fn foreign_when_session_id_differs() {
+        let input = json!({ "data": { "sessionId": "22222222-different" } });
+        assert!(!classify_ownership(Some(&input), SID));
+    }
+
+    #[test]
+    fn fail_open_when_owner_absent_or_malformed() {
+        // No sessionId key.
+        assert!(classify_ownership(
+            Some(&json!({ "data": { "userMessage": "hi" } })),
+            SID
+        ));
+        // Empty-string sessionId is treated as absent (fail-open own).
+        assert!(classify_ownership(
+            Some(&json!({ "data": { "sessionId": "" } })),
+            SID
+        ));
+        // sessionId present but not a string.
+        assert!(classify_ownership(
+            Some(&json!({ "data": { "sessionId": 42 } })),
+            SID
+        ));
+        // No `data` envelope at all.
+        assert!(classify_ownership(Some(&json!({ "sessionId": SID })), SID));
+        // `data` is not an object.
+        assert!(classify_ownership(Some(&json!({ "data": "nope" })), SID));
+        // No input at all (pre-registration / unreadable).
+        assert!(classify_ownership(None, SID));
+    }
 }
