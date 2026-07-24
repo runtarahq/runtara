@@ -1,7 +1,40 @@
 # Channel session re-flush fix — owning-session provenance guard
 
-Status: **planned** (not started). Supersedes the "surface the `Deduplicated`
-flag through the engine" idea, which the research below shows is the wrong seam.
+Status: **implemented** (slices 1–3 landed on main). Supersedes the "surface the
+`Deduplicated` flag through the engine" idea, which the research below shows is
+the wrong seam.
+
+## What shipped
+
+- **Slice 1+2** (`classify_ownership` + `session_loop` wiring): a session
+  dispatches/flushes only when the polled instance's `input.data.sessionId`
+  equals its own; a **foreign owner always suppresses** — the terminal branch
+  skips both `flush_events` and the Failed notice, the running/streaming branch
+  is skipped, and an *undecided* poll (input not yet readable) also skips rather
+  than dispatch from offset 0. `owns_instance` is cached per instance-loop
+  iteration so an idle-requeue re-derives ownership. Slices 1 and 2 landed in one
+  commit — the repo's `-D warnings` pre-commit rejects an unused helper landed
+  alone. **attach-forward was dropped** (the adversarial review showed it
+  re-introduces duplicates under concurrent `per_message`).
+- **Slice 3** (`e2e/test_channel_reflush_provenance.sh`): a failing workflow
+  makes `session_loop` emit exactly one "Sorry…" reply, captured at a mock Bot
+  Connector. Owner replies once; a redelivery after `DEL`-ing the Valkey dedup
+  key replies zero times (foreign-suppressed); a distinct activity still replies.
+  **Negative-control verified**: forcing `classify_ownership` to always-own makes
+  the residual-window case fail with `replies=2`, so the e2e genuinely catches
+  the bug.
+
+**Owner-died-before-flush** is the accepted, documented **v1 limitation** (see
+"The owner-died-before-flush decision"): it requires Layer-1 dedup loss **and**
+the owning session dying before its flush — strictly rarer than the duplicate
+storm the guard fixes. The optional **flush-claim lease** (Slice 4 / 5 below) is
+the fast-follow that would also recover that corner; **not** yet implemented.
+
+Verification: 910 `runtara-server` unit tests green (incl. 3 `classify_ownership`
+cases); the new provenance e2e + the inbound-webhook e2e pass on a local isolated
+server. `test_trigger_replay_idempotency.sh` is untouched by design (the change
+is confined to `session_loop`, downstream of the trigger-stream/Environment dedup
+path that test exercises).
 
 ## The bug
 
