@@ -19,6 +19,7 @@ import { useWorkflowStore } from '@/features/workflows/stores/workflowStore.ts';
 import { useExecutionStore } from '@/features/workflows/stores/executionStore';
 import { useValidationStore } from '@/features/workflows/stores/validationStore';
 import { toast } from 'sonner';
+import { useIsDarkTheme } from '@/shared/stores/themeStore';
 import { cn } from '@/lib/utils.ts';
 import {
   Tabs,
@@ -313,6 +314,7 @@ function WorkflowEditorContent({
   onStagedNodeChange,
   onResetNodeChanges,
 }: WorkflowEditorProps) {
+  const isDark = useIsDarkTheme();
   // Context for creating new steps
   const [createStepContext, setCreateStepContext] =
     useState<CreateStepContext | null>(null);
@@ -2105,11 +2107,7 @@ function WorkflowEditorContent({
                   <Background
                     gap={SNAP_GRID_SIZE}
                     size={1}
-                    color={
-                      document.documentElement.classList.contains('dark')
-                        ? '#262626'
-                        : undefined
-                    }
+                    color={isDark ? '#262626' : undefined}
                   />
                 </ReactFlow>
               </EdgeContextProvider>

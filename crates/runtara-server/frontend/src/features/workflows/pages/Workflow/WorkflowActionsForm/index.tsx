@@ -138,7 +138,7 @@ export function WorkflowActionsForm(props: Props) {
   return (
     <div className="flex flex-col items-center">
       {/* Workflow name as separate h1 */}
-      <h1 className="mb-2 mt-3 text-lg font-semibold text-slate-900/90 drop-shadow-sm">
+      <h1 className="mb-2 mt-3 text-lg font-semibold text-foreground drop-shadow-sm">
         {workflowName || 'Untitled Workflow'}
       </h1>
 
@@ -171,7 +171,7 @@ export function WorkflowActionsForm(props: Props) {
                   ) : (
                     <Loader2 className="h-3.5 w-3.5 animate-spin text-blue-600" />
                   )}
-                  <span className="text-xs font-medium text-slate-700">
+                  <span className="text-xs font-medium text-foreground">
                     {compilationStatus.status === 'success'
                       ? 'Compiled'
                       : compilationStatus.status === 'failed'
@@ -221,7 +221,7 @@ export function WorkflowActionsForm(props: Props) {
                   ) : (
                     <Lock className="h-3.5 w-3.5 text-muted-foreground" />
                   )}
-                  <span className="text-xs font-medium text-slate-700">
+                  <span className="text-xs font-medium text-foreground">
                     {isSuspended
                       ? 'Paused at breakpoint'
                       : isExecutionActive

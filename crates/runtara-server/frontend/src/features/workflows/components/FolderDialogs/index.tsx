@@ -287,7 +287,7 @@ export function MoveToFolderDialog({
               'flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left transition-colors',
               isCreatingNew
                 ? 'border border-amber-200 bg-amber-50 dark:border-amber-700 dark:bg-amber-900/30'
-                : 'border border-dashed border-slate-300 hover:bg-slate-100 dark:border-slate-600 dark:hover:bg-slate-800'
+                : 'border border-dashed border-input hover:bg-muted'
             )}
           >
             <FolderPlus
@@ -299,9 +299,7 @@ export function MoveToFolderDialog({
             <p
               className={cn(
                 'text-sm font-medium',
-                isCreatingNew
-                  ? 'text-amber-600'
-                  : 'text-slate-700 dark:text-slate-200'
+                isCreatingNew ? 'text-amber-600' : 'text-foreground'
               )}
             >
               Create new folder
@@ -335,7 +333,7 @@ export function MoveToFolderDialog({
             </div>
           )}
 
-          <div className="my-2 border-t border-slate-200 dark:border-slate-700" />
+          <div className="my-2 border-t border-border" />
 
           {/* Root option */}
           <button
@@ -349,7 +347,7 @@ export function MoveToFolderDialog({
               'flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left transition-colors',
               selectedPath === '/' && !isCreatingNew
                 ? 'border border-blue-200 bg-blue-50 dark:border-blue-700 dark:bg-blue-900/30'
-                : 'hover:bg-slate-100 dark:hover:bg-slate-800'
+                : 'hover:bg-muted'
             )}
           >
             <Home
@@ -357,7 +355,7 @@ export function MoveToFolderDialog({
                 'h-5 w-5',
                 selectedPath === '/' && !isCreatingNew
                   ? 'text-blue-600'
-                  : 'text-slate-400'
+                  : 'text-muted-foreground'
               )}
             />
             <div>
@@ -366,15 +364,17 @@ export function MoveToFolderDialog({
                   'text-sm font-medium',
                   selectedPath === '/' && !isCreatingNew
                     ? 'text-blue-600'
-                    : 'text-slate-700 dark:text-slate-200'
+                    : 'text-foreground'
                 )}
               >
                 Root (All Workflows)
               </p>
-              <p className="text-xs text-slate-500">No folder</p>
+              <p className="text-xs text-muted-foreground">No folder</p>
             </div>
             {currentPath === '/' && (
-              <span className="ml-auto text-xs text-slate-400">Current</span>
+              <span className="ml-auto text-xs text-muted-foreground">
+                Current
+              </span>
             )}
           </button>
 
@@ -392,7 +392,7 @@ export function MoveToFolderDialog({
                 'flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left transition-colors',
                 selectedPath === folder.path && !isCreatingNew
                   ? 'border border-blue-200 bg-blue-50 dark:border-blue-700 dark:bg-blue-900/30'
-                  : 'hover:bg-slate-100 dark:hover:bg-slate-800'
+                  : 'hover:bg-muted'
               )}
               style={{ paddingLeft: `${12 + (folder.depth - 1) * 16}px` }}
             >
@@ -410,15 +410,17 @@ export function MoveToFolderDialog({
                     'text-sm font-medium',
                     selectedPath === folder.path && !isCreatingNew
                       ? 'text-blue-600'
-                      : 'text-slate-700 dark:text-slate-200'
+                      : 'text-foreground'
                   )}
                 >
                   {folder.name}
                 </p>
-                <p className="text-xs text-slate-500">{folder.path}</p>
+                <p className="text-xs text-muted-foreground">{folder.path}</p>
               </div>
               {folder.path === currentPath && (
-                <span className="ml-auto text-xs text-slate-400">Current</span>
+                <span className="ml-auto text-xs text-muted-foreground">
+                  Current
+                </span>
               )}
             </button>
           ))}

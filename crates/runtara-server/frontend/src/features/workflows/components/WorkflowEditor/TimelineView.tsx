@@ -396,7 +396,7 @@ function getExecutionBorderClass(status?: ExecutionStatus) {
     case 'suspended':
       return 'border-blue-400';
     case 'cancelled':
-      return 'border-gray-400';
+      return 'border-muted-foreground/60';
     default:
       return '';
   }
@@ -420,9 +420,9 @@ function getExecutionIconClass(
     case 'queued':
       return 'border-yellow-500 bg-yellow-50 text-yellow-700 dark:bg-yellow-950 dark:text-yellow-300';
     case 'suspended':
-      return 'border-blue-400 bg-slate-50 text-slate-700 dark:bg-slate-900 dark:text-slate-300';
+      return 'border-blue-400 bg-muted/50 text-foreground';
     case 'cancelled':
-      return 'border-gray-400 bg-gray-50 text-gray-600 dark:bg-gray-900 dark:text-gray-300';
+      return 'border-muted-foreground/60 bg-muted/50 text-muted-foreground';
     default:
       return '';
   }

@@ -17,6 +17,7 @@ import { JsonEditor, githubLightTheme, githubDarkTheme } from 'json-edit-react';
 import { Braces } from 'lucide-react';
 import { formatDate } from '@/lib/utils';
 import { Instance } from '@/generated/RuntaraRuntimeApi';
+import { useIsDarkTheme } from '@/shared/stores/themeStore';
 
 interface EditableCellProps {
   getValue: () => any;
@@ -268,6 +269,7 @@ function JsonCellEditor({
   onUpdate: (value: any) => void;
   onFocus?: () => void;
 }) {
+  const isDark = useIsDarkTheme();
   const [open, setOpen] = useState(false);
   const jsonValue = value ?? {};
 
@@ -297,11 +299,7 @@ function JsonCellEditor({
           }}
           rootName=""
           collapse={2}
-          theme={
-            document.documentElement.classList.contains('dark')
-              ? githubDarkTheme
-              : githubLightTheme
-          }
+          theme={isDark ? githubDarkTheme : githubLightTheme}
           minWidth="100%"
           rootFontSize="0.8rem"
         />

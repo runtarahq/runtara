@@ -53,10 +53,8 @@ const AddRowButton = memo(({ onClick }: { onClick: () => void }) => {
   return (
     <button
       type="button"
-      className={`w-full cursor-pointer border-t border-slate-200 py-3 text-center transition-colors dark:border-slate-700 ${
-        isHovering
-          ? 'bg-slate-100/80 dark:bg-slate-800/50'
-          : 'bg-slate-50/50 dark:bg-slate-800/20'
+      className={`w-full cursor-pointer border-t border-border py-3 text-center transition-colors ${
+        isHovering ? 'bg-muted/80' : 'bg-muted/30'
       }`}
       onMouseEnter={() => setIsHovering(true)}
       onMouseLeave={() => setIsHovering(false)}
@@ -64,9 +62,7 @@ const AddRowButton = memo(({ onClick }: { onClick: () => void }) => {
     >
       <span
         className={`text-xs font-medium ${
-          isHovering
-            ? 'text-slate-700 dark:text-slate-200'
-            : 'text-slate-400 dark:text-slate-500'
+          isHovering ? 'text-foreground' : 'text-muted-foreground'
         }`}
       >
         {isHovering ? '+ Click to add a new row' : '+ Add row'}

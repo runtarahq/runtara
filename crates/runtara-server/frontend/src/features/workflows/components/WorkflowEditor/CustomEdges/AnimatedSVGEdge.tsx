@@ -9,6 +9,7 @@ import { Plus } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button';
 import { useExecutionStore } from '@/features/workflows/stores/executionStore';
 import { useEdgeContext } from './EdgeContext';
+import { useIsDarkTheme } from '@/shared/stores/themeStore';
 
 export function AnimatedSVGEdge({
   id,
@@ -45,7 +46,7 @@ export function AnimatedSVGEdge({
         ? 'False'
         : '';
 
-  const isDark = document.documentElement.classList.contains('dark');
+  const isDark = useIsDarkTheme();
   const baseStrokeColor =
     sourceHandleId === 'true'
       ? isDark

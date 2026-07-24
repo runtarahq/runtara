@@ -19,6 +19,7 @@ import {
 import { layoutDag } from './layoutDag';
 import { ReplayNode, type ReplayFlowNode } from './ReplayNode';
 import type { ReplayFrame, ReplayModel } from './types';
+import { useIsDarkTheme } from '@/shared/stores/themeStore';
 
 const NODE_WIDTH = 176;
 const NODE_HEIGHT = 46;
@@ -32,13 +33,6 @@ interface ReplayGraphProps {
   onSelectNode: (nodeId: string | null) => void;
 }
 
-function isDark(): boolean {
-  return (
-    typeof document !== 'undefined' &&
-    document.documentElement.classList.contains('dark')
-  );
-}
-
 function ReplayGraphInner({
   model,
   frame,
@@ -46,6 +40,7 @@ function ReplayGraphInner({
   onSelectNode,
 }: ReplayGraphProps) {
   const { fitView } = useReactFlow();
+  const isDark = useIsDarkTheme();
 
   // Layout is stable per graph — recompute only when the node/edge set changes.
   const layoutKey = useMemo(
@@ -194,7 +189,7 @@ function ReplayGraphInner({
         variant={BackgroundVariant.Dots}
         gap={20}
         size={1}
-        color={isDark() ? '#262626' : undefined}
+        color={isDark ? '#262626' : undefined}
       />
       <Controls showInteractive={false} />
       <MiniMap

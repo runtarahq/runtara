@@ -39,7 +39,7 @@ export function EditObjectInstance() {
             <p className="text-xs font-semibold uppercase tracking-[0.08em] text-muted-foreground">
               Objects
             </p>
-            <h1 className="text-3xl font-semibold leading-tight text-slate-900/90">
+            <h1 className="text-3xl font-semibold leading-tight text-foreground">
               Edit {objectSchemaDto?.name ?? typeName} record
             </h1>
           </div>

@@ -29,7 +29,7 @@ export function MetricCard({
         ? 'text-green-600'
         : trend === 'down'
           ? 'text-red-600'
-          : 'text-gray-600';
+          : 'text-muted-foreground';
     }
 
     if (title.toLowerCase().includes('error')) {
@@ -37,7 +37,7 @@ export function MetricCard({
         ? 'text-red-600'
         : trend === 'down'
           ? 'text-green-600'
-          : 'text-gray-600';
+          : 'text-muted-foreground';
     }
 
     if (
@@ -48,14 +48,14 @@ export function MetricCard({
         ? 'text-red-600'
         : trend === 'down'
           ? 'text-green-600'
-          : 'text-gray-600';
+          : 'text-muted-foreground';
     }
 
     return trend === 'up'
       ? 'text-green-600'
       : trend === 'down'
         ? 'text-red-600'
-        : 'text-gray-600';
+        : 'text-muted-foreground';
   };
 
   const formatValue = (val: string | number) => {
@@ -88,7 +88,7 @@ export function MetricCard({
           {title}
         </div>
         <div className="flex flex-1 items-center">
-          <div className="text-2xl font-semibold leading-tight text-slate-900/90">
+          <div className="text-2xl font-semibold leading-tight text-foreground">
             {formatValue(value)}
           </div>
         </div>

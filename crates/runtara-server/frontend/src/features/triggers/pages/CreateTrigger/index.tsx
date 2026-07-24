@@ -112,7 +112,7 @@ export function CreateTrigger() {
             Invocation triggers
           </p>
           <div className="space-y-2">
-            <h1 className="text-3xl font-semibold leading-tight text-slate-900/90">
+            <h1 className="text-3xl font-semibold leading-tight text-foreground">
               Create trigger
             </h1>
             <p className="text-sm text-muted-foreground">

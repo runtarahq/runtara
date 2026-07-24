@@ -20,7 +20,7 @@ export function MaintenancePage() {
   };
 
   return (
-    <div className="relative flex min-h-screen items-center justify-center overflow-hidden bg-white p-4">
+    <div className="relative flex min-h-screen items-center justify-center overflow-hidden bg-background p-4">
       {/* Ambient glow */}
       <div className="pointer-events-none absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2">
         <div className="h-[600px] w-[600px] rounded-full bg-blue-500/[0.06] blur-[120px]" />
@@ -56,17 +56,17 @@ export function MaintenancePage() {
               </span>
             </div>
 
-            <h1 className="mb-3 text-2xl font-semibold tracking-tight text-gray-900">
+            <h1 className="mb-3 text-2xl font-semibold tracking-tight text-foreground">
               Scheduled Maintenance
             </h1>
 
-            <p className="mx-auto max-w-sm leading-relaxed text-gray-500">
+            <p className="mx-auto max-w-sm leading-relaxed text-muted-foreground">
               We're performing planned improvements to bring you a better
               experience. The system will be back online shortly.
             </p>
 
             {/* Status row */}
-            <div className="mt-8 flex items-center justify-center gap-2 text-sm text-gray-400">
+            <div className="mt-8 flex items-center justify-center gap-2 text-sm text-muted-foreground">
               <span className="relative flex h-2 w-2">
                 <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-amber-400 opacity-75" />
                 <span className="relative inline-flex h-2 w-2 rounded-full bg-amber-400" />
@@ -76,11 +76,11 @@ export function MaintenancePage() {
           </div>
 
           {/* Footer / retry */}
-          <div className="border-t border-gray-100 px-8 py-5">
+          <div className="border-t border-border px-8 py-5">
             <button
               onClick={handleRetry}
               disabled={checking}
-              className="inline-flex items-center gap-2 rounded-lg bg-gray-900 px-5 py-2.5 text-sm font-medium text-white shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md disabled:opacity-50 disabled:hover:translate-y-0"
+              className="inline-flex items-center gap-2 rounded-lg bg-primary px-5 py-2.5 text-sm font-medium text-primary-foreground shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md disabled:opacity-50 disabled:hover:translate-y-0"
             >
               {checking ? (
                 <>
@@ -113,7 +113,7 @@ export function MaintenancePage() {
         </div>
 
         {/* Footer text */}
-        <p className="mt-8 text-xs text-gray-400">
+        <p className="mt-8 text-xs text-muted-foreground">
           This page refreshes automatically every 30 seconds.
         </p>
       </div>

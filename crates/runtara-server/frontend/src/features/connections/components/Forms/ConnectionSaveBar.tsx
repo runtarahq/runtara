@@ -42,10 +42,10 @@ export function ConnectionSaveBar({
   const summary = changesSummary(dirtyCount, clearedCount);
 
   return (
-    <div className="sticky bottom-0 z-10 border-t border-slate-200/60 bg-slate-50/80 backdrop-blur-sm dark:border-slate-700/60 dark:bg-background/80">
+    <div className="sticky bottom-0 z-10 border-t border-border bg-muted/50 backdrop-blur-sm dark:bg-background/80">
       <div className="mx-auto flex w-full max-w-2xl items-center gap-3 px-4 py-3 sm:px-6">
         {summary && (
-          <div className="flex min-w-0 items-center gap-2 text-sm text-slate-600 dark:text-slate-400">
+          <div className="flex min-w-0 items-center gap-2 text-sm text-muted-foreground">
             <span
               className="h-1.5 w-1.5 flex-shrink-0 rounded-full bg-amber-500"
               aria-hidden
@@ -61,7 +61,7 @@ export function ConnectionSaveBar({
               size="sm"
               onClick={onDiscard}
               disabled={isLoading}
-              className="text-slate-600 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200"
+              className="text-muted-foreground hover:text-foreground"
             >
               Discard
             </Button>

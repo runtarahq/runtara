@@ -43,7 +43,7 @@ export function WorkflowForm(props: WorkflowFormProps) {
           <p className="text-xs font-semibold uppercase tracking-[0.08em] text-muted-foreground">
             Workflows
           </p>
-          <h1 className="text-3xl font-semibold leading-tight text-slate-900/90">
+          <h1 className="text-3xl font-semibold leading-tight text-foreground">
             {title}
           </h1>
         </div>

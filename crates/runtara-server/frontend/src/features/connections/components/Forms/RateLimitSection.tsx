@@ -71,7 +71,7 @@ export function RateLimitSection({
         />
 
         {!rateLimitEnabled && defaultConfig && (
-          <div className="rounded-md bg-slate-50 px-3 py-2 text-xs text-slate-500 dark:bg-slate-800/50 dark:text-slate-400">
+          <div className="rounded-md bg-muted/50 px-3 py-2 text-xs text-muted-foreground">
             Using defaults: {defaultConfig.requestsPerSecond} req/s, burst{' '}
             {defaultConfig.burstSize},{' '}
             {defaultConfig.retryOnLimit

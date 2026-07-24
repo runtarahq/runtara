@@ -419,7 +419,7 @@ function AiAgentNodeComponent({
       case 'queued':
         return <Pause className="h-3 w-3 text-yellow-500" />;
       case 'cancelled':
-        return <XCircle className="h-3 w-3 text-gray-400" />;
+        return <XCircle className="h-3 w-3 text-muted-foreground" />;
       default:
         return null;
     }

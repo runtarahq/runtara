@@ -33,15 +33,15 @@ export function ObjectSchemaFormLayout(props: ObjectSchemaFormLayoutProps) {
   const isEditMode = title.toLowerCase().includes('edit');
 
   return (
-    <div className="min-h-screen bg-slate-50/50 dark:bg-background">
+    <div className="min-h-screen bg-muted/30 dark:bg-background">
       {/* Sticky Header */}
-      <header className="sticky top-0 z-10 border-b border-slate-200/60 bg-slate-50/80 backdrop-blur-sm dark:border-slate-700/60 dark:bg-background/80">
+      <header className="sticky top-0 z-10 border-b border-border bg-muted/50 backdrop-blur-sm dark:bg-background/80">
         <div className="px-6 py-4">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
               <Link
                 to={cancelHref}
-                className="-ml-1.5 rounded-lg p-1.5 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-slate-800 dark:hover:text-slate-300"
+                className="-ml-1.5 rounded-lg p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
               >
                 <ArrowLeft className="h-5 w-5" />
               </Link>
@@ -49,10 +49,12 @@ export function ObjectSchemaFormLayout(props: ObjectSchemaFormLayoutProps) {
                 <p className="text-xs font-semibold uppercase tracking-wider text-blue-600">
                   Objects
                 </p>
-                <h1 className="text-lg font-semibold text-slate-900 dark:text-slate-100">
+                <h1 className="text-lg font-semibold text-foreground">
                   {title}
                   {schemaName && (
-                    <span className="ml-1 text-slate-400">{schemaName}</span>
+                    <span className="ml-1 text-muted-foreground">
+                      {schemaName}
+                    </span>
                   )}
                 </h1>
               </div>
@@ -80,7 +82,7 @@ export function ObjectSchemaFormLayout(props: ObjectSchemaFormLayoutProps) {
                   type="button"
                   variant="ghost"
                   size="sm"
-                  className="text-slate-600 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200"
+                  className="text-muted-foreground hover:text-foreground"
                 >
                   Cancel
                 </Button>
@@ -116,7 +118,7 @@ export function ObjectSchemaFormLayout(props: ObjectSchemaFormLayoutProps) {
             <Database className="h-5 w-5 text-white" />
           </div>
           <div>
-            <h2 className="text-base font-semibold text-slate-900 dark:text-slate-100">
+            <h2 className="text-base font-semibold text-foreground">
               Object Type Definition
             </h2>
             {metadata && metadata.filter(Boolean).length > 0 && (
@@ -124,10 +126,10 @@ export function ObjectSchemaFormLayout(props: ObjectSchemaFormLayoutProps) {
                 {metadata.filter(Boolean).map((item, index) => (
                   <span
                     key={index}
-                    className="flex items-center gap-2 text-sm text-slate-500 dark:text-slate-400"
+                    className="flex items-center gap-2 text-sm text-muted-foreground"
                   >
                     {index > 0 && (
-                      <span className="h-1 w-1 rounded-full bg-slate-300 dark:bg-slate-600" />
+                      <span className="h-1 w-1 rounded-full bg-border" />
                     )}
                     {item}
                   </span>

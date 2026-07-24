@@ -539,8 +539,8 @@ export function WorkflowHistory() {
               {/* Timeline */}
               <div className="space-y-4">
                 <div className="flex items-start gap-3">
-                  <div className="mt-0.5 rounded-full bg-slate-500/10 p-2">
-                    <Calendar className="h-4 w-4 text-slate-600" />
+                  <div className="bg-muted/500/10 mt-0.5 rounded-full p-2">
+                    <Calendar className="h-4 w-4 text-muted-foreground" />
                   </div>
                   <div className="flex-1 space-y-1">
                     <p className="text-sm font-medium">Created</p>

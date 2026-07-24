@@ -246,7 +246,7 @@ export function NameField({ name }: { name: string }) {
                 <Input
                   {...field}
                   placeholder="Step name"
-                  className="h-auto border-0 bg-transparent p-0 text-lg font-semibold text-slate-900/90 focus-visible:ring-0 focus-visible:ring-offset-0 dark:text-slate-100"
+                  className="h-auto border-0 bg-transparent p-0 text-lg font-semibold text-foreground focus-visible:ring-0 focus-visible:ring-offset-0"
                 />
               </FormControl>
               <FormMessage />
@@ -306,7 +306,7 @@ export function NameField({ name }: { name: string }) {
               <Input
                 {...field}
                 placeholder="Step name"
-                className="h-auto border-0 bg-transparent p-0 text-lg font-semibold text-slate-900/90 focus-visible:ring-0 focus-visible:ring-offset-0 dark:text-slate-100"
+                className="h-auto border-0 bg-transparent p-0 text-lg font-semibold text-foreground focus-visible:ring-0 focus-visible:ring-offset-0"
               />
             </FormControl>
             <FormMessage />

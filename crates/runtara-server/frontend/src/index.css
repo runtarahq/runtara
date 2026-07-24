@@ -32,6 +32,9 @@
 
 @layer base {
   :root {
+    /* Native UI (scrollbars, form controls, <select> popups) follows the theme */
+    color-scheme: light;
+
     /* Safe area insets for iOS */
     --safe-area-inset-top: env(safe-area-inset-top, 0px);
     --safe-area-inset-bottom: env(safe-area-inset-bottom, 0px);
@@ -73,13 +76,19 @@
     --sidebar-ring: 217 91% 60%; /* vibrant blue */
   }
   .dark {
-    /* Based on docs/dark-color-theme.md with softer contrast. */
+    color-scheme: dark;
+
+    /* Based on docs/dark-color-theme.md with softer contrast.
+       These variables are the single source of truth for dark colors — do not
+       add .dark class/element overrides on top of them (they make the tokens
+       lie: the same token would render differently depending on how it is
+       referenced). */
     --background: 0 0% 4%; /* #0a0a0a - Near-black base background */
-    --foreground: 0 0% 64%; /* #a3a3a3 - Medium gray for primary text (softer than pure white) */
+    --foreground: 0 0% 75%; /* #bfbfbf - Primary text (softer than pure white) */
     --card: 0 0% 10%; /* #1a1a1a - Elevated surface background */
-    --card-foreground: 0 0% 64%; /* #a3a3a3 - Medium gray for card content */
+    --card-foreground: 0 0% 75%; /* matches --foreground */
     --popover: 0 0% 10%; /* #1a1a1a - Same as card */
-    --popover-foreground: 0 0% 64%; /* #a3a3a3 */
+    --popover-foreground: 0 0% 75%; /* matches --foreground */
     --primary: 217 91% 60%; /* #3b82f6 - Bright blue for CTAs */
     --primary-foreground: 0 0% 100%; /* white */
     --secondary: 0 0% 7%; /* #111111 - Slightly lighter dark background */
@@ -116,62 +125,6 @@
   }
   body {
     @apply bg-background text-foreground;
-  }
-
-  /* Softer text colors in dark mode for better readability */
-  .dark h1,
-  .dark h2,
-  .dark h3,
-  .dark h4,
-  .dark h5,
-  .dark h6 {
-    @apply text-gray-200;
-  }
-
-  .dark .font-bold,
-  .dark .font-semibold {
-    @apply text-gray-300;
-  }
-
-  /* Softer colors for interactive elements */
-  .dark .text-foreground {
-    color: hsl(0 0% 75%);
-  }
-
-  /* Muted text stays quieter than foreground but keeps ~4.5:1 on cards —
-     12px uppercase labels (table headers, metric labels) must stay legible. */
-  .dark .text-muted-foreground {
-    color: hsl(0 0% 55%);
-  }
-
-  /* Table and list specific styles for softer text */
-  .dark table {
-    color: hsl(0 0% 60%);
-  }
-
-  .dark th {
-    color: hsl(0 0% 55%);
-    font-weight: 500;
-  }
-
-  .dark td {
-    color: hsl(0 0% 65%);
-  }
-
-  /* List items */
-  .dark li {
-    color: hsl(0 0% 65%);
-  }
-
-  /* Make table hover states more subtle */
-  .dark tr:hover td {
-    color: hsl(0 0% 75%);
-  }
-
-  /* Selected or active table rows */
-  .dark tr[data-state='selected'] td,
-  .dark tr.selected td {
-    color: hsl(0 0% 80%);
   }
 }
 

@@ -39,7 +39,7 @@ export function Layout({ children }: LayoutProps) {
     <SidebarProvider>
       <div className="pt-safe flex min-h-dvh w-full overflow-hidden">
         <Sidebar />
-        <SidebarInset className="flex min-w-0 flex-col overflow-y-auto overflow-x-hidden bg-slate-50/50 dark:bg-background">
+        <SidebarInset className="flex min-w-0 flex-col overflow-y-auto overflow-x-hidden bg-muted/30 dark:bg-background">
           <div className="pb-safe flex-1">{children ?? <Outlet />}</div>
         </SidebarInset>
       </div>

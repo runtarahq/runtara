@@ -61,7 +61,7 @@ function HeaderMenu() {
           <span
             role="link"
             tabIndex={0}
-            className="cursor-pointer text-[11px] text-gray-500 no-underline hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300"
+            className="cursor-pointer text-[11px] text-muted-foreground no-underline hover:text-foreground"
             onClick={(e) => {
               e.preventDefault();
               e.stopPropagation();

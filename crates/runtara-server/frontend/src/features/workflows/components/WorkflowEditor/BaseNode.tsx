@@ -125,7 +125,7 @@ export const BaseNode = forwardRef<
         case 'suspended':
           return 'border-blue-400';
         case 'cancelled':
-          return 'border-gray-400';
+          return 'border-muted-foreground/60';
         default:
           return '';
       }
@@ -146,7 +146,7 @@ export const BaseNode = forwardRef<
           case 'queued':
             return 'bg-yellow-100 dark:bg-yellow-950';
           case 'suspended':
-            return 'bg-slate-100 dark:bg-slate-900';
+            return 'bg-muted';
           default:
             return 'bg-muted/30';
         }
@@ -189,9 +189,9 @@ export const BaseNode = forwardRef<
         case 'queued':
           return 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900 dark:text-yellow-300';
         case 'suspended':
-          return 'bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300';
+          return 'bg-muted text-muted-foreground';
         case 'cancelled':
-          return 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400';
+          return 'bg-muted text-muted-foreground';
         default:
           return '';
       }

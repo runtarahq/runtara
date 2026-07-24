@@ -5,6 +5,25 @@
     <script id="runtara-runtime-config">
       window.__RUNTARA_CONFIG__ = {};
     </script>
+    <script>
+      // Apply the persisted theme before first paint to avoid a light flash.
+      // Mirrors themeStore's zustand-persist state ('theme-storage').
+      (function () {
+        try {
+          var stored = localStorage.getItem('theme-storage');
+          var theme = stored ? JSON.parse(stored).state.theme : 'system';
+          if (
+            theme === 'dark' ||
+            (theme === 'system' &&
+              window.matchMedia('(prefers-color-scheme: dark)').matches)
+          ) {
+            document.documentElement.classList.add('dark');
+          }
+        } catch (e) {
+          /* fall through to light */
+        }
+      })();
+    </script>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/png" href="./logo-icon.png" />
     <meta

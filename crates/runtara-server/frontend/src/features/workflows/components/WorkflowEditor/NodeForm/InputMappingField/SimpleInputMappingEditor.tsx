@@ -315,10 +315,7 @@ function FieldRow({
       {/* Name column */}
       <TableCell className="max-w-0 overflow-hidden pt-3 align-top">
         <div className="flex min-w-0 items-center gap-1">
-          <span
-            className="truncate text-sm text-slate-900/90 dark:text-slate-100"
-            title={label}
-          >
+          <span className="truncate text-sm text-foreground" title={label}>
             {label}
           </span>
           {field.required && (
@@ -1049,7 +1046,7 @@ export function SimpleInputMappingEditor({
                 className="flex items-center justify-between"
               >
                 <div className="flex flex-col">
-                  <span className="text-sm text-slate-900/90 dark:text-slate-100">
+                  <span className="text-sm text-foreground">
                     {getFieldLabel(field)}
                   </span>
                   {field.description && (

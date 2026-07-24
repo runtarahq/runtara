@@ -15,9 +15,7 @@ export function SheetBase(props: Props) {
       {/* Header - only show if title provided */}
       {title && (
         <div className="shrink-0 pb-3">
-          <h2 className="text-lg font-semibold text-slate-900/90 dark:text-slate-100">
-            {title}
-          </h2>
+          <h2 className="text-lg font-semibold text-foreground">{title}</h2>
         </div>
       )}
 

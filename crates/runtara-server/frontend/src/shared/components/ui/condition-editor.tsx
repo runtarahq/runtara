@@ -123,7 +123,7 @@ const getArgumentValueTypeColor = (type: ArgumentValueType): string => {
     case 'operation':
       return 'bg-violet-100 text-violet-700 dark:bg-violet-950 dark:text-violet-300';
     default:
-      return 'bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400';
+      return 'bg-muted text-muted-foreground';
   }
 };
 
@@ -826,7 +826,7 @@ export const ConditionEditor = ({
       />
       {/* Expression preview */}
       {readableExpression && (
-        <div className="mt-3 break-words rounded bg-slate-100 px-2 py-1.5 font-mono text-[11px] text-slate-600 dark:bg-slate-800 dark:text-slate-400">
+        <div className="mt-3 break-words rounded bg-muted px-2 py-1.5 font-mono text-[11px] text-muted-foreground">
           {readableExpression}
         </div>
       )}
@@ -1062,13 +1062,7 @@ const ConditionBuilder = ({
   const isNested = value !== undefined;
 
   return (
-    <div
-      className={
-        isNested
-          ? 'ml-1 border-l-2 border-gray-200 pl-3 dark:border-gray-700'
-          : ''
-      }
-    >
+    <div className={isNested ? 'ml-1 border-l-2 border-border pl-3' : ''}>
       {/* Compact operator select with optional inline controls */}
       <div className="flex items-center gap-1">
         <Select
@@ -1076,7 +1070,7 @@ const ConditionBuilder = ({
           onValueChange={handleOperatorChange}
           disabled={disabled}
         >
-          <SelectTrigger className="h-7 w-auto min-w-[80px] border-gray-300 px-2 text-xs font-semibold dark:border-gray-600">
+          <SelectTrigger className="h-7 w-auto min-w-[80px] border-input px-2 text-xs font-semibold">
             <SelectValue placeholder="Op" />
           </SelectTrigger>
           <SelectContent>
@@ -1205,7 +1199,7 @@ const ConditionBuilder = ({
                       type="button"
                       onClick={() => setPickerOpenForIndex(index)}
                       disabled={disabled}
-                      className="flex h-7 items-center rounded border border-dashed border-gray-300 px-2 text-xs text-muted-foreground transition-colors hover:border-gray-400 hover:bg-muted/50 disabled:opacity-50 dark:border-gray-600"
+                      className="flex h-7 items-center rounded border border-dashed border-input px-2 text-xs text-muted-foreground transition-colors hover:border-muted-foreground/50 hover:bg-muted/50 disabled:opacity-50"
                     >
                       Select variable...
                     </button>
@@ -1275,7 +1269,7 @@ const ConditionBuilder = ({
               e.stopPropagation();
               handleAddArgument();
             }}
-            className="self-start rounded border border-dashed border-gray-300 px-2 py-1 text-[11px] text-muted-foreground transition-colors hover:border-gray-400 hover:bg-muted/50 dark:border-gray-600"
+            className="self-start rounded border border-dashed border-input px-2 py-1 text-[11px] text-muted-foreground transition-colors hover:border-muted-foreground/50 hover:bg-muted/50"
             disabled={disabled}
           >
             + Add

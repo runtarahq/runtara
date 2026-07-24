@@ -25,10 +25,10 @@ const formatDuration = (seconds: number | null | undefined): string => {
 // emerald "fast run" branch.
 const getDurationColorClass = (seconds: number | null | undefined): string => {
   if (seconds === null || seconds === undefined || seconds < 0)
-    return 'text-slate-400';
+    return 'text-muted-foreground';
   const ms = seconds * 1000;
   if (ms < 100) return 'text-emerald-600 dark:text-emerald-400';
-  if (ms < 1000) return 'text-slate-600 dark:text-slate-400';
+  if (ms < 1000) return 'text-muted-foreground';
   if (ms < 5000) return 'text-amber-600 dark:text-amber-400';
   return 'text-red-600 dark:text-red-400';
 };
@@ -63,17 +63,17 @@ export const invocationHistoryColumns: ColumnDef<ExecutionHistoryItem>[] = [
           {workflowName ? (
             <Link
               to={`/workflows/${workflowId}`}
-              className="group/link inline-flex items-center gap-1.5 text-sm font-medium text-slate-900 hover:text-blue-600 dark:text-slate-100 dark:hover:text-blue-400"
+              className="group/link inline-flex items-center gap-1.5 text-sm font-medium text-foreground hover:text-blue-600 dark:hover:text-blue-400"
             >
               {workflowName}
-              <ExternalLink className="h-3 w-3 text-slate-400 transition-colors group-hover/link:text-blue-500 dark:group-hover/link:text-blue-400" />
+              <ExternalLink className="h-3 w-3 text-muted-foreground transition-colors group-hover/link:text-blue-500 dark:group-hover/link:text-blue-400" />
             </Link>
           ) : (
-            <span className="text-sm font-medium italic text-slate-400 dark:text-slate-500">
+            <span className="text-sm font-medium italic text-muted-foreground">
               Ad-hoc invocation
             </span>
           )}
-          <span className="font-mono text-xs text-slate-400 dark:text-slate-500">
+          <span className="font-mono text-xs text-muted-foreground">
             {instanceId}
           </span>
         </div>
@@ -87,9 +87,7 @@ export const invocationHistoryColumns: ColumnDef<ExecutionHistoryItem>[] = [
     cell: ({ row }) => {
       const createdAt: string = row.getValue('createdAt');
       return (
-        <span className="text-sm text-slate-700 dark:text-slate-300">
-          {formatDate(createdAt)}
-        </span>
+        <span className="text-sm text-foreground">{formatDate(createdAt)}</span>
       );
     },
   },
@@ -103,12 +101,10 @@ export const invocationHistoryColumns: ColumnDef<ExecutionHistoryItem>[] = [
       // its `completedAt` is a suspend/drain timestamp, so don't present it as
       // "Completed".
       if (!completedAt || isActiveStatus(row.original.status)) {
-        return (
-          <span className="text-sm text-slate-400 dark:text-slate-500">-</span>
-        );
+        return <span className="text-sm text-muted-foreground">-</span>;
       }
       return (
-        <span className="text-sm text-slate-700 dark:text-slate-300">
+        <span className="text-sm text-foreground">
           {formatDate(completedAt)}
         </span>
       );
@@ -163,7 +159,7 @@ export const invocationHistoryColumns: ColumnDef<ExecutionHistoryItem>[] = [
     cell: ({ row }) => {
       const version = row.original.version;
       return version !== undefined ? (
-        <span className="inline-flex items-center rounded bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-500 dark:bg-slate-800 dark:text-slate-400">
+        <span className="inline-flex items-center rounded bg-muted px-2 py-0.5 text-xs font-medium text-muted-foreground">
           v{version}
         </span>
       ) : null;
@@ -213,7 +209,7 @@ export const invocationHistoryColumns: ColumnDef<ExecutionHistoryItem>[] = [
             <Button
               variant="ghost"
               size="icon"
-              className="h-auto w-auto rounded-lg p-2 text-slate-400 transition-colors hover:bg-blue-50 hover:text-blue-600 dark:hover:bg-blue-900/30 dark:hover:text-blue-400"
+              className="h-auto w-auto rounded-lg p-2 text-muted-foreground transition-colors hover:bg-blue-50 hover:text-blue-600 dark:hover:bg-blue-900/30 dark:hover:text-blue-400"
               title="View details"
             >
               <Eye className="h-4 w-4" />
@@ -224,7 +220,7 @@ export const invocationHistoryColumns: ColumnDef<ExecutionHistoryItem>[] = [
               instanceId={instanceId}
               variant="ghost"
               size="icon"
-              className="h-auto w-auto rounded-lg p-2 text-slate-400 transition-colors hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-900/30 dark:hover:text-red-400"
+              className="h-auto w-auto rounded-lg p-2 text-muted-foreground transition-colors hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-900/30 dark:hover:text-red-400"
             />
           ) : (
             <>
@@ -233,14 +229,14 @@ export const invocationHistoryColumns: ColumnDef<ExecutionHistoryItem>[] = [
                   instanceId={instanceId}
                   variant="ghost"
                   size="icon"
-                  className="h-auto w-auto rounded-lg p-2 text-slate-400 transition-colors hover:bg-blue-50 hover:text-blue-600 dark:hover:bg-blue-900/30 dark:hover:text-blue-400"
+                  className="h-auto w-auto rounded-lg p-2 text-muted-foreground transition-colors hover:bg-blue-50 hover:text-blue-600 dark:hover:bg-blue-900/30 dark:hover:text-blue-400"
                 />
               )}
               <ReplayButton
                 instanceId={instanceId}
                 variant="ghost"
                 size="icon"
-                className="h-auto w-auto rounded-lg p-2 text-slate-400 transition-colors hover:bg-emerald-50 hover:text-emerald-600 dark:hover:bg-emerald-900/30 dark:hover:text-emerald-400"
+                className="h-auto w-auto rounded-lg p-2 text-muted-foreground transition-colors hover:bg-emerald-50 hover:text-emerald-600 dark:hover:bg-emerald-900/30 dark:hover:text-emerald-400"
               />
             </>
           )}

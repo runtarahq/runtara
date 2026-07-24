@@ -197,7 +197,7 @@ export function CustomFieldRow({
           <button
             type="button"
             onClick={handleNameEdit}
-            className="text-left text-sm text-slate-900/90 transition-colors hover:text-primary dark:text-slate-100"
+            className="text-left text-sm text-foreground transition-colors hover:text-primary"
             title="Click to rename"
           >
             {fieldName}

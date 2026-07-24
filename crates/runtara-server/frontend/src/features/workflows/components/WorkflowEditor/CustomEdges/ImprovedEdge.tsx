@@ -12,6 +12,7 @@ import { Button } from '@/shared/components/ui/button';
 import { useExecutionStore } from '@/features/workflows/stores/executionStore';
 import { useEdgeContext } from './EdgeContext';
 import { shouldHideDuplicateEdgeLabel } from '../CustomNodes/layout';
+import { useIsDarkTheme } from '@/shared/stores/themeStore';
 
 interface ImprovedEdgeProps extends EdgeProps {
   pathType?: 'bezier' | 'smoothstep' | 'straight';
@@ -190,7 +191,7 @@ export function ImprovedEdge({
               ? sourceHandleId
               : '';
 
-  const isDark = document.documentElement.classList.contains('dark');
+  const isDark = useIsDarkTheme();
   const isSwitchCase = sourceHandleId?.startsWith('case-');
   const isSwitchDefault = sourceHandleId === 'default';
 

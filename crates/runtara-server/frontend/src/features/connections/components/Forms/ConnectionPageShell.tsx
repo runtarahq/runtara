@@ -43,36 +43,36 @@ export function ConnectionPageShell({
   const CategoryIcon = getCategoryIcon(integrationCategory);
 
   return (
-    <div className="flex min-h-screen flex-col bg-slate-50/50 dark:bg-background">
-      <header className="sticky top-0 z-10 border-b border-slate-200/60 bg-slate-50/80 backdrop-blur-sm dark:border-slate-700/60 dark:bg-background/80">
+    <div className="flex min-h-screen flex-col bg-muted/30 dark:bg-background">
+      <header className="sticky top-0 z-10 border-b border-border bg-muted/50 backdrop-blur-sm dark:bg-background/80">
         <div className="px-6 py-4">
           <div className="flex items-center justify-between gap-4">
             <div className="flex min-w-0 items-center gap-3">
               <Link
                 to={backHref}
                 aria-label="Back to connections"
-                className="-ml-1.5 rounded-lg p-1.5 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-slate-800 dark:hover:text-slate-300"
+                className="-ml-1.5 rounded-lg p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
               >
                 <ArrowLeft className="h-5 w-5" />
               </Link>
               <div className="flex min-w-0 items-center gap-3">
                 {integrationIcon}
                 <div className="min-w-0">
-                  <h1 className="truncate text-lg font-semibold text-slate-900 dark:text-slate-100">
+                  <h1 className="truncate text-lg font-semibold text-foreground">
                     {title}
                   </h1>
                   {(integrationName || integrationCategory) && (
                     <div className="flex items-center gap-2">
                       {integrationName && (
-                        <span className="text-sm text-slate-500 dark:text-slate-400">
+                        <span className="text-sm text-muted-foreground">
                           {integrationName}
                         </span>
                       )}
                       {integrationName && integrationCategory && (
-                        <span className="h-1 w-1 rounded-full bg-slate-300 dark:bg-slate-600" />
+                        <span className="h-1 w-1 rounded-full bg-border" />
                       )}
                       {integrationCategory && (
-                        <span className="inline-flex items-center gap-1 rounded bg-slate-100 px-1.5 py-0.5 text-xs text-slate-500 dark:bg-slate-700 dark:text-slate-400">
+                        <span className="inline-flex items-center gap-1 rounded bg-muted px-1.5 py-0.5 text-xs text-muted-foreground">
                           <CategoryIcon className="h-3 w-3" />
                           {getCategoryLabel(integrationCategory)}
                         </span>

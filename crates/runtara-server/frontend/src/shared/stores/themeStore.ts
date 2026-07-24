@@ -1,3 +1,4 @@
+import { useSyncExternalStore } from 'react';
 import { create } from 'zustand';
 import { devtools, persist } from 'zustand/middleware';
 import { immer } from 'zustand/middleware/immer';
@@ -36,6 +37,28 @@ export const useThemeStore = create<ThemeState>()(
   )
 );
 
+/**
+ * Reactive dark-mode flag. Unlike reading
+ * `document.documentElement.classList.contains('dark')` during render (which
+ * goes stale when the theme is toggled), this re-renders the consumer on both
+ * explicit theme changes and OS-level scheme flips while in 'system' mode.
+ */
+export function useIsDarkTheme(): boolean {
+  const theme = useThemeStore((s) => s.theme);
+  const systemDark = useSyncExternalStore(subscribeToSystemScheme, () =>
+    typeof window === 'undefined'
+      ? false
+      : window.matchMedia('(prefers-color-scheme: dark)').matches
+  );
+  return theme === 'dark' || (theme === 'system' && systemDark);
+}
+
+function subscribeToSystemScheme(callback: () => void) {
+  const mq = window.matchMedia('(prefers-color-scheme: dark)');
+  mq.addEventListener('change', callback);
+  return () => mq.removeEventListener('change', callback);
+}
+
 function updateThemeClass(theme: Theme) {
   const root = document.documentElement;
   const isDark =
@@ -50,8 +73,13 @@ function updateThemeClass(theme: Theme) {
   }
 }
 
-// Initialize theme on load
-if (typeof window !== 'undefined') {
+// Initialize theme on load. Guard every browser API separately — test
+// environments may provide window without localStorage/matchMedia.
+if (
+  typeof window !== 'undefined' &&
+  typeof localStorage !== 'undefined' &&
+  typeof window.matchMedia === 'function'
+) {
   const stored = localStorage.getItem('theme-storage');
   if (stored) {
     try {
