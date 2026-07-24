@@ -13,7 +13,7 @@ import {
   AlertDescription,
   AlertTitle,
 } from '@/shared/components/ui/alert';
-import { useToast } from '@/shared/hooks/useToast';
+import { toast } from 'sonner';
 import { testAgent } from '@/features/workflows/queries';
 import { TestAgentResponse } from '@/generated/RuntaraRuntimeApi';
 import { SimpleInputMappingEditor } from '../InputMappingField/SimpleInputMappingEditor';
@@ -53,7 +53,6 @@ const TEST_NODE_ID = '__test_agent__';
 
 export function TestAgentInline() {
   const token = useToken();
-  const { toast } = useToast();
   const { watch } = useFormContext();
   const { agents } = useContext(NodeFormContext);
   const entitlements = useEntitlements();
@@ -184,10 +183,7 @@ export function TestAgentInline() {
           ? testResult.output
           : JSON.stringify(testResult.output, null, 2);
       navigator.clipboard.writeText(outputText);
-      toast({
-        title: 'Copied',
-        description: 'Output copied to clipboard',
-      });
+      toast.success('Output copied to clipboard');
     }
   };
 

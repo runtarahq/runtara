@@ -10,6 +10,10 @@ import { ensureReportDsl } from '@/wasm/runtara-report-dsl/index';
 import { ensureRustValidationInitialized } from '@/shared/lib/rust-validation-wasm';
 import App from '@/App';
 
+// Self-hosted Inter (variable font) — the primary face declared in
+// tailwind.config.js fontFamily.sans; without this import the app silently
+// fell back to Roboto/system-ui.
+import '@fontsource-variable/inter';
 import './index.css';
 
 initAnalytics();
@@ -41,7 +45,7 @@ createRoot(document.getElementById('root')!).render(
         <ReactFlowProvider>
           <App />
         </ReactFlowProvider>
-        <Toaster richColors toastOptions={{}} />
+        <Toaster />
       </QueryClientProvider>
     </AuthProvider>
   </StrictMode>

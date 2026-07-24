@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { Loader2, Pause } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button.tsx';
 import { pauseInstance } from '@/features/workflows/queries';
-import { useToast } from '@/shared/hooks/useToast';
+import { toast } from 'sonner';
 import { useToken } from '@/shared/hooks';
 import { ModalDialog } from '@/shared/components/next-dialog';
 import {
@@ -39,7 +39,6 @@ export function PauseButton(props: Props) {
     className = '',
   } = props;
   const token = useToken();
-  const { toast } = useToast();
   const [isLoading, setIsLoading] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
 
@@ -50,20 +49,14 @@ export function PauseButton(props: Props) {
     setIsLoading(true);
     try {
       await pauseInstance(token, instanceId);
-      toast({
-        title: 'Success',
-        description: 'Workflow instance has been paused',
-      });
+      toast.success('Workflow instance has been paused');
     } catch (error) {
       console.error('Error pausing instance:', error);
-      toast({
-        title: 'Error',
-        description:
-          error instanceof Error && error.message
-            ? error.message
-            : 'Failed to pause workflow instance',
-        variant: 'destructive',
-      });
+      toast.error(
+        error instanceof Error && error.message
+          ? error.message
+          : 'Failed to pause workflow instance'
+      );
     } finally {
       setIsLoading(false);
     }

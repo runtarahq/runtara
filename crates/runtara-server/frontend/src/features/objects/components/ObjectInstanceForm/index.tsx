@@ -10,7 +10,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/shared/components/ui/select';
-import { toast } from '@/shared/hooks/useToast';
+import { toast } from 'sonner';
 import {
   Instance,
   CreateInstanceRequest,
@@ -116,20 +116,12 @@ export function ObjectInstanceDtoForm({
     e.preventDefault();
 
     if (!objectSchemaDto.columns || !objectSchemaDto.id) {
-      toast({
-        title: 'Error',
-        description: 'Schema is not properly defined',
-        variant: 'destructive',
-      });
+      toast.error('Schema is not properly defined');
       return;
     }
 
     if (!connectionId) {
-      toast({
-        title: 'Error',
-        description: 'Select a database connection first',
-        variant: 'destructive',
-      });
+      toast.error('Select a database connection first');
       return;
     }
 
@@ -196,10 +188,7 @@ export function ObjectInstanceDtoForm({
           data: updateRequest,
         });
 
-        toast({
-          title: 'Success',
-          description: 'Instance updated successfully',
-        });
+        toast.success('Instance updated successfully');
       } else {
         const createRequest: CreateInstanceRequest = {
           schemaId: objectSchemaDto.id,
@@ -211,21 +200,14 @@ export function ObjectInstanceDtoForm({
           data: createRequest,
         });
 
-        toast({
-          title: 'Success',
-          description: 'Instance created successfully',
-        });
+        toast.success('Instance created successfully');
       }
 
       if (onSuccess) {
         onSuccess();
       }
     } catch (error) {
-      toast({
-        title: 'Error',
-        description: (error as Error)?.message || 'An error occurred',
-        variant: 'destructive',
-      });
+      toast.error((error as Error)?.message || 'An error occurred');
     }
   };
 

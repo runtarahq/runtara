@@ -281,7 +281,7 @@ export function HistoryPanelContent({ workflowId }: HistoryPanelContentProps) {
         {/* Loading bar for active executions */}
         {isSelectedActive && (
           <div className="h-0.5 bg-muted relative overflow-hidden flex-shrink-0">
-            <div className="absolute inset-0 w-1/2 bg-gradient-to-r from-transparent via-primary to-transparent animate-[loading_1.5s_ease-in-out_infinite]" />
+            <div className="absolute inset-0 w-1/2 bg-gradient-to-r from-transparent via-primary to-transparent animate-loading" />
           </div>
         )}
 

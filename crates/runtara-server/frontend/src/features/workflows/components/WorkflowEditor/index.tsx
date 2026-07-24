@@ -18,7 +18,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { useWorkflowStore } from '@/features/workflows/stores/workflowStore.ts';
 import { useExecutionStore } from '@/features/workflows/stores/executionStore';
 import { useValidationStore } from '@/features/workflows/stores/validationStore';
-import { toast } from '@/shared/hooks/useToast';
+import { toast } from 'sonner';
 import { cn } from '@/lib/utils.ts';
 import {
   Tabs,
@@ -49,7 +49,6 @@ import {
   ConditionalNode,
   ContainerNode,
   CreateNode,
-  EventNode,
   SwitchNode,
   AiAgentNode,
   NoteNode,
@@ -107,10 +106,7 @@ const nodeTypes: NodeTypes = {
   [NODE_TYPES.CreateNode]: CreateNode,
   [NODE_TYPES.ConditionalNode]: ConditionalNode,
   [NODE_TYPES.SwitchNode]: SwitchNode,
-  [NODE_TYPES.EventNode]: EventNode,
-  [NODE_TYPES.WaitNode]: BasicNode,
   [NODE_TYPES.ContainerNode]: ContainerNode,
-  [NODE_TYPES.GroupByNode]: BasicNode,
   [NODE_TYPES.AiAgentNode]: AiAgentNode,
   [NODE_TYPES.NoteNode]: NoteNode,
   [NODE_TYPES.StartIndicatorNode]: StartIndicatorNode,
@@ -933,10 +929,8 @@ function WorkflowEditorContent({
         );
 
         if (!validation.isValid) {
-          toast({
-            title: 'Invalid Connection',
+          toast.error('Invalid Connection', {
             description: validation.errorMessage,
-            variant: 'destructive',
           });
           return;
         }
@@ -1703,19 +1697,16 @@ function WorkflowEditorContent({
       }
 
       if (!validation.canApply) {
-        toast({
-          title: 'Step validation failed',
+        toast.error('Step validation failed', {
           description:
             validation.rustValidation.errors[0] ||
             validation.rustValidation.message,
-          variant: 'destructive',
         });
         return false;
       }
 
       if (validation.rustValidation.status === 'unavailable') {
-        toast({
-          title: 'Rust validation unavailable',
+        toast.warning('Rust validation unavailable', {
           description: validation.rustValidation.message,
         });
       }

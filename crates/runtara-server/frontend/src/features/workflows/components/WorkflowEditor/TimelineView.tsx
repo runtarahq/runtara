@@ -217,7 +217,7 @@ type StepData = Partial<ExecutionGraphStepDto> & {
   content?: string;
 };
 
-const excludedNodeTypes = new Set([
+const excludedNodeTypes = new Set<string>([
   NODE_TYPES.CreateNode,
   NODE_TYPES.NoteNode,
   NODE_TYPES.StartIndicatorNode,

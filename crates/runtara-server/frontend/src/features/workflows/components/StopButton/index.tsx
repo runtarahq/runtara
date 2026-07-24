@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { Square } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button.tsx';
 import { stopInstance } from '@/features/workflows/queries';
-import { useToast } from '@/shared/hooks/useToast';
+import { toast } from 'sonner';
 import { useToken } from '@/shared/hooks';
 
 type Props = {
@@ -26,7 +26,6 @@ export function StopButton(props: Props) {
     className = '',
   } = props;
   const token = useToken();
-  const { toast } = useToast();
   const [isLoading, setIsLoading] = useState(false);
 
   const handleClick = async () => {
@@ -35,17 +34,10 @@ export function StopButton(props: Props) {
     setIsLoading(true);
     try {
       await stopInstance(token, instanceId);
-      toast({
-        title: 'Success',
-        description: 'Workflow instance has been stopped',
-      });
+      toast.success('Workflow instance has been stopped');
     } catch (error) {
       console.error('Error stopping instance:', error);
-      toast({
-        title: 'Error',
-        description: 'Failed to stop workflow instance',
-        variant: 'destructive',
-      });
+      toast.error('Failed to stop workflow instance');
     } finally {
       setIsLoading(false);
     }

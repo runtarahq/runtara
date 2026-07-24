@@ -9,6 +9,7 @@ import type { ExecutionGraphDto } from '@/features/workflows/types/execution-gra
 import {
   NODE_TYPE_SIZES,
   NODE_TYPES,
+  type NodeTypeId,
 } from '@/features/workflows/config/workflow.ts';
 import { normalizeMappingObject } from '../NodeForm/InputMappingField/mapping-entries';
 
@@ -55,7 +56,7 @@ function roundTripStep(graph: ExecutionGraphDto & { entryPoint: string }) {
 
 function makeLayoutNode(
   id: string,
-  type = NODE_TYPES.BasicNode,
+  type: NodeTypeId = NODE_TYPES.BasicNode,
   parentId?: string
 ): Node {
   const size = NODE_TYPE_SIZES[type] ?? NODE_TYPE_SIZES[NODE_TYPES.BasicNode];

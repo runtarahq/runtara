@@ -286,7 +286,7 @@ function StepAdvancedFields() {
 }
 
 // Node types that never represent a referenceable workflow step.
-const NON_STEP_NODE_TYPES = new Set([
+const NON_STEP_NODE_TYPES = new Set<string>([
   NODE_TYPES.CreateNode,
   NODE_TYPES.NoteNode,
   NODE_TYPES.StartIndicatorNode,

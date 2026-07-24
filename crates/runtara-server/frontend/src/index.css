@@ -58,7 +58,9 @@
     --input: 214 32% 91%; /* light blue-gray input */
     --ring: 217 91% 60%; /* vibrant blue */
     --success: 142 71% 45%; /* green */
+    --success-foreground: 0 0% 100%; /* white */
     --warning: 38 92% 50%; /* amber */
+    --warning-foreground: 0 0% 100%; /* white */
     --error: 0 84% 60%; /* soft red */
     --chart-1: 217 91% 60%; /* vibrant blue */
     --chart-2: 174 77% 50%; /* teal */
@@ -100,7 +102,9 @@
     --input: 0 0% 15%; /* #262626 - Same as border */
     --ring: 217 91% 60%; /* #3b82f6 - Bright blue focus ring */
     --success: 142 71% 45%; /* #22c55e - Green for success */
+    --success-foreground: 0 0% 100%; /* white */
     --warning: 38 92% 50%; /* amber */
+    --warning-foreground: 0 0% 100%; /* white */
     --error: 0 84% 60%; /* #ef4444 - Red for errors */
     --chart-1: 217 91% 60%; /* #3b82f6 */
     --chart-2: 174 77% 50%; /* teal */
@@ -191,13 +195,15 @@
   display: none;
 }
 
+/* Report printing: every rule below is scoped to body.printing-report (added
+   by ReportPage while a rendered report is on screen) so that printing any
+   other route produces normal output instead of blank pages. */
 @media print {
   @page {
     margin: 12mm;
   }
 
-  :root,
-  .dark {
+  body.printing-report {
     --background: 0 0% 100%;
     --foreground: 222 47% 11%;
     --card: 0 0% 100%;
@@ -208,32 +214,32 @@
     --primary: 217 91% 45%;
   }
 
-  html,
-  body,
-  #root {
+  html:has(body.printing-report),
+  body.printing-report,
+  body.printing-report #root {
     height: auto !important;
     overflow: visible !important;
     background: #ffffff !important;
     color: #0f172a !important;
   }
 
-  [data-variant][data-side],
-  [data-sidebar='sidebar'],
-  [data-sidebar='rail'],
-  [data-sidebar='trigger'] {
+  body.printing-report [data-variant][data-side],
+  body.printing-report [data-sidebar='sidebar'],
+  body.printing-report [data-sidebar='rail'],
+  body.printing-report [data-sidebar='trigger'] {
     display: none !important;
   }
 
-  main,
-  .overflow-hidden,
-  .overflow-x-hidden,
-  .overflow-y-auto {
+  body.printing-report main,
+  body.printing-report .overflow-hidden,
+  body.printing-report .overflow-x-hidden,
+  body.printing-report .overflow-y-auto {
     width: 100% !important;
     max-width: none !important;
     overflow: visible !important;
   }
 
-  body * {
+  body.printing-report * {
     visibility: hidden !important;
   }
 
@@ -344,20 +350,14 @@
 /* React Flow custom node fixed dimensions */
 .react-flow__node-BASIC_NODE,
 .react-flow__node-CONDITIONAL_NODE,
-.react-flow__node-EVENT_NODE,
-.react-flow__node-WAIT_NODE,
-.react-flow__node-CREATE_NODE,
-.react-flow__node-GROUP_BY_NODE {
+.react-flow__node-CREATE_NODE {
   width: 132px !important;
   height: 36px !important;
 }
 
 .react-flow__node-BASIC_NODE > div,
 .react-flow__node-CONDITIONAL_NODE > div,
-.react-flow__node-EVENT_NODE > div,
-.react-flow__node-WAIT_NODE > div,
-.react-flow__node-CREATE_NODE > div,
-.react-flow__node-GROUP_BY_NODE > div {
+.react-flow__node-CREATE_NODE > div {
   width: 132px !important;
   height: 36px !important;
   max-width: 132px !important;

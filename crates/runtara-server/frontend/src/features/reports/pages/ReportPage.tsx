@@ -314,6 +314,14 @@ export function ReportPage() {
     ]
   );
 
+  // The @media print rules that blank everything except the report are scoped
+  // to body.printing-report so other routes keep normal print output.
+  useEffect(() => {
+    if (editing) return;
+    document.body.classList.add('printing-report');
+    return () => document.body.classList.remove('printing-report');
+  }, [editing]);
+
   // Phase 9: in-place block preview for the wizard. Debounced from the
   // live definition so live edits don't pummel the preview API.
   const [debouncedDefinition, setDebouncedDefinition] =

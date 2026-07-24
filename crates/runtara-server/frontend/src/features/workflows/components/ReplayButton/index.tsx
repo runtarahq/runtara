@@ -3,7 +3,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import { CirclePlay, RotateCcw } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button.tsx';
 import { replayWorkflow } from '@/features/workflows/queries';
-import { useToast } from '@/shared/hooks/useToast';
+import { toast } from 'sonner';
 import { useToken } from '@/shared/hooks';
 import { queryKeys } from '@/shared/queries/query-keys';
 import { isOidcAuth } from '@/shared/config/runtimeConfig';
@@ -41,7 +41,6 @@ export function ReplayButton(props: Props) {
     className = '',
   } = props;
   const token = useToken();
-  const { toast } = useToast();
   const queryClient = useQueryClient();
   const [isLoading, setIsLoading] = useState(false);
 
@@ -74,19 +73,14 @@ export function ReplayButton(props: Props) {
             }),
       ]);
 
-      toast({
-        title: 'Success',
-        description: isTransient
+      toast.success(
+        isTransient
           ? 'Workflow retry has been scheduled'
-          : 'Workflow has been scheduled for replay',
-      });
+          : 'Workflow has been scheduled for replay'
+      );
     } catch (error) {
       console.error('Error replaying workflow:', error);
-      toast({
-        title: 'Error',
-        description: 'Failed to replay workflow',
-        variant: 'destructive',
-      });
+      toast.error('Failed to replay workflow');
     } finally {
       setIsLoading(false);
     }

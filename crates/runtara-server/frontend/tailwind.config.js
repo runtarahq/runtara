@@ -5,28 +5,35 @@ import typography from '@tailwindcss/typography';
 export default {
   darkMode: ['class'],
   content: [
-    './src/pages/**/*.{js,ts,tsx}',
-    './src/components/**/*.{js,ts,tsx}',
+    './index.html',
     './src/shared/**/*.{js,ts,tsx}',
     './src/features/**/*.{js,ts,tsx}',
     './src/lib/**/*.{js,ts,tsx}',
+    './src/router/**/*.{js,ts,tsx}',
     './src/*.{js,ts,tsx}',
   ],
   theme: {
-    fontFamily: {
-      sans: ['Inter', 'Roboto', 'ui-sans-serif', 'system-ui', 'sans-serif'],
-      mono: [
-        'ui-monospace',
-        'SFMono-Regular',
-        'Menlo',
-        'Monaco',
-        'Consolas',
-        'Liberation Mono',
-        'Courier New',
-        'monospace',
-      ],
-    },
     extend: {
+      fontFamily: {
+        sans: [
+          'Inter Variable',
+          'Inter',
+          'Roboto',
+          'ui-sans-serif',
+          'system-ui',
+          'sans-serif',
+        ],
+        mono: [
+          'ui-monospace',
+          'SFMono-Regular',
+          'Menlo',
+          'Monaco',
+          'Consolas',
+          'Liberation Mono',
+          'Courier New',
+          'monospace',
+        ],
+      },
       spacing: {
         'safe-top': 'env(safe-area-inset-top)',
         'safe-bottom': 'env(safe-area-inset-bottom)',
@@ -86,15 +93,11 @@ export default {
         },
         success: {
           DEFAULT: 'hsl(var(--success))',
-          foreground: 'hsl(var(--success-foreground), 0 0% 100%)',
+          foreground: 'hsl(var(--success-foreground))',
         },
         warning: {
           DEFAULT: 'hsl(var(--warning))',
-          foreground: 'hsl(var(--warning-foreground), 0 0% 100%)',
-        },
-        error: {
-          DEFAULT: 'hsl(var(--error))',
-          foreground: 'hsl(var(--error-foreground), 0 0% 100%)',
+          foreground: 'hsl(var(--warning-foreground))',
         },
         border: 'hsl(var(--border))',
         input: 'hsl(var(--input))',
@@ -120,8 +123,13 @@ export default {
       animation: {
         in: 'animate-in 0.5s ease-out',
         'fade-in-slide-up': 'fade-in-slide-up 0.5s ease-out',
+        loading: 'loading 1.5s ease-in-out infinite',
       },
       keyframes: {
+        loading: {
+          '0%': { transform: 'translateX(-100%)' },
+          '100%': { transform: 'translateX(200%)' },
+        },
         'fade-in-slide-up': {
           '0%': {
             opacity: '0',

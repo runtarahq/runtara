@@ -10,11 +10,12 @@ import {
 import {
   NODE_TYPE_SIZES,
   NODE_TYPES,
+  type NodeTypeId,
 } from '@/features/workflows/config/workflow.ts';
 
 function makeNode(
   id: string,
-  type = NODE_TYPES.BasicNode,
+  type: NodeTypeId = NODE_TYPES.BasicNode,
   data: Record<string, unknown> = {}
 ): Node {
   const size = NODE_TYPE_SIZES[type] ?? NODE_TYPE_SIZES[NODE_TYPES.BasicNode];
