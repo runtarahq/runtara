@@ -3101,6 +3101,124 @@ fn llm_http_500() -> Value {
     })
 }
 
+/// A single-shot AiAgent that declares a structured `outputSchema`: two required
+/// fields, one of them an enum. The compiler converts the DSL flat map to JSON
+/// Schema and the `chat-completion` capability must parse *and* validate the
+/// model's text against it.
+fn structured_ai_agent_graph_json() -> &'static str {
+    r##"{
+      "entryPoint": "ai",
+      "executionPlan": [{"fromStep":"ai","toStep":"finish","label":"next"}],
+      "steps": {
+        "ai": {"id":"ai","stepType":"AiAgent","connectionId":"conn-1","config":{
+          "systemPrompt":{"valueType":"immediate","value":"You are a test stub caller"},
+          "userPrompt":{"valueType":"immediate","value":"Classify this"},
+          "provider":{"valueType":"immediate","value":"openai"},
+          "model":{"valueType":"immediate","value":"gpt-4o"},
+          "outputSchema":{
+            "sentiment":{"type":"string","required":true,"enum":["positive","negative"]},
+            "confidence":{"type":"number","required":true}
+          }
+        }},
+        "finish": {"id":"finish","stepType":"Finish","inputMapping":{
+          "answer":{"valueType":"reference","value":"steps.ai.outputs.response"}
+        }}
+      }
+    }"##
+}
+
+#[test]
+fn direct_wasm_execute_ai_agent_structured_output_yields_the_parsed_object() {
+    let components_dir = direct_e2e_components_dir();
+
+    // Happy path: a conforming response reaches `Finish` as a parsed object,
+    // not as the raw assistant text.
+    let result = run_direct_workflow_with_llm_script(
+        &components_dir,
+        "ai-structured-output-ok",
+        structured_ai_agent_graph_json(),
+        br#"{}"#,
+        vec![llm_ok(r#"{"sentiment": "positive", "confidence": 0.87}"#)],
+    );
+
+    assert!(
+        result.status_success,
+        "stderr: {} error: {:?}",
+        result.stderr, result.error_json
+    );
+    let output = result.output_json.expect("workflow completes");
+    let answer = output.get("answer").expect("answer");
+    assert_eq!(
+        answer.get("sentiment").and_then(Value::as_str),
+        Some("positive"),
+        "{output}"
+    );
+    assert_eq!(
+        answer.get("confidence").and_then(Value::as_f64),
+        Some(0.87),
+        "{output}"
+    );
+}
+
+#[test]
+fn direct_wasm_execute_ai_agent_structured_output_fails_on_non_json() {
+    let components_dir = direct_e2e_components_dir();
+
+    // Regression: this used to collapse to `structured_output: None`, and the
+    // step "succeeded" with the raw text as its `response`.
+    let result = run_direct_workflow_with_llm_script(
+        &components_dir,
+        "ai-structured-output-not-json",
+        structured_ai_agent_graph_json(),
+        br#"{}"#,
+        vec![llm_ok("Sure! The sentiment is positive.")],
+    );
+
+    assert!(
+        !result.status_success,
+        "a non-JSON response must fail the step; output: {:?}",
+        result.output_json
+    );
+    let error = result.error_json.expect("failure is reported");
+    let rendered = error.to_string();
+    assert!(
+        rendered.contains("AI_STRUCTURED_OUTPUT_INVALID"),
+        "expected the structured-output parse error: {rendered}"
+    );
+}
+
+#[test]
+fn direct_wasm_execute_ai_agent_structured_output_fails_on_schema_violation() {
+    let components_dir = direct_e2e_components_dir();
+
+    // Parseable JSON that doesn't honour the declared contract: `confidence` is
+    // missing and `sentiment` isn't one of the declared enum values. Downstream
+    // mappings used to read this silently.
+    let result = run_direct_workflow_with_llm_script(
+        &components_dir,
+        "ai-structured-output-off-schema",
+        structured_ai_agent_graph_json(),
+        br#"{}"#,
+        vec![llm_ok(r#"{"sentiment": "ecstatic"}"#)],
+    );
+
+    assert!(
+        !result.status_success,
+        "an off-schema response must fail the step; output: {:?}",
+        result.output_json
+    );
+    let error = result.error_json.expect("failure is reported");
+    let rendered = error.to_string();
+    assert!(
+        rendered.contains("AI_STRUCTURED_OUTPUT_SCHEMA_MISMATCH"),
+        "expected the schema-mismatch error: {rendered}"
+    );
+    assert!(
+        rendered.contains("confidence"),
+        "the error should name the offending field: {rendered}"
+    );
+}
+
 #[test]
 fn direct_wasm_execute_ai_agent_single_shot_completes_against_stub() {
     let components_dir = direct_e2e_components_dir();

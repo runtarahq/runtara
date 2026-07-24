@@ -56,6 +56,9 @@ pub mod spec;
 // DSL flat-map schema → JSON Schema conversion
 pub mod schema_convert;
 
+// Structural validation of a value against a `schema_convert` JSON Schema.
+pub mod schema_validate;
+
 // Shared deterministic evaluator for UI/report-safe condition expressions.
 pub mod condition_eval;
 

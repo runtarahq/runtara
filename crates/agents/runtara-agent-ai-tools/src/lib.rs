@@ -839,10 +839,7 @@ pub fn chat_completion(input: ChatCompletionInput) -> Result<ChatCompletionOutpu
         tools,
         temperature: input.temperature.unwrap_or(0.7),
         max_tokens: input.max_tokens.map(|v| v.max(0) as u64),
-        output_schema_json: input
-            .output_schema
-            .as_ref()
-            .map(|s| serde_json::to_string(s).unwrap_or_default()),
+        output_schema_json: serialize_output_schema(input.output_schema.as_ref())?,
         // Author-configurable per-attempt timeout; None resolves to
         // DEFAULT_STEP_TIMEOUT_MS in run_completion.
         timeout_ms: input.timeout_ms,
@@ -862,22 +859,24 @@ pub fn chat_completion(input: ChatCompletionInput) -> Result<ChatCompletionOutpu
         .as_ref()
         .and_then(|u| serde_json::to_value(u).ok());
 
-    // When an output schema was requested, parse the final assistant text as
-    // JSON — mirroring the generated loop's `serde_json::from_str(&text)` with a
-    // string fallback. We surface it as `structured_output` so `ai-agent-output`
-    // can use it as the response value.
-    let structured_output = if input.output_schema.is_some() {
-        let final_text = response
-            .choice
-            .iter()
-            .find_map(|content| match content {
-                runtara_ai::AssistantContent::Text(text) => Some(text.text.clone()),
-                _ => None,
-            })
-            .unwrap_or_default();
-        serde_json::from_str::<Value>(&final_text).ok()
-    } else {
-        None
+    // When an output schema was requested, parse and validate the final
+    // assistant text against it. We surface the result as `structured_output`
+    // so `ai-agent-output` can use it as the response value; a response that
+    // isn't valid JSON, or that doesn't match the schema, fails the step rather
+    // than degrading to the raw text.
+    let structured_output = match input.output_schema.as_ref() {
+        Some(schema) => {
+            let final_text = response
+                .choice
+                .iter()
+                .find_map(|content| match content {
+                    runtara_ai::AssistantContent::Text(text) => Some(text.text.clone()),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            Some(structured_response(&final_text, schema)?)
+        }
+        None => None,
     };
 
     Ok(ChatCompletionOutput {
@@ -1089,10 +1088,7 @@ pub fn chat_turn(input: ChatTurnInput) -> Result<ChatTurnOutput, AgentError> {
         tools,
         temperature: input.temperature.unwrap_or(0.7),
         max_tokens: input.max_tokens.map(|v| v.max(0) as u64),
-        output_schema_json: input
-            .output_schema
-            .as_ref()
-            .map(|s| serde_json::to_string(s).unwrap_or_default()),
+        output_schema_json: serialize_output_schema(input.output_schema.as_ref())?,
         // Author-configurable per-attempt timeout; None resolves to
         // DEFAULT_STEP_TIMEOUT_MS in run_completion.
         timeout_ms: input.timeout_ms,
@@ -1147,12 +1143,13 @@ pub fn chat_turn(input: ChatTurnInput) -> Result<ChatTurnOutput, AgentError> {
         .collect::<Vec<_>>();
 
     if tool_calls.is_empty() {
-        // Complete: derive the response value (parsed JSON for structured output).
+        // Complete: derive the response value. With a declared output schema the
+        // final text must parse and validate against it — a non-conforming
+        // response fails the turn instead of collapsing to a plain string.
         let text = final_text.unwrap_or_default();
-        let response_value = if input.output_schema.is_some() {
-            serde_json::from_str::<Value>(&text).unwrap_or(Value::String(text))
-        } else {
-            Value::String(text)
+        let response_value = match input.output_schema.as_ref() {
+            Some(schema) => structured_response(&text, schema)?,
+            None => Value::String(text),
         };
         Ok(ChatTurnOutput {
             action: "complete".to_string(),
@@ -2420,6 +2417,56 @@ fn parse_structured_output(text: &str, schema: &Option<Value>) -> Option<Value> 
     serde_json::from_str(text).ok()
 }
 
+/// Serialize a declared output schema for `runtara_ai::CompletionInvokeRequest`.
+///
+/// A schema that can't be serialized would otherwise degrade to an empty string
+/// and silently disable structured output for the whole call.
+fn serialize_output_schema(schema: Option<&Value>) -> Result<Option<String>, AgentError> {
+    schema
+        .map(|schema| {
+            serde_json::to_string(schema).map_err(|e| {
+                AgentError::permanent(
+                    "AI_STRUCTURED_OUTPUT_BAD_SCHEMA",
+                    format!("output schema could not be serialized: {e}"),
+                )
+            })
+        })
+        .transpose()
+}
+
+/// Turn a model's final text into the structured response promised by a
+/// declared `output_schema`.
+///
+/// Both failure modes are hard errors: a response that isn't JSON, or one that
+/// doesn't match the declared schema, means the step's output contract was
+/// violated and downstream mappings would silently read the wrong shape.
+/// Mirrors how the `text-completion` structured paths propagate parse failures.
+fn structured_response(text: &str, schema: &Value) -> Result<Value, AgentError> {
+    let value: Value = serde_json::from_str(text).map_err(|e| {
+        AgentError::permanent(
+            "AI_STRUCTURED_OUTPUT_INVALID",
+            format!(
+                "an output schema was declared but the response is not valid JSON: {e}; response: {}",
+                truncate(text, 500)
+            ),
+        )
+    })?;
+
+    runtara_dsl::schema_validate::validate_against_json_schema(&value, schema).map_err(
+        |errors| {
+            AgentError::permanent(
+                "AI_STRUCTURED_OUTPUT_SCHEMA_MISMATCH",
+                format!(
+                    "the response does not match the declared output schema: {}",
+                    errors.join("; ")
+                ),
+            )
+        },
+    )?;
+
+    Ok(value)
+}
+
 fn classify_http_status(status: u16) -> (&'static str, &'static str) {
     if status == 429 {
         ("transient", "HTTP_429")
@@ -2663,6 +2710,71 @@ mod tests {
             parameters: serde_json::Value::Null,
             rate_limit_config: None,
         }
+    }
+
+    /// The JSON Schema an AiAgent step actually sends, as produced by
+    /// `dsl_schema_to_json_schema` from the DSL flat-map `output_schema`.
+    fn sentiment_schema() -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "sentiment": {"type": "string", "enum": ["positive", "negative"]},
+                "confidence": {"type": "number"},
+            },
+            "required": ["confidence", "sentiment"],
+            "additionalProperties": false,
+        })
+    }
+
+    #[test]
+    fn structured_response_returns_the_parsed_object() {
+        let value = structured_response(
+            r#"{"sentiment": "positive", "confidence": 0.9}"#,
+            &sentiment_schema(),
+        )
+        .expect("conforming response");
+        assert_eq!(value["sentiment"], "positive");
+    }
+
+    #[test]
+    fn structured_response_rejects_non_json_text() {
+        // Previously this collapsed to `Value::String(text)` (chat-turn) or
+        // `structured_output: None` (chat-completion), and the step "succeeded"
+        // with the wrong shape.
+        let err = structured_response("Sure! The sentiment is positive.", &sentiment_schema())
+            .expect_err("non-JSON response must fail the step");
+        assert_eq!(err.code, "AI_STRUCTURED_OUTPUT_INVALID");
+        assert_eq!(err.category, "permanent");
+        assert!(err.message.contains("not valid JSON"), "{}", err.message);
+    }
+
+    #[test]
+    fn structured_response_rejects_schema_violations() {
+        let err = structured_response(r#"{"sentiment": "positive"}"#, &sentiment_schema())
+            .expect_err("missing required property must fail the step");
+        assert_eq!(err.code, "AI_STRUCTURED_OUTPUT_SCHEMA_MISMATCH");
+        assert_eq!(err.category, "permanent");
+        assert!(err.message.contains("`confidence`"), "{}", err.message);
+    }
+
+    #[test]
+    fn structured_response_error_bounds_the_echoed_text() {
+        let err = structured_response(&"x".repeat(5_000), &sentiment_schema())
+            .expect_err("non-JSON response");
+        assert!(err.message.len() < 1_000, "{}", err.message.len());
+    }
+
+    #[test]
+    fn output_schema_serialization_is_optional_but_not_silent() {
+        assert_eq!(serialize_output_schema(None).expect("no schema"), None);
+        let schema = sentiment_schema();
+        let serialized = serialize_output_schema(Some(&schema))
+            .expect("serializable schema")
+            .expect("some");
+        assert_eq!(
+            serde_json::from_str::<Value>(&serialized).expect("round-trips"),
+            schema
+        );
     }
 
     // `#[field(example = ...)]` values are attribute literals and cannot
