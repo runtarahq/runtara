@@ -2,9 +2,13 @@ import { ColumnDef } from '@tanstack/react-table';
 import { Link } from 'react-router';
 import { ExternalLink, Eye, Zap, MessageSquare, Bug } from 'lucide-react';
 import { ExecutionHistoryItem } from '../types';
-import { formatDate } from '@/lib/utils';
+import { cn, formatDate } from '@/lib/utils';
 import { Button } from '@/shared/components/ui/button';
-import { StatusPill, executionStatusPill } from '@/shared/components/console';
+import {
+  StatusPill,
+  executionStatusPill,
+  statusToneClasses,
+} from '@/shared/components/console';
 import { isActiveStatus } from '@/shared/utils/status-display';
 import { ReplayButton } from '@/features/workflows/components/ReplayButton';
 import { ResumeButton } from '@/features/workflows/components/ResumeButton';
@@ -123,7 +127,10 @@ export const invocationHistoryColumns: ColumnDef<ExecutionHistoryItem>[] = [
           {hasPendingInput && (
             <Link
               to={`/workflows/${row.original.workflowId}/chat/${row.original.instanceId}`}
-              className="inline-flex items-center gap-1 rounded-full border border-amber-200/60 bg-amber-50 px-2 py-1 text-xs font-medium text-amber-700 transition-colors hover:bg-amber-100 dark:border-amber-700/40 dark:bg-amber-900/30 dark:text-amber-400 dark:hover:bg-amber-900/50"
+              className={cn(
+                'inline-flex items-center gap-1 rounded-full border px-2 py-1 text-xs font-medium transition-colors hover:bg-warning/20',
+                statusToneClasses('warning').pill
+              )}
               title="Continue chat"
             >
               <MessageSquare className="h-3 w-3" />

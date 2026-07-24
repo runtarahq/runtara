@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
-import { Loader2 } from 'lucide-react';
 
 import { Button } from '@/shared/components/ui/button';
+import { Spinner } from '@/shared/components/ui/spinner';
 import {
   analyzeFormWithRust,
   FormRenderer,
@@ -85,7 +85,7 @@ export function ActionForm({
           analysis?.wasmAvailable === false
         }
       >
-        {disabled ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+        {disabled ? <Spinner className="mr-2 h-4 w-4" /> : null}
         {submitLabel}
       </Button>
     </div>

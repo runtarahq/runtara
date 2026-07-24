@@ -504,8 +504,7 @@ export function FinishStepField({ name }: FinishStepFieldProps) {
                     <Button
                       type="button"
                       variant="ghost"
-                      size="icon"
-                      className="h-7 w-7"
+                      size="icon-sm"
                       onClick={() => remove(index)}
                       disabled={isRequired}
                     >

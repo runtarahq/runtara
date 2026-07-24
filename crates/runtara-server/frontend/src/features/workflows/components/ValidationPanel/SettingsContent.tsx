@@ -13,6 +13,7 @@ import {
   FormMessage,
 } from '@/shared/components/ui/form';
 import { Input } from '@/shared/components/ui/input';
+import { SectionLabel } from '@/shared/components/section-label';
 import { Textarea } from '@/shared/components/ui/textarea';
 import { Switch } from '@/shared/components/ui/switch';
 import {
@@ -123,9 +124,7 @@ export function SettingsContent({
       {/* Left panel - Sections list */}
       <div className="flex w-56 flex-shrink-0 flex-col overflow-hidden border-r">
         <div className="flex items-center border-b bg-muted/20 px-3 py-1.5">
-          <span className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
-            Settings
-          </span>
+          <SectionLabel as="span">Settings</SectionLabel>
         </div>
         <div className="flex-1 overflow-y-auto">
           {sections.map((section) => {

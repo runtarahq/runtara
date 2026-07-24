@@ -1,5 +1,4 @@
 import { useController, useWatch } from 'react-hook-form';
-import { Loader2 } from 'lucide-react';
 import { FormLabel } from '@/shared/components/ui/form';
 import {
   Select,
@@ -9,6 +8,7 @@ import {
   SelectValue,
 } from '@/shared/components/ui/select';
 import { useConnections } from '@/features/connections/hooks/useConnections';
+import { Spinner } from '@/shared/components/ui/spinner';
 
 // The server-side verifier (api/services/webhook_verification.rs) dispatches
 // on the connection's integration id; only Mailgun connections currently
@@ -51,7 +51,7 @@ export function WebhookConnectionField({
       <FormLabel>{label}</FormLabel>
       {isLoading ? (
         <div className="flex items-center gap-2 text-sm text-muted-foreground">
-          <Loader2 className="h-4 w-4 animate-spin" />
+          <Spinner className="h-4 w-4" />
           Loading connections...
         </div>
       ) : verifiableConnections.length === 0 ? (

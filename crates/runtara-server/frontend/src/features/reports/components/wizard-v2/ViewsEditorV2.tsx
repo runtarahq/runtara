@@ -1,6 +1,7 @@
 import { Button } from '@/shared/components/ui/button';
 import { Input } from '@/shared/components/ui/input';
 import { Label } from '@/shared/components/ui/label';
+import { NativeSelect } from '@/shared/components/ui/native-select';
 import {
   Card,
   CardContent,
@@ -178,8 +179,8 @@ export function ViewsEditorV2({ definition, onChange }: ViewsEditorV2Props) {
                   <Button
                     type="button"
                     variant="ghost"
-                    size="icon"
-                    className="h-7 w-7 text-destructive"
+                    size="icon-sm"
+                    className="text-destructive"
                     aria-label={`Delete view ${view.title || view.id}`}
                     onClick={() => deleteView(view.id)}
                   >
@@ -224,7 +225,7 @@ export function ViewsEditorV2({ definition, onChange }: ViewsEditorV2Props) {
                     >
                       Parent view
                     </Label>
-                    <select
+                    <NativeSelect
                       id={`view-parent-${view.id}`}
                       value={view.parentViewId ?? ''}
                       onChange={(event) =>
@@ -233,7 +234,6 @@ export function ViewsEditorV2({ definition, onChange }: ViewsEditorV2Props) {
                           parentViewId: event.target.value || null,
                         }))
                       }
-                      className="h-9 rounded-md border border-input bg-background px-3 text-sm"
                     >
                       <option value="">None (top-level)</option>
                       {views
@@ -243,7 +243,7 @@ export function ViewsEditorV2({ definition, onChange }: ViewsEditorV2Props) {
                             {candidate.title || candidate.id}
                           </option>
                         ))}
-                    </select>
+                    </NativeSelect>
                   </div>
                 </CardContent>
               </Card>
@@ -379,8 +379,8 @@ function NavigationGroupEditor({
         <Button
           type="button"
           variant="ghost"
-          size="icon"
-          className="h-7 w-7 text-destructive"
+          size="icon-sm"
+          className="text-destructive"
           aria-label={`Delete navigation group ${group.id}`}
           onClick={onDelete}
         >
@@ -408,7 +408,7 @@ function NavigationGroupEditor({
             <Label htmlFor={`group-access-${group.id}`} className="text-xs">
               Accessible views
             </Label>
-            <select
+            <NativeSelect
               id={`group-access-${group.id}`}
               value={group.access ?? 'all'}
               onChange={(event) => {
@@ -432,7 +432,6 @@ function NavigationGroupEditor({
                     : {}),
                 }));
               }}
-              className="h-9 rounded-md border border-input bg-background px-3 text-sm"
             >
               <option value="all">All views</option>
               {group.mode === 'stages' ? (
@@ -443,7 +442,7 @@ function NavigationGroupEditor({
                   </option>
                 </>
               ) : null}
-            </select>
+            </NativeSelect>
             {group.access === 'current_only' ? (
               <p className="text-xs text-muted-foreground">
                 The current stage comes from the configured field. Viewers
@@ -461,7 +460,7 @@ function NavigationGroupEditor({
                   key={`${stage.viewId}-${index}`}
                   className="grid gap-2 rounded-md border p-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]"
                 >
-                  <select
+                  <NativeSelect
                     aria-label={`View for stage ${index + 1}`}
                     value={stage.viewId}
                     onChange={(event) =>
@@ -474,14 +473,13 @@ function NavigationGroupEditor({
                         ),
                       }))
                     }
-                    className="h-9 rounded-md border border-input bg-background px-3 text-sm"
                   >
                     {views.map((view) => (
                       <option key={view.id} value={view.id}>
                         {view.title || view.id}
                       </option>
                     ))}
-                  </select>
+                  </NativeSelect>
                   <Input
                     aria-label={`Persisted value for stage ${index + 1}`}
                     value={stage.value}
@@ -517,7 +515,7 @@ function NavigationGroupEditor({
                   key={`${viewId}-${index}`}
                   className="grid gap-2 rounded-md border p-2 sm:grid-cols-[minmax(0,1fr)_auto]"
                 >
-                  <select
+                  <NativeSelect
                     aria-label={`Tab view ${index + 1}`}
                     value={viewId}
                     onChange={(event) =>
@@ -528,14 +526,13 @@ function NavigationGroupEditor({
                         ),
                       }))
                     }
-                    className="h-9 rounded-md border border-input bg-background px-3 text-sm"
                   >
                     {views.map((view) => (
                       <option key={view.id} value={view.id}>
                         {view.title || view.id}
                       </option>
                     ))}
-                  </select>
+                  </NativeSelect>
                   <MemberActions
                     index={index}
                     count={(group.viewIds ?? []).length}
@@ -744,7 +741,7 @@ function StageSourceEditor({
         <Label className="text-xs" htmlFor={typeId}>
           Current stage comes from
         </Label>
-        <select
+        <NativeSelect
           id={typeId}
           value={source.type}
           onChange={(event) =>
@@ -761,24 +758,22 @@ function StageSourceEditor({
                   }
             )
           }
-          className="h-9 rounded-md border border-input bg-background px-3 text-sm"
         >
           {!requireBlock ? <option value="filter">Filter value</option> : null}
           <option value="block">Rendered block field</option>
-        </select>
+        </NativeSelect>
       </div>
       {source.type === 'filter' ? (
         <div className="grid gap-1.5 md:col-span-2">
           <Label className="text-xs" htmlFor={filterId}>
             Filter
           </Label>
-          <select
+          <NativeSelect
             id={filterId}
             value={source.filterId}
             onChange={(event) =>
               onChange({ type: 'filter', filterId: event.target.value })
             }
-            className="h-9 rounded-md border border-input bg-background px-3 text-sm"
           >
             {definition.filters.length === 0 ? (
               <option value="">No filters available</option>
@@ -788,7 +783,7 @@ function StageSourceEditor({
                 {filter.label || filter.id}
               </option>
             ))}
-          </select>
+          </NativeSelect>
         </div>
       ) : (
         <>
@@ -796,13 +791,12 @@ function StageSourceEditor({
             <Label className="text-xs" htmlFor={blockId}>
               Block
             </Label>
-            <select
+            <NativeSelect
               id={blockId}
               value={source.blockId}
               onChange={(event) =>
                 onChange({ ...source, blockId: event.target.value })
               }
-              className="h-9 rounded-md border border-input bg-background px-3 text-sm"
             >
               {availableBlocks.length === 0 ? (
                 <option value="">No blocks available</option>
@@ -812,7 +806,7 @@ function StageSourceEditor({
                   {block.title || block.id}
                 </option>
               ))}
-            </select>
+            </NativeSelect>
           </div>
           <div className="grid gap-1.5">
             <Label className="text-xs" htmlFor={fieldId}>

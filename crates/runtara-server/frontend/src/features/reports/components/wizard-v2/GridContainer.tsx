@@ -465,8 +465,8 @@ function GridNodeEditor({
           <Button
             type="button"
             variant="ghost"
-            size="icon"
-            className="h-7 w-7 shrink-0"
+            size="icon-sm"
+            className="shrink-0"
             title="More grid settings"
             aria-label="Grid settings"
             onClick={() => setShowSettings((v) => !v)}
@@ -477,8 +477,8 @@ function GridNodeEditor({
             <Button
               type="button"
               variant="ghost"
-              size="icon"
-              className="h-7 w-7 shrink-0 text-destructive"
+              size="icon-sm"
+              className="shrink-0 text-destructive"
               title="Remove grid"
               aria-label="Remove grid"
               onClick={handleDelete}

@@ -16,6 +16,7 @@ import {
 import { JsonEditor, githubLightTheme, githubDarkTheme } from 'json-edit-react';
 import { Braces } from 'lucide-react';
 import { formatDate } from '@/lib/utils';
+import { PICKER_LIST_MAX_HEIGHT } from '@/shared/components/picker-dialog';
 import { Instance } from '@/generated/RuntaraRuntimeApi';
 import { useIsDarkTheme } from '@/shared/stores/themeStore';
 
@@ -289,7 +290,7 @@ function JsonCellEditor({
       <PopoverContent
         side="bottom"
         align="start"
-        className="max-h-[400px] w-[400px] overflow-auto p-0"
+        className={`${PICKER_LIST_MAX_HEIGHT} w-[400px] overflow-auto p-0`}
         onOpenAutoFocus={(e) => e.preventDefault()}
       >
         <JsonEditor

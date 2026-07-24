@@ -34,9 +34,11 @@ import {
 } from '@/shared/components/ui/select.tsx';
 import { Switch as ToggleSwitch } from '@/shared/components/ui/switch.tsx';
 import { Label } from '@/shared/components/ui/label.tsx';
+import { FieldError } from '@/shared/components/ui/form';
 import { useContext, useEffect, useState } from 'react';
 import { NodeFormContext } from '../NodeFormContext';
 import { ValueType } from '../TypeHintSelector';
+import { EditorTh } from '@/features/workflows/components/WorkflowEditor/EditorTable';
 
 type MatchType =
   | 'exact'
@@ -618,23 +620,11 @@ export function SwitchCasesField(props: any) {
           <table className="w-full">
             <thead>
               <tr className="border-b">
-                <th className="w-32 p-2 text-left text-sm font-medium text-muted-foreground">
-                  Match Type
-                </th>
-                <th className="p-2 text-left text-sm font-medium text-muted-foreground">
-                  Match Pattern
-                </th>
-                <th className="p-2 text-left text-sm font-medium text-muted-foreground">
-                  Output
-                </th>
-                {isRoutingMode && (
-                  <th className="w-28 p-2 text-left text-sm font-medium text-muted-foreground">
-                    Route
-                  </th>
-                )}
-                <th className="w-16 p-2 text-center text-sm font-medium text-muted-foreground">
-                  Actions
-                </th>
+                <EditorTh className="w-32">Match Type</EditorTh>
+                <EditorTh>Match Pattern</EditorTh>
+                <EditorTh>Output</EditorTh>
+                {isRoutingMode && <EditorTh className="w-28">Route</EditorTh>}
+                <EditorTh className="w-16 text-center">Actions</EditorTh>
               </tr>
             </thead>
             <tbody>
@@ -894,9 +884,9 @@ export function SwitchCasesField(props: any) {
       </div>
 
       {error && (
-        <div className="mt-2 text-[0.8rem] font-medium text-destructive">
+        <FieldError className="mt-2">
           {error.message || error.root?.message}
-        </div>
+        </FieldError>
       )}
 
       <Dialog open={editDialogOpen} onOpenChange={setEditDialogOpen}>

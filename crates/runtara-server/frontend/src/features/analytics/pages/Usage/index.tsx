@@ -3,9 +3,9 @@ import { useSearchParams } from 'react-router';
 import { usePageTitle } from '@/shared/hooks/usePageTitle';
 import { RefreshCw } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button';
-import { Icons } from '@/shared/components/icons';
 import {
   Breadcrumb,
+  ConsoleErrorState,
   ConsoleTableShell,
   ConsoleToolbar,
 } from '@/shared/components/console';
@@ -330,12 +330,6 @@ export function Usage() {
     });
   }, [tenantMetrics, dateRange]);
 
-  const isNetworkError =
-    !!metricsError &&
-    (error?.message?.includes('fetch') ||
-      (error as { code?: string })?.code === 'ERR_NETWORK' ||
-      !(error as { response?: unknown })?.response);
-
   return (
     <ConsoleTableShell
       bodyClassName="p-4 md:p-6"
@@ -370,26 +364,11 @@ export function Usage() {
       }
     >
       {metricsError && !metricsLoading ? (
-        <div className="flex flex-col items-center justify-center rounded-lg border bg-muted/20 px-6 py-10 text-center">
-          <Icons.warning className="mb-4 h-10 w-10 text-destructive" />
-          <p className="text-base font-semibold text-foreground">
-            {isNetworkError
-              ? 'Unable to connect to backend'
-              : 'An error occurred'}
-          </p>
-          <p className="mt-1 text-sm text-muted-foreground">
-            {isNetworkError
-              ? 'Please check your network connection and try again.'
-              : 'There was a problem loading analytics. Please try again.'}
-          </p>
-          {import.meta.env.DEV && error && (
-            <div className="mt-4 max-w-md rounded-lg bg-destructive/10 p-3 text-left">
-              <p className="break-words font-mono text-xs text-destructive">
-                {error.message || 'Unknown error'}
-              </p>
-            </div>
-          )}
-        </div>
+        <ConsoleErrorState
+          error={error}
+          entityLabel="analytics"
+          className="h-auto rounded-lg border bg-muted/20"
+        />
       ) : (
         <div className="space-y-4">
           <section className="grid gap-4 md:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-6">

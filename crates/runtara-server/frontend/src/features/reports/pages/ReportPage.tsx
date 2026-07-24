@@ -629,8 +629,8 @@ export function ReportPage() {
       contentClassName={!editing ? 'report-print-content pb-16' : undefined}
     >
       {needsReAuthoring ? (
-        <Alert className="mb-4 border-amber-400/60 bg-amber-50 dark:bg-amber-950/30">
-          <AlertTriangle className="h-4 w-4 text-amber-600" />
+        <Alert variant="warning" className="mb-4">
+          <AlertTriangle className="h-4 w-4" />
           <AlertTitle>This report needs re-authoring</AlertTitle>
           <AlertDescription>
             <p className="mb-2 text-sm">

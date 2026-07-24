@@ -1,6 +1,7 @@
 import { useContext, useEffect, useMemo, useState } from 'react';
 import { useFormContext, useWatch } from 'react-hook-form';
 import {
+  FieldError,
   FormControl,
   FormItem,
   FormLabel,
@@ -1013,9 +1014,7 @@ export function AiAgentStepField({ name }: AiAgentStepFieldProps) {
               Add
             </Button>
           </div>
-          {toolError && (
-            <p className="mt-1 text-xs text-destructive">{toolError}</p>
-          )}
+          {toolError && <FieldError className="mt-1">{toolError}</FieldError>}
         </div>
       </div>
 

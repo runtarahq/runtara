@@ -1,5 +1,4 @@
 import {
-  Loader2,
   Play,
   Pencil,
   Copy,
@@ -14,6 +13,7 @@ import { Button } from '@/shared/components/ui/button.tsx';
 import { Can } from '@/shared/components/Can';
 import { TableCell, TableRow } from '@/shared/components/ui/table';
 import { parseSchema } from '@/features/workflows/utils/schema';
+import { Spinner } from '@/shared/components/ui/spinner';
 
 interface WorkflowCardProps {
   workflow: WorkflowDto;
@@ -108,14 +108,14 @@ export function WorkflowCard({
           <Can permission="workflow:execute">
             <Button
               variant="ghost"
-              size="icon"
+              size="icon-sm"
               onClick={() => onSchedule(workflow)}
               title="Start"
-              className="h-7 w-7 text-muted-foreground"
+              className="text-muted-foreground"
               disabled={isScheduling}
             >
               {isScheduling ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
+                <Spinner className="h-4 w-4" />
               ) : (
                 <Play className="h-4 w-4" />
               )}
@@ -124,10 +124,10 @@ export function WorkflowCard({
           {onChat && (
             <Button
               variant="ghost"
-              size="icon"
+              size="icon-sm"
               onClick={() => onChat(workflow)}
               title="Chat"
-              className="h-7 w-7 text-muted-foreground"
+              className="text-muted-foreground"
             >
               <MessageSquare className="h-4 w-4" />
             </Button>
@@ -135,10 +135,10 @@ export function WorkflowCard({
           <Can permission="workflow:update">
             <Button
               variant="ghost"
-              size="icon"
+              size="icon-sm"
               onClick={() => onUpdate(workflow)}
               title="Edit"
-              className="h-7 w-7 text-muted-foreground"
+              className="text-muted-foreground"
             >
               <Pencil className="h-4 w-4" />
             </Button>
@@ -147,14 +147,14 @@ export function WorkflowCard({
             <Can permission="workflow:update">
               <Button
                 variant="ghost"
-                size="icon"
+                size="icon-sm"
                 onClick={() => onMoveToFolder(workflow)}
                 title="Move to folder"
-                className="h-7 w-7 text-muted-foreground"
+                className="text-muted-foreground"
                 disabled={isMoving}
               >
                 {isMoving ? (
-                  <Loader2 className="h-4 w-4 animate-spin" />
+                  <Spinner className="h-4 w-4" />
                 ) : (
                   <FolderInput className="h-4 w-4" />
                 )}
@@ -164,14 +164,14 @@ export function WorkflowCard({
           <Can permission="workflow:create">
             <Button
               variant="ghost"
-              size="icon"
+              size="icon-sm"
               onClick={() => onClone(workflow)}
               title="Duplicate"
-              className="h-7 w-7 text-muted-foreground"
+              className="text-muted-foreground"
               disabled={isCloning}
             >
               {isCloning ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
+                <Spinner className="h-4 w-4" />
               ) : (
                 <Copy className="h-4 w-4" />
               )}
@@ -180,14 +180,14 @@ export function WorkflowCard({
           <Can permission="workflow:delete">
             <Button
               variant="ghost"
-              size="icon"
+              size="icon-sm"
               onClick={() => onDelete(workflow)}
               title="Delete"
-              className="h-7 w-7 text-muted-foreground hover:text-destructive"
+              className="text-muted-foreground hover:text-destructive"
               disabled={isDeleting}
             >
               {isDeleting ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
+                <Spinner className="h-4 w-4" />
               ) : (
                 <Trash2 className="h-4 w-4" />
               )}

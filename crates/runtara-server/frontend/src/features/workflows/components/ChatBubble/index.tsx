@@ -4,7 +4,6 @@ import remarkGfm from 'remark-gfm';
 import {
   ChevronDown,
   ChevronRight,
-  Loader2,
   Wrench,
   Check,
   Brain,
@@ -14,6 +13,7 @@ import {
 import { Badge } from '@/shared/components/ui/badge.tsx';
 import { cn } from '@/lib/utils.ts';
 import { ChatMessage, ChatSSEEvent } from '@/features/workflows/types/chat';
+import { Spinner } from '@/shared/components/ui/spinner';
 
 interface ChatBubbleProps {
   message: ChatMessage;
@@ -194,7 +194,7 @@ export function ChatBubble({ message }: ChatBubbleProps) {
           </div>
         ) : isStreaming ? (
           <div className="flex items-center gap-2 text-muted-foreground">
-            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            <Spinner className="h-3.5 w-3.5" />
             <span className="text-xs">Thinking...</span>
           </div>
         ) : null}

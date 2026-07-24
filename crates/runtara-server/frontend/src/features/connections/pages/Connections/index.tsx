@@ -5,7 +5,7 @@ import { ConnectionPickerModal } from '@/features/connections/components/Connect
 import { usePageTitle } from '@/shared/hooks/usePageTitle';
 import { Button } from '@/shared/components/ui/button';
 import { Can } from '@/shared/components/Can';
-import { Plus, Loader2 } from 'lucide-react';
+import { Plus } from 'lucide-react';
 import { useCustomQuery } from '@/shared/hooks/api';
 import { queryKeys } from '@/shared/queries/query-keys';
 import {
@@ -14,6 +14,7 @@ import {
 } from '@/features/connections/queries';
 import { ConnectionTypeDto } from '@/generated/RuntaraRuntimeApi';
 import { Breadcrumb, ConsoleToolbar } from '@/shared/components/console';
+import { Spinner } from '@/shared/components/ui/spinner';
 
 export function Connections() {
   const navigate = useNavigate();
@@ -56,7 +57,7 @@ export function Connections() {
           >
             {isFetching ? (
               <>
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                <Spinner className="mr-2 h-4 w-4" />
                 Loading...
               </>
             ) : (

@@ -19,6 +19,7 @@ import {
   ZAxis,
 } from 'recharts';
 import { ReportBlockDefinition, ReportBlockResult } from '../../types';
+import { BlockFrame } from './BlockFrame';
 
 // Categorical palette, assigned in fixed order (never cycled by rank). The
 // sequence alternates hue families so adjacent series stay distinguishable
@@ -113,8 +114,8 @@ export function ChartBlock({
   if (chart.kind === 'pie' || chart.kind === 'donut') {
     const seriesField = series[0].field;
     return (
-      <div
-        className={`h-80 overflow-hidden rounded-lg border bg-card p-4 shadow-sm ${
+      <BlockFrame
+        className={`h-80 overflow-hidden p-4 ${
           onPointClick ? 'cursor-pointer' : ''
         }`}
       >
@@ -145,7 +146,7 @@ export function ChartBlock({
             </Pie>
           </PieChart>
         </ResponsiveContainer>
-      </div>
+      </BlockFrame>
     );
   }
 
@@ -161,8 +162,8 @@ export function ChartBlock({
       sizeField,
     });
     return (
-      <div
-        className={`h-80 overflow-hidden rounded-lg border bg-card p-4 shadow-sm ${
+      <BlockFrame
+        className={`h-80 overflow-hidden p-4 ${
           onPointClick ? 'cursor-pointer' : ''
         }`}
       >
@@ -232,7 +233,7 @@ export function ChartBlock({
             ))}
           </ScatterChart>
         </ResponsiveContainer>
-      </div>
+      </BlockFrame>
     );
   }
 
@@ -276,8 +277,8 @@ export function ChartBlock({
   );
 
   return (
-    <div
-      className={`h-80 overflow-hidden rounded-lg border bg-card p-4 shadow-sm ${
+    <BlockFrame
+      className={`h-80 overflow-hidden p-4 ${
         onPointClick ? 'cursor-pointer' : ''
       }`}
     >
@@ -373,7 +374,7 @@ export function ChartBlock({
           </LineChart>
         )}
       </ResponsiveContainer>
-    </div>
+    </BlockFrame>
   );
 }
 

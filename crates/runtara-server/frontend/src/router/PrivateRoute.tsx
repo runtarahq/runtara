@@ -2,6 +2,7 @@ import React from 'react';
 import { useAuth } from 'react-oidc-context';
 import { Navigate } from 'react-router';
 import { isOidcAuth } from '@/shared/config/runtimeConfig';
+import { Spinner } from '@/shared/components/ui/spinner';
 
 interface PrivateRouteProps {
   children: React.ReactNode;
@@ -9,7 +10,7 @@ interface PrivateRouteProps {
 
 const PageLoader = () => (
   <div className="flex h-full items-center justify-center">
-    <div className="h-8 w-8 animate-spin rounded-full border-b-2 border-primary"></div>
+    <Spinner className="h-8 w-8 text-primary" />
   </div>
 );
 

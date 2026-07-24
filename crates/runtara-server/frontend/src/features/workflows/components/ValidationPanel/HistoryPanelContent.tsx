@@ -13,9 +13,9 @@ import { cn } from '@/lib/utils';
 import { Icons } from '@/shared/components/icons';
 import { Badge } from '@/shared/components/ui/badge';
 import { Button } from '@/shared/components/ui/button';
+import { SectionLabel } from '@/shared/components/section-label';
 import {
   ExternalLink,
-  Loader2,
   Zap,
   ChevronRight,
   ChevronDown,
@@ -33,6 +33,7 @@ import { StructuredErrorDisplay } from '@/shared/components/StructuredErrorDispl
 import { useExecutionStore } from '@/features/workflows/stores/executionStore';
 import { resolvePayloadForCopy } from '@/shared/utils/truncated-payload';
 import { PayloadPreBlock } from '@/shared/components/PayloadPreBlock';
+import { Spinner } from '@/shared/components/ui/spinner';
 
 interface HistoryPanelContentProps {
   workflowId: string;
@@ -179,9 +180,7 @@ export function HistoryPanelContent({ workflowId }: HistoryPanelContentProps) {
       {/* Left panel - Invocations list */}
       <div className="flex w-72 flex-shrink-0 flex-col overflow-hidden border-r">
         <div className="flex items-center justify-between border-b bg-muted/20 px-3 py-1.5">
-          <span className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
-            Recent Executions
-          </span>
+          <SectionLabel as="span">Recent Executions</SectionLabel>
           <Link
             to={`/invocation-history?workflowId=${workflowId}`}
             className="flex items-center gap-1 text-xs text-primary hover:underline"
@@ -250,7 +249,7 @@ export function HistoryPanelContent({ workflowId }: HistoryPanelContentProps) {
                   )}
                   <Badge variant={statusInfo.variant} className="text-[10px]">
                     {isActive && statusInfo.showSpinner && (
-                      <Loader2 className="mr-1 h-2.5 w-2.5 animate-spin" />
+                      <Spinner className="mr-1 h-2.5 w-2.5" />
                     )}
                     {statusInfo.text}
                   </Badge>
@@ -289,7 +288,7 @@ export function HistoryPanelContent({ workflowId }: HistoryPanelContentProps) {
         <div className="flex-1 overflow-y-auto">
           {stepsLoading && stepSummaries.length === 0 ? (
             <div className="flex h-full items-center justify-center">
-              <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+              <Spinner className="h-5 w-5 text-muted-foreground" />
             </div>
           ) : stepSummaries.length === 0 ? (
             <div className="flex h-full flex-col items-center justify-center text-center">
@@ -411,9 +410,7 @@ function EventRow({ step, sequence }: { step: StepSummary; sequence: number }) {
             variant={getBadgeVariant()}
             className="px-1.5 py-0 text-[10px]"
           >
-            {isRunning && (
-              <Loader2 className="mr-0.5 h-2.5 w-2.5 animate-spin" />
-            )}
+            {isRunning && <Spinner className="mr-0.5 h-2.5 w-2.5" />}
             {getStatusLabel()}
           </Badge>
         </td>

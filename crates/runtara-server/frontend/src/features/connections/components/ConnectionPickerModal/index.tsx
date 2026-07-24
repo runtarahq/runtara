@@ -15,6 +15,12 @@ import {
   getCategoryIcon,
   getCategoryLabel,
 } from '@/features/connections/utils/category-icons';
+import { SectionLabel } from '@/shared/components/section-label';
+import {
+  PICKER_DIALOG_WIDTH,
+  PICKER_LIST_MAX_HEIGHT,
+} from '@/shared/components/picker-dialog';
+import { PickerEmpty } from '@/shared/components/picker-item';
 
 interface ConnectionPickerModalProps {
   open: boolean;
@@ -130,7 +136,7 @@ export function ConnectionPickerModal({
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent
-        className="gap-0 p-0 sm:max-w-[500px]"
+        className={`gap-0 p-0 ${PICKER_DIALOG_WIDTH}`}
         hideCloseButton
         aria-describedby={undefined}
       >
@@ -164,18 +170,14 @@ export function ConnectionPickerModal({
         </div>
 
         {/* Content */}
-        <div className="max-h-[400px] overflow-y-auto p-4">
+        <div className={`${PICKER_LIST_MAX_HEIGHT} overflow-y-auto p-4`}>
           {isLoading ? (
-            <div className="py-8 text-center text-muted-foreground">
-              Loading connection types...
-            </div>
+            <PickerEmpty>Loading connection types...</PickerEmpty>
           ) : isSearching ? (
             // Search Results View
             <div className="space-y-1">
               {searchResults && searchResults.length === 0 ? (
-                <div className="py-8 text-center text-muted-foreground">
-                  No results found for "{searchQuery}"
-                </div>
+                <PickerEmpty>No results found for "{searchQuery}"</PickerEmpty>
               ) : (
                 searchResults?.map((ct) => {
                   const Icon = getCategoryIcon(ct.category);
@@ -204,17 +206,13 @@ export function ConnectionPickerModal({
             // Browse View - Grouped by Category
             <div className="space-y-6">
               {groupedConnectionTypes.length === 0 ? (
-                <div className="py-8 text-center text-muted-foreground">
-                  No connection types available
-                </div>
+                <PickerEmpty>No connection types available</PickerEmpty>
               ) : (
                 groupedConnectionTypes.map((group) => (
                   <div key={group.category}>
                     <div className="mb-2 flex items-center gap-2">
                       <group.Icon className="h-4 w-4 text-muted-foreground" />
-                      <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                        {group.label}
-                      </span>
+                      <SectionLabel as="span">{group.label}</SectionLabel>
                     </div>
                     <div className="space-y-1">
                       {group.items.map((ct) => (

@@ -2,6 +2,7 @@ import { useMemo } from 'react';
 import { Check, RefreshCw } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button';
 import { Badge } from '@/shared/components/ui/badge';
+import { SectionLabel } from '@/shared/components/section-label';
 import { cn } from '@/lib/utils';
 import { WorkflowVersionInfoDto } from '@/features/workflows/queries';
 
@@ -90,9 +91,7 @@ export function VersionsPanelContent({
       {/* Versions list */}
       <div className="flex flex-1 flex-col overflow-hidden">
         <div className="flex items-center justify-between border-b bg-muted/20 px-3 py-1.5">
-          <span className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
-            Workflow Versions
-          </span>
+          <SectionLabel as="span">Workflow Versions</SectionLabel>
           <span className="text-xs text-muted-foreground">
             {versions.length} version{versions.length !== 1 ? 's' : ''}
           </span>

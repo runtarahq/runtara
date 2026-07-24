@@ -88,8 +88,8 @@ export function InlineBlockEditor({
           <Button
             type="button"
             variant="ghost"
-            size="icon"
-            className="h-7 w-7 text-destructive"
+            size="icon-sm"
+            className="text-destructive"
             title="Remove block"
             aria-label="Remove block"
             onClick={onDelete}

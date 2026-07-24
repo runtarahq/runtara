@@ -28,6 +28,7 @@ import { Plus, X } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button';
 import { Input } from '@/shared/components/ui/input';
 import { Textarea } from '@/shared/components/ui/textarea';
+import { FieldError } from '@/shared/components/ui/form';
 import {
   Select,
   SelectContent,
@@ -225,9 +226,7 @@ export function MappingObjectField({
                   Cancel
                 </Button>
               </div>
-              {addError && (
-                <p className="mt-1 text-xs text-destructive">{addError}</p>
-              )}
+              {addError && <FieldError className="mt-1">{addError}</FieldError>}
             </div>
           )}
 
@@ -491,7 +490,7 @@ function MappingObjectRow({
         </Button>
       </div>
 
-      {keyError && <p className="text-xs text-destructive">{keyError}</p>}
+      {keyError && <FieldError>{keyError}</FieldError>}
 
       {isComposite && (
         <div className="rounded-md border bg-muted/20">

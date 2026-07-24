@@ -222,7 +222,8 @@ function ConditionalNodeComponent({
         onToggleBreakpoint={handleToggleBreakpoint}
         subtitle={conditionSummary}
         style={{
-          height: `${NODE_TYPE_SIZES[NODE_TYPES.ConditionalNode].height}px`,
+          width: NODE_TYPE_SIZES[NODE_TYPES.ConditionalNode].width,
+          height: NODE_TYPE_SIZES[NODE_TYPES.ConditionalNode].height,
         }}
       >
         {/* True handle - pill centered on the right border, positioned at 30% from top */}
@@ -244,7 +245,7 @@ function ConditionalNodeComponent({
               zIndex: -1,
             }}
           >
-            <div className="ml-0.5 h-[1px] w-4 bg-border" />
+            <div className="ml-0.5 h-px w-4 bg-border" />
             <Button
               className="nodrag nopan pointer-events-auto h-3.5 w-3.5 rounded-full shadow-sm [&_svg]:size-1.5"
               variant="outline"
@@ -280,7 +281,7 @@ function ConditionalNodeComponent({
               zIndex: -1,
             }}
           >
-            <div className="ml-0.5 h-[1px] w-4 bg-border" />
+            <div className="ml-0.5 h-px w-4 bg-border" />
             <Button
               className="nodrag nopan pointer-events-auto h-3.5 w-3.5 rounded-full shadow-sm [&_svg]:size-1.5"
               variant="outline"

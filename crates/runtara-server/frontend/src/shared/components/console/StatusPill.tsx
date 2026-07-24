@@ -1,31 +1,45 @@
 import { type ReactNode } from 'react';
-import { Loader2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { Spinner } from '@/shared/components/ui/spinner';
 
 export type StatusTone = 'success' | 'warning' | 'error' | 'info' | 'neutral';
 
-const TONE_CLASSES: Record<StatusTone, { pill: string; dot: string }> = {
+/**
+ * Tone recipes derived from the theme status tokens (success/warning/
+ * destructive/info) so pills follow the theme in both modes with no dark:
+ * twins. Exported for the rare case that needs the raw classes on a
+ * different shell (e.g. a clickable pill) — never copy these strings.
+ */
+export const TONE_CLASSES: Record<StatusTone, { pill: string; dot: string }> = {
   success: {
-    pill: 'text-emerald-700 bg-emerald-50 border-emerald-200/60 dark:text-emerald-400 dark:bg-emerald-900/30 dark:border-emerald-700/40',
-    dot: 'bg-emerald-500 dark:bg-emerald-400',
+    pill: 'text-success bg-success/10 border-success/30',
+    dot: 'bg-success',
   },
   warning: {
-    pill: 'text-amber-700 bg-amber-50 border-amber-200/60 dark:text-amber-400 dark:bg-amber-900/30 dark:border-amber-700/40',
-    dot: 'bg-amber-500 dark:bg-amber-400',
+    pill: 'text-warning bg-warning/10 border-warning/30',
+    dot: 'bg-warning',
   },
   error: {
-    pill: 'text-red-700 bg-red-50 border-red-200/60 dark:text-red-400 dark:bg-red-900/30 dark:border-red-700/40',
-    dot: 'bg-red-500 dark:bg-red-400',
+    pill: 'text-destructive bg-destructive/10 border-destructive/30',
+    dot: 'bg-destructive',
   },
   info: {
-    pill: 'text-blue-700 bg-blue-50 border-blue-200/60 dark:text-blue-400 dark:bg-blue-900/30 dark:border-blue-700/40',
-    dot: 'bg-blue-500 dark:bg-blue-400',
+    pill: 'text-info bg-info/10 border-info/30',
+    dot: 'bg-info',
   },
   neutral: {
-    pill: 'text-slate-700 bg-slate-100 border-slate-200/60 dark:text-slate-400 dark:bg-slate-800 dark:border-slate-700/40',
-    dot: 'bg-slate-500 dark:bg-slate-400',
+    pill: 'text-muted-foreground bg-muted border-border',
+    dot: 'bg-muted-foreground',
   },
 };
+
+/** Pill + dot classes for a tone — use with your own shell element. */
+export function statusToneClasses(tone: StatusTone): {
+  pill: string;
+  dot: string;
+} {
+  return TONE_CLASSES[tone];
+}
 
 export interface StatusPillProps {
   tone?: StatusTone;
@@ -61,7 +75,7 @@ export function StatusPill({
       )}
     >
       {spin ? (
-        <Loader2 className="h-3 w-3 animate-spin" />
+        <Spinner className="h-3 w-3" />
       ) : dot ? (
         <span
           className={cn(

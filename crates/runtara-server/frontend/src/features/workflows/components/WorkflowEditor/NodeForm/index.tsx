@@ -1,7 +1,7 @@
 import { useContext, useMemo, useEffect, useState } from 'react';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
-import { Loader2, RotateCcw, Trash2 } from 'lucide-react';
+import { RotateCcw, Trash2 } from 'lucide-react';
 import { NextForm } from '@/shared/components/NextForm';
 import { SheetBase } from '@/shared/components/next-dialog/sheet-base.tsx';
 import { FormContent } from '@/shared/components/NextForm/form-content.tsx';
@@ -10,6 +10,7 @@ import { NodeFormContext } from './NodeFormContext.tsx';
 import * as form from './NodeFormItem.tsx';
 import { TabProvider, useTabContext } from './NodeFormItem.tsx';
 import { getTestHandler } from './TestAgentButton/TestAgentInline';
+import { Spinner } from '@/shared/components/ui/spinner';
 
 type Props = {
   isEdit?: boolean;
@@ -256,9 +257,7 @@ export function FormActions({
             testHandler?.isPending
           }
         >
-          {testHandler?.isPending && (
-            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-          )}
+          {testHandler?.isPending && <Spinner className="mr-2 h-4 w-4" />}
           Run Test
         </Button>
       </div>

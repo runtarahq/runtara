@@ -24,6 +24,7 @@ import { FileUploadBlock } from './blocks/FileUploadBlock';
 import { ReportFilterBar } from './ReportFilterBar';
 import { encodeFilterValue } from '../utils';
 import type { ReportWorkflowActionResult } from './blocks/useReportWorkflowAction';
+import { BlockFrame } from './blocks/BlockFrame';
 
 type ReportBlockHostProps = {
   reportId: string;
@@ -609,22 +610,16 @@ function escapeMarkdownText(value: string) {
 function BlockSkeleton({ block }: { block: ReportBlockDefinition }) {
   if (block.type === 'metric') {
     return (
-      <div
-        className="rounded-lg border bg-card p-4"
-        aria-label="Loading report block"
-      >
+      <BlockFrame className="p-4" aria-label="Loading report block">
         <div className="h-3 w-20 animate-pulse rounded bg-muted/50" />
         <div className="mt-3 h-7 w-24 animate-pulse rounded bg-muted/50" />
-      </div>
+      </BlockFrame>
     );
   }
 
   if (block.type === 'table') {
     return (
-      <div
-        className="overflow-hidden rounded-lg border bg-card"
-        aria-label="Loading report block"
-      >
+      <BlockFrame className="overflow-hidden" aria-label="Loading report block">
         <div className="h-9 animate-pulse bg-muted/40" />
         <div className="divide-y">
           {Array.from({ length: 6 }).map((_, index) => (
@@ -635,15 +630,15 @@ function BlockSkeleton({ block }: { block: ReportBlockDefinition }) {
             </div>
           ))}
         </div>
-      </div>
+      </BlockFrame>
     );
   }
 
   if (block.type === 'chart') {
     const bars = [48, 72, 36, 84, 56, 68, 44, 76, 52, 64];
     return (
-      <div
-        className="flex h-72 items-end gap-2 rounded-lg border bg-card p-4"
+      <BlockFrame
+        className="flex h-72 items-end gap-2 p-4"
         aria-label="Loading report block"
       >
         {bars.map((height, index) => (
@@ -653,21 +648,18 @@ function BlockSkeleton({ block }: { block: ReportBlockDefinition }) {
             style={{ height: `${height}%` }}
           />
         ))}
-      </div>
+      </BlockFrame>
     );
   }
 
   // markdown / card / default
   return (
-    <div
-      className="space-y-3 rounded-lg border bg-card p-4"
-      aria-label="Loading report block"
-    >
+    <BlockFrame className="space-y-3 p-4" aria-label="Loading report block">
       <div className="h-4 w-1/3 animate-pulse rounded bg-muted/40" />
       <div className="h-3 w-full animate-pulse rounded bg-muted/40" />
       <div className="h-3 w-5/6 animate-pulse rounded bg-muted/40" />
       <div className="h-3 w-2/3 animate-pulse rounded bg-muted/40" />
-    </div>
+    </BlockFrame>
   );
 }
 

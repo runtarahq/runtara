@@ -34,6 +34,12 @@ export default {
           'monospace',
         ],
       },
+      fontSize: {
+        // Micro sizes below text-xs — use these instead of text-[10px]/[11px]
+        // and the rem near-duplicates (0.65/0.7rem).
+        '2xs': ['11px', { lineHeight: '14px' }],
+        '3xs': ['10px', { lineHeight: '13px' }],
+      },
       borderRadius: {
         lg: 'var(--radius)',
         md: 'calc(var(--radius) - 2px)',
@@ -78,6 +84,10 @@ export default {
           DEFAULT: 'hsl(var(--warning))',
           foreground: 'hsl(var(--warning-foreground))',
         },
+        info: {
+          DEFAULT: 'hsl(var(--info))',
+          foreground: 'hsl(var(--info-foreground))',
+        },
         border: 'hsl(var(--border))',
         input: 'hsl(var(--input))',
         ring: 'hsl(var(--ring))',
@@ -101,11 +111,16 @@ export default {
          the tailwindcss-animate plugin — do not redefine them here. */
       animation: {
         loading: 'loading 1.5s ease-in-out infinite',
+        'row-flash': 'row-flash 1s ease-in-out',
       },
       keyframes: {
         loading: {
           '0%': { transform: 'translateX(-100%)' },
           '100%': { transform: 'translateX(200%)' },
+        },
+        'row-flash': {
+          '0%, 100%': { backgroundColor: 'transparent' },
+          '50%': { backgroundColor: 'hsl(var(--success) / 0.2)' },
         },
       },
     },

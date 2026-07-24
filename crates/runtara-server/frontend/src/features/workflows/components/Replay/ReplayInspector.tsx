@@ -8,6 +8,7 @@ import { useState } from 'react';
 import { ChevronDown, ChevronRight, X } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Button } from '@/shared/components/ui/button';
+import { SectionLabel } from '@/shared/components/section-label';
 import { useCustomQuery } from '@/shared/hooks/api';
 import { fetchStepDetail } from './useReplayModel';
 import type { ReplayModel, ReplayNodeState } from './types';
@@ -64,9 +65,9 @@ function Section({
 }) {
   return (
     <div>
-      <h4 className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+      <SectionLabel size="sm" as="h4" className="mb-1">
         {label}
-      </h4>
+      </SectionLabel>
       {children}
     </div>
   );

@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef, useMemo } from 'react';
-import { Upload, FileSpreadsheet, Loader2, ArrowRight } from 'lucide-react';
+import { Upload, FileSpreadsheet, ArrowRight } from 'lucide-react';
 import {
   Dialog,
   DialogContent,
@@ -20,6 +20,7 @@ import { Label } from '@/shared/components/ui/label';
 import { Badge } from '@/shared/components/ui/badge';
 import { Checkbox } from '@/shared/components/ui/checkbox';
 import { toast } from 'sonner';
+import { Spinner } from '@/shared/components/ui/spinner';
 import {
   Schema,
   ImportPreviewResponse,
@@ -277,7 +278,7 @@ export function ImportCsvDialog({
             >
               {previewMutation.isPending ? (
                 <>
-                  <Loader2 className="mx-auto mb-3 h-10 w-10 animate-spin text-muted-foreground" />
+                  <Spinner className="mx-auto mb-3 h-10 w-10 text-muted-foreground" />
                   <p className="text-sm text-muted-foreground">
                     Parsing {fileName}...
                   </p>
@@ -506,7 +507,7 @@ export function ImportCsvDialog({
 
         {step === 'importing' && (
           <div className="flex flex-col items-center justify-center gap-3 py-10">
-            <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+            <Spinner className="h-8 w-8 text-muted-foreground" />
             <p className="text-sm text-muted-foreground">Importing data...</p>
           </div>
         )}

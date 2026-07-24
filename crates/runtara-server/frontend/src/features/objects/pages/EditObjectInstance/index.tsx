@@ -3,9 +3,11 @@ import { ObjectInstanceDtoForm } from '@/features/objects/components/ObjectInsta
 import { useObjectSchemaDto } from '@/features/objects/hooks/useObjectSchema';
 import { useObjectInstanceDto } from '@/features/objects/hooks/useObjectRecords';
 import { usePageTitle } from '@/shared/hooks/usePageTitle';
-import { Loader2 } from 'lucide-react';
 import { ObjectModelConnectionSelector } from '@/features/objects/components/ObjectModelConnectionSelector';
 import { useObjectModelConnectionSelection } from '@/features/objects/hooks/useObjectModelConnectionSelection';
+import { Spinner } from '@/shared/components/ui/spinner';
+import { PageContainer } from '@/shared/components/page-container';
+import { SectionLabel } from '@/shared/components/section-label';
 
 export function EditObjectInstance() {
   const { typeName, id } = useParams<{ typeName: string; id: string }>();
@@ -32,13 +34,11 @@ export function EditObjectInstance() {
   };
 
   return (
-    <div className="w-full px-4 py-6 sm:px-6 lg:px-10">
+    <PageContainer>
       <div className="mx-auto flex w-full max-w-5xl flex-col gap-6">
         <section className="rounded-lg bg-transparent px-4 py-4 sm:px-5">
           <div className="space-y-2">
-            <p className="text-xs font-semibold uppercase tracking-[0.08em] text-muted-foreground">
-              Objects
-            </p>
+            <SectionLabel>Objects</SectionLabel>
             <h1 className="text-3xl font-semibold leading-tight text-foreground">
               Edit {objectSchemaDto?.name ?? typeName} record
             </h1>
@@ -51,7 +51,7 @@ export function EditObjectInstance() {
 
         {isSchemaLoading || isRecordLoading ? (
           <div className="flex min-h-[40vh] items-center justify-center px-4 text-muted-foreground sm:px-5">
-            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+            <Spinner className="mr-2 h-4 w-4" />
             Loading data...
           </div>
         ) : !objectSchemaDto ? (
@@ -69,6 +69,6 @@ export function EditObjectInstance() {
           </section>
         )}
       </div>
-    </div>
+    </PageContainer>
   );
 }

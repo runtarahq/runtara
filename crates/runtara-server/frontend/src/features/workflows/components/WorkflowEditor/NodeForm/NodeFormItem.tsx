@@ -13,6 +13,7 @@ import {
   useRef,
 } from 'react';
 import { useFormContext, useWatch } from 'react-hook-form';
+import { FieldError } from '@/shared/components/ui/form';
 import { InputMappingField } from './InputMappingField';
 import { MappingObjectField } from './InputMappingField/MappingObjectField';
 import { NodeFormContext } from './NodeFormContext';
@@ -547,7 +548,7 @@ function CompensationField() {
             spellCheck={false}
             placeholder='{"compensationStep":"rollback"}'
           />
-          {jsonError && <p className="text-xs text-destructive">{jsonError}</p>}
+          {jsonError && <FieldError>{jsonError}</FieldError>}
         </>
       )}
     </div>

@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { X, ChevronDown, ChevronRight } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button';
+import { SectionLabel } from '@/shared/components/section-label';
 import { cn } from '@/lib/utils';
 import { useExecutionStore } from '@/features/workflows/stores/executionStore';
 import { useWorkflowStore } from '@/features/workflows/stores/workflowStore';
@@ -164,9 +165,9 @@ function Section({
 }) {
   return (
     <div>
-      <h4 className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+      <SectionLabel size="sm" as="h4" className="mb-1">
         {label}
-      </h4>
+      </SectionLabel>
       {children}
     </div>
   );

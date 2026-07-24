@@ -3,6 +3,7 @@ import { Button } from '@/shared/components/ui/button';
 import { Checkbox } from '@/shared/components/ui/checkbox';
 import { Input } from '@/shared/components/ui/input';
 import { Label } from '@/shared/components/ui/label';
+import { FieldError } from '@/shared/components/ui/form';
 import { Plus, Settings2, Trash2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { validateSchemaFieldsWithRust } from '@/features/workflows/utils/rust-workflow-validation';
@@ -20,6 +21,7 @@ import {
   SelectValue,
 } from '@/shared/components/ui/select';
 import { Textarea } from '@/shared/components/ui/textarea';
+import { EditorTh } from '@/features/workflows/components/WorkflowEditor/EditorTable';
 import {
   Dialog,
   DialogContent,
@@ -581,8 +583,7 @@ function AdvancedSchemaFieldDialog({
         <Button
           type="button"
           variant={hasAdvanced ? 'secondary' : 'ghost'}
-          size="sm"
-          className="h-7 w-7 p-0"
+          size="icon-sm"
           aria-label={`Edit advanced schema for ${field.name || 'field'}`}
         >
           <Settings2 className="h-3.5 w-3.5" />
@@ -633,9 +634,7 @@ function AdvancedSchemaFieldDialog({
                     placeholder="Sort order"
                     disabled={readOnly}
                   />
-                  {errors.order && (
-                    <p className="text-xs text-destructive">{errors.order}</p>
-                  )}
+                  {errors.order && <FieldError>{errors.order}</FieldError>}
                 </div>
                 <div className="space-y-1">
                   <Label id={`${baseId}-format-label`}>Format</Label>
@@ -676,9 +675,7 @@ function AdvancedSchemaFieldDialog({
                     placeholder="Min value / length"
                     disabled={readOnly}
                   />
-                  {errors.min && (
-                    <p className="text-xs text-destructive">{errors.min}</p>
-                  )}
+                  {errors.min && <FieldError>{errors.min}</FieldError>}
                 </div>
                 <div className="space-y-1">
                   <Label htmlFor={`${baseId}-max`}>Max</Label>
@@ -690,9 +687,7 @@ function AdvancedSchemaFieldDialog({
                     placeholder="Max value / length"
                     disabled={readOnly}
                   />
-                  {errors.max && (
-                    <p className="text-xs text-destructive">{errors.max}</p>
-                  )}
+                  {errors.max && <FieldError>{errors.max}</FieldError>}
                 </div>
                 <div className="col-span-2 space-y-1">
                   <Label htmlFor={`${baseId}-pattern`}>Pattern</Label>
@@ -720,9 +715,7 @@ function AdvancedSchemaFieldDialog({
                     className="font-mono"
                     spellCheck={false}
                   />
-                  {errors.example && (
-                    <p className="text-xs text-destructive">{errors.example}</p>
-                  )}
+                  {errors.example && <FieldError>{errors.example}</FieldError>}
                 </div>
               </div>
             </DialogSection>
@@ -878,8 +871,7 @@ function AdvancedSchemaFieldDialog({
                           <Button
                             type="button"
                             variant="ghost"
-                            size="sm"
-                            className="h-7 w-7 p-0"
+                            size="icon-sm"
                             aria-label="Remove visibility condition"
                             onClick={() =>
                               updateDraft({
@@ -909,7 +901,7 @@ function AdvancedSchemaFieldDialog({
                 </div>
               )}
               {errors.visibleWhen && (
-                <p className="text-sm text-destructive">{errors.visibleWhen}</p>
+                <FieldError>{errors.visibleWhen}</FieldError>
               )}
             </DialogSection>
 
@@ -935,9 +927,7 @@ function AdvancedSchemaFieldDialog({
                   aria-label="Unknown extensions (JSON)"
                 />
                 {errors.extensions && (
-                  <p className="text-sm text-destructive">
-                    {errors.extensions}
-                  </p>
+                  <FieldError>{errors.extensions}</FieldError>
                 )}
               </div>
             </details>
@@ -1051,39 +1041,17 @@ export function SchemaFieldsEditor({
         <table className="w-full min-w-[980px]">
           <thead>
             <tr className="border-b">
-              <th className="p-2 text-left text-sm font-medium text-muted-foreground">
-                Field Name
-              </th>
-              <th className="p-2 text-left text-sm font-medium text-muted-foreground">
-                Type
-              </th>
-              <th className="w-20 p-2 text-center text-sm font-medium text-muted-foreground">
-                Required
-              </th>
-              <th className="w-20 p-2 text-center text-sm font-medium text-muted-foreground">
-                Nullable
-              </th>
-              <th className="p-2 text-left text-sm font-medium text-muted-foreground">
-                Description
-              </th>
-              <th className="p-2 text-left text-sm font-medium text-muted-foreground">
-                Default
-              </th>
-              <th className="p-2 text-left text-sm font-medium text-muted-foreground">
-                Format
-              </th>
-              {showEnum && (
-                <th className="p-2 text-left text-sm font-medium text-muted-foreground">
-                  Enum
-                </th>
-              )}
-              <th className="w-20 p-2 text-center text-sm font-medium text-muted-foreground">
-                Advanced
-              </th>
+              <EditorTh>Field Name</EditorTh>
+              <EditorTh>Type</EditorTh>
+              <EditorTh className="w-20 text-center">Required</EditorTh>
+              <EditorTh className="w-20 text-center">Nullable</EditorTh>
+              <EditorTh>Description</EditorTh>
+              <EditorTh>Default</EditorTh>
+              <EditorTh>Format</EditorTh>
+              {showEnum && <EditorTh>Enum</EditorTh>}
+              <EditorTh className="w-20 text-center">Advanced</EditorTh>
               {!readOnly && (
-                <th className="w-16 p-2 text-center text-sm font-medium text-muted-foreground">
-                  Actions
-                </th>
+                <EditorTh className="w-16 text-center">Actions</EditorTh>
               )}
             </tr>
           </thead>

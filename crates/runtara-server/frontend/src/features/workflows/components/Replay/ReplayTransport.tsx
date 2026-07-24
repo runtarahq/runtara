@@ -65,9 +65,8 @@ export function ReplayTransport({
         {/* Play / Pause */}
         <Button
           type="button"
-          size="icon"
+          size="icon-sm"
           variant="default"
-          className="h-7 w-7"
           onClick={clock.toggle}
           aria-label={clock.playing ? 'Pause replay' : 'Play replay'}
           data-testid="replay-play-pause"
@@ -85,9 +84,8 @@ export function ReplayTransport({
           <TooltipTrigger asChild>
             <Button
               type="button"
-              size="icon"
+              size="icon-sm"
               variant="ghost"
-              className="h-7 w-7"
               onClick={clock.restart}
               aria-label="Restart replay"
               data-testid="replay-restart"

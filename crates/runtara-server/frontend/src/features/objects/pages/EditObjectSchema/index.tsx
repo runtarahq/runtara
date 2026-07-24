@@ -1,14 +1,16 @@
+import { useState } from 'react';
 import { useNavigate, useParams } from 'react-router';
 import { ObjectSchemaDtoForm } from '@/features/objects/components/ObjectSchemaForm';
+import { ConfirmationDialog } from '@/shared/components/confirmation-dialog.tsx';
 import {
   useObjectSchemaDtoById,
   useDeleteObjectSchema,
 } from '@/features/objects/hooks/useObjectSchemas';
 import { usePageTitle } from '@/shared/hooks/usePageTitle';
 import { toast } from 'sonner';
-import { Loader2 } from 'lucide-react';
 import { ObjectModelConnectionSelector } from '@/features/objects/components/ObjectModelConnectionSelector';
 import { useObjectModelConnectionSelection } from '@/features/objects/hooks/useObjectModelConnectionSelection';
+import { Spinner } from '@/shared/components/ui/spinner';
 
 export function EditObjectSchema() {
   const { id } = useParams<{ id: string }>();
@@ -31,14 +33,16 @@ export function EditObjectSchema() {
     navigate(`/objects/types${connectionQuery}`);
   };
 
-  const handleDelete = async () => {
+  const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
+
+  const handleDelete = () => {
     if (!id) return;
+    setConfirmDeleteOpen(true);
+  };
 
-    const confirmed = window.confirm(
-      `Are you sure you want to delete "${objectSchemaDto?.name}"? This action cannot be undone.`
-    );
-
-    if (!confirmed) return;
+  const performDelete = async () => {
+    if (!id) return;
+    setConfirmDeleteOpen(false);
 
     try {
       await deleteSchema.mutateAsync(id);
@@ -52,7 +56,7 @@ export function EditObjectSchema() {
   if (isLoading) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-muted/30 dark:bg-background">
-        <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+        <Spinner className="h-8 w-8 text-muted-foreground" />
       </div>
     );
   }
@@ -76,6 +80,12 @@ export function EditObjectSchema() {
         onDelete={handleDelete}
         isDeleting={deleteSchema.isPending}
         connectionId={selectedConnectionId}
+      />
+      <ConfirmationDialog
+        open={confirmDeleteOpen}
+        description={`Are you sure you want to delete "${objectSchemaDto?.name}"? This action cannot be undone.`}
+        onClose={() => setConfirmDeleteOpen(false)}
+        onConfirm={() => void performDelete()}
       />
     </div>
   );

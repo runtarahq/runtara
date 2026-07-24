@@ -1,7 +1,7 @@
 import { useCallback, useState, type ReactNode } from 'react';
 import { useNavigate } from 'react-router';
 import { toast } from 'sonner';
-import { Loader2, Edit2, Trash2, Database, Plus } from 'lucide-react';
+import { Edit2, Trash2, Database, Plus } from 'lucide-react';
 import { Schema } from '@/generated/RuntaraRuntimeApi';
 import { Button } from '@/shared/components/ui/button';
 import { Can } from '@/shared/components/Can';
@@ -15,9 +15,12 @@ import {
 } from '@/shared/components/ui/table';
 import {
   Breadcrumb,
+  ConsoleEmptyState,
+  ConsoleErrorState,
   ConsoleTableShell,
   ConsoleToolbar,
   StatusPill,
+  TableSkeletonRows,
   TableStatusFooter,
 } from '@/shared/components/console';
 import { ModalDialog } from '@/shared/components/next-dialog';
@@ -31,6 +34,7 @@ import {
 import { Icons } from '@/shared/components/icons';
 import { formatDate } from '@/lib/utils';
 import { ObjectModelConnectionSelector } from '../ObjectModelConnectionSelector';
+import { Spinner } from '@/shared/components/ui/spinner';
 import {
   useObjectSchemaDtos,
   useDeleteObjectSchema,
@@ -128,69 +132,29 @@ export function ObjectSchemaDtosTable({
   let body: ReactNode;
   if (showSkeleton) {
     body = (
-      <div className="divide-y divide-border/50">
-        {[...Array(6)].map((_, i) => (
-          <div key={i} className="flex items-center gap-4 px-5 py-3.5">
-            <div className="h-4 w-40 animate-pulse rounded bg-muted/60" />
-            <div className="h-4 w-16 animate-pulse rounded bg-muted/60" />
-            <div className="h-4 w-48 animate-pulse rounded bg-muted/60" />
-            <div className="ml-auto h-4 w-28 animate-pulse rounded bg-muted/60" />
-          </div>
-        ))}
-      </div>
+      <TableSkeletonRows
+        rows={6}
+        widths={['w-40', 'w-16', 'w-48', 'ml-auto w-28']}
+      />
     );
   } else if (!connectionId) {
     body = (
-      <div className="flex h-full flex-col items-center justify-center px-6 py-10 text-center">
-        <Icons.warning className="mb-4 h-10 w-10 text-muted-foreground" />
-        <p className="text-base font-semibold text-foreground">
-          No database connection selected
-        </p>
-        <p className="mt-1 text-sm text-muted-foreground">
-          Select a database connection to view its object types.
-        </p>
-      </div>
+      <ConsoleEmptyState
+        icon={
+          <Icons.warning className="mb-4 h-10 w-10 text-muted-foreground" />
+        }
+        title="No database connection selected"
+        description="Select a database connection to view its object types."
+      />
     );
   } else if (isError) {
-    const err = error as Error & { code?: string; response?: unknown };
-    const isNetworkError =
-      err?.message?.includes('fetch') ||
-      err?.code === 'ERR_NETWORK' ||
-      !err?.response;
-
-    body = (
-      <div className="flex h-full flex-col items-center justify-center px-6 py-10 text-center">
-        <Icons.warning className="mb-4 h-10 w-10 text-destructive" />
-        <p className="text-base font-semibold text-foreground">
-          {isNetworkError
-            ? 'Unable to connect to backend'
-            : 'An error occurred'}
-        </p>
-        <p className="mt-1 text-sm text-muted-foreground">
-          {isNetworkError
-            ? 'Please check that the backend service is running and try again.'
-            : 'There was a problem loading object types. Please try again.'}
-        </p>
-        {import.meta.env.DEV && error && (
-          <div className="mt-4 max-w-md rounded-lg bg-destructive/10 p-3 text-left">
-            <p className="break-words font-mono text-xs text-destructive">
-              {err.message || 'Unknown error'}
-            </p>
-          </div>
-        )}
-      </div>
-    );
+    body = <ConsoleErrorState error={error} entityLabel="object types" />;
   } else if (objectSchemaDtos.length === 0) {
     body = (
-      <div className="flex h-full flex-col items-center justify-center px-6 py-10 text-center">
-        <Icons.inbox className="mb-4 h-10 w-10 text-muted-foreground" />
-        <p className="text-base font-semibold text-foreground">
-          No object types yet
-        </p>
-        <p className="mt-1 text-sm text-muted-foreground">
-          Create your first object type to start managing records.
-        </p>
-      </div>
+      <ConsoleEmptyState
+        title="No object types yet"
+        description="Create your first object type to start managing records."
+      />
     );
   } else {
     body = (
@@ -237,8 +201,8 @@ export function ObjectSchemaDtosTable({
                   <div className="flex items-center justify-end gap-1">
                     <Button
                       variant="ghost"
-                      size="icon"
-                      className="h-7 w-7 text-muted-foreground"
+                      size="icon-sm"
+                      className="text-muted-foreground"
                       title="Manage instances"
                       onClick={() => handleViewInstances(schema)}
                     >
@@ -247,8 +211,8 @@ export function ObjectSchemaDtosTable({
                     <Can permission="database:update">
                       <Button
                         variant="ghost"
-                        size="icon"
-                        className="h-7 w-7 text-muted-foreground"
+                        size="icon-sm"
+                        className="text-muted-foreground"
                         title="Edit object type"
                         onClick={() => handleEdit(schema)}
                       >
@@ -258,14 +222,14 @@ export function ObjectSchemaDtosTable({
                     <Can permission="database:delete">
                       <Button
                         variant="ghost"
-                        size="icon"
-                        className="h-7 w-7 text-muted-foreground hover:text-destructive"
+                        size="icon-sm"
+                        className="text-muted-foreground hover:text-destructive"
                         title="Delete object type"
                         disabled={deletingId === schema.id}
                         onClick={() => setDeleteTarget(schema)}
                       >
                         {deletingId === schema.id ? (
-                          <Loader2 className="h-4 w-4 animate-spin" />
+                          <Spinner className="h-4 w-4" />
                         ) : (
                           <Trash2 className="h-4 w-4" />
                         )}

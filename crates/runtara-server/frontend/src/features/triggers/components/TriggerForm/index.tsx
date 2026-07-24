@@ -1,13 +1,13 @@
 import { z } from 'zod';
 import { Link } from 'react-router';
 import { useMemo } from 'react';
-import { Loader2 } from 'lucide-react';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import * as form from './TriggerItem';
 import { Button } from '@/shared/components/ui/button';
 import { FormContent } from '@/shared/components/NextForm/form-content';
 import { NextForm } from '@/shared/components/NextForm';
+import { Spinner } from '@/shared/components/ui/spinner';
 
 export type TriggerSchemaType = z.infer<typeof form.schema>;
 
@@ -167,7 +167,7 @@ export function TriggerForm(props: Props) {
           >
             {isLoading ? (
               <>
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                <Spinner className="mr-2 h-4 w-4" />
                 {loadingLabel}
               </>
             ) : (

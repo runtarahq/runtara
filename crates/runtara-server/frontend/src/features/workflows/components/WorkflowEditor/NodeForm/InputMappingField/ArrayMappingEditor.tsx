@@ -12,9 +12,12 @@
 import { useCallback, useMemo } from 'react';
 import { Link, Layers, X } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button';
-import { cn } from '@/lib/utils';
 import { MappingValueInput } from './MappingValueInput';
 import { CompositeValueEditor } from './CompositeValueEditor';
+import {
+  MappingModeToggle,
+  type MappingModeToggleOption,
+} from './MappingModeToggle';
 import type {
   CompositeObjectValue,
   CompositeArrayValue,
@@ -22,6 +25,11 @@ import type {
 } from '@/features/workflows/stores/nodeFormStore';
 
 type ArrayMode = 'reference' | 'build';
+
+const MODE_OPTIONS: readonly MappingModeToggleOption<ArrayMode>[] = [
+  { value: 'reference', label: 'Reference', icon: Link, tone: 'info' },
+  { value: 'build', label: 'Build', icon: Layers },
+];
 
 interface ArrayMappingEditorProps {
   /** The array type (e.g., "array<string>", "array<object>") - used for hints */
@@ -118,36 +126,12 @@ export function ArrayMappingEditor({
     <div className="flex flex-col">
       {/* Mode selector with close button */}
       <div className="flex shrink-0 items-center gap-2 px-4 py-3">
-        <div className="flex flex-1 gap-1">
-          <button
-            type="button"
-            onClick={() => handleModeChange('reference')}
-            className={cn(
-              'flex flex-1 items-center justify-center gap-1.5 px-3 py-2',
-              'rounded-md border text-sm transition-colors',
-              mode === 'reference'
-                ? 'border-blue-300 bg-blue-50 text-blue-700 dark:border-blue-800 dark:bg-blue-950 dark:text-blue-400'
-                : 'border-input bg-background text-muted-foreground hover:bg-muted/50'
-            )}
-          >
-            <Link className="h-4 w-4" />
-            Reference
-          </button>
-          <button
-            type="button"
-            onClick={() => handleModeChange('build')}
-            className={cn(
-              'flex flex-1 items-center justify-center gap-1.5 px-3 py-2',
-              'rounded-md border text-sm transition-colors',
-              mode === 'build'
-                ? 'border-green-300 bg-green-50 text-green-700 dark:border-green-800 dark:bg-green-950 dark:text-green-400'
-                : 'border-input bg-background text-muted-foreground hover:bg-muted/50'
-            )}
-          >
-            <Layers className="h-4 w-4" />
-            Build
-          </button>
-        </div>
+        <MappingModeToggle
+          className="flex-1"
+          options={MODE_OPTIONS}
+          value={mode}
+          onChange={handleModeChange}
+        />
         <Button
           type="button"
           variant="ghost"

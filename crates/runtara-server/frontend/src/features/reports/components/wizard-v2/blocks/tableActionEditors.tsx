@@ -2,7 +2,7 @@ import { Plus, Trash2 } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button';
 import { Checkbox } from '@/shared/components/ui/checkbox';
 import { Input } from '@/shared/components/ui/input';
-import { Label } from '@/shared/components/ui/label';
+import { SectionLabel } from '@/shared/components/section-label';
 import {
   Select,
   SelectContent,
@@ -150,9 +150,7 @@ export function WorkflowActionEditor({
     <div className="grid gap-2 rounded-md border bg-muted/10 p-3">
       <div className="grid gap-2 sm:grid-cols-2">
         <div className="grid gap-1">
-          <Label className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-            Workflow
-          </Label>
+          <SectionLabel size="sm">Workflow</SectionLabel>
           <Select
             value={action.workflowId || ''}
             onValueChange={(workflowId) => update({ workflowId })}
@@ -175,9 +173,7 @@ export function WorkflowActionEditor({
           </Select>
         </div>
         <div className="grid gap-1">
-          <Label className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-            Context mode
-          </Label>
+          <SectionLabel size="sm">Context mode</SectionLabel>
           <Select
             value={contextMode}
             onValueChange={(mode) =>
@@ -203,9 +199,7 @@ export function WorkflowActionEditor({
       <div className="grid gap-2 sm:grid-cols-2">
         {contextMode === 'field' ? (
           <div className="grid gap-1">
-            <Label className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-              Context field
-            </Label>
+            <SectionLabel size="sm">Context field</SectionLabel>
             {fieldOptions.length > 0 ? (
               <Select
                 value={context.field ?? fieldOptions[0] ?? ''}
@@ -235,9 +229,7 @@ export function WorkflowActionEditor({
           </div>
         ) : null}
         <div className="grid gap-1">
-          <Label className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-            Input key
-          </Label>
+          <SectionLabel size="sm">Input key</SectionLabel>
           <Input
             value={context.inputKey ?? ''}
             placeholder="Use raw context"
@@ -250,9 +242,7 @@ export function WorkflowActionEditor({
       </div>
       <div className="grid gap-2 sm:grid-cols-3">
         <div className="grid gap-1">
-          <Label className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-            Button label
-          </Label>
+          <SectionLabel size="sm">Button label</SectionLabel>
           <Input
             value={action.label ?? ''}
             placeholder="Run workflow"
@@ -261,9 +251,7 @@ export function WorkflowActionEditor({
           />
         </div>
         <div className="grid gap-1">
-          <Label className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-            Running label
-          </Label>
+          <SectionLabel size="sm">Running label</SectionLabel>
           <Input
             value={action.runningLabel ?? ''}
             placeholder="Running…"
@@ -274,9 +262,7 @@ export function WorkflowActionEditor({
           />
         </div>
         <div className="grid gap-1">
-          <Label className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-            Success message
-          </Label>
+          <SectionLabel size="sm">Success message</SectionLabel>
           <Input
             value={action.successMessage ?? ''}
             placeholder="Started"
@@ -377,7 +363,7 @@ function RowConditionRow({
   if (value && !isSimple) {
     return (
       <div className="grid gap-1 rounded-md border bg-background p-2 text-xs text-muted-foreground">
-        <span className="font-semibold uppercase tracking-wider">{label}</span>
+        <SectionLabel as="span">{label}</SectionLabel>
         <code className="truncate">{summarizeCondition(value)}</code>
         <div>
           <Button
@@ -396,9 +382,7 @@ function RowConditionRow({
 
   return (
     <div className="grid gap-1">
-      <Label className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-        {label}
-      </Label>
+      <SectionLabel size="sm">{label}</SectionLabel>
       <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] gap-1">
         {fieldOptions.length > 0 ? (
           <Select
@@ -509,9 +493,7 @@ export function InteractionButtonsEditor({
   return (
     <div className="grid gap-2 rounded-md border bg-muted/10 p-3">
       <div className="flex items-center justify-between">
-        <Label className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-          Buttons
-        </Label>
+        <SectionLabel size="sm">Buttons</SectionLabel>
         <Button
           type="button"
           variant="outline"
@@ -538,9 +520,7 @@ export function InteractionButtonsEditor({
             >
               <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_140px_auto]">
                 <div className="grid gap-1">
-                  <Label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-                    ID
-                  </Label>
+                  <SectionLabel size="sm">ID</SectionLabel>
                   <Input
                     value={button.id}
                     className="h-8"
@@ -552,9 +532,7 @@ export function InteractionButtonsEditor({
                   />
                 </div>
                 <div className="grid gap-1">
-                  <Label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-                    Label
-                  </Label>
+                  <SectionLabel size="sm">Label</SectionLabel>
                   <Input
                     value={button.label ?? ''}
                     className="h-8"
@@ -565,9 +543,7 @@ export function InteractionButtonsEditor({
                   />
                 </div>
                 <div className="grid gap-1">
-                  <Label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-                    Icon
-                  </Label>
+                  <SectionLabel size="sm">Icon</SectionLabel>
                   <Select
                     value={button.icon ?? 'arrow_right'}
                     onValueChange={(icon) =>
@@ -641,9 +617,7 @@ export function InteractionActionsList({
   return (
     <div className="mt-2 grid gap-2">
       <div className="flex items-center justify-between">
-        <Label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-          Actions
-        </Label>
+        <SectionLabel size="sm">Actions</SectionLabel>
         <Button
           type="button"
           size="sm"
@@ -672,9 +646,7 @@ export function InteractionActionsList({
             className="grid gap-2 rounded-md border bg-muted/10 p-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]"
           >
             <div className="grid gap-1">
-              <Label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-                Action
-              </Label>
+              <SectionLabel size="sm">Action</SectionLabel>
               <Select
                 value={action.type}
                 onValueChange={(type) =>
@@ -705,9 +677,7 @@ export function InteractionActionsList({
             {(action.type === 'set_filter' ||
               action.type === 'clear_filter') && (
               <div className="grid gap-1">
-                <Label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-                  Filter ID
-                </Label>
+                <SectionLabel size="sm">Filter ID</SectionLabel>
                 <Input
                   value={action.filterId ?? ''}
                   placeholder="filter_id"
@@ -722,9 +692,9 @@ export function InteractionActionsList({
             )}
             {action.type === 'clear_filters' && (
               <div className="grid gap-1">
-                <Label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                <SectionLabel size="sm">
                   Filter IDs (comma-separated)
-                </Label>
+                </SectionLabel>
                 <Input
                   value={(action.filterIds ?? []).join(', ')}
                   placeholder="filter_a, filter_b"
@@ -742,9 +712,7 @@ export function InteractionActionsList({
             )}
             {action.type === 'navigate_view' && (
               <div className="grid gap-1">
-                <Label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-                  View ID
-                </Label>
+                <SectionLabel size="sm">View ID</SectionLabel>
                 <Input
                   value={action.viewId ?? ''}
                   placeholder="view_id"
@@ -759,9 +727,7 @@ export function InteractionActionsList({
             )}
             {action.type === 'set_filter' && (
               <div className="grid gap-1 sm:col-span-2">
-                <Label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-                  Value from
-                </Label>
+                <SectionLabel size="sm">Value from</SectionLabel>
                 <Input
                   value={action.valueFrom ?? ''}
                   placeholder="datum.id"
@@ -819,9 +785,7 @@ export function TableBulkActionsEditor({
   return (
     <div className="grid gap-2">
       <div className="flex items-center justify-between">
-        <Label className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-          Bulk actions
-        </Label>
+        <SectionLabel size="sm">Bulk actions</SectionLabel>
         <Button
           type="button"
           size="sm"
@@ -846,9 +810,7 @@ export function TableBulkActionsEditor({
           >
             <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]">
               <div className="grid gap-1">
-                <Label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-                  ID
-                </Label>
+                <SectionLabel size="sm">ID</SectionLabel>
                 <Input
                   value={action.id}
                   className="h-8"
@@ -860,9 +822,7 @@ export function TableBulkActionsEditor({
                 />
               </div>
               <div className="grid gap-1">
-                <Label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-                  Label
-                </Label>
+                <SectionLabel size="sm">Label</SectionLabel>
                 <Input
                   value={action.label ?? ''}
                   className="h-8"

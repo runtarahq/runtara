@@ -10,6 +10,7 @@ import {
   SelectValue,
 } from '@/shared/components/ui/select';
 import { VariableType } from '@/generated/RuntaraRuntimeApi';
+import { EditorTh } from '@/features/workflows/components/WorkflowEditor/EditorTable';
 
 // UI-specific variable type with name field for editing
 export interface UIVariable {
@@ -146,22 +147,12 @@ export function VariablesEditor({
         <table className="w-full">
           <thead>
             <tr className="border-b">
-              <th className="p-2 text-left text-sm font-medium text-muted-foreground">
-                Name
-              </th>
-              <th className="p-2 text-left text-sm font-medium text-muted-foreground">
-                Value
-              </th>
-              <th className="p-2 text-left text-sm font-medium text-muted-foreground">
-                Type
-              </th>
-              <th className="p-2 text-left text-sm font-medium text-muted-foreground">
-                Description
-              </th>
+              <EditorTh>Name</EditorTh>
+              <EditorTh>Value</EditorTh>
+              <EditorTh>Type</EditorTh>
+              <EditorTh>Description</EditorTh>
               {!readOnly && (
-                <th className="w-16 p-2 text-center text-sm font-medium text-muted-foreground">
-                  Actions
-                </th>
+                <EditorTh className="w-16 text-center">Actions</EditorTh>
               )}
             </tr>
           </thead>

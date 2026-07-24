@@ -1,7 +1,6 @@
 import { Link } from 'react-router';
 import { useForm } from 'react-hook-form';
 import { z } from 'zod';
-import { Loader2 } from 'lucide-react';
 import {
   Form,
   FormControl,
@@ -13,6 +12,9 @@ import {
 import { Button } from '@/shared/components/ui/button.tsx';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { Input } from '@/shared/components/ui/input.tsx';
+import { Spinner } from '@/shared/components/ui/spinner';
+import { PageContainer } from '@/shared/components/page-container';
+import { SectionLabel } from '@/shared/components/section-label';
 
 interface WorkflowFormProps {
   title: string;
@@ -37,12 +39,10 @@ export function WorkflowForm(props: WorkflowFormProps) {
   });
 
   return (
-    <div className="w-full px-4 py-6 sm:px-6 lg:px-10">
+    <PageContainer>
       <div className="mx-auto w-full max-w-5xl">
         <div className="space-y-2 px-4 sm:px-6">
-          <p className="text-xs font-semibold uppercase tracking-[0.08em] text-muted-foreground">
-            Workflows
-          </p>
+          <SectionLabel>Workflows</SectionLabel>
           <h1 className="text-3xl font-semibold leading-tight text-foreground">
             {title}
           </h1>
@@ -83,7 +83,7 @@ export function WorkflowForm(props: WorkflowFormProps) {
               >
                 {loading ? (
                   <>
-                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    <Spinner className="mr-2 h-4 w-4" />
                     Saving...
                   </>
                 ) : (
@@ -94,6 +94,6 @@ export function WorkflowForm(props: WorkflowFormProps) {
           </form>
         </Form>
       </div>
-    </div>
+    </PageContainer>
   );
 }

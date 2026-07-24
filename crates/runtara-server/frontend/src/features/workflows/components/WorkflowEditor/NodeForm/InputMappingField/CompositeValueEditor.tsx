@@ -13,16 +13,24 @@
 
 import { useCallback, useMemo } from 'react';
 import { Braces, List } from 'lucide-react';
-import { cn } from '@/lib/utils';
 import type {
   CompositeObjectValue,
   CompositeArrayValue,
 } from '@/features/workflows/stores/nodeFormStore';
 import { CompositeObjectEditor } from './CompositeObjectEditor';
 import { CompositeArrayEditor } from './CompositeArrayEditor';
+import {
+  MappingModeToggle,
+  type MappingModeToggleOption,
+} from './MappingModeToggle';
 import { validateCompositeValue } from './compositeValidation';
 
 type CompositeMode = 'object' | 'array';
+
+const MODE_OPTIONS: readonly MappingModeToggleOption<CompositeMode>[] = [
+  { value: 'object', label: 'Composite Object', icon: Braces },
+  { value: 'array', label: 'Composite Array', icon: List },
+];
 
 interface CompositeValueEditorProps {
   /** The composite value to edit */
@@ -100,39 +108,14 @@ export function CompositeValueEditor({
     <div className="flex h-full flex-col">
       {/* Mode switcher (if enabled) */}
       {showModeSwitcher && (
-        <div className="flex shrink-0 gap-2 border-b px-4 py-3">
-          <button
-            type="button"
-            onClick={() => handleModeChange('object')}
+        <div className="shrink-0 border-b px-4 py-3">
+          <MappingModeToggle
+            className="gap-2"
+            options={MODE_OPTIONS}
+            value={mode}
+            onChange={handleModeChange}
             disabled={disabled}
-            className={cn(
-              'flex flex-1 items-center justify-center gap-2 px-4 py-2',
-              'rounded-md border text-sm transition-colors',
-              mode === 'object'
-                ? 'border-green-300 bg-green-50 text-green-700 dark:border-green-800 dark:bg-green-950 dark:text-green-400'
-                : 'border-input bg-background text-muted-foreground hover:bg-muted/50',
-              disabled && 'cursor-not-allowed opacity-50'
-            )}
-          >
-            <Braces className="h-4 w-4" />
-            Composite Object
-          </button>
-          <button
-            type="button"
-            onClick={() => handleModeChange('array')}
-            disabled={disabled}
-            className={cn(
-              'flex flex-1 items-center justify-center gap-2 px-4 py-2',
-              'rounded-md border text-sm transition-colors',
-              mode === 'array'
-                ? 'border-green-300 bg-green-50 text-green-700 dark:border-green-800 dark:bg-green-950 dark:text-green-400'
-                : 'border-input bg-background text-muted-foreground hover:bg-muted/50',
-              disabled && 'cursor-not-allowed opacity-50'
-            )}
-          >
-            <List className="h-4 w-4" />
-            Composite Array
-          </button>
+          />
         </div>
       )}
 

@@ -38,8 +38,11 @@ import {
   TableRow,
 } from '@/shared/components/ui/table';
 import {
+  ConsoleEmptyState,
+  ConsoleErrorState,
   ConsoleTableShell,
   TablePagination,
+  TableSkeletonRows,
   TableStatusFooter,
 } from '@/shared/components/console';
 import { WorkflowExecuteDialog } from '@/features/workflows/components/WorkflowExecuteDialog';
@@ -380,64 +383,24 @@ export function WorkflowsGrid({
   let body: ReactNode;
   if (isFetching) {
     body = (
-      <div className="divide-y divide-border/50">
-        {[...Array(8)].map((_, i) => (
-          <div key={i} className="flex items-center gap-4 px-5 py-3.5">
-            <div className="h-4 w-40 animate-pulse rounded bg-muted/60" />
-            <div className="h-4 w-64 animate-pulse rounded bg-muted/60" />
-            <div className="ml-auto h-4 w-24 animate-pulse rounded bg-muted/60" />
-          </div>
-        ))}
-      </div>
+      <TableSkeletonRows rows={8} widths={['w-40', 'w-64', 'ml-auto w-24']} />
     );
   } else if (isError) {
-    const err = error as any;
-    const isNetworkError =
-      err?.message?.includes('fetch') ||
-      err?.code === 'ERR_NETWORK' ||
-      !err?.response;
-    const status = err?.response?.status;
-    const message = err?.response?.data?.message || err?.message;
-    body = (
-      <div className="flex h-full flex-col items-center justify-center px-6 py-10 text-center">
-        <Icons.warning className="mb-4 h-10 w-10 text-destructive" />
-        <p className="text-base font-semibold text-foreground">
-          {isNetworkError
-            ? 'Unable to connect to backend'
-            : `An error occurred (Status: ${status || 'N/A'})`}
-        </p>
-        <p className="mt-1 text-sm text-muted-foreground">
-          {isNetworkError
-            ? 'Please check your network connection and try again.'
-            : message ||
-              'There was a problem loading workflows. Please try again.'}
-        </p>
-        {import.meta.env.DEV && error && (
-          <div className="mt-4 max-w-md rounded-lg bg-destructive/10 p-3 text-left">
-            <p className="break-words font-mono text-xs text-destructive">
-              {error.message || 'Unknown error'}
-            </p>
-          </div>
-        )}
-      </div>
-    );
+    body = <ConsoleErrorState error={error} entityLabel="workflows" />;
   } else if (!hasContent) {
     body = (
-      <div className="flex h-full flex-col items-center justify-center px-6 py-10 text-center">
-        <Icons.inbox className="mb-4 h-10 w-10 text-muted-foreground" />
-        <p className="text-base font-semibold text-foreground">
-          No workflows yet
-        </p>
-        <p className="mt-1 text-sm text-muted-foreground">
-          Create your first workflow to kick off an automation flow.
-        </p>
-        <Link to="/workflows/create" className="mt-4">
-          <Button>
-            <Icons.add className="mr-2 h-4 w-4" />
-            Create workflow
-          </Button>
-        </Link>
-      </div>
+      <ConsoleEmptyState
+        title="No workflows yet"
+        description="Create your first workflow to kick off an automation flow."
+        action={
+          <Link to="/workflows/create">
+            <Button>
+              <Icons.add className="mr-2 h-4 w-4" />
+              Create workflow
+            </Button>
+          </Link>
+        }
+      />
     );
   } else {
     body = (
@@ -488,8 +451,8 @@ export function WorkflowsGrid({
                     <Can permission="workflow:folder_rename">
                       <Button
                         variant="ghost"
-                        size="icon"
-                        className="h-7 w-7 text-muted-foreground"
+                        size="icon-sm"
+                        className="text-muted-foreground"
                         title="Rename folder"
                         onClick={() => onFolderRename?.(folder.path)}
                       >
@@ -499,8 +462,8 @@ export function WorkflowsGrid({
                     <Can permission="workflow:delete">
                       <Button
                         variant="ghost"
-                        size="icon"
-                        className="h-7 w-7 text-muted-foreground hover:text-destructive"
+                        size="icon-sm"
+                        className="text-muted-foreground hover:text-destructive"
                         title="Delete folder"
                         onClick={() => onFolderDelete?.(folder.path)}
                       >

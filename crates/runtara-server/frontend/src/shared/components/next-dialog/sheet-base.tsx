@@ -1,4 +1,4 @@
-import { Loader2 } from '../loader.tsx';
+import { PageLoader } from '../loader.tsx';
 
 type Props = {
   title?: string;
@@ -25,7 +25,7 @@ export function SheetBase(props: Props) {
           contentScrollable ? 'overflow-y-auto' : ''
         }`}
       >
-        {loading ? <Loader2 /> : children}
+        {loading ? <PageLoader /> : children}
       </div>
     </div>
   );

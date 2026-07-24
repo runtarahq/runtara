@@ -389,10 +389,9 @@ export function ScheduleBuilder({
                   <Button
                     type="button"
                     variant="ghost"
-                    size="icon"
+                    size="icon-sm"
                     onClick={() => handleRemoveTime(index)}
                     disabled={disabled}
-                    className="h-7 w-7"
                   >
                     <Cross2Icon className="h-3 w-3" />
                   </Button>

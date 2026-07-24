@@ -46,8 +46,8 @@ export function ValidationPanelHeader({
       {showClearButton && (
         <Button
           variant="ghost"
-          size="icon"
-          className="mr-2 h-7 w-7"
+          size="icon-sm"
+          className="mr-2"
           onClick={(e) => {
             e.stopPropagation();
             clearMessages();

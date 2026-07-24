@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from 'react';
-import { AlertCircle, Loader2 } from 'lucide-react';
+import { AlertCircle } from 'lucide-react';
 
 import {
   Alert,
@@ -12,6 +12,7 @@ import { FieldControl } from './FieldControl';
 import { FormSection } from './FormSection';
 import { analyzeFormWithRust } from './rust-form-validation';
 import { useResolvedOptions } from './use-resolved-options';
+import { Spinner } from '@/shared/components/ui/spinner';
 import type {
   FormAnalysisResult,
   FormDefinition,
@@ -131,7 +132,7 @@ export function FormRenderer({
         className="flex items-center gap-2 text-sm text-muted-foreground"
         role="status"
       >
-        <Loader2 className="h-4 w-4 animate-spin" />
+        <Spinner className="h-4 w-4" />
         Preparing form…
       </div>
     );

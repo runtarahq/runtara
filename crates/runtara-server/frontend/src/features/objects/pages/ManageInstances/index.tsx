@@ -1,5 +1,5 @@
 import { useParams } from 'react-router';
-import { AlertCircle, Loader2 } from 'lucide-react';
+import { AlertCircle } from 'lucide-react';
 import {
   Alert,
   AlertDescription,
@@ -9,6 +9,7 @@ import { ObjectInstanceDtosTable } from '../../components/ObjectInstancesTable';
 import { useObjectSchemaDto } from '../../hooks/useObjectSchema';
 import { usePageTitle } from '@/shared/hooks/usePageTitle';
 import { useObjectModelConnectionSelection } from '../../hooks/useObjectModelConnectionSelection';
+import { Spinner } from '@/shared/components/ui/spinner';
 
 export function ManageInstances() {
   const { typeName } = useParams<{ typeName: string }>();
@@ -28,7 +29,7 @@ export function ManageInstances() {
   if (isLoading) {
     return (
       <div className="flex h-dvh items-center justify-center text-muted-foreground">
-        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+        <Spinner className="mr-2 h-4 w-4" />
         Loading records...
       </div>
     );

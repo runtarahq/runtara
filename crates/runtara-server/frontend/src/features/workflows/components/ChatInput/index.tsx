@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef, KeyboardEvent } from 'react';
-import { Send, Loader2 } from 'lucide-react';
+import { Send } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button.tsx';
 import { Textarea } from '@/shared/components/ui/textarea.tsx';
 import {
@@ -7,6 +7,7 @@ import {
   WaitingForInputData,
 } from '@/features/workflows/types/chat';
 import { ChatFormInput } from './ChatFormInput';
+import { Spinner } from '@/shared/components/ui/spinner';
 
 interface ChatInputProps {
   onSend: (message: string) => void;
@@ -120,14 +121,14 @@ export function ChatInput({
       {isWaiting &&
         !isSimpleMessageSchema &&
         (waitingForInput?.message || schemaFieldDescription) && (
-          <div className="mb-2 rounded-lg border border-amber-200/60 bg-amber-50 px-3 py-2 text-xs text-amber-700 dark:border-amber-700/40 dark:bg-amber-900/20 dark:text-amber-400">
+          <div className="mb-2 rounded-lg border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning">
             {waitingForInput?.message || schemaFieldDescription}
           </div>
         )}
 
       {isDisabled && (
         <div className="mb-2 flex items-center gap-1.5 text-xs text-muted-foreground">
-          <Loader2 className="h-3 w-3 animate-spin" />
+          <Spinner className="h-3 w-3" />
           AI is thinking...
         </div>
       )}

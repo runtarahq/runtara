@@ -6,6 +6,7 @@ import { useState } from 'react';
 import { Button } from '@/shared/components/ui/button';
 import { Input } from '@/shared/components/ui/input';
 import { Label } from '@/shared/components/ui/label';
+import { FieldError } from '@/shared/components/ui/form';
 import {
   Dialog,
   DialogContent,
@@ -131,7 +132,7 @@ export function AddCustomFieldDialog({
               Use dots to build nested objects, e.g.{' '}
               <code className="rounded bg-muted px-1">payload.user.name</code>.
             </p>
-            {error && <p className="text-sm text-destructive">{error}</p>}
+            {error && <FieldError>{error}</FieldError>}
           </div>
 
           <div className="grid gap-2">

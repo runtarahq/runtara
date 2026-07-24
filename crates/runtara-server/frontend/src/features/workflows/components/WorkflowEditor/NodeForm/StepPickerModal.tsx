@@ -3,7 +3,6 @@ import {
   Bot,
   ChevronLeft,
   ChevronRight,
-  Loader2,
   Search,
   X,
   Zap,
@@ -25,6 +24,13 @@ import { StepTypeIcon } from '@/features/workflows/components/StepTypeIcon';
 import { getAgentIcon } from '@/features/workflows/utils/agent-icons';
 import { useEntitlements } from '@/shared/hooks/useEntitlements';
 import { agentEnabled } from '@/shared/entitlements';
+import { SectionLabel } from '@/shared/components/section-label';
+import {
+  PICKER_DIALOG_WIDTH,
+  PICKER_LIST_MAX_HEIGHT,
+} from '@/shared/components/picker-dialog';
+import { PickerEmpty } from '@/shared/components/picker-item';
+import { Spinner } from '@/shared/components/ui/spinner';
 
 interface CapabilitySearchResult {
   agentId: string;
@@ -404,7 +410,7 @@ export function StepPickerPanel({
       <div
         className={cn(
           'p-4',
-          contentScrollable && 'max-h-[400px] overflow-y-auto'
+          contentScrollable && `${PICKER_LIST_MAX_HEIGHT} overflow-y-auto`
         )}
       >
         {viewMode === 'search' ? (
@@ -464,9 +470,7 @@ function SearchResults({
     return (
       <div className="space-y-4">
         {loading && <LoadingMore />}
-        <div className="py-8 text-center text-muted-foreground">
-          No results found for "{searchQuery}"
-        </div>
+        <PickerEmpty>No results found for "{searchQuery}"</PickerEmpty>
       </div>
     );
   }
@@ -536,9 +540,7 @@ function StepTypeSection({
     <div>
       <div className="mb-2 flex items-center gap-2">
         <Zap className="h-5 w-5 text-muted-foreground" />
-        <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-          Step Types
-        </span>
+        <SectionLabel as="span">Step Types</SectionLabel>
       </div>
       <div className="space-y-1">
         {stepTypes.map((stepType) => (
@@ -584,9 +586,7 @@ function AgentSection({
     <div>
       <div className="mb-2 flex items-center gap-2">
         <Bot className="h-5 w-5 text-muted-foreground" />
-        <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-          {title}
-        </span>
+        <SectionLabel as="span">{title}</SectionLabel>
       </div>
       <div className="space-y-1">
         {agents.map((agent) => {
@@ -634,9 +634,9 @@ function CapabilitySearchSection({
 }) {
   return (
     <div>
-      <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+      <SectionLabel as="div" className="mb-2">
         Capabilities
-      </div>
+      </SectionLabel>
       <div className="space-y-1">
         {results.map((result) => {
           const AgentIcon = result.agentIcon;
@@ -703,7 +703,7 @@ function CapabilityList({
   if (!selectedAgentData || !selectedAgentId) {
     return (
       <div className="flex items-center justify-center py-8">
-        <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+        <Spinner className="h-6 w-6 text-muted-foreground" />
         <span className="ml-2 text-muted-foreground">
           Loading capabilities...
         </span>
@@ -712,11 +712,7 @@ function CapabilityList({
   }
 
   if ((selectedAgentData.capabilities || []).length === 0) {
-    return (
-      <div className="py-8 text-center text-muted-foreground">
-        No capabilities found
-      </div>
-    );
+    return <PickerEmpty>No capabilities found</PickerEmpty>;
   }
 
   return (
@@ -751,7 +747,7 @@ function CapabilityList({
 function LoadingMore() {
   return (
     <div className="flex items-center gap-2 text-sm text-muted-foreground">
-      <Loader2 className="h-4 w-4 animate-spin" />
+      <Spinner className="h-4 w-4" />
       Loading more results...
     </div>
   );
@@ -775,7 +771,7 @@ export function StepPickerModal({
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
-        className="gap-0 p-0 sm:max-w-[500px]"
+        className={`gap-0 p-0 ${PICKER_DIALOG_WIDTH}`}
         hideCloseButton
         aria-describedby={undefined}
       >

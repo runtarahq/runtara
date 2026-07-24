@@ -1,5 +1,7 @@
+import { useState } from 'react';
 import { Input } from '@/shared/components/ui/input';
 import { Label } from '@/shared/components/ui/label';
+import { ConfirmationDialog } from '@/shared/components/confirmation-dialog.tsx';
 import {
   Select,
   SelectContent,
@@ -58,13 +60,14 @@ export function BlockEditor({
   const showSourceEditor =
     block.type !== 'markdown' && block.type !== 'file_upload' && !hasDataset;
 
+  // Block type whose switch would discard config and awaits confirmation.
+  const [pendingType, setPendingType] = useState<ReportBlockType | null>(null);
+
   const handleTypeChange = (nextType: ReportBlockType) => {
     if (nextType === block.type) return;
     if (hasMeaningfulTypeConfig(block)) {
-      const ok = window.confirm(
-        `Switching from "${blockTypeLabel(block.type as ReportBlockType)}" to "${blockTypeLabel(nextType)}" will discard the current ${block.type} configuration. Continue?`
-      );
-      if (!ok) return;
+      setPendingType(nextType);
+      return;
     }
     onChange(changeBlockType(block, nextType));
   };
@@ -200,6 +203,22 @@ export function BlockEditor({
           Lazy load
         </label>
       </div>
+
+      <ConfirmationDialog
+        open={pendingType !== null}
+        description={
+          pendingType
+            ? `Switching from "${blockTypeLabel(block.type as ReportBlockType)}" to "${blockTypeLabel(pendingType)}" will discard the current ${block.type} configuration. Continue?`
+            : ''
+        }
+        onClose={() => setPendingType(null)}
+        onConfirm={() => {
+          if (pendingType) {
+            onChange(changeBlockType(block, pendingType));
+          }
+          setPendingType(null);
+        }}
+      />
     </div>
   );
 }

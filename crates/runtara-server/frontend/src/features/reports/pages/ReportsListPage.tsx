@@ -3,7 +3,6 @@ import { Link } from 'react-router';
 import { BarChart3, Edit, PlusIcon } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button';
 import { Can } from '@/shared/components/Can';
-import { Icons } from '@/shared/components/icons';
 import {
   Table,
   TableBody,
@@ -14,9 +13,12 @@ import {
 } from '@/shared/components/ui/table';
 import {
   Breadcrumb,
+  ConsoleEmptyState,
+  ConsoleErrorState,
   ConsoleTableShell,
   ConsoleToolbar,
   StatusPill,
+  TableSkeletonRows,
   TableStatusFooter,
 } from '@/shared/components/console';
 import { usePageTitle } from '@/shared/hooks/usePageTitle';
@@ -47,40 +49,17 @@ export function ReportsListPage() {
   let body: ReactNode;
   if (isPending) {
     body = (
-      <div className="divide-y divide-border/50">
-        {[...Array(8)].map((_, index) => (
-          <div key={index} className="flex items-center gap-4 px-5 py-3.5">
-            <div className="h-4 w-48 animate-pulse rounded bg-muted/60" />
-            <div className="h-4 w-72 animate-pulse rounded bg-muted/60" />
-            <div className="ml-auto h-4 w-32 animate-pulse rounded bg-muted/60" />
-          </div>
-        ))}
-      </div>
+      <TableSkeletonRows rows={8} widths={['w-48', 'w-72', 'ml-auto w-32']} />
     );
   } else if (isError) {
-    body = (
-      <div className="flex h-full flex-col items-center justify-center px-6 py-10 text-center">
-        <Icons.warning className="mb-4 h-10 w-10 text-destructive" />
-        <p className="text-base font-semibold text-foreground">
-          Reports could not be loaded
-        </p>
-        <p className="mt-1 text-sm text-muted-foreground">
-          {error?.message ?? 'Please try again.'}
-        </p>
-      </div>
-    );
+    body = <ConsoleErrorState error={error} entityLabel="reports" />;
   } else if (reports.length === 0) {
     body = (
-      <div className="flex h-full flex-col items-center justify-center px-6 py-12 text-center">
-        <BarChart3 className="mb-4 h-10 w-10 text-muted-foreground" />
-        <p className="text-base font-semibold text-foreground">
-          No reports yet
-        </p>
-        <p className="mt-1 max-w-md text-sm text-muted-foreground">
-          Create a report to render Object Model data as markdown, tables,
-          metrics, and charts.
-        </p>
-      </div>
+      <ConsoleEmptyState
+        icon={<BarChart3 className="mb-4 h-10 w-10 text-muted-foreground" />}
+        title="No reports yet"
+        description="Create a report to render Object Model data as markdown, tables, metrics, and charts."
+      />
     );
   } else {
     body = (
@@ -128,8 +107,8 @@ export function ReportsListPage() {
                       <Button
                         type="button"
                         variant="ghost"
-                        size="icon"
-                        className="h-7 w-7 text-muted-foreground"
+                        size="icon-sm"
+                        className="text-muted-foreground"
                         aria-label={`Edit ${report.name}`}
                         title={`Edit ${report.name}`}
                       >
@@ -144,8 +123,8 @@ export function ReportsListPage() {
                       iconOnly
                       navigateAfterDelete={false}
                       triggerVariant="ghost"
-                      triggerSize="icon"
-                      className="h-7 w-7 text-muted-foreground hover:text-destructive"
+                      triggerSize="icon-sm"
+                      className="text-muted-foreground hover:text-destructive"
                     />
                   </Can>
                 </div>

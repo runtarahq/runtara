@@ -137,10 +137,7 @@ const FormDescription = React.forwardRef<
     <p
       ref={ref}
       id={formDescriptionId}
-      className={cn(
-        'text-[0.7rem] leading-tight text-muted-foreground',
-        className
-      )}
+      className={cn('text-2xs text-muted-foreground', className)}
       {...props}
     />
   );
@@ -171,6 +168,24 @@ const FormMessage = React.forwardRef<
 });
 FormMessage.displayName = 'FormMessage';
 
+// Standalone field-error element for non-react-hook-form contexts; renders
+// nothing when there is no error content.
+const FieldError = React.forwardRef<
+  HTMLParagraphElement,
+  React.HTMLAttributes<HTMLParagraphElement>
+>(({ className, children, ...props }, ref) =>
+  children ? (
+    <p
+      ref={ref}
+      className={cn('text-[0.8rem] font-medium text-destructive', className)}
+      {...props}
+    >
+      {children}
+    </p>
+  ) : null
+);
+FieldError.displayName = 'FieldError';
+
 export {
   useFormField,
   Form,
@@ -180,4 +195,5 @@ export {
   FormDescription,
   FormMessage,
   FormField,
+  FieldError,
 };

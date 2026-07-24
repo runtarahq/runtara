@@ -1,5 +1,5 @@
 import { useState, useMemo, useContext, useEffect } from 'react';
-import { ChevronLeft, ChevronRight, Search, Loader2 } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Search } from 'lucide-react';
 import { Dialog, DialogContent } from '@/shared/components/ui/dialog';
 import { Input } from '@/shared/components/ui/input';
 import { cn } from '@/lib/utils';
@@ -11,6 +11,13 @@ import { NodeFormContext } from './NodeFormContext';
 import { useMultipleAgentDetails } from '@/features/workflows/hooks';
 import { useEntitlements } from '@/shared/hooks/useEntitlements';
 import { agentEnabled } from '@/shared/entitlements';
+import { SectionLabel } from '@/shared/components/section-label';
+import {
+  PICKER_DIALOG_WIDTH,
+  PICKER_LIST_MAX_HEIGHT,
+} from '@/shared/components/picker-dialog';
+import { PickerEmpty } from '@/shared/components/picker-item';
+import { Spinner } from '@/shared/components/ui/spinner';
 
 interface CapabilitySearchResult {
   agentId: string;
@@ -281,7 +288,10 @@ export function CapabilityPickerModal({
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
-      <DialogContent className="gap-0 p-0 sm:max-w-[500px]" hideCloseButton>
+      <DialogContent
+        className={`gap-0 p-0 ${PICKER_DIALOG_WIDTH}`}
+        hideCloseButton
+      >
         {/* Header */}
         <div className="flex items-center gap-2 border-b p-4">
           {viewMode === 'capabilities' && (
@@ -314,30 +324,28 @@ export function CapabilityPickerModal({
         </div>
 
         {/* Content */}
-        <div className="max-h-[400px] overflow-y-auto p-4">
+        <div className={`${PICKER_LIST_MAX_HEIGHT} overflow-y-auto p-4`}>
           {viewMode === 'search' ? (
             // Search Results View
             <div className="space-y-4">
               {someLoading && (
                 <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                  <Loader2 className="h-4 w-4 animate-spin" />
+                  <Spinner className="h-4 w-4" />
                   Loading more results...
                 </div>
               )}
 
               {searchResults.agents.length === 0 &&
               searchResults.capabilities.length === 0 ? (
-                <div className="py-8 text-center text-muted-foreground">
-                  No results found for "{searchQuery}"
-                </div>
+                <PickerEmpty>No results found for "{searchQuery}"</PickerEmpty>
               ) : (
                 <>
                   {/* Matching Agents */}
                   {searchResults.agents.length > 0 && (
                     <div>
-                      <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                      <SectionLabel as="div" className="mb-2">
                         Agents
-                      </div>
+                      </SectionLabel>
                       <div className="space-y-1">
                         {searchResults.agents.map((agent) => {
                           const category = getAgentCategory(agent);
@@ -376,9 +384,9 @@ export function CapabilityPickerModal({
                   {/* Matching Capabilities */}
                   {searchResults.capabilities.length > 0 && (
                     <div>
-                      <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                      <SectionLabel as="div" className="mb-2">
                         Capabilities
-                      </div>
+                      </SectionLabel>
                       <div className="space-y-1">
                         {searchResults.capabilities.map((result) => (
                           <button
@@ -434,7 +442,7 @@ export function CapabilityPickerModal({
             // Capabilities List View
             isFetching ? (
               <div className="flex items-center justify-center py-8">
-                <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+                <Spinner className="h-6 w-6 text-muted-foreground" />
                 <span className="ml-2 text-muted-foreground">
                   Loading capabilities...
                 </span>
@@ -442,9 +450,7 @@ export function CapabilityPickerModal({
             ) : (
               <div className="space-y-1">
                 {filteredCapabilities.length === 0 ? (
-                  <div className="py-8 text-center text-muted-foreground">
-                    No capabilities found
-                  </div>
+                  <PickerEmpty>No capabilities found</PickerEmpty>
                 ) : (
                   filteredCapabilities.map((capability: CapabilityInfo) => {
                     return (
@@ -479,17 +485,13 @@ export function CapabilityPickerModal({
             // Browse Agents View
             <div className="space-y-4">
               {groupedAgents.length === 0 ? (
-                <div className="py-8 text-center text-muted-foreground">
-                  No agents available
-                </div>
+                <PickerEmpty>No agents available</PickerEmpty>
               ) : (
                 groupedAgents.map((group) => (
                   <div key={group.category}>
                     <div className="mb-2 flex items-center gap-2">
                       <span className="text-lg">{group.icon}</span>
-                      <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                        {group.category}
-                      </span>
+                      <SectionLabel as="span">{group.category}</SectionLabel>
                     </div>
                     <div className="space-y-1">
                       {group.agents.map((agent) => (

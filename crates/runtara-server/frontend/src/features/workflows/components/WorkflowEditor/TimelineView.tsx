@@ -45,6 +45,7 @@ import { Button } from '@/shared/components/ui/button';
 import { Badge } from '@/shared/components/ui/badge';
 import { Input } from '@/shared/components/ui/input';
 import { Label } from '@/shared/components/ui/label';
+import { FieldError } from '@/shared/components/ui/form';
 import {
   Popover,
   PopoverContent,
@@ -1473,7 +1474,7 @@ function TimelineAddMcpToolsetButton({
             placeholder="e.g. linear"
             data-testid="timeline-mcp-toolset-name"
           />
-          {error && <p className="text-xs text-destructive">{error}</p>}
+          {error && <FieldError>{error}</FieldError>}
         </div>
         <div className="flex justify-end gap-2">
           <Button
@@ -2047,7 +2048,7 @@ function TimelineRouteSettings({
               className="min-h-32 font-mono text-xs"
             />
           )}
-          {error && <p className="text-xs text-destructive">{error}</p>}
+          {error && <FieldError>{error}</FieldError>}
         </div>
 
         <div className="flex items-center justify-between gap-2">

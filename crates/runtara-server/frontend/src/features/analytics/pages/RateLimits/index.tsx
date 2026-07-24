@@ -3,9 +3,10 @@ import { useSearchParams } from 'react-router';
 import { usePageTitle } from '@/shared/hooks/usePageTitle';
 import { RefreshCw, Link, X } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button';
-import { Icons } from '@/shared/components/icons';
 import {
   Breadcrumb,
+  ConsoleEmptyState,
+  ConsoleErrorState,
   ConsoleTableShell,
   ConsoleToolbar,
 } from '@/shared/components/console';
@@ -131,12 +132,6 @@ export function RateLimits() {
     (r) => r.connectionId === selectedConnectionId
   );
 
-  const isNetworkError =
-    !!isError &&
-    (error?.message?.includes('fetch') ||
-      (error as { code?: string })?.code === 'ERR_NETWORK' ||
-      !(error as { response?: unknown })?.response);
-
   return (
     <ConsoleTableShell
       bodyClassName="p-4 md:p-6"
@@ -172,26 +167,11 @@ export function RateLimits() {
       }
     >
       {isError && !isLoading ? (
-        <div className="flex flex-col items-center justify-center rounded-lg border bg-muted/20 px-6 py-10 text-center">
-          <Icons.warning className="mb-4 h-10 w-10 text-destructive" />
-          <p className="text-base font-semibold text-foreground">
-            {isNetworkError
-              ? 'Unable to connect to backend'
-              : 'An error occurred'}
-          </p>
-          <p className="mt-1 text-sm text-muted-foreground">
-            {isNetworkError
-              ? 'Please check your network connection and try again.'
-              : 'There was a problem loading rate limits. Please try again.'}
-          </p>
-          {import.meta.env.DEV && error && (
-            <div className="mt-4 max-w-md rounded-lg bg-destructive/10 p-3 text-left">
-              <p className="break-words font-mono text-xs text-destructive">
-                {error.message || 'Unknown error'}
-              </p>
-            </div>
-          )}
-        </div>
+        <ConsoleErrorState
+          error={error}
+          entityLabel="rate limits"
+          className="h-auto rounded-lg border bg-muted/20"
+        />
       ) : (
         <div className="space-y-4">
           {/* Connections Grid */}
@@ -219,15 +199,12 @@ export function RateLimits() {
                 ))}
               </div>
             ) : rateLimits.length === 0 ? (
-              <div className="flex flex-col items-center justify-center rounded-lg border bg-muted/20 px-6 py-10 text-center">
-                <Link className="mb-4 h-10 w-10 text-muted-foreground" />
-                <p className="text-base font-semibold text-foreground">
-                  No connections found
-                </p>
-                <p className="mt-1 text-sm text-muted-foreground">
-                  Create a connection to see rate limit status.
-                </p>
-              </div>
+              <ConsoleEmptyState
+                icon={<Link className="mb-4 h-10 w-10 text-muted-foreground" />}
+                title="No connections found"
+                description="Create a connection to see rate limit status."
+                className="h-auto rounded-lg border bg-muted/20"
+              />
             ) : (
               <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
                 {rateLimits.map((rateLimitStatus) => (

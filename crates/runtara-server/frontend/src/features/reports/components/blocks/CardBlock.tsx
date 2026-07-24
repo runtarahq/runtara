@@ -1,10 +1,11 @@
 import { useState } from 'react';
-import { ChevronDown, ChevronRight, Loader2, Pencil, Play } from 'lucide-react';
+import { ChevronDown, ChevronRight, Pencil, Play } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
 import { Badge } from '@/shared/components/ui/badge';
 import { Button } from '@/shared/components/ui/button';
+import { SectionLabel } from '@/shared/components/section-label';
 
 import {
   ReportBlockDefinition,
@@ -26,6 +27,8 @@ import {
 } from '../../utils';
 import { FieldEditor } from './editable/FieldEditor';
 import { useReportWriteback } from './editable/useReportWriteback';
+import { Spinner } from '@/shared/components/ui/spinner';
+import { BlockFrame } from './BlockFrame';
 import {
   ReportWorkflowActionPhase,
   ReportWorkflowActionResult,
@@ -259,7 +262,7 @@ function CardGroup({
 } & FieldEditingProps) {
   const columns = clampColumns(group.columns ?? 2);
   return (
-    <section className="rounded-lg border bg-card shadow-sm">
+    <BlockFrame as="section">
       {(group.title || group.description) && (
         <header className="border-b px-4 py-3">
           {group.title && (
@@ -299,7 +302,7 @@ function CardGroup({
           />
         ))}
       </div>
-    </section>
+    </BlockFrame>
   );
 }
 
@@ -353,9 +356,7 @@ function CardField({
       style={{ gridColumn: `span ${span} / span ${span}` }}
     >
       <div className="flex items-center gap-1">
-        <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-          {label}
-        </p>
+        <SectionLabel>{label}</SectionLabel>
         {canEdit && !isEditing && (
           <button
             type="button"
@@ -507,7 +508,7 @@ function WorkflowActionButton({
       }}
     >
       {phase ? (
-        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+        <Spinner className="h-3.5 w-3.5" />
       ) : (
         <Play className="h-3.5 w-3.5" />
       )}

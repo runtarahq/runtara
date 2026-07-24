@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Loader2, RefreshCw } from 'lucide-react';
+import { RefreshCw } from 'lucide-react';
 
 import type {
   ConnectionGrantState,
@@ -19,6 +19,7 @@ import {
   AlertDialogTitle,
 } from '@/shared/components/ui/alert-dialog';
 import type { FormDefinition } from '@/shared/forms';
+import { Spinner } from '@/shared/components/ui/spinner';
 
 import {
   connectionIdentity,
@@ -171,7 +172,7 @@ export function ConnectionStatusCard({
       className={!isConnected ? 'shadow-sm shadow-blue-600/20' : undefined}
     >
       {isReconnecting ? (
-        <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
+        <Spinner className="mr-1.5 h-4 w-4" />
       ) : (
         <RefreshCw className="mr-1.5 h-4 w-4" />
       )}

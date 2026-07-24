@@ -684,8 +684,8 @@ export function CompositeValueItem({
           <Button
             type="button"
             variant="ghost"
-            size="icon"
-            className="h-7 w-7 shrink-0 text-muted-foreground hover:text-destructive"
+            size="icon-sm"
+            className="shrink-0 text-muted-foreground hover:text-destructive"
             onClick={onRemove}
           >
             <X className="h-3.5 w-3.5" />

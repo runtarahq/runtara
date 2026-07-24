@@ -8,6 +8,7 @@ import { EntitlementRoute } from '@/router/EntitlementRoute';
 import { Layout } from '@/shared/layouts/layout';
 import { Login } from '@/shared/pages/login';
 import { ErrorBoundary } from '@/shared/components/error-boundary.tsx';
+import { Spinner } from '@/shared/components/ui/spinner';
 
 // Lazy load all page components
 const Connections = lazy(() =>
@@ -149,7 +150,7 @@ const Settings = lazy(() =>
 // Loading component for Suspense
 const PageLoader = () => (
   <div className="flex h-full items-center justify-center">
-    <div className="h-8 w-8 animate-spin rounded-full border-b-2 border-primary"></div>
+    <Spinner className="h-8 w-8 text-primary" />
   </div>
 );
 

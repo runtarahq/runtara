@@ -1,7 +1,8 @@
 import { ReactNode } from 'react';
 import { Link } from 'react-router';
-import { Loader2, ArrowLeft, Save, Trash2, Database } from 'lucide-react';
+import { ArrowLeft, Save, Trash2, Database } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button';
+import { Spinner } from '@/shared/components/ui/spinner';
 
 type ObjectSchemaFormLayoutProps = {
   title: string;
@@ -70,7 +71,7 @@ export function ObjectSchemaFormLayout(props: ObjectSchemaFormLayoutProps) {
                   className="text-red-600 hover:bg-red-50 hover:text-red-700 dark:hover:bg-red-900/30"
                 >
                   {isDeleting ? (
-                    <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
+                    <Spinner className="mr-1.5 h-4 w-4" />
                   ) : (
                     <Trash2 className="mr-1.5 h-4 w-4" />
                   )}
@@ -95,7 +96,7 @@ export function ObjectSchemaFormLayout(props: ObjectSchemaFormLayoutProps) {
               >
                 {isLoading ? (
                   <>
-                    <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
+                    <Spinner className="mr-1.5 h-4 w-4" />
                     {loadingLabel || 'Saving...'}
                   </>
                 ) : (

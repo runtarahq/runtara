@@ -66,8 +66,7 @@ export function BlockHostInEdit({
           <Button
             type="button"
             variant="ghost"
-            size="icon"
-            className="h-7 w-7"
+            size="icon-sm"
             title="Edit block"
             aria-label="Edit block"
             onClick={onEdit}
@@ -77,8 +76,8 @@ export function BlockHostInEdit({
           <Button
             type="button"
             variant="ghost"
-            size="icon"
-            className="h-7 w-7 text-destructive"
+            size="icon-sm"
+            className="text-destructive"
             title="Remove block"
             onClick={onDelete}
           >

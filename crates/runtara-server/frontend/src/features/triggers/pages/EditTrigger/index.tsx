@@ -4,6 +4,8 @@ import { useCustomMutation, useCustomQuery } from '@/shared/hooks/api';
 import { queryKeys } from '@/shared/queries/query-keys';
 import { WorkflowDto } from '@/generated/RuntaraRuntimeApi';
 import { Loader } from '@/shared/components/loader.tsx';
+import { PageContainer } from '@/shared/components/page-container';
+import { SectionLabel } from '@/shared/components/section-label';
 import { TriggerForm } from '@/features/triggers/components/TriggerForm';
 import { queryClient } from '@/main';
 import { scheduleToCron, cronToSchedule } from '@/features/triggers/utils/cron';
@@ -20,6 +22,7 @@ import { getWorkflows } from '@/features/workflows/queries';
 import { getConnections } from '@/features/connections/queries';
 import { usePageTitle } from '@/shared/hooks/usePageTitle';
 import { defaultScheduleConfig } from '@/features/triggers/components/TriggerForm/TriggerItem';
+import { Alert, AlertDescription } from '@/shared/components/ui/alert';
 
 export function EditTrigger() {
   const { triggerId } = useParams();
@@ -253,12 +256,10 @@ export function EditTrigger() {
   ].filter(Boolean) as string[];
 
   return (
-    <div className="w-full px-4 py-6 sm:px-6 lg:px-10">
+    <PageContainer>
       <div className="mx-auto flex w-full max-w-5xl flex-col gap-6">
         <section className="space-y-3 px-4 sm:px-5">
-          <p className="text-xs font-semibold uppercase tracking-[0.08em] text-muted-foreground">
-            Invocation triggers
-          </p>
+          <SectionLabel>Invocation triggers</SectionLabel>
           <div className="space-y-2">
             <h1 className="text-3xl font-semibold leading-tight text-foreground">
               Edit trigger
@@ -278,14 +279,14 @@ export function EditTrigger() {
 
         <section className="space-y-4 px-4 sm:px-5">
           {initValues.triggerType === 'APPLICATION' && (
-            <div className="flex items-start gap-2 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900">
-              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
-              <p>
+            <Alert variant="warning">
+              <AlertTriangle className="h-4 w-4" />
+              <AlertDescription>
                 Application triggers are not currently fired by the platform.
                 You can still edit this trigger, but it will not launch its
                 workflow until Application events are supported.
-              </p>
-            </div>
+              </AlertDescription>
+            </Alert>
           )}
           <TriggerForm
             title="Trigger details"
@@ -302,6 +303,6 @@ export function EditTrigger() {
           />
         </section>
       </div>
-    </div>
+    </PageContainer>
   );
 }

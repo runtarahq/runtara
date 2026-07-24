@@ -2,6 +2,10 @@ import { memo } from 'react';
 import { NodeProps, Position, Handle } from '@xyflow/react';
 import { Play, Plus } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button';
+import {
+  NODE_TYPE_SIZES,
+  NODE_TYPES,
+} from '@/features/workflows/config/workflow.ts';
 
 /**
  * Virtual Start Indicator Node
@@ -19,7 +23,13 @@ function StartIndicatorNodeComponent({ data }: NodeProps) {
     .onAddFirstStep;
 
   return (
-    <div className="flex h-full w-full items-center justify-center gap-1.5 rounded-full bg-muted/40 px-3">
+    <div
+      className="flex items-center justify-center gap-1.5 rounded-full bg-muted/40 px-3"
+      style={{
+        width: NODE_TYPE_SIZES[NODE_TYPES.StartIndicatorNode].width,
+        height: NODE_TYPE_SIZES[NODE_TYPES.StartIndicatorNode].height,
+      }}
+    >
       {/* Icon */}
       <div className="flex flex-shrink-0 items-center justify-center text-muted-foreground/50">
         <Play className="h-3 w-3 fill-current" />
@@ -51,7 +61,7 @@ function StartIndicatorNodeComponent({ data }: NodeProps) {
             transform: 'translateY(-50%)',
           }}
         >
-          <div className="h-[1px] w-4 bg-border" />
+          <div className="h-px w-4 bg-border" />
           <Button
             className="nodrag nopan pointer-events-auto h-5 w-5 rounded-full shadow-md [&_svg]:size-3"
             variant="outline"

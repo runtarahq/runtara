@@ -15,7 +15,6 @@ import {
   MemoryStick,
   RotateCw,
   XCircle,
-  Loader2,
   Tag,
   Server,
   Hash,
@@ -66,6 +65,7 @@ import {
 import { ExecutionTimeline } from '@/features/workflows/components/ExecutionTimeline';
 import { ReplayView } from '@/features/workflows/components/Replay';
 import { Tabs, TabsList, TabsTrigger } from '@/shared/components/ui/tabs';
+import { Spinner } from '@/shared/components/ui/spinner';
 import {
   hasElidedPayload,
   mapElidedForDisplay,
@@ -377,9 +377,7 @@ export function WorkflowHistory() {
                 const statusInfo = getStatusDisplay(data.status);
                 return (
                   <>
-                    {statusInfo.showSpinner && (
-                      <Loader2 className="h-4 w-4 animate-spin" />
-                    )}
+                    {statusInfo.showSpinner && <Spinner className="h-4 w-4" />}
                     <Badge variant={statusInfo.variant}>
                       {statusInfo.text}
                     </Badge>
@@ -877,7 +875,7 @@ export function WorkflowHistory() {
               />
             ) : isListFetching ? (
               <div className="flex items-center justify-center py-16">
-                <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+                <Spinner className="h-8 w-8 text-muted-foreground" />
               </div>
             ) : stepSummaries.length > 0 ? (
               <div className="space-y-3">
@@ -938,9 +936,7 @@ export function WorkflowHistory() {
                           </span>
                         </button>
                         <Badge variant={getBadgeVariant()}>
-                          {isRunning && (
-                            <Loader2 className="mr-1 h-3 w-3 animate-spin" />
-                          )}
+                          {isRunning && <Spinner className="mr-1 h-3 w-3" />}
                           {getStatusLabel()}
                         </Badge>
                       </div>

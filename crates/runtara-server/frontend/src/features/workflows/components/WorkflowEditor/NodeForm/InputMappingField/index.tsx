@@ -5,6 +5,7 @@ import {
   type Condition,
 } from '@/shared/components/ui/condition-editor';
 import { ErrorConditionTemplates } from '@/shared/components/ErrorConditionTemplates';
+import { FieldError } from '@/shared/components/ui/form';
 import { useContext, useEffect, useMemo, useRef } from 'react';
 import { NodeFormContext } from '../NodeFormContext';
 import { composeConditionSuggestions } from '../InputMappingValueField/VariableSuggestions';
@@ -423,9 +424,9 @@ export function InputMappingField(props: any) {
           suggestions={conditionSuggestions}
         />
         {error && (
-          <div className="mt-2 text-[0.8rem] font-medium text-destructive">
+          <FieldError className="mt-2">
             {error.message || error.root?.message}
-          </div>
+          </FieldError>
         )}
       </div>
     );
@@ -491,9 +492,9 @@ export function InputMappingField(props: any) {
           allowCustomFields={true}
         />
         {error && (
-          <div className="mt-2 text-[0.8rem] font-medium text-destructive">
+          <FieldError className="mt-2">
             {error.message || error.root?.message}
-          </div>
+          </FieldError>
         )}
       </div>
     );
@@ -546,9 +547,9 @@ export function InputMappingField(props: any) {
           allowCustomFields={true}
         />
         {error && (
-          <div className="mt-2 text-[0.8rem] font-medium text-destructive">
+          <FieldError className="mt-2">
             {error.message || error.root?.message}
-          </div>
+          </FieldError>
         )}
       </div>
     );
@@ -581,9 +582,9 @@ export function InputMappingField(props: any) {
         </div>
       </div>
       {error && (
-        <div className="mt-2 text-[0.8rem] font-medium text-destructive">
+        <FieldError className="mt-2">
           {error.message || error.root?.message}
-        </div>
+        </FieldError>
       )}
     </div>
   );

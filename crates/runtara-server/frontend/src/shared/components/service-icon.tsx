@@ -78,9 +78,6 @@ export function ServiceIcon({
   return (
     <div
       className={`${className} bg-gradient-to-br ${gradient} flex items-center justify-center rounded-lg shadow-lg`}
-      style={{
-        boxShadow: `0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -4px rgba(0, 0, 0, 0.1)`,
-      }}
     >
       <Icon className="h-1/2 w-1/2 text-white" />
     </div>

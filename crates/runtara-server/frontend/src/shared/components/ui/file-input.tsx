@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { Upload, File, X, Loader2 } from 'lucide-react';
+import { Upload, File, X } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Button } from './button';
 import {
@@ -8,6 +8,7 @@ import {
   parseFileDataFromString,
 } from '@/shared/utils/file-utils';
 import { MAX_FILE_SIZE_DISPLAY } from '@/shared/types/file';
+import { Spinner } from '@/shared/components/ui/spinner';
 
 interface FileInputProps {
   id?: string;
@@ -192,7 +193,7 @@ export const FileInput = React.forwardRef<HTMLInputElement, FileInputProps>(
             )}
           >
             {isLoading ? (
-              <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+              <Spinner className="h-4 w-4 text-muted-foreground" />
             ) : (
               <Upload className="h-4 w-4 text-muted-foreground" />
             )}

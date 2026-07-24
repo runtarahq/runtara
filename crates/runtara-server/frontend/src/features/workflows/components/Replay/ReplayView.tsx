@@ -5,7 +5,7 @@
  * inspector. Switching pacing preserves the current playhead (model) time.
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { GitBranch, Loader2, Radio } from 'lucide-react';
+import { GitBranch, Radio } from 'lucide-react';
 import { useReplayModel } from './useReplayModel';
 import { buildTimeMap, type ReplayPacing } from './timeMap';
 import { useReplayClock } from './useReplayClock';
@@ -14,6 +14,7 @@ import { ReplayGraph } from './ReplayGraph';
 import { ReplayTransport } from './ReplayTransport';
 import { ReplayInspector } from './ReplayInspector';
 import type { ReplayFrame } from './types';
+import { Spinner } from '@/shared/components/ui/spinner';
 
 const EMPTY_FRAME: ReplayFrame = {
   t: 0,
@@ -75,7 +76,7 @@ export function ReplayView({ workflowId, instanceId }: ReplayViewProps) {
   if (isLoading) {
     return (
       <div className="flex h-[520px] items-center justify-center">
-        <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+        <Spinner className="h-8 w-8 text-muted-foreground" />
       </div>
     );
   }

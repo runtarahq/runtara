@@ -1,7 +1,7 @@
 import { memo, useCallback, useMemo, useState } from 'react';
 import { Handle, Node, NodeProps, Position } from '@xyflow/react';
 import { v4 as uuidv4 } from 'uuid';
-import { Plus, Loader2, CheckCircle2, XCircle, Pause } from 'lucide-react';
+import { Plus, CheckCircle2, XCircle, Pause } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button.tsx';
 import { BaseNode } from '../BaseNode.tsx';
 import { StepTypeIcon } from '@/features/workflows/components/StepTypeIcon';
@@ -21,6 +21,7 @@ import { cn } from '@/lib/utils.ts';
 import { useNodeConfigContext } from '../NodeConfigContext';
 import { NodeFormProvider } from '../NodeForm/NodeFormProvider';
 import { StepPickerModal, StepPickerResult } from '../NodeForm/StepPickerModal';
+import { Spinner } from '@/shared/components/ui/spinner';
 
 /** Shorten model identifiers for badge display */
 function formatModelName(model: string): string {
@@ -255,8 +256,7 @@ function AiAgentNodeComponent({
         currentNode.positionAbsolute?.y ?? currentNode.position.y;
       const currentWidth =
         (currentNode.style?.width as number) ||
-        NODE_TYPE_SIZES[NODE_TYPES.AiAgentNode]?.width ||
-        252;
+        NODE_TYPE_SIZES[NODE_TYPES.AiAgentNode].width;
 
       const nodeData = {
         ...form.initialValues,
@@ -313,8 +313,7 @@ function AiAgentNodeComponent({
         currentNode.positionAbsolute?.y ?? currentNode.position.y;
       const currentWidth =
         (currentNode.style?.width as number) ||
-        NODE_TYPE_SIZES[NODE_TYPES.AiAgentNode]?.width ||
-        252;
+        NODE_TYPE_SIZES[NODE_TYPES.AiAgentNode].width;
 
       const position = snapPositionToGrid({
         x: currentPosAbsX + currentWidth + 108,
@@ -410,7 +409,7 @@ function AiAgentNodeComponent({
     switch (s) {
       case 'running':
       case 'compiling':
-        return <Loader2 className="h-3 w-3 animate-spin text-blue-500" />;
+        return <Spinner className="h-3 w-3 text-blue-500" />;
       case 'completed':
         return <CheckCircle2 className="h-3 w-3 text-green-500" />;
       case 'failed':
@@ -438,9 +437,7 @@ function AiAgentNodeComponent({
         isExecutionReadOnly={isExecuting}
         breakpoint={!!(data as any).breakpoint}
         onToggleBreakpoint={handleToggleBreakpoint}
-        style={{
-          width: `${NODE_TYPE_SIZES[NODE_TYPES.AiAgentNode]?.width || 252}px`,
-        }}
+        style={{ width: NODE_TYPE_SIZES[NODE_TYPES.AiAgentNode].width }}
       >
         <div className="flex h-full w-full flex-col">
           {/* Header */}

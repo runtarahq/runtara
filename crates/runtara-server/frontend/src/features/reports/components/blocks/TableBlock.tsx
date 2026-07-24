@@ -11,7 +11,6 @@ import {
   Eye,
   ExternalLink,
   FileText,
-  Loader2,
   Pencil,
   Play,
 } from 'lucide-react';
@@ -27,6 +26,7 @@ import {
 } from 'recharts';
 import { Button } from '@/shared/components/ui/button';
 import { Checkbox } from '@/shared/components/ui/checkbox';
+import { SectionLabel } from '@/shared/components/section-label';
 import {
   Select,
   SelectContent,
@@ -83,6 +83,7 @@ import {
 } from './tableLayout';
 import { FieldEditor } from './editable/FieldEditor';
 import { useReportWriteback } from './editable/useReportWriteback';
+import { Spinner } from '@/shared/components/ui/spinner';
 import {
   ReportWorkflowActionPhase,
   ReportWorkflowActionResult,
@@ -406,7 +407,7 @@ export function TableBlock({
                       <button
                         type="button"
                         className={cn(
-                          'group/h flex w-full items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground transition-colors hover:text-foreground',
+                          'group/h flex w-full items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-muted-foreground transition-colors hover:text-foreground',
                           effectiveAlign === 'right' && 'justify-end'
                         )}
                         onClick={() =>
@@ -419,16 +420,17 @@ export function TableBlock({
                         <SortIcon direction={sortDirection} />
                       </button>
                     ) : (
-                      <span
+                      <SectionLabel
+                        as="span"
                         className={cn(
-                          'block truncate text-xs font-semibold uppercase tracking-wide text-muted-foreground',
+                          'block truncate',
                           effectiveAlign === 'right'
                             ? 'text-right'
                             : 'text-left'
                         )}
                       >
                         {column.label ?? humanizeFieldName(column.key)}
-                      </span>
+                      </SectionLabel>
                     )}
                   </TableHead>
                 );
@@ -1004,7 +1006,7 @@ function WorkflowActionButton({
       }}
     >
       {phase ? (
-        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+        <Spinner className="h-3.5 w-3.5" />
       ) : (
         <Play className="h-3.5 w-3.5" />
       )}

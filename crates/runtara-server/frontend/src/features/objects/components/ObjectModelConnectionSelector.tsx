@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Check, Database, Loader2 } from 'lucide-react';
+import { Check, Database } from 'lucide-react';
 import { Link } from 'react-router';
 import { Button } from '@/shared/components/ui/button';
 import {
@@ -9,6 +9,7 @@ import {
 } from '@/shared/components/ui/popover';
 import { cn } from '@/lib/utils';
 import { useObjectModelConnectionSelection } from '../hooks/useObjectModelConnectionSelection';
+import { Spinner } from '@/shared/components/ui/spinner';
 
 export function ObjectModelConnectionSelector() {
   const {
@@ -29,7 +30,7 @@ export function ObjectModelConnectionSelector() {
         disabled
         aria-label="Loading database connections"
       >
-        <Loader2 className="h-4 w-4 animate-spin" />
+        <Spinner className="h-4 w-4" />
       </Button>
     );
   }

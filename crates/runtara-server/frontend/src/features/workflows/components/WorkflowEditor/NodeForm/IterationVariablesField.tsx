@@ -4,6 +4,7 @@ import { ChevronRight, Plus, Trash2 } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button';
 import { Input } from '@/shared/components/ui/input';
 import { Label } from '@/shared/components/ui/label';
+import { FieldError } from '@/shared/components/ui/form';
 import {
   Select,
   SelectContent,
@@ -19,6 +20,7 @@ import { CompositeValueEditor } from './InputMappingField/CompositeValueEditor';
 import { ModeToggleButton } from './InputMappingField/ModeToggleButton';
 import { VariablePickerModal } from './InputMappingField/VariablePickerModal';
 import type { VariableSuggestion } from './InputMappingValueField/VariableSuggestions';
+import { EditorTh } from '@/features/workflows/components/WorkflowEditor/EditorTable';
 import type {
   CompositeArrayValue,
   CompositeObjectValue,
@@ -107,18 +109,10 @@ export function IterationVariablesField({
         <table className="w-full">
           <thead>
             <tr className="border-b">
-              <th className="p-2 text-left text-sm font-medium text-muted-foreground">
-                Name
-              </th>
-              <th className="p-2 text-left text-sm font-medium text-muted-foreground">
-                Value
-              </th>
-              <th className="w-28 p-2 text-left text-sm font-medium text-muted-foreground">
-                Type
-              </th>
-              <th className="w-16 p-2 text-center text-sm font-medium text-muted-foreground">
-                Actions
-              </th>
+              <EditorTh>Name</EditorTh>
+              <EditorTh>Value</EditorTh>
+              <EditorTh className="w-28">Type</EditorTh>
+              <EditorTh className="w-16 text-center">Actions</EditorTh>
             </tr>
           </thead>
           <tbody>
@@ -159,12 +153,12 @@ export function IterationVariablesField({
                       />
                       {form.getFieldState(`${path}.name`, form.formState).error
                         ?.message && (
-                        <p className="mt-1 text-xs text-destructive">
+                        <FieldError className="mt-1">
                           {
                             form.getFieldState(`${path}.name`, form.formState)
                               .error?.message
                           }
-                        </p>
+                        </FieldError>
                       )}
                     </td>
                     <td className="p-2">
@@ -284,16 +278,16 @@ export function IterationVariablesField({
                       )}
                       {form.getFieldState(`${path}.value`, form.formState).error
                         ?.message && (
-                        <p className="mt-1 text-xs text-destructive">
+                        <FieldError className="mt-1">
                           {
                             form.getFieldState(`${path}.value`, form.formState)
                               .error?.message
                           }
-                        </p>
+                        </FieldError>
                       )}
                       {form.getFieldState(`${path}.valueType`, form.formState)
                         .error?.message && (
-                        <p className="mt-1 text-xs text-destructive">
+                        <FieldError className="mt-1">
                           Unsupported value mode:{' '}
                           {
                             form.getFieldState(
@@ -301,7 +295,7 @@ export function IterationVariablesField({
                               form.formState
                             ).error?.message
                           }
-                        </p>
+                        </FieldError>
                       )}
                     </td>
                     <td className="p-2">

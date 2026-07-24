@@ -8,10 +8,13 @@ import {
   snapToGrid,
 } from '@/features/workflows/config/workflow-editor';
 
-export const BASE_WIDTH = 132;
-export const BASE_HEIGHT = 36;
-export const BASE_GROUP_WIDTH = 168;
-export const BASE_GROUP_HEIGHT = 132;
+// Derived from NODE_TYPE_SIZES — the single source of truth for node
+// dimensions (workflow.ts). Do not re-declare pixel literals here.
+export const BASE_WIDTH = NODE_TYPE_SIZES[NODE_TYPES.BasicNode].width;
+export const BASE_HEIGHT = NODE_TYPE_SIZES[NODE_TYPES.BasicNode].height;
+export const BASE_GROUP_WIDTH = NODE_TYPE_SIZES[NODE_TYPES.ContainerNode].width;
+export const BASE_GROUP_HEIGHT =
+  NODE_TYPE_SIZES[NODE_TYPES.ContainerNode].height;
 export const SWITCH_HANDLE_SPACING = 24;
 export const SWITCH_FIRST_HANDLE_TOP = 28;
 

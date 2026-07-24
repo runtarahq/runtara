@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect } from 'react';
-import { Send, Loader2 } from 'lucide-react';
+import { Send } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button';
 import { WaitingForInputData } from '@/features/workflows/types/chat';
 import {
@@ -13,6 +13,7 @@ import {
 } from '@/features/workflows/utils/form-schema-adapter';
 import { deliverSignal } from '@/features/workflows/queries';
 import { useChatStore } from '@/features/workflows/stores/chatStore';
+import { Spinner } from '@/shared/components/ui/spinner';
 
 interface ChatFormInputProps {
   waitingForInput: WaitingForInputData;
@@ -119,7 +120,7 @@ export function ChatFormInput({
   return (
     <div className="border-t bg-background px-4 py-3">
       {waitingForInput.message && (
-        <div className="mb-3 rounded-lg border border-amber-200/60 bg-amber-50 px-3 py-2 text-xs text-amber-700 dark:border-amber-700/40 dark:bg-amber-900/20 dark:text-amber-400">
+        <div className="mb-3 rounded-lg border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning">
           {waitingForInput.message}
         </div>
       )}
@@ -153,7 +154,7 @@ export function ChatFormInput({
         size="sm"
       >
         {isSubmitting ? (
-          <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+          <Spinner className="mr-2 h-4 w-4" />
         ) : (
           <Send className="mr-2 h-4 w-4" />
         )}

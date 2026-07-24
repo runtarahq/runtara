@@ -15,7 +15,9 @@ import {
 import { Button } from '@/shared/components/ui/button';
 import { Input } from '@/shared/components/ui/input';
 import { Label } from '@/shared/components/ui/label';
+import { FieldError } from '@/shared/components/ui/form';
 import { useCreateApiKey } from '../../hooks/useApiKeys';
+import { Alert, AlertDescription } from '@/shared/components/ui/alert';
 
 const schema = z.object({
   name: z.string().min(1, 'Name is required').max(100, 'Name is too long'),
@@ -74,13 +76,13 @@ export function CreateApiKeyDialog({ open, onClose }: CreateApiKeyDialogProps) {
               </DialogDescription>
             </DialogHeader>
             <div className="space-y-3">
-              <div className="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3">
-                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-500" />
-                <p className="text-sm text-amber-700 dark:text-amber-400">
+              <Alert variant="warning">
+                <AlertTriangle className="h-4 w-4" />
+                <AlertDescription>
                   This is the only time the full key will be displayed. Store it
                   securely.
-                </p>
-              </div>
+                </AlertDescription>
+              </Alert>
               <div className="flex items-center gap-2">
                 <code className="flex-1 break-all rounded-md bg-muted px-3 py-2 font-mono text-sm">
                   {createdKey}
@@ -120,9 +122,9 @@ export function CreateApiKeyDialog({ open, onClose }: CreateApiKeyDialogProps) {
                 className="mt-1.5"
               />
               {form.formState.errors.name && (
-                <p className="mt-1 text-sm text-destructive">
+                <FieldError className="mt-1">
                   {form.formState.errors.name.message}
-                </p>
+                </FieldError>
               )}
             </div>
             <DialogFooter>

@@ -1,5 +1,6 @@
 import { ReportBlockDefinition, ReportBlockResult } from '../../types';
 import { formatCellValue } from '../../utils';
+import { BlockFrame } from './BlockFrame';
 
 type MetricData = {
   value?: unknown;
@@ -47,7 +48,7 @@ export function MetricBlock({
       : null;
 
   return (
-    <div className="h-full rounded-lg border bg-card p-4 shadow-sm">
+    <BlockFrame className="h-full p-4">
       <p
         className="truncate text-sm font-medium text-muted-foreground"
         title={label}
@@ -61,7 +62,7 @@ export function MetricBlock({
       >
         {compact ?? full}
       </p>
-    </div>
+    </BlockFrame>
   );
 }
 

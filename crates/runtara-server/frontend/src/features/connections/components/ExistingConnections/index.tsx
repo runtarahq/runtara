@@ -1,11 +1,10 @@
 import { ReactNode, useState } from 'react';
 import { Link } from 'react-router';
 import { toast } from 'sonner';
-import { Activity, Pencil, Trash2, Loader2, RefreshCw } from 'lucide-react';
+import { Activity, Pencil, Trash2, RefreshCw } from 'lucide-react';
 import { queryClient } from '@/main';
 import { useCustomMutation, useCustomQuery } from '@/shared/hooks/api';
 import { queryKeys } from '@/shared/queries/query-keys';
-import { Icons } from '@/shared/components/icons.tsx';
 import { Button } from '@/shared/components/ui/button';
 import { Can } from '@/shared/components/Can';
 import {
@@ -17,8 +16,11 @@ import {
   TableRow,
 } from '@/shared/components/ui/table';
 import {
+  ConsoleEmptyState,
+  ConsoleErrorState,
   ConsoleTableShell,
   StatusPill,
+  TableSkeletonRows,
   TableStatusFooter,
 } from '@/shared/components/console';
 import { ModalDialog } from '@/shared/components/next-dialog';
@@ -36,6 +38,7 @@ import {
 } from '@/features/connections/queries';
 import { useConnectionOAuth } from '@/features/connections/hooks/useConnectionOAuth';
 import { connectionStatusPill } from '@/features/connections/utils/status';
+import { Spinner } from '@/shared/components/ui/spinner';
 
 function formatNumber(num: number): string {
   if (num >= 1000000) {
@@ -115,56 +118,16 @@ export function ExistingConnections({ toolbar }: ExistingConnectionsProps) {
   let body: ReactNode;
   if (isFetching) {
     body = (
-      <div className="divide-y divide-border/50">
-        {[...Array(8)].map((_, i) => (
-          <div key={i} className="flex items-center gap-4 px-5 py-3.5">
-            <div className="h-4 w-40 animate-pulse rounded bg-muted/60" />
-            <div className="h-4 w-24 animate-pulse rounded bg-muted/60" />
-            <div className="ml-auto h-4 w-32 animate-pulse rounded bg-muted/60" />
-          </div>
-        ))}
-      </div>
+      <TableSkeletonRows rows={8} widths={['w-40', 'w-24', 'ml-auto w-32']} />
     );
   } else if (isError) {
-    const err = error as any;
-    const isNetworkError =
-      err?.message?.includes('fetch') ||
-      err?.code === 'ERR_NETWORK' ||
-      !err?.response;
-
-    body = (
-      <div className="flex h-full flex-col items-center justify-center px-6 py-10 text-center">
-        <Icons.warning className="mb-4 h-10 w-10 text-destructive" />
-        <p className="text-base font-semibold text-foreground">
-          {isNetworkError
-            ? 'Unable to connect to backend'
-            : 'An error occurred'}
-        </p>
-        <p className="mt-1 text-sm text-muted-foreground">
-          {isNetworkError
-            ? 'Please check that the backend service is running and try again.'
-            : 'There was a problem loading connections. Please try again.'}
-        </p>
-        {import.meta.env.DEV && error && (
-          <div className="mt-4 max-w-md rounded-lg bg-destructive/10 p-3 text-left">
-            <p className="break-words font-mono text-xs text-destructive">
-              {error.message || 'Unknown error'}
-            </p>
-          </div>
-        )}
-      </div>
-    );
+    body = <ConsoleErrorState error={error} entityLabel="connections" />;
   } else if (!hasConnections) {
     body = (
-      <div className="flex h-full flex-col items-center justify-center px-6 py-10 text-center">
-        <Icons.inbox className="mb-4 h-10 w-10 text-muted-foreground" />
-        <p className="text-base font-semibold text-foreground">
-          No connections configured
-        </p>
-        <p className="mt-1 text-sm text-muted-foreground">
-          Add a connection using the New connection button above.
-        </p>
-      </div>
+      <ConsoleEmptyState
+        title="No connections configured"
+        description="Add a connection using the New connection button above."
+      />
     );
   } else {
     body = (
@@ -202,14 +165,14 @@ export function ExistingConnections({ toolbar }: ExistingConnectionsProps) {
                         <Can permission="connection:update">
                           <Button
                             variant="ghost"
-                            size="icon"
-                            className="h-7 w-7 text-amber-600 hover:text-amber-700 dark:text-amber-500"
+                            size="icon-sm"
+                            className="text-amber-600 hover:text-amber-700 dark:text-amber-500"
                             title="Reconnect (re-authorize with saved credentials)"
                             disabled={isAuthorizing(connection.id)}
                             onClick={() => authorize(connection.id)}
                           >
                             {isAuthorizing(connection.id) ? (
-                              <Loader2 className="h-4 w-4 animate-spin" />
+                              <Spinner className="h-4 w-4" />
                             ) : (
                               <RefreshCw className="h-4 w-4" />
                             )}
@@ -220,8 +183,8 @@ export function ExistingConnections({ toolbar }: ExistingConnectionsProps) {
                       <Link to={`/connections/${connection.id}`}>
                         <Button
                           variant="ghost"
-                          size="icon"
-                          className="h-7 w-7 text-muted-foreground"
+                          size="icon-sm"
+                          className="text-muted-foreground"
                           title="Edit connection"
                         >
                           <Pencil className="h-4 w-4" />
@@ -231,14 +194,14 @@ export function ExistingConnections({ toolbar }: ExistingConnectionsProps) {
                     <Can permission="connection:delete">
                       <Button
                         variant="ghost"
-                        size="icon"
-                        className="h-7 w-7 text-muted-foreground hover:text-destructive"
+                        size="icon-sm"
+                        className="text-muted-foreground hover:text-destructive"
                         title="Delete connection"
                         disabled={deletingId === connection.id}
                         onClick={() => setDeleteTarget(connection)}
                       >
                         {deletingId === connection.id ? (
-                          <Loader2 className="h-4 w-4 animate-spin" />
+                          <Spinner className="h-4 w-4" />
                         ) : (
                           <Trash2 className="h-4 w-4" />
                         )}

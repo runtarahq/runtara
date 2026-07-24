@@ -7,6 +7,7 @@ import React, { useState, useEffect } from 'react';
 import { Icons } from '@/shared/components/icons';
 import { Button } from '@/shared/components/ui/button';
 import { Input } from '@/shared/components/ui/input';
+import { FieldError } from '@/shared/components/ui/form';
 import { TableCell, TableRow } from '@/shared/components/ui/table';
 import {
   DropdownMenu,
@@ -189,9 +190,7 @@ export function CustomFieldRow({
               autoFocus
               className="h-7 text-sm"
             />
-            {nameError && (
-              <p className="mt-1 text-xs text-destructive">{nameError}</p>
-            )}
+            {nameError && <FieldError className="mt-1">{nameError}</FieldError>}
           </div>
         ) : (
           <button
@@ -238,8 +237,8 @@ export function CustomFieldRow({
         <Button
           type="button"
           variant="ghost"
-          size="icon"
-          className="h-7 w-7 text-muted-foreground hover:text-destructive"
+          size="icon-sm"
+          className="text-muted-foreground hover:text-destructive"
           onClick={onRemove}
           title="Remove custom field"
         >

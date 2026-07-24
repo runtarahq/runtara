@@ -1,5 +1,6 @@
 import { Schema } from '@/generated/RuntaraRuntimeApi';
 import { Label } from '@/shared/components/ui/label';
+import { NativeSelect } from '@/shared/components/ui/native-select';
 import { useEffect, useMemo, useState } from 'react';
 import { ReportBlockResult, ReportDefinition } from '../../types';
 import { FiltersEditorV2 } from './FiltersEditorV2';
@@ -94,11 +95,10 @@ export function ReportBuilderWizardV2({
             <Label htmlFor="report-layout-target" className="text-xs">
               Layout to edit
             </Label>
-            <select
+            <NativeSelect
               id="report-layout-target"
               value={layoutViewId ?? ''}
               onChange={(event) => setLayoutViewId(event.target.value || null)}
-              className="h-9 rounded-md border border-input bg-background px-3 text-sm"
             >
               <option value="">Main report</option>
               {(definition.views ?? []).map((view) => (
@@ -106,7 +106,7 @@ export function ReportBuilderWizardV2({
                   {view.title || view.id}
                 </option>
               ))}
-            </select>
+            </NativeSelect>
           </div>
         ) : null}
         <GridContainer

@@ -2,7 +2,7 @@ import { useCallback, useMemo, useState, memo, useRef, useEffect } from 'react';
 import { RowSelectionState, SortingState } from '@tanstack/react-table';
 import { Button } from '@/shared/components/ui/button';
 import { Can } from '@/shared/components/Can';
-import { Download, Loader2, Pencil, Plus, Trash2, Upload } from 'lucide-react';
+import { Download, Pencil, Plus, Trash2, Upload } from 'lucide-react';
 import { DataTable } from '@/shared/components/table';
 import {
   Breadcrumb,
@@ -46,6 +46,7 @@ import { BulkEditDialog } from './BulkEditDialog';
 import { BulkInsertDialog } from './BulkInsertDialog';
 import { toast } from 'sonner';
 import { Alert, AlertDescription } from '@/shared/components/ui/alert';
+import { Spinner } from '@/shared/components/ui/spinner';
 
 const AddRowButton = memo(({ onClick }: { onClick: () => void }) => {
   const [isHovering, setIsHovering] = useState(false);
@@ -631,7 +632,7 @@ export function ObjectInstanceDtosTable({
                         disabled={exportCsvMutation.isPending}
                       >
                         {exportCsvMutation.isPending ? (
-                          <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                          <Spinner className="mr-2 h-4 w-4" />
                         ) : (
                           <Download className="mr-2 h-4 w-4" />
                         )}
@@ -715,16 +716,6 @@ export function ObjectInstanceDtosTable({
           />
         }
       >
-        <style>{`
-          @keyframes row-flash-success {
-            0% { background-color: rgba(34, 197, 94, 0); }
-            50% { background-color: rgba(34, 197, 94, 0.2); }
-            100% { background-color: rgba(34, 197, 94, 0); }
-          }
-          .row-animating {
-            animation: row-flash-success 1s ease-in-out;
-          }
-        `}</style>
         <DataTable
           columns={columns}
           data={records}
@@ -747,7 +738,7 @@ export function ObjectInstanceDtosTable({
           onRowSelectionChange={setRowSelection}
           getRowId={(row) => row.id || ''}
           getRowClassName={(row) =>
-            row.original.id === animatingRowId ? 'row-animating' : ''
+            row.original.id === animatingRowId ? 'animate-row-flash' : ''
           }
           beforePaginationSlot={
             <Can permission="database:create">

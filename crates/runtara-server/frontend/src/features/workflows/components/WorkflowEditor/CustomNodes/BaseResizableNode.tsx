@@ -3,6 +3,10 @@ import { forwardRef, useCallback } from 'react';
 
 import { BaseNode } from '../BaseNode';
 import { SNAP_GRID_SIZE } from '@/features/workflows/config/workflow-editor';
+import {
+  NODE_TYPE_SIZES,
+  NODE_TYPES,
+} from '@/features/workflows/config/workflow.ts';
 
 const snapToGrid = (value: number) =>
   Math.round(value / SNAP_GRID_SIZE) * SNAP_GRID_SIZE;
@@ -74,8 +78,8 @@ export const BaseResizableNode = forwardRef<
         onResizeStart={onResizeStart}
         onResize={handleResize}
         onResizeEnd={onResizeEnd}
-        minWidth={SNAP_GRID_SIZE * 4}
-        minHeight={SNAP_GRID_SIZE * 4}
+        minWidth={NODE_TYPE_SIZES[NODE_TYPES.ContainerNode].width}
+        minHeight={NODE_TYPE_SIZES[NODE_TYPES.ContainerNode].height}
       />
       {children}
     </BaseNode>

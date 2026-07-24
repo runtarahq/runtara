@@ -25,9 +25,7 @@ export const ButtonHandle = ({
         <div
           className={`absolute flex items-center ${wrapperClassName} pointer-events-none`}
         >
-          <div
-            className={`bg-border ${vertical ? 'h-2 w-[1px]' : 'h-[1px] w-2'}`}
-          />
+          <div className={`bg-border ${vertical ? 'h-2 w-px' : 'h-px w-2'}`} />
           <div className="nodrag nopan pointer-events-auto flex">
             {children}
           </div>

@@ -11,14 +11,16 @@ import {
 } from '@/shared/components/ui/table';
 import {
   Breadcrumb,
+  ConsoleEmptyState,
+  ConsoleErrorState,
   ConsoleTableShell,
   ConsoleToolbar,
   StatusPill,
+  TableSkeletonRows,
   TableStatusFooter,
   type BreadcrumbItem,
 } from '@/shared/components/console';
 import { usePageTitle } from '@/shared/hooks/usePageTitle';
-import { Icons } from '@/shared/components/icons';
 import { useApiKeys } from '../../hooks/useApiKeys';
 import { CreateApiKeyDialog } from '../../components/CreateApiKeyDialog';
 import { RevokeApiKeyDialog } from '../../components/RevokeApiKeyDialog';
@@ -41,12 +43,6 @@ export function Settings() {
   const [revokeTarget, setRevokeTarget] = useState<ApiKey | null>(null);
 
   usePageTitle('Settings');
-
-  const err = error as any;
-  const isNetworkError =
-    err?.message?.includes('fetch') ||
-    err?.code === 'ERR_NETWORK' ||
-    !err?.response;
 
   const activeKeys = apiKeys?.filter((k) => !k.is_revoked) ?? [];
   const revokedKeys = apiKeys?.filter((k) => k.is_revoked) ?? [];
@@ -74,48 +70,24 @@ export function Settings() {
   const renderBody = () => {
     if (isFetching) {
       return (
-        <div className="divide-y divide-border/50">
-          {[...Array(4)].map((_, i) => (
-            <div key={i} className="flex items-center gap-4 px-5 py-3.5">
-              <div className="h-4 w-40 animate-pulse rounded bg-muted/60" />
-              <div className="h-4 w-16 animate-pulse rounded bg-muted/60" />
-              <div className="h-4 w-28 animate-pulse rounded bg-muted/60" />
-              <div className="ml-auto h-4 w-20 animate-pulse rounded bg-muted/60" />
-            </div>
-          ))}
-        </div>
+        <TableSkeletonRows
+          rows={4}
+          widths={['w-40', 'w-16', 'w-28', 'ml-auto w-20']}
+        />
       );
     }
 
     if (isError) {
-      return (
-        <div className="flex h-full flex-col items-center justify-center px-6 py-10 text-center">
-          <Icons.warning className="mb-4 h-10 w-10 text-destructive" />
-          <p className="text-base font-semibold text-foreground">
-            {isNetworkError
-              ? 'Unable to connect to backend'
-              : 'An error occurred'}
-          </p>
-          <p className="mt-1 text-sm text-muted-foreground">
-            {isNetworkError
-              ? 'Please check that the backend service is running and try again.'
-              : 'There was a problem loading API keys. Please try again.'}
-          </p>
-        </div>
-      );
+      return <ConsoleErrorState error={error} entityLabel="API keys" />;
     }
 
     if (!hasContent) {
       return (
-        <div className="flex h-full flex-col items-center justify-center px-6 py-10 text-center">
-          <Key className="mb-4 h-10 w-10 text-muted-foreground" />
-          <p className="text-base font-semibold text-foreground">
-            No API keys yet
-          </p>
-          <p className="mt-1 text-sm text-muted-foreground">
-            Create an API key to connect MCP clients or external integrations.
-          </p>
-        </div>
+        <ConsoleEmptyState
+          icon={<Key className="mb-4 h-10 w-10 text-muted-foreground" />}
+          title="No API keys yet"
+          description="Create an API key to connect MCP clients or external integrations."
+        />
       );
     }
 
@@ -159,8 +131,8 @@ export function Settings() {
                       always available on the keys shown — not role-gated. */}
                   <Button
                     variant="ghost"
-                    size="icon"
-                    className="h-7 w-7 text-muted-foreground hover:text-destructive"
+                    size="icon-sm"
+                    className="text-muted-foreground hover:text-destructive"
                     title="Revoke API key"
                     onClick={() => setRevokeTarget(key)}
                   >

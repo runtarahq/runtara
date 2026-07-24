@@ -4,6 +4,8 @@ import { useCustomMutation, useCustomQuery } from '@/shared/hooks/api';
 import { queryKeys } from '@/shared/queries/query-keys';
 import { WorkflowDto } from '@/generated/RuntaraRuntimeApi';
 import { Loader } from '@/shared/components/loader.tsx';
+import { PageContainer } from '@/shared/components/page-container';
+import { SectionLabel } from '@/shared/components/section-label';
 import { TriggerForm } from '@/features/triggers/components/TriggerForm';
 import { scheduleToCron } from '@/features/triggers/utils/cron';
 import {
@@ -105,12 +107,10 @@ export function CreateTrigger() {
   }
 
   return (
-    <div className="w-full px-4 py-6 sm:px-6 lg:px-10">
+    <PageContainer>
       <div className="mx-auto flex w-full max-w-5xl flex-col gap-6">
         <section className="space-y-3 px-4 sm:px-5">
-          <p className="text-xs font-semibold uppercase tracking-[0.08em] text-muted-foreground">
-            Invocation triggers
-          </p>
+          <SectionLabel>Invocation triggers</SectionLabel>
           <div className="space-y-2">
             <h1 className="text-3xl font-semibold leading-tight text-foreground">
               Create trigger
@@ -138,6 +138,6 @@ export function CreateTrigger() {
           />
         </section>
       </div>
-    </div>
+    </PageContainer>
   );
 }

@@ -1,6 +1,6 @@
 import { type ComponentProps, useState } from 'react';
 import { useNavigate } from 'react-router';
-import { Loader2, Trash2 } from 'lucide-react';
+import { Trash2 } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button';
 import { ModalDialog } from '@/shared/components/next-dialog';
 import {
@@ -11,6 +11,7 @@ import {
   DialogTitle,
 } from '@/shared/components/ui/dialog';
 import { useDeleteReport } from '../hooks/useReports';
+import { Spinner } from '@/shared/components/ui/spinner';
 
 type ReportDeleteButtonProps = {
   reportId: string;
@@ -60,7 +61,7 @@ export function ReportDeleteButton({
         title={iconOnly ? `Delete ${reportName}` : undefined}
       >
         {deleteReport.isPending ? (
-          <Loader2
+          <Spinner
             className={
               iconOnly ? 'h-4 w-4 animate-spin' : 'mr-2 h-4 w-4 animate-spin'
             }

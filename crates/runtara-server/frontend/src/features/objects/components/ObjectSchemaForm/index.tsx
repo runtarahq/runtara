@@ -21,6 +21,7 @@ import {
   ObjectSchemaFieldsTable,
   FieldDefinition,
 } from './ObjectSchemaFieldsTable';
+import { ConfirmationDialog } from '@/shared/components/confirmation-dialog.tsx';
 
 const generateFieldId = () =>
   `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
@@ -195,6 +196,10 @@ export function ObjectSchemaDtoForm({
   );
   const [errors, setErrors] = useState<FormErrors>({});
   const [touched, setTouched] = useState<Record<string, boolean>>({});
+  // Column names whose deletion awaits user confirmation in the dialog.
+  const [pendingDroppedColumns, setPendingDroppedColumns] = useState<
+    string[] | null
+  >(null);
 
   // Capture each existing column's original name keyed by the field's stable
   // client-side `__id`, so we can tell a rename (same field, changed name) from
@@ -314,24 +319,7 @@ export function ObjectSchemaDtoForm({
     return Object.values(formErrors).some((error) => error !== undefined);
   };
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-
-    if (!connectionId) {
-      toast.error('Select a database connection first');
-      return;
-    }
-
-    // Mark all fields as touched on submit
-    setTouched({ name: true, tableName: true, fields: true });
-
-    const formErrors = validateForm();
-    setErrors(formErrors);
-
-    if (hasErrors(formErrors)) {
-      return;
-    }
-
+  const performSubmit = async (allowDestructive: boolean) => {
     const columns = convertFieldsToColumns(fields);
 
     try {
@@ -347,25 +335,6 @@ export function ObjectSchemaDtoForm({
             return from && from !== f.name.trim();
           })
           .map((f) => ({ from: originalNames[f.__id], to: f.name.trim() }));
-
-        // A column whose field is gone (removed, or its name cleared) is a real
-        // drop that destroys data — confirm before acknowledging it.
-        const currentIds = new Set(namedFields.map((f) => f.__id));
-        const droppedColumns = Object.entries(originalNames)
-          .filter(([id]) => !currentIds.has(id))
-          .map(([, colName]) => colName);
-
-        let allowDestructive = false;
-        if (droppedColumns.length > 0) {
-          const confirmed = window.confirm(
-            `This will permanently delete the following column(s) and all their ` +
-              `data:\n\n  ${droppedColumns.join(', ')}\n\nThis cannot be undone. Continue?`
-          );
-          if (!confirmed) {
-            return;
-          }
-          allowDestructive = true;
-        }
 
         const updateRequest: UpdateSchemaRequest = {
           name,
@@ -403,6 +372,44 @@ export function ObjectSchemaDtoForm({
     } catch {
       // Error toast is handled by useCustomMutation's onError
     }
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+
+    if (!connectionId) {
+      toast.error('Select a database connection first');
+      return;
+    }
+
+    // Mark all fields as touched on submit
+    setTouched({ name: true, tableName: true, fields: true });
+
+    const formErrors = validateForm();
+    setErrors(formErrors);
+
+    if (hasErrors(formErrors)) {
+      return;
+    }
+
+    if (isEditing && objectSchemaDto?.id) {
+      // A column whose field is gone (removed, or its name cleared) is a real
+      // drop that destroys data — confirm before acknowledging it.
+      const originalNames = originalNamesByIdRef.current ?? {};
+      const currentIds = new Set(
+        fields.filter((f) => f.name.trim()).map((f) => f.__id)
+      );
+      const droppedColumns = Object.entries(originalNames)
+        .filter(([id]) => !currentIds.has(id))
+        .map(([, colName]) => colName);
+
+      if (droppedColumns.length > 0) {
+        setPendingDroppedColumns(droppedColumns);
+        return;
+      }
+    }
+
+    await performSubmit(false);
   };
 
   const isPending =
@@ -584,6 +591,15 @@ export function ObjectSchemaDtoForm({
           )}
         </div>
       </ObjectSchemaFormLayout>
+      <ConfirmationDialog
+        open={pendingDroppedColumns !== null}
+        description={`This will permanently delete the following column(s) and all their data:\n\n  ${(pendingDroppedColumns ?? []).join(', ')}\n\nThis cannot be undone. Continue?`}
+        onClose={() => setPendingDroppedColumns(null)}
+        onConfirm={() => {
+          setPendingDroppedColumns(null);
+          void performSubmit(true);
+        }}
+      />
     </form>
   );
 }

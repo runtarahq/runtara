@@ -1,5 +1,5 @@
 import { useNavigate, useParams } from 'react-router';
-import { AlertCircle, Loader2 } from 'lucide-react';
+import { AlertCircle } from 'lucide-react';
 import {
   Alert,
   AlertDescription,
@@ -10,6 +10,9 @@ import { useObjectSchemaDto } from '@/features/objects/hooks/useObjectSchema';
 import { usePageTitle } from '@/shared/hooks/usePageTitle';
 import { ObjectModelConnectionSelector } from '@/features/objects/components/ObjectModelConnectionSelector';
 import { useObjectModelConnectionSelection } from '@/features/objects/hooks/useObjectModelConnectionSelection';
+import { Spinner } from '@/shared/components/ui/spinner';
+import { PageContainer } from '@/shared/components/page-container';
+import { SectionLabel } from '@/shared/components/section-label';
 
 export function CreateObjectInstance() {
   const { typeName } = useParams<{ typeName: string }>();
@@ -33,13 +36,11 @@ export function CreateObjectInstance() {
   };
 
   return (
-    <div className="w-full px-4 py-6 sm:px-6 lg:px-10">
+    <PageContainer>
       <div className="mx-auto flex w-full max-w-5xl flex-col gap-6">
         <section className="rounded-lg bg-transparent px-4 py-4 sm:px-5">
           <div className="space-y-2">
-            <p className="text-xs font-semibold uppercase tracking-[0.08em] text-muted-foreground">
-              Objects
-            </p>
+            <SectionLabel>Objects</SectionLabel>
             <h1 className="text-3xl font-semibold leading-tight text-foreground">
               Create {objectSchemaDto?.name ?? typeName} record
             </h1>
@@ -52,7 +53,7 @@ export function CreateObjectInstance() {
 
         {isLoading ? (
           <div className="flex min-h-[40vh] items-center justify-center px-4 text-muted-foreground sm:px-5">
-            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+            <Spinner className="mr-2 h-4 w-4" />
             Loading type details...
           </div>
         ) : !objectSchemaDto ? (
@@ -76,6 +77,6 @@ export function CreateObjectInstance() {
           </section>
         )}
       </div>
-    </div>
+    </PageContainer>
   );
 }

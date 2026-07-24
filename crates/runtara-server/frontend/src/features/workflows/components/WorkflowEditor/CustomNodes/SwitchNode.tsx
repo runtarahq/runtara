@@ -16,6 +16,10 @@ import {
   snapPositionToGrid,
   snapToGrid,
 } from '@/features/workflows/config/workflow-editor';
+import {
+  NODE_TYPE_SIZES,
+  NODE_TYPES,
+} from '@/features/workflows/config/workflow.ts';
 import { NodeFormProvider } from '../NodeForm/NodeFormProvider';
 import { StepPickerModal, StepPickerResult } from '../NodeForm/StepPickerModal';
 import { SWITCH_FIRST_HANDLE_TOP, SWITCH_HANDLE_SPACING } from './layout';
@@ -317,7 +321,10 @@ function SwitchNodeComponent({
         isExecutionReadOnly={isExecuting}
         breakpoint={!!(data as any).breakpoint}
         onToggleBreakpoint={handleToggleBreakpoint}
-        style={{ height: `${requiredHeight}px` }}
+        style={{
+          width: NODE_TYPE_SIZES[NODE_TYPES.SwitchNode].width,
+          height: requiredHeight,
+        }}
         rightReservedWidth={isRoutingMode ? 75 : undefined}
       >
         {isRoutingMode ? (
@@ -348,7 +355,7 @@ function SwitchNodeComponent({
                         zIndex: -1,
                       }}
                     >
-                      <div className="ml-1 h-[1px] w-6 bg-border" />
+                      <div className="ml-1 h-px w-6 bg-border" />
                       <Button
                         className="nodrag nopan pointer-events-auto h-4 w-4 rounded-full shadow-sm [&_svg]:size-2"
                         variant="outline"
@@ -365,7 +372,7 @@ function SwitchNodeComponent({
                   )}
                   {/* Case label */}
                   <div
-                    className="pointer-events-none absolute whitespace-nowrap text-[0.65rem] text-muted-foreground"
+                    className="pointer-events-none absolute whitespace-nowrap text-3xs text-muted-foreground"
                     style={{
                       right: '12px',
                       top: `${topPosition}px`,
@@ -398,7 +405,7 @@ function SwitchNodeComponent({
                   transform: 'translateY(-50%)',
                 }}
               >
-                <div className="ml-1 h-[1px] w-6 bg-border" />
+                <div className="ml-1 h-px w-6 bg-border" />
                 <Button
                   className="nodrag nopan pointer-events-auto h-4 w-4 rounded-full shadow-sm [&_svg]:size-2"
                   variant="outline"
@@ -415,7 +422,7 @@ function SwitchNodeComponent({
             )}
             {/* Default label */}
             <div
-              className="pointer-events-none absolute whitespace-nowrap text-[0.65rem] text-muted-foreground"
+              className="pointer-events-none absolute whitespace-nowrap text-3xs text-muted-foreground"
               style={{
                 right: '12px',
                 top: `${firstHandleTop + cases.length * handleSpacing}px`,

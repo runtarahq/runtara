@@ -19,6 +19,7 @@ import { Input } from '@/shared/components/ui/input';
 import { NodeFormContext } from './NodeFormContext';
 import { ValueMode } from './InputMappingField/MappingValueInput';
 import { MappingObjectField } from './InputMappingField/MappingObjectField';
+import { FieldError } from '@/shared/components/ui/form';
 
 type ErrorStepFieldProps = {
   name: string;
@@ -292,9 +293,5 @@ function ErrorFieldMessage({
     (typeof entry.value === 'string' && entry.value.trim() === '');
 
   if (!isEmpty) return null;
-  return (
-    <p className="text-[0.8rem] font-medium text-destructive">
-      {label} is required.
-    </p>
-  );
+  return <FieldError>{label} is required.</FieldError>;
 }

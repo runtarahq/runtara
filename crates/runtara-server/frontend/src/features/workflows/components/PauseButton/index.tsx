@@ -1,10 +1,11 @@
 import { useState } from 'react';
-import { Loader2, Pause } from 'lucide-react';
+import { Pause } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button.tsx';
 import { pauseInstance } from '@/features/workflows/queries';
 import { toast } from 'sonner';
 import { useToken } from '@/shared/hooks';
 import { ModalDialog } from '@/shared/components/next-dialog';
+import { Spinner } from '@/shared/components/ui/spinner';
 import {
   DialogClose,
   DialogDescription,
@@ -68,7 +69,7 @@ export function PauseButton(props: Props) {
         title="Pause"
       >
         {isLoading ? (
-          <Loader2 size={16} className={size === 'icon' ? '' : 'mr-2'} />
+          <Spinner className={size === 'icon' ? undefined : 'mr-2'} />
         ) : (
           <Pause size={16} className={size === 'icon' ? '' : 'mr-2'} />
         )}

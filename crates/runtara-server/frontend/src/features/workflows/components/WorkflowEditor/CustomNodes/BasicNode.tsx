@@ -18,6 +18,7 @@ import {
   NODE_TYPE_SIZES,
 } from '@/features/workflows/config/workflow.ts';
 
+const BASIC_NODE_WIDTH = NODE_TYPE_SIZES[NODE_TYPES.BasicNode].width;
 const BASIC_NODE_HEIGHT = NODE_TYPE_SIZES[NODE_TYPES.BasicNode].height;
 import { useExecutionStore } from '@/features/workflows/stores/executionStore';
 import { NodeFormProvider } from '../NodeForm/NodeFormProvider';
@@ -401,7 +402,7 @@ function BasicNodeComponent({
         isExecutionReadOnly={isExecuting}
         breakpoint={!!(data as any).breakpoint}
         onToggleBreakpoint={isStartStep ? undefined : handleToggleBreakpoint}
-        style={{ height: `${BASIC_NODE_HEIGHT}px` }}
+        style={{ width: BASIC_NODE_WIDTH, height: BASIC_NODE_HEIGHT }}
       >
         {/* Only show source handle for non-Finish steps */}
         {!isFinishStep && (

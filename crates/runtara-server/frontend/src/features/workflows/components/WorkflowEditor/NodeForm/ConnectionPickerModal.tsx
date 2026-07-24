@@ -8,6 +8,7 @@ import {
   DialogDescription,
 } from '@/shared/components/ui/dialog';
 import { Input } from '@/shared/components/ui/input';
+import { PickerEmpty } from '@/shared/components/picker-item';
 import { getPlatformIcon, getPlatformName } from '@/shared/utils/platform-info';
 import { ConnectionDto } from '@/generated/RuntaraRuntimeApi';
 
@@ -104,10 +105,10 @@ export function ConnectionPickerModal({
           {/* Connection list */}
           <div className="max-h-[300px] space-y-1 overflow-y-auto">
             {filteredOptions.length === 0 ? (
-              <div className="py-8 text-center text-muted-foreground">
+              <PickerEmpty>
                 <Inbox className="mx-auto mb-2 h-8 w-8 opacity-50" />
                 <p>No connections found</p>
-              </div>
+              </PickerEmpty>
             ) : (
               filteredOptions.map((option) => {
                 const isSelected = currentConnectionId

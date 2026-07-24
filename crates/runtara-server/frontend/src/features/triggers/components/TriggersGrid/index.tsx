@@ -1,7 +1,7 @@
 import { ReactNode, useState } from 'react';
 import { Link } from 'react-router';
 import { toast } from 'sonner';
-import { Pencil, Trash2, Loader2, Copy } from 'lucide-react';
+import { Pencil, Trash2, Copy } from 'lucide-react';
 import { EnrichedTrigger, TriggerType } from '@/features/triggers/types';
 import { useCustomMutation } from '@/shared/hooks/api';
 import { queryKeys } from '@/shared/queries/query-keys.ts';
@@ -13,7 +13,6 @@ import {
   getEmailTriggerAddress,
   getChannelWebhookUrl,
 } from '@/features/triggers/utils/endpoints';
-import { Icons } from '@/shared/components/icons.tsx';
 import { Badge } from '@/shared/components/ui/badge';
 import { Button } from '@/shared/components/ui/button';
 import { Can } from '@/shared/components/Can';
@@ -26,8 +25,11 @@ import {
   TableRow,
 } from '@/shared/components/ui/table';
 import {
+  ConsoleEmptyState,
+  ConsoleErrorState,
   ConsoleTableShell,
   StatusPill,
+  TableSkeletonRows,
   TableStatusFooter,
 } from '@/shared/components/console';
 import {
@@ -37,6 +39,7 @@ import {
   TooltipTrigger,
 } from '@/shared/components/ui/tooltip';
 import { ModalDialog } from '@/shared/components/next-dialog';
+import { Spinner } from '@/shared/components/ui/spinner';
 import {
   DialogClose,
   DialogDescription,
@@ -150,56 +153,19 @@ export function TriggersGrid({
   let body: ReactNode;
   if (isFetching) {
     body = (
-      <div className="divide-y divide-border/50">
-        {[...Array(8)].map((_, i) => (
-          <div key={i} className="flex items-center gap-4 px-5 py-3.5">
-            <div className="h-4 w-40 animate-pulse rounded bg-muted/60" />
-            <div className="h-4 w-16 animate-pulse rounded bg-muted/60" />
-            <div className="h-4 w-16 animate-pulse rounded bg-muted/60" />
-            <div className="ml-auto h-4 w-48 animate-pulse rounded bg-muted/60" />
-          </div>
-        ))}
-      </div>
+      <TableSkeletonRows
+        rows={8}
+        widths={['w-40', 'w-16', 'w-16', 'ml-auto w-48']}
+      />
     );
   } else if (isError) {
-    const err = error as any;
-    const isNetworkError =
-      err?.message?.includes('fetch') ||
-      err?.code === 'ERR_NETWORK' ||
-      !err?.response;
-    body = (
-      <div className="flex h-full flex-col items-center justify-center px-6 py-10 text-center">
-        <Icons.warning className="mb-4 h-10 w-10 text-destructive" />
-        <p className="text-base font-semibold text-foreground">
-          {isNetworkError
-            ? 'Unable to connect to backend'
-            : 'An error occurred'}
-        </p>
-        <p className="mt-1 text-sm text-muted-foreground">
-          {isNetworkError
-            ? 'Please check that the backend service is running and try again.'
-            : 'There was a problem loading triggers. Please try again.'}
-        </p>
-        {import.meta.env.DEV && err && (
-          <div className="mt-4 max-w-md rounded-lg bg-destructive/10 p-3 text-left">
-            <p className="break-words font-mono text-xs text-destructive">
-              {err.message || 'Unknown error'}
-            </p>
-          </div>
-        )}
-      </div>
-    );
+    body = <ConsoleErrorState error={error} entityLabel="triggers" />;
   } else if (!hasContent) {
     body = (
-      <div className="flex h-full flex-col items-center justify-center px-6 py-10 text-center">
-        <Icons.inbox className="mb-4 h-10 w-10 text-muted-foreground" />
-        <p className="text-base font-semibold text-foreground">
-          No triggers yet
-        </p>
-        <p className="mt-1 text-sm text-muted-foreground">
-          Create your first trigger to connect external events.
-        </p>
-      </div>
+      <ConsoleEmptyState
+        title="No triggers yet"
+        description="Create your first trigger to connect external events."
+      />
     );
   } else {
     body = (
@@ -306,8 +272,8 @@ export function TriggersGrid({
                         <Link to={`/invocation-triggers/${trigger.id}`}>
                           <Button
                             variant="ghost"
-                            size="icon"
-                            className="h-7 w-7 text-muted-foreground"
+                            size="icon-sm"
+                            className="text-muted-foreground"
                             title="Edit trigger"
                           >
                             <Pencil className="h-4 w-4" />
@@ -317,14 +283,14 @@ export function TriggersGrid({
                       <Can permission="trigger:delete">
                         <Button
                           variant="ghost"
-                          size="icon"
-                          className="h-7 w-7 text-muted-foreground hover:text-destructive"
+                          size="icon-sm"
+                          className="text-muted-foreground hover:text-destructive"
                           title="Delete trigger"
                           disabled={deletingId === trigger.id}
                           onClick={() => setDeleteTarget(trigger)}
                         >
                           {deletingId === trigger.id ? (
-                            <Loader2 className="h-4 w-4 animate-spin" />
+                            <Spinner className="h-4 w-4" />
                           ) : (
                             <Trash2 className="h-4 w-4" />
                           )}

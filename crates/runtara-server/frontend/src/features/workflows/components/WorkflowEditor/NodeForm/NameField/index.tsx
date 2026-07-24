@@ -2,6 +2,7 @@ import { useContext, useMemo, useState } from 'react';
 import { useFormContext, useWatch, FieldValues } from 'react-hook-form';
 import { Check, Pencil, X } from 'lucide-react';
 import {
+  FieldError,
   FormControl,
   FormField as FormFieldUI,
   FormItem,
@@ -143,7 +144,7 @@ function StepIdRow({ stepId }: { stepId: string }) {
         </button>
       </div>
       {error ? (
-        <p className="text-xs text-destructive">{error}</p>
+        <FieldError>{error}</FieldError>
       ) : (
         <p className="text-xs text-muted-foreground">
           Used in reference paths (steps.{draft.trim() || '<id>'}

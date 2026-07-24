@@ -1,11 +1,13 @@
 import { useRef, useState } from 'react';
-import { File as FileIcon, Loader2, Upload, X } from 'lucide-react';
+import { File as FileIcon, Upload, X } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Button } from '@/shared/components/ui/button';
+import { FieldError } from '@/shared/components/ui/form';
 import { fileToFileData, formatFileSize } from '@/shared/utils/file-utils';
 import { MAX_FILE_SIZE_BYTES } from '@/shared/types/file';
 import type { FileData } from '@/shared/types/file';
 import { ReportBlockDefinition, ReportWorkflowActionConfig } from '../../types';
+import { Spinner } from '@/shared/components/ui/spinner';
 import {
   useReportWorkflowAction,
   type ReportWorkflowActionResult,
@@ -164,7 +166,7 @@ export function FileUploadBlock({
         )}
       >
         {busy ? (
-          <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+          <Spinner className="h-6 w-6 text-muted-foreground" />
         ) : (
           <Upload className="h-6 w-6 text-muted-foreground" />
         )}
@@ -188,9 +190,7 @@ export function FileUploadBlock({
         </div>
       </div>
 
-      {localError ? (
-        <p className="text-xs text-destructive">{localError}</p>
-      ) : null}
+      {localError ? <FieldError>{localError}</FieldError> : null}
 
       {!automatic && selected ? (
         <div className="flex items-center gap-3 rounded-md border border-input bg-background px-3 py-2">
@@ -225,7 +225,7 @@ export function FileUploadBlock({
           >
             {isRunning ? (
               <>
-                <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />
+                <Spinner className="mr-2 h-3.5 w-3.5" />
                 {runningLabel}
               </>
             ) : (

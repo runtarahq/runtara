@@ -16,7 +16,6 @@ import {
   ToggleLeft,
   ChevronRight,
   ChevronDown,
-  Loader2,
   Sparkles,
   Wrench,
   Hand,
@@ -46,6 +45,7 @@ import { HumanInputCard } from '@/features/workflows/components/ExecutionPanel/H
 import { useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import { isActiveStatus } from '@/shared/utils/status-display';
+import { Spinner } from '@/shared/components/ui/spinner';
 
 interface ExecutionTimelineProps {
   workflowId: string;
@@ -142,12 +142,13 @@ const stepTypeConfig: Record<
   },
 };
 
-const statusColors: Record<string, string> = {
-  completed: '#22C55E',
-  running: '#3B82F6',
-  failed: '#EF4444',
-  pending: '#6B7280',
-  waiting: '#F59E0B',
+// Status text colors via theme tokens (dark mode + theming for free).
+const statusTextClasses: Record<string, string> = {
+  completed: 'text-success',
+  running: 'text-info',
+  failed: 'text-destructive',
+  pending: 'text-muted-foreground',
+  waiting: 'text-warning',
 };
 
 const formatTime = (ms: number | null | undefined): string => {
@@ -268,7 +269,7 @@ export function ExecutionTimeline({
     return (
       <div className="px-6 py-16 text-center">
         <div className="mb-4 inline-flex h-16 w-16 items-center justify-center rounded-full bg-purple-500/10">
-          <Loader2 className="h-8 w-8 animate-spin text-purple-600" />
+          <Spinner className="h-8 w-8 text-purple-600" />
         </div>
         <h3 className="mb-2 text-lg font-semibold">Loading Timeline...</h3>
         <p className="mx-auto max-w-md text-sm text-muted-foreground">
@@ -465,7 +466,7 @@ export function ExecutionTimeline({
                       disabled={step.isLoadingChildren}
                     >
                       {step.isLoadingChildren ? (
-                        <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />
+                        <Spinner className="h-3 w-3 text-muted-foreground" />
                       ) : step.isExpanded ? (
                         <ChevronDown className="h-4 w-4 text-muted-foreground" />
                       ) : (
@@ -558,7 +559,7 @@ export function ExecutionTimeline({
                       className={`px-1.5 py-0 text-xs ${displayStatus === 'waiting' ? 'border-amber-500 text-amber-600' : ''}`}
                     >
                       {displayStatus === 'running' && (
-                        <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+                        <Spinner className="mr-1 h-3 w-3" />
                       )}
                       {displayStatus === 'waiting' && (
                         <Hand className="mr-1 h-3 w-3" />
@@ -670,12 +671,11 @@ export function ExecutionTimeline({
                         <div>
                           <span className="text-muted-foreground">Status:</span>{' '}
                           <span
-                            style={{
-                              color:
-                                statusColors[
-                                  stepPendingInput ? 'waiting' : step.status
-                                ],
-                            }}
+                            className={
+                              statusTextClasses[
+                                stepPendingInput ? 'waiting' : step.status
+                              ] ?? 'text-foreground'
+                            }
                           >
                             {stepDisplayStatus}
                           </span>

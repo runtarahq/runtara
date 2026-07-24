@@ -1,6 +1,7 @@
-import { Loader2, RefreshCw } from 'lucide-react';
+import { RefreshCw } from 'lucide-react';
 
 import { Button } from '@/shared/components/ui/button';
+import { Spinner } from '@/shared/components/ui/spinner';
 
 export function ReconnectPromptNotice({
   provider,
@@ -21,7 +22,7 @@ export function ReconnectPromptNotice({
       : 'Because the credentials changed, the stored authorization was reset.';
   return (
     <div
-      className="rounded-lg border border-blue-300 bg-blue-50 p-4 text-blue-950 dark:border-blue-700 dark:bg-blue-950/30 dark:text-blue-100"
+      className="rounded-lg border border-info/40 bg-info/10 p-4 text-foreground"
       role="alert"
     >
       <div className="flex items-start gap-3">
@@ -42,7 +43,7 @@ export function ReconnectPromptNotice({
               disabled={isReconnecting}
             >
               {isReconnecting ? (
-                <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
+                <Spinner className="mr-1.5 h-4 w-4" />
               ) : (
                 <RefreshCw className="mr-1.5 h-4 w-4" />
               )}

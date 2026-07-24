@@ -5,7 +5,7 @@ import { toast } from 'sonner';
 import { useCustomMutation, useCustomQuery } from '@/shared/hooks/api';
 import { queryKeys } from '@/shared/queries/query-keys';
 import { ConnectionTypeDto } from '@/generated/RuntaraRuntimeApi';
-import { Loader2 } from '@/shared/components/loader.tsx';
+import { PageLoader } from '@/shared/components/loader.tsx';
 import { DynamicConnectionForm } from '@/features/connections/components/Forms/DynamicConnectionForm';
 import {
   createConnection,
@@ -151,7 +151,7 @@ export function CreateConnection() {
   if (isFetching) {
     return (
       <div className="mx-auto max-w-5xl px-4 py-10 sm:px-6 lg:px-10">
-        <Loader2 />
+        <PageLoader />
       </div>
     );
   }

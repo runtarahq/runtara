@@ -3,7 +3,6 @@ import { useNavigate } from 'react-router';
 import { cn } from '@/lib/utils.ts';
 import { StepTypeIcon } from '@/features/workflows/components/StepTypeIcon';
 import {
-  Loader2,
   CheckCircle2,
   XCircle,
   AlertCircle,
@@ -17,6 +16,7 @@ import {
 } from '@/features/workflows/stores/executionStore';
 import { ExecutionStatus } from '@/generated/RuntaraRuntimeApi';
 import { parseStructuredError } from '@/shared/utils/structured-error';
+import { Spinner } from '@/shared/components/ui/spinner';
 import type {
   ReplayIterationCounts,
   ReplayNodeState,
@@ -158,7 +158,7 @@ export const BaseNode = forwardRef<
       switch (status) {
         case 'running':
         case 'compiling':
-          return <Loader2 className="h-2 w-2 animate-spin" />;
+          return <Spinner className="h-2 w-2" />;
         case 'completed':
           return <CheckCircle2 className="h-2 w-2" />;
         case 'failed':
@@ -231,7 +231,7 @@ export const BaseNode = forwardRef<
       switch (replayState) {
         case 'running':
           return {
-            icon: <Loader2 className="h-2.5 w-2.5 animate-spin" />,
+            icon: <Spinner className="h-2.5 w-2.5" />,
             cls: 'bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300',
           };
         case 'done':

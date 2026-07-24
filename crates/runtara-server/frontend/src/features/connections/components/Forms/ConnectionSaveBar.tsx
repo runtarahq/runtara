@@ -1,6 +1,7 @@
-import { Loader2, Save } from 'lucide-react';
+import { Save } from 'lucide-react';
 
 import { Button } from '@/shared/components/ui/button';
+import { Spinner } from '@/shared/components/ui/spinner';
 
 type ConnectionSaveBarProps = {
   isLoading?: boolean;
@@ -74,7 +75,7 @@ export function ConnectionSaveBar({
           >
             {isLoading ? (
               <>
-                <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
+                <Spinner className="mr-1.5 h-4 w-4" />
                 {loadingLabel || 'Saving...'}
               </>
             ) : (

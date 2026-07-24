@@ -1,11 +1,12 @@
 import { useMemo, useState } from 'react';
 import { X } from 'lucide-react';
 import { useController, useWatch } from 'react-hook-form';
-import { FormLabel } from '@/shared/components/ui/form';
+import { FieldError, FormLabel } from '@/shared/components/ui/form';
 import { Button } from '@/shared/components/ui/button';
 import { Textarea } from '@/shared/components/ui/textarea';
 import { useWorkflowFormDefinition } from '@/features/workflows/utils/form-schema-adapter';
 import { FormRenderer } from '@/shared/forms';
+import { Alert, AlertDescription } from '@/shared/components/ui/alert';
 import {
   analyzeStaticInputs,
   buildStaticInputsText,
@@ -122,11 +123,13 @@ export function CronInputsField({
       {structuredActive && analysis.representable ? (
         <>
           {unrepresentedKeyLabels.length > 0 && (
-            <p className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-[0.7rem] leading-tight text-amber-900">
-              The current JSON contains keys this form does not edit (
-              {unrepresentedKeyLabels.join(', ')}). They are kept as-is when you
-              change fields here; use Advanced (JSON) to edit them.
-            </p>
+            <Alert variant="warning" className="text-2xs">
+              <AlertDescription>
+                The current JSON contains keys this form does not edit (
+                {unrepresentedKeyLabels.join(', ')}). They are kept as-is when
+                you change fields here; use Advanced (JSON) to edit them.
+              </AlertDescription>
+            </Alert>
           )}
           <div className="rounded-md border border-input p-3">
             <FormRenderer
@@ -176,7 +179,7 @@ export function CronInputsField({
               )}
             />
           </div>
-          <p className="text-[0.7rem] leading-tight text-muted-foreground">
+          <p className="text-2xs text-muted-foreground">
             Optional. Values are sent as the workflow input envelope (
             {'{"data": {...}}'}) on each fire. Leave fields unset to start the
             workflow with an empty input.
@@ -196,13 +199,13 @@ export function CronInputsField({
             className="font-mono text-xs"
             aria-invalid={!!error}
           />
-          <p className="text-[0.7rem] leading-tight text-muted-foreground">
+          <p className="text-2xs text-muted-foreground">
             Optional. Sent as the workflow input envelope on each fire, e.g.{' '}
             {'{"data": {...}, "variables": {...}}'}. Leave blank to start the
             workflow with an empty input.
           </p>
           {structuredAvailable && !analysis.representable && (
-            <p className="text-[0.7rem] leading-tight text-muted-foreground">
+            <p className="text-2xs text-muted-foreground">
               {analysis.reason === 'invalid-json'
                 ? 'Fix the JSON to switch back to the structured form.'
                 : 'The "data" key is not a JSON object, so the structured form cannot edit it.'}
@@ -211,13 +214,9 @@ export function CronInputsField({
         </>
       )}
 
-      {error && (
-        <p className="text-[0.8rem] font-medium text-destructive">{error}</p>
-      )}
+      {error && <FieldError>{error}</FieldError>}
       {formNormalizationError && (
-        <p className="text-[0.8rem] font-medium text-destructive">
-          {formNormalizationError}
-        </p>
+        <FieldError>{formNormalizationError}</FieldError>
       )}
     </div>
   );

@@ -5,7 +5,7 @@ import { useAuth } from 'react-oidc-context';
 import { toast } from 'sonner';
 import { useCustomMutation, useCustomQuery } from '@/shared/hooks/api';
 import { queryKeys } from '@/shared/queries/query-keys';
-import { Loader2 } from '@/shared/components/loader.tsx';
+import { PageLoader } from '@/shared/components/loader.tsx';
 import { ConnectionTypeDto } from '@/generated/RuntaraRuntimeApi';
 import {
   DynamicConnectionForm,
@@ -237,7 +237,7 @@ export function Connection() {
   if (connection.isLoading || connectionTypesQuery.isLoading) {
     return (
       <div className="mx-auto max-w-5xl px-4 py-10 sm:px-6 lg:px-10">
-        <Loader2 />
+        <PageLoader />
       </div>
     );
   }

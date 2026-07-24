@@ -1,12 +1,5 @@
 import { useState, useEffect } from 'react';
-import {
-  Folder,
-  FolderPlus,
-  Pencil,
-  Trash2,
-  Loader2,
-  Home,
-} from 'lucide-react';
+import { Folder, FolderPlus, Pencil, Trash2, Home } from 'lucide-react';
 import {
   Dialog,
   DialogContent,
@@ -30,6 +23,7 @@ import { Input } from '@/shared/components/ui/input';
 import { Label } from '@/shared/components/ui/label';
 import { cn } from '@/lib/utils';
 import { FolderInfo, getFolderName } from '../../hooks/useFolders';
+import { Spinner } from '@/shared/components/ui/spinner';
 
 // ==================== Rename Folder Dialog ====================
 
@@ -124,7 +118,7 @@ export function RenameFolderDialog({
           >
             {isLoading ? (
               <>
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                <Spinner className="mr-2 h-4 w-4" />
                 Renaming...
               </>
             ) : (
@@ -187,7 +181,7 @@ export function DeleteFolderDialog({
           >
             {isLoading ? (
               <>
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                <Spinner className="mr-2 h-4 w-4" />
                 Deleting...
               </>
             ) : (
@@ -443,7 +437,7 @@ export function MoveToFolderDialog({
           >
             {isLoading ? (
               <>
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                <Spinner className="mr-2 h-4 w-4" />
                 Moving...
               </>
             ) : isCreatingNew ? (

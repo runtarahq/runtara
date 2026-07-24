@@ -1,6 +1,5 @@
-import { Loader2 } from 'lucide-react';
-
 import { buttonVariants } from '@/shared/components/ui/button';
+import { Spinner } from '@/shared/components/ui/spinner';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -70,7 +69,7 @@ export function DeleteConnectionDialog({
           >
             {isDeleting ? (
               <>
-                <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
+                <Spinner className="mr-1.5 h-4 w-4" />
                 Deleting…
               </>
             ) : (
