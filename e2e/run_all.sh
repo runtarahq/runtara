@@ -74,6 +74,7 @@ run_test "Stale artifact + trigger replay idempotency (regression)" "${SCRIPT_DI
 # and do not depend on ./start.sh. They need docker + python3 + openssl.
 run_test "Teams outbound send-message (mock Bot Connector)" "${SCRIPT_DIR}/test_teams_send_message.sh"
 run_test "Teams inbound webhook JWT + dedup (mock authority)" "${SCRIPT_DIR}/test_teams_inbound_webhook.sh"
+run_test "Channel session re-flush provenance guard" "${SCRIPT_DIR}/test_channel_reflush_provenance.sh"
 
 # Summary
 echo "=========================================="
