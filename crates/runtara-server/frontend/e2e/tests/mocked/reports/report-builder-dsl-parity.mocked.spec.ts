@@ -555,7 +555,11 @@ test.describe('SYN-410 report builder DSL parity (mocked)', () => {
               items: [
                 {
                   id: 'view_list_root_i0',
-                  child: { id: 'list_orders_node', type: 'block', blockId: 'orders' },
+                  child: {
+                    id: 'list_orders_node',
+                    type: 'block',
+                    blockId: 'orders',
+                  },
                 },
               ],
             },
@@ -578,7 +582,11 @@ test.describe('SYN-410 report builder DSL parity (mocked)', () => {
               items: [
                 {
                   id: 'view_detail_root_i0',
-                  child: { id: 'detail_orders_node', type: 'block', blockId: 'orders' },
+                  child: {
+                    id: 'detail_orders_node',
+                    type: 'block',
+                    blockId: 'orders',
+                  },
                 },
               ],
             },
@@ -1523,11 +1531,19 @@ test.describe('SYN-410 report builder DSL parity (mocked)', () => {
                 items: [
                   {
                     id: 'metrics_i0',
-                    child: { id: 'oc_node', type: 'block', blockId: 'order_count' },
+                    child: {
+                      id: 'oc_node',
+                      type: 'block',
+                      blockId: 'order_count',
+                    },
                   },
                   {
                     id: 'metrics_i1',
-                    child: { id: 'ta_node', type: 'block', blockId: 'total_amount' },
+                    child: {
+                      id: 'ta_node',
+                      type: 'block',
+                      blockId: 'total_amount',
+                    },
                   },
                 ],
               },
@@ -1541,11 +1557,19 @@ test.describe('SYN-410 report builder DSL parity (mocked)', () => {
                 items: [
                   {
                     id: 'split_left',
-                    child: { id: 'orders_node', type: 'block', blockId: 'orders' },
+                    child: {
+                      id: 'orders_node',
+                      type: 'block',
+                      blockId: 'orders',
+                    },
                   },
                   {
                     id: 'split_right',
-                    child: { id: 'status_node', type: 'block', blockId: 'status_chart' },
+                    child: {
+                      id: 'status_node',
+                      type: 'block',
+                      blockId: 'status_chart',
+                    },
                   },
                 ],
               },
@@ -1569,15 +1593,19 @@ test.describe('SYN-410 report builder DSL parity (mocked)', () => {
     const metrics = saved.layout.items[0].child;
     expect(metrics.type).toBe('grid');
     if (metrics.type !== 'grid') return;
-    expect(metrics.items.map((item) =>
-      item.child.type === 'block' ? item.child.blockId : null
-    )).toEqual(['order_count', 'total_amount']);
+    expect(
+      metrics.items.map((item) =>
+        item.child.type === 'block' ? item.child.blockId : null
+      )
+    ).toEqual(['order_count', 'total_amount']);
     const split = saved.layout.items[1].child;
     expect(split.type).toBe('grid');
     if (split.type !== 'grid') return;
-    expect(split.items.map((item) =>
-      item.child.type === 'block' ? item.child.blockId : null
-    )).toEqual(['orders', 'status_chart']);
+    expect(
+      split.items.map((item) =>
+        item.child.type === 'block' ? item.child.blockId : null
+      )
+    ).toEqual(['orders', 'status_chart']);
   });
 
   test('21 saves actions block type', async ({ page, mockApi }) => {

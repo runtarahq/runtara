@@ -167,8 +167,7 @@ export function ErrorStepField({ name }: ErrorStepFieldProps) {
         <FormLabel>Error Message *</FormLabel>
         <FormDescription>
           Human-readable error message, emitted verbatim — references and
-          templates are not resolved here. Put dynamic values in Context
-          below.
+          templates are not resolved here. Put dynamic values in Context below.
         </FormDescription>
         <FormControl>
           <Textarea

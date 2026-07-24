@@ -10,10 +10,7 @@ import {
   DialogTrigger,
 } from '@/shared/components/ui/dialog';
 import { RotateCcw } from 'lucide-react';
-import {
-  ReportBlockDefinition,
-  ReportDatasetDefinition,
-} from '../../../types';
+import { ReportBlockDefinition, ReportDatasetDefinition } from '../../../types';
 import { reconcileDatasetBlock } from '../../../datasetBlocks';
 
 interface DatasetReconcileButtonProps {
@@ -37,8 +34,7 @@ export function DatasetReconcileButton({
     [block, dataset, open]
   );
 
-  const sameJson =
-    JSON.stringify(block) === JSON.stringify(proposed);
+  const sameJson = JSON.stringify(block) === JSON.stringify(proposed);
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>

@@ -101,8 +101,7 @@ export function ChartBlock({
   const showLegend = series.length > 1;
   // Bar categories are identities, not a continuum — every bar deserves its
   // label as long as they can physically fit.
-  const showEveryCategoryTick =
-    chart.kind === 'bar' && chartRows.length <= 16;
+  const showEveryCategoryTick = chart.kind === 'bar' && chartRows.length <= 16;
   // Counts must never grid on 2.25 / 0.75; fractional measures keep decimals.
   const yAllowsDecimals = !series.every((entry) =>
     chartRows.every((row) => {

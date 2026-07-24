@@ -164,7 +164,7 @@ const ArgumentValueTypeSelector = ({
               <button
                 type="button"
                 disabled={disabled}
-                className={`h-6 w-6 rounded border border-current flex items-center justify-center text-[9px] font-bold shrink-0 transition-colors hover:opacity-80 ${getArgumentValueTypeColor(
+                className={`flex h-6 w-6 shrink-0 items-center justify-center rounded border border-current text-[9px] font-bold transition-colors hover:opacity-80 ${getArgumentValueTypeColor(
                   value
                 )}`}
               >
@@ -173,7 +173,7 @@ const ArgumentValueTypeSelector = ({
             </DropdownMenuTrigger>
           </TooltipTrigger>
           <TooltipContent className="border-0">
-            <p className="font-semibold text-foreground text-xs">
+            <p className="text-xs font-semibold text-foreground">
               {selectedOption.label}
             </p>
             <p className="text-[10px] opacity-80">
@@ -187,26 +187,26 @@ const ArgumentValueTypeSelector = ({
                 <DropdownMenuItem
                   key={option.value}
                   onClick={() => onChange(option.value)}
-                  className={`cursor-pointer h-10 px-2 rounded-md focus:bg-accent/50 hover:bg-accent/40 transition-colors ${
+                  className={`h-10 cursor-pointer rounded-md px-2 transition-colors hover:bg-accent/40 focus:bg-accent/50 ${
                     isSelected ? 'bg-accent/60 ring-1 ring-primary/30' : ''
                   }`}
                 >
-                  <div className="flex items-center gap-2 w-full">
+                  <div className="flex w-full items-center gap-2">
                     <span
-                      className={`h-5 w-5 rounded border flex items-center justify-center text-[8px] font-bold shrink-0 ${getArgumentValueTypeColor(
+                      className={`flex h-5 w-5 shrink-0 items-center justify-center rounded border text-[8px] font-bold ${getArgumentValueTypeColor(
                         option.value
                       )} ${isSelected ? 'ring-1 ring-primary' : 'border-current'}`}
                     >
                       {getArgumentValueTypeSymbol(option.value)}
                     </span>
-                    <div className="flex flex-col flex-1 min-w-0">
+                    <div className="flex min-w-0 flex-1 flex-col">
                       <span
-                        className={`font-medium text-xs leading-tight ${isSelected ? 'text-primary' : ''}`}
+                        className={`text-xs font-medium leading-tight ${isSelected ? 'text-primary' : ''}`}
                       >
                         {option.label}
                         {isSelected && ' ✓'}
                       </span>
-                      <span className="text-[10px] text-muted-foreground leading-tight truncate">
+                      <span className="truncate text-[10px] leading-tight text-muted-foreground">
                         {option.description}
                       </span>
                     </div>
@@ -261,11 +261,7 @@ const getArgumentImmediateType = (
     if (typeof value === 'boolean') return 'boolean';
     if (typeof value === 'number') return 'number';
     if (value === 'true' || value === 'false') return 'boolean';
-    if (
-      typeof value === 'string' &&
-      value !== '' &&
-      !isNaN(Number(value))
-    ) {
+    if (typeof value === 'string' && value !== '' && !isNaN(Number(value))) {
       return 'number';
     }
   }
@@ -400,7 +396,7 @@ const ConditionVariablePickerModal = ({
         <div className="space-y-4">
           {/* Search input */}
           <div className="relative">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+            <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
             <Input
               placeholder="Search variables..."
               value={searchQuery}
@@ -411,7 +407,7 @@ const ConditionVariablePickerModal = ({
           </div>
 
           {/* Variable list */}
-          <div className="max-h-[400px] overflow-y-auto space-y-4">
+          <div className="max-h-[400px] space-y-4 overflow-y-auto">
             {/* Free-text path entry: any legal reference path can be used
                 even when it is not in the suggestion list */}
             {searchQuery.trim() !== '' &&
@@ -427,21 +423,21 @@ const ConditionVariablePickerModal = ({
                       group: 'Workflow Inputs',
                     })
                   }
-                  className="w-full flex items-center gap-2 px-2 py-1.5 rounded border border-dashed hover:bg-accent text-left transition-colors text-muted-foreground hover:text-foreground"
+                  className="flex w-full items-center gap-2 rounded border border-dashed px-2 py-1.5 text-left text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
                 >
-                  <div className="flex-1 min-w-0">
-                    <p className="font-mono text-sm truncate">
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate font-mono text-sm">
                       {searchQuery.trim()}
                     </p>
-                    <p className="text-xs truncate opacity-70">
+                    <p className="truncate text-xs opacity-70">
                       Use as custom reference path
                     </p>
                   </div>
                 </button>
               )}
             {filteredSuggestions.length === 0 ? (
-              <div className="text-center py-8 text-muted-foreground">
-                <Inbox className="h-8 w-8 mx-auto mb-2 opacity-50" />
+              <div className="py-8 text-center text-muted-foreground">
+                <Inbox className="mx-auto mb-2 h-8 w-8 opacity-50" />
                 <p>No matching variables</p>
               </div>
             ) : (
@@ -450,7 +446,7 @@ const ConditionVariablePickerModal = ({
                   ([group, groupSuggestionsList]) =>
                     groupSuggestionsList.length > 0 && (
                       <div key={group}>
-                        <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">
+                        <h4 className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
                           {group}
                         </h4>
                         <div className="space-y-0.5">
@@ -459,11 +455,11 @@ const ConditionVariablePickerModal = ({
                               key={suggestion.value}
                               type="button"
                               onClick={() => handleSelect(suggestion)}
-                              className="w-full flex items-center gap-2 px-2 py-1.5 rounded hover:bg-accent text-left transition-colors text-muted-foreground hover:text-foreground overflow-hidden"
+                              className="flex w-full items-center gap-2 overflow-hidden rounded px-2 py-1.5 text-left text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
                             >
-                              <div className="flex-1 min-w-0">
+                              <div className="min-w-0 flex-1">
                                 {suggestion.stepName ? (
-                                  <p className="text-sm truncate">
+                                  <p className="truncate text-sm">
                                     <span className="font-medium">
                                       {suggestion.stepName}
                                     </span>
@@ -477,18 +473,18 @@ const ConditionVariablePickerModal = ({
                                     )}
                                   </p>
                                 ) : (
-                                  <p className="font-mono text-sm truncate">
+                                  <p className="truncate font-mono text-sm">
                                     {suggestion.label}
                                   </p>
                                 )}
                                 {suggestion.description && (
-                                  <p className="text-xs truncate opacity-70">
+                                  <p className="truncate text-xs opacity-70">
                                     {suggestion.description}
                                   </p>
                                 )}
                               </div>
                               {suggestion.type && (
-                                <span className="text-[11px] font-mono px-1.5 py-0.5 rounded shrink-0 text-muted-foreground bg-black/5 dark:bg-white/10">
+                                <span className="shrink-0 rounded bg-black/5 px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground dark:bg-white/10">
                                   {suggestion.type}
                                 </span>
                               )}
@@ -555,12 +551,12 @@ const ReferencePill = ({
   const displayValue = formatReferenceForDisplay(value, suggestions);
 
   return (
-    <span className="inline-flex items-center gap-1.5 px-2 py-1 text-xs bg-emerald-50 border border-emerald-200 rounded text-emerald-700 dark:bg-emerald-950 dark:border-emerald-800 dark:text-emerald-300">
+    <span className="inline-flex items-center gap-1.5 rounded border border-emerald-200 bg-emerald-50 px-2 py-1 text-xs text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950 dark:text-emerald-300">
       <button
         type="button"
         onClick={onClick}
         disabled={disabled}
-        className="truncate hover:underline max-w-[200px]"
+        className="max-w-[200px] truncate hover:underline"
         title={value}
       >
         {displayValue}
@@ -600,13 +596,13 @@ const ImmediateValueInput = ({
   // Render appropriate input based on immediate type
   if (immediateType === 'boolean') {
     return (
-      <div className="flex items-center gap-1.5 flex-1">
+      <div className="flex flex-1 items-center gap-1.5">
         <Select
           value={value || 'true'}
           onValueChange={onChange}
           disabled={disabled}
         >
-          <SelectTrigger className="h-7 text-xs flex-1">
+          <SelectTrigger className="h-7 flex-1 text-xs">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
@@ -625,7 +621,7 @@ const ImmediateValueInput = ({
           }
           disabled={disabled}
         >
-          <SelectTrigger className="h-7 text-xs w-20">
+          <SelectTrigger className="h-7 w-20 text-xs">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
@@ -641,10 +637,10 @@ const ImmediateValueInput = ({
   }
 
   return (
-    <div className="flex items-center gap-1.5 flex-1">
+    <div className="flex flex-1 items-center gap-1.5">
       <Input
         type={immediateType === 'number' ? 'number' : 'text'}
-        className="h-7 text-xs flex-1"
+        className="h-7 flex-1 text-xs"
         value={value}
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder}
@@ -657,7 +653,7 @@ const ImmediateValueInput = ({
         }
         disabled={disabled}
       >
-        <SelectTrigger className="h-7 text-xs w-20">
+        <SelectTrigger className="h-7 w-20 text-xs">
           <SelectValue />
         </SelectTrigger>
         <SelectContent>
@@ -830,7 +826,7 @@ export const ConditionEditor = ({
       />
       {/* Expression preview */}
       {readableExpression && (
-        <div className="mt-3 px-2 py-1.5 bg-slate-100 dark:bg-slate-800 rounded text-[11px] font-mono text-slate-600 dark:text-slate-400 break-words">
+        <div className="mt-3 break-words rounded bg-slate-100 px-2 py-1.5 font-mono text-[11px] text-slate-600 dark:bg-slate-800 dark:text-slate-400">
           {readableExpression}
         </div>
       )}
@@ -1069,7 +1065,7 @@ const ConditionBuilder = ({
     <div
       className={
         isNested
-          ? 'pl-3 border-l-2 border-gray-200 dark:border-gray-700 ml-1'
+          ? 'ml-1 border-l-2 border-gray-200 pl-3 dark:border-gray-700'
           : ''
       }
     >
@@ -1080,11 +1076,11 @@ const ConditionBuilder = ({
           onValueChange={handleOperatorChange}
           disabled={disabled}
         >
-          <SelectTrigger className="w-auto min-w-[80px] h-7 text-xs font-semibold px-2 border-gray-300 dark:border-gray-600">
+          <SelectTrigger className="h-7 w-auto min-w-[80px] border-gray-300 px-2 text-xs font-semibold dark:border-gray-600">
             <SelectValue placeholder="Op" />
           </SelectTrigger>
           <SelectContent>
-            <div className="text-[10px] font-semibold text-muted-foreground px-2 py-1">
+            <div className="px-2 py-1 text-[10px] font-semibold text-muted-foreground">
               Logic
             </div>
             {OPERATORS.filter((o) => ['AND', 'OR', 'NOT'].includes(o.key)).map(
@@ -1094,7 +1090,7 @@ const ConditionBuilder = ({
                 </SelectItem>
               )
             )}
-            <div className="text-[10px] font-semibold text-muted-foreground px-2 py-1 mt-1">
+            <div className="mt-1 px-2 py-1 text-[10px] font-semibold text-muted-foreground">
               Compare
             </div>
             {OPERATORS.filter((o) =>
@@ -1104,7 +1100,7 @@ const ConditionBuilder = ({
                 {o.key} ({o.label})
               </SelectItem>
             ))}
-            <div className="text-[10px] font-semibold text-muted-foreground px-2 py-1 mt-1">
+            <div className="mt-1 px-2 py-1 text-[10px] font-semibold text-muted-foreground">
               Check
             </div>
             {OPERATORS.filter((o) =>
@@ -1116,7 +1112,7 @@ const ConditionBuilder = ({
                 {o.label}
               </SelectItem>
             ))}
-            <div className="text-[10px] font-semibold text-muted-foreground px-2 py-1 mt-1">
+            <div className="mt-1 px-2 py-1 text-[10px] font-semibold text-muted-foreground">
               List/String
             </div>
             {OPERATORS.filter((o) =>
@@ -1132,7 +1128,7 @@ const ConditionBuilder = ({
       </div>
 
       {/* Arguments with tighter spacing */}
-      <div className="flex flex-col gap-1.5 mt-2">
+      <div className="mt-2 flex flex-col gap-1.5">
         {args.map((arg, index) => {
           const currentValueType = getArgumentValueType(arg);
           const displayValue = getArgumentDisplayValue(arg);
@@ -1195,7 +1191,7 @@ const ConditionBuilder = ({
                 />
               ) : currentValueType === 'reference' ? (
                 // Reference mode - show compact pill
-                <div className="flex-1 flex items-center gap-1.5">
+                <div className="flex flex-1 items-center gap-1.5">
                   {displayValue ? (
                     <ReferencePill
                       value={displayValue}
@@ -1209,7 +1205,7 @@ const ConditionBuilder = ({
                       type="button"
                       onClick={() => setPickerOpenForIndex(index)}
                       disabled={disabled}
-                      className="flex items-center h-7 px-2 text-xs text-muted-foreground border border-dashed border-gray-300 dark:border-gray-600 rounded hover:bg-muted/50 hover:border-gray-400 transition-colors disabled:opacity-50"
+                      className="flex h-7 items-center rounded border border-dashed border-gray-300 px-2 text-xs text-muted-foreground transition-colors hover:border-gray-400 hover:bg-muted/50 disabled:opacity-50 dark:border-gray-600"
                     >
                       Select variable...
                     </button>
@@ -1235,7 +1231,7 @@ const ConditionBuilder = ({
                 </div>
               ) : (
                 // Immediate mode - compact input
-                <div className="flex-1 flex items-center gap-1.5">
+                <div className="flex flex-1 items-center gap-1.5">
                   <ImmediateValueInput
                     value={displayValue}
                     onChange={(value) => handleArgValueChange(index, value)}
@@ -1279,7 +1275,7 @@ const ConditionBuilder = ({
               e.stopPropagation();
               handleAddArgument();
             }}
-            className="self-start px-2 py-1 text-[11px] text-muted-foreground border border-dashed border-gray-300 dark:border-gray-600 rounded hover:bg-muted/50 hover:border-gray-400 transition-colors"
+            className="self-start rounded border border-dashed border-gray-300 px-2 py-1 text-[11px] text-muted-foreground transition-colors hover:border-gray-400 hover:bg-muted/50 dark:border-gray-600"
             disabled={disabled}
           >
             + Add

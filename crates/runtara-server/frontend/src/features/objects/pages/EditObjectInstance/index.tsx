@@ -50,7 +50,7 @@ export function EditObjectInstance() {
         </div>
 
         {isSchemaLoading || isRecordLoading ? (
-          <div className="flex min-h-[40vh] items-center justify-center px-4 sm:px-5 text-muted-foreground">
+          <div className="flex min-h-[40vh] items-center justify-center px-4 text-muted-foreground sm:px-5">
             <Loader2 className="mr-2 h-4 w-4 animate-spin" />
             Loading data...
           </div>

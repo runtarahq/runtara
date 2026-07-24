@@ -71,9 +71,9 @@ export function GroupByStepField({ name }: GroupByStepFieldProps) {
         <Label className="text-sm font-medium">Group Key</Label>
         <p className="text-xs text-muted-foreground">
           Property path to group by. Use dot notation for nested properties
-          (e.g., <code className="bg-muted px-1 rounded">status</code>,{' '}
-          <code className="bg-muted px-1 rounded">user.role</code>,{' '}
-          <code className="bg-muted px-1 rounded">data.category</code>).
+          (e.g., <code className="rounded bg-muted px-1">status</code>,{' '}
+          <code className="rounded bg-muted px-1">user.role</code>,{' '}
+          <code className="rounded bg-muted px-1">data.category</code>).
         </p>
         <Input
           placeholder="e.g., status"
@@ -88,7 +88,7 @@ export function GroupByStepField({ name }: GroupByStepFieldProps) {
       <div className="space-y-2">
         <Label className="text-sm font-medium">
           Expected Keys{' '}
-          <span className="text-muted-foreground font-normal">(optional)</span>
+          <span className="font-normal text-muted-foreground">(optional)</span>
         </Label>
         <p className="text-xs text-muted-foreground">
           Pre-define expected key values. These keys will always appear in

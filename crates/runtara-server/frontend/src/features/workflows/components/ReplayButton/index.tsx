@@ -22,12 +22,7 @@ type Props = {
   /** Optional error string to enable smart retry logic */
   error?: string | null;
   variant?:
-    | 'default'
-    | 'outline'
-    | 'secondary'
-    | 'ghost'
-    | 'link'
-    | 'destructive';
+    'default' | 'outline' | 'secondary' | 'ghost' | 'link' | 'destructive';
   size?: 'default' | 'sm' | 'lg' | 'icon';
   className?: string;
 };

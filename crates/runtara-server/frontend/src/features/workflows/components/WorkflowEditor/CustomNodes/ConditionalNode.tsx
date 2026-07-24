@@ -230,13 +230,13 @@ function ConditionalNodeComponent({
           id={SOURCE_TRUE}
           type="source"
           position={Position.Right}
-          className="!w-2 !h-2 !rounded-full !bg-green-500 dark:!bg-green-400 !border-0"
+          className="!h-2 !w-2 !rounded-full !border-0 !bg-green-500 dark:!bg-green-400"
           style={{ top: '30%', right: '-4px', transform: 'translateY(-50%)' }}
           isConnectable={isConnectable && !isExecuting}
         />
         {!trueConnections.length && !isExecuting && (
           <div
-            className="absolute flex items-center pointer-events-none"
+            className="pointer-events-none absolute flex items-center"
             style={{
               right: '-32px',
               top: '30%',
@@ -244,9 +244,9 @@ function ConditionalNodeComponent({
               zIndex: -1,
             }}
           >
-            <div className="bg-border h-[1px] w-4 ml-0.5" />
+            <div className="ml-0.5 h-[1px] w-4 bg-border" />
             <Button
-              className="w-3.5 h-3.5 rounded-full [&_svg]:size-1.5 shadow-sm pointer-events-auto nodrag nopan"
+              className="nodrag nopan pointer-events-auto h-3.5 w-3.5 rounded-full shadow-sm [&_svg]:size-1.5"
               variant="outline"
               size="icon"
               aria-label={`Add true branch from ${data.name || id || 'conditional'}`}
@@ -266,13 +266,13 @@ function ConditionalNodeComponent({
           id={SOURCE_FALSE}
           type="source"
           position={Position.Right}
-          className="!w-2 !h-2 !rounded-full !bg-red-500 dark:!bg-red-400 !border-0"
+          className="!h-2 !w-2 !rounded-full !border-0 !bg-red-500 dark:!bg-red-400"
           style={{ top: '70%', right: '-4px', transform: 'translateY(-50%)' }}
           isConnectable={isConnectable && !isExecuting}
         />
         {!falseConnections.length && !isExecuting && (
           <div
-            className="absolute flex items-center pointer-events-none"
+            className="pointer-events-none absolute flex items-center"
             style={{
               right: '-32px',
               top: '70%',
@@ -280,9 +280,9 @@ function ConditionalNodeComponent({
               zIndex: -1,
             }}
           >
-            <div className="bg-border h-[1px] w-4 ml-0.5" />
+            <div className="ml-0.5 h-[1px] w-4 bg-border" />
             <Button
-              className="w-3.5 h-3.5 rounded-full [&_svg]:size-1.5 shadow-sm pointer-events-auto nodrag nopan"
+              className="nodrag nopan pointer-events-auto h-3.5 w-3.5 rounded-full shadow-sm [&_svg]:size-1.5"
               variant="outline"
               size="icon"
               aria-label={`Add false branch from ${data.name || id || 'conditional'}`}
@@ -301,7 +301,7 @@ function ConditionalNodeComponent({
           type="target"
           id="target"
           position={Position.Left}
-          className="!w-2 !h-2 !rounded-full !bg-muted-foreground/40 !border-0"
+          className="!h-2 !w-2 !rounded-full !border-0 !bg-muted-foreground/40"
           isConnectable={isConnectable && !isExecuting}
         />
       </BaseNode>

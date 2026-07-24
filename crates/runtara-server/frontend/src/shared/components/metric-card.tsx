@@ -67,28 +67,28 @@ export function MetricCard({
 
   if (loading) {
     return (
-      <Card className="h-full rounded-lg border border-border/40 bg-card px-4 py-3 sm:px-5 sm:py-4 shadow-none">
+      <Card className="h-full rounded-lg border border-border/40 bg-card px-4 py-3 shadow-none sm:px-5 sm:py-4">
         <div className="flex h-full flex-col">
-          <div className="min-h-[40px] text-sm font-medium text-muted-foreground leading-snug">
+          <div className="min-h-[40px] text-sm font-medium leading-snug text-muted-foreground">
             {title}
           </div>
           <div className="flex flex-1 items-center">
-            <div className="h-7 w-24 rounded bg-muted animate-pulse" />
+            <div className="h-7 w-24 animate-pulse rounded bg-muted" />
           </div>
-          <div className="h-5 w-20 rounded bg-muted animate-pulse" />
+          <div className="h-5 w-20 animate-pulse rounded bg-muted" />
         </div>
       </Card>
     );
   }
 
   return (
-    <Card className="h-full rounded-lg border border-border/40 bg-card px-4 py-3 sm:px-5 sm:py-4 shadow-none">
+    <Card className="h-full rounded-lg border border-border/40 bg-card px-4 py-3 shadow-none sm:px-5 sm:py-4">
       <div className="flex h-full flex-col">
-        <div className="min-h-[40px] text-sm font-semibold text-muted-foreground leading-snug">
+        <div className="min-h-[40px] text-sm font-semibold leading-snug text-muted-foreground">
           {title}
         </div>
         <div className="flex flex-1 items-center">
-          <div className="text-2xl font-semibold text-slate-900/90 leading-tight">
+          <div className="text-2xl font-semibold leading-tight text-slate-900/90">
             {formatValue(value)}
           </div>
         </div>

@@ -217,32 +217,32 @@ export function ExistingConnections({ toolbar }: ExistingConnectionsProps) {
                         </Can>
                       )}
                     <Can permission="connection:update">
-                    <Link to={`/connections/${connection.id}`}>
+                      <Link to={`/connections/${connection.id}`}>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-7 w-7 text-muted-foreground"
+                          title="Edit connection"
+                        >
+                          <Pencil className="h-4 w-4" />
+                        </Button>
+                      </Link>
+                    </Can>
+                    <Can permission="connection:delete">
                       <Button
                         variant="ghost"
                         size="icon"
-                        className="h-7 w-7 text-muted-foreground"
-                        title="Edit connection"
+                        className="h-7 w-7 text-muted-foreground hover:text-destructive"
+                        title="Delete connection"
+                        disabled={deletingId === connection.id}
+                        onClick={() => setDeleteTarget(connection)}
                       >
-                        <Pencil className="h-4 w-4" />
+                        {deletingId === connection.id ? (
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                        ) : (
+                          <Trash2 className="h-4 w-4" />
+                        )}
                       </Button>
-                    </Link>
-                    </Can>
-                    <Can permission="connection:delete">
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-7 w-7 text-muted-foreground hover:text-destructive"
-                      title="Delete connection"
-                      disabled={deletingId === connection.id}
-                      onClick={() => setDeleteTarget(connection)}
-                    >
-                      {deletingId === connection.id ? (
-                        <Loader2 className="h-4 w-4 animate-spin" />
-                      ) : (
-                        <Trash2 className="h-4 w-4" />
-                      )}
-                    </Button>
                     </Can>
                   </div>
                 </TableCell>
@@ -271,10 +271,7 @@ export function ExistingConnections({ toolbar }: ExistingConnectionsProps) {
         {body}
       </ConsoleTableShell>
 
-      <ModalDialog
-        open={!!deleteTarget}
-        onClose={() => setDeleteTarget(null)}
-      >
+      <ModalDialog open={!!deleteTarget} onClose={() => setDeleteTarget(null)}>
         <DialogHeader>
           <DialogTitle>Delete Connection</DialogTitle>
           <DialogDescription>

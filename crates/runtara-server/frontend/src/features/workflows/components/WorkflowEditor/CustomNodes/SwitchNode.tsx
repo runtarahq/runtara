@@ -334,13 +334,13 @@ function SwitchNodeComponent({
                     id={handleId}
                     type="source"
                     position={Position.Right}
-                    className="!w-2 !h-2 !rounded-full !bg-blue-500/60 dark:!bg-blue-500/40 !border-0"
+                    className="!h-2 !w-2 !rounded-full !border-0 !bg-blue-500/60 dark:!bg-blue-500/40"
                     style={{ top: `${topPosition}px` }}
                     isConnectable={isConnectable && !isExecuting}
                   />
                   {!hasConnection(handleId) && !isExecuting && (
                     <div
-                      className="absolute flex items-center pointer-events-none"
+                      className="pointer-events-none absolute flex items-center"
                       style={{
                         right: '-40px',
                         top: `${topPosition}px`,
@@ -348,9 +348,9 @@ function SwitchNodeComponent({
                         zIndex: -1,
                       }}
                     >
-                      <div className="bg-border h-[1px] w-6 ml-1" />
+                      <div className="ml-1 h-[1px] w-6 bg-border" />
                       <Button
-                        className="w-4 h-4 rounded-full [&_svg]:size-2 shadow-sm pointer-events-auto nodrag nopan"
+                        className="nodrag nopan pointer-events-auto h-4 w-4 rounded-full shadow-sm [&_svg]:size-2"
                         variant="outline"
                         size="icon"
                         onClick={(e) => {
@@ -365,7 +365,7 @@ function SwitchNodeComponent({
                   )}
                   {/* Case label */}
                   <div
-                    className="absolute text-[0.65rem] text-muted-foreground pointer-events-none whitespace-nowrap"
+                    className="pointer-events-none absolute whitespace-nowrap text-[0.65rem] text-muted-foreground"
                     style={{
                       right: '12px',
                       top: `${topPosition}px`,
@@ -383,7 +383,7 @@ function SwitchNodeComponent({
               id="default"
               type="source"
               position={Position.Right}
-              className="!w-2 !h-2 !rounded-full !bg-muted-foreground/40 !border-0"
+              className="!h-2 !w-2 !rounded-full !border-0 !bg-muted-foreground/40"
               style={{
                 top: `${firstHandleTop + cases.length * handleSpacing}px`,
               }}
@@ -391,16 +391,16 @@ function SwitchNodeComponent({
             />
             {!hasConnection('default') && !isExecuting && (
               <div
-                className="absolute flex items-center pointer-events-none"
+                className="pointer-events-none absolute flex items-center"
                 style={{
                   right: '-40px',
                   top: `${firstHandleTop + cases.length * handleSpacing}px`,
                   transform: 'translateY(-50%)',
                 }}
               >
-                <div className="bg-border h-[1px] w-6 ml-1" />
+                <div className="ml-1 h-[1px] w-6 bg-border" />
                 <Button
-                  className="w-4 h-4 rounded-full [&_svg]:size-2 shadow-sm pointer-events-auto nodrag nopan"
+                  className="nodrag nopan pointer-events-auto h-4 w-4 rounded-full shadow-sm [&_svg]:size-2"
                   variant="outline"
                   size="icon"
                   onClick={(e) => {
@@ -415,7 +415,7 @@ function SwitchNodeComponent({
             )}
             {/* Default label */}
             <div
-              className="absolute text-[0.65rem] text-muted-foreground pointer-events-none whitespace-nowrap"
+              className="pointer-events-none absolute whitespace-nowrap text-[0.65rem] text-muted-foreground"
               style={{
                 right: '12px',
                 top: `${firstHandleTop + cases.length * handleSpacing}px`,
@@ -432,7 +432,7 @@ function SwitchNodeComponent({
               id="source"
               type="source"
               position={Position.Right}
-              className="!w-2 !h-2 !rounded-full !bg-muted-foreground/40 !border-0"
+              className="!h-2 !w-2 !rounded-full !border-0 !bg-muted-foreground/40"
               isConnectable={isConnectable && !isExecuting}
             />
           </>
@@ -442,7 +442,7 @@ function SwitchNodeComponent({
           type="target"
           id="target"
           position={Position.Left}
-          className="!w-2 !h-2 !rounded-full !bg-muted-foreground/40 !border-0"
+          className="!h-2 !w-2 !rounded-full !border-0 !bg-muted-foreground/40"
           isConnectable={isConnectable && !isExecuting}
         />
       </BaseNode>

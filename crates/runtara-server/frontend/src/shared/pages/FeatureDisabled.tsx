@@ -24,19 +24,13 @@ export function FeatureDisabled({ feature }: FeatureDisabledProps) {
     <section
       role="region"
       aria-labelledby="feature-disabled-heading"
-      className="flex flex-col items-center justify-center min-h-[60vh] px-6 text-center"
+      className="flex min-h-[60vh] flex-col items-center justify-center px-6 text-center"
     >
-      <Lock
-        className="size-12 text-muted-foreground mb-4"
-        aria-hidden="true"
-      />
-      <h2
-        id="feature-disabled-heading"
-        className="text-2xl font-semibold mb-2"
-      >
+      <Lock className="mb-4 size-12 text-muted-foreground" aria-hidden="true" />
+      <h2 id="feature-disabled-heading" className="mb-2 text-2xl font-semibold">
         Feature not enabled
       </h2>
-      <p className="max-w-md text-muted-foreground mb-6">
+      <p className="mb-6 max-w-md text-muted-foreground">
         The <strong>{label}</strong> feature isn&apos;t included in your current
         plan. Contact your administrator if you believe this is unexpected.
       </p>

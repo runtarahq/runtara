@@ -142,24 +142,24 @@ export function VariablesEditor({
       {!hideLabel && (
         <Label className="text-sm font-medium">Variables (Constants)</Label>
       )}
-      <div className="border rounded-lg">
+      <div className="rounded-lg border">
         <table className="w-full">
           <thead>
             <tr className="border-b">
-              <th className="text-left p-2 text-sm font-medium text-muted-foreground">
+              <th className="p-2 text-left text-sm font-medium text-muted-foreground">
                 Name
               </th>
-              <th className="text-left p-2 text-sm font-medium text-muted-foreground">
+              <th className="p-2 text-left text-sm font-medium text-muted-foreground">
                 Value
               </th>
-              <th className="text-left p-2 text-sm font-medium text-muted-foreground">
+              <th className="p-2 text-left text-sm font-medium text-muted-foreground">
                 Type
               </th>
-              <th className="text-left p-2 text-sm font-medium text-muted-foreground">
+              <th className="p-2 text-left text-sm font-medium text-muted-foreground">
                 Description
               </th>
               {!readOnly && (
-                <th className="w-16 text-center p-2 text-sm font-medium text-muted-foreground">
+                <th className="w-16 p-2 text-center text-sm font-medium text-muted-foreground">
                   Actions
                 </th>
               )}
@@ -176,7 +176,7 @@ export function VariablesEditor({
                     }
                     placeholder="myVar"
                     disabled={readOnly}
-                    className="font-mono text-sm border-0 p-1 h-auto focus-visible:ring-0 focus-visible:ring-offset-0"
+                    className="h-auto border-0 p-1 font-mono text-sm focus-visible:ring-0 focus-visible:ring-offset-0"
                   />
                 </td>
                 <td className="p-2">
@@ -188,7 +188,7 @@ export function VariablesEditor({
                       }
                       disabled={readOnly}
                     >
-                      <SelectTrigger className="h-7 font-mono text-sm border-0 focus:ring-0 focus:ring-offset-0">
+                      <SelectTrigger className="h-7 border-0 font-mono text-sm focus:ring-0 focus:ring-offset-0">
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
@@ -204,7 +204,7 @@ export function VariablesEditor({
                       }
                       placeholder="constant value"
                       disabled={readOnly}
-                      className="font-mono text-sm border-0 p-1 h-auto focus-visible:ring-0 focus-visible:ring-offset-0"
+                      className="h-auto border-0 p-1 font-mono text-sm focus-visible:ring-0 focus-visible:ring-offset-0"
                     />
                   )}
                 </td>
@@ -220,21 +220,11 @@ export function VariablesEditor({
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value={'string'}>
-                        String
-                      </SelectItem>
-                      <SelectItem value={'number'}>
-                        Number
-                      </SelectItem>
-                      <SelectItem value={'integer'}>
-                        Integer
-                      </SelectItem>
-                      <SelectItem value={'boolean'}>
-                        Boolean
-                      </SelectItem>
-                      <SelectItem value={'object'}>
-                        Object
-                      </SelectItem>
+                      <SelectItem value={'string'}>String</SelectItem>
+                      <SelectItem value={'number'}>Number</SelectItem>
+                      <SelectItem value={'integer'}>Integer</SelectItem>
+                      <SelectItem value={'boolean'}>Boolean</SelectItem>
+                      <SelectItem value={'object'}>Object</SelectItem>
                       <SelectItem value={'array'}>Array</SelectItem>
                       <SelectItem value={'file'}>File</SelectItem>
                     </SelectContent>
@@ -248,7 +238,7 @@ export function VariablesEditor({
                     }
                     placeholder="Optional description"
                     disabled={readOnly}
-                    className="text-sm border-0 p-1 h-auto focus-visible:ring-0 focus-visible:ring-offset-0"
+                    className="h-auto border-0 p-1 text-sm focus-visible:ring-0 focus-visible:ring-offset-0"
                   />
                 </td>
                 {!readOnly && (
@@ -288,7 +278,7 @@ export function VariablesEditor({
           onClick={handleAdd}
           className="w-full"
         >
-          <Plus className="h-4 w-4 mr-2" />
+          <Plus className="mr-2 h-4 w-4" />
           Add Variable
         </Button>
       )}

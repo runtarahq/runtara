@@ -249,10 +249,7 @@ export function ObjectInstanceDtoForm({
                   value={formValues[column.name] || ''}
                   onValueChange={(value) => handleChange(column.name, value)}
                 >
-                  <SelectTrigger
-                    id={`field-${column.name}`}
-                    className="h-9"
-                  >
+                  <SelectTrigger id={`field-${column.name}`} className="h-9">
                     <SelectValue placeholder="-- Select --" />
                   </SelectTrigger>
                   <SelectContent>
@@ -297,7 +294,7 @@ export function ObjectInstanceDtoForm({
                     }
                   }}
                   placeholder='{"key": "value"}'
-                  className="min-h-[120px] w-full rounded-lg border border-border/50 bg-background px-3 py-2 text-sm font-mono focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  className="min-h-[120px] w-full rounded-lg border border-border/50 bg-background px-3 py-2 font-mono text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                   rows={5}
                 />
               ) : (

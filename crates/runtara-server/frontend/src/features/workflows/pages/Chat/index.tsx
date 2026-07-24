@@ -84,8 +84,7 @@ export function ChatPage() {
               signalId: waitEvent.data.signal_id as string,
               message: waitEvent.data.message as string | undefined,
               responseSchema: waitEvent.data.response_schema as
-                | Record<string, unknown>
-                | undefined,
+                Record<string, unknown> | undefined,
               toolName: waitEvent.data.tool_name as string | undefined,
             });
             store.setStatus('waiting_for_input');
@@ -93,8 +92,7 @@ export function ChatPage() {
 
           // Extract sessionId from instance inputs and reconnect
           const sessionId = instanceData?.inputs?.data?.sessionId as
-            | string
-            | undefined;
+            string | undefined;
           if (sessionId) {
             store.setSessionId(sessionId);
             reconnect(sessionId);
@@ -133,7 +131,7 @@ export function ChatPage() {
         >
           <ArrowLeft className="h-4 w-4" />
         </Button>
-        <div className="flex-1 min-w-0">
+        <div className="min-w-0 flex-1">
           <h1 className="truncate text-sm font-semibold">{workflowName}</h1>
           {useChatStore.getState().instanceId && (
             <p className="truncate text-xs text-muted-foreground">

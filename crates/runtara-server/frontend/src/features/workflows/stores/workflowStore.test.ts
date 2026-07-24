@@ -115,9 +115,9 @@ describe('rewriteStepReferencesInString', () => {
   });
 
   it('does not rewrite inside other identifiers', () => {
-    expect(
-      rewriteStepReferencesInString('mysteps.a.outputs.x', 'a', 'z')
-    ).toBe('mysteps.a.outputs.x');
+    expect(rewriteStepReferencesInString('mysteps.a.outputs.x', 'a', 'z')).toBe(
+      'mysteps.a.outputs.x'
+    );
     expect(
       rewriteStepReferencesInString('data.steps.a.outputs.x', 'a', 'z')
     ).toBe('data.steps.a.outputs.x');
@@ -151,10 +151,12 @@ describe('workflowStore renameStep', () => {
 
   it('re-points edges and container parentId, and renames node id + data.id', () => {
     addAgentNode('start');
-    useWorkflowStore.getState().addNode(
-      { id: 'split', stepType: 'Split', name: 'Split items' } as never,
-      { x: 240, y: 0 }
-    );
+    useWorkflowStore
+      .getState()
+      .addNode(
+        { id: 'split', stepType: 'Split', name: 'Split items' } as never,
+        { x: 240, y: 0 }
+      );
     addAgentNode('child', {}, { x: 24, y: 24 }, 'split');
     addAgentNode('after', {}, { x: 480, y: 0 });
     useWorkflowStore.getState().addEdge('start', 'split');

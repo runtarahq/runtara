@@ -51,15 +51,15 @@ function FieldRow({
         style={depth > 0 ? { marginLeft: depth * 16 } : undefined}
         data-testid="output-field-row"
       >
-        <div className="min-w-0 flex flex-col">
-          <span className="font-mono text-xs truncate">{field.name}</span>
+        <div className="flex min-w-0 flex-col">
+          <span className="truncate font-mono text-xs">{field.name}</span>
           {field.description && (
-            <span className="text-[11px] text-muted-foreground truncate">
+            <span className="truncate text-[11px] text-muted-foreground">
               {field.description}
             </span>
           )}
         </div>
-        <div className="flex items-center gap-1 shrink-0">
+        <div className="flex shrink-0 items-center gap-1">
           {field.nullable && (
             <Badge variant="secondary" className="h-5 rounded text-[10px]">
               nullable
@@ -71,7 +71,11 @@ function FieldRow({
         </div>
       </div>
       {(field.fields ?? []).map((child) => (
-        <FieldRow key={`${field.name}.${child.name}`} field={child} depth={depth + 1} />
+        <FieldRow
+          key={`${field.name}.${child.name}`}
+          field={child}
+          depth={depth + 1}
+        />
       ))}
       {itemFields &&
         itemFields.map((child) => (
@@ -118,7 +122,8 @@ function AgentOutputBody({ stepId }: { stepId?: string }) {
   // (the value is an array; elements are addressed by index). Prefix them so
   // nobody wires a null-resolving path off the panel.
   const directFields = output.fields ?? [];
-  const itemFields = directFields.length === 0 ? (output.items?.fields ?? []) : [];
+  const itemFields =
+    directFields.length === 0 ? (output.items?.fields ?? []) : [];
   const containerType = output.type ?? 'unknown';
 
   return (
@@ -183,7 +188,7 @@ function EmbedOutputBody({ stepId }: { stepId?: string }) {
 
   return (
     <div className="space-y-2">
-      <div className="text-xs text-muted-foreground font-mono">
+      <div className="font-mono text-xs text-muted-foreground">
         {referenceHint(stepId, '.outputs')}
       </div>
       {fields.length > 0 ? (
@@ -273,7 +278,7 @@ function ShapeOutputBody({
       )}
       {(shape.siblingFields?.length ?? 0) > 0 && (
         <div className="space-y-1">
-          <p className="text-[11px] uppercase tracking-wide text-muted-foreground pt-1">
+          <p className="pt-1 text-[11px] uppercase tracking-wide text-muted-foreground">
             Also written under steps.{stepId || '<id>'}
           </p>
           {shape.siblingFields!.map((field) => (
@@ -318,7 +323,7 @@ export function StepOutputPanel() {
     <Collapsible open={open} onOpenChange={setOpen}>
       <CollapsibleTrigger
         type="button"
-        className="flex w-full items-center gap-1.5 text-sm font-medium py-1 text-left"
+        className="flex w-full items-center gap-1.5 py-1 text-left text-sm font-medium"
         data-testid="step-output-panel-trigger"
       >
         <Icons.chevronRight
@@ -329,7 +334,7 @@ export function StepOutputPanel() {
           — what this step produces
         </span>
       </CollapsibleTrigger>
-      <CollapsibleContent className="pt-1 pb-2">
+      <CollapsibleContent className="pb-2 pt-1">
         {stepType === 'Agent' ? (
           <AgentOutputBody stepId={nodeId} />
         ) : stepType === 'EmbedWorkflow' ? (

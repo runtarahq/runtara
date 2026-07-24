@@ -775,7 +775,7 @@ export function StepPickerModal({
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
-        className="sm:max-w-[500px] p-0 gap-0"
+        className="gap-0 p-0 sm:max-w-[500px]"
         hideCloseButton
         aria-describedby={undefined}
       >

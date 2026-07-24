@@ -142,7 +142,7 @@ export function FilterStepField({ name }: FilterStepFieldProps) {
         <Label className="text-sm font-medium">Filter Condition</Label>
         <p className="text-xs text-muted-foreground">
           Items matching this condition will be kept. Use{' '}
-          <code className="bg-muted px-1 rounded">item.*</code> to reference
+          <code className="rounded bg-muted px-1">item.*</code> to reference
           properties of each array element.
         </p>
         <ConditionEditor

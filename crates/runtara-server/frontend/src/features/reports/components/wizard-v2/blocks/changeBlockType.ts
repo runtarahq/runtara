@@ -14,7 +14,10 @@ import {
   ReportSource,
 } from '../../../types';
 
-const TYPE_SPECIFIC_FIELDS: Record<ReportBlockType, keyof ReportBlockDefinition> = {
+const TYPE_SPECIFIC_FIELDS: Record<
+  ReportBlockType,
+  keyof ReportBlockDefinition
+> = {
   markdown: 'markdown',
   table: 'table',
   chart: 'chart',
@@ -136,9 +139,7 @@ function defaultConfigFor(
 /** Returns `true` when the block has user-authored type-specific config
  *  that would be discarded by switching types. Callers use this to
  *  decide whether to prompt for confirmation. */
-export function hasMeaningfulTypeConfig(
-  block: ReportBlockDefinition
-): boolean {
+export function hasMeaningfulTypeConfig(block: ReportBlockDefinition): boolean {
   const field = TYPE_SPECIFIC_FIELDS[block.type as ReportBlockType];
   const config = (block as unknown as Record<string, unknown>)[field];
   if (config == null) return false;

@@ -329,9 +329,7 @@ test.describe('reports corpus — viewer block-type loading (mocked)', () => {
       page.getByRole('heading', { name: 'Total revenue' })
     ).toBeVisible();
     // currency format renders with the locale currency symbol.
-    await expect(
-      page.getByText(/\$\s?199,?500|199,500/).first()
-    ).toBeVisible();
+    await expect(page.getByText(/\$\s?199,?500|199,500/).first()).toBeVisible();
   });
 
   test('card block renders its group fields', async ({ page, mockApi }) => {

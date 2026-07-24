@@ -66,7 +66,7 @@ function CreateNodeComponent(props: NodeProps<Node>) {
 
       <Dialog open={openCreate} onOpenChange={setOpenCreate}>
         <DialogContent
-          className="flex flex-col w-[50vw] h-[70vh] max-w-none overflow-hidden"
+          className="flex h-[70vh] w-[50vw] max-w-none flex-col overflow-hidden"
           hideCloseButton
         >
           <BaseNodeForm

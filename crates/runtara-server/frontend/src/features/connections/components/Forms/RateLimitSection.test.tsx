@@ -38,9 +38,12 @@ describe('RateLimitSection', () => {
         <RateLimitSection />
       </Wrapper>
     );
-    expect(screen.getByText(/No rate limiting is applied/i)).toBeInTheDocument();
-    expect(screen.getByText(/requests to this connection are unlimited/i))
-      .toBeInTheDocument();
+    expect(
+      screen.getByText(/No rate limiting is applied/i)
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/requests to this connection are unlimited/i)
+    ).toBeInTheDocument();
     expect(screen.getByText('Enable rate limiting')).toBeInTheDocument();
     // The default form must NOT imply a baseline is being declined.
     expect(

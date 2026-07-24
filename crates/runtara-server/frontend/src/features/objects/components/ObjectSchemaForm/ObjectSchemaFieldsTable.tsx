@@ -104,11 +104,11 @@ function FieldRow({ field, onUpdate, onRemove }: FieldRowProps) {
   };
 
   return (
-    <TableRow className="hover:bg-muted/30 group">
+    <TableRow className="group hover:bg-muted/30">
       {/* Type column */}
       <TableCell className="align-middle">
         <span
-          className="text-[11px] font-mono px-1.5 py-0.5 rounded text-muted-foreground bg-muted/40 cursor-default"
+          className="cursor-default rounded bg-muted/40 px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground"
           title={getTypeLabel(field.dataType)}
         >
           {getTypeAbbreviation(field.dataType)}
@@ -133,7 +133,7 @@ function FieldRow({ field, onUpdate, onRemove }: FieldRowProps) {
             handleDataTypeChange(value)
           }
         >
-          <SelectTrigger className="h-9 rounded-lg w-full">
+          <SelectTrigger className="h-9 w-full rounded-lg">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
@@ -147,7 +147,7 @@ function FieldRow({ field, onUpdate, onRemove }: FieldRowProps) {
       </TableCell>
 
       {/* Required column */}
-      <TableCell className="align-middle text-center">
+      <TableCell className="text-center align-middle">
         <div
           className="flex justify-center"
           title={field.nullable ? 'Optional' : 'Required'}
@@ -160,7 +160,7 @@ function FieldRow({ field, onUpdate, onRemove }: FieldRowProps) {
       </TableCell>
 
       {/* Unique column */}
-      <TableCell className="align-middle text-center">
+      <TableCell className="text-center align-middle">
         <div
           className="flex justify-center"
           title={field.unique ? 'Unique constraint' : 'No unique constraint'}
@@ -202,7 +202,7 @@ function FieldRow({ field, onUpdate, onRemove }: FieldRowProps) {
                   <div className="space-y-4">
                     <div className="flex items-center gap-2">
                       <Settings2 className="h-4 w-4 text-muted-foreground" />
-                      <span className="font-medium text-sm">
+                      <span className="text-sm font-medium">
                         Decimal Configuration
                       </span>
                     </div>
@@ -253,7 +253,7 @@ function FieldRow({ field, onUpdate, onRemove }: FieldRowProps) {
                   <div className="space-y-4">
                     <div className="flex items-center gap-2">
                       <Settings2 className="h-4 w-4 text-muted-foreground" />
-                      <span className="font-medium text-sm">Enum Values</span>
+                      <span className="text-sm font-medium">Enum Values</span>
                     </div>
                     <TagInput
                       value={field.values || []}
@@ -269,7 +269,7 @@ function FieldRow({ field, onUpdate, onRemove }: FieldRowProps) {
                   <div className="space-y-4">
                     <div className="flex items-center gap-2">
                       <Settings2 className="h-4 w-4 text-muted-foreground" />
-                      <span className="font-medium text-sm">
+                      <span className="text-sm font-medium">
                         Text Search Configuration
                       </span>
                     </div>
@@ -305,7 +305,7 @@ function FieldRow({ field, onUpdate, onRemove }: FieldRowProps) {
                   <div className="space-y-4">
                     <div className="flex items-center gap-2">
                       <Settings2 className="h-4 w-4 text-muted-foreground" />
-                      <span className="font-medium text-sm">
+                      <span className="text-sm font-medium">
                         Vector Configuration
                       </span>
                     </div>
@@ -369,7 +369,7 @@ function FieldRow({ field, onUpdate, onRemove }: FieldRowProps) {
             variant="ghost"
             size="icon"
             onClick={onRemove}
-            className="h-8 w-8 text-muted-foreground hover:text-destructive opacity-0 group-hover:opacity-100 transition-opacity"
+            className="h-8 w-8 text-muted-foreground opacity-0 transition-opacity hover:text-destructive group-hover:opacity-100"
             title="Remove column"
           >
             <Trash2 className="h-4 w-4" />
@@ -430,8 +430,8 @@ export function ObjectSchemaFieldsTable({
 
   return (
     <div className="space-y-4">
-      <div className="rounded-lg bg-card overflow-hidden">
-        <Table className="table-fixed w-full">
+      <div className="overflow-hidden rounded-lg bg-card">
+        <Table className="w-full table-fixed">
           <colgroup>
             <col className="w-14" />
             <col className="w-40" />
@@ -442,7 +442,7 @@ export function ObjectSchemaFieldsTable({
             <col className="w-20" />
           </colgroup>
           <TableHeader>
-            <TableRow className="hover:bg-transparent border-b border-border/40">
+            <TableRow className="border-b border-border/40 hover:bg-transparent">
               <TableHead className="text-xs font-medium text-muted-foreground">
                 Type
               </TableHead>
@@ -453,13 +453,13 @@ export function ObjectSchemaFieldsTable({
                 Data Type
               </TableHead>
               <TableHead
-                className="text-xs font-medium text-muted-foreground text-center"
+                className="text-center text-xs font-medium text-muted-foreground"
                 title="Required - Every record must have a value"
               >
                 Req
               </TableHead>
               <TableHead
-                className="text-xs font-medium text-muted-foreground text-center"
+                className="text-center text-xs font-medium text-muted-foreground"
                 title="Unique - No duplicate values allowed"
               >
                 Uniq
@@ -491,7 +491,7 @@ export function ObjectSchemaFieldsTable({
           className="text-muted-foreground hover:text-foreground"
           onClick={onAddField}
         >
-          <Plus className="h-4 w-4 mr-2" />
+          <Plus className="mr-2 h-4 w-4" />
           Add column
         </Button>
       </div>

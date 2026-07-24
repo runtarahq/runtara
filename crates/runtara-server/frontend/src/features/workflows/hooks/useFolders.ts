@@ -44,9 +44,7 @@ function parseFolderPaths(paths: readonly string[]): FolderInfo[] {
         if (byPath.has(fullPath)) continue;
 
         const parentPath =
-          prefix.length > 1
-            ? '/' + prefix.slice(0, -1).join('/') + '/'
-            : '/';
+          prefix.length > 1 ? '/' + prefix.slice(0, -1).join('/') + '/' : '/';
 
         byPath.set(fullPath, {
           path: fullPath,

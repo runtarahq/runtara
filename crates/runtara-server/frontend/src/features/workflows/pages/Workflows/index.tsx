@@ -168,7 +168,10 @@ export function Workflows() {
       segments.forEach((segment) => {
         acc += '/' + segment;
         const path = acc + '/';
-        items.push({ label: segment, onClick: () => handleFolderNavigate(path) });
+        items.push({
+          label: segment,
+          onClick: () => handleFolderNavigate(path),
+        });
       });
     }
     return items;

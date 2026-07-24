@@ -9,22 +9,13 @@ import { immer } from 'zustand/middleware/immer';
  * - 'composite': Structured object/array with nested MappingValues
  */
 export type InputMappingValueType =
-  | 'immediate'
-  | 'reference'
-  | 'composite'
-  | 'template';
+  'immediate' | 'reference' | 'composite' | 'template';
 
 /**
  * Supported type hints for immediate values within composites
  */
 export type CompositeImmediateTypeHint =
-  | 'string'
-  | 'integer'
-  | 'number'
-  | 'boolean'
-  | 'file'
-  | 'json'
-  | 'auto';
+  'string' | 'integer' | 'number' | 'boolean' | 'file' | 'json' | 'auto';
 
 /**
  * A single value within a composite structure.

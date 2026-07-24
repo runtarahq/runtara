@@ -86,11 +86,11 @@ export function VersionsPanelContent({
   }
 
   return (
-    <div className="flex flex-1 min-h-0 overflow-hidden">
+    <div className="flex min-h-0 flex-1 overflow-hidden">
       {/* Versions list */}
-      <div className="flex-1 flex flex-col overflow-hidden">
-        <div className="flex items-center justify-between px-3 py-1.5 border-b bg-muted/20">
-          <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
+      <div className="flex flex-1 flex-col overflow-hidden">
+        <div className="flex items-center justify-between border-b bg-muted/20 px-3 py-1.5">
+          <span className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
             Workflow Versions
           </span>
           <span className="text-xs text-muted-foreground">
@@ -108,8 +108,7 @@ export function VersionsPanelContent({
             // Rebuild button. Treat an in-flight rebuild of this version
             // as still-compiled for layout purposes — the user clicked
             // the button on a compiled row and shouldn't see it vanish.
-            const isRebuilding =
-              rebuildingVersion === version.versionNumber;
+            const isRebuilding = rebuildingVersion === version.versionNumber;
             const isCompiled = version.compiled || isRebuilding;
             // A row is "failed" when the worker recorded a failure and we
             // are NOT currently mid-rebuild (the rebuild click should
@@ -123,9 +122,9 @@ export function VersionsPanelContent({
               <div
                 key={version.versionId ?? version.versionNumber}
                 className={cn(
-                  'flex items-center justify-between px-3 py-2 border-b cursor-pointer transition-colors',
+                  'flex cursor-pointer items-center justify-between border-b px-3 py-2 transition-colors',
                   'hover:bg-muted/50',
-                  isSelected && 'bg-accent border-l-2 border-l-primary'
+                  isSelected && 'border-l-2 border-l-primary bg-accent'
                 )}
                 onClick={() => {
                   if (version.versionNumber && !isLoading) {
@@ -135,7 +134,7 @@ export function VersionsPanelContent({
               >
                 {/* Left side: Version info */}
                 <div className="flex items-center gap-3">
-                  <span className="text-sm font-semibold min-w-[32px]">
+                  <span className="min-w-[32px] text-sm font-semibold">
                     v{version.versionNumber}
                   </span>
                   <span className="text-xs text-muted-foreground">
@@ -149,14 +148,14 @@ export function VersionsPanelContent({
                   <Badge
                     variant="outline"
                     className={cn(
-                      'text-[10px] px-1.5 py-0 h-4',
+                      'h-4 px-1.5 py-0 text-[10px]',
                       isRebuilding
-                        ? 'border-blue-500 text-blue-600 bg-blue-50 dark:bg-blue-950/30'
+                        ? 'border-blue-500 bg-blue-50 text-blue-600 dark:bg-blue-950/30'
                         : version.compiled
-                          ? 'border-green-500 text-green-600 bg-green-50 dark:bg-green-950/30'
+                          ? 'border-green-500 bg-green-50 text-green-600 dark:bg-green-950/30'
                           : isFailed
-                            ? 'border-destructive/60 text-destructive bg-destructive/5'
-                            : 'border-amber-500 text-amber-600 bg-amber-50 dark:bg-amber-950/30'
+                            ? 'border-destructive/60 bg-destructive/5 text-destructive'
+                            : 'border-amber-500 bg-amber-50 text-amber-600 dark:bg-amber-950/30'
                     )}
                     title={
                       isFailed && version.errorMessage
@@ -180,7 +179,7 @@ export function VersionsPanelContent({
                       until the new compile lands. */}
                   {isCompiled && version.wasmSize != null && (
                     <span
-                      className="text-[10px] text-muted-foreground tabular-nums"
+                      className="text-[10px] tabular-nums text-muted-foreground"
                       title={`Binary: ${formatBytes(version.wasmSize)} · Package source: ${formatBytes(version.packageSize)}`}
                     >
                       wasm {formatBytes(version.wasmSize)} · pkg{' '}
@@ -191,7 +190,7 @@ export function VersionsPanelContent({
 
                 {/* Right side: Controls */}
                 <div
-                  className="flex items-center gap-2 flex-shrink-0"
+                  className="flex flex-shrink-0 items-center gap-2"
                   onClick={(e) => e.stopPropagation()}
                 >
                   {/* Rebuild button — visible for:
@@ -208,7 +207,7 @@ export function VersionsPanelContent({
                     <Button
                       variant="outline"
                       size="sm"
-                      className="h-6 px-2.5 text-[10px] gap-1"
+                      className="h-6 gap-1 px-2.5 text-[10px]"
                       onClick={() => {
                         if (version.versionNumber) {
                           onVersionRebuild(version.versionNumber);
@@ -223,9 +222,7 @@ export function VersionsPanelContent({
                           isRebuilding && 'animate-spin'
                         )}
                       />
-                      <span>
-                        {isRebuilding ? 'Rebuilding' : 'Rebuild'}
-                      </span>
+                      <span>{isRebuilding ? 'Rebuilding' : 'Rebuild'}</span>
                     </Button>
                   )}
 
@@ -234,7 +231,7 @@ export function VersionsPanelContent({
                     variant={isActive ? 'outline' : 'default'}
                     size="sm"
                     className={cn(
-                      'h-6 px-2.5 text-[10px] gap-1',
+                      'h-6 gap-1 px-2.5 text-[10px]',
                       isActive &&
                         'border-green-200 bg-green-50 text-green-700 hover:bg-green-50 dark:border-green-800 dark:bg-green-900/20 dark:text-green-400'
                     )}

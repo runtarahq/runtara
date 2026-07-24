@@ -278,9 +278,9 @@ export function ReportPage() {
       const startingCurrentViewId = startingGroup?.currentViewId;
       const shouldPoll = Boolean(
         group?.mode === 'stages' &&
-          group.followCurrentOnAdvance &&
-          startingCurrentViewId &&
-          startingNavigation?.activeViewId === startingCurrentViewId
+        group.followCurrentOnAdvance &&
+        startingCurrentViewId &&
+        startingNavigation?.activeViewId === startingCurrentViewId
       );
       const delays = shouldPoll ? [0, 100, 250, 500, 1000] : [0];
       let result: Awaited<ReturnType<typeof renderQuery.refetch>> | undefined;

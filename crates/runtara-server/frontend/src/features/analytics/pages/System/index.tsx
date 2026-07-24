@@ -55,7 +55,7 @@ export function System() {
         <section>
           <div className="grid gap-4 md:grid-cols-3">
             {/* CPU Info */}
-            <Card className="rounded-lg border border-border/40 bg-card px-4 py-4 sm:px-5 shadow-none">
+            <Card className="rounded-lg border border-border/40 bg-card px-4 py-4 shadow-none sm:px-5">
               {systemLoading ? (
                 <div className="space-y-3">
                   <div className="flex items-center gap-2">
@@ -64,8 +64,8 @@ export function System() {
                       CPU
                     </span>
                   </div>
-                  <div className="h-6 w-32 rounded bg-muted animate-pulse" />
-                  <div className="h-4 w-24 rounded bg-muted animate-pulse" />
+                  <div className="h-6 w-32 animate-pulse rounded bg-muted" />
+                  <div className="h-4 w-24 animate-pulse rounded bg-muted" />
                 </div>
               ) : systemAnalytics?.data?.cpu ? (
                 <div className="space-y-3">
@@ -99,7 +99,7 @@ export function System() {
             </Card>
 
             {/* Memory Info */}
-            <Card className="rounded-lg border border-border/40 bg-card px-4 py-4 sm:px-5 shadow-none">
+            <Card className="rounded-lg border border-border/40 bg-card px-4 py-4 shadow-none sm:px-5">
               {systemLoading ? (
                 <div className="space-y-3">
                   <div className="flex items-center gap-2">
@@ -108,9 +108,9 @@ export function System() {
                       Memory
                     </span>
                   </div>
-                  <div className="h-6 w-32 rounded bg-muted animate-pulse" />
-                  <div className="h-2 w-full rounded bg-muted animate-pulse" />
-                  <div className="h-4 w-40 rounded bg-muted animate-pulse" />
+                  <div className="h-6 w-32 animate-pulse rounded bg-muted" />
+                  <div className="h-2 w-full animate-pulse rounded bg-muted" />
+                  <div className="h-4 w-40 animate-pulse rounded bg-muted" />
                 </div>
               ) : systemAnalytics?.data?.memory ? (
                 <div className="space-y-3">
@@ -157,7 +157,7 @@ export function System() {
             </Card>
 
             {/* Disk Info */}
-            <Card className="rounded-lg border border-border/40 bg-card px-4 py-4 sm:px-5 shadow-none">
+            <Card className="rounded-lg border border-border/40 bg-card px-4 py-4 shadow-none sm:px-5">
               {systemLoading ? (
                 <div className="space-y-3">
                   <div className="flex items-center gap-2">
@@ -166,9 +166,9 @@ export function System() {
                       Disk
                     </span>
                   </div>
-                  <div className="h-6 w-32 rounded bg-muted animate-pulse" />
-                  <div className="h-2 w-full rounded bg-muted animate-pulse" />
-                  <div className="h-4 w-40 rounded bg-muted animate-pulse" />
+                  <div className="h-6 w-32 animate-pulse rounded bg-muted" />
+                  <div className="h-2 w-full animate-pulse rounded bg-muted" />
+                  <div className="h-4 w-40 animate-pulse rounded bg-muted" />
                 </div>
               ) : systemAnalytics?.data?.disk ? (
                 <div className="space-y-3">

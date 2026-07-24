@@ -75,7 +75,7 @@ export function StructuredErrorDisplay({
     return (
       <div
         className={cn(
-          'text-sm text-destructive bg-destructive/10 p-3 rounded',
+          'rounded bg-destructive/10 p-3 text-sm text-destructive',
           className
         )}
       >
@@ -149,13 +149,13 @@ function StructuredErrorContent({
     return (
       <div
         className={cn(
-          'text-sm rounded p-3',
+          'rounded p-3 text-sm',
           bgColorClass,
           textColorClass,
           className
         )}
       >
-        <div className="flex items-start gap-2 flex-wrap">
+        <div className="flex flex-wrap items-start gap-2">
           {showCode && (
             <Badge variant={badgeVariant} className="shrink-0">
               {structured.code}
@@ -166,7 +166,7 @@ function StructuredErrorContent({
               {structured.category}
             </Badge>
           )}
-          <span className="flex-1 min-w-0">{localizedMessage}</span>
+          <span className="min-w-0 flex-1">{localizedMessage}</span>
         </div>
       </div>
     );
@@ -175,9 +175,9 @@ function StructuredErrorContent({
   // Expanded mode
   return (
     <div className={cn('rounded border', bgColorClass, className)}>
-      <div className="p-4 space-y-3">
+      <div className="space-y-3 p-4">
         {/* Header with badges */}
-        <div className="flex items-center gap-2 flex-wrap">
+        <div className="flex flex-wrap items-center gap-2">
           {showCode && (
             <Badge variant={badgeVariant} className="font-mono">
               {structured.code}
@@ -200,7 +200,7 @@ function StructuredErrorContent({
 
         {/* Guidance */}
         {guidance && (
-          <div className="text-sm text-muted-foreground bg-background/50 p-2 rounded border">
+          <div className="rounded border bg-background/50 p-2 text-sm text-muted-foreground">
             <strong>Suggestion:</strong> {guidance}
           </div>
         )}
@@ -210,7 +210,7 @@ function StructuredErrorContent({
           <div className="border-t pt-3">
             <button
               onClick={() => setAttributesExpanded(!attributesExpanded)}
-              className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+              className="flex items-center gap-1 text-xs text-muted-foreground transition-colors hover:text-foreground"
             >
               {attributesExpanded ? (
                 <ChevronDown className="h-3 w-3" />
@@ -223,7 +223,7 @@ function StructuredErrorContent({
             {attributesExpanded && (
               <div className="mt-2 space-y-1">
                 {Object.entries(attributes).map(([key, value]) => (
-                  <div key={key} className="text-xs font-mono">
+                  <div key={key} className="font-mono text-xs">
                     <span className="text-muted-foreground">{key}:</span>{' '}
                     <span className={textColorClass}>
                       {JSON.stringify(value)}

@@ -125,8 +125,8 @@ export function LogStepField({ name }: LogStepFieldProps) {
       <FormItem>
         <FormLabel>Message *</FormLabel>
         <FormDescription>
-          The log message is emitted verbatim — references and templates are
-          not resolved here. Put dynamic values in Context below.
+          The log message is emitted verbatim — references and templates are not
+          resolved here. Put dynamic values in Context below.
         </FormDescription>
         <FormControl>
           <Textarea

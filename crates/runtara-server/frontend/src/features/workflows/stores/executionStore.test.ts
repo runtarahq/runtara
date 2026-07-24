@@ -103,12 +103,8 @@ describe('executionStore', () => {
 
       const state = useExecutionStore.getState();
       expect(state.nodeExecutionStatus.size).toBe(3);
-      expect(state.nodeExecutionStatus.get('node-1')?.status).toBe(
-        'completed'
-      );
-      expect(state.nodeExecutionStatus.get('node-2')?.status).toBe(
-        'running'
-      );
+      expect(state.nodeExecutionStatus.get('node-1')?.status).toBe('completed');
+      expect(state.nodeExecutionStatus.get('node-2')?.status).toBe('running');
       expect(state.nodeExecutionStatus.get('node-3')?.error).toBe(
         'Something went wrong'
       );
@@ -154,31 +150,21 @@ describe('executionStore', () => {
   describe('updateInstanceStatus', () => {
     it('updates the instance status', () => {
       useExecutionStore.getState().startExecution('inst-1', 'scen-1', false);
-      useExecutionStore
-        .getState()
-        .updateInstanceStatus('running');
+      useExecutionStore.getState().updateInstanceStatus('running');
 
-      expect(useExecutionStore.getState().instanceStatus).toBe(
-        'running'
-      );
+      expect(useExecutionStore.getState().instanceStatus).toBe('running');
     });
 
     it('can set status to failed', () => {
       useExecutionStore.getState().updateInstanceStatus('failed');
 
-      expect(useExecutionStore.getState().instanceStatus).toBe(
-        'failed'
-      );
+      expect(useExecutionStore.getState().instanceStatus).toBe('failed');
     });
 
     it('can set status to succeeded', () => {
-      useExecutionStore
-        .getState()
-        .updateInstanceStatus('completed');
+      useExecutionStore.getState().updateInstanceStatus('completed');
 
-      expect(useExecutionStore.getState().instanceStatus).toBe(
-        'completed'
-      );
+      expect(useExecutionStore.getState().instanceStatus).toBe('completed');
     });
   });
 
@@ -236,14 +222,10 @@ describe('executionStore', () => {
 
       // Start execution
       store.startExecution('inst-1', 'scen-1', false);
-      expect(useExecutionStore.getState().instanceStatus).toBe(
-        'queued'
-      );
+      expect(useExecutionStore.getState().instanceStatus).toBe('queued');
 
       // Running
-      useExecutionStore
-        .getState()
-        .updateInstanceStatus('running');
+      useExecutionStore.getState().updateInstanceStatus('running');
       useExecutionStore.getState().updateNodeStatus('step-1', {
         status: 'running',
         startedAt: '2024-01-01T00:00:00Z',
@@ -272,9 +254,7 @@ describe('executionStore', () => {
       });
 
       // Execution completes
-      useExecutionStore
-        .getState()
-        .updateInstanceStatus('completed');
+      useExecutionStore.getState().updateInstanceStatus('completed');
 
       const finalState = useExecutionStore.getState();
       expect(finalState.instanceStatus).toBe('completed');

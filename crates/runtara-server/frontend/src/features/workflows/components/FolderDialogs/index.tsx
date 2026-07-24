@@ -81,7 +81,7 @@ export function RenameFolderDialog({
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
-            <Pencil className="w-5 h-5 text-blue-500" />
+            <Pencil className="h-5 w-5 text-blue-500" />
             Rename folder
           </DialogTitle>
           <DialogDescription>
@@ -124,7 +124,7 @@ export function RenameFolderDialog({
           >
             {isLoading ? (
               <>
-                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
                 Renaming...
               </>
             ) : (
@@ -163,7 +163,7 @@ export function DeleteFolderDialog({
       <AlertDialogContent>
         <AlertDialogHeader>
           <AlertDialogTitle className="flex items-center gap-2">
-            <Trash2 className="w-5 h-5 text-red-500" />
+            <Trash2 className="h-5 w-5 text-red-500" />
             Delete folder "{folderName}"?
           </AlertDialogTitle>
           <AlertDialogDescription>
@@ -187,7 +187,7 @@ export function DeleteFolderDialog({
           >
             {isLoading ? (
               <>
-                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
                 Deleting...
               </>
             ) : (
@@ -268,14 +268,14 @@ export function MoveToFolderDialog({
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
-            <Folder className="w-5 h-5 text-amber-500" />
+            <Folder className="h-5 w-5 text-amber-500" />
             Move workflow
           </DialogTitle>
           <DialogDescription>
             Move "{workflowName}" to a different folder.
           </DialogDescription>
         </DialogHeader>
-        <div className="space-y-2 py-4 max-h-[300px] overflow-y-auto">
+        <div className="max-h-[300px] space-y-2 overflow-y-auto py-4">
           {/* Create new folder option */}
           <button
             onClick={() => {
@@ -284,15 +284,15 @@ export function MoveToFolderDialog({
               setError(null);
             }}
             className={cn(
-              'w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-left transition-colors',
+              'flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left transition-colors',
               isCreatingNew
-                ? 'bg-amber-50 border border-amber-200 dark:bg-amber-900/30 dark:border-amber-700'
-                : 'hover:bg-slate-100 dark:hover:bg-slate-800 border border-dashed border-slate-300 dark:border-slate-600'
+                ? 'border border-amber-200 bg-amber-50 dark:border-amber-700 dark:bg-amber-900/30'
+                : 'border border-dashed border-slate-300 hover:bg-slate-100 dark:border-slate-600 dark:hover:bg-slate-800'
             )}
           >
             <FolderPlus
               className={cn(
-                'w-5 h-5',
+                'h-5 w-5',
                 isCreatingNew ? 'text-amber-600' : 'text-amber-500'
               )}
             />
@@ -331,11 +331,11 @@ export function MoveToFolderDialog({
                   }
                 }}
               />
-              {error && <p className="text-xs text-red-500 mt-1">{error}</p>}
+              {error && <p className="mt-1 text-xs text-red-500">{error}</p>}
             </div>
           )}
 
-          <div className="border-t border-slate-200 dark:border-slate-700 my-2" />
+          <div className="my-2 border-t border-slate-200 dark:border-slate-700" />
 
           {/* Root option */}
           <button
@@ -346,15 +346,15 @@ export function MoveToFolderDialog({
               setError(null);
             }}
             className={cn(
-              'w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-left transition-colors',
+              'flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left transition-colors',
               selectedPath === '/' && !isCreatingNew
-                ? 'bg-blue-50 border border-blue-200 dark:bg-blue-900/30 dark:border-blue-700'
+                ? 'border border-blue-200 bg-blue-50 dark:border-blue-700 dark:bg-blue-900/30'
                 : 'hover:bg-slate-100 dark:hover:bg-slate-800'
             )}
           >
             <Home
               className={cn(
-                'w-5 h-5',
+                'h-5 w-5',
                 selectedPath === '/' && !isCreatingNew
                   ? 'text-blue-600'
                   : 'text-slate-400'
@@ -389,16 +389,16 @@ export function MoveToFolderDialog({
                 setError(null);
               }}
               className={cn(
-                'w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-left transition-colors',
+                'flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left transition-colors',
                 selectedPath === folder.path && !isCreatingNew
-                  ? 'bg-blue-50 border border-blue-200 dark:bg-blue-900/30 dark:border-blue-700'
+                  ? 'border border-blue-200 bg-blue-50 dark:border-blue-700 dark:bg-blue-900/30'
                   : 'hover:bg-slate-100 dark:hover:bg-slate-800'
               )}
               style={{ paddingLeft: `${12 + (folder.depth - 1) * 16}px` }}
             >
               <Folder
                 className={cn(
-                  'w-5 h-5',
+                  'h-5 w-5',
                   selectedPath === folder.path && !isCreatingNew
                     ? 'text-blue-600'
                     : 'text-amber-500'
@@ -441,12 +441,12 @@ export function MoveToFolderDialog({
           >
             {isLoading ? (
               <>
-                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
                 Moving...
               </>
             ) : isCreatingNew ? (
               <>
-                <FolderPlus className="w-4 h-4 mr-2" />
+                <FolderPlus className="mr-2 h-4 w-4" />
                 Create & Move
               </>
             ) : (

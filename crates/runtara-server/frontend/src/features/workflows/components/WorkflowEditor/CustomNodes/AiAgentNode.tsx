@@ -442,16 +442,16 @@ function AiAgentNodeComponent({
           width: `${NODE_TYPE_SIZES[NODE_TYPES.AiAgentNode]?.width || 252}px`,
         }}
       >
-        <div className="flex flex-col w-full h-full">
+        <div className="flex h-full w-full flex-col">
           {/* Header */}
-          <div className="flex items-center gap-1.5 px-2 py-1.5 border-b border-border/50">
+          <div className="flex items-center gap-1.5 border-b border-border/50 px-2 py-1.5">
             {data.stepType && (
-              <div className="flex-shrink-0 w-4 h-4 flex items-center justify-center rounded-sm bg-muted/30 [&_svg]:w-2.5 [&_svg]:h-2.5">
+              <div className="flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-sm bg-muted/30 [&_svg]:h-2.5 [&_svg]:w-2.5">
                 <StepTypeIcon type={data.stepType} />
               </div>
             )}
             <span
-              className="text-[11px] font-medium text-foreground truncate flex-1"
+              className="flex-1 truncate text-[11px] font-medium text-foreground"
               title={data.name || undefined}
             >
               {data.name || (
@@ -461,18 +461,18 @@ function AiAgentNodeComponent({
               )}
             </span>
             {modelName && (
-              <span className="flex-shrink-0 text-[9px] px-1.5 py-0.5 rounded bg-violet-100 text-violet-700 dark:bg-violet-900/40 dark:text-violet-300 font-medium whitespace-nowrap">
+              <span className="flex-shrink-0 whitespace-nowrap rounded bg-violet-100 px-1.5 py-0.5 text-[9px] font-medium text-violet-700 dark:bg-violet-900/40 dark:text-violet-300">
                 {modelName}
               </span>
             )}
-            <div className="flex-shrink-0 w-3 h-3 flex items-center justify-center">
+            <div className="flex h-3 w-3 flex-shrink-0 items-center justify-center">
               {renderStatusIcon()}
             </div>
           </div>
 
           {/* Tools section */}
-          <div className="px-2 pt-1.5 pb-1">
-            <span className="text-[8px] font-semibold uppercase text-muted-foreground tracking-wider leading-none">
+          <div className="px-2 pb-1 pt-1.5">
+            <span className="text-[8px] font-semibold uppercase leading-none tracking-wider text-muted-foreground">
               Tools
             </span>
             {toolNames.map((toolName: string) => {
@@ -481,7 +481,7 @@ function AiAgentNodeComponent({
               return (
                 <div
                   key={toolName}
-                  className="flex items-center gap-1.5 h-[22px] cursor-pointer nodrag nopan hover:bg-muted/30 rounded-sm -mx-0.5 px-0.5"
+                  className="nodrag nopan -mx-0.5 flex h-[22px] cursor-pointer items-center gap-1.5 rounded-sm px-0.5 hover:bg-muted/30"
                   onClick={(e) => {
                     e.stopPropagation();
                     // Open the tool step's config dialog (not the AI Agent's)
@@ -495,15 +495,15 @@ function AiAgentNodeComponent({
                 >
                   <div
                     className={cn(
-                      'w-1.5 h-1.5 rounded-full flex-shrink-0',
+                      'h-1.5 w-1.5 flex-shrink-0 rounded-full',
                       'bg-violet-500 dark:bg-violet-400'
                     )}
                   />
-                  <span className="text-[10px] text-foreground truncate flex-1">
+                  <span className="flex-1 truncate text-[10px] text-foreground">
                     {toolName}
                   </span>
                   {typeLabel && (
-                    <span className="text-[9px] text-muted-foreground flex-shrink-0">
+                    <span className="flex-shrink-0 text-[9px] text-muted-foreground">
                       {typeLabel}
                     </span>
                   )}
@@ -513,18 +513,18 @@ function AiAgentNodeComponent({
             {/* Add tool row */}
             {!isExecuting && (
               <div
-                className="flex items-center gap-1.5 h-[22px] cursor-pointer nodrag nopan hover:bg-muted/30 rounded-sm -mx-0.5 px-0.5"
+                className="nodrag nopan -mx-0.5 flex h-[22px] cursor-pointer items-center gap-1.5 rounded-sm px-0.5 hover:bg-muted/30"
                 onClick={(e) => {
                   e.stopPropagation();
                   setStepPickerMode('tool');
                 }}
               >
-                <div className="w-1.5 h-1.5 flex-shrink-0" />
-                <span className="text-[10px] text-muted-foreground/60 italic flex-1">
+                <div className="h-1.5 w-1.5 flex-shrink-0" />
+                <span className="flex-1 text-[10px] italic text-muted-foreground/60">
                   Add tool…
                 </span>
                 <Button
-                  className="w-4 h-4 rounded-full [&_svg]:size-2 shadow-sm pointer-events-none flex-shrink-0"
+                  className="pointer-events-none h-4 w-4 flex-shrink-0 rounded-full shadow-sm [&_svg]:size-2"
                   variant="outline"
                   size="icon"
                   tabIndex={-1}
@@ -536,13 +536,13 @@ function AiAgentNodeComponent({
           </div>
 
           {/* Memory section */}
-          <div className="px-2 pt-1 pb-1.5 border-t border-border/30">
-            <span className="text-[8px] font-semibold uppercase text-muted-foreground tracking-wider leading-none">
+          <div className="border-t border-border/30 px-2 pb-1.5 pt-1">
+            <span className="text-[8px] font-semibold uppercase leading-none tracking-wider text-muted-foreground">
               Memory
             </span>
             {hasMemory && (
               <div
-                className="flex items-center gap-1.5 h-[22px] cursor-pointer nodrag nopan hover:bg-muted/30 rounded-sm -mx-0.5 px-0.5"
+                className="nodrag nopan -mx-0.5 flex h-[22px] cursor-pointer items-center gap-1.5 rounded-sm px-0.5 hover:bg-muted/30"
                 onClick={(e) => {
                   e.stopPropagation();
                   // Always open AI Agent config — memory settings are managed there
@@ -551,14 +551,14 @@ function AiAgentNodeComponent({
               >
                 <div
                   className={cn(
-                    'w-1.5 h-1.5 rounded-full flex-shrink-0',
+                    'h-1.5 w-1.5 flex-shrink-0 rounded-full',
                     'bg-blue-500 dark:bg-blue-400'
                   )}
                 />
-                <span className="text-[10px] text-foreground truncate flex-1">
+                <span className="flex-1 truncate text-[10px] text-foreground">
                   Conversation
                 </span>
-                <span className="text-[9px] text-muted-foreground flex-shrink-0">
+                <span className="flex-shrink-0 text-[9px] text-muted-foreground">
                   {memoryTypeLabel}
                 </span>
               </div>
@@ -566,18 +566,18 @@ function AiAgentNodeComponent({
             {/* Add memory row */}
             {!isExecuting && !hasMemory && (
               <div
-                className="flex items-center gap-1.5 h-[22px] cursor-pointer nodrag nopan hover:bg-muted/30 rounded-sm -mx-0.5 px-0.5"
+                className="nodrag nopan -mx-0.5 flex h-[22px] cursor-pointer items-center gap-1.5 rounded-sm px-0.5 hover:bg-muted/30"
                 onClick={(e) => {
                   e.stopPropagation();
                   setStepPickerMode('memory');
                 }}
               >
-                <div className="w-1.5 h-1.5 flex-shrink-0" />
-                <span className="text-[10px] text-muted-foreground/60 italic flex-1">
+                <div className="h-1.5 w-1.5 flex-shrink-0" />
+                <span className="flex-1 text-[10px] italic text-muted-foreground/60">
                   Add memory…
                 </span>
                 <Button
-                  className="w-4 h-4 rounded-full [&_svg]:size-2 shadow-sm pointer-events-none flex-shrink-0"
+                  className="pointer-events-none h-4 w-4 flex-shrink-0 rounded-full shadow-sm [&_svg]:size-2"
                   variant="outline"
                   size="icon"
                   tabIndex={-1}
@@ -596,21 +596,21 @@ function AiAgentNodeComponent({
           id="source"
           type="source"
           position={Position.Right}
-          className="!w-2 !h-2 !rounded-full !bg-muted-foreground/40 !border-0"
+          className="!h-2 !w-2 !rounded-full !border-0 !bg-muted-foreground/40"
           isConnectable={isConnectable && !isExecuting}
         />
         <Handle
           type="target"
           id="target"
           position={Position.Left}
-          className="!w-2 !h-2 !rounded-full !bg-muted-foreground/40 !border-0"
+          className="!h-2 !w-2 !rounded-full !border-0 !bg-muted-foreground/40"
           isConnectable={isConnectable && !isExecuting}
         />
         <Handle
           id="onError"
           type="source"
           position={Position.Bottom}
-          className="!w-2 !h-2 !rounded-full !bg-destructive/40 !border-0"
+          className="!h-2 !w-2 !rounded-full !border-0 !bg-destructive/40"
           isConnectable={isConnectable && !isExecuting}
         />
       </BaseNode>

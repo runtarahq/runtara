@@ -903,8 +903,8 @@ function getWritebackContext(
 function shouldRefreshAfterWriteback(column: TableColumn): boolean {
   return Boolean(
     column.displayField ||
-      column.displayTemplate ||
-      column.editor?.kind === 'lookup'
+    column.displayTemplate ||
+    column.editor?.kind === 'lookup'
   );
 }
 

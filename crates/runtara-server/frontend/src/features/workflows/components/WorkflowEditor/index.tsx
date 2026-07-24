@@ -158,8 +158,7 @@ function generateUniqueAiToolName(result: StepPickerResult, nodes: Node[]) {
   for (const node of nodes) {
     if (node.type !== NODE_TYPES.AiAgentNode) continue;
     const inputMapping = (node.data?.inputMapping || []) as
-      | WorkflowInputMappingItem[]
-      | undefined;
+      WorkflowInputMappingItem[] | undefined;
     const toolsField = inputMapping?.find((item) => item.type === 'tools');
     if (Array.isArray(toolsField?.value)) {
       for (const toolName of toolsField.value) {

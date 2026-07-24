@@ -84,7 +84,8 @@ export function SourceEditor({ source, schemas, onChange }: SourceEditorProps) {
               kind === 'workflow_runtime' ? 'instances | actions' : 'metrics'
             }
             onChange={(event) => {
-              const raw = event.target.value as ReportWorkflowRuntimeEntity | '';
+              const raw = event.target.value as
+                ReportWorkflowRuntimeEntity | '';
               onChange({
                 ...base,
                 entity: raw === '' ? null : raw,

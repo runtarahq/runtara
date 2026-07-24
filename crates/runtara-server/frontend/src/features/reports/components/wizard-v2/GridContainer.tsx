@@ -36,7 +36,14 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@/shared/components/ui/dropdown-menu';
-import { ChevronDown, GripVertical, Minus, Plus, Settings2, Trash2 } from 'lucide-react';
+import {
+  ChevronDown,
+  GripVertical,
+  Minus,
+  Plus,
+  Settings2,
+  Trash2,
+} from 'lucide-react';
 import { CSSProperties, useEffect, useState } from 'react';
 import {
   ReportBlockResult,
@@ -416,7 +423,9 @@ function GridNodeEditor({
               </h3>
             ) : (
               <span className="text-xs uppercase tracking-wider text-muted-foreground">
-                {isRoot ? `Report layout · ${columns}×${rows}` : `Grid · ${columns}×${rows}`}
+                {isRoot
+                  ? `Report layout · ${columns}×${rows}`
+                  : `Grid · ${columns}×${rows}`}
               </span>
             )}
             {node.description ? (
@@ -495,9 +504,7 @@ function GridNodeEditor({
       >
         <div
           className="grid w-full gap-3 rounded-md border border-dashed border-muted-foreground/20 bg-muted/10 p-2 [grid-template-columns:var(--report-grid-edit-cols)]"
-          style={
-            { '--report-grid-edit-cols': template } as CSSProperties
-          }
+          style={{ '--report-grid-edit-cols': template } as CSSProperties}
         >
           {node.items.map((item) => {
             const colSpan =
@@ -561,7 +568,9 @@ function GridNodeEditor({
         </div>
       </SortableContext>
       <p className="mt-2 text-[11px] text-muted-foreground">
-        Tip: drag the <GripVertical className="inline h-3 w-3 align-text-bottom" /> grip on any block to reorder.
+        Tip: drag the{' '}
+        <GripVertical className="inline h-3 w-3 align-text-bottom" /> grip on
+        any block to reorder.
       </p>
     </section>
   );

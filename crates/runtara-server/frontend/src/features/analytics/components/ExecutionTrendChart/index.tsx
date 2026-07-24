@@ -70,7 +70,7 @@ export function ExecutionTrendChart({
           <CardTitle>Execution Trends</CardTitle>
         </CardHeader>
         <CardContent>
-          <div className="h-[350px] bg-muted animate-pulse rounded" />
+          <div className="h-[350px] animate-pulse rounded bg-muted" />
         </CardContent>
       </Card>
     );
@@ -83,7 +83,7 @@ export function ExecutionTrendChart({
           <CardTitle>Execution Trends</CardTitle>
         </CardHeader>
         <CardContent>
-          <div className="h-[350px] flex items-center justify-center text-muted-foreground">
+          <div className="flex h-[350px] items-center justify-center text-muted-foreground">
             No data available for the selected period
           </div>
         </CardContent>

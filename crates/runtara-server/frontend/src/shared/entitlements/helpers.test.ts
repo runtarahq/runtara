@@ -128,7 +128,10 @@ describe('enabledAgentSet', () => {
     // case — must NOT be treated like the permissive fallback. The
     // identity-based short-circuit means copies of the fallback do not
     // count; only the singleton triggers the undefined return.
-    const denyAll: EntitlementsSnapshot = { ...PERMISSIVE_FALLBACK, agents: [] };
+    const denyAll: EntitlementsSnapshot = {
+      ...PERMISSIVE_FALLBACK,
+      agents: [],
+    };
     const set = enabledAgentSet(denyAll);
     expect(set).toBeInstanceOf(Set);
     expect(set?.size).toBe(0);

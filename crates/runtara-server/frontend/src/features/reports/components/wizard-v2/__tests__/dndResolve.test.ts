@@ -140,9 +140,9 @@ describe('resolveDrop', () => {
 
   it('no-ops when over-target id is missing', () => {
     const def = definitionWithGrid();
-    expect(
-      resolveDrop(def, { sourceId: 'n_a', overId: 'missing' })
-    ).toEqual({ apply: false });
+    expect(resolveDrop(def, { sourceId: 'n_a', overId: 'missing' })).toEqual({
+      apply: false,
+    });
   });
 
   it('drop on empty cell pins the source to that (col, row)', () => {

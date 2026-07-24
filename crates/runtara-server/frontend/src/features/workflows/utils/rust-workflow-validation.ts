@@ -33,8 +33,7 @@ export interface RustSchemaFieldsValidationError {
   rowIndices: number[];
 }
 
-export interface RustSchemaFieldsValidationResult
-  extends RustWorkflowValidationResult {
+export interface RustSchemaFieldsValidationResult extends RustWorkflowValidationResult {
   schemaErrors: RustSchemaFieldsValidationError[];
 }
 

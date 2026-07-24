@@ -74,7 +74,9 @@ function getEndpoint(trigger: EnrichedTrigger): string | null {
     const connectionId = (trigger.configuration as any)?.connection_id;
     return (
       trigger.webhookUrl ||
-      (tenantId && connectionId && getChannelWebhookUrl(tenantId, connectionId)) ||
+      (tenantId &&
+        connectionId &&
+        getChannelWebhookUrl(tenantId, connectionId)) ||
       null
     );
   }
@@ -108,7 +110,9 @@ export function TriggersGrid({
   isError = false,
   error,
 }: TriggersGridProps) {
-  const [deleteTarget, setDeleteTarget] = useState<EnrichedTrigger | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<EnrichedTrigger | null>(
+    null
+  );
 
   const removeMutation = useCustomMutation({
     mutationFn: removeInvocationTrigger,
@@ -167,7 +171,9 @@ export function TriggersGrid({
       <div className="flex h-full flex-col items-center justify-center px-6 py-10 text-center">
         <Icons.warning className="mb-4 h-10 w-10 text-destructive" />
         <p className="text-base font-semibold text-foreground">
-          {isNetworkError ? 'Unable to connect to backend' : 'An error occurred'}
+          {isNetworkError
+            ? 'Unable to connect to backend'
+            : 'An error occurred'}
         </p>
         <p className="mt-1 text-sm text-muted-foreground">
           {isNetworkError
@@ -218,7 +224,7 @@ export function TriggersGrid({
                   <TableCell className="font-medium text-foreground">
                     <Link
                       to={`/invocation-triggers/${trigger.id}`}
-                      className="hover:underline hover:text-primary"
+                      className="hover:text-primary hover:underline"
                     >
                       {trigger.workflowName}
                     </Link>
@@ -297,32 +303,32 @@ export function TriggersGrid({
                   <TableCell className="text-right">
                     <div className="flex items-center justify-end gap-1">
                       <Can permission="trigger:update">
-                      <Link to={`/invocation-triggers/${trigger.id}`}>
+                        <Link to={`/invocation-triggers/${trigger.id}`}>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-7 w-7 text-muted-foreground"
+                            title="Edit trigger"
+                          >
+                            <Pencil className="h-4 w-4" />
+                          </Button>
+                        </Link>
+                      </Can>
+                      <Can permission="trigger:delete">
                         <Button
                           variant="ghost"
                           size="icon"
-                          className="h-7 w-7 text-muted-foreground"
-                          title="Edit trigger"
+                          className="h-7 w-7 text-muted-foreground hover:text-destructive"
+                          title="Delete trigger"
+                          disabled={deletingId === trigger.id}
+                          onClick={() => setDeleteTarget(trigger)}
                         >
-                          <Pencil className="h-4 w-4" />
+                          {deletingId === trigger.id ? (
+                            <Loader2 className="h-4 w-4 animate-spin" />
+                          ) : (
+                            <Trash2 className="h-4 w-4" />
+                          )}
                         </Button>
-                      </Link>
-                      </Can>
-                      <Can permission="trigger:delete">
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        className="h-7 w-7 text-muted-foreground hover:text-destructive"
-                        title="Delete trigger"
-                        disabled={deletingId === trigger.id}
-                        onClick={() => setDeleteTarget(trigger)}
-                      >
-                        {deletingId === trigger.id ? (
-                          <Loader2 className="h-4 w-4 animate-spin" />
-                        ) : (
-                          <Trash2 className="h-4 w-4" />
-                        )}
-                      </Button>
                       </Can>
                     </div>
                   </TableCell>

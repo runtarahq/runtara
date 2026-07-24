@@ -84,7 +84,7 @@ export function SQLPreview({
         </p>
       </div>
       <Card className="overflow-hidden rounded-lg border border-border/40 bg-muted/20">
-        <pre className="overflow-x-auto p-4 text-xs font-mono text-foreground/90">
+        <pre className="overflow-x-auto p-4 font-mono text-xs text-foreground/90">
           <code>{generateSQL()}</code>
         </pre>
       </Card>

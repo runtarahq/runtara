@@ -26,15 +26,15 @@ export function ValidationPanelContent({
   // Show empty state when there are no messages at all
   if (!hasAnyMessages) {
     return (
-      <div className="flex flex-1 flex-col items-center justify-center min-h-0 text-muted-foreground">
-        <CheckCircle2 className="h-8 w-8 text-success mb-2" />
+      <div className="flex min-h-0 flex-1 flex-col items-center justify-center text-muted-foreground">
+        <CheckCircle2 className="mb-2 h-8 w-8 text-success" />
         <p className="text-sm">No problems detected</p>
       </div>
     );
   }
 
   return (
-    <div className="flex flex-1 flex-col min-h-0">
+    <div className="flex min-h-0 flex-1 flex-col">
       <ValidationFilterTabs />
 
       <div className="flex-1 overflow-y-auto">

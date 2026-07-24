@@ -169,8 +169,7 @@ function stripBlockReferencesFromGrid<T extends ReportGridLayoutNode>(
   if (!grid) return newDefaultLayout() as T;
   const items: ReportGridLayoutItem[] = (grid.items ?? [])
     .filter(
-      (item) =>
-        !(item.child.type === 'block' && item.child.blockId === blockId)
+      (item) => !(item.child.type === 'block' && item.child.blockId === blockId)
     )
     .map((item) => {
       if (item.child.type === 'grid') {

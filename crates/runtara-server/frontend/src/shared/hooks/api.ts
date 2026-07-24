@@ -33,11 +33,10 @@ type TableQueryFnType<T> = (
   context?: any
 ) => Promise<PaginatedResponse<T>>;
 
-interface CustomQueryOptions<TData = unknown>
-  extends Omit<
-    UseQueryOptions<TData, Error, TData, QueryKey>,
-    'queryKey' | 'queryFn'
-  > {
+interface CustomQueryOptions<TData = unknown> extends Omit<
+  UseQueryOptions<TData, Error, TData, QueryKey>,
+  'queryKey' | 'queryFn'
+> {
   queryKey: QueryKey;
   queryFn: QueryFnType<TData>;
 }
@@ -92,9 +91,7 @@ export interface ValidationError {
  * `data.code` is the SPA's contract for entitlement-shaped 403 bodies.
  */
 type EntitlementErrorCode =
-  | 'ENTITLEMENT_REQUIRED'
-  | 'AGENT_NOT_ENABLED'
-  | 'ENTITLEMENT_LIMIT_EXCEEDED';
+  'ENTITLEMENT_REQUIRED' | 'AGENT_NOT_ENABLED' | 'ENTITLEMENT_LIMIT_EXCEEDED';
 
 export interface ApiError extends Error {
   /** Axios error code (e.g., 'ERR_NETWORK', 'ERR_BAD_REQUEST') */
@@ -124,8 +121,10 @@ export interface ApiError extends Error {
   };
 }
 
-interface CustomMutationOptions<TData = unknown, TVariables = unknown>
-  extends Omit<UseMutationOptions<TData, ApiError, TVariables>, 'mutationFn'> {
+interface CustomMutationOptions<
+  TData = unknown,
+  TVariables = unknown,
+> extends Omit<UseMutationOptions<TData, ApiError, TVariables>, 'mutationFn'> {
   mutationFn: MutationFnType<TData, TVariables>;
   /**
    * When true, suppresses toast notifications for validation errors (400 status with validationErrors).
@@ -159,7 +158,7 @@ export function handleEntitlementDenial(error: ApiError): boolean {
     case 'ENTITLEMENT_REQUIRED': {
       const label = isFeatureKey(data.feature)
         ? FEATURE_LABELS[data.feature]
-        : data.feature ?? 'This feature';
+        : (data.feature ?? 'This feature');
       toast.error(`${label} not enabled`, {
         description:
           fallbackMessage ?? `${label} is not enabled for this tenant.`,
@@ -171,8 +170,7 @@ export function handleEntitlementDenial(error: ApiError): boolean {
       const agent = data.agent ?? 'unknown';
       toast.error(`Agent '${agent}' not enabled`, {
         description:
-          fallbackMessage ??
-          `Agent '${agent}' is not enabled for this tenant.`,
+          fallbackMessage ?? `Agent '${agent}' is not enabled for this tenant.`,
         duration: 8000,
       });
       return true;
@@ -331,16 +329,10 @@ export function useCustomMutation<TData = unknown, TVariables = unknown>({
   });
 }
 
-interface TableQueryOptions<T = unknown>
-  extends Omit<
-    UseQueryOptions<
-      PaginatedResponse<T>,
-      Error,
-      PaginatedResponse<T>,
-      QueryKey
-    >,
-    'queryKey' | 'queryFn'
-  > {
+interface TableQueryOptions<T = unknown> extends Omit<
+  UseQueryOptions<PaginatedResponse<T>, Error, PaginatedResponse<T>, QueryKey>,
+  'queryKey' | 'queryFn'
+> {
   queryKey: QueryKey;
   queryFn: TableQueryFnType<T>;
 }

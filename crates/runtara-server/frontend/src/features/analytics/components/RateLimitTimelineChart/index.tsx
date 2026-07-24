@@ -45,7 +45,7 @@ function TimelineSummary({ buckets }: { buckets: RateLimitTimelineBucket[] }) {
   }, [buckets]);
 
   return (
-    <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+    <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
       <div className="flex items-center gap-3 rounded-lg bg-muted/30 p-3">
         <div className="rounded-full bg-blue-500/10 p-2">
           <Activity className="h-4 w-4 text-blue-500" />
@@ -121,7 +121,7 @@ export function RateLimitTimelineChart({
 
       {hasData ? (
         <div className="pt-4">
-          <h4 className="text-sm font-medium mb-3">
+          <h4 className="mb-3 text-sm font-medium">
             Events Over Time (
             {granularity === 'minute'
               ? 'Per Minute'
@@ -182,7 +182,7 @@ export function RateLimitTimelineChart({
           </ResponsiveContainer>
         </div>
       ) : (
-        <div className="text-center text-sm text-muted-foreground py-8">
+        <div className="py-8 text-center text-sm text-muted-foreground">
           No rate limit events in the selected period
         </div>
       )}

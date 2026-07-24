@@ -103,17 +103,17 @@ export function ObjectMappingEditor({
   return (
     <div className="flex flex-col">
       {/* Mode selector with close button */}
-      <div className="flex items-center gap-2 px-4 py-3 shrink-0">
-        <div className="flex gap-1 flex-1">
+      <div className="flex shrink-0 items-center gap-2 px-4 py-3">
+        <div className="flex flex-1 gap-1">
           <button
             type="button"
             onClick={() => handleModeChange('reference')}
             className={cn(
-              'flex-1 flex items-center justify-center gap-1.5 px-3 py-2',
-              'text-sm border rounded-md transition-colors',
+              'flex flex-1 items-center justify-center gap-1.5 px-3 py-2',
+              'rounded-md border text-sm transition-colors',
               mode === 'reference'
-                ? 'bg-blue-50 border-blue-300 text-blue-700 dark:bg-blue-950 dark:border-blue-800 dark:text-blue-400'
-                : 'bg-background border-input text-muted-foreground hover:bg-muted/50'
+                ? 'border-blue-300 bg-blue-50 text-blue-700 dark:border-blue-800 dark:bg-blue-950 dark:text-blue-400'
+                : 'border-input bg-background text-muted-foreground hover:bg-muted/50'
             )}
           >
             <Link className="h-4 w-4" />
@@ -123,11 +123,11 @@ export function ObjectMappingEditor({
             type="button"
             onClick={() => handleModeChange('build')}
             className={cn(
-              'flex-1 flex items-center justify-center gap-1.5 px-3 py-2',
-              'text-sm border rounded-md transition-colors',
+              'flex flex-1 items-center justify-center gap-1.5 px-3 py-2',
+              'rounded-md border text-sm transition-colors',
               mode === 'build'
-                ? 'bg-green-50 border-green-300 text-green-700 dark:bg-green-950 dark:border-green-800 dark:text-green-400'
-                : 'bg-background border-input text-muted-foreground hover:bg-muted/50'
+                ? 'border-green-300 bg-green-50 text-green-700 dark:border-green-800 dark:bg-green-950 dark:text-green-400'
+                : 'border-input bg-background text-muted-foreground hover:bg-muted/50'
             )}
           >
             <Layers className="h-4 w-4" />
@@ -173,14 +173,14 @@ export function ObjectMappingEditor({
             </p>
             {/* Schema hint if available */}
             {schemaFields.length > 0 && (
-              <div className="flex items-center gap-2 p-2 bg-muted/30 rounded-md border text-xs flex-wrap mb-2">
-                <span className="text-muted-foreground font-medium">
+              <div className="mb-2 flex flex-wrap items-center gap-2 rounded-md border bg-muted/30 p-2 text-xs">
+                <span className="font-medium text-muted-foreground">
                   Expected fields:
                 </span>
                 {schemaFields.map((field) => (
                   <span
                     key={field.name}
-                    className="flex items-center gap-1 px-2 py-0.5 bg-background rounded border"
+                    className="flex items-center gap-1 rounded border bg-background px-2 py-0.5"
                   >
                     <span className="font-mono">{field.name}</span>
                     {field.required && (

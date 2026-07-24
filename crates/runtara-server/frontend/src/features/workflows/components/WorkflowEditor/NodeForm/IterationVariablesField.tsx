@@ -103,20 +103,20 @@ export function IterationVariablesField({
     <div className="space-y-2">
       <Label className="text-sm font-medium">Variables</Label>
       <p className="text-xs text-muted-foreground">{description}</p>
-      <div className="border rounded-lg">
+      <div className="rounded-lg border">
         <table className="w-full">
           <thead>
             <tr className="border-b">
-              <th className="text-left p-2 text-sm font-medium text-muted-foreground">
+              <th className="p-2 text-left text-sm font-medium text-muted-foreground">
                 Name
               </th>
-              <th className="text-left p-2 text-sm font-medium text-muted-foreground">
+              <th className="p-2 text-left text-sm font-medium text-muted-foreground">
                 Value
               </th>
-              <th className="text-left p-2 text-sm font-medium text-muted-foreground w-28">
+              <th className="w-28 p-2 text-left text-sm font-medium text-muted-foreground">
                 Type
               </th>
-              <th className="w-16 text-center p-2 text-sm font-medium text-muted-foreground">
+              <th className="w-16 p-2 text-center text-sm font-medium text-muted-foreground">
                 Actions
               </th>
             </tr>
@@ -155,11 +155,11 @@ export function IterationVariablesField({
                       <Input
                         {...form.register(`${path}.name`)}
                         placeholder="variableName"
-                        className="font-mono text-sm border-0 p-1 h-auto focus-visible:ring-0"
+                        className="h-auto border-0 p-1 font-mono text-sm focus-visible:ring-0"
                       />
                       {form.getFieldState(`${path}.name`, form.formState).error
                         ?.message && (
-                        <p className="text-xs text-destructive mt-1">
+                        <p className="mt-1 text-xs text-destructive">
                           {
                             form.getFieldState(`${path}.name`, form.formState)
                               .error?.message
@@ -226,15 +226,15 @@ export function IterationVariablesField({
                                   current === index ? null : index
                                 );
                               }}
-                              className="w-full flex items-center justify-between gap-2 px-3 py-2 text-sm border rounded-md bg-muted/30 hover:bg-muted/50 transition-colors text-left"
+                              className="flex w-full items-center justify-between gap-2 rounded-md border bg-muted/30 px-3 py-2 text-left text-sm transition-colors hover:bg-muted/50"
                             >
-                              <span className="text-muted-foreground truncate">
+                              <span className="truncate text-muted-foreground">
                                 Composite: {itemCount}{' '}
                                 {isArray
                                   ? `item${itemCount === 1 ? '' : 's'}`
                                   : `field${itemCount === 1 ? '' : 's'}`}
                               </span>
-                              <ChevronRight className="h-4 w-4 text-muted-foreground shrink-0" />
+                              <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />
                             </button>
                           )}
                           <ModeToggleButton
@@ -284,7 +284,7 @@ export function IterationVariablesField({
                       )}
                       {form.getFieldState(`${path}.value`, form.formState).error
                         ?.message && (
-                        <p className="text-xs text-destructive mt-1">
+                        <p className="mt-1 text-xs text-destructive">
                           {
                             form.getFieldState(`${path}.value`, form.formState)
                               .error?.message
@@ -293,7 +293,7 @@ export function IterationVariablesField({
                       )}
                       {form.getFieldState(`${path}.valueType`, form.formState)
                         .error?.message && (
-                        <p className="text-xs text-destructive mt-1">
+                        <p className="mt-1 text-xs text-destructive">
                           Unsupported value mode:{' '}
                           {
                             form.getFieldState(
@@ -345,7 +345,7 @@ export function IterationVariablesField({
                         </SelectContent>
                       </Select>
                     </td>
-                    <td className="w-16 text-center p-2">
+                    <td className="w-16 p-2 text-center">
                       <Button
                         type="button"
                         variant="ghost"
@@ -363,7 +363,7 @@ export function IterationVariablesField({
                   </tr>
                   {isStructured && !isReference && editingIndex === index && (
                     <tr className="hover:bg-transparent">
-                      <td colSpan={4} className="p-0 border-t-0">
+                      <td colSpan={4} className="border-t-0 p-0">
                         <div className="border-t border-primary/20 bg-muted/20">
                           <CompositeValueEditor
                             value={structuredValue}
@@ -435,7 +435,7 @@ export function IterationVariablesField({
         }
         className="w-full"
       >
-        <Plus className="h-4 w-4 mr-2" />
+        <Plus className="mr-2 h-4 w-4" />
         Add Variable
       </Button>
     </div>

@@ -46,7 +46,10 @@ export function DeleteConnectionDialog({
         </AlertDialogHeader>
         <ul className="list-disc space-y-1 pl-5 text-sm text-muted-foreground">
           {isOAuth && (
-            <li>The provider&rsquo;s access grant will be revoked first (best effort).</li>
+            <li>
+              The provider&rsquo;s access grant will be revoked first (best
+              effort).
+            </li>
           )}
           <li>
             Stored credentials and tokens are removed and cannot be recovered.
@@ -67,7 +70,7 @@ export function DeleteConnectionDialog({
           >
             {isDeleting ? (
               <>
-                <Loader2 className="w-4 h-4 mr-1.5 animate-spin" />
+                <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
                 Deleting…
               </>
             ) : (

@@ -263,9 +263,7 @@ describe('composePreviousSteps agent output nesting', () => {
         .map((s) => [s.value, s])
     );
 
-    expect(byValue["steps['fetch'].outputs.status_code"]?.type).toBe(
-      'integer'
-    );
+    expect(byValue["steps['fetch'].outputs.status_code"]?.type).toBe('integer');
     // Nested object fields are suggested with dotted labels and types.
     expect(byValue["steps['fetch'].outputs.body.token"]?.type).toBe('string');
     expect(byValue["steps['fetch'].outputs.body.token"]?.label).toBe(
@@ -296,9 +294,7 @@ describe('composeVariableSuggestions sibling labels', () => {
     );
 
     const suggestions = composeVariableSuggestions(previousSteps);
-    const stats = suggestions.find(
-      (s) => s.value === "steps['split'].stats"
-    );
+    const stats = suggestions.find((s) => s.value === "steps['split'].stats");
     expect(stats?.label).toBe('stats');
     expect(stats?.group).toBe('Step Outputs');
     expect(stats?.type).toBe('object');

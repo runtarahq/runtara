@@ -150,12 +150,12 @@ export function NodeConfigDialog({
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
-        className="max-w-4xl max-h-[90vh] flex flex-col p-0 gap-0"
+        className="flex max-h-[90vh] max-w-4xl flex-col gap-0 p-0"
         data-testid="node-config-dialog"
         data-node-id={nodeId}
         data-step-type={stepType}
       >
-        <DialogHeader className="px-6 py-4 border-b shrink-0">
+        <DialogHeader className="shrink-0 border-b px-6 py-4">
           <DialogTitle className="text-lg font-semibold">
             {dialogTitle}
           </DialogTitle>
@@ -166,12 +166,12 @@ export function NodeConfigDialog({
 
         <div
           ref={formContainerRef}
-          className="flex-1 overflow-y-auto px-6 py-4 min-h-0"
+          className="min-h-0 flex-1 overflow-y-auto px-6 py-4"
         >
           <NodeFormProvider
             nodeId={nodeId}
             parentNodeId={parentNodeId}
-          createContainerId={createContainerId}
+            createContainerId={createContainerId}
             outputSchemaFields={outputSchemaFields}
             inputSchemaFields={inputSchemaFields}
             variables={variables}
@@ -190,7 +190,7 @@ export function NodeConfigDialog({
         </div>
 
         {!isCreate && (
-          <DialogFooter className="px-6 py-4 border-t shrink-0">
+          <DialogFooter className="shrink-0 border-t px-6 py-4">
             <Button variant="outline" onClick={handleCancel}>
               Cancel
             </Button>

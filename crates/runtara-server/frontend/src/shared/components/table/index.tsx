@@ -301,12 +301,12 @@ export function DataTable<TData, TValue>({
                     <tr className="hover:bg-transparent">
                       <td
                         colSpan={row.getAllCells().length}
-                        className="!p-0 !border-0"
+                        className="!border-0 !p-0"
                       >
                         <div className="relative">
-                          <div className="absolute inset-0 bg-muted/30 border-t" />
+                          <div className="absolute inset-0 border-t bg-muted/30" />
                           <div className="relative p-4">
-                            <div className="overflow-x-auto -mx-4 px-4">
+                            <div className="-mx-4 overflow-x-auto px-4">
                               {SubComponent && <SubComponent row={row} />}
                             </div>
                           </div>
@@ -332,15 +332,13 @@ export function DataTable<TData, TValue>({
       </div>
       {beforePaginationSlot}
       {shouldRenderPagination && totalRowCount > PAGE_SIZE_OPTIONS[0] && (
-        <div className="px-3 py-2.5 border-t bg-muted/30 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex flex-col gap-3 border-t bg-muted/30 px-3 py-2.5 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex flex-wrap items-center gap-3 text-sm text-muted-foreground">
             <span>
               Rows {startRow}-{endRow} of {totalRowCount.toLocaleString()}
             </span>
             <div className="flex items-center gap-2">
-              <span className="text-sm text-muted-foreground">
-                Page size:
-              </span>
+              <span className="text-sm text-muted-foreground">Page size:</span>
               <select
                 className="h-8 rounded-md border bg-background px-2.5 text-sm text-foreground"
                 value={pagination.pageSize}
@@ -363,28 +361,28 @@ export function DataTable<TData, TValue>({
             </span>
             <div className="flex items-center gap-1">
               <button
-                className="p-1.5 text-muted-foreground hover:text-foreground hover:bg-muted rounded transition-colors disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-muted-foreground"
+                className="rounded p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-muted-foreground"
                 disabled={!table.getCanPreviousPage()}
                 onClick={() => table.firstPage()}
               >
                 <ChevronFirst size={16} />
               </button>
               <button
-                className="p-1.5 text-muted-foreground hover:text-foreground hover:bg-muted rounded transition-colors disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-muted-foreground"
+                className="rounded p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-muted-foreground"
                 disabled={!table.getCanPreviousPage()}
                 onClick={() => table.previousPage()}
               >
                 <ChevronLeft size={16} />
               </button>
               <button
-                className="p-1.5 text-muted-foreground hover:text-foreground hover:bg-muted rounded transition-colors disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-muted-foreground"
+                className="rounded p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-muted-foreground"
                 disabled={!table.getCanNextPage()}
                 onClick={() => table.nextPage()}
               >
                 <ChevronRight size={16} />
               </button>
               <button
-                className="p-1.5 text-muted-foreground hover:text-foreground hover:bg-muted rounded transition-colors disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-muted-foreground"
+                className="rounded p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-muted-foreground"
                 disabled={!table.getCanNextPage()}
                 onClick={() => table.lastPage()}
               >

@@ -456,8 +456,8 @@ function getDisplayValue(
 function shouldRefreshAfterWriteback(field: ReportCardField): boolean {
   return Boolean(
     field.displayField ||
-      field.displayTemplate ||
-      field.editor?.kind === 'lookup'
+    field.displayTemplate ||
+    field.editor?.kind === 'lookup'
   );
 }
 

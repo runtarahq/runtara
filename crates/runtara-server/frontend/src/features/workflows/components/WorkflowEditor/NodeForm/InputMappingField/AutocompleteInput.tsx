@@ -160,7 +160,7 @@ export function AutocompleteInput({
       {type === 'textarea' ? (
         <Textarea
           {...inputProps}
-          className={`${className} ${rawModeClass} font-mono text-sm min-h-[100px]`}
+          className={`${className} ${rawModeClass} min-h-[100px] font-mono text-sm`}
         />
       ) : (
         <Input {...inputProps} type={type} />
@@ -168,8 +168,8 @@ export function AutocompleteInput({
 
       {/* Autocomplete Popover */}
       {showAutocomplete && shouldShowAutocomplete && (
-        <div className="absolute left-0 top-full mt-1 w-80 z-50 rounded-md border bg-popover text-popover-foreground shadow-md overflow-hidden">
-          <div className="overflow-y-auto max-h-[300px] p-1">
+        <div className="absolute left-0 top-full z-50 mt-1 w-80 overflow-hidden rounded-md border bg-popover text-popover-foreground shadow-md">
+          <div className="max-h-[300px] overflow-y-auto p-1">
             {filteredSuggestions.length === 0 ? (
               <div className="py-6 text-center text-sm">
                 No variables found.
@@ -187,7 +187,7 @@ export function AutocompleteInput({
                           <div
                             key={suggestion.value}
                             onClick={() => handleAutocompleteSelect(suggestion)}
-                            className="relative flex cursor-pointer select-none items-center rounded-sm px-2 py-1.5 text-sm outline-none hover:bg-accent hover:text-accent-foreground transition-colors"
+                            className="relative flex cursor-pointer select-none items-center rounded-sm px-2 py-1.5 text-sm outline-none transition-colors hover:bg-accent hover:text-accent-foreground"
                           >
                             <div className="flex flex-col">
                               <span className="font-mono text-sm">

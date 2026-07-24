@@ -70,7 +70,9 @@ describe('patchCompensation', () => {
   });
 
   it('returns undefined when patching nothing into nothing', () => {
-    expect(patchCompensation(undefined, { compensationStep: '' })).toBeUndefined();
+    expect(
+      patchCompensation(undefined, { compensationStep: '' })
+    ).toBeUndefined();
   });
 
   it('preserves unknown JSON-authored keys on structured edits', () => {
@@ -145,12 +147,18 @@ describe('serializeCompensationData', () => {
       ok: true,
       data: undefined,
     });
-    expect(serializeCompensationData('')).toEqual({ ok: true, data: undefined });
+    expect(serializeCompensationData('')).toEqual({
+      ok: true,
+      data: undefined,
+    });
     expect(serializeCompensationData('   ')).toEqual({
       ok: true,
       data: undefined,
     });
-    expect(serializeCompensationData({})).toEqual({ ok: true, data: undefined });
+    expect(serializeCompensationData({})).toEqual({
+      ok: true,
+      data: undefined,
+    });
   });
 
   it('serializes UI-format entries to the DSL MappingValue shape', () => {

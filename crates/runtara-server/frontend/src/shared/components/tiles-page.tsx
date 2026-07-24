@@ -23,15 +23,13 @@ export function TilesPage(props: TilesPageProps) {
   } = props;
 
   return (
-    <div
-      className={cn('w-full min-h-screen bg-background', className)}
-    >
+    <div className={cn('min-h-screen w-full bg-background', className)}>
       {/* Header */}
       <header
         data-tiles-page-header
-        className="sticky top-0 z-10 bg-background/80 backdrop-blur-sm border-b"
+        className="sticky top-0 z-10 border-b bg-background/80 backdrop-blur-sm"
       >
-        <div className="px-4 md:px-8 py-4">
+        <div className="px-4 py-4 md:px-8">
           <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
             <div className="min-w-0 flex-1 space-y-1">
               {kicker && (
@@ -39,9 +37,7 @@ export function TilesPage(props: TilesPageProps) {
                   {kicker}
                 </p>
               )}
-              <h1 className="text-xl font-semibold text-foreground">
-                {title}
-              </h1>
+              <h1 className="text-xl font-semibold text-foreground">{title}</h1>
             </div>
             {action && (
               <div data-tiles-page-action className="contents">
@@ -54,10 +50,7 @@ export function TilesPage(props: TilesPageProps) {
 
       {/* Filters/Toolbar */}
       {toolbar && (
-        <div
-          data-tiles-page-toolbar
-          className="px-4 md:px-8 py-3 border-b"
-        >
+        <div data-tiles-page-toolbar className="border-b px-4 py-3 md:px-8">
           {toolbar}
         </div>
       )}
@@ -65,7 +58,7 @@ export function TilesPage(props: TilesPageProps) {
       {/* Content */}
       <div
         data-tiles-page-content
-        className={cn('px-4 md:px-8 py-5', contentClassName)}
+        className={cn('px-4 py-5 md:px-8', contentClassName)}
       >
         {children}
       </div>

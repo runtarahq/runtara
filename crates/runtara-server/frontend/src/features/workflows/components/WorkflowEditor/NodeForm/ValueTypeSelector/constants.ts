@@ -7,10 +7,7 @@ export type ValueType =
 
 /** Base value type without composite distinction (for store compatibility) */
 export type BaseValueType =
-  | 'reference'
-  | 'immediate'
-  | 'composite'
-  | 'template';
+  'reference' | 'immediate' | 'composite' | 'template';
 
 interface ValueTypeOption {
   value: ValueType;

@@ -130,7 +130,7 @@ export function ConnectionPickerModal({
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent
-        className="sm:max-w-[500px] p-0 gap-0"
+        className="gap-0 p-0 sm:max-w-[500px]"
         hideCloseButton
         aria-describedby={undefined}
       >
@@ -140,7 +140,7 @@ export function ConnectionPickerModal({
         </VisuallyHidden>
 
         {/* Header */}
-        <div className="flex items-center gap-2 p-4 border-b">
+        <div className="flex items-center gap-2 border-b p-4">
           <div className="flex-1">
             <h2 className="text-lg font-semibold">New Connection</h2>
             <p className="text-sm text-muted-foreground">
@@ -150,9 +150,9 @@ export function ConnectionPickerModal({
         </div>
 
         {/* Search */}
-        <div className="p-4 border-b">
+        <div className="border-b p-4">
           <div className="relative">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+            <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
             <Input
               placeholder="Search connection types..."
               value={searchQuery}
@@ -166,14 +166,14 @@ export function ConnectionPickerModal({
         {/* Content */}
         <div className="max-h-[400px] overflow-y-auto p-4">
           {isLoading ? (
-            <div className="text-center py-8 text-muted-foreground">
+            <div className="py-8 text-center text-muted-foreground">
               Loading connection types...
             </div>
           ) : isSearching ? (
             // Search Results View
             <div className="space-y-1">
               {searchResults && searchResults.length === 0 ? (
-                <div className="text-center py-8 text-muted-foreground">
+                <div className="py-8 text-center text-muted-foreground">
                   No results found for "{searchQuery}"
                 </div>
               ) : (
@@ -184,7 +184,7 @@ export function ConnectionPickerModal({
                       key={ct.integrationId}
                       type="button"
                       onClick={() => handleSelect(ct)}
-                      className="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-left transition-colors hover:bg-muted"
+                      className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left transition-colors hover:bg-muted"
                     >
                       <Icon className="h-5 w-5 text-muted-foreground" />
                       <div>
@@ -204,15 +204,15 @@ export function ConnectionPickerModal({
             // Browse View - Grouped by Category
             <div className="space-y-6">
               {groupedConnectionTypes.length === 0 ? (
-                <div className="text-center py-8 text-muted-foreground">
+                <div className="py-8 text-center text-muted-foreground">
                   No connection types available
                 </div>
               ) : (
                 groupedConnectionTypes.map((group) => (
                   <div key={group.category}>
-                    <div className="flex items-center gap-2 mb-2">
+                    <div className="mb-2 flex items-center gap-2">
                       <group.Icon className="h-4 w-4 text-muted-foreground" />
-                      <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
+                      <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
                         {group.label}
                       </span>
                     </div>
@@ -222,7 +222,7 @@ export function ConnectionPickerModal({
                           key={ct.integrationId}
                           type="button"
                           onClick={() => handleSelect(ct)}
-                          className="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-left transition-colors hover:bg-muted"
+                          className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left transition-colors hover:bg-muted"
                         >
                           <group.Icon className="h-5 w-5 text-muted-foreground" />
                           <div>

@@ -71,9 +71,7 @@ function StepIdRow({ stepId }: { stepId: string }) {
       setError(validationError);
       return;
     }
-    const renameError = useWorkflowStore
-      .getState()
-      .renameStep(stepId, next);
+    const renameError = useWorkflowStore.getState().renameStep(stepId, next);
     if (renameError) {
       setError(renameError);
       return;
@@ -86,7 +84,7 @@ function StepIdRow({ stepId }: { stepId: string }) {
     return (
       <div className="space-y-0.5">
         <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-          <span className="font-mono truncate" title={stepId}>
+          <span className="truncate font-mono" title={stepId}>
             {stepId}
           </span>
           <button
@@ -248,7 +246,7 @@ export function NameField({ name }: { name: string }) {
                 <Input
                   {...field}
                   placeholder="Step name"
-                  className="h-auto text-lg font-semibold text-slate-900/90 dark:text-slate-100 border-0 bg-transparent p-0 focus-visible:ring-0 focus-visible:ring-offset-0"
+                  className="h-auto border-0 bg-transparent p-0 text-lg font-semibold text-slate-900/90 focus-visible:ring-0 focus-visible:ring-offset-0 dark:text-slate-100"
                 />
               </FormControl>
               <FormMessage />
@@ -308,7 +306,7 @@ export function NameField({ name }: { name: string }) {
               <Input
                 {...field}
                 placeholder="Step name"
-                className="h-auto text-lg font-semibold text-slate-900/90 dark:text-slate-100 border-0 bg-transparent p-0 focus-visible:ring-0 focus-visible:ring-offset-0"
+                className="h-auto border-0 bg-transparent p-0 text-lg font-semibold text-slate-900/90 focus-visible:ring-0 focus-visible:ring-offset-0 dark:text-slate-100"
               />
             </FormControl>
             <FormMessage />

@@ -153,8 +153,8 @@ function ReplayGraphInner({
             stroke: active
               ? 'hsl(var(--primary))'
               : reached
-              ? 'hsl(var(--muted-foreground))'
-              : 'hsl(var(--border))',
+                ? 'hsl(var(--muted-foreground))'
+                : 'hsl(var(--border))',
             strokeWidth: active ? 2.5 : 1.5,
             opacity: reached || active ? 1 : 0.5,
             transition: 'stroke 200ms, stroke-width 200ms, opacity 200ms',
@@ -166,7 +166,10 @@ function ReplayGraphInner({
 
   // Fit the view once per layout (not per animation frame).
   useEffect(() => {
-    const t = window.setTimeout(() => fitView({ padding: 0.18, duration: 200 }), 60);
+    const t = window.setTimeout(
+      () => fitView({ padding: 0.18, duration: 200 }),
+      60
+    );
     return () => window.clearTimeout(t);
   }, [layoutKey, fitView]);
 

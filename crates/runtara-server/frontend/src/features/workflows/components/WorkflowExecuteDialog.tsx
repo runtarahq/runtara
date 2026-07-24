@@ -128,7 +128,7 @@ export function WorkflowExecuteDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-2xl max-h-[80vh] overflow-y-auto">
+      <DialogContent className="max-h-[80vh] max-w-2xl overflow-y-auto">
         <DialogHeader>
           <DialogTitle>
             Execute Workflow{workflowName ? `: ${workflowName}` : ''}

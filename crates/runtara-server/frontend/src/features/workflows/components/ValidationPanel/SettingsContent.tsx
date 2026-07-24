@@ -119,11 +119,11 @@ export function SettingsContent({
     useState<SettingsSection>('general');
 
   return (
-    <div className="flex flex-1 min-h-0 overflow-hidden">
+    <div className="flex min-h-0 flex-1 overflow-hidden">
       {/* Left panel - Sections list */}
-      <div className="w-56 border-r flex-shrink-0 flex flex-col overflow-hidden">
-        <div className="flex items-center px-3 py-1.5 border-b bg-muted/20">
-          <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
+      <div className="flex w-56 flex-shrink-0 flex-col overflow-hidden border-r">
+        <div className="flex items-center border-b bg-muted/20 px-3 py-1.5">
+          <span className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
             Settings
           </span>
         </div>
@@ -135,15 +135,15 @@ export function SettingsContent({
               <div
                 key={section.id}
                 className={cn(
-                  'flex items-center gap-3 px-3 py-2.5 border-b cursor-pointer transition-colors',
+                  'flex cursor-pointer items-center gap-3 border-b px-3 py-2.5 transition-colors',
                   'hover:bg-muted/50',
-                  isSelected && 'bg-accent border-l-2 border-l-primary'
+                  isSelected && 'border-l-2 border-l-primary bg-accent'
                 )}
                 onClick={() => setActiveSection(section.id)}
               >
                 <div
                   className={cn(
-                    'p-1.5 rounded',
+                    'rounded p-1.5',
                     isSelected
                       ? 'bg-primary/10 text-primary'
                       : 'bg-muted/50 text-muted-foreground'
@@ -153,7 +153,7 @@ export function SettingsContent({
                 </div>
                 <div className="min-w-0 flex-1">
                   <div className="text-sm font-medium">{section.label}</div>
-                  <div className="text-[10px] text-muted-foreground truncate">
+                  <div className="truncate text-[10px] text-muted-foreground">
                     {section.description}
                   </div>
                 </div>
@@ -164,7 +164,7 @@ export function SettingsContent({
       </div>
 
       {/* Right panel - Section content */}
-      <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
+      <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
         <div className="flex-1 overflow-y-auto p-4">
           {activeSection === 'general' && (
             <GeneralSection

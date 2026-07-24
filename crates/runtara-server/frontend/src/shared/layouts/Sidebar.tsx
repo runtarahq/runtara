@@ -20,7 +20,10 @@ import { config } from '@/shared/config/runtimeConfig';
 import { useEntitlements } from '@/shared/hooks/useEntitlements';
 import Logo from '@/assets/logo/runtara-logo-icon.svg';
 import { AuthSidebar } from './AuthSidebar.tsx';
-import { useAuthStore, useHasExplicitPermission } from '@/shared/stores/authStore.ts';
+import {
+  useAuthStore,
+  useHasExplicitPermission,
+} from '@/shared/stores/authStore.ts';
 import { ThemeSwitcher } from '@/shared/components/theme-switcher.tsx';
 import { DollarSign, Settings } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button';
@@ -58,7 +61,7 @@ function HeaderMenu() {
           <span
             role="link"
             tabIndex={0}
-            className="text-[11px] text-gray-500 no-underline hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300 cursor-pointer"
+            className="cursor-pointer text-[11px] text-gray-500 no-underline hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300"
             onClick={(e) => {
               e.preventDefault();
               e.stopPropagation();
@@ -195,7 +198,7 @@ function FooterMenu() {
           <span className="sr-only">Manage billing</span>
         </Button>
         <ThemeSwitcher />
-        <SidebarTrigger className="w-min px-0 mx-0 shrink-0" />
+        <SidebarTrigger className="mx-0 w-min shrink-0 px-0" />
       </div>
       <div
         className="min-w-0 px-1 text-center text-[11px] font-medium text-muted-foreground/80 group-data-[state=collapsed]:hidden"

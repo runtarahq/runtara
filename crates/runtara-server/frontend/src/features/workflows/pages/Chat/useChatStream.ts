@@ -20,11 +20,9 @@ function handleSSEEvent(event: ChatSSEEvent) {
     case 'session_created': {
       console.debug('[Chat] session_created event data:', event.data);
       const sessionId = (event.data.session_id ?? event.data.sessionId) as
-        | string
-        | undefined;
+        string | undefined;
       const instanceId = (event.data.instance_id ?? event.data.instanceId) as
-        | string
-        | undefined;
+        string | undefined;
       if (sessionId) {
         store.setSessionId(sessionId);
       }
@@ -99,8 +97,7 @@ function handleSSEEvent(event: ChatSSEEvent) {
 
       // Only show system message for structured input (not simple "message" field)
       const responseSchema = event.data.response_schema as
-        | Record<string, unknown>
-        | undefined;
+        Record<string, unknown> | undefined;
       const schemaKeys =
         responseSchema && typeof responseSchema === 'object'
           ? Object.keys(responseSchema)
@@ -118,8 +115,7 @@ function handleSSEEvent(event: ChatSSEEvent) {
         signalId: event.data.signal_id as string,
         message: event.data.message as string | undefined,
         responseSchema: event.data.response_schema as
-          | Record<string, unknown>
-          | undefined,
+          Record<string, unknown> | undefined,
         toolName: event.data.tool_name as string | undefined,
       });
       store.setStatus('waiting_for_input');

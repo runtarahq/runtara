@@ -43,22 +43,22 @@ export function ConnectionPageShell({
   const CategoryIcon = getCategoryIcon(integrationCategory);
 
   return (
-    <div className="min-h-screen flex flex-col bg-slate-50/50 dark:bg-background">
-      <header className="sticky top-0 z-10 bg-slate-50/80 backdrop-blur-sm border-b border-slate-200/60 dark:bg-background/80 dark:border-slate-700/60">
+    <div className="flex min-h-screen flex-col bg-slate-50/50 dark:bg-background">
+      <header className="sticky top-0 z-10 border-b border-slate-200/60 bg-slate-50/80 backdrop-blur-sm dark:border-slate-700/60 dark:bg-background/80">
         <div className="px-6 py-4">
           <div className="flex items-center justify-between gap-4">
-            <div className="flex items-center gap-3 min-w-0">
+            <div className="flex min-w-0 items-center gap-3">
               <Link
                 to={backHref}
                 aria-label="Back to connections"
-                className="p-1.5 -ml-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition-colors dark:hover:text-slate-300 dark:hover:bg-slate-800"
+                className="-ml-1.5 rounded-lg p-1.5 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-slate-800 dark:hover:text-slate-300"
               >
-                <ArrowLeft className="w-5 h-5" />
+                <ArrowLeft className="h-5 w-5" />
               </Link>
-              <div className="flex items-center gap-3 min-w-0">
+              <div className="flex min-w-0 items-center gap-3">
                 {integrationIcon}
                 <div className="min-w-0">
-                  <h1 className="text-lg font-semibold text-slate-900 truncate dark:text-slate-100">
+                  <h1 className="truncate text-lg font-semibold text-slate-900 dark:text-slate-100">
                     {title}
                   </h1>
                   {(integrationName || integrationCategory) && (
@@ -69,11 +69,11 @@ export function ConnectionPageShell({
                         </span>
                       )}
                       {integrationName && integrationCategory && (
-                        <span className="w-1 h-1 bg-slate-300 rounded-full dark:bg-slate-600" />
+                        <span className="h-1 w-1 rounded-full bg-slate-300 dark:bg-slate-600" />
                       )}
                       {integrationCategory && (
-                        <span className="inline-flex items-center gap-1 text-xs text-slate-500 bg-slate-100 px-1.5 py-0.5 rounded dark:bg-slate-700 dark:text-slate-400">
-                          <CategoryIcon className="w-3 h-3" />
+                        <span className="inline-flex items-center gap-1 rounded bg-slate-100 px-1.5 py-0.5 text-xs text-slate-500 dark:bg-slate-700 dark:text-slate-400">
+                          <CategoryIcon className="h-3 w-3" />
                           {getCategoryLabel(integrationCategory)}
                         </span>
                       )}
@@ -83,7 +83,7 @@ export function ConnectionPageShell({
               </div>
             </div>
             {headerActions && (
-              <div className="flex items-center gap-2 flex-shrink-0">
+              <div className="flex flex-shrink-0 items-center gap-2">
                 {headerActions}
               </div>
             )}
@@ -91,7 +91,7 @@ export function ConnectionPageShell({
         </div>
       </header>
 
-      <div className="mx-auto w-full max-w-2xl flex-1 px-4 sm:px-6 py-6">
+      <div className="mx-auto w-full max-w-2xl flex-1 px-4 py-6 sm:px-6">
         {children}
       </div>
 

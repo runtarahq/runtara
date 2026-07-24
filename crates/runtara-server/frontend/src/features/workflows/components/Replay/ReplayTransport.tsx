@@ -12,7 +12,11 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from '@/shared/components/ui/tooltip';
-import { REPLAY_SPEEDS, type ReplayClock, type ReplaySpeed } from './useReplayClock';
+import {
+  REPLAY_SPEEDS,
+  type ReplayClock,
+  type ReplaySpeed,
+} from './useReplayClock';
 import type { ReplayPacing, TimeMap } from './timeMap';
 
 function formatMs(ms: number): string {
@@ -95,11 +99,15 @@ export function ReplayTransport({
         </Tooltip>
 
         {/* Scrubber with parked-gap markers */}
-        <div className="relative flex-1 min-w-[140px]">
+        <div className="relative min-w-[140px] flex-1">
           <div className="pointer-events-none absolute inset-x-0 top-1/2 h-1 -translate-y-1/2 overflow-hidden rounded-full bg-muted">
-            <div className="h-full bg-primary/60" style={{ width: `${pct}%` }} />
+            <div
+              className="h-full bg-primary/60"
+              style={{ width: `${pct}%` }}
+            />
             {gaps.map((g, i) => {
-              const left = displayEnd > 0 ? (g.displayStart / displayEnd) * 100 : 0;
+              const left =
+                displayEnd > 0 ? (g.displayStart / displayEnd) * 100 : 0;
               const width =
                 displayEnd > 0
                   ? ((g.displayEnd - g.displayStart) / displayEnd) * 100
@@ -108,7 +116,10 @@ export function ReplayTransport({
                 <div
                   key={i}
                   className="absolute top-0 h-full bg-amber-400/50"
-                  style={{ left: `${left}%`, width: `${Math.max(width, 0.6)}%` }}
+                  style={{
+                    left: `${left}%`,
+                    width: `${Math.max(width, 0.6)}%`,
+                  }}
                   title={`parked · ${formatMs(g.modelDurationMs)}`}
                 />
               );
@@ -128,7 +139,7 @@ export function ReplayTransport({
         </div>
 
         {/* Elapsed / total */}
-        <div className="tabular-nums text-[11px] text-muted-foreground whitespace-nowrap">
+        <div className="whitespace-nowrap text-[11px] tabular-nums text-muted-foreground">
           {formatMs(modelT)} / {formatMs(totalModelMs)}
         </div>
 
@@ -145,7 +156,11 @@ export function ReplayTransport({
         )}
 
         {/* Speed */}
-        <div className="flex items-center rounded-md border p-0.5" role="group" aria-label="Playback speed">
+        <div
+          className="flex items-center rounded-md border p-0.5"
+          role="group"
+          aria-label="Playback speed"
+        >
           {REPLAY_SPEEDS.map((s) => (
             <button
               key={s}
@@ -165,7 +180,11 @@ export function ReplayTransport({
         </div>
 
         {/* Pacing */}
-        <div className="flex items-center rounded-md border p-0.5" role="group" aria-label="Pacing">
+        <div
+          className="flex items-center rounded-md border p-0.5"
+          role="group"
+          aria-label="Pacing"
+        >
           {(['even', 'real'] as const).map((p) => (
             <Tooltip key={p}>
               <TooltipTrigger asChild>

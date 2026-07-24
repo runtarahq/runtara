@@ -18,12 +18,12 @@ function JsonBlock({
   const isLong = lines > 3;
 
   if (data === undefined || data === null) {
-    return <span className="text-xs text-muted-foreground italic">empty</span>;
+    return <span className="text-xs italic text-muted-foreground">empty</span>;
   }
 
   if (!isLong) {
     return (
-      <pre className="text-xs bg-muted/50 rounded px-2 py-1.5 overflow-x-auto whitespace-pre-wrap break-all text-foreground/80">
+      <pre className="overflow-x-auto whitespace-pre-wrap break-all rounded bg-muted/50 px-2 py-1.5 text-xs text-foreground/80">
         {text}
       </pre>
     );
@@ -44,7 +44,7 @@ function JsonBlock({
         {open ? 'Collapse' : `Expand (${lines} lines)`}
       </button>
       {open && (
-        <pre className="text-xs bg-muted/50 rounded px-2 py-1.5 mt-1 overflow-x-auto max-h-64 overflow-y-auto whitespace-pre-wrap break-all text-foreground/80">
+        <pre className="mt-1 max-h-64 overflow-x-auto overflow-y-auto whitespace-pre-wrap break-all rounded bg-muted/50 px-2 py-1.5 text-xs text-foreground/80">
           {text}
         </pre>
       )}
@@ -88,20 +88,20 @@ export function DebugStepInspector() {
   return (
     <div
       className={cn(
-        'absolute right-2 top-16 z-20 w-80 max-h-[calc(100%-5rem)]',
-        'bg-background/95 backdrop-blur border rounded-lg shadow-lg',
+        'absolute right-2 top-16 z-20 max-h-[calc(100%-5rem)] w-80',
+        'rounded-lg border bg-background/95 shadow-lg backdrop-blur',
         'flex flex-col overflow-hidden'
       )}
     >
       {/* Header */}
-      <div className="flex items-center justify-between px-3 py-2 border-b shrink-0">
-        <div className="flex flex-col min-w-0">
+      <div className="flex shrink-0 items-center justify-between border-b px-3 py-2">
+        <div className="flex min-w-0 flex-col">
           <div className="flex items-center gap-1.5">
-            <span className="text-xs font-semibold text-foreground truncate">
+            <span className="truncate text-xs font-semibold text-foreground">
               {stepName}
             </span>
             {isSuspendedStep && (
-              <span className="text-[9px] font-medium text-blue-600 bg-blue-50 px-1 rounded">
+              <span className="rounded bg-blue-50 px-1 text-[9px] font-medium text-blue-600">
                 breakpoint
               </span>
             )}
@@ -124,7 +124,7 @@ export function DebugStepInspector() {
       </div>
 
       {/* Content */}
-      <div className="flex-1 overflow-y-auto p-3 space-y-3">
+      <div className="flex-1 space-y-3 overflow-y-auto p-3">
         {nodeStatus?.error && (
           <Section label="Error">
             <p className="text-xs text-destructive">{nodeStatus.error}</p>
@@ -146,7 +146,7 @@ export function DebugStepInspector() {
         )}
 
         {inputs === null && outputs === null && !nodeStatus?.error && (
-          <p className="text-xs text-muted-foreground italic text-center py-4">
+          <p className="py-4 text-center text-xs italic text-muted-foreground">
             No debug data available for this step
           </p>
         )}
@@ -164,7 +164,7 @@ function Section({
 }) {
   return (
     <div>
-      <h4 className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground mb-1">
+      <h4 className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
         {label}
       </h4>
       {children}

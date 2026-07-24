@@ -90,18 +90,24 @@ function parseMs(iso: string | null | undefined): number | null {
  * `durationMs`) — which is when the step was recorded, not when it ran, and
  * cascades for parallel branches. Returns null when there is no usable start.
  */
-function intervalOf(s: StepSummaryLike): { startAbs: number; endAbs: number } | null {
+function intervalOf(
+  s: StepSummaryLike
+): { startAbs: number; endAbs: number } | null {
   if (
     s.launchedAtMs != null &&
     s.settledAtMs != null &&
     s.launchedAtMs > 0 &&
     s.settledAtMs > 0
   ) {
-    return { startAbs: s.launchedAtMs, endAbs: Math.max(s.settledAtMs, s.launchedAtMs) };
+    return {
+      startAbs: s.launchedAtMs,
+      endAbs: Math.max(s.settledAtMs, s.launchedAtMs),
+    };
   }
   const startAbs = parseMs(s.startedAt);
   if (startAbs == null) return null;
-  const endAbs = parseMs(s.completedAt) ?? startAbs + Math.max(0, s.durationMs ?? 0);
+  const endAbs =
+    parseMs(s.completedAt) ?? startAbs + Math.max(0, s.durationMs ?? 0);
   return { startAbs, endAbs: Math.max(endAbs, startAbs) };
 }
 
@@ -193,35 +199,37 @@ export function buildReplayModel(
   const hasEvents = raw.length > 0;
   const t0 = hasEvents ? Math.min(...raw.map((r) => r.startAbs)) : 0;
 
-  const instances: ReplayStepInstance[] = raw.map(({ s, startAbs, endAbs }, idx) => {
-    const startT = startAbs - t0;
-    const rawEndT = endAbs - t0;
-    const endT = Math.max(rawEndT, startT + MIN_VISUAL_MS);
-    let status = normalizeStatus(s.status);
-    if (
-      instanceSuspended &&
-      status === 'running' &&
-      DURABLE_WAIT_STEP_TYPES.has(s.stepType)
-    ) {
-      status = 'suspended';
+  const instances: ReplayStepInstance[] = raw.map(
+    ({ s, startAbs, endAbs }, idx) => {
+      const startT = startAbs - t0;
+      const rawEndT = endAbs - t0;
+      const endT = Math.max(rawEndT, startT + MIN_VISUAL_MS);
+      let status = normalizeStatus(s.status);
+      if (
+        instanceSuspended &&
+        status === 'running' &&
+        DURABLE_WAIT_STEP_TYPES.has(s.stepType)
+      ) {
+        status = 'suspended';
+      }
+      return {
+        // Unique per recorded execution — several steps can share one scope
+        // (Split's it/itf, a While's repeated steps), so the scope alone is not
+        // unique. The source index guarantees distinctness.
+        key: `${s.scopeId ?? 'root'}::${s.stepId}::${idx}`,
+        stepId: s.stepId,
+        stepName: s.stepName ?? s.stepId,
+        stepType: s.stepType,
+        scopeId: s.scopeId ?? null,
+        parentScopeId: s.parentScopeId ?? null,
+        startT,
+        endT,
+        rawEndT,
+        status,
+        isInstant: rawEndT - startT < INSTANT_THRESHOLD_MS,
+      };
     }
-    return {
-      // Unique per recorded execution — several steps can share one scope
-      // (Split's it/itf, a While's repeated steps), so the scope alone is not
-      // unique. The source index guarantees distinctness.
-      key: `${s.scopeId ?? 'root'}::${s.stepId}::${idx}`,
-      stepId: s.stepId,
-      stepName: s.stepName ?? s.stepId,
-      stepType: s.stepType,
-      scopeId: s.scopeId ?? null,
-      parentScopeId: s.parentScopeId ?? null,
-      startT,
-      endT,
-      rawEndT,
-      status,
-      isInstant: rawEndT - startT < INSTANT_THRESHOLD_MS,
-    };
-  });
+  );
   instances.sort((a, b) => a.startT - b.startT || a.endT - b.endT);
 
   const rawTEnd = hasEvents ? Math.max(...instances.map((i) => i.rawEndT)) : 0;
@@ -274,7 +282,8 @@ export function buildReplayModel(
       if (!i.scopeId || i.scopeId === ownScope) continue;
       const byName =
         i.scopeId === namePrefix || i.scopeId.startsWith(`${namePrefix}_`);
-      const byTree = ownScope !== nodeId && isDescendantScope(i.scopeId, ownScope);
+      const byTree =
+        ownScope !== nodeId && isDescendantScope(i.scopeId, ownScope);
       if ((byName || byTree) && !seen.has(i.key)) {
         seen.add(i.key);
         children.push(i);

@@ -71,16 +71,16 @@ export function ReferencePill({
   return (
     <div
       className={cn(
-        'inline-flex items-center gap-1.5 px-2 py-1 rounded-full text-xs',
-        'bg-blue-50 text-blue-600 border border-blue-200',
-        'dark:bg-blue-950 dark:text-blue-400 dark:border-blue-800',
+        'inline-flex items-center gap-1.5 rounded-full px-2 py-1 text-xs',
+        'border border-blue-200 bg-blue-50 text-blue-600',
+        'dark:border-blue-800 dark:bg-blue-950 dark:text-blue-400',
         disabled && 'opacity-50',
         className
       )}
       title={type ? `${path} — ${type}` : path}
     >
       {getIconForType(type)}
-      <span className="truncate max-w-[200px]">
+      <span className="max-w-[200px] truncate">
         {hasStepInfo ? (
           <>
             <span className="font-medium">{stepName}</span>
@@ -96,7 +96,7 @@ export function ReferencePill({
         )}
       </span>
       {type && (
-        <span className="shrink-0 font-mono text-[10px] leading-none px-1 py-0.5 rounded bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300">
+        <span className="shrink-0 rounded bg-blue-100 px-1 py-0.5 font-mono text-[10px] leading-none text-blue-700 dark:bg-blue-900 dark:text-blue-300">
           {type}
         </span>
       )}
@@ -107,7 +107,7 @@ export function ReferencePill({
             e.stopPropagation();
             onRemove();
           }}
-          className="ml-0.5 p-0.5 rounded-full hover:bg-blue-100 dark:hover:bg-blue-900 transition-colors"
+          className="ml-0.5 rounded-full p-0.5 transition-colors hover:bg-blue-100 dark:hover:bg-blue-900"
           aria-label="Remove reference"
         >
           <Icons.x className="h-3 w-3" />

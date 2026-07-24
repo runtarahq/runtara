@@ -74,9 +74,7 @@ export function buildConnectionUpdateInput({
   return {
     id,
     version: projection.version,
-    title: dirtyFields.has('title')
-      ? (title as string | undefined)
-      : undefined,
+    title: dirtyFields.has('title') ? (title as string | undefined) : undefined,
     parameterPatch,
     rateLimitConfig,
     isDefaultFileStorage:

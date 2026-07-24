@@ -175,7 +175,9 @@ export function RateLimits() {
         <div className="flex flex-col items-center justify-center rounded-lg border bg-muted/20 px-6 py-10 text-center">
           <Icons.warning className="mb-4 h-10 w-10 text-destructive" />
           <p className="text-base font-semibold text-foreground">
-            {isNetworkError ? 'Unable to connect to backend' : 'An error occurred'}
+            {isNetworkError
+              ? 'Unable to connect to backend'
+              : 'An error occurred'}
           </p>
           <p className="mt-1 text-sm text-muted-foreground">
             {isNetworkError
@@ -184,7 +186,7 @@ export function RateLimits() {
           </p>
           {import.meta.env.DEV && error && (
             <div className="mt-4 max-w-md rounded-lg bg-destructive/10 p-3 text-left">
-              <p className="text-xs font-mono text-destructive break-words">
+              <p className="break-words font-mono text-xs text-destructive">
                 {error.message || 'Unknown error'}
               </p>
             </div>
@@ -192,79 +194,79 @@ export function RateLimits() {
         </div>
       ) : (
         <div className="space-y-4">
-        {/* Connections Grid */}
-        <section>
-          <div className="flex items-center justify-between mb-3">
-            <h2 className="text-sm font-medium text-muted-foreground">
-              Connections ({rateLimits.length})
-            </h2>
-            {selectedConnectionId && (
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => setSelectedConnectionId(null)}
-                className="h-7 px-2 text-xs"
-              >
-                <X className="h-3 w-3 mr-1" />
-                Clear selection
-              </Button>
-            )}
-          </div>
-          {isLoading ? (
-            <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-              {Array.from({ length: 6 }).map((_, index) => (
-                <RateLimitCardSkeleton key={index} />
-              ))}
+          {/* Connections Grid */}
+          <section>
+            <div className="mb-3 flex items-center justify-between">
+              <h2 className="text-sm font-medium text-muted-foreground">
+                Connections ({rateLimits.length})
+              </h2>
+              {selectedConnectionId && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setSelectedConnectionId(null)}
+                  className="h-7 px-2 text-xs"
+                >
+                  <X className="mr-1 h-3 w-3" />
+                  Clear selection
+                </Button>
+              )}
             </div>
-          ) : rateLimits.length === 0 ? (
-            <div className="flex flex-col items-center justify-center rounded-lg border bg-muted/20 px-6 py-10 text-center">
-              <Link className="mb-4 h-10 w-10 text-muted-foreground" />
-              <p className="text-base font-semibold text-foreground">
-                No connections found
-              </p>
-              <p className="mt-1 text-sm text-muted-foreground">
-                Create a connection to see rate limit status.
-              </p>
-            </div>
-          ) : (
-            <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-              {rateLimits.map((rateLimitStatus) => (
-                <RateLimitCard
-                  key={rateLimitStatus.connectionId}
-                  rateLimitStatus={rateLimitStatus}
-                  onClick={() => handleSelectConnection(rateLimitStatus)}
-                  selected={
-                    selectedConnectionId === rateLimitStatus.connectionId
-                  }
-                />
-              ))}
-            </div>
-          )}
-        </section>
-
-        {/* History Section */}
-        {selectedConnection && (
-          <section className="mt-4">
-            {historyLoading || timelineLoading ? (
-              <RateLimitHistorySkeleton />
+            {isLoading ? (
+              <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+                {Array.from({ length: 6 }).map((_, index) => (
+                  <RateLimitCardSkeleton key={index} />
+                ))}
+              </div>
+            ) : rateLimits.length === 0 ? (
+              <div className="flex flex-col items-center justify-center rounded-lg border bg-muted/20 px-6 py-10 text-center">
+                <Link className="mb-4 h-10 w-10 text-muted-foreground" />
+                <p className="text-base font-semibold text-foreground">
+                  No connections found
+                </p>
+                <p className="mt-1 text-sm text-muted-foreground">
+                  Create a connection to see rate limit status.
+                </p>
+              </div>
             ) : (
-              <RateLimitHistory
-                events={historyResponse?.data ?? []}
-                status={selectedConnection}
-                loading={historyLoading || timelineLoading}
-                timelineBuckets={timelineBuckets}
-                granularity={granularity}
-              />
+              <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+                {rateLimits.map((rateLimitStatus) => (
+                  <RateLimitCard
+                    key={rateLimitStatus.connectionId}
+                    rateLimitStatus={rateLimitStatus}
+                    onClick={() => handleSelectConnection(rateLimitStatus)}
+                    selected={
+                      selectedConnectionId === rateLimitStatus.connectionId
+                    }
+                  />
+                ))}
+              </div>
             )}
           </section>
-        )}
 
-        {/* Hint when no connection selected */}
-        {!selectedConnectionId && rateLimits.length > 0 && !isLoading && (
-          <div className="text-center text-sm text-muted-foreground py-4">
-            Click on a connection card to view its rate limit history
-          </div>
-        )}
+          {/* History Section */}
+          {selectedConnection && (
+            <section className="mt-4">
+              {historyLoading || timelineLoading ? (
+                <RateLimitHistorySkeleton />
+              ) : (
+                <RateLimitHistory
+                  events={historyResponse?.data ?? []}
+                  status={selectedConnection}
+                  loading={historyLoading || timelineLoading}
+                  timelineBuckets={timelineBuckets}
+                  granularity={granularity}
+                />
+              )}
+            </section>
+          )}
+
+          {/* Hint when no connection selected */}
+          {!selectedConnectionId && rateLimits.length > 0 && !isLoading && (
+            <div className="py-4 text-center text-sm text-muted-foreground">
+              Click on a connection card to view its rate limit history
+            </div>
+          )}
         </div>
       )}
     </ConsoleTableShell>

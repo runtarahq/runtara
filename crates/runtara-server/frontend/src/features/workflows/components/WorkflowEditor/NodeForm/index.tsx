@@ -153,7 +153,7 @@ export function NodeForm({
   return (
     <TabProvider>
       <NextForm
-        className="flex flex-col h-full"
+        className="flex h-full flex-col"
         form={entireForm}
         formProps={formProps}
         renderContent={renderContent}
@@ -199,11 +199,11 @@ export function FormActions({
     }
     if (isEdit) {
       return (
-        <div className="flex justify-between pt-4 mt-auto border-t">
+        <div className="mt-auto flex justify-between border-t pt-4">
           <Button
             type="button"
             variant="outline"
-            className="px-6 text-destructive hover:text-destructive hover:bg-destructive/10"
+            className="px-6 text-destructive hover:bg-destructive/10 hover:text-destructive"
             onClick={onDelete}
             data-testid="node-form-delete"
           >
@@ -225,7 +225,7 @@ export function FormActions({
     }
     // Create mode - show Save button
     return (
-      <div className="flex justify-end pt-4 mt-auto border-t">
+      <div className="mt-auto flex justify-end border-t pt-4">
         <Button
           type="submit"
           className="px-6"
@@ -244,7 +244,7 @@ export function FormActions({
     const testHandler = getTestHandler();
 
     return (
-      <div className="flex justify-end pt-4 mt-auto border-t">
+      <div className="mt-auto flex justify-end border-t pt-4">
         <Button
           type="button"
           className="px-6"
@@ -278,7 +278,7 @@ function FormContentWrapper({
   contentScrollable?: boolean;
 }) {
   return (
-    <div className="flex flex-col h-full min-h-0">
+    <div className="flex h-full min-h-0 flex-col">
       <SheetBase loading={isLoading} contentScrollable={contentScrollable}>
         <FormContent fieldsConfig={fieldsConfig} />
       </SheetBase>

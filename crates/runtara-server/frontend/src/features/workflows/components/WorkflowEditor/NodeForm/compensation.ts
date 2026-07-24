@@ -165,7 +165,9 @@ function serializeUiEntry(entry: MappingObjectEntry): Record<string, unknown> {
     if (Array.isArray(inner)) {
       return {
         valueType: 'composite',
-        value: inner.map((item) => serializeUiEntry(item as MappingObjectEntry)),
+        value: inner.map((item) =>
+          serializeUiEntry(item as MappingObjectEntry)
+        ),
       };
     }
     if (isPlainObject(inner)) {
@@ -224,7 +226,9 @@ export type CompensationDataResult =
  * (legacy textarea parity — serde validates server-side). Everything else
  * (invalid JSON strings, arrays, scalars) is reported as not committable.
  */
-export function serializeCompensationData(raw: unknown): CompensationDataResult {
+export function serializeCompensationData(
+  raw: unknown
+): CompensationDataResult {
   if (raw === undefined || raw === null || raw === '') {
     return { ok: true, data: undefined };
   }

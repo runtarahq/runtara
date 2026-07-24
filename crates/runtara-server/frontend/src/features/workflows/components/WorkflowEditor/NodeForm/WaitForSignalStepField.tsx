@@ -265,9 +265,9 @@ export function WaitForSignalStepField({ name }: WaitForSignalStepFieldProps) {
           onClick={() => setShowAdvanced(!showAdvanced)}
         >
           {showAdvanced ? (
-            <ChevronDown className="h-3 w-3 mr-1" />
+            <ChevronDown className="mr-1 h-3 w-3" />
           ) : (
-            <ChevronRight className="h-3 w-3 mr-1" />
+            <ChevronRight className="mr-1 h-3 w-3" />
           )}
           Advanced Settings
         </Button>
@@ -359,16 +359,16 @@ export function WaitForSignalStepField({ name }: WaitForSignalStepFieldProps) {
                   Runs before the workflow suspends. Edited visually — add,
                   connect and configure the steps inside this container on the
                   timeline or canvas. Inside the flow,{' '}
-                  <code>variables._signal_id</code> holds the signal id
-                  external systems must use to resume this step.
+                  <code>variables._signal_id</code> holds the signal id external
+                  systems must use to resume this step.
                 </FormDescription>
               ) : showOnWaitJson ? (
                 <>
                   <FormDescription>
                     Optional execution graph that runs before the workflow
                     suspends. This graph could not be opened as a visual
-                    container (it has no steps); edit the JSON directly or
-                    clear it.
+                    container (it has no steps); edit the JSON directly or clear
+                    it.
                   </FormDescription>
                   <FormControl>
                     <Textarea

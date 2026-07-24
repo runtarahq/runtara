@@ -84,8 +84,9 @@ describe('EntitlementRoute', () => {
     ).toBeInTheDocument();
     expect(screen.getByText(/Reports/)).toBeInTheDocument();
     // Back link is always rendered.
-    expect(screen.getByRole('link', { name: /back to workflows/i }))
-      .toHaveAttribute('href', '/workflows');
+    expect(
+      screen.getByRole('link', { name: /back to workflows/i })
+    ).toHaveAttribute('href', '/workflows');
   });
 
   it('uses the right human-readable label for database', () => {

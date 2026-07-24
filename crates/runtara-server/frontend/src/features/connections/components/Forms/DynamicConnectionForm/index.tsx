@@ -144,8 +144,7 @@ export function DynamicConnectionForm({
     connectionType.category ?? ''
   );
   const editProjection = initValues?.editProjection as
-    | EditProjection
-    | undefined;
+    EditProjection | undefined;
   const secretState = editProjection?.secretState ?? EMPTY_SECRET_STATE;
   const [clearedSecrets, setClearedSecrets] = useState<Set<string>>(
     () => new Set()
@@ -175,8 +174,7 @@ export function DynamicConnectionForm({
   );
   const defaultRateLimit = connectionType.defaultRateLimitConfig;
   const existingRateLimit = initValues?.rateLimitConfig as
-    | RateLimitConfigDto
-    | undefined;
+    RateLimitConfigDto | undefined;
   const formValues = useMemo(
     () => ({
       ...canonicalDefaults,

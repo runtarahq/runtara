@@ -90,10 +90,7 @@ export function CapabilityPickerModal({
   const [searchQuery, setSearchQuery] = useState('');
 
   // Get agent IDs for fetching details — only for the filtered (enabled) list.
-  const agentIds = useMemo(
-    () => agents.map((a) => a.id),
-    [agents]
-  );
+  const agentIds = useMemo(() => agents.map((a) => a.id), [agents]);
 
   // Fetch details for ALL agents to enable global search
   const {
@@ -284,14 +281,14 @@ export function CapabilityPickerModal({
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
-      <DialogContent className="sm:max-w-[500px] p-0 gap-0" hideCloseButton>
+      <DialogContent className="gap-0 p-0 sm:max-w-[500px]" hideCloseButton>
         {/* Header */}
-        <div className="flex items-center gap-2 p-4 border-b">
+        <div className="flex items-center gap-2 border-b p-4">
           {viewMode === 'capabilities' && (
             <button
               type="button"
               onClick={handleBack}
-              className="p-1 rounded hover:bg-muted"
+              className="rounded p-1 hover:bg-muted"
             >
               <ChevronLeft className="h-5 w-5" />
             </button>
@@ -303,9 +300,9 @@ export function CapabilityPickerModal({
         </div>
 
         {/* Search */}
-        <div className="p-4 border-b">
+        <div className="border-b p-4">
           <div className="relative">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+            <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
             <Input
               placeholder="Search agents or capabilities..."
               value={searchQuery}
@@ -330,7 +327,7 @@ export function CapabilityPickerModal({
 
               {searchResults.agents.length === 0 &&
               searchResults.capabilities.length === 0 ? (
-                <div className="text-center py-8 text-muted-foreground">
+                <div className="py-8 text-center text-muted-foreground">
                   No results found for "{searchQuery}"
                 </div>
               ) : (
@@ -338,7 +335,7 @@ export function CapabilityPickerModal({
                   {/* Matching Agents */}
                   {searchResults.agents.length > 0 && (
                     <div>
-                      <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">
+                      <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
                         Agents
                       </div>
                       <div className="space-y-1">
@@ -351,7 +348,7 @@ export function CapabilityPickerModal({
                               onClick={() =>
                                 handleAgentSelect(agent.id, agent.name || '')
                               }
-                              className="w-full flex items-center justify-between gap-2 px-3 py-2 rounded-lg text-left transition-colors hover:bg-muted"
+                              className="flex w-full items-center justify-between gap-2 rounded-lg px-3 py-2 text-left transition-colors hover:bg-muted"
                             >
                               <div className="flex items-center gap-3">
                                 <span className="text-xl">
@@ -362,7 +359,7 @@ export function CapabilityPickerModal({
                                     {agent.name}
                                   </div>
                                   {agent.description && (
-                                    <div className="text-xs text-muted-foreground line-clamp-1">
+                                    <div className="line-clamp-1 text-xs text-muted-foreground">
                                       {agent.description}
                                     </div>
                                   )}
@@ -379,7 +376,7 @@ export function CapabilityPickerModal({
                   {/* Matching Capabilities */}
                   {searchResults.capabilities.length > 0 && (
                     <div>
-                      <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">
+                      <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
                         Capabilities
                       </div>
                       <div className="space-y-1">
@@ -396,10 +393,10 @@ export function CapabilityPickerModal({
                             }
                             disabled={!result.isSupported}
                             className={cn(
-                              'w-full flex flex-col gap-1 px-3 py-3 rounded-lg text-left transition-colors',
+                              'flex w-full flex-col gap-1 rounded-lg px-3 py-3 text-left transition-colors',
                               result.isSupported
                                 ? 'hover:bg-muted'
-                                : 'opacity-50 cursor-not-allowed'
+                                : 'cursor-not-allowed opacity-50'
                             )}
                           >
                             <div className="flex items-center gap-2">
@@ -415,13 +412,13 @@ export function CapabilityPickerModal({
                                   result.capability.name}
                               </span>
                               {!result.isSupported && (
-                                <span className="px-1.5 py-0.5 text-[10px] font-medium rounded bg-yellow-100 text-yellow-700">
+                                <span className="rounded bg-yellow-100 px-1.5 py-0.5 text-[10px] font-medium text-yellow-700">
                                   Coming Soon
                                 </span>
                               )}
                             </div>
                             {result.capability.description && (
-                              <p className="text-xs text-muted-foreground line-clamp-1 ml-6">
+                              <p className="ml-6 line-clamp-1 text-xs text-muted-foreground">
                                 {result.capability.description}
                               </p>
                             )}
@@ -445,7 +442,7 @@ export function CapabilityPickerModal({
             ) : (
               <div className="space-y-1">
                 {filteredCapabilities.length === 0 ? (
-                  <div className="text-center py-8 text-muted-foreground">
+                  <div className="py-8 text-center text-muted-foreground">
                     No capabilities found
                   </div>
                 ) : (
@@ -460,7 +457,7 @@ export function CapabilityPickerModal({
                             capability.id
                           )
                         }
-                        className="w-full flex flex-col gap-1 px-3 py-3 rounded-lg text-left transition-colors hover:bg-muted"
+                        className="flex w-full flex-col gap-1 rounded-lg px-3 py-3 text-left transition-colors hover:bg-muted"
                       >
                         <div className="flex items-center gap-2">
                           <span className="font-medium">
@@ -468,7 +465,7 @@ export function CapabilityPickerModal({
                           </span>
                         </div>
                         {capability.description && (
-                          <p className="text-xs text-muted-foreground line-clamp-2">
+                          <p className="line-clamp-2 text-xs text-muted-foreground">
                             {capability.description}
                           </p>
                         )}
@@ -482,15 +479,15 @@ export function CapabilityPickerModal({
             // Browse Agents View
             <div className="space-y-4">
               {groupedAgents.length === 0 ? (
-                <div className="text-center py-8 text-muted-foreground">
+                <div className="py-8 text-center text-muted-foreground">
                   No agents available
                 </div>
               ) : (
                 groupedAgents.map((group) => (
                   <div key={group.category}>
-                    <div className="flex items-center gap-2 mb-2">
+                    <div className="mb-2 flex items-center gap-2">
                       <span className="text-lg">{group.icon}</span>
-                      <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
+                      <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
                         {group.category}
                       </span>
                     </div>
@@ -503,7 +500,7 @@ export function CapabilityPickerModal({
                             handleAgentSelect(agent.id, agent.name || '')
                           }
                           className={cn(
-                            'w-full flex items-center justify-between gap-2 px-3 py-2 rounded-lg text-left transition-colors',
+                            'flex w-full items-center justify-between gap-2 rounded-lg px-3 py-2 text-left transition-colors',
                             'hover:bg-muted',
                             selectedAgent?.id === agent.id && 'bg-muted'
                           )}
@@ -513,7 +510,7 @@ export function CapabilityPickerModal({
                             <div>
                               <div className="font-medium">{agent.name}</div>
                               {agent.description && (
-                                <div className="text-xs text-muted-foreground line-clamp-1">
+                                <div className="line-clamp-1 text-xs text-muted-foreground">
                                   {agent.description}
                                 </div>
                               )}

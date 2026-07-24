@@ -31,7 +31,8 @@ export function GridSettingsPanel({ grid, onChange }: GridSettingsPanelProps) {
 
   const setColumnWidth = (index: number, value: number) => {
     onChange((g) => {
-      const current = g.columnWidths ?? Array.from({ length: columns }, () => 1);
+      const current =
+        g.columnWidths ?? Array.from({ length: columns }, () => 1);
       const next = [...current];
       while (next.length < columns) next.push(1);
       next[index] = Math.max(0.01, value);
@@ -136,8 +137,8 @@ export function GridSettingsPanel({ grid, onChange }: GridSettingsPanelProps) {
           </div>
         ) : (
           <p className="text-xs text-muted-foreground">
-            Columns share equal width. Customize to pin fractional widths
-            (e.g. 2 fr / 1 fr for a wide-left layout).
+            Columns share equal width. Customize to pin fractional widths (e.g.
+            2 fr / 1 fr for a wide-left layout).
           </p>
         )}
       </div>

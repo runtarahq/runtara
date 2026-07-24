@@ -27,7 +27,7 @@ function RecentEventsTable({ events }: { events: RateLimitEventDto[] }) {
 
   if (recentEvents.length === 0) {
     return (
-      <div className="text-center text-sm text-muted-foreground py-4">
+      <div className="py-4 text-center text-sm text-muted-foreground">
         No recent events
       </div>
     );
@@ -38,13 +38,13 @@ function RecentEventsTable({ events }: { events: RateLimitEventDto[] }) {
       <table className="w-full text-sm">
         <thead>
           <tr className="border-b">
-            <th className="text-left py-2 px-2 font-medium text-muted-foreground">
+            <th className="px-2 py-2 text-left font-medium text-muted-foreground">
               Time
             </th>
-            <th className="text-left py-2 px-2 font-medium text-muted-foreground">
+            <th className="px-2 py-2 text-left font-medium text-muted-foreground">
               Event
             </th>
-            <th className="text-left py-2 px-2 font-medium text-muted-foreground">
+            <th className="px-2 py-2 text-left font-medium text-muted-foreground">
               Details
             </th>
           </tr>
@@ -52,10 +52,10 @@ function RecentEventsTable({ events }: { events: RateLimitEventDto[] }) {
         <tbody>
           {recentEvents.map((event) => (
             <tr key={event.id} className="border-b last:border-0">
-              <td className="py-2 px-2 text-xs text-muted-foreground whitespace-nowrap">
+              <td className="whitespace-nowrap px-2 py-2 text-xs text-muted-foreground">
                 {format(parseISO(event.createdAt), 'MMM dd HH:mm:ss')}
               </td>
-              <td className="py-2 px-2">
+              <td className="px-2 py-2">
                 <Badge
                   variant={
                     event.eventType === 'request'
@@ -71,7 +71,7 @@ function RecentEventsTable({ events }: { events: RateLimitEventDto[] }) {
                     : event.eventType}
                 </Badge>
               </td>
-              <td className="py-2 px-2 text-xs text-muted-foreground max-w-[200px] truncate">
+              <td className="max-w-[200px] truncate px-2 py-2 text-xs text-muted-foreground">
                 {event.metadata ? JSON.stringify(event.metadata) : '-'}
               </td>
             </tr>
@@ -99,7 +99,7 @@ export function RateLimitHistory({
             </CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="h-[200px] bg-muted animate-pulse rounded" />
+            <div className="h-[200px] animate-pulse rounded bg-muted" />
           </CardContent>
         </Card>
       </div>
@@ -146,15 +146,15 @@ export function RateLimitHistorySkeleton() {
     <div className="space-y-4">
       <Card>
         <CardHeader>
-          <div className="h-5 w-48 bg-muted animate-pulse rounded" />
+          <div className="h-5 w-48 animate-pulse rounded bg-muted" />
         </CardHeader>
         <CardContent className="space-y-4">
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
             {Array.from({ length: 4 }).map((_, i) => (
-              <div key={i} className="h-16 bg-muted animate-pulse rounded-lg" />
+              <div key={i} className="h-16 animate-pulse rounded-lg bg-muted" />
             ))}
           </div>
-          <div className="h-[200px] bg-muted animate-pulse rounded" />
+          <div className="h-[200px] animate-pulse rounded bg-muted" />
         </CardContent>
       </Card>
     </div>

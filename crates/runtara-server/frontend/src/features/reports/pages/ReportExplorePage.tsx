@@ -457,17 +457,17 @@ export function ReportExplorePage() {
   const blockPreview = buildPreviewBlock(dataset, state, columns);
   const canSaveBlock = Boolean(
     savedBlock &&
-      currentVizValidity.valid &&
-      !query.isFetching &&
-      !query.isError &&
-      query.data
+    currentVizValidity.valid &&
+    !query.isFetching &&
+    !query.isError &&
+    query.data
   );
   const canReplaceBlock = Boolean(
     canSaveBlock &&
-      sourceBlockId &&
-      report.definition.blocks.some(
-        (block) => block.id === sourceBlockId && block.dataset
-      )
+    sourceBlockId &&
+    report.definition.blocks.some(
+      (block) => block.id === sourceBlockId && block.dataset
+    )
   );
 
   return (

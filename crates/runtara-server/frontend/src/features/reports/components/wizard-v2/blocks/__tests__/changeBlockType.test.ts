@@ -1,8 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import {
-  changeBlockType,
-  hasMeaningfulTypeConfig,
-} from '../changeBlockType';
+import { changeBlockType, hasMeaningfulTypeConfig } from '../changeBlockType';
 import { ReportBlockDefinition } from '../../../../types';
 
 function tableBlock(): ReportBlockDefinition {
@@ -100,9 +97,7 @@ describe('changeBlockType', () => {
     // the block renders out of the box.
     expect(after.metric).toEqual({ valueField: 'value' });
     expect(after.source.mode).toBe('aggregate');
-    expect(after.source.aggregates).toEqual([
-      { alias: 'value', op: 'count' },
-    ]);
+    expect(after.source.aggregates).toEqual([{ alias: 'value', op: 'count' }]);
   });
 
   it('switching to chart seeds a default aggregate + series binding', () => {
@@ -112,9 +107,7 @@ describe('changeBlockType', () => {
     };
     expect(after.type).toBe('chart');
     expect(after.source.mode).toBe('aggregate');
-    expect(after.source.aggregates).toEqual([
-      { alias: 'value', op: 'count' },
-    ]);
+    expect(after.source.aggregates).toEqual([{ alias: 'value', op: 'count' }]);
     expect(after.chart?.series).toEqual([{ field: 'value' }]);
   });
 
@@ -141,7 +134,10 @@ describe('changeBlockType', () => {
 
   it('switching TO file_upload resets the source and seeds a value-mode action', () => {
     const before = tableBlock();
-    const after = changeBlockType(before, 'file_upload') as ReportBlockDefinition & {
+    const after = changeBlockType(
+      before,
+      'file_upload'
+    ) as ReportBlockDefinition & {
       table?: unknown;
     };
     expect(after.type).toBe('file_upload');

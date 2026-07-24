@@ -101,10 +101,7 @@ export function ObjectSchemaDtosTable({
 
   const showSkeleton = isLoading || connectionsLoading;
   const hasContent =
-    !showSkeleton &&
-    !!connectionId &&
-    !isError &&
-    objectSchemaDtos.length > 0;
+    !showSkeleton && !!connectionId && !isError && objectSchemaDtos.length > 0;
 
   const toolbar = (
     <ConsoleToolbar
@@ -114,7 +111,9 @@ export function ObjectSchemaDtosTable({
           <ObjectModelConnectionSelector />
           <Can permission="database:create">
             <Button
-              onClick={() => navigate(`/objects/types/create${connectionQuery}`)}
+              onClick={() =>
+                navigate(`/objects/types/create${connectionQuery}`)
+              }
               disabled={isError || !connectionId}
             >
               <Plus className="mr-2 h-4 w-4" />
@@ -163,7 +162,9 @@ export function ObjectSchemaDtosTable({
       <div className="flex h-full flex-col items-center justify-center px-6 py-10 text-center">
         <Icons.warning className="mb-4 h-10 w-10 text-destructive" />
         <p className="text-base font-semibold text-foreground">
-          {isNetworkError ? 'Unable to connect to backend' : 'An error occurred'}
+          {isNetworkError
+            ? 'Unable to connect to backend'
+            : 'An error occurred'}
         </p>
         <p className="mt-1 text-sm text-muted-foreground">
           {isNetworkError
@@ -244,31 +245,31 @@ export function ObjectSchemaDtosTable({
                       <Database className="h-4 w-4" />
                     </Button>
                     <Can permission="database:update">
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-7 w-7 text-muted-foreground"
-                      title="Edit object type"
-                      onClick={() => handleEdit(schema)}
-                    >
-                      <Edit2 className="h-4 w-4" />
-                    </Button>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-7 w-7 text-muted-foreground"
+                        title="Edit object type"
+                        onClick={() => handleEdit(schema)}
+                      >
+                        <Edit2 className="h-4 w-4" />
+                      </Button>
                     </Can>
                     <Can permission="database:delete">
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-7 w-7 text-muted-foreground hover:text-destructive"
-                      title="Delete object type"
-                      disabled={deletingId === schema.id}
-                      onClick={() => setDeleteTarget(schema)}
-                    >
-                      {deletingId === schema.id ? (
-                        <Loader2 className="h-4 w-4 animate-spin" />
-                      ) : (
-                        <Trash2 className="h-4 w-4" />
-                      )}
-                    </Button>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-7 w-7 text-muted-foreground hover:text-destructive"
+                        title="Delete object type"
+                        disabled={deletingId === schema.id}
+                        onClick={() => setDeleteTarget(schema)}
+                      >
+                        {deletingId === schema.id ? (
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                        ) : (
+                          <Trash2 className="h-4 w-4" />
+                        )}
+                      </Button>
                     </Can>
                   </div>
                 </TableCell>

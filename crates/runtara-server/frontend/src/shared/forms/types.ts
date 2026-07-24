@@ -1,11 +1,5 @@
 export type FormFieldType =
-  | 'string'
-  | 'integer'
-  | 'number'
-  | 'boolean'
-  | 'array'
-  | 'object'
-  | 'file';
+  'string' | 'integer' | 'number' | 'boolean' | 'array' | 'object' | 'file';
 
 export type FieldAccessMode = 'read_write' | 'read' | 'write';
 

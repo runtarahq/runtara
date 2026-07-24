@@ -37,7 +37,7 @@ function EventDetails({ events }: { events: ChatSSEEvent[] }) {
     <div className="mt-2 border-t border-border/40 pt-2">
       <button
         onClick={() => setExpanded(!expanded)}
-        className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+        className="flex items-center gap-1 text-xs text-muted-foreground transition-colors hover:text-foreground"
       >
         {expanded ? (
           <ChevronDown className="h-3 w-3" />
@@ -189,7 +189,7 @@ export function ChatBubble({ message }: ChatBubbleProps) {
         )}
       >
         {content ? (
-          <div className="prose prose-sm dark:prose-invert max-w-none [&>*:first-child]:mt-0 [&>*:last-child]:mb-0">
+          <div className="prose prose-sm max-w-none dark:prose-invert [&>*:first-child]:mt-0 [&>*:last-child]:mb-0">
             <Markdown remarkPlugins={[remarkGfm]}>{content}</Markdown>
           </div>
         ) : isStreaming ? (
@@ -200,7 +200,7 @@ export function ChatBubble({ message }: ChatBubbleProps) {
         ) : null}
 
         {isStreaming && content && (
-          <span className="inline-block h-4 w-0.5 animate-pulse bg-foreground/60 ml-0.5" />
+          <span className="ml-0.5 inline-block h-4 w-0.5 animate-pulse bg-foreground/60" />
         )}
 
         <EventDetails events={events} />

@@ -33,7 +33,11 @@ import type {
   ReportAggregateSpec,
 } from '@/generated/RuntaraRuntimeApi';
 
-const AGG_OPS: Array<{ value: ReportAggregateFn; label: string; requiresField: boolean }> = [
+const AGG_OPS: Array<{
+  value: ReportAggregateFn;
+  label: string;
+  requiresField: boolean;
+}> = [
   { value: 'count', label: 'count', requiresField: false },
   { value: 'sum', label: 'sum', requiresField: true },
   { value: 'avg', label: 'avg', requiresField: true },
@@ -88,8 +92,8 @@ export function SourceAggregatesEditor({
         <div className="grid">
           <Label className="text-xs font-semibold">Source aggregates</Label>
           <span className="text-[10px] text-muted-foreground">
-            Required for chart and metric blocks. Each row produces one
-            column you can reference by alias.
+            Required for chart and metric blocks. Each row produces one column
+            you can reference by alias.
           </span>
         </div>
         <Button
@@ -129,9 +133,7 @@ export function SourceAggregatesEditor({
                   onChange={(event) =>
                     updateAggregates(
                       aggregates.map((a, i) =>
-                        i === index
-                          ? { ...a, alias: event.target.value }
-                          : a
+                        i === index ? { ...a, alias: event.target.value } : a
                       )
                     )
                   }
@@ -147,11 +149,10 @@ export function SourceAggregatesEditor({
                               op: value as ReportAggregateFn,
                               // Drop `field` when switching to count
                               // since count doesn't take one.
-                              field:
-                                AGG_OPS.find((o) => o.value === value)
-                                  ?.requiresField
-                                  ? a.field
-                                  : null,
+                              field: AGG_OPS.find((o) => o.value === value)
+                                ?.requiresField
+                                ? a.field
+                                : null,
                             }
                           : a
                       )

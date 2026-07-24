@@ -34,11 +34,7 @@ export interface ChatMessage {
 }
 
 export type ChatStatus =
-  | 'idle'
-  | 'streaming'
-  | 'waiting_for_input'
-  | 'done'
-  | 'error';
+  'idle' | 'streaming' | 'waiting_for_input' | 'done' | 'error';
 
 export interface WaitingForInputData {
   signalId: string;

@@ -371,8 +371,7 @@ function reconstructMessagesFromEvents(
 
         if (stepType === 'AiAgentMemoryLoad') {
           const outputs = payload.outputs as
-            | Record<string, unknown>
-            | undefined;
+            Record<string, unknown> | undefined;
           const memCount = outputs?.message_count ?? 0;
           addSystem(
             `Loaded ${memCount} messages from memory${durationStr}`,

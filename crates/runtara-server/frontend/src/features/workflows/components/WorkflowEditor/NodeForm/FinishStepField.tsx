@@ -269,7 +269,7 @@ export function FinishStepField({ name }: FinishStepFieldProps) {
       )}
 
       {/* Output fields table */}
-      <div className="border rounded-lg overflow-hidden">
+      <div className="overflow-hidden rounded-lg border">
         <table className="w-full table-fixed">
           <colgroup>
             <col className="w-10" />
@@ -279,16 +279,16 @@ export function FinishStepField({ name }: FinishStepFieldProps) {
           </colgroup>
           <thead>
             <tr className="border-b bg-muted/30">
-              <th className="text-center p-2 text-xs font-medium text-muted-foreground">
+              <th className="p-2 text-center text-xs font-medium text-muted-foreground">
                 Type
               </th>
-              <th className="text-left p-2 text-xs font-medium text-muted-foreground">
+              <th className="p-2 text-left text-xs font-medium text-muted-foreground">
                 Output Name
               </th>
-              <th className="text-left p-2 text-xs font-medium text-muted-foreground">
+              <th className="p-2 text-left text-xs font-medium text-muted-foreground">
                 Source
               </th>
-              <th className="text-center p-2 text-xs font-medium text-muted-foreground"></th>
+              <th className="p-2 text-center text-xs font-medium text-muted-foreground"></th>
             </tr>
           </thead>
           <tbody>
@@ -318,7 +318,7 @@ export function FinishStepField({ name }: FinishStepFieldProps) {
 
               return (
                 <tr key={field.id} className="border-b hover:bg-muted/30">
-                  <td className="text-center p-2">
+                  <td className="p-2 text-center">
                     {isTypeEditable ? (
                       <FormField
                         control={form.control}
@@ -328,7 +328,7 @@ export function FinishStepField({ name }: FinishStepFieldProps) {
                             <DropdownMenuTrigger asChild>
                               <button
                                 type="button"
-                                className="font-bold text-muted-foreground hover:text-foreground transition-colors cursor-pointer flex items-center gap-0.5 mx-auto"
+                                className="mx-auto flex cursor-pointer items-center gap-0.5 font-bold text-muted-foreground transition-colors hover:text-foreground"
                                 title={`${typeInfo.full} — click to change`}
                               >
                                 <span>{typeInfo.short}</span>
@@ -344,7 +344,7 @@ export function FinishStepField({ name }: FinishStepFieldProps) {
                                   }
                                   className="text-xs"
                                 >
-                                  <span className="font-bold w-5">
+                                  <span className="w-5 font-bold">
                                     {t.short}
                                   </span>
                                   <span>{t.full}</span>
@@ -356,7 +356,7 @@ export function FinishStepField({ name }: FinishStepFieldProps) {
                       />
                     ) : (
                       <span
-                        className={`font-bold cursor-help ${
+                        className={`cursor-help font-bold ${
                           isSchemaField
                             ? 'text-green-600/70 dark:text-green-500/50'
                             : 'text-muted-foreground'
@@ -381,7 +381,7 @@ export function FinishStepField({ name }: FinishStepFieldProps) {
                             <div className="flex items-center gap-1">
                               <Input
                                 {...field}
-                                className={`font-mono text-sm border-0 p-1 h-auto focus-visible:ring-0 ${
+                                className={`h-auto border-0 p-1 font-mono text-sm focus-visible:ring-0 ${
                                   isRequired
                                     ? 'font-semibold'
                                     : 'text-muted-foreground'
@@ -390,7 +390,7 @@ export function FinishStepField({ name }: FinishStepFieldProps) {
                                 readOnly={isSchemaField}
                               />
                               {isRequired && (
-                                <span className="text-yellow-500 text-xs">
+                                <span className="text-xs text-yellow-500">
                                   *
                                 </span>
                               )}
@@ -442,7 +442,7 @@ export function FinishStepField({ name }: FinishStepFieldProps) {
                                       }
                                     />
                                     {isCompositeMode && (
-                                      <div className="mt-2 border-t border-primary/20 bg-muted/20 rounded-b-md">
+                                      <div className="mt-2 rounded-b-md border-t border-primary/20 bg-muted/20">
                                         {isArrayOutput ? (
                                           <ArrayMappingEditor
                                             arrayType={outputFieldType}
@@ -500,7 +500,7 @@ export function FinishStepField({ name }: FinishStepFieldProps) {
                       )}
                     />
                   </td>
-                  <td className="text-center p-2 pl-3">
+                  <td className="p-2 pl-3 text-center">
                     <Button
                       type="button"
                       variant="ghost"
@@ -542,7 +542,7 @@ export function FinishStepField({ name }: FinishStepFieldProps) {
                 variant="outline"
                 className="flex-1"
               >
-                <Plus className="h-4 w-4 mr-2" />
+                <Plus className="mr-2 h-4 w-4" />
                 Add optional field
               </Button>
             </DropdownMenuTrigger>
@@ -587,7 +587,7 @@ export function FinishStepField({ name }: FinishStepFieldProps) {
               })
             }
           >
-            <Plus className="h-4 w-4 mr-2" />
+            <Plus className="mr-2 h-4 w-4" />
             Add custom output
           </Button>
         )}

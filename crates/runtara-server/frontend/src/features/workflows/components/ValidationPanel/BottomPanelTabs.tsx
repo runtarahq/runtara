@@ -62,13 +62,13 @@ export function BottomPanelTabs({ versionCount = 0 }: BottomPanelTabsProps) {
       badge: hasProblems ? (
         <span className="flex items-center gap-1">
           {errorCount > 0 && (
-            <Badge variant="destructive" className="h-5 px-1.5 gap-0.5">
+            <Badge variant="destructive" className="h-5 gap-0.5 px-1.5">
               <AlertCircle className="h-3 w-3" />
               {errorCount}
             </Badge>
           )}
           {warningCount > 0 && (
-            <Badge variant="warning" className="h-5 px-1.5 gap-0.5">
+            <Badge variant="warning" className="h-5 gap-0.5 px-1.5">
               <AlertTriangle className="h-3 w-3" />
               {warningCount}
             </Badge>
@@ -95,10 +95,10 @@ export function BottomPanelTabs({ versionCount = 0 }: BottomPanelTabsProps) {
           type="button"
           onClick={() => setActiveTab(tab.id)}
           className={cn(
-            'flex items-center gap-2 px-3 py-1.5 text-sm font-medium rounded-t-md transition-colors border-b-2',
+            'flex items-center gap-2 rounded-t-md border-b-2 px-3 py-1.5 text-sm font-medium transition-colors',
             activeTab === tab.id
-              ? 'bg-card text-foreground border-primary'
-              : 'text-muted-foreground hover:text-foreground border-transparent hover:bg-muted/50'
+              ? 'border-primary bg-card text-foreground'
+              : 'border-transparent text-muted-foreground hover:bg-muted/50 hover:text-foreground'
           )}
         >
           {tab.icon}

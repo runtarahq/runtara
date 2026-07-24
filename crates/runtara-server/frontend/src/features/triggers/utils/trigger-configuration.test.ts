@@ -87,7 +87,10 @@ describe('analyzeStaticInputs', () => {
 
   it('exposes data fields covered by the schema with no warnings', () => {
     expect(
-      analyzeStaticInputs('{"data": {"region": "eu", "limit": 5}}', schemaFields)
+      analyzeStaticInputs(
+        '{"data": {"region": "eu", "limit": 5}}',
+        schemaFields
+      )
     ).toEqual({
       representable: true,
       data: { region: 'eu', limit: 5 },
@@ -193,7 +196,11 @@ describe('buildStaticInputsText', () => {
     const previous = JSON.stringify({
       data: { region: 'us', extra: [1, 2] },
     });
-    const text = buildStaticInputsText(previous, { region: 'eu' }, schemaFields);
+    const text = buildStaticInputsText(
+      previous,
+      { region: 'eu' },
+      schemaFields
+    );
     expect(JSON.parse(text)).toEqual({
       data: { region: 'eu', extra: [1, 2] },
     });
@@ -204,7 +211,11 @@ describe('buildStaticInputsText', () => {
       data: { region: 'eu', limit: 5, extra: true },
     });
     // The form cleared `limit`: it is absent from the form data object.
-    const text = buildStaticInputsText(previous, { region: 'eu' }, schemaFields);
+    const text = buildStaticInputsText(
+      previous,
+      { region: 'eu' },
+      schemaFields
+    );
     expect(JSON.parse(text)).toEqual({
       data: { region: 'eu', extra: true },
     });

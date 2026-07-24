@@ -605,7 +605,9 @@ test.describe.serial('Connection schema form local UI', () => {
     await dialog.getByRole('button', { name: 'Delete connection' }).click();
 
     await expect(page).toHaveURL('/connections');
-    await expect(page.getByText(`Connection "${title}" deleted.`)).toBeVisible();
+    await expect(
+      page.getByText(`Connection "${title}" deleted.`)
+    ).toBeVisible();
 
     const response = await request.get(`${apiBase}/connections/${id}`);
     expect(response.status()).toBe(404);
@@ -664,7 +666,9 @@ test.describe.serial('Connection schema form local UI', () => {
     // "Later" dismisses the prompt but the card keeps a Connect affordance.
     await notice.getByRole('button', { name: 'Later' }).click();
     await expect(notice).toBeHidden();
-    await expect(page.getByRole('button', { name: 'Connect', exact: true })).toBeVisible();
+    await expect(
+      page.getByRole('button', { name: 'Connect', exact: true })
+    ).toBeVisible();
   });
 
   test('renders the non-OAuth status card and delete dialog without OAuth affordances', async ({
@@ -694,14 +698,19 @@ test.describe.serial('Connection schema form local UI', () => {
       (s) => s.configured
     ).length;
     await expect(
-      page.getByText(`${secretCount} secret${secretCount === 1 ? '' : 's'} configured`, {
-        exact: false,
-      })
+      page.getByText(
+        `${secretCount} secret${secretCount === 1 ? '' : 's'} configured`,
+        {
+          exact: false,
+        }
+      )
     ).toBeVisible();
     await expect(
       page.getByRole('button', { name: 'Connect', exact: true })
     ).toHaveCount(0);
-    await expect(page.getByRole('button', { name: 'Reconnect' })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Reconnect' })).toHaveCount(
+      0
+    );
     await expect(page.getByText('Authorization needed')).toHaveCount(0);
     await expect(page.getByText('Reconnect required')).toHaveCount(0);
 

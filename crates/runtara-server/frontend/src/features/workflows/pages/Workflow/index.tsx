@@ -2145,7 +2145,7 @@ export function Workflow() {
 
   return (
     <div className="flex h-full flex-col bg-background">
-      <div className="relative flex-1 min-h-0 overflow-hidden">
+      <div className="relative min-h-0 flex-1 overflow-hidden">
         {/* Floating toolbar container */}
         <div className="pointer-events-none absolute inset-x-0 top-0 z-10 flex justify-center">
           <div className="pointer-events-auto">

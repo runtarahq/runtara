@@ -11,7 +11,7 @@ export function SheetBase(props: Props) {
   const { children, title, loading, contentScrollable = true } = props;
 
   return (
-    <div className="flex flex-col h-full min-h-0">
+    <div className="flex h-full min-h-0 flex-col">
       {/* Header - only show if title provided */}
       {title && (
         <div className="shrink-0 pb-3">
@@ -23,7 +23,7 @@ export function SheetBase(props: Props) {
 
       {/* Content area - scrollable */}
       <div
-        className={`flex-1 min-h-0 space-y-4 ${
+        className={`min-h-0 flex-1 space-y-4 ${
           contentScrollable ? 'overflow-y-auto' : ''
         }`}
       >

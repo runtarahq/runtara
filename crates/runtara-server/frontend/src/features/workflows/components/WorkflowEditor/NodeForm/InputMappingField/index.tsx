@@ -40,8 +40,7 @@ function getValueTypeFromSchemaType(schemaType: string): ValueType {
     lowerType.includes('array<')
   )
     return 'json';
-  if (lowerType === 'object' || lowerType.startsWith('{'))
-    return 'json';
+  if (lowerType === 'object' || lowerType.startsWith('{')) return 'json';
   if (lowerType === 'file') return 'file';
 
   // Default to string for unknown types
@@ -424,7 +423,7 @@ export function InputMappingField(props: any) {
           suggestions={conditionSuggestions}
         />
         {error && (
-          <div className="text-[0.8rem] mt-2 font-medium text-destructive">
+          <div className="mt-2 text-[0.8rem] font-medium text-destructive">
             {error.message || error.root?.message}
           </div>
         )}
@@ -474,7 +473,7 @@ export function InputMappingField(props: any) {
       return (
         <div>
           <div className="mb-4">{label}</div>
-          <div className="text-sm text-muted-foreground border border-dashed rounded-lg p-4 text-center">
+          <div className="rounded-lg border border-dashed p-4 text-center text-sm text-muted-foreground">
             The selected child workflow has no input parameters defined.
           </div>
         </div>
@@ -492,7 +491,7 @@ export function InputMappingField(props: any) {
           allowCustomFields={true}
         />
         {error && (
-          <div className="text-[0.8rem] mt-2 font-medium text-destructive">
+          <div className="mt-2 text-[0.8rem] font-medium text-destructive">
             {error.message || error.root?.message}
           </div>
         )}
@@ -547,7 +546,7 @@ export function InputMappingField(props: any) {
           allowCustomFields={true}
         />
         {error && (
-          <div className="text-[0.8rem] mt-2 font-medium text-destructive">
+          <div className="mt-2 text-[0.8rem] font-medium text-destructive">
             {error.message || error.root?.message}
           </div>
         )}
@@ -565,9 +564,9 @@ export function InputMappingField(props: any) {
   return (
     <div>
       <div className="mb-4">{label}</div>
-      <div className="border border-destructive/50 bg-destructive/10 rounded-lg p-4">
+      <div className="rounded-lg border border-destructive/50 bg-destructive/10 p-4">
         <div className="flex items-start gap-3">
-          <Icons.warning className="h-5 w-5 text-destructive shrink-0 mt-0.5" />
+          <Icons.warning className="mt-0.5 h-5 w-5 shrink-0 text-destructive" />
           <div className="space-y-1">
             <p className="text-sm font-medium text-destructive">
               Missing capability metadata
@@ -575,14 +574,14 @@ export function InputMappingField(props: any) {
             <p className="text-sm text-muted-foreground">
               The capability "{capabilityId}" for agent "{agentId}" does not
               have input field definitions. The backend must return an{' '}
-              <code className="bg-muted px-1 rounded">inputs</code> array in the
+              <code className="rounded bg-muted px-1">inputs</code> array in the
               CapabilityInfo.
             </p>
           </div>
         </div>
       </div>
       {error && (
-        <div className="text-[0.8rem] mt-2 font-medium text-destructive">
+        <div className="mt-2 text-[0.8rem] font-medium text-destructive">
           {error.message || error.root?.message}
         </div>
       )}

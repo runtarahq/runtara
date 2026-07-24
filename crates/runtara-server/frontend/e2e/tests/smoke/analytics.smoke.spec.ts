@@ -13,7 +13,9 @@ test.describe('Analytics Smoke Tests', () => {
 
     // Page header is a console toolbar breadcrumb (Analytics / Usage)
     const breadcrumb = page.getByRole('navigation', { name: 'Breadcrumb' });
-    await expect(breadcrumb.getByText('Analytics', { exact: true })).toBeVisible();
+    await expect(
+      breadcrumb.getByText('Analytics', { exact: true })
+    ).toBeVisible();
     await expect(breadcrumb.getByText('Usage', { exact: true })).toBeVisible();
   });
 

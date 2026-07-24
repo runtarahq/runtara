@@ -150,14 +150,14 @@ export function CustomFieldRow({
   };
 
   return (
-    <TableRow className="hover:bg-muted/30 bg-amber-50/30 dark:bg-amber-950/10">
+    <TableRow className="bg-amber-50/30 hover:bg-muted/30 dark:bg-amber-950/10">
       {/* Type column - editable with dropdown */}
-      <TableCell className="align-top pt-3">
+      <TableCell className="pt-3 align-top">
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <button
               type="button"
-              className="text-[11px] font-mono px-1.5 py-0.5 rounded text-muted-foreground bg-muted/40 hover:bg-muted/60 transition-colors cursor-pointer flex items-center gap-1"
+              className="flex cursor-pointer items-center gap-1 rounded bg-muted/40 px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground transition-colors hover:bg-muted/60"
             >
               <span>{getTypeLabel()}</span>
               <Icons.chevronDown className="h-3 w-3" />
@@ -178,7 +178,7 @@ export function CustomFieldRow({
       </TableCell>
 
       {/* Name column - editable */}
-      <TableCell className="align-top pt-3 overflow-hidden">
+      <TableCell className="overflow-hidden pt-3 align-top">
         {isEditingName ? (
           <div>
             <Input
@@ -190,14 +190,14 @@ export function CustomFieldRow({
               className="h-7 text-sm"
             />
             {nameError && (
-              <p className="text-xs text-destructive mt-1">{nameError}</p>
+              <p className="mt-1 text-xs text-destructive">{nameError}</p>
             )}
           </div>
         ) : (
           <button
             type="button"
             onClick={handleNameEdit}
-            className="text-sm text-slate-900/90 dark:text-slate-100 hover:text-primary transition-colors text-left"
+            className="text-left text-sm text-slate-900/90 transition-colors hover:text-primary dark:text-slate-100"
             title="Click to rename"
           >
             {fieldName}
@@ -234,7 +234,7 @@ export function CustomFieldRow({
       </TableCell>
 
       {/* Actions column - always show remove for custom fields */}
-      <TableCell className="align-top pt-2">
+      <TableCell className="pt-2 align-top">
         <Button
           type="button"
           variant="ghost"

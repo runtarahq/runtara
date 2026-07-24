@@ -3,10 +3,7 @@ import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { render, fireEvent } from '@testing-library/react';
 import { ReportBuilderWizardV2 } from '../ReportBuilderWizardV2';
-import {
-  ReportBlockDefinition,
-  ReportDefinition,
-} from '../../../types';
+import { ReportBlockDefinition, ReportDefinition } from '../../../types';
 import {
   addBlock,
   collectLayoutBlockIds,
@@ -17,10 +14,7 @@ import {
   walkLayout,
 } from '../layoutOps';
 
-const FIXTURE_DIR = path.resolve(
-  process.cwd(),
-  '../tests/fixtures/reports'
-);
+const FIXTURE_DIR = path.resolve(process.cwd(), '../tests/fixtures/reports');
 
 function loadFixtures(): Array<{ name: string; definition: ReportDefinition }> {
   return readdirSync(FIXTURE_DIR)
@@ -68,17 +62,13 @@ describe('wizard v2 identity-edit round-trip', () => {
       const ids = collectLayoutBlockIds(fixture.definition.layout);
       let working = fixture.definition;
       for (const id of ids) {
-        const before = JSON.stringify(
-          working.blocks.find((b) => b.id === id)
-        );
+        const before = JSON.stringify(working.blocks.find((b) => b.id === id));
         working = updateBlock(working, id, (block) => block);
         const after = JSON.stringify(working.blocks.find((b) => b.id === id));
         expect(after).toBe(before);
       }
       // Full-definition round-trip identical.
-      expect(JSON.stringify(working)).toBe(
-        JSON.stringify(fixture.definition)
-      );
+      expect(JSON.stringify(working)).toBe(JSON.stringify(fixture.definition));
     });
 
     it(`${fixture.name}: moveLayoutNode in-place is a no-op`, () => {

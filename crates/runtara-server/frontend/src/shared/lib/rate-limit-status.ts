@@ -9,10 +9,7 @@ import type { RateLimitStatusDto } from '@/generated/RuntaraRuntimeApi';
  * "No limit" — never the green "OK" success badge that implies protection.
  */
 export type RateLimitBadgeVariant =
-  | 'muted'
-  | 'warning'
-  | 'destructive'
-  | 'success';
+  'muted' | 'warning' | 'destructive' | 'success';
 
 export interface RateLimitBadge {
   label: string;
@@ -61,13 +58,15 @@ export function getRateLimitBadge(state: RateLimitState): RateLimitBadge {
     return {
       label: 'Rate limited',
       variant: 'destructive',
-      description: 'The rate limit is currently exhausted; requests are waiting.',
+      description:
+        'The rate limit is currently exhausted; requests are waiting.',
     };
   }
   return {
     label: 'OK',
     variant: 'success',
-    description: 'A rate limit is configured and enforced, with capacity available.',
+    description:
+      'A rate limit is configured and enforced, with capacity available.',
   };
 }
 

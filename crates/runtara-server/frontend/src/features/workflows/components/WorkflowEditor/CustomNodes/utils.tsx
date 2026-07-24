@@ -1261,10 +1261,7 @@ function cleanNodeData(steps: Record<string, any>) {
             typeof varField.name === 'string' ? varField.name.trim() : '';
           if (variableName && varField.value !== undefined) {
             const resolvedValueType:
-              | 'reference'
-              | 'immediate'
-              | 'composite'
-              | 'template' =
+              'reference' | 'immediate' | 'composite' | 'template' =
               varField.valueType ||
               (typeof varField.value === 'object' && varField.value !== null
                 ? 'composite'
@@ -1930,8 +1927,7 @@ function normalizeNodesAndEdges(
     let onWaitGraph: ExecutionGraphDto | undefined;
     if ((step.stepType as string) === 'WaitForSignal') {
       const rawOnWait = (data as Record<string, unknown>).onWait as
-        | (ExecutionGraphDto & Record<string, unknown>)
-        | undefined;
+        (ExecutionGraphDto & Record<string, unknown>) | undefined;
       if (
         rawOnWait &&
         typeof rawOnWait === 'object' &&
@@ -2106,9 +2102,7 @@ function normalizeNodesAndEdges(
               value: typedValue.value, // Can be string, array, object, or composite structure
               typeHint: typedValue.type as ValueType | undefined,
               valueType: resolvedValueType as
-                | 'reference'
-                | 'immediate'
-                | 'template',
+                'reference' | 'immediate' | 'template',
             };
             // Preserve ReferenceValue.default so a subsequent save doesn't drop it.
             if (
@@ -2153,18 +2147,12 @@ function normalizeNodesAndEdges(
                 ? Object.entries(config.variables).map(([name, varDef]) => {
                     const typedVarDef = varDef as {
                       valueType?:
-                        | 'reference'
-                        | 'immediate'
-                        | 'composite'
-                        | 'template';
+                        'reference' | 'immediate' | 'composite' | 'template';
                       value: unknown;
                       type?: string;
                     };
                     const resolvedValueType:
-                      | 'reference'
-                      | 'immediate'
-                      | 'composite'
-                      | 'template' =
+                      'reference' | 'immediate' | 'composite' | 'template' =
                       typedVarDef.valueType ||
                       (typeof typedVarDef.value === 'object' &&
                       typedVarDef.value !== null
@@ -2326,10 +2314,7 @@ function normalizeNodesAndEdges(
                 ? Object.entries(config.variables).map(([name, variable]) => {
                     const typedVariable = variable as {
                       valueType?:
-                        | 'reference'
-                        | 'immediate'
-                        | 'composite'
-                        | 'template';
+                        'reference' | 'immediate' | 'composite' | 'template';
                       value: unknown;
                       type?: string;
                     };

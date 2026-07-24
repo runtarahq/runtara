@@ -200,7 +200,10 @@ describe('advanced schema draft (dialog apply path)', () => {
       itemsType: 'integer',
     });
 
-    expect(applied?.items).toEqual({ type: 'integer', description: 'each tag' });
+    expect(applied?.items).toEqual({
+      type: 'integer',
+      description: 'each tag',
+    });
   });
 
   it('round-trips an existing object element definition through the draft', () => {

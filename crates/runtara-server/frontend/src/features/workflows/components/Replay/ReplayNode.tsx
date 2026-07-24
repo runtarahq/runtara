@@ -32,14 +32,14 @@ function ReplayNodeComponent({ data, selected }: NodeProps<ReplayFlowNode>) {
         id="target"
         position={Position.Left}
         isConnectable={false}
-        className="!bg-muted-foreground/40 !w-1.5 !h-1.5 !border-0"
+        className="!h-1.5 !w-1.5 !border-0 !bg-muted-foreground/40"
       />
       <Handle
         type="source"
         id="source"
         position={Position.Right}
         isConnectable={false}
-        className="!bg-muted-foreground/40 !w-1.5 !h-1.5 !border-0"
+        className="!h-1.5 !w-1.5 !border-0 !bg-muted-foreground/40"
       />
     </BaseNode>
   );

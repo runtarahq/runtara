@@ -252,8 +252,7 @@ function isScopeStepType(stepType: string): boolean {
  */
 export function isTimelineContainerNode(node: Node): boolean {
   return (
-    isScopeStepType(getStepType(node)) ||
-    node.type === NODE_TYPES.ContainerNode
+    isScopeStepType(getStepType(node)) || node.type === NODE_TYPES.ContainerNode
   );
 }
 
@@ -674,7 +673,7 @@ function LaneContinuationNode({ node }: { node: Node }) {
         'flex min-w-0 items-center gap-2 rounded-md border border-dashed bg-muted/30 px-3 py-2 text-sm transition-colors',
         executionStatus && getExecutionBorderClass(executionStatus.status),
         executionStatus?.status === 'suspended' &&
-          'border-2 animate-glow-pulse',
+          'animate-glow-pulse border-2',
         isSuspendedExecution &&
           executionStatus?.status === 'queued' &&
           'opacity-25'
@@ -1379,9 +1378,9 @@ function isMcpToolsetRequestForNode(
 ): request is TimelineAddStepRequest {
   return Boolean(
     request &&
-      request.sourceNodeId === nodeId &&
-      typeof request.sourceHandle === 'string' &&
-      request.sourceHandle.startsWith('mcp.')
+    request.sourceNodeId === nodeId &&
+    typeof request.sourceHandle === 'string' &&
+    request.sourceHandle.startsWith('mcp.')
   );
 }
 
@@ -2381,11 +2380,11 @@ function WorkflowTimelineItem({
               : (isSelected || isEditingInline) &&
                 'border-primary bg-primary/5',
           executionStatus?.status === 'suspended' &&
-            'border-2 animate-glow-pulse',
+            'animate-glow-pulse border-2',
           !canInspectInDebug && 'opacity-60',
           isSuspendedExecution &&
             executionStatus?.status === 'queued' &&
-            'opacity-25 pointer-events-none',
+            'pointer-events-none opacity-25',
           isDragging && 'opacity-50'
         )}
         style={{ marginLeft: depth * 24 }}
@@ -2687,8 +2686,7 @@ export function WorkflowTimelineView({
     );
 
     let bestTarget:
-      | { target: NonNullable<DropTarget>; distance: number }
-      | undefined;
+      { target: NonNullable<DropTarget>; distance: number } | undefined;
 
     for (const element of candidates) {
       const nodeId = element.dataset.timelineNodeId;

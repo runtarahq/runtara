@@ -50,9 +50,8 @@ describe('shared Rust validation initialization', () => {
   it('initializes domain-neutral validation without fetching workflow metadata', async () => {
     const fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
-    const { ensureRustValidationInitialized } = await import(
-      './rust-validation-wasm'
-    );
+    const { ensureRustValidationInitialized } =
+      await import('./rust-validation-wasm');
 
     await ensureRustValidationInitialized();
 
@@ -80,9 +79,8 @@ describe('shared Rust validation initialization', () => {
         new Response(JSON.stringify(details[1]), { status: 200 })
       );
     vi.stubGlobal('fetch', fetchMock);
-    const { ensureWorkflowValidationInitialized } = await import(
-      './rust-validation-wasm'
-    );
+    const { ensureWorkflowValidationInitialized } =
+      await import('./rust-validation-wasm');
 
     await ensureWorkflowValidationInitialized();
 

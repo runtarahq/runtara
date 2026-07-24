@@ -124,29 +124,29 @@ export function ReportsListPage() {
               <TableCell className="text-right">
                 <div className="flex items-center justify-end gap-1">
                   <Can permission="report:update">
-                  <Link to={`/reports/${report.id}?edit=1`}>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon"
-                      className="h-7 w-7 text-muted-foreground"
-                      aria-label={`Edit ${report.name}`}
-                      title={`Edit ${report.name}`}
-                    >
-                      <Edit className="h-4 w-4" />
-                    </Button>
-                  </Link>
+                    <Link to={`/reports/${report.id}?edit=1`}>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        className="h-7 w-7 text-muted-foreground"
+                        aria-label={`Edit ${report.name}`}
+                        title={`Edit ${report.name}`}
+                      >
+                        <Edit className="h-4 w-4" />
+                      </Button>
+                    </Link>
                   </Can>
                   <Can permission="report:delete">
-                  <ReportDeleteButton
-                    reportId={report.id}
-                    reportName={report.name}
-                    iconOnly
-                    navigateAfterDelete={false}
-                    triggerVariant="ghost"
-                    triggerSize="icon"
-                    className="h-7 w-7 text-muted-foreground hover:text-destructive"
-                  />
+                    <ReportDeleteButton
+                      reportId={report.id}
+                      reportName={report.name}
+                      iconOnly
+                      navigateAfterDelete={false}
+                      triggerVariant="ghost"
+                      triggerSize="icon"
+                      className="h-7 w-7 text-muted-foreground hover:text-destructive"
+                    />
                   </Can>
                 </div>
               </TableCell>

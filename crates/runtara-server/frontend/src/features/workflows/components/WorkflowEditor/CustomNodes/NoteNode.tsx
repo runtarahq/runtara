@@ -126,12 +126,12 @@ const NoteNodeComponent = ({ id, data, selected, dragging }: NodeProps) => {
   return (
     <div
       className={cn(
-        'group relative w-full h-full rounded-md',
+        'group relative h-full w-full rounded-md',
         'bg-yellow-50 dark:bg-yellow-950/20',
         'border-2',
         selected
-          ? 'border-yellow-500 dark:border-yellow-600 shadow-lg'
-          : 'border-yellow-300 dark:border-yellow-700 shadow-md',
+          ? 'border-yellow-500 shadow-lg dark:border-yellow-600'
+          : 'border-yellow-300 shadow-md dark:border-yellow-700',
         'transition-all duration-200',
         'hover:shadow-lg',
         isEditing && 'nodrag nopan [&_*]:select-text'
@@ -152,8 +152,8 @@ const NoteNodeComponent = ({ id, data, selected, dragging }: NodeProps) => {
         <button
           onClick={handleDelete}
           className={cn(
-            'absolute top-2 right-2 z-10',
-            'p-1 rounded-sm',
+            'absolute right-2 top-2 z-10',
+            'rounded-sm p-1',
             'bg-yellow-100 dark:bg-yellow-900/40',
             'hover:bg-yellow-200 dark:hover:bg-yellow-800/60',
             'text-yellow-700 dark:text-yellow-300',
@@ -168,7 +168,7 @@ const NoteNodeComponent = ({ id, data, selected, dragging }: NodeProps) => {
       )}
 
       {/* Content area */}
-      <div className="w-full h-full p-3 overflow-hidden rounded-md text-[10px] leading-snug">
+      <div className="h-full w-full overflow-hidden rounded-md p-3 text-[10px] leading-snug">
         {isEditing ? (
           <Textarea
             ref={textareaRef}
@@ -177,8 +177,8 @@ const NoteNodeComponent = ({ id, data, selected, dragging }: NodeProps) => {
             onBlur={handleBlur}
             onKeyDown={handleKeyDown}
             className={cn(
-              'w-full h-full resize-none',
-              'bg-transparent border-none',
+              'h-full w-full resize-none',
+              'border-none bg-transparent',
               'text-yellow-900 dark:text-yellow-100',
               'placeholder:text-yellow-500 dark:placeholder:text-yellow-600',
               'focus:outline-none focus:ring-0',
@@ -193,23 +193,23 @@ const NoteNodeComponent = ({ id, data, selected, dragging }: NodeProps) => {
               'text-yellow-900 dark:text-yellow-100',
               'cursor-text select-text',
               // Custom markdown styling
-              '[&>h1]:text-[12px] [&>h1]:font-bold [&>h1]:mb-1',
-              '[&>h2]:text-[11px] [&>h2]:font-bold [&>h2]:mb-1',
-              '[&>h3]:text-[10px] [&>h3]:font-semibold [&>h3]:mb-1',
-              '[&>p]:mb-1 [&>p:last-child]:mb-0',
-              '[&>ul]:list-disc [&>ul]:ml-3 [&>ul]:mb-1',
-              '[&>ol]:list-decimal [&>ol]:ml-3 [&>ol]:mb-1',
-              '[&>ul>li]:mb-0.5 [&>ol>li]:mb-0.5',
-              '[&>code]:bg-yellow-200/50 [&>code]:dark:bg-yellow-900/50 [&>code]:px-1 [&>code]:rounded',
-              '[&>pre]:bg-yellow-200/50 [&>pre]:dark:bg-yellow-900/50 [&>pre]:p-2 [&>pre]:rounded [&>pre]:mb-1 [&>pre]:overflow-x-auto',
-              '[&>blockquote]:border-l-2 [&>blockquote]:border-yellow-400 [&>blockquote]:pl-2 [&>blockquote]:italic [&>blockquote]:mb-1',
+              '[&>h1]:mb-1 [&>h1]:text-[12px] [&>h1]:font-bold',
+              '[&>h2]:mb-1 [&>h2]:text-[11px] [&>h2]:font-bold',
+              '[&>h3]:mb-1 [&>h3]:text-[10px] [&>h3]:font-semibold',
+              '[&>p:last-child]:mb-0 [&>p]:mb-1',
+              '[&>ul]:mb-1 [&>ul]:ml-3 [&>ul]:list-disc',
+              '[&>ol]:mb-1 [&>ol]:ml-3 [&>ol]:list-decimal',
+              '[&>ol>li]:mb-0.5 [&>ul>li]:mb-0.5',
+              '[&>code]:rounded [&>code]:bg-yellow-200/50 [&>code]:px-1 [&>code]:dark:bg-yellow-900/50',
+              '[&>pre]:mb-1 [&>pre]:overflow-x-auto [&>pre]:rounded [&>pre]:bg-yellow-200/50 [&>pre]:p-2 [&>pre]:dark:bg-yellow-900/50',
+              '[&>blockquote]:mb-1 [&>blockquote]:border-l-2 [&>blockquote]:border-yellow-400 [&>blockquote]:pl-2 [&>blockquote]:italic',
               '[&_strong]:font-bold',
               '[&_em]:italic',
-              '[&_a]:text-yellow-700 [&_a]:dark:text-yellow-400 [&_a]:underline',
+              '[&_a]:text-yellow-700 [&_a]:underline [&_a]:dark:text-yellow-400',
               // Table styling
-              '[&_table]:w-full [&_table]:border-collapse [&_table]:mb-1',
-              '[&_th]:border [&_th]:border-yellow-400 [&_th]:dark:border-yellow-600 [&_th]:bg-yellow-200/50 [&_th]:dark:bg-yellow-900/50 [&_th]:px-1.5 [&_th]:py-0.5 [&_th]:text-left [&_th]:font-semibold',
-              '[&_td]:border [&_td]:border-yellow-300 [&_td]:dark:border-yellow-700 [&_td]:px-1.5 [&_td]:py-0.5'
+              '[&_table]:mb-1 [&_table]:w-full [&_table]:border-collapse',
+              '[&_th]:border [&_th]:border-yellow-400 [&_th]:bg-yellow-200/50 [&_th]:px-1.5 [&_th]:py-0.5 [&_th]:text-left [&_th]:font-semibold [&_th]:dark:border-yellow-600 [&_th]:dark:bg-yellow-900/50',
+              '[&_td]:border [&_td]:border-yellow-300 [&_td]:px-1.5 [&_td]:py-0.5 [&_td]:dark:border-yellow-700'
             )}
           >
             {content ? (
@@ -217,7 +217,7 @@ const NoteNodeComponent = ({ id, data, selected, dragging }: NodeProps) => {
                 {content}
               </ReactMarkdown>
             ) : (
-              <p className="text-yellow-500 dark:text-yellow-600 italic text-[10px]">
+              <p className="text-[10px] italic text-yellow-500 dark:text-yellow-600">
                 Click to add note...
               </p>
             )}

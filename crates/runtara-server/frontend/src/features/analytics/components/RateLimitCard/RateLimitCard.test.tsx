@@ -29,9 +29,7 @@ describe('RateLimitCard badge', () => {
     render(<RateLimitCard rateLimitStatus={status({ config: null })} />);
     expect(screen.getByText('No limit')).toBeInTheDocument();
     expect(screen.queryByText('OK')).not.toBeInTheDocument();
-    expect(
-      screen.getByText(/requests are not throttled/i)
-    ).toBeInTheDocument();
+    expect(screen.getByText(/requests are not throttled/i)).toBeInTheDocument();
   });
 
   it('config but Redis unavailable → "Not enforced"', () => {

@@ -19,10 +19,10 @@ function StartIndicatorNodeComponent({ data }: NodeProps) {
     .onAddFirstStep;
 
   return (
-    <div className="flex items-center justify-center w-full h-full px-3 gap-1.5 rounded-full bg-muted/40">
+    <div className="flex h-full w-full items-center justify-center gap-1.5 rounded-full bg-muted/40 px-3">
       {/* Icon */}
-      <div className="flex-shrink-0 flex items-center justify-center text-muted-foreground/50">
-        <Play className="w-3 h-3 fill-current" />
+      <div className="flex flex-shrink-0 items-center justify-center text-muted-foreground/50">
+        <Play className="h-3 w-3 fill-current" />
       </div>
 
       {/* Label */}
@@ -36,7 +36,7 @@ function StartIndicatorNodeComponent({ data }: NodeProps) {
           type="source"
           position={Position.Right}
           id="source"
-          className="!bg-muted-foreground/40 !border-0 !rounded-full !w-2 !h-2"
+          className="!h-2 !w-2 !rounded-full !border-0 !bg-muted-foreground/40"
           isConnectable={false}
         />
       )}
@@ -44,16 +44,16 @@ function StartIndicatorNodeComponent({ data }: NodeProps) {
       {/* Add first step button when no entry point */}
       {!hasEntryPoint && (
         <div
-          className="absolute flex items-center pointer-events-none"
+          className="pointer-events-none absolute flex items-center"
           style={{
             right: '-32px',
             top: '50%',
             transform: 'translateY(-50%)',
           }}
         >
-          <div className="bg-border h-[1px] w-4" />
+          <div className="h-[1px] w-4 bg-border" />
           <Button
-            className="w-5 h-5 rounded-full [&_svg]:size-3 shadow-md pointer-events-auto nodrag nopan"
+            className="nodrag nopan pointer-events-auto h-5 w-5 rounded-full shadow-md [&_svg]:size-3"
             variant="outline"
             size="icon"
             aria-label="Add first workflow step"

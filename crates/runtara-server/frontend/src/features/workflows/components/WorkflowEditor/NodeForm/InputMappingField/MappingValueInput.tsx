@@ -247,10 +247,10 @@ export function MappingValueInput({
               scalarsCoerceToString,
             });
         return (
-          <div className="flex-1 min-w-0">
+          <div className="min-w-0 flex-1">
             <div
               className={cn(
-                'flex items-center min-h-9 px-2 py-1 bg-muted/30 rounded-md border',
+                'flex min-h-9 items-center rounded-md border bg-muted/30 px-2 py-1',
                 referenceError && 'border-destructive'
               )}
             >
@@ -265,14 +265,14 @@ export function MappingValueInput({
             </div>
             {referenceError && (
               <p
-                className="text-[11px] text-destructive mt-0.5"
+                className="mt-0.5 text-[11px] text-destructive"
                 data-testid="reference-error"
               >
                 {referenceError}
               </p>
             )}
             {typeMismatch && (
-              <p className="text-[11px] text-amber-600 dark:text-amber-500 mt-0.5">
+              <p className="mt-0.5 text-[11px] text-amber-600 dark:text-amber-500">
                 {typeMismatch}
               </p>
             )}
@@ -290,7 +290,7 @@ export function MappingValueInput({
                   disabled={disabled}
                   className="h-7 font-mono text-xs"
                 />
-                <p className="text-[11px] text-muted-foreground mt-0.5">
+                <p className="mt-0.5 text-[11px] text-muted-foreground">
                   Used when the referenced path is missing or null
                 </p>
               </div>
@@ -304,11 +304,11 @@ export function MappingValueInput({
             onClick={() => setIsPickerOpen(true)}
             disabled={disabled}
             className={cn(
-              'flex-1 flex items-center justify-center min-h-9 px-3 py-2',
+              'flex min-h-9 flex-1 items-center justify-center px-3 py-2',
               'text-sm text-muted-foreground',
-              'bg-muted/30 border border-dashed rounded-md',
-              'hover:bg-muted/50 hover:border-muted-foreground/50 transition-colors',
-              disabled && 'opacity-50 cursor-not-allowed'
+              'rounded-md border border-dashed bg-muted/30',
+              'transition-colors hover:border-muted-foreground/50 hover:bg-muted/50',
+              disabled && 'cursor-not-allowed opacity-50'
             )}
           >
             Click to select a variable...
@@ -322,8 +322,8 @@ export function MappingValueInput({
       const isArrayComposite = isArrayFieldType(lowerFieldType);
       const CompositeIcon = isArrayComposite ? Icons.list : Icons.braces;
       return (
-        <div className="flex-1 flex items-center min-h-9 px-3 py-1 bg-green-50 dark:bg-green-950/30 rounded-md border border-green-200 dark:border-green-800">
-          <CompositeIcon className="h-4 w-4 text-green-600 dark:text-green-400 mr-2 shrink-0" />
+        <div className="flex min-h-9 flex-1 items-center rounded-md border border-green-200 bg-green-50 px-3 py-1 dark:border-green-800 dark:bg-green-950/30">
+          <CompositeIcon className="mr-2 h-4 w-4 shrink-0 text-green-600 dark:text-green-400" />
           <span className="text-sm text-green-700 dark:text-green-300">
             {isArrayComposite
               ? 'Composite array - configure below'
@@ -345,7 +345,7 @@ export function MappingValueInput({
             'e.g., Bearer {{ steps.my_conn.outputs.parameters.api_key }}'
           }
           disabled={disabled}
-          className="flex-1 font-mono focus-visible:ring-0 focus-visible:ring-offset-0 border-0 shadow-none"
+          className="flex-1 border-0 font-mono shadow-none focus-visible:ring-0 focus-visible:ring-offset-0"
         />
       );
     }
@@ -353,7 +353,7 @@ export function MappingValueInput({
     // Immediate mode - render based on field type
     if (isNullValue) {
       return (
-        <div className="flex-1 flex items-center justify-between min-h-9 px-3">
+        <div className="flex min-h-9 flex-1 items-center justify-between px-3">
           <span className="font-mono text-sm text-muted-foreground">null</span>
           <Button
             type="button"
@@ -374,7 +374,7 @@ export function MappingValueInput({
     if (lowerFieldType === 'boolean' || lowerFieldType === 'bool') {
       const boolValue = value === true || stringValue === 'true';
       return (
-        <div className="flex-1 flex items-center min-h-9 px-3">
+        <div className="flex min-h-9 flex-1 items-center px-3">
           <Checkbox
             checked={boolValue}
             onCheckedChange={(checked) => onChange(String(checked))}
@@ -426,7 +426,7 @@ export function MappingValueInput({
           onChange={(e) => onChange(e.target.value)}
           placeholder={placeholder}
           disabled={disabled}
-          className="flex-1 font-mono focus-visible:ring-0 focus-visible:ring-offset-0 border-0 shadow-none"
+          className="flex-1 border-0 font-mono shadow-none focus-visible:ring-0 focus-visible:ring-offset-0"
         />
       );
     }
@@ -446,7 +446,7 @@ export function MappingValueInput({
           onChange={(e) => onChange(e.target.value)}
           placeholder={placeholder}
           disabled={disabled}
-          className="flex-1 focus-visible:ring-0 focus-visible:ring-offset-0 border-0 shadow-none"
+          className="flex-1 border-0 shadow-none focus-visible:ring-0 focus-visible:ring-offset-0"
         />
       );
     }
@@ -459,7 +459,7 @@ export function MappingValueInput({
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder}
         disabled={disabled}
-        className="flex-1 focus-visible:ring-0 focus-visible:ring-offset-0 border-0 shadow-none"
+        className="flex-1 border-0 shadow-none focus-visible:ring-0 focus-visible:ring-offset-0"
       />
     );
   };
@@ -477,7 +477,7 @@ export function MappingValueInput({
     <>
       <div className={cn('flex items-start gap-2', className)}>
         {needsGroupedWrapper ? (
-          <div className="flex-1 flex items-center h-9 border border-input rounded-md focus-within:ring-1 focus-within:ring-ring bg-background overflow-hidden">
+          <div className="flex h-9 flex-1 items-center overflow-hidden rounded-md border border-input bg-background focus-within:ring-1 focus-within:ring-ring">
             {renderInput()}
           </div>
         ) : (
@@ -502,7 +502,7 @@ export function MappingValueInput({
             type="button"
             variant="ghost"
             size="icon"
-            className="h-9 w-9 shrink-0 text-muted-foreground hover:text-primary hover:bg-primary/10"
+            className="h-9 w-9 shrink-0 text-muted-foreground hover:bg-primary/10 hover:text-primary"
             onClick={() => setIsTemplateEditorOpen(true)}
             disabled={disabled}
             title="Open template editor"

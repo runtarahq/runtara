@@ -258,12 +258,7 @@ function formatValueViaIntl(
 function formatBytesViaIntl(num: number, locale: string | undefined): string {
   const abs = Math.abs(num);
   let unit:
-    | 'byte'
-    | 'kilobyte'
-    | 'megabyte'
-    | 'gigabyte'
-    | 'terabyte'
-    | 'petabyte';
+    'byte' | 'kilobyte' | 'megabyte' | 'gigabyte' | 'terabyte' | 'petabyte';
   let divisor: number;
   if (abs < 1e3) {
     unit = 'byte';

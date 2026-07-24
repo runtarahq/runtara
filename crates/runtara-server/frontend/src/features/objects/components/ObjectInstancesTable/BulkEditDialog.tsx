@@ -133,7 +133,7 @@ export function BulkEditDialog({
           </AlertDialogDescription>
         </AlertDialogHeader>
 
-        <div className="max-h-[50vh] overflow-y-auto space-y-3 pr-1">
+        <div className="max-h-[50vh] space-y-3 overflow-y-auto pr-1">
           {columns.length === 0 && (
             <p className="text-sm text-muted-foreground">
               This schema has no editable columns.

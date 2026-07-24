@@ -55,7 +55,7 @@ export function MetricBlock({
         {label}
       </p>
       <p
-        className="mt-2 text-3xl font-semibold tracking-tight tabular-nums text-foreground"
+        className="mt-2 text-3xl font-semibold tabular-nums tracking-tight text-foreground"
         title={compact ? full : undefined}
         aria-label={compact ? full : undefined}
       >

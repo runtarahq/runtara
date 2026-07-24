@@ -64,12 +64,14 @@ export function RateLimitSection({
         <CheckboxInput
           name="rateLimitEnabled"
           label={
-            defaultConfig ? 'Override default rate limits' : 'Enable rate limiting'
+            defaultConfig
+              ? 'Override default rate limits'
+              : 'Enable rate limiting'
           }
         />
 
         {!rateLimitEnabled && defaultConfig && (
-          <div className="text-xs text-slate-500 bg-slate-50 rounded-md px-3 py-2 dark:bg-slate-800/50 dark:text-slate-400">
+          <div className="rounded-md bg-slate-50 px-3 py-2 text-xs text-slate-500 dark:bg-slate-800/50 dark:text-slate-400">
             Using defaults: {defaultConfig.requestsPerSecond} req/s, burst{' '}
             {defaultConfig.burstSize},{' '}
             {defaultConfig.retryOnLimit
@@ -83,7 +85,9 @@ export function RateLimitSection({
             <div className="flex items-start gap-2 text-xs text-warning">
               <ShieldOff className="mt-0.5 h-3.5 w-3.5 shrink-0" />
               <span>
-                <span className="font-medium">No rate limiting is applied.</span>{' '}
+                <span className="font-medium">
+                  No rate limiting is applied.
+                </span>{' '}
                 Requests to this connection are unlimited — bursts can trigger
                 provider 429s, key bans, or runaway cost. Enable a limit to
                 protect this connection.

@@ -598,9 +598,9 @@ describe('useTableQuery', () => {
 // 403 entitlement-denial → toast mapping.
 // ─────────────────────────────────────────────────────────────────────────
 
-function entitlementError(data: Record<string, unknown>): Parameters<
-  typeof handleEntitlementDenial
->[0] {
+function entitlementError(
+  data: Record<string, unknown>
+): Parameters<typeof handleEntitlementDenial>[0] {
   return {
     name: 'ApiError',
     message: 'Forbidden',

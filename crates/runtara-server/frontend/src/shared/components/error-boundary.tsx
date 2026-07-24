@@ -24,7 +24,7 @@ export function ErrorBoundary() {
             <p className="text-xl">
               Please report about this issue to the development team:
             </p>
-            <div className="bg-accent rounded-sm space-y-3 break-words p-4">
+            <div className="space-y-3 break-words rounded-sm bg-accent p-4">
               <pre className="whitespace-pre-wrap">{error.message}</pre>
               <pre className="whitespace-pre-wrap">{error.stack}</pre>
             </div>

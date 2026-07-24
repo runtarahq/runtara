@@ -9,7 +9,7 @@ type Props = {
 export function StepTypeIcon(props: Props) {
   const { className, type } = props;
 
-  const iconClassName = cn('w-4 h-4', className);
+  const iconClassName = cn('h-4 w-4', className);
 
   switch (type) {
     case 'Create':

@@ -13,9 +13,9 @@ export function Login() {
   );
 
   return (
-    <section className="flex flex-col justify-center items-center h-[calc(100vh-300px)]">
+    <section className="flex h-[calc(100vh-300px)] flex-col items-center justify-center">
       <div className="flex flex-col items-start">
-        <h2 className="max-w-96 font-light mb-6">{message}</h2>
+        <h2 className="mb-6 max-w-96 font-light">{message}</h2>
         <AuthButton />
       </div>
     </section>

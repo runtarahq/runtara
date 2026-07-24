@@ -16,7 +16,10 @@ import {
 } from './types';
 
 /** Aggregate the state of one node from its recorded executions at time `t`. */
-function nodeStateAt(insts: ReplayStepInstance[] | undefined, t: number): ReplayNodeState {
+function nodeStateAt(
+  insts: ReplayStepInstance[] | undefined,
+  t: number
+): ReplayNodeState {
   if (!insts || insts.length === 0) return 'skipped';
 
   let anyStarted = false;
@@ -67,7 +70,9 @@ function nodeStateAt(insts: ReplayStepInstance[] | undefined, t: number): Replay
 }
 
 /** Min start / max end across a node's own executions (for edge timing). */
-function windowOf(insts: ReplayStepInstance[] | undefined): { start: number; end: number } | null {
+function windowOf(
+  insts: ReplayStepInstance[] | undefined
+): { start: number; end: number } | null {
   if (!insts || insts.length === 0) return null;
   let start = Infinity;
   let end = -Infinity;
@@ -83,7 +88,9 @@ function windowOf(insts: ReplayStepInstance[] | undefined): { start: number; end
  * shapes: Split (one scope per iteration → one bucket per scope) and While (one
  * shared scope with steps repeated per pass → split by per-stepId occurrence).
  */
-function iterationBuckets(children: ReplayStepInstance[]): ReplayStepInstance[][] {
+function iterationBuckets(
+  children: ReplayStepInstance[]
+): ReplayStepInstance[][] {
   const byScope = new Map<string, ReplayStepInstance[]>();
   for (const c of children) {
     const scope = c.scopeId ?? c.key;

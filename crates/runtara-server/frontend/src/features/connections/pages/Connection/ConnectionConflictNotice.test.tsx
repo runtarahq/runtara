@@ -17,7 +17,9 @@ describe('ConnectionConflictNotice', () => {
       />
     );
     expect(screen.getByText(/Loading the latest version/)).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Reload latest' })).toBeDisabled();
+    expect(
+      screen.getByRole('button', { name: 'Reload latest' })
+    ).toBeDisabled();
     expect(
       screen.getByRole('button', { name: 'Apply my submitted changes' })
     ).toBeDisabled();

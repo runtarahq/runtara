@@ -8,11 +8,7 @@
 //
 // All API calls are intercepted; no real backend.
 import type { Page, Route } from '@playwright/test';
-import {
-  buildObjectModelConnection,
-  expect,
-  test,
-} from '../../../fixtures';
+import { buildObjectModelConnection, expect, test } from '../../../fixtures';
 import { appPath } from '../../../utils/app-path';
 import type { Schema } from '../../../../src/generated/RuntaraRuntimeApi';
 import type {
@@ -85,7 +81,7 @@ function emptyReport(): ReportDto {
 
 async function setupWizardEditing(
   page: Page,
-  mockApi: typeof import('../../../fixtures')['test']['_mockApi'] extends never
+  mockApi: (typeof import('../../../fixtures'))['test']['_mockApi'] extends never
     ? never
     : import('../../../fixtures/mock.fixture').MockApi
 ): Promise<{ getSaved: () => UpdateReportRequest | null }> {

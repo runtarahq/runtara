@@ -680,7 +680,7 @@ export function AiAgentStepField({ name }: AiAgentStepFieldProps) {
             {connectionOptions.length === 1 ? (
               <>
                 <SelectItem value="__none__">None</SelectItem>
-                <div className="px-2 py-3 text-sm text-muted-foreground text-center">
+                <div className="px-2 py-3 text-center text-sm text-muted-foreground">
                   No LLM connections available. Create one in Connections.
                 </div>
               </>
@@ -691,16 +691,16 @@ export function AiAgentStepField({ name }: AiAgentStepFieldProps) {
 
                 return (
                   <SelectItem key={option.value} value={option.value}>
-                    <div className="flex items-center gap-2 min-w-0">
+                    <div className="flex min-w-0 items-center gap-2">
                       {option.integrationId && (
                         <span className="shrink-0 text-base">
                           {platformIcon}
                         </span>
                       )}
-                      <div className="flex flex-col min-w-0 flex-1">
+                      <div className="flex min-w-0 flex-1 flex-col">
                         <span className="truncate">{option.label}</span>
                         {option.integrationId && (
-                          <span className="text-xs text-muted-foreground truncate">
+                          <span className="truncate text-xs text-muted-foreground">
                             {platformName}
                           </span>
                         )}
@@ -783,10 +783,10 @@ export function AiAgentStepField({ name }: AiAgentStepFieldProps) {
       </FormItem>
 
       {/* Advanced Settings */}
-      <div className="border rounded-lg">
+      <div className="rounded-lg border">
         <button
           type="button"
-          className="flex items-center gap-2 w-full p-3 text-sm font-medium text-left hover:bg-muted/50 transition-colors"
+          className="flex w-full items-center gap-2 p-3 text-left text-sm font-medium transition-colors hover:bg-muted/50"
           onClick={() => setShowAdvanced(!showAdvanced)}
         >
           {showAdvanced ? (
@@ -797,7 +797,7 @@ export function AiAgentStepField({ name }: AiAgentStepFieldProps) {
           Advanced Settings
         </button>
         {showAdvanced && (
-          <div className="px-3 pb-3 space-y-4 border-t pt-3">
+          <div className="space-y-4 border-t px-3 pb-3 pt-3">
             {/* Max Iterations */}
             <FormItem>
               <FormLabel>Max Iterations</FormLabel>
@@ -943,7 +943,7 @@ export function AiAgentStepField({ name }: AiAgentStepFieldProps) {
       </div>
 
       {/* Tools Section */}
-      <div className="border rounded-lg">
+      <div className="rounded-lg border">
         <div className="flex items-center gap-2 p-3">
           <Wrench className="h-4 w-4 text-muted-foreground" />
           <span className="text-sm font-medium">Tools</span>
@@ -953,19 +953,19 @@ export function AiAgentStepField({ name }: AiAgentStepFieldProps) {
         </div>
 
         {allToolNames.length > 0 && (
-          <div className="px-3 pb-2 space-y-1">
+          <div className="space-y-1 px-3 pb-2">
             {allToolNames.map((toolName) => {
               const edgeInfo = toolEdges.find((e) => e.toolName === toolName);
               return (
                 <div
                   key={toolName}
-                  className="flex items-center gap-2 px-2 py-1.5 rounded-md bg-muted/30 group"
+                  className="group flex items-center gap-2 rounded-md bg-muted/30 px-2 py-1.5"
                 >
-                  <span className="text-sm font-mono flex-1 truncate">
+                  <span className="flex-1 truncate font-mono text-sm">
                     {toolName}
                   </span>
                   {edgeInfo && (
-                    <span className="text-xs text-muted-foreground truncate max-w-[120px]">
+                    <span className="max-w-[120px] truncate text-xs text-muted-foreground">
                       {edgeInfo.targetName}
                     </span>
                   )}
@@ -973,7 +973,7 @@ export function AiAgentStepField({ name }: AiAgentStepFieldProps) {
                     type="button"
                     variant="ghost"
                     size="icon"
-                    className="h-6 w-6 opacity-0 group-hover:opacity-100 transition-opacity"
+                    className="h-6 w-6 opacity-0 transition-opacity group-hover:opacity-100"
                     onClick={() => handleRemoveTool(toolName)}
                   >
                     <Trash2 className="h-3 w-3" />
@@ -1000,7 +1000,7 @@ export function AiAgentStepField({ name }: AiAgentStepFieldProps) {
                 }
               }}
               placeholder="tool_name"
-              className="font-mono text-sm h-8 flex-1"
+              className="h-8 flex-1 font-mono text-sm"
             />
             <Button
               type="button"
@@ -1009,12 +1009,12 @@ export function AiAgentStepField({ name }: AiAgentStepFieldProps) {
               className="h-8"
               onClick={handleAddTool}
             >
-              <Plus className="h-3 w-3 mr-1" />
+              <Plus className="mr-1 h-3 w-3" />
               Add
             </Button>
           </div>
           {toolError && (
-            <p className="text-xs text-destructive mt-1">{toolError}</p>
+            <p className="mt-1 text-xs text-destructive">{toolError}</p>
           )}
         </div>
       </div>
@@ -1028,12 +1028,12 @@ export function AiAgentStepField({ name }: AiAgentStepFieldProps) {
       </div>
 
       {/* Output Schema Section */}
-      <div className="border rounded-lg">
+      <div className="rounded-lg border">
         <div className="flex items-center gap-2 p-3">
           <ListTree className="h-4 w-4 text-muted-foreground" />
           <span className="text-sm font-medium">Structured Output</span>
         </div>
-        <div className="px-3 pb-3 space-y-2">
+        <div className="space-y-2 px-3 pb-3">
           <p className="text-xs text-muted-foreground">
             Define an output schema to force the LLM to return structured JSON
             matching this shape.
@@ -1058,7 +1058,7 @@ export function AiAgentStepField({ name }: AiAgentStepFieldProps) {
       {/* Memory Section — memory is added from the canvas; it can be
           configured or removed here */}
       {getValue('memoryEnabled') === true && (
-        <div className="border rounded-lg">
+        <div className="rounded-lg border">
           <div className="flex items-center justify-between p-3">
             <div className="flex items-center gap-2">
               <Brain className="h-4 w-4 text-muted-foreground" />
@@ -1083,13 +1083,13 @@ export function AiAgentStepField({ name }: AiAgentStepFieldProps) {
                 onClick={handleRemoveMemory}
                 title="Remove conversation memory and its provider step"
               >
-                <Trash2 className="h-3.5 w-3.5 mr-1" />
+                <Trash2 className="mr-1 h-3.5 w-3.5" />
                 Remove memory
               </Button>
             </div>
           </div>
 
-          <div className="px-3 pb-3 space-y-4 border-t pt-3">
+          <div className="space-y-4 border-t px-3 pb-3 pt-3">
             {/* Conversation ID */}
             <FormItem>
               <FormLabel>Conversation ID *</FormLabel>
@@ -1119,10 +1119,10 @@ export function AiAgentStepField({ name }: AiAgentStepFieldProps) {
             </FormItem>
 
             {/* Compaction (Advanced) */}
-            <div className="border rounded-lg">
+            <div className="rounded-lg border">
               <button
                 type="button"
-                className="flex items-center gap-2 w-full p-3 text-sm font-medium text-left hover:bg-muted/50 transition-colors"
+                className="flex w-full items-center gap-2 p-3 text-left text-sm font-medium transition-colors hover:bg-muted/50"
                 onClick={() => setShowCompaction(!showCompaction)}
               >
                 {showCompaction ? (
@@ -1133,7 +1133,7 @@ export function AiAgentStepField({ name }: AiAgentStepFieldProps) {
                 Compaction
               </button>
               {showCompaction && (
-                <div className="px-3 pb-3 space-y-4 border-t pt-3">
+                <div className="space-y-4 border-t px-3 pb-3 pt-3">
                   <FormItem>
                     <FormLabel>Max Messages</FormLabel>
                     <FormDescription>

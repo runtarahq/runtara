@@ -21,10 +21,7 @@ export {
   TableStatusFooter,
   type TableStatusFooterProps,
 } from './TableStatusFooter';
-export {
-  TablePagination,
-  type TablePaginationProps,
-} from './TablePagination';
+export { TablePagination, type TablePaginationProps } from './TablePagination';
 export {
   ConsoleTableShell,
   type ConsoleTableShellProps,

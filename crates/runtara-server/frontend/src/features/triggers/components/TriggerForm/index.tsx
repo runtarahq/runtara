@@ -97,9 +97,9 @@ export function TriggerForm(props: Props) {
         if (field.name === 'triggerType' && hiddenTriggerTypes.length > 0) {
           return {
             ...field,
-            options: (field.options as { label: string; value: string }[]).filter(
-              (option) => !hiddenTriggerTypes.includes(option.value)
-            ),
+            options: (
+              field.options as { label: string; value: string }[]
+            ).filter((option) => !hiddenTriggerTypes.includes(option.value)),
           };
         }
         // Inject messaging connections into the connectionId select

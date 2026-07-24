@@ -12,7 +12,13 @@ import { useCustomQuery } from '@/shared/hooks/api';
 import { fetchStepDetail } from './useReplayModel';
 import type { ReplayModel, ReplayNodeState } from './types';
 
-function JsonBlock({ data, defaultOpen = false }: { data: unknown; defaultOpen?: boolean }) {
+function JsonBlock({
+  data,
+  defaultOpen = false,
+}: {
+  data: unknown;
+  defaultOpen?: boolean;
+}) {
   const [open, setOpen] = useState(defaultOpen);
   if (data === undefined || data === null) {
     return <span className="text-xs italic text-muted-foreground">empty</span>;
@@ -33,11 +39,15 @@ function JsonBlock({ data, defaultOpen = false }: { data: unknown; defaultOpen?:
         className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
         onClick={() => setOpen(!open)}
       >
-        {open ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+        {open ? (
+          <ChevronDown className="h-3 w-3" />
+        ) : (
+          <ChevronRight className="h-3 w-3" />
+        )}
         {open ? 'Collapse' : `Expand (${lines} lines)`}
       </button>
       {open && (
-        <pre className="mt-1 max-h-64 overflow-y-auto overflow-x-auto whitespace-pre-wrap break-all rounded bg-muted/50 px-2 py-1.5 text-xs text-foreground/80">
+        <pre className="mt-1 max-h-64 overflow-x-auto overflow-y-auto whitespace-pre-wrap break-all rounded bg-muted/50 px-2 py-1.5 text-xs text-foreground/80">
           {text}
         </pre>
       )}
@@ -45,7 +55,13 @@ function JsonBlock({ data, defaultOpen = false }: { data: unknown; defaultOpen?:
   );
 }
 
-function Section({ label, children }: { label: string; children: React.ReactNode }) {
+function Section({
+  label,
+  children,
+}: {
+  label: string;
+  children: React.ReactNode;
+}) {
   return (
     <div>
       <h4 className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
@@ -93,8 +109,16 @@ export function ReplayInspector({
   const iters = model.childInstancesByStep.get(nodeId);
 
   const detail = useCustomQuery({
-    queryKey: ['workflows', 'replay', 'stepDetail', workflowId, instanceId, nodeId],
-    queryFn: (token: string) => fetchStepDetail(token, workflowId, instanceId, nodeId),
+    queryKey: [
+      'workflows',
+      'replay',
+      'stepDetail',
+      workflowId,
+      instanceId,
+      nodeId,
+    ],
+    queryFn: (token: string) =>
+      fetchStepDetail(token, workflowId, instanceId, nodeId),
     enabled: state !== 'skipped',
     staleTime: 60_000,
   });
@@ -146,8 +170,8 @@ export function ReplayInspector({
             {iters && iters.length > 0 && (
               <Section label="Iterations">
                 <p className="text-xs text-foreground/80">
-                  {iters.length} recorded execution{iters.length === 1 ? '' : 's'} in
-                  nested scopes
+                  {iters.length} recorded execution
+                  {iters.length === 1 ? '' : 's'} in nested scopes
                 </p>
               </Section>
             )}
@@ -176,7 +200,7 @@ export function ReplayInspector({
             {!detail.isLoading &&
               inputs == null &&
               outputs == null &&
-              (error == null) && (
+              error == null && (
                 <p className="py-4 text-center text-xs italic text-muted-foreground">
                   No recorded data for this step.
                 </p>

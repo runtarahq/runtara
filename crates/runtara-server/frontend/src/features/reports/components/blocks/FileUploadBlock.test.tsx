@@ -99,7 +99,9 @@ describe('FileUploadBlock (button mode)', () => {
     expect(screen.getByText('Import price list')).not.toBeNull();
     selectFile('csv_import', new File(['a,b\n1,2'], 'prices.csv'));
 
-    await waitFor(() => expect(screen.queryByText('prices.csv')).not.toBeNull());
+    await waitFor(() =>
+      expect(screen.queryByText('prices.csv')).not.toBeNull()
+    );
     expect(executeReportWorkflowAction).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByTestId('file-upload-run-csv_import'));
@@ -137,7 +139,9 @@ describe('FileUploadBlock (button mode)', () => {
     renderBlock(uploadBlock(), onRefresh);
 
     selectFile('csv_import', new File(['x'], 'prices.csv'));
-    await waitFor(() => expect(screen.queryByText('prices.csv')).not.toBeNull());
+    await waitFor(() =>
+      expect(screen.queryByText('prices.csv')).not.toBeNull()
+    );
     fireEvent.click(screen.getByTestId('file-upload-run-csv_import'));
 
     await waitFor(() => expect(onRefresh).toHaveBeenCalledTimes(1));

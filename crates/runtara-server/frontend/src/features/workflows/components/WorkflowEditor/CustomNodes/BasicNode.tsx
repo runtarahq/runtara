@@ -414,7 +414,7 @@ function BasicNodeComponent({
             className="!bg-muted-foreground/40"
           >
             <Button
-              className="w-4 h-4 rounded-full [&_svg]:size-2 shadow-sm"
+              className="h-4 w-4 rounded-full shadow-sm [&_svg]:size-2"
               variant="outline"
               size="icon"
               onClick={handleOpenCreate}
@@ -436,7 +436,7 @@ function BasicNodeComponent({
             className="!bg-muted-foreground/40"
           >
             <Button
-              className="w-4 h-4 rounded-full [&_svg]:size-2 shadow-sm"
+              className="h-4 w-4 rounded-full shadow-sm [&_svg]:size-2"
               variant="outline"
               size="icon"
               onClick={handleOpenCreateBefore}
@@ -461,7 +461,7 @@ function BasicNodeComponent({
             className={selected ? '!bg-destructive/40' : '!opacity-0'}
           >
             <Button
-              className="w-4 h-4 rounded-full [&_svg]:size-2 shadow-sm bg-destructive/10 hover:bg-destructive/20"
+              className="h-4 w-4 rounded-full bg-destructive/10 shadow-sm hover:bg-destructive/20 [&_svg]:size-2"
               variant="outline"
               size="icon"
               onClick={handleOpenCreateError}

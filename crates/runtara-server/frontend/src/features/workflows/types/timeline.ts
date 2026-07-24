@@ -82,7 +82,8 @@ export function stepStartMs(step: StepSummaryResponse): number {
 
 /** Absolute end wall-clock (epoch ms): real settle when present, else start + duration. */
 export function stepEndMs(step: StepSummaryResponse): number {
-  if (hasRealInterval(step)) return Math.max(step.settledAtMs!, step.launchedAtMs!);
+  if (hasRealInterval(step))
+    return Math.max(step.settledAtMs!, step.launchedAtMs!);
   return new Date(step.startedAt).getTime() + (step.durationMs || 0);
 }
 

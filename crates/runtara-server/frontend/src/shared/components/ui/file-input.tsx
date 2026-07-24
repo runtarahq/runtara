@@ -151,13 +151,13 @@ export const FileInput = React.forwardRef<HTMLInputElement, FileInputProps>(
           // File selected state
           <div
             className={cn(
-              'flex items-center gap-3 rounded-md border border-input bg-background px-3 py-2 h-8',
+              'flex h-8 items-center gap-3 rounded-md border border-input bg-background px-3 py-2',
               displayError && 'border-destructive',
-              disabled && 'opacity-50 cursor-not-allowed'
+              disabled && 'cursor-not-allowed opacity-50'
             )}
           >
-            <File className="h-4 w-4 text-muted-foreground flex-shrink-0" />
-            <span className="text-sm truncate flex-1">
+            <File className="h-4 w-4 flex-shrink-0 text-muted-foreground" />
+            <span className="flex-1 truncate text-sm">
               {fileInfo?.filename || 'File selected'}
             </span>
             {!disabled && (
@@ -185,7 +185,7 @@ export const FileInput = React.forwardRef<HTMLInputElement, FileInputProps>(
             aria-labelledby={labelledBy}
             aria-disabled={disabled}
             className={cn(
-              'flex items-center gap-2 rounded-md border border-dashed border-input bg-background px-3 py-2 h-8 cursor-pointer transition-colors',
+              'flex h-8 cursor-pointer items-center gap-2 rounded-md border border-dashed border-input bg-background px-3 py-2 transition-colors',
               isDragOver && 'border-primary bg-primary/5',
               disabled && 'cursor-not-allowed opacity-50',
               displayError && 'border-destructive'
@@ -196,18 +196,18 @@ export const FileInput = React.forwardRef<HTMLInputElement, FileInputProps>(
             ) : (
               <Upload className="h-4 w-4 text-muted-foreground" />
             )}
-            <span className="text-sm text-muted-foreground truncate">
+            <span className="truncate text-sm text-muted-foreground">
               {isLoading ? 'Reading file...' : placeholder}
             </span>
           </div>
         )}
 
         {displayError && (
-          <p className="text-xs text-destructive mt-1">{displayError}</p>
+          <p className="mt-1 text-xs text-destructive">{displayError}</p>
         )}
 
         {!hasValue && !displayError && (
-          <p className="text-xs text-muted-foreground mt-1">
+          <p className="mt-1 text-xs text-muted-foreground">
             Max size: {MAX_FILE_SIZE_DISPLAY}
           </p>
         )}

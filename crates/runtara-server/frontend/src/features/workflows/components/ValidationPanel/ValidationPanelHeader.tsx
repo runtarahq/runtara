@@ -31,7 +31,7 @@ export function ValidationPanelHeader({
         <button
           type="button"
           onClick={togglePanel}
-          className="flex items-center justify-center w-10 h-10 text-muted-foreground hover:text-foreground transition-colors"
+          className="flex h-10 w-10 items-center justify-center text-muted-foreground transition-colors hover:text-foreground"
           title={isPanelExpanded ? 'Collapse panel' : 'Expand panel'}
         >
           {isPanelExpanded ? (
@@ -47,7 +47,7 @@ export function ValidationPanelHeader({
         <Button
           variant="ghost"
           size="icon"
-          className="h-7 w-7 mr-2"
+          className="mr-2 h-7 w-7"
           onClick={(e) => {
             e.stopPropagation();
             clearMessages();

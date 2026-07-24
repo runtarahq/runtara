@@ -306,27 +306,27 @@ function FieldRow({
   return (
     <TableRow className="hover:bg-muted/30">
       {/* Type column */}
-      <TableCell className="align-top pt-3">
-        <span className="text-[11px] font-mono px-1.5 py-0.5 rounded text-muted-foreground bg-muted/40 truncate block">
+      <TableCell className="pt-3 align-top">
+        <span className="block truncate rounded bg-muted/40 px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground">
           {field.type || 'any'}
         </span>
       </TableCell>
 
       {/* Name column */}
-      <TableCell className="align-top pt-3 overflow-hidden max-w-0">
-        <div className="flex items-center gap-1 min-w-0">
+      <TableCell className="max-w-0 overflow-hidden pt-3 align-top">
+        <div className="flex min-w-0 items-center gap-1">
           <span
-            className="text-sm text-slate-900/90 dark:text-slate-100 truncate"
+            className="truncate text-sm text-slate-900/90 dark:text-slate-100"
             title={label}
           >
             {label}
           </span>
           {field.required && (
-            <span className="text-destructive text-xs shrink-0">*</span>
+            <span className="shrink-0 text-xs text-destructive">*</span>
           )}
           {helpText && (
             <Icons.info
-              className="h-3 w-3 text-muted-foreground cursor-help shrink-0"
+              className="h-3 w-3 shrink-0 cursor-help text-muted-foreground"
               title={helpText}
             />
           )}
@@ -340,24 +340,24 @@ function FieldRow({
           <button
             type="button"
             onClick={() => onEditArray?.(field)}
-            className="w-full flex items-center justify-between gap-2 px-3 py-2 text-sm border rounded-md bg-muted/30 hover:bg-muted/50 transition-colors text-left"
+            className="flex w-full items-center justify-between gap-2 rounded-md border bg-muted/30 px-3 py-2 text-left text-sm transition-colors hover:bg-muted/50"
           >
-            <span className="text-muted-foreground truncate">
+            <span className="truncate text-muted-foreground">
               {getArrayDisplayValue()}
             </span>
-            <Icons.chevronRight className="h-4 w-4 text-muted-foreground shrink-0" />
+            <Icons.chevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />
           </button>
         ) : showObjectEditor ? (
           // Object/untyped field - show button to open object editor (with composite mode)
           <button
             type="button"
             onClick={() => onEditObject?.(field)}
-            className="w-full flex items-center justify-between gap-2 px-3 py-2 text-sm border rounded-md bg-muted/30 hover:bg-muted/50 transition-colors text-left"
+            className="flex w-full items-center justify-between gap-2 rounded-md border bg-muted/30 px-3 py-2 text-left text-sm transition-colors hover:bg-muted/50"
           >
-            <span className="text-muted-foreground truncate">
+            <span className="truncate text-muted-foreground">
               {getObjectDisplayValue()}
             </span>
-            <Icons.chevronRight className="h-4 w-4 text-muted-foreground shrink-0" />
+            <Icons.chevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />
           </button>
         ) : componentType === 'file' ? (
           <div onFocus={onFieldFocus}>
@@ -392,7 +392,7 @@ function FieldRow({
       </TableCell>
 
       {/* Actions column */}
-      <TableCell className="align-top pt-2">
+      <TableCell className="pt-2 align-top">
         {isOptional && onRemove && (
           <Button
             type="button"
@@ -840,7 +840,7 @@ export function SimpleInputMappingEditor({
 
   if (hasNoFields && !allowCustomFields) {
     return (
-      <div className="text-sm text-muted-foreground p-6 rounded-lg bg-muted/20 text-center">
+      <div className="rounded-lg bg-muted/20 p-6 text-center text-sm text-muted-foreground">
         No input fields required for this operation
       </div>
     );
@@ -848,7 +848,7 @@ export function SimpleInputMappingEditor({
 
   return (
     <div className="space-y-4">
-      <div className="rounded-lg bg-card overflow-hidden">
+      <div className="overflow-hidden rounded-lg bg-card">
         <Table className="w-full" style={{ tableLayout: 'fixed' }}>
           <colgroup>
             <col style={{ width: '80px' }} />
@@ -857,7 +857,7 @@ export function SimpleInputMappingEditor({
             <col style={{ width: '48px' }} />
           </colgroup>
           <TableHeader>
-            <TableRow className="hover:bg-transparent border-b border-border/40">
+            <TableRow className="border-b border-border/40 hover:bg-transparent">
               <TableHead className="text-xs font-medium text-muted-foreground">
                 Type
               </TableHead>
@@ -903,7 +903,7 @@ export function SimpleInputMappingEditor({
                     {/* Inline array editor - appears below the field row */}
                     {isEditingThisArray && isArrayType(field.type) && (
                       <TableRow className="hover:bg-transparent">
-                        <TableCell colSpan={4} className="p-0 border-t-0">
+                        <TableCell colSpan={4} className="border-t-0 p-0">
                           <div className="border-t border-primary/20 bg-muted/20">
                             <ArrayMappingEditor
                               arrayType={field.type || 'array'}
@@ -957,15 +957,14 @@ export function SimpleInputMappingEditor({
                         const valueForEditor =
                           effectiveValueType === 'composite'
                             ? ((isValueObject ? fieldEntry.value : {}) as
-                                | CompositeObjectValue
-                                | CompositeArrayValue)
+                                CompositeObjectValue | CompositeArrayValue)
                             : effectiveValueType === 'reference'
                               ? String(fieldEntry?.value ?? '')
                               : String(fieldEntry?.value ?? '');
 
                         return (
                           <TableRow className="hover:bg-transparent">
-                            <TableCell colSpan={4} className="p-0 border-t-0">
+                            <TableCell colSpan={4} className="border-t-0 p-0">
                               <div className="border-t border-primary/20 bg-muted/20">
                                 <ObjectMappingEditor
                                   value={valueForEditor}
@@ -994,7 +993,7 @@ export function SimpleInputMappingEditor({
               <TableRow>
                 <TableCell
                   colSpan={4}
-                  className="text-center text-muted-foreground py-8"
+                  className="py-8 text-center text-muted-foreground"
                 >
                   {allowCustomFields
                     ? 'No parameters defined. Add custom parameters below.'
@@ -1034,14 +1033,14 @@ export function SimpleInputMappingEditor({
               size="sm"
               className="w-full text-muted-foreground hover:text-foreground"
             >
-              <Icons.add className="h-4 w-4 mr-2" />
+              <Icons.add className="mr-2 h-4 w-4" />
               Add optional parameter ({availableOptionalFields.length}{' '}
               available)
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent
             align="start"
-            className="w-80 max-h-64 overflow-y-auto"
+            className="max-h-64 w-80 overflow-y-auto"
           >
             {availableOptionalFields.map((field) => (
               <DropdownMenuItem
@@ -1054,12 +1053,12 @@ export function SimpleInputMappingEditor({
                     {getFieldLabel(field)}
                   </span>
                   {field.description && (
-                    <span className="text-xs text-muted-foreground truncate max-w-60">
+                    <span className="max-w-60 truncate text-xs text-muted-foreground">
                       {field.description}
                     </span>
                   )}
                 </div>
-                <span className="text-[10px] font-mono px-1.5 py-0.5 rounded text-muted-foreground bg-muted/40 ml-2 shrink-0">
+                <span className="ml-2 shrink-0 rounded bg-muted/40 px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
                   {field.type || 'any'}
                 </span>
               </DropdownMenuItem>
@@ -1074,10 +1073,10 @@ export function SimpleInputMappingEditor({
           type="button"
           variant="outline"
           size="sm"
-          className="w-full text-muted-foreground hover:text-foreground border-dashed"
+          className="w-full border-dashed text-muted-foreground hover:text-foreground"
           onClick={() => setIsAddCustomFieldOpen(true)}
         >
-          <Icons.add className="h-4 w-4 mr-2" />
+          <Icons.add className="mr-2 h-4 w-4" />
           Add custom parameter
         </Button>
       )}

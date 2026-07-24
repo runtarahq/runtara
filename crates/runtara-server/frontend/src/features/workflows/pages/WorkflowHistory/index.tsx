@@ -284,10 +284,10 @@ export function WorkflowHistory() {
   }
 
   return (
-    <div className="py-8 px-4 sm:px-6 lg:px-8 max-w-7xl mx-auto">
+    <div className="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
       {/* Header Section */}
       <div className="mb-8">
-        <div className="flex items-center gap-3 mb-4">
+        <div className="mb-4 flex items-center gap-3">
           <Button
             variant="ghost"
             size="icon"
@@ -301,10 +301,10 @@ export function WorkflowHistory() {
               Workflow Execution Details
             </h1>
             {data?.metadata?.workflowName && (
-              <p className="text-muted-foreground mt-1">
+              <p className="mt-1 text-muted-foreground">
                 {data.metadata.workflowName}
                 {data.metadata.workflowDescription && (
-                  <span className="text-sm ml-2">
+                  <span className="ml-2 text-sm">
                     • {data.metadata.workflowDescription}
                   </span>
                 )}
@@ -368,9 +368,9 @@ export function WorkflowHistory() {
 
         {/* Status Overview Bar */}
         {data && (
-          <div className="flex items-center gap-4 p-4 bg-muted/50 rounded-lg border">
+          <div className="flex items-center gap-4 rounded-lg border bg-muted/50 p-4">
             <div
-              className="flex items-center gap-2 cursor-help"
+              className="flex cursor-help items-center gap-2"
               title="Execution Status - Shows the current state of your workflow execution"
             >
               {(() => {
@@ -397,7 +397,7 @@ export function WorkflowHistory() {
                   <>
                     <Separator orientation="vertical" className="h-6" />
                     <div
-                      className="flex items-center gap-2 cursor-help"
+                      className="flex cursor-help items-center gap-2"
                       title="Termination Type - Provides context for why this execution terminated"
                     >
                       <Info className="h-4 w-4 text-muted-foreground" />
@@ -413,7 +413,7 @@ export function WorkflowHistory() {
               <>
                 <Separator orientation="vertical" className="h-6" />
                 <div
-                  className="flex items-center gap-2 text-sm text-muted-foreground cursor-help"
+                  className="flex cursor-help items-center gap-2 text-sm text-muted-foreground"
                   title="Unique identifier for this workflow execution. Use this ID when reporting issues or tracking specific runs."
                 >
                   <Hash className="h-4 w-4" />
@@ -427,7 +427,7 @@ export function WorkflowHistory() {
 
       {/* Pending Human Input Cards */}
       {pendingInputs.length > 0 && (
-        <div className="space-y-3 mb-6">
+        <div className="mb-6 space-y-3">
           {pendingInputs.map((pi) => (
             <HumanInputCard
               key={pi.signalId}
@@ -441,14 +441,14 @@ export function WorkflowHistory() {
 
       <div className="space-y-6">
         {/* Timing and Performance Metrics */}
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
           {/* Execution Duration Card */}
           {data.executionDurationSeconds !== undefined &&
             data.executionDurationSeconds !== null && (
               <Card>
                 <CardHeader className="pb-3">
                   <CardTitle
-                    className="text-sm font-medium flex items-center gap-2 text-muted-foreground cursor-help"
+                    className="flex cursor-help items-center gap-2 text-sm font-medium text-muted-foreground"
                     title="The total time spent actively running your workflow, from start to finish. This doesn't include time waiting in queue."
                   >
                     <Timer className="h-4 w-4" />
@@ -469,7 +469,7 @@ export function WorkflowHistory() {
               <Card>
                 <CardHeader className="pb-3">
                   <CardTitle
-                    className="text-sm font-medium flex items-center gap-2 text-muted-foreground cursor-help"
+                    className="flex cursor-help items-center gap-2 text-sm font-medium text-muted-foreground"
                     title="The time your workflow spent waiting before it could start running. During busy periods, workflows may need to wait for available resources."
                   >
                     <Clock className="h-4 w-4" />
@@ -489,7 +489,7 @@ export function WorkflowHistory() {
             <Card>
               <CardHeader className="pb-3">
                 <CardTitle
-                  className="text-sm font-medium flex items-center gap-2 text-muted-foreground cursor-help"
+                  className="flex cursor-help items-center gap-2 text-sm font-medium text-muted-foreground"
                   title="The maximum amount of memory (RAM) used while running this workflow. Higher values indicate more data was being processed at once."
                 >
                   <MemoryStick className="h-4 w-4" />
@@ -510,7 +510,7 @@ export function WorkflowHistory() {
               <Card>
                 <CardHeader className="pb-3">
                   <CardTitle
-                    className="text-sm font-medium flex items-center gap-2 text-muted-foreground cursor-help"
+                    className="flex cursor-help items-center gap-2 text-sm font-medium text-muted-foreground"
                     title="Shows how many times this workflow was retried after encountering issues (current / maximum allowed). Automatic retries help ensure your workflows complete successfully."
                   >
                     <RotateCw className="h-4 w-4" />
@@ -535,11 +535,11 @@ export function WorkflowHistory() {
             </CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
               {/* Timeline */}
               <div className="space-y-4">
                 <div className="flex items-start gap-3">
-                  <div className="rounded-full bg-slate-500/10 p-2 mt-0.5">
+                  <div className="mt-0.5 rounded-full bg-slate-500/10 p-2">
                     <Calendar className="h-4 w-4 text-slate-600" />
                   </div>
                   <div className="flex-1 space-y-1">
@@ -557,7 +557,7 @@ export function WorkflowHistory() {
 
                 {data.metadata?.startedAt && (
                   <div className="flex items-start gap-3">
-                    <div className="rounded-full bg-blue-500/10 p-2 mt-0.5">
+                    <div className="mt-0.5 rounded-full bg-blue-500/10 p-2">
                       <Zap className="h-4 w-4 text-blue-600" />
                     </div>
                     <div className="flex-1 space-y-1">
@@ -574,7 +574,7 @@ export function WorkflowHistory() {
 
                 {data.metadata?.completedAt && (
                   <div className="flex items-start gap-3">
-                    <div className="rounded-full bg-green-500/10 p-2 mt-0.5">
+                    <div className="mt-0.5 rounded-full bg-green-500/10 p-2">
                       <Flag className="h-4 w-4 text-green-600" />
                     </div>
                     <div className="flex-1 space-y-1">
@@ -593,7 +593,7 @@ export function WorkflowHistory() {
               {/* Additional Details */}
               <div className="space-y-4">
                 {data.usedVersion !== undefined && (
-                  <div className="flex justify-between items-center py-2 border-b">
+                  <div className="flex items-center justify-between border-b py-2">
                     <span className="text-sm text-muted-foreground">
                       Version
                     </span>
@@ -603,9 +603,9 @@ export function WorkflowHistory() {
 
                 {data.processingOverheadSeconds !== undefined &&
                   data.processingOverheadSeconds !== null && (
-                    <div className="flex justify-between items-center py-2 border-b">
+                    <div className="flex items-center justify-between border-b py-2">
                       <span
-                        className="text-sm text-muted-foreground flex items-center gap-1 cursor-help"
+                        className="flex cursor-help items-center gap-1 text-sm text-muted-foreground"
                         title="The time spent on setup and coordination tasks before and after running your workflow. This is separate from the actual execution time."
                       >
                         Processing Overhead
@@ -617,15 +617,15 @@ export function WorkflowHistory() {
                   )}
 
                 {data.metadata?.workerId && (
-                  <div className="flex justify-between items-center py-2 border-b">
+                  <div className="flex items-center justify-between border-b py-2">
                     <span
-                      className="text-sm text-muted-foreground flex items-center gap-2 cursor-help"
+                      className="flex cursor-help items-center gap-2 text-sm text-muted-foreground"
                       title="A unique identifier for the server that processed this workflow. Useful for troubleshooting and tracking which server handled your request."
                     >
                       <Server className="h-4 w-4" />
                       Worker ID
                     </span>
-                    <span className="text-sm font-mono text-muted-foreground">
+                    <span className="font-mono text-sm text-muted-foreground">
                       {data.metadata.workerId}
                     </span>
                   </div>
@@ -636,8 +636,8 @@ export function WorkflowHistory() {
             {/* Error Message */}
             {data.metadata?.errorMessage && (
               <div className="mt-6">
-                <div className="flex items-start gap-2 mb-2">
-                  <XCircle className="h-5 w-5 text-destructive mt-0.5" />
+                <div className="mb-2 flex items-start gap-2">
+                  <XCircle className="mt-0.5 h-5 w-5 text-destructive" />
                   <p className="font-semibold text-destructive">
                     Error Message
                   </p>
@@ -653,7 +653,7 @@ export function WorkflowHistory() {
             {/* Tags */}
             {data.tags && data.tags.length > 0 && (
               <div className="mt-6">
-                <div className="flex items-center gap-2 mb-3">
+                <div className="mb-3 flex items-center gap-2">
                   <Tag className="h-4 w-4 text-muted-foreground" />
                   <span className="text-sm font-medium">Tags</span>
                 </div>
@@ -674,9 +674,9 @@ export function WorkflowHistory() {
         </Card>
 
         {/* Inputs & Outputs */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
           <Card className="overflow-hidden">
-            <CardHeader className="bg-gradient-to-r from-blue-500/10 to-blue-500/5 border-b">
+            <CardHeader className="border-b bg-gradient-to-r from-blue-500/10 to-blue-500/5">
               <div className="flex items-center justify-between">
                 <CardTitle className="flex items-center gap-2 text-lg">
                   <div className="rounded-lg bg-blue-500/10 p-2">
@@ -701,10 +701,10 @@ export function WorkflowHistory() {
                 )}
               </div>
             </CardHeader>
-            <CardContent className="p-0 bg-muted/30">
+            <CardContent className="bg-muted/30 p-0">
               {data.inputs ? (
                 <div className="relative">
-                  <pre className="text-xs font-mono p-6 overflow-auto max-h-[500px]">
+                  <pre className="max-h-[500px] overflow-auto p-6 font-mono text-xs">
                     <code className="text-foreground">
                       {JSON.stringify(
                         mapElidedForDisplay(data.inputs),
@@ -726,10 +726,10 @@ export function WorkflowHistory() {
                 </div>
               ) : (
                 <div className="p-12 text-center">
-                  <div className="inline-flex items-center justify-center w-12 h-12 rounded-full bg-muted mb-3">
+                  <div className="mb-3 inline-flex h-12 w-12 items-center justify-center rounded-full bg-muted">
                     <Database className="h-6 w-6 text-muted-foreground" />
                   </div>
-                  <p className="text-sm text-muted-foreground mb-1">
+                  <p className="mb-1 text-sm text-muted-foreground">
                     No input data
                   </p>
                   <p className="text-xs text-muted-foreground">
@@ -741,7 +741,7 @@ export function WorkflowHistory() {
           </Card>
 
           <Card className="overflow-hidden">
-            <CardHeader className="bg-gradient-to-r from-green-500/10 to-green-500/5 border-b">
+            <CardHeader className="border-b bg-gradient-to-r from-green-500/10 to-green-500/5">
               <div className="flex items-center justify-between">
                 <CardTitle className="flex items-center gap-2 text-lg">
                   <div className="rounded-lg bg-green-500/10 p-2">
@@ -769,7 +769,7 @@ export function WorkflowHistory() {
             <CardContent className="p-0">
               {data.outputs ? (
                 <div className="relative bg-muted/30">
-                  <pre className="text-xs font-mono p-6 overflow-auto max-h-[500px]">
+                  <pre className="max-h-[500px] overflow-auto p-6 font-mono text-xs">
                     <code className="text-foreground">
                       {(() => {
                         try {
@@ -808,10 +808,10 @@ export function WorkflowHistory() {
                 </div>
               ) : (
                 <div className="p-12 text-center">
-                  <div className="inline-flex items-center justify-center w-12 h-12 rounded-full bg-muted mb-3">
+                  <div className="mb-3 inline-flex h-12 w-12 items-center justify-center rounded-full bg-muted">
                     <Sparkles className="h-6 w-6 text-muted-foreground" />
                   </div>
-                  <p className="text-sm text-muted-foreground mb-1">
+                  <p className="mb-1 text-sm text-muted-foreground">
                     No output data yet
                   </p>
                   <p className="text-xs text-muted-foreground">
@@ -825,7 +825,7 @@ export function WorkflowHistory() {
 
         {/* Events Section */}
         <Card className="overflow-hidden">
-          <CardHeader className="bg-gradient-to-r from-purple-500/10 to-purple-500/5 border-b">
+          <CardHeader className="border-b bg-gradient-to-r from-purple-500/10 to-purple-500/5">
             <div className="flex items-center justify-between">
               <CardTitle className="flex items-center gap-2 text-lg">
                 <div className="rounded-lg bg-purple-500/10 p-2">
@@ -862,7 +862,7 @@ export function WorkflowHistory() {
                 </TabsList>
               </Tabs>
             </div>
-            <p className="text-sm text-muted-foreground mt-2">
+            <p className="mt-2 text-sm text-muted-foreground">
               Step execution events showing inputs, outputs, and status for each
               step in your workflow
             </p>
@@ -920,12 +920,12 @@ export function WorkflowHistory() {
                   return (
                     <div
                       key={step.stepId || index}
-                      className={`border rounded-lg p-4 space-y-3 transition-colors ${getBorderClass()}`}
+                      className={`space-y-3 rounded-lg border p-4 transition-colors ${getBorderClass()}`}
                     >
                       <div className="flex items-center justify-between">
                         <button
                           onClick={() => toggleStepExpanded(index)}
-                          className="flex items-center gap-2 font-medium hover:text-purple-600 transition-colors"
+                          className="flex items-center gap-2 font-medium transition-colors hover:text-purple-600"
                         >
                           {isExpanded ? (
                             <ChevronDown className="h-4 w-4" />
@@ -939,7 +939,7 @@ export function WorkflowHistory() {
                         </button>
                         <Badge variant={getBadgeVariant()}>
                           {isRunning && (
-                            <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                            <Loader2 className="mr-1 h-3 w-3 animate-spin" />
                           )}
                           {getStatusLabel()}
                         </Badge>
@@ -979,12 +979,12 @@ export function WorkflowHistory() {
 
                       {/* Expandable Inputs/Outputs */}
                       {isExpanded && (
-                        <div className="mt-3 pt-3 border-t space-y-4">
+                        <div className="mt-3 space-y-4 border-t pt-3">
                           {/* Inputs */}
                           {step.inputs && (
                             <div>
-                              <div className="flex items-center justify-between mb-2">
-                                <span className="text-sm font-semibold text-muted-foreground flex items-center gap-1">
+                              <div className="mb-2 flex items-center justify-between">
+                                <span className="flex items-center gap-1 text-sm font-semibold text-muted-foreground">
                                   <Database className="h-3 w-3" />
                                   Inputs
                                 </span>
@@ -999,11 +999,11 @@ export function WorkflowHistory() {
                                     toast.success('Inputs copied');
                                   }}
                                 >
-                                  <Copy className="h-3 w-3 mr-1" />
+                                  <Copy className="mr-1 h-3 w-3" />
                                   Copy
                                 </Button>
                               </div>
-                              <pre className="text-xs bg-muted p-3 rounded overflow-x-auto max-h-60 overflow-y-auto font-mono">
+                              <pre className="max-h-60 overflow-x-auto overflow-y-auto rounded bg-muted p-3 font-mono text-xs">
                                 {JSON.stringify(step.inputs, null, 2)}
                               </pre>
                             </div>
@@ -1012,8 +1012,8 @@ export function WorkflowHistory() {
                           {/* Outputs */}
                           {step.outputs && (
                             <div>
-                              <div className="flex items-center justify-between mb-2">
-                                <span className="text-sm font-semibold text-muted-foreground flex items-center gap-1">
+                              <div className="mb-2 flex items-center justify-between">
+                                <span className="flex items-center gap-1 text-sm font-semibold text-muted-foreground">
                                   <Sparkles className="h-3 w-3" />
                                   Outputs
                                 </span>
@@ -1028,11 +1028,11 @@ export function WorkflowHistory() {
                                     toast.success('Outputs copied');
                                   }}
                                 >
-                                  <Copy className="h-3 w-3 mr-1" />
+                                  <Copy className="mr-1 h-3 w-3" />
                                   Copy
                                 </Button>
                               </div>
-                              <pre className="text-xs bg-muted p-3 rounded overflow-x-auto max-h-60 overflow-y-auto font-mono">
+                              <pre className="max-h-60 overflow-x-auto overflow-y-auto rounded bg-muted p-3 font-mono text-xs">
                                 {JSON.stringify(step.outputs, null, 2)}
                               </pre>
                             </div>
@@ -1051,7 +1051,7 @@ export function WorkflowHistory() {
 
                 {/* Pagination Controls */}
                 {totalPages > 1 && (
-                  <div className="flex items-center justify-between pt-4 border-t mt-4">
+                  <div className="mt-4 flex items-center justify-between border-t pt-4">
                     <div className="text-sm text-muted-foreground">
                       Showing {listPageIndex * LIST_PAGE_SIZE + 1} -{' '}
                       {Math.min(
@@ -1079,7 +1079,7 @@ export function WorkflowHistory() {
                       >
                         <ChevronLeft className="h-4 w-4" />
                       </Button>
-                      <span className="text-sm text-muted-foreground px-2">
+                      <span className="px-2 text-sm text-muted-foreground">
                         Page {listPageIndex + 1} of {totalPages}
                       </span>
                       <Button
@@ -1107,12 +1107,12 @@ export function WorkflowHistory() {
                 )}
               </div>
             ) : (
-              <div className="py-16 px-6 text-center">
-                <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-purple-500/10 mb-4">
+              <div className="px-6 py-16 text-center">
+                <div className="mb-4 inline-flex h-16 w-16 items-center justify-center rounded-full bg-purple-500/10">
                   <ChevronRight className="h-8 w-8 text-purple-600" />
                 </div>
-                <h3 className="text-lg font-semibold mb-2">No Events Yet</h3>
-                <p className="text-sm text-muted-foreground max-w-md mx-auto">
+                <h3 className="mb-2 text-lg font-semibold">No Events Yet</h3>
+                <p className="mx-auto max-w-md text-sm text-muted-foreground">
                   Events will appear here as your workflow executes. If your
                   workflow is still running, events may appear soon. Check back
                   or refresh the page to see the latest events.

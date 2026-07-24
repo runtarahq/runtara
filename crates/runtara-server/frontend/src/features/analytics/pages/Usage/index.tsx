@@ -373,7 +373,9 @@ export function Usage() {
         <div className="flex flex-col items-center justify-center rounded-lg border bg-muted/20 px-6 py-10 text-center">
           <Icons.warning className="mb-4 h-10 w-10 text-destructive" />
           <p className="text-base font-semibold text-foreground">
-            {isNetworkError ? 'Unable to connect to backend' : 'An error occurred'}
+            {isNetworkError
+              ? 'Unable to connect to backend'
+              : 'An error occurred'}
           </p>
           <p className="mt-1 text-sm text-muted-foreground">
             {isNetworkError
@@ -382,7 +384,7 @@ export function Usage() {
           </p>
           {import.meta.env.DEV && error && (
             <div className="mt-4 max-w-md rounded-lg bg-destructive/10 p-3 text-left">
-              <p className="text-xs font-mono text-destructive break-words">
+              <p className="break-words font-mono text-xs text-destructive">
                 {error.message || 'Unknown error'}
               </p>
             </div>
@@ -390,54 +392,54 @@ export function Usage() {
         </div>
       ) : (
         <div className="space-y-4">
-        <section className="grid gap-4 md:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-6">
-          <MetricCard
-            title="Total Executions"
-            value={formatNumber(metrics.totalExecutions)}
-            change={trends.executionsChange}
-            trend={trends.executionsTrend}
-            loading={metricsLoading}
-          />
-          <MetricCard
-            title="Success Rate"
-            value={`${metrics.successRate.toFixed(1)}%`}
-            change={Math.abs(trends.executionsChange * 0.1)}
-            trend={trends.successTrend}
-            loading={metricsLoading}
-          />
-          <MetricCard
-            title="Avg Duration"
-            value={formatDurationSeconds(metrics.avgDurationSeconds)}
-            change={Math.abs(trends.executionsChange * 0.05)}
-            trend={trends.durationTrend}
-            loading={metricsLoading}
-          />
-          <MetricCard
-            title="Avg Memory"
-            value={formatMemory(metrics.avgMemory)}
-            change={Math.abs(trends.executionsChange * 0.08)}
-            trend={trends.memoryTrend}
-            loading={metricsLoading}
-          />
-          <MetricCard
-            title="Failed Executions"
-            value={formatNumber(metrics.failureCount)}
-            change={Math.abs(trends.executionsChange * 0.15)}
-            trend={metrics.failureCount > 0 ? 'down' : 'stable'}
-            loading={metricsLoading}
-          />
-          <MetricCard
-            title="Cancelled"
-            value={formatNumber(metrics.cancelledCount)}
-            change={Math.abs(trends.executionsChange * 0.12)}
-            trend={trends.cancelledTrend}
-            loading={metricsLoading}
-          />
-        </section>
+          <section className="grid gap-4 md:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-6">
+            <MetricCard
+              title="Total Executions"
+              value={formatNumber(metrics.totalExecutions)}
+              change={trends.executionsChange}
+              trend={trends.executionsTrend}
+              loading={metricsLoading}
+            />
+            <MetricCard
+              title="Success Rate"
+              value={`${metrics.successRate.toFixed(1)}%`}
+              change={Math.abs(trends.executionsChange * 0.1)}
+              trend={trends.successTrend}
+              loading={metricsLoading}
+            />
+            <MetricCard
+              title="Avg Duration"
+              value={formatDurationSeconds(metrics.avgDurationSeconds)}
+              change={Math.abs(trends.executionsChange * 0.05)}
+              trend={trends.durationTrend}
+              loading={metricsLoading}
+            />
+            <MetricCard
+              title="Avg Memory"
+              value={formatMemory(metrics.avgMemory)}
+              change={Math.abs(trends.executionsChange * 0.08)}
+              trend={trends.memoryTrend}
+              loading={metricsLoading}
+            />
+            <MetricCard
+              title="Failed Executions"
+              value={formatNumber(metrics.failureCount)}
+              change={Math.abs(trends.executionsChange * 0.15)}
+              trend={metrics.failureCount > 0 ? 'down' : 'stable'}
+              loading={metricsLoading}
+            />
+            <MetricCard
+              title="Cancelled"
+              value={formatNumber(metrics.cancelledCount)}
+              change={Math.abs(trends.executionsChange * 0.12)}
+              trend={trends.cancelledTrend}
+              loading={metricsLoading}
+            />
+          </section>
 
-        <section>
-          <ExecutionTrendChart data={chartData} loading={metricsLoading} />
-        </section>
+          <section>
+            <ExecutionTrendChart data={chartData} loading={metricsLoading} />
+          </section>
         </div>
       )}
     </ConsoleTableShell>

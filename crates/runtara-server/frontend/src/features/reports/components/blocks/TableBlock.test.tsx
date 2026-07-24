@@ -149,8 +149,16 @@ describe('TableBlock default sizing without explicit config', () => {
           { key: 'qty', label: 'Qty' },
         ],
         rows: [
-          { sku: 'WB-001', description: 'A reasonably long description', qty: 7 },
-          { sku: 'WB-002', description: 'Another description with words', qty: 12 },
+          {
+            sku: 'WB-001',
+            description: 'A reasonably long description',
+            qty: 7,
+          },
+          {
+            sku: 'WB-002',
+            description: 'Another description with words',
+            qty: 12,
+          },
         ],
       },
     };
@@ -247,8 +255,7 @@ describe('TableBlock default sizing without explicit config', () => {
     const cols = container.querySelectorAll('col');
     // Sized to a real (header-derived) width, never the old fragile 1%.
     expect(colWidthPx(cols[1])).toBeGreaterThanOrEqual(MIN_TEXT_PX);
-    const emptyColStyle =
-      (cols[1] as HTMLElement).getAttribute('style') ?? '';
+    const emptyColStyle = (cols[1] as HTMLElement).getAttribute('style') ?? '';
     expect(emptyColStyle).not.toMatch(/1%/);
   });
 

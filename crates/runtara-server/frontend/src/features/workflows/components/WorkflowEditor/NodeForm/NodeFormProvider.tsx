@@ -233,8 +233,9 @@ export const NodeFormProvider = ({
     } else if (createContainerId !== undefined) {
       resolvedContainerId = createContainerId ?? undefined;
     } else if (parentNodeId) {
-      resolvedContainerId = nodes.find((node) => node.id === parentNodeId)
-        ?.parentId;
+      resolvedContainerId = nodes.find(
+        (node) => node.id === parentNodeId
+      )?.parentId;
     }
     return {
       containerId: resolvedContainerId,

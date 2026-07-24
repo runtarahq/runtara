@@ -41,16 +41,16 @@ export function ErrorConditionTemplates({
           variant="outline"
           size="sm"
           disabled={disabled}
-          className="text-xs gap-1.5"
+          className="gap-1.5 text-xs"
         >
-          <AlertTriangle className="w-3.5 h-3.5 text-destructive" />
+          <AlertTriangle className="h-3.5 w-3.5 text-destructive" />
           Error Templates
-          <ChevronDown className="w-3 h-3 opacity-50" />
+          <ChevronDown className="h-3 w-3 opacity-50" />
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent
         align="start"
-        className="w-72 max-h-80 overflow-y-auto"
+        className="max-h-80 w-72 overflow-y-auto"
       >
         <DropdownMenuLabel className="text-xs text-muted-foreground">
           Quick Error Conditions
@@ -60,10 +60,10 @@ export function ErrorConditionTemplates({
           <DropdownMenuItem
             key={index}
             onClick={() => handleSelect(template.condition)}
-            className="flex-col items-start gap-0.5 cursor-pointer py-2"
+            className="cursor-pointer flex-col items-start gap-0.5 py-2"
           >
-            <div className="font-medium text-sm">{template.label}</div>
-            <div className="text-[11px] text-muted-foreground leading-snug">
+            <div className="text-sm font-medium">{template.label}</div>
+            <div className="text-[11px] leading-snug text-muted-foreground">
               {template.description}
             </div>
           </DropdownMenuItem>

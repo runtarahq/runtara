@@ -76,7 +76,9 @@ export function useOAuthPopup() {
             );
           } else {
             settle(() =>
-              reject(new Error(event.data.error || 'OAuth authorization failed'))
+              reject(
+                new Error(event.data.error || 'OAuth authorization failed')
+              )
             );
           }
         };

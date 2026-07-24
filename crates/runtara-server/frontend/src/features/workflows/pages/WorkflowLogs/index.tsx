@@ -92,7 +92,7 @@ const highlightText = (
     regex.test(part) ? (
       <span
         key={index}
-        className="bg-yellow-200 dark:bg-yellow-800 px-0.5 rounded"
+        className="rounded bg-yellow-200 px-0.5 dark:bg-yellow-800"
       >
         {part}
       </span>
@@ -133,7 +133,7 @@ const HighlightedJson: React.FC<{
         regex.test(part) ? (
           <span
             key={index}
-            className="bg-yellow-200 dark:bg-yellow-800 px-0.5 rounded"
+            className="rounded bg-yellow-200 px-0.5 dark:bg-yellow-800"
           >
             {part}
           </span>
@@ -381,9 +381,9 @@ export function WorkflowLogs() {
   const hasLogs = logs.length > 0;
 
   return (
-    <div className="py-6 px-4 max-w-full overflow-x-hidden">
+    <div className="max-w-full overflow-x-hidden px-4 py-6">
       {/* Header */}
-      <div className="flex items-center justify-between mb-6 bg-background">
+      <div className="mb-6 flex items-center justify-between bg-background">
         <div className="flex items-center gap-3">
           <Button
             variant="ghost"
@@ -403,10 +403,10 @@ export function WorkflowLogs() {
       </div>
 
       {/* Search and Filters */}
-      <div className="bg-card p-4 rounded-lg border mb-4">
+      <div className="mb-4 rounded-lg border bg-card p-4">
         <div className="flex gap-3">
           <div className="relative flex-1">
-            <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+            <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 transform text-muted-foreground" />
             <Input
               placeholder="Search logs..."
               value={searchInput}
@@ -422,7 +422,7 @@ export function WorkflowLogs() {
             }}
           >
             <SelectTrigger className="w-[180px]">
-              <Filter className="h-4 w-4 mr-2" />
+              <Filter className="mr-2 h-4 w-4" />
               <SelectValue placeholder="All logs" />
             </SelectTrigger>
             <SelectContent>
@@ -438,7 +438,7 @@ export function WorkflowLogs() {
       </div>
 
       {/* Logs Container */}
-      <div className="bg-card rounded-lg border overflow-hidden">
+      <div className="overflow-hidden rounded-lg border bg-card">
         {hasLogs ? (
           <>
             {/* Log Entries */}
@@ -446,7 +446,7 @@ export function WorkflowLogs() {
               {logs.map((log: LogEntry) => (
                 <div
                   key={log.id}
-                  className="p-4 hover:bg-muted/50 transition-colors"
+                  className="p-4 transition-colors hover:bg-muted/50"
                 >
                   <div className="flex items-start gap-3">
                     {/* Log Level Icon */}
@@ -455,9 +455,9 @@ export function WorkflowLogs() {
                     </div>
 
                     {/* Log Content */}
-                    <div className="flex-1 min-w-0">
+                    <div className="min-w-0 flex-1">
                       {/* Header */}
-                      <div className="flex items-center gap-3 mb-2 flex-wrap">
+                      <div className="mb-2 flex flex-wrap items-center gap-3">
                         <span className="text-xs text-muted-foreground">
                           {log.createdAt
                             ? formatDate(
@@ -500,7 +500,7 @@ export function WorkflowLogs() {
                       </div>
 
                       {/* Additional Details */}
-                      <div className="flex gap-4 mt-2 text-xs text-muted-foreground">
+                      <div className="mt-2 flex gap-4 text-xs text-muted-foreground">
                         {log.itemIndex != null && log.totalItems != null && (
                           <span>
                             Item {log.itemIndex}/{log.totalItems}
@@ -530,14 +530,14 @@ export function WorkflowLogs() {
                                   log.contextData,
                                   searchTerm
                                 )
-                                  ? 'text-yellow-600 dark:text-yellow-400 font-semibold'
+                                  ? 'font-semibold text-yellow-600 dark:text-yellow-400'
                                   : 'text-muted-foreground'
                               } hover:text-foreground`}
                             >
                               {expandedContextIds.has(log.id) ? (
-                                <ChevronDown className="h-3 w-3 mr-1" />
+                                <ChevronDown className="mr-1 h-3 w-3" />
                               ) : (
-                                <ChevronRight className="h-3 w-3 mr-1" />
+                                <ChevronRight className="mr-1 h-3 w-3" />
                               )}
                               Context Data
                               {objectContainsSearchTerm(
@@ -551,8 +551,8 @@ export function WorkflowLogs() {
                             </Button>
                           </CollapsibleTrigger>
                           <CollapsibleContent>
-                            <div className="mt-2 p-3 bg-muted/50 rounded-md">
-                              <pre className="text-xs overflow-auto">
+                            <div className="mt-2 rounded-md bg-muted/50 p-3">
+                              <pre className="overflow-auto text-xs">
                                 {(() => {
                                   const resolved = resolveRecordPayloads(
                                     log.contextData!
@@ -579,7 +579,7 @@ export function WorkflowLogs() {
             </div>
 
             {/* Pagination */}
-            <div className="p-4 border-t bg-muted/50">
+            <div className="border-t bg-muted/50 p-4">
               <div className="flex items-center justify-between">
                 <div className="text-sm text-muted-foreground">
                   Showing{' '}
@@ -634,8 +634,8 @@ export function WorkflowLogs() {
         ) : (
           /* Empty State */
           <div className="p-16 text-center">
-            <Info className="h-12 w-12 mx-auto mb-4 text-muted-foreground" />
-            <h3 className="text-lg font-semibold mb-2">No logs found</h3>
+            <Info className="mx-auto mb-4 h-12 w-12 text-muted-foreground" />
+            <h3 className="mb-2 text-lg font-semibold">No logs found</h3>
             <p className="text-sm text-muted-foreground">
               {searchTerm || logLevelFilter !== 'all'
                 ? 'Try adjusting your search or filters'

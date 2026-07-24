@@ -67,10 +67,10 @@ export function ModeToggleButton({
       onClick={onClick}
       disabled={disabled}
       className={cn(
-        'h-9 w-9 shrink-0 flex items-center justify-center rounded-md border transition-colors',
+        'flex h-9 w-9 shrink-0 items-center justify-center rounded-md border transition-colors',
         'hover:bg-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring',
         config.activeClass,
-        disabled && 'opacity-50 cursor-not-allowed',
+        disabled && 'cursor-not-allowed opacity-50',
         className
       )}
       aria-label={config.ariaLabel}

@@ -156,27 +156,24 @@ function FilterChip({
   const auth = useAuth();
   const queryClient = useQueryClient();
   const usesDynamicOptions = filter.options?.source === 'object_model';
-  const optionDefinition = useMemo<FormDefinition>(
-    () => {
-      const field = reportFilterToFormField(filter);
-      return {
-        fields: {
-          [filter.id]: {
-            ...field,
-            control: {
-              ...field.control!,
-              optionResolver:
-                reportId && usesDynamicOptions && open
-                  ? 'reports.filter-options'
-                  : undefined,
-              optionDependencies: Object.keys(allValues).sort(),
-            },
+  const optionDefinition = useMemo<FormDefinition>(() => {
+    const field = reportFilterToFormField(filter);
+    return {
+      fields: {
+        [filter.id]: {
+          ...field,
+          control: {
+            ...field.control!,
+            optionResolver:
+              reportId && usesDynamicOptions && open
+                ? 'reports.filter-options'
+                : undefined,
+            optionDependencies: Object.keys(allValues).sort(),
           },
         },
-      };
-    },
-    [allValues, filter, open, reportId, usesDynamicOptions]
-  );
+      },
+    };
+  }, [allValues, filter, open, reportId, usesDynamicOptions]);
   const resolveOptions = useCallback<OptionResolver>(
     async ({ resolverKey, currentData, signal }) => {
       if (resolverKey !== 'reports.filter-options' || !reportId) return [];
@@ -186,11 +183,7 @@ function FilterChip({
         timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
       };
       const response = await queryClient.fetchQuery({
-        queryKey: queryKeys.reports.filterOptions(
-          reportId,
-          filter.id,
-          request
-        ),
+        queryKey: queryKeys.reports.filterOptions(reportId, filter.id, request),
         queryFn: () =>
           resolveReportFilterOptions(
             auth.user?.access_token ?? '',
@@ -211,8 +204,7 @@ function FilterChip({
     resolveOptions
   );
   const dynamicOptions = resolvedOptions.options[filter.id] as
-    | FilterOption[]
-    | undefined;
+    FilterOption[] | undefined;
   const isLoadingOptions = resolvedOptions.loading.has(filter.id);
   const options: FilterOption[] =
     dynamicOptions ?? filter.options?.values ?? [];
@@ -233,7 +225,10 @@ function FilterChip({
         </PopoverTrigger>
         <PopoverContent className="w-72 p-0" align="start">
           {resolvedOptions.errors[filter.id] && (
-            <p className="border-b px-3 py-2 text-xs text-destructive" role="alert">
+            <p
+              className="border-b px-3 py-2 text-xs text-destructive"
+              role="alert"
+            >
               {resolvedOptions.errors[filter.id]}
             </p>
           )}

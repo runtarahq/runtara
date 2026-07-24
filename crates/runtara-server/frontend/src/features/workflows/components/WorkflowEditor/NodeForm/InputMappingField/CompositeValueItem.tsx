@@ -152,7 +152,6 @@ const IMMEDIATE_TYPE_HINT_OPTIONS: Array<{
   { value: 'json', label: 'JSON', description: 'JSON object/array' },
 ];
 
-
 export function CompositeValueItem({
   value,
   onChange,
@@ -367,7 +366,7 @@ export function CompositeValueItem({
     return (
       <span
         className={cn(
-          'inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs border',
+          'inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-xs',
           getValueTypeBadgeColor(badgeType)
         )}
       >
@@ -385,7 +384,7 @@ export function CompositeValueItem({
     if (typeHint === 'boolean') {
       const boolValue = value.value === true || value.value === 'true';
       return (
-        <div className="flex items-center h-8 px-2">
+        <div className="flex h-8 items-center px-2">
           <Checkbox
             checked={boolValue}
             onCheckedChange={(checked) =>
@@ -412,7 +411,7 @@ export function CompositeValueItem({
           }
           step={typeHint === 'integer' ? '1' : 'any'}
           disabled={disabled}
-          className={cn('flex-1 h-8 text-sm', hasError && 'border-destructive')}
+          className={cn('h-8 flex-1 text-sm', hasError && 'border-destructive')}
         />
       );
     }
@@ -432,7 +431,7 @@ export function CompositeValueItem({
         }
         disabled={disabled}
         className={cn(
-          'flex-1 h-8 text-sm',
+          'h-8 flex-1 text-sm',
           typeHint === 'json' && 'font-mono',
           hasError && 'border-destructive'
         )}
@@ -453,7 +452,7 @@ export function CompositeValueItem({
           placeholder="e.g., Bearer {{ steps.my_conn.outputs.parameters.api_key }}"
           disabled={disabled}
           className={cn(
-            'flex-1 h-8 font-mono text-sm',
+            'h-8 flex-1 font-mono text-sm',
             hasError && 'border-destructive'
           )}
         />
@@ -463,7 +462,7 @@ export function CompositeValueItem({
     switch (value.valueType) {
       case 'immediate':
         return (
-          <div className="flex items-center gap-2 flex-1">
+          <div className="flex flex-1 items-center gap-2">
             {/* Type hint selector */}
             <Select
               value={currentTypeHint}
@@ -472,7 +471,7 @@ export function CompositeValueItem({
               }
               disabled={disabled}
             >
-              <SelectTrigger className="h-8 w-[90px] text-xs shrink-0">
+              <SelectTrigger className="h-8 w-[90px] shrink-0 text-xs">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -507,7 +506,7 @@ export function CompositeValueItem({
               />
               {referenceError && (
                 <p
-                  className="text-[11px] text-destructive mt-0.5"
+                  className="mt-0.5 text-[11px] text-destructive"
                   data-testid="reference-error"
                 >
                   {referenceError}
@@ -522,11 +521,11 @@ export function CompositeValueItem({
             onClick={() => setIsPickerOpen(true)}
             disabled={disabled}
             className={cn(
-              'flex-1 flex items-center justify-center h-8 px-3',
+              'flex h-8 flex-1 items-center justify-center px-3',
               'text-sm text-muted-foreground',
-              'bg-muted/30 border border-dashed rounded-md',
-              'hover:bg-muted/50 hover:border-muted-foreground/50 transition-colors',
-              disabled && 'opacity-50 cursor-not-allowed',
+              'rounded-md border border-dashed bg-muted/30',
+              'transition-colors hover:border-muted-foreground/50 hover:bg-muted/50',
+              disabled && 'cursor-not-allowed opacity-50',
               hasError && 'border-destructive'
             )}
           >
@@ -536,8 +535,7 @@ export function CompositeValueItem({
 
       case 'composite': {
         const compositeValue = value.value as
-          | CompositeObjectValue
-          | CompositeArrayValue;
+          CompositeObjectValue | CompositeArrayValue;
         const isArray = Array.isArray(compositeValue);
         const itemCount = isArray
           ? compositeValue.length
@@ -550,7 +548,7 @@ export function CompositeValueItem({
               onClick={() => setIsExpanded(!isExpanded)}
               className={cn(
                 'flex items-center gap-2 text-sm text-muted-foreground',
-                'hover:text-foreground transition-colors'
+                'transition-colors hover:text-foreground'
               )}
             >
               {isExpanded ? (
@@ -582,8 +580,7 @@ export function CompositeValueItem({
     if (value.valueType !== 'composite' || !isExpanded) return null;
 
     const compositeValue = value.value as
-      | CompositeObjectValue
-      | CompositeArrayValue;
+      CompositeObjectValue | CompositeArrayValue;
     const isArray = Array.isArray(compositeValue);
     const visualDepth = Math.min(depth + 1, MAX_VISUAL_DEPTH);
 
@@ -593,7 +590,7 @@ export function CompositeValueItem({
       return (
         <div
           className={cn(
-            'mt-2 ml-4 pl-3 border-l-2 border-muted',
+            'ml-4 mt-2 border-l-2 border-muted pl-3',
             visualDepth >= MAX_VISUAL_DEPTH && 'ml-2 pl-2'
           )}
         >
@@ -613,7 +610,7 @@ export function CompositeValueItem({
     return (
       <div
         className={cn(
-          'mt-2 ml-4 pl-3 border-l-2 border-muted',
+          'ml-4 mt-2 border-l-2 border-muted pl-3',
           visualDepth >= MAX_VISUAL_DEPTH && 'ml-2 pl-2'
         )}
       >
@@ -635,7 +632,7 @@ export function CompositeValueItem({
       <div className="flex items-center gap-2">
         {/* Label */}
         {label && (
-          <span className="text-sm font-mono text-muted-foreground min-w-[60px] truncate">
+          <span className="min-w-[60px] truncate font-mono text-sm text-muted-foreground">
             {label}
           </span>
         )}
@@ -656,7 +653,7 @@ export function CompositeValueItem({
                     key={option.value}
                     onClick={() => handleTypeChange(option.value)}
                   >
-                    <IconComponent className="h-4 w-4 mr-2" />
+                    <IconComponent className="mr-2 h-4 w-4" />
                     {option.label}
                   </DropdownMenuItem>
                 );
@@ -674,7 +671,7 @@ export function CompositeValueItem({
         {directError && (
           <Tooltip>
             <TooltipTrigger asChild>
-              <AlertTriangle className="h-4 w-4 text-destructive shrink-0" />
+              <AlertTriangle className="h-4 w-4 shrink-0 text-destructive" />
             </TooltipTrigger>
             <TooltipContent>
               <p>{directError.message}</p>
@@ -688,7 +685,7 @@ export function CompositeValueItem({
             type="button"
             variant="ghost"
             size="icon"
-            className="h-7 w-7 text-muted-foreground hover:text-destructive shrink-0"
+            className="h-7 w-7 shrink-0 text-muted-foreground hover:text-destructive"
             onClick={onRemove}
           >
             <X className="h-3.5 w-3.5" />
@@ -756,7 +753,7 @@ function CompositeObjectEditorInline({
       ))}
 
       {Object.keys(value).length === 0 && (
-        <p className="text-sm text-muted-foreground italic py-2">
+        <p className="py-2 text-sm italic text-muted-foreground">
           No fields. Add one below.
         </p>
       )}
@@ -769,7 +766,7 @@ function CompositeObjectEditorInline({
           onChange={(e) => setNewFieldName(e.target.value)}
           onKeyDown={(e) => e.key === 'Enter' && handleAddField()}
           placeholder="Field name"
-          className="h-8 text-sm flex-1"
+          className="h-8 flex-1 text-sm"
         />
         <Button
           type="button"
@@ -844,7 +841,7 @@ function CompositeArrayEditorInline({
       ))}
 
       {value.length === 0 && (
-        <p className="text-sm text-muted-foreground italic py-2">
+        <p className="py-2 text-sm italic text-muted-foreground">
           No items. Add one below.
         </p>
       )}
@@ -869,7 +866,7 @@ function CompositeArrayEditorInline({
                 key={option.value}
                 onClick={() => handleAddItem(option.value)}
               >
-                <IconComponent className="h-4 w-4 mr-2" />
+                <IconComponent className="mr-2 h-4 w-4" />
                 {option.label}
               </DropdownMenuItem>
             );

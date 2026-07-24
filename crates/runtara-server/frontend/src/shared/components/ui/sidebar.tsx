@@ -204,7 +204,7 @@ const Sidebar = React.forwardRef<
           {/* Minimized sidebar always visible on mobile */}
           <div
             ref={ref}
-            className="group peer text-sidebar-foreground block"
+            className="group peer block text-sidebar-foreground"
             data-state="collapsed"
             data-collapsible="icon"
             data-variant={variant}
@@ -222,10 +222,10 @@ const Sidebar = React.forwardRef<
             />
             <div
               className={cn(
-                'fixed inset-y-0 z-10 h-svh w-[--sidebar-width-icon] flex transition-[left,right,width] duration-200 ease-linear pt-safe',
+                'pt-safe fixed inset-y-0 z-10 flex h-svh w-[--sidebar-width-icon] transition-[left,right,width] duration-200 ease-linear',
                 side === 'left' ? 'left-0' : 'right-0',
                 variant === 'floating' || variant === 'inset'
-                  ? 'p-2 w-[calc(var(--sidebar-width-icon)_+_theme(spacing.4)_+2px)]'
+                  ? 'w-[calc(var(--sidebar-width-icon)_+_theme(spacing.4)_+2px)] p-2'
                   : 'w-[--sidebar-width-icon] group-data-[side=left]:border-r group-data-[side=right]:border-l',
                 className
               )}
@@ -245,7 +245,7 @@ const Sidebar = React.forwardRef<
             <SheetContent
               data-sidebar="sidebar"
               data-mobile="true"
-              className="w-[--sidebar-width] bg-sidebar p-0 text-sidebar-foreground rounded-l-xl [&>button]:hidden pt-safe"
+              className="pt-safe w-[--sidebar-width] rounded-l-xl bg-sidebar p-0 text-sidebar-foreground [&>button]:hidden"
               style={
                 {
                   '--sidebar-width': SIDEBAR_WIDTH_MOBILE,
@@ -395,7 +395,7 @@ const SidebarInput = React.forwardRef<
       ref={ref}
       data-sidebar="input"
       className={cn(
-        'h-8 w-full bg-background shadow-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-sidebar-ring',
+        'h-8 w-full bg-background shadow-none focus-visible:ring-2 focus-visible:ring-sidebar-ring focus-visible:ring-offset-2',
         className
       )}
       {...props}
@@ -573,12 +573,12 @@ const sidebarMenuButtonVariants = cva(
         default:
           'hover:bg-sidebar-accent/50 hover:text-sidebar-accent-foreground',
         outline:
-          'bg-background border border-sidebar-border/40 hover:bg-sidebar-accent/50 hover:text-sidebar-accent-foreground hover:border-sidebar-accent/40',
+          'border border-sidebar-border/40 bg-background hover:border-sidebar-accent/40 hover:bg-sidebar-accent/50 hover:text-sidebar-accent-foreground',
       },
       size: {
         default: 'h-9 text-sm',
         sm: 'h-8 text-xs',
-        lg: 'h-12 text-sm group-data-[collapsible=icon]:!p-0 group-data-[collapsible=icon]:!h-12 group-data-[collapsible=icon]:!w-12 group-data-[collapsible=icon]:justify-center',
+        lg: 'h-12 text-sm group-data-[collapsible=icon]:!h-12 group-data-[collapsible=icon]:!w-12 group-data-[collapsible=icon]:justify-center group-data-[collapsible=icon]:!p-0',
       },
     },
     defaultVariants: {
@@ -779,7 +779,7 @@ const SidebarMenuSubButton = React.forwardRef<
       className={cn(
         'flex h-7 min-w-0 -translate-x-px items-center gap-2 overflow-hidden rounded-sm px-2 text-sidebar-foreground outline-none ring-sidebar-ring transition-all duration-200 ease-in-out hover:bg-sidebar-accent/50 hover:text-sidebar-accent-foreground focus-visible:ring-2 active:bg-sidebar-accent/70 active:text-sidebar-accent-foreground disabled:pointer-events-none disabled:opacity-50 aria-disabled:pointer-events-none aria-disabled:opacity-50 [&>span:last-child]:truncate [&>svg]:size-4 [&>svg]:shrink-0 [&>svg]:text-sidebar-accent-foreground',
         'data-[active=true]:bg-sidebar-accent/70 data-[active=true]:text-sidebar-accent-foreground',
-        size === 'sm' && 'text-xs h-7',
+        size === 'sm' && 'h-7 text-xs',
         size === 'md' && 'text-sm',
         'group-data-[collapsible=icon]:hidden',
         className

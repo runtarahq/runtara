@@ -192,7 +192,10 @@ export type AdvancedSchemaDraft = {
 };
 
 export type AdvancedSchemaDraftErrors = Partial<
-  Record<'order' | 'min' | 'max' | 'example' | 'visibleWhen' | 'extensions', string>
+  Record<
+    'order' | 'min' | 'max' | 'example' | 'visibleWhen' | 'extensions',
+    string
+  >
 >;
 
 /**
@@ -226,7 +229,9 @@ function parseLooseValue(raw: string): any {
   }
 }
 
-function toEditorFields(parsed: ReturnType<typeof parseRawSchema>): SchemaField[] {
+function toEditorFields(
+  parsed: ReturnType<typeof parseRawSchema>
+): SchemaField[] {
   return parsed.map((property) => ({
     ...property,
     type: property.type || 'string',
@@ -235,9 +240,13 @@ function toEditorFields(parsed: ReturnType<typeof parseRawSchema>): SchemaField[
   })) as SchemaField[];
 }
 
-export function createAdvancedSchemaDraft(field: SchemaField): AdvancedSchemaDraft {
+export function createAdvancedSchemaDraft(
+  field: SchemaField
+): AdvancedSchemaDraft {
   const rawItems =
-    field.items && typeof field.items === 'object' && !Array.isArray(field.items)
+    field.items &&
+    typeof field.items === 'object' &&
+    !Array.isArray(field.items)
       ? (field.items as Record<string, any>)
       : undefined;
   const {
@@ -343,7 +352,8 @@ export function applyAdvancedSchemaDraft(
     try {
       next.example = JSON.parse(exampleRaw);
     } catch {
-      errors.example = 'Example must be valid JSON (quote strings, e.g. "text").';
+      errors.example =
+        'Example must be valid JSON (quote strings, e.g. "text").';
     }
   }
 
@@ -353,7 +363,9 @@ export function applyAdvancedSchemaDraft(
       type: draft.itemsType || 'string',
     };
     if (items.type === 'object' && draft.itemsProperties.length > 0) {
-      items.properties = buildSchemaObjectFromFields(draft.itemsProperties as any);
+      items.properties = buildSchemaObjectFromFields(
+        draft.itemsProperties as any
+      );
     }
     next.items = items;
   } else if (field.items !== undefined) {
@@ -368,7 +380,8 @@ export function applyAdvancedSchemaDraft(
   if (draft.visibleWhenRows.length > 0) {
     const visibleWhenField = draft.visibleWhenField.trim();
     if (!visibleWhenField) {
-      errors.visibleWhen = 'Enter the sibling field name the visibility rule checks.';
+      errors.visibleWhen =
+        'Enter the sibling field name the visibility rule checks.';
     } else {
       const visibleWhen: NonNullable<SchemaField['visibleWhen']> = {
         field: visibleWhenField,
@@ -922,7 +935,9 @@ function AdvancedSchemaFieldDialog({
                   aria-label="Unknown extensions (JSON)"
                 />
                 {errors.extensions && (
-                  <p className="text-sm text-destructive">{errors.extensions}</p>
+                  <p className="text-sm text-destructive">
+                    {errors.extensions}
+                  </p>
                 )}
               </div>
             </details>
@@ -1032,41 +1047,41 @@ export function SchemaFieldsEditor({
   return (
     <div className="space-y-2">
       {!hideLabel && <Label className="text-sm font-medium">{label}</Label>}
-      <div className="border rounded-lg overflow-x-auto">
+      <div className="overflow-x-auto rounded-lg border">
         <table className="w-full min-w-[980px]">
           <thead>
             <tr className="border-b">
-              <th className="text-left p-2 text-sm font-medium text-muted-foreground">
+              <th className="p-2 text-left text-sm font-medium text-muted-foreground">
                 Field Name
               </th>
-              <th className="text-left p-2 text-sm font-medium text-muted-foreground">
+              <th className="p-2 text-left text-sm font-medium text-muted-foreground">
                 Type
               </th>
-              <th className="w-20 text-center p-2 text-sm font-medium text-muted-foreground">
+              <th className="w-20 p-2 text-center text-sm font-medium text-muted-foreground">
                 Required
               </th>
-              <th className="w-20 text-center p-2 text-sm font-medium text-muted-foreground">
+              <th className="w-20 p-2 text-center text-sm font-medium text-muted-foreground">
                 Nullable
               </th>
-              <th className="text-left p-2 text-sm font-medium text-muted-foreground">
+              <th className="p-2 text-left text-sm font-medium text-muted-foreground">
                 Description
               </th>
-              <th className="text-left p-2 text-sm font-medium text-muted-foreground">
+              <th className="p-2 text-left text-sm font-medium text-muted-foreground">
                 Default
               </th>
-              <th className="text-left p-2 text-sm font-medium text-muted-foreground">
+              <th className="p-2 text-left text-sm font-medium text-muted-foreground">
                 Format
               </th>
               {showEnum && (
-                <th className="text-left p-2 text-sm font-medium text-muted-foreground">
+                <th className="p-2 text-left text-sm font-medium text-muted-foreground">
                   Enum
                 </th>
               )}
-              <th className="w-20 text-center p-2 text-sm font-medium text-muted-foreground">
+              <th className="w-20 p-2 text-center text-sm font-medium text-muted-foreground">
                 Advanced
               </th>
               {!readOnly && (
-                <th className="w-16 text-center p-2 text-sm font-medium text-muted-foreground">
+                <th className="w-16 p-2 text-center text-sm font-medium text-muted-foreground">
                   Actions
                 </th>
               )}
@@ -1092,7 +1107,7 @@ export function SchemaFieldsEditor({
                       aria-invalid={!!fieldNameError}
                       aria-describedby={fieldNameErrorId}
                       className={cn(
-                        'font-mono text-sm border-0 p-1 h-auto focus-visible:ring-0 focus-visible:ring-offset-0',
+                        'h-auto border-0 p-1 font-mono text-sm focus-visible:ring-0 focus-visible:ring-offset-0',
                         fieldNameError &&
                           'bg-destructive/10 text-destructive focus-visible:ring-destructive'
                       )}
@@ -1126,7 +1141,7 @@ export function SchemaFieldsEditor({
                       </SelectContent>
                     </Select>
                   </td>
-                  <td className="w-20 text-center p-2 align-top">
+                  <td className="w-20 p-2 text-center align-top">
                     <Checkbox
                       checked={field.required}
                       onCheckedChange={(checked) =>
@@ -1135,7 +1150,7 @@ export function SchemaFieldsEditor({
                       disabled={readOnly}
                     />
                   </td>
-                  <td className="w-20 text-center p-2 align-top">
+                  <td className="w-20 p-2 text-center align-top">
                     <Checkbox
                       checked={!!field.nullable}
                       onCheckedChange={(checked) =>
@@ -1152,7 +1167,7 @@ export function SchemaFieldsEditor({
                       }
                       placeholder="Field description"
                       disabled={readOnly}
-                      className="text-sm border-0 p-1 h-auto focus-visible:ring-0 focus-visible:ring-offset-0"
+                      className="h-auto border-0 p-1 text-sm focus-visible:ring-0 focus-visible:ring-offset-0"
                     />
                   </td>
                   <td className="p-2 align-top">
@@ -1167,7 +1182,7 @@ export function SchemaFieldsEditor({
                       }
                       placeholder="Default"
                       disabled={readOnly}
-                      className="font-mono text-sm border-0 p-1 h-auto focus-visible:ring-0 focus-visible:ring-offset-0"
+                      className="h-auto border-0 p-1 font-mono text-sm focus-visible:ring-0 focus-visible:ring-offset-0"
                     />
                   </td>
                   <td className="p-2 align-top">
@@ -1182,7 +1197,7 @@ export function SchemaFieldsEditor({
                       }
                       placeholder="date, email..."
                       disabled={readOnly}
-                      className="font-mono text-sm border-0 p-1 h-auto focus-visible:ring-0 focus-visible:ring-offset-0"
+                      className="h-auto border-0 p-1 font-mono text-sm focus-visible:ring-0 focus-visible:ring-offset-0"
                     />
                   </td>
                   {showEnum && (
@@ -1199,11 +1214,11 @@ export function SchemaFieldsEditor({
                         }}
                         placeholder="val1, val2, ..."
                         disabled={readOnly}
-                        className="font-mono text-sm border-0 p-1 h-auto focus-visible:ring-0 focus-visible:ring-offset-0"
+                        className="h-auto border-0 p-1 font-mono text-sm focus-visible:ring-0 focus-visible:ring-offset-0"
                       />
                     </td>
                   )}
-                  <td className="w-20 text-center p-2 align-top">
+                  <td className="w-20 p-2 text-center align-top">
                     <AdvancedSchemaFieldDialog
                       field={field}
                       readOnly={readOnly}
@@ -1220,7 +1235,7 @@ export function SchemaFieldsEditor({
                     />
                   </td>
                   {!readOnly && (
-                    <td className="w-16 text-center p-2 align-top">
+                    <td className="w-16 p-2 text-center align-top">
                       <Button
                         type="button"
                         variant="ghost"
@@ -1256,7 +1271,7 @@ export function SchemaFieldsEditor({
           onClick={handleAdd}
           className="w-full"
         >
-          <Plus className="h-4 w-4 mr-2" />
+          <Plus className="mr-2 h-4 w-4" />
           Add Field
         </Button>
       )}

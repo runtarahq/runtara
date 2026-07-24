@@ -249,7 +249,7 @@ export function ImportCsvDialog({
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
-      <DialogContent className="w-[min(56rem,calc(100vw-2rem))] max-w-none max-h-[85vh] overflow-y-auto overflow-x-hidden">
+      <DialogContent className="max-h-[85vh] w-[min(56rem,calc(100vw-2rem))] max-w-none overflow-y-auto overflow-x-hidden">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <FileSpreadsheet className="h-5 w-5" />
@@ -273,22 +273,22 @@ export function ImportCsvDialog({
               type="button"
               onClick={() => fileInputRef.current?.click()}
               disabled={previewMutation.isPending}
-              className="w-full border-2 border-dashed border-muted-foreground/25 rounded-lg p-8 text-center hover:border-muted-foreground/50 transition-colors cursor-pointer disabled:cursor-not-allowed disabled:opacity-50"
+              className="w-full cursor-pointer rounded-lg border-2 border-dashed border-muted-foreground/25 p-8 text-center transition-colors hover:border-muted-foreground/50 disabled:cursor-not-allowed disabled:opacity-50"
             >
               {previewMutation.isPending ? (
                 <>
-                  <Loader2 className="h-10 w-10 mx-auto mb-3 text-muted-foreground animate-spin" />
+                  <Loader2 className="mx-auto mb-3 h-10 w-10 animate-spin text-muted-foreground" />
                   <p className="text-sm text-muted-foreground">
                     Parsing {fileName}...
                   </p>
                 </>
               ) : (
                 <>
-                  <Upload className="h-10 w-10 mx-auto mb-3 text-muted-foreground" />
+                  <Upload className="mx-auto mb-3 h-10 w-10 text-muted-foreground" />
                   <p className="text-sm font-medium">
                     Click to select a CSV file
                   </p>
-                  <p className="text-xs text-muted-foreground mt-1">
+                  <p className="mt-1 text-xs text-muted-foreground">
                     Supports .csv files
                   </p>
                 </>
@@ -298,7 +298,7 @@ export function ImportCsvDialog({
         )}
 
         {step === 'mapping' && preview && (
-          <div className="space-y-4 min-w-0">
+          <div className="min-w-0 space-y-4">
             <div className="flex items-center justify-between text-sm text-muted-foreground">
               <span>
                 {fileName} &mdash; {preview.totalRows} row
@@ -312,9 +312,9 @@ export function ImportCsvDialog({
             {/* Column Mapping */}
             <div className="space-y-3">
               <Label className="text-sm font-medium">Column Mapping</Label>
-              <div className="border rounded-lg max-h-[40vh] overflow-y-auto">
+              <div className="max-h-[40vh] overflow-y-auto rounded-lg border">
                 <div
-                  className={`grid items-center gap-0 bg-card px-3 py-2 border-b sticky top-0 z-10 ${
+                  className={`sticky top-0 z-10 grid items-center gap-0 border-b bg-card px-3 py-2 ${
                     showMatchBy
                       ? 'grid-cols-[minmax(0,1fr)_32px_minmax(0,1fr)_60px]'
                       : 'grid-cols-[minmax(0,1fr)_32px_minmax(0,1fr)]'
@@ -328,7 +328,7 @@ export function ImportCsvDialog({
                     Schema Column
                   </span>
                   {showMatchBy && (
-                    <span className="text-xs font-medium text-muted-foreground text-center">
+                    <span className="text-center text-xs font-medium text-muted-foreground">
                       Match by
                     </span>
                   )}
@@ -346,19 +346,19 @@ export function ImportCsvDialog({
                   return (
                     <div
                       key={header}
-                      className={`grid items-center gap-0 px-3 py-2 border-b last:border-b-0 ${
+                      className={`grid items-center gap-0 border-b px-3 py-2 last:border-b-0 ${
                         showMatchBy
                           ? 'grid-cols-[minmax(0,1fr)_32px_minmax(0,1fr)_60px]'
                           : 'grid-cols-[minmax(0,1fr)_32px_minmax(0,1fr)]'
                       }`}
                     >
                       <span
-                        className="text-sm font-mono truncate min-w-0"
+                        className="min-w-0 truncate font-mono text-sm"
                         title={header}
                       >
                         {header}
                       </span>
-                      <ArrowRight className="h-4 w-4 text-muted-foreground mx-auto" />
+                      <ArrowRight className="mx-auto h-4 w-4 text-muted-foreground" />
                       <Select
                         value={columnMapping[header] || SKIP_COLUMN}
                         onValueChange={(val) =>
@@ -370,7 +370,7 @@ export function ImportCsvDialog({
                         </SelectTrigger>
                         <SelectContent>
                           <SelectItem value={SKIP_COLUMN}>
-                            <span className="text-muted-foreground italic">
+                            <span className="italic text-muted-foreground">
                               Skip
                             </span>
                           </SelectItem>
@@ -385,11 +385,11 @@ export function ImportCsvDialog({
                                 disabled={isUsedByOther}
                               >
                                 {col.name}{' '}
-                                <span className="text-muted-foreground ml-1">
+                                <span className="ml-1 text-muted-foreground">
                                   ({col.type})
                                 </span>
                                 {isUsedByOther && (
-                                  <span className="text-muted-foreground ml-1">
+                                  <span className="ml-1 text-muted-foreground">
                                     — mapped
                                   </span>
                                 )}
@@ -433,14 +433,14 @@ export function ImportCsvDialog({
             {preview.sampleRows.length > 0 && (
               <div className="space-y-2">
                 <Label className="text-sm font-medium">Sample Data</Label>
-                <div className="border rounded-lg overflow-x-auto">
+                <div className="overflow-x-auto rounded-lg border">
                   <table className="w-full text-xs">
                     <thead>
-                      <tr className="bg-muted/50 border-b">
+                      <tr className="border-b bg-muted/50">
                         {preview.csvHeaders.map((h) => (
                           <th
                             key={h}
-                            className="px-3 py-2 text-left font-medium text-muted-foreground whitespace-nowrap"
+                            className="whitespace-nowrap px-3 py-2 text-left font-medium text-muted-foreground"
                           >
                             {h}
                           </th>
@@ -453,7 +453,7 @@ export function ImportCsvDialog({
                           {row.map((cell, j) => (
                             <td
                               key={j}
-                              className="px-3 py-1.5 whitespace-nowrap max-w-[200px] truncate"
+                              className="max-w-[200px] truncate whitespace-nowrap px-3 py-1.5"
                               title={cell}
                             >
                               {cell}
@@ -491,7 +491,7 @@ export function ImportCsvDialog({
             </div>
 
             {/* Skip errors checkbox */}
-            <label className="flex items-center gap-2 cursor-pointer">
+            <label className="flex cursor-pointer items-center gap-2">
               <Checkbox
                 checked={skipErrors}
                 onCheckedChange={(checked) => setSkipErrors(!!checked)}
@@ -505,14 +505,14 @@ export function ImportCsvDialog({
         )}
 
         {step === 'importing' && (
-          <div className="flex flex-col items-center justify-center py-10 gap-3">
+          <div className="flex flex-col items-center justify-center gap-3 py-10">
             <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
             <p className="text-sm text-muted-foreground">Importing data...</p>
           </div>
         )}
 
         {step === 'results' && importResult && (
-          <div className="space-y-4 min-w-0">
+          <div className="min-w-0 space-y-4">
             <div className="flex items-center gap-3 text-sm">
               <Badge variant="default">
                 {importResult.affectedRows} imported
@@ -529,11 +529,11 @@ export function ImportCsvDialog({
               ?.length ? (
               <div className="space-y-2">
                 <Label className="text-sm font-medium">Validation Errors</Label>
-                <div className="border rounded-lg max-h-[40vh] overflow-y-auto">
+                <div className="max-h-[40vh] overflow-y-auto rounded-lg border">
                   <table className="w-full text-xs">
                     <thead>
-                      <tr className="bg-muted/50 border-b sticky top-0">
-                        <th className="px-3 py-2 text-left font-medium text-muted-foreground w-16">
+                      <tr className="sticky top-0 border-b bg-muted/50">
+                        <th className="w-16 px-3 py-2 text-left font-medium text-muted-foreground">
                           Row
                         </th>
                         <th className="px-3 py-2 text-left font-medium text-muted-foreground">

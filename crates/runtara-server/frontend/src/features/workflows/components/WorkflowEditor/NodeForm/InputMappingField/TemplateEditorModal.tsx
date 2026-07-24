@@ -361,12 +361,12 @@ export function TemplateEditorModal({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-4xl max-h-[90vh] flex flex-col p-0 gap-0 overflow-hidden">
+      <DialogContent className="flex max-h-[90vh] flex-col gap-0 overflow-hidden p-0 sm:max-w-4xl">
         {/* Header */}
-        <DialogHeader className="px-6 py-4 border-b border-border bg-muted/30 shrink-0">
+        <DialogHeader className="shrink-0 border-b border-border bg-muted/30 px-6 py-4">
           <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-lg bg-primary/10 flex items-center justify-center">
-              <Icons.code className="w-4 h-4 text-primary" />
+            <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary/10">
+              <Icons.code className="h-4 w-4 text-primary" />
             </div>
             <div>
               <DialogTitle className="text-base">Template Editor</DialogTitle>
@@ -380,15 +380,15 @@ export function TemplateEditorModal({
         </DialogHeader>
 
         {/* Toolbar */}
-        <div className="flex items-center justify-between gap-2 px-4 py-2 border-b border-border bg-background shrink-0">
+        <div className="flex shrink-0 items-center justify-between gap-2 border-b border-border bg-background px-4 py-2">
           {/* Snippets */}
           <div className="flex items-center gap-1">
-            <span className="text-xs text-muted-foreground mr-1">Insert:</span>
+            <span className="mr-1 text-xs text-muted-foreground">Insert:</span>
             <Button
               type="button"
               variant="ghost"
               size="sm"
-              className="h-7 px-2 font-mono text-xs text-purple-600 dark:text-purple-400 hover:bg-purple-50 dark:hover:bg-purple-950"
+              className="h-7 px-2 font-mono text-xs text-purple-600 hover:bg-purple-50 dark:text-purple-400 dark:hover:bg-purple-950"
               onClick={() =>
                 insertSnippet('{% if condition %}\n  \n{% endif %}')
               }
@@ -399,7 +399,7 @@ export function TemplateEditorModal({
               type="button"
               variant="ghost"
               size="sm"
-              className="h-7 px-2 font-mono text-xs text-purple-600 dark:text-purple-400 hover:bg-purple-50 dark:hover:bg-purple-950"
+              className="h-7 px-2 font-mono text-xs text-purple-600 hover:bg-purple-50 dark:text-purple-400 dark:hover:bg-purple-950"
               onClick={() =>
                 insertSnippet(
                   '{% for item in items %}\n  {{ item }}\n{% endfor %}'
@@ -412,7 +412,7 @@ export function TemplateEditorModal({
               type="button"
               variant="ghost"
               size="sm"
-              className="h-7 px-2 font-mono text-xs text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-950"
+              className="h-7 px-2 font-mono text-xs text-blue-600 hover:bg-blue-50 dark:text-blue-400 dark:hover:bg-blue-950"
               onClick={() => insertSnippet('{{ value | default("") }}')}
             >
               default
@@ -435,15 +435,15 @@ export function TemplateEditorModal({
               onValueChange={(v) => setViewMode(v as ViewMode)}
             >
               <TabsList className="h-8">
-                <TabsTrigger value="editor" className="h-6 px-2 text-xs gap-1">
+                <TabsTrigger value="editor" className="h-6 gap-1 px-2 text-xs">
                   <Icons.code className="h-3 w-3" />
                   Editor
                 </TabsTrigger>
-                <TabsTrigger value="preview" className="h-6 px-2 text-xs gap-1">
+                <TabsTrigger value="preview" className="h-6 gap-1 px-2 text-xs">
                   <Icons.eye className="h-3 w-3" />
                   Preview
                 </TabsTrigger>
-                <TabsTrigger value="split" className="h-6 px-2 text-xs gap-1">
+                <TabsTrigger value="split" className="h-6 gap-1 px-2 text-xs">
                   <Icons.columns className="h-3 w-3" />
                   Split
                 </TabsTrigger>
@@ -454,7 +454,7 @@ export function TemplateEditorModal({
               type="button"
               variant={showVariables ? 'secondary' : 'ghost'}
               size="sm"
-              className="h-8 px-2 text-xs gap-1"
+              className="h-8 gap-1 px-2 text-xs"
               onClick={() => setShowVariables(!showVariables)}
             >
               <Icons.variable className="h-3.5 w-3.5" />
@@ -464,9 +464,9 @@ export function TemplateEditorModal({
         </div>
 
         {/* Main content */}
-        <div className="flex-1 flex min-h-0 overflow-hidden">
+        <div className="flex min-h-0 flex-1 overflow-hidden">
           {/* Editor / Preview area */}
-          <div className="flex-1 flex flex-col min-w-0">
+          <div className="flex min-w-0 flex-1 flex-col">
             {(viewMode === 'editor' || viewMode === 'split') && (
               <div
                 className={cn(
@@ -477,8 +477,8 @@ export function TemplateEditorModal({
                 )}
               >
                 {/* Editor toolbar */}
-                <div className="flex items-center justify-between px-3 py-1.5 bg-muted/30 border-b border-border text-xs shrink-0">
-                  <span className="text-muted-foreground font-medium">
+                <div className="flex shrink-0 items-center justify-between border-b border-border bg-muted/30 px-3 py-1.5 text-xs">
+                  <span className="font-medium text-muted-foreground">
                     Template
                   </span>
                   <Button
@@ -490,24 +490,24 @@ export function TemplateEditorModal({
                   >
                     {copied ? (
                       <>
-                        <Icons.check className="h-3 w-3 mr-1" />
+                        <Icons.check className="mr-1 h-3 w-3" />
                         Copied!
                       </>
                     ) : (
                       <>
-                        <Icons.copy className="h-3 w-3 mr-1" />
+                        <Icons.copy className="mr-1 h-3 w-3" />
                         Copy
                       </>
                     )}
                   </Button>
                 </div>
                 {/* Textarea */}
-                <div className="flex-1 relative overflow-hidden">
+                <div className="relative flex-1 overflow-hidden">
                   <textarea
                     ref={textareaRef}
                     value={localValue}
                     onChange={(e) => setLocalValue(e.target.value)}
-                    className="absolute inset-0 w-full h-full p-3 font-mono text-sm resize-none focus:outline-none focus:ring-0 bg-background text-foreground"
+                    className="absolute inset-0 h-full w-full resize-none bg-background p-3 font-mono text-sm text-foreground focus:outline-none focus:ring-0"
                     placeholder={placeholder}
                     spellCheck={false}
                   />
@@ -523,17 +523,17 @@ export function TemplateEditorModal({
                 )}
               >
                 {/* Preview header */}
-                <div className="flex items-center gap-2 px-3 py-1.5 bg-green-50 dark:bg-green-950/30 border-b border-green-100 dark:border-green-900 text-xs shrink-0">
+                <div className="flex shrink-0 items-center gap-2 border-b border-green-100 bg-green-50 px-3 py-1.5 text-xs dark:border-green-900 dark:bg-green-950/30">
                   <Icons.eye className="h-3 w-3 text-green-600 dark:text-green-400" />
-                  <span className="text-green-700 dark:text-green-400 font-medium">
+                  <span className="font-medium text-green-700 dark:text-green-400">
                     Preview with sample data
                   </span>
                 </div>
                 {/* Preview content */}
-                <div className="flex-1 p-3 bg-muted/20 overflow-auto">
-                  <pre className="font-mono text-sm text-foreground whitespace-pre-wrap">
+                <div className="flex-1 overflow-auto bg-muted/20 p-3">
+                  <pre className="whitespace-pre-wrap font-mono text-sm text-foreground">
                     {previewContent || (
-                      <span className="text-muted-foreground italic">
+                      <span className="italic text-muted-foreground">
                         Empty template
                       </span>
                     )}
@@ -545,9 +545,9 @@ export function TemplateEditorModal({
 
           {/* Variables panel */}
           {showVariables && (
-            <div className="w-64 border-l border-border bg-muted/20 flex flex-col shrink-0">
-              <div className="p-3 border-b border-border shrink-0">
-                <h3 className="text-xs font-semibold text-foreground flex items-center gap-1.5 mb-1">
+            <div className="flex w-64 shrink-0 flex-col border-l border-border bg-muted/20">
+              <div className="shrink-0 border-b border-border p-3">
+                <h3 className="mb-1 flex items-center gap-1.5 text-xs font-semibold text-foreground">
                   <Icons.variable className="h-3.5 w-3.5" />
                   Template Variables
                 </h3>
@@ -559,13 +559,13 @@ export function TemplateEditorModal({
                 {/* Search - only show if there are variables */}
                 {templateVariables.length > 0 && (
                   <div className="relative mt-2">
-                    <Icons.search className="absolute left-2 top-1/2 -translate-y-1/2 h-3 w-3 text-muted-foreground" />
+                    <Icons.search className="absolute left-2 top-1/2 h-3 w-3 -translate-y-1/2 text-muted-foreground" />
                     <input
                       type="text"
                       placeholder="Search..."
                       value={searchQuery}
                       onChange={(e) => setSearchQuery(e.target.value)}
-                      className="w-full h-7 pl-7 pr-2 text-xs rounded border border-input bg-background focus:outline-none focus:ring-1 focus:ring-ring"
+                      className="h-7 w-full rounded border border-input bg-background pl-7 pr-2 text-xs focus:outline-none focus:ring-1 focus:ring-ring"
                     />
                   </div>
                 )}
@@ -573,10 +573,10 @@ export function TemplateEditorModal({
 
               <div className="flex-1 overflow-auto p-2">
                 {filteredVariables.length === 0 ? (
-                  <div className="text-center py-6 text-muted-foreground text-xs">
+                  <div className="py-6 text-center text-xs text-muted-foreground">
                     {templateVariables.length === 0 ? (
                       <div className="space-y-2">
-                        <Icons.inbox className="h-8 w-8 mx-auto opacity-50" />
+                        <Icons.inbox className="mx-auto h-8 w-8 opacity-50" />
                         <p>No variables defined</p>
                         <p className="text-[11px]">
                           Add variables using the
@@ -595,23 +595,23 @@ export function TemplateEditorModal({
                         key={variable.value}
                         type="button"
                         onClick={() => insertVariable(variable)}
-                        className="w-full text-left p-2 rounded border border-transparent hover:border-primary/30 hover:bg-primary/5 transition-colors group"
+                        className="group w-full rounded border border-transparent p-2 text-left transition-colors hover:border-primary/30 hover:bg-primary/5"
                       >
                         <div className="flex items-center gap-1.5">
                           <span className="text-muted-foreground group-hover:text-primary">
                             {getIconForType(variable.type, variable.value)}
                           </span>
-                          <code className="text-xs font-semibold text-primary truncate">
+                          <code className="truncate text-xs font-semibold text-primary">
                             {variable.label}
                           </code>
                           {variable.type && (
-                            <span className="text-[10px] text-muted-foreground ml-auto">
+                            <span className="ml-auto text-[10px] text-muted-foreground">
                               {variable.type}
                             </span>
                           )}
                         </div>
                         {variable.description && (
-                          <div className="text-[10px] text-muted-foreground mt-0.5 pl-5 truncate">
+                          <div className="mt-0.5 truncate pl-5 text-[10px] text-muted-foreground">
                             {variable.description}
                           </div>
                         )}
@@ -625,7 +625,7 @@ export function TemplateEditorModal({
         </div>
 
         {/* Footer */}
-        <div className="flex items-center justify-between px-4 py-3 border-t border-border bg-muted/30 shrink-0">
+        <div className="flex shrink-0 items-center justify-between border-t border-border bg-muted/30 px-4 py-3">
           <div className="text-xs text-muted-foreground">
             {stats.characters} characters
             {stats.variables > 0 && <span className="mx-1">•</span>}

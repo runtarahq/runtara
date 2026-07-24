@@ -486,26 +486,26 @@ export function WorkflowsGrid({
                 >
                   <div className="flex items-center justify-end gap-1 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100">
                     <Can permission="workflow:folder_rename">
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-7 w-7 text-muted-foreground"
-                      title="Rename folder"
-                      onClick={() => onFolderRename?.(folder.path)}
-                    >
-                      <Pencil className="h-4 w-4" />
-                    </Button>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-7 w-7 text-muted-foreground"
+                        title="Rename folder"
+                        onClick={() => onFolderRename?.(folder.path)}
+                      >
+                        <Pencil className="h-4 w-4" />
+                      </Button>
                     </Can>
                     <Can permission="workflow:delete">
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-7 w-7 text-muted-foreground hover:text-destructive"
-                      title="Delete folder"
-                      onClick={() => onFolderDelete?.(folder.path)}
-                    >
-                      <Trash2 className="h-4 w-4" />
-                    </Button>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-7 w-7 text-muted-foreground hover:text-destructive"
+                        title="Delete folder"
+                        onClick={() => onFolderDelete?.(folder.path)}
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
                     </Can>
                   </div>
                 </TableCell>

@@ -189,7 +189,7 @@ export const EditableCell = memo(function EditableCell({
             setIsEditing(false);
           }}
         >
-          <SelectTrigger className="h-10 w-full border-0 px-2 py-2 ring-0 focus:ring-0 rounded-none box-border">
+          <SelectTrigger className="box-border h-10 w-full rounded-none border-0 px-2 py-2 ring-0 focus:ring-0">
             <SelectValue placeholder="Select..." />
           </SelectTrigger>
           <SelectContent>
@@ -221,7 +221,7 @@ export const EditableCell = memo(function EditableCell({
         }}
         onBlur={onBlur}
         onKeyDown={handleKeyDown}
-        className="h-10 w-full rounded-none border-0 px-2 py-2 focus-visible:ring-0 bg-blue-50 dark:bg-blue-950/30 box-border ring-2 ring-inset ring-blue-500 dark:ring-blue-600"
+        className="box-border h-10 w-full rounded-none border-0 bg-blue-50 px-2 py-2 ring-2 ring-inset ring-blue-500 focus-visible:ring-0 dark:bg-blue-950/30 dark:ring-blue-600"
         type={
           dataType === 'integer' || dataType === 'decimal' ? 'number' : 'text'
         }
@@ -232,7 +232,7 @@ export const EditableCell = memo(function EditableCell({
 
   return (
     <div
-      className="h-10 w-full cursor-text px-2 py-2 hover:bg-muted/50 flex items-center box-border"
+      className="box-border flex h-10 w-full cursor-text items-center px-2 py-2 hover:bg-muted/50"
       onMouseDown={(e) => {
         e.preventDefault(); // Prevent default to avoid issues
         onFocus?.();
@@ -275,11 +275,11 @@ function JsonCellEditor({
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
         <div
-          className="h-10 w-full cursor-pointer px-2 py-2 hover:bg-muted/50 flex items-center gap-1.5 box-border"
+          className="box-border flex h-10 w-full cursor-pointer items-center gap-1.5 px-2 py-2 hover:bg-muted/50"
           onMouseDown={() => onFocus?.()}
         >
-          <Braces className="h-3.5 w-3.5 text-muted-foreground/60 shrink-0" />
-          <span className="font-mono text-xs text-muted-foreground truncate">
+          <Braces className="h-3.5 w-3.5 shrink-0 text-muted-foreground/60" />
+          <span className="truncate font-mono text-xs text-muted-foreground">
             {getJsonPreview(jsonValue)}
           </span>
         </div>
@@ -287,7 +287,7 @@ function JsonCellEditor({
       <PopoverContent
         side="bottom"
         align="start"
-        className="w-[400px] max-h-[400px] overflow-auto p-0"
+        className="max-h-[400px] w-[400px] overflow-auto p-0"
         onOpenAutoFocus={(e) => e.preventDefault()}
       >
         <JsonEditor
@@ -312,7 +312,7 @@ function JsonCellEditor({
 
 function renderValue(value: any, dataType: string) {
   if (value === undefined || value === null) {
-    return <span className="text-muted-foreground/50 italic">Empty</span>;
+    return <span className="italic text-muted-foreground/50">Empty</span>;
   }
 
   // Handle transition period: extract value from object if it has a nested "value" property
@@ -336,7 +336,7 @@ function renderValue(value: any, dataType: string) {
       return typeof value === 'number' ? value.toFixed(2) : String(value);
     case 'json':
       return (
-        <span className="font-mono text-xs text-muted-foreground truncate max-w-[200px] block">
+        <span className="block max-w-[200px] truncate font-mono text-xs text-muted-foreground">
           {JSON.stringify(value)}
         </span>
       );
@@ -351,13 +351,13 @@ function renderValue(value: any, dataType: string) {
       // Safety: if the value is an object/array that slipped through, stringify it
       if (typeof value === 'object') {
         return (
-          <span className="font-mono text-xs text-muted-foreground truncate max-w-[200px] block">
+          <span className="block max-w-[200px] truncate font-mono text-xs text-muted-foreground">
             {JSON.stringify(value)}
           </span>
         );
       }
       return (
-        <span className="truncate block max-w-[300px]">{String(value)}</span>
+        <span className="block max-w-[300px] truncate">{String(value)}</span>
       );
   }
 }

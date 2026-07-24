@@ -114,8 +114,8 @@ export function EmbedWorkflowConfigField({
     <div className="space-y-4">
       {/* Workflow Selector */}
       <div>
-        <Label className="text-sm font-medium mb-2 block">Child Workflow</Label>
-        <div className="flex items-center gap-2 w-full">
+        <Label className="mb-2 block text-sm font-medium">Child Workflow</Label>
+        <div className="flex w-full items-center gap-2">
           <div className="flex-grow">
             <Select
               onValueChange={handleWorkflowChange}
@@ -149,7 +149,7 @@ export function EmbedWorkflowConfigField({
       {/* Version Selector */}
       {currentWorkflowId && (
         <div>
-          <Label className="text-sm font-medium mb-2 block">Version</Label>
+          <Label className="mb-2 block text-sm font-medium">Version</Label>
           {isLoadingVersions ? (
             <div className="text-sm text-muted-foreground">
               Loading versions...
@@ -168,7 +168,7 @@ export function EmbedWorkflowConfigField({
                   {/* Latest option always at the top */}
                   <SelectItem value="latest">
                     <span className="font-medium">Latest</span>
-                    <span className="text-muted-foreground ml-2">
+                    <span className="ml-2 text-muted-foreground">
                       (always use the newest version)
                     </span>
                   </SelectItem>
@@ -176,7 +176,7 @@ export function EmbedWorkflowConfigField({
                   {/* Current option */}
                   <SelectItem value="current">
                     <span className="font-medium">Current</span>
-                    <span className="text-muted-foreground ml-2">
+                    <span className="ml-2 text-muted-foreground">
                       (locked to version at workflow creation)
                     </span>
                   </SelectItem>
@@ -192,7 +192,7 @@ export function EmbedWorkflowConfigField({
                           Version {version.versionNumber || 'Unknown'}
                         </span>
                         {version.createdAt && (
-                          <span className="text-muted-foreground ml-2">
+                          <span className="ml-2 text-muted-foreground">
                             ({new Date(version.createdAt).toLocaleDateString()})
                           </span>
                         )}
@@ -212,7 +212,7 @@ export function EmbedWorkflowConfigField({
                         <span className="font-medium">
                           Version {currentVersion}
                         </span>
-                        <span className="text-muted-foreground ml-2">
+                        <span className="ml-2 text-muted-foreground">
                           (not in version list)
                         </span>
                       </SelectItem>

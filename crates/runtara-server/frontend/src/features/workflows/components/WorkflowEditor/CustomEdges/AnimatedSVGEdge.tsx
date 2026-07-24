@@ -154,7 +154,7 @@ export function AnimatedSVGEdge({
               pointerEvents: 'all',
               zIndex: 1002,
             }}
-            className="nodrag nopan bg-background/80 backdrop-blur-sm px-1 py-px rounded text-[9px] font-normal text-muted-foreground/60"
+            className="nodrag nopan rounded bg-background/80 px-1 py-px text-[9px] font-normal text-muted-foreground/60 backdrop-blur-sm"
           >
             {label}
           </div>
@@ -173,7 +173,7 @@ export function AnimatedSVGEdge({
             onMouseLeave={() => setIsHovered(false)}
           >
             <Button
-              className="w-4 h-4 rounded-full [&_svg]:size-2 shadow-sm hover:shadow-md"
+              className="h-4 w-4 rounded-full shadow-sm hover:shadow-md [&_svg]:size-2"
               variant="outline"
               size="icon"
               onClick={handleInsertClick}

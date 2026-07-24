@@ -3,7 +3,7 @@ import { cn } from '@/lib/utils.ts';
 
 export function Loader() {
   return (
-    <div className="flex justify-center items-center h-screen">
+    <div className="flex h-screen items-center justify-center">
       <Icons.spinner className="h-8 w-8 animate-spin text-primary" />
     </div>
   );
@@ -11,9 +11,9 @@ export function Loader() {
 
 export function Loader2({ className }: { className?: string }) {
   return (
-    <div className="flex justify-center items-center">
+    <div className="flex items-center justify-center">
       <Icons.spinner
-        className={cn('my-28 h-8 w-8 text-primary animate-spin', className)}
+        className={cn('my-28 h-8 w-8 animate-spin text-primary', className)}
       />
     </div>
   );

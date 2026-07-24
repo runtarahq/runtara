@@ -147,8 +147,7 @@ describe('block-side operations', () => {
     };
     const next = addBlock(baseDefinition(), block);
     expect(next.blocks.map((b) => b.id)).toEqual(['a', 'b', 'c', 'd']);
-    const lastItem =
-      next.layout.items[next.layout.items.length - 1];
+    const lastItem = next.layout.items[next.layout.items.length - 1];
     expect(lastItem.child.type).toBe('block');
     if (lastItem.child.type === 'block') {
       expect(lastItem.child.blockId).toBe('d');
@@ -195,8 +194,7 @@ describe('grid (layout-node) operations', () => {
     const next = addLayoutNode(baseDefinition(), newBlock, {
       parentGridId: null,
     });
-    const lastItem =
-      next.layout.items[next.layout.items.length - 1];
+    const lastItem = next.layout.items[next.layout.items.length - 1];
     expect(lastItem.child).toEqual(newBlock);
   });
 
@@ -357,9 +355,7 @@ describe('positional adds (Phase 11)', () => {
       col: 4,
       row: 3,
     });
-    const moved = next.layout.items.find(
-      (item) => item.child.id === 'n_a'
-    );
+    const moved = next.layout.items.find((item) => item.child.id === 'n_a');
     expect(moved?.col).toBe(4);
     expect(moved?.row).toBe(3);
   });

@@ -38,7 +38,9 @@ export function KeyValueInputField(props: KeyValueInputFieldProps) {
       name={name}
       render={({ field }) => {
         const value =
-          field.value && typeof field.value === 'object' && !Array.isArray(field.value)
+          field.value &&
+          typeof field.value === 'object' &&
+          !Array.isArray(field.value)
             ? (field.value as Record<string, string>)
             : {};
         return (

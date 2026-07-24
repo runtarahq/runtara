@@ -197,17 +197,13 @@ export function FiltersEditorV2({
                   otherFilterIds={otherFilterIds.filter(
                     (id) => id !== filter.id
                   )}
-                  onChange={(updated) =>
-                    updateFilter(filter.id, () => updated)
-                  }
+                  onChange={(updated) => updateFilter(filter.id, () => updated)}
                 />
 
                 <AppliesToEditor
                   filter={filter}
                   blockIds={blockIds}
-                  onChange={(updated) =>
-                    updateFilter(filter.id, () => updated)
-                  }
+                  onChange={(updated) => updateFilter(filter.id, () => updated)}
                 />
               </CardContent>
             </Card>
@@ -241,8 +237,7 @@ function FilterOptionsEditor({
   onChange,
 }: FilterOptionsEditorProps) {
   const options: ReportFilterOptionsConfig = (filter.options ?? {}) as
-    | ReportFilterOptionsConfig
-    | Record<string, never>;
+    ReportFilterOptionsConfig | Record<string, never>;
   const source = options.source ?? 'static';
   const schema = schemas.find((s) => s.name === options.schema);
   const fields = schema?.columns.map((c) => c.name) ?? [];
@@ -297,10 +292,7 @@ interface StaticOptionsEditorProps {
   onChange: (values: StaticOption[]) => void;
 }
 
-function StaticOptionsEditor({
-  values,
-  onChange,
-}: StaticOptionsEditorProps) {
+function StaticOptionsEditor({ values, onChange }: StaticOptionsEditorProps) {
   return (
     <div className="grid gap-1.5">
       <div className="flex items-center justify-between">
@@ -353,9 +345,7 @@ function StaticOptionsEditor({
                 variant="ghost"
                 size="icon"
                 className="h-8 w-8"
-                onClick={() =>
-                  onChange(values.filter((_, i) => i !== index))
-                }
+                onClick={() => onChange(values.filter((_, i) => i !== index))}
               >
                 <Trash2 className="h-3.5 w-3.5" />
               </Button>
@@ -680,11 +670,7 @@ interface AppliesToEditorProps {
   onChange: (filter: ReportFilterDefinition) => void;
 }
 
-function AppliesToEditor({
-  filter,
-  blockIds,
-  onChange,
-}: AppliesToEditorProps) {
+function AppliesToEditor({ filter, blockIds, onChange }: AppliesToEditorProps) {
   const appliesTo = filter.appliesTo ?? [];
 
   return (
@@ -727,9 +713,7 @@ function AppliesToEditor({
                   onChange({
                     ...filter,
                     appliesTo: appliesTo.map((t, i) =>
-                      i === index
-                        ? { ...t, blockId: value || null }
-                        : t
+                      i === index ? { ...t, blockId: value || null } : t
                     ),
                   })
                 }

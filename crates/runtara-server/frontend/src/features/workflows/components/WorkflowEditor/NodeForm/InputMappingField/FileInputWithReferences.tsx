@@ -87,7 +87,7 @@ export function FileInputWithReferences({
           disabled={disabled}
           className="h-7 text-xs"
         >
-          <Upload className="h-3 w-3 mr-1" />
+          <Upload className="mr-1 h-3 w-3" />
           Upload
         </Button>
         <Button
@@ -98,7 +98,7 @@ export function FileInputWithReferences({
           disabled={disabled}
           className="h-7 text-xs"
         >
-          <Link className="h-3 w-3 mr-1" />
+          <Link className="mr-1 h-3 w-3" />
           Reference
         </Button>
       </div>

@@ -49,7 +49,10 @@ export interface ReplayModelResult {
  * subgraphs into parent-scoped children) down to the top-level step DAG. Each
  * composite step stays a single node; its iterations surface as a counter.
  */
-export function graphToReplayInput(nodes: Node[], edges: Edge[]): ReplayGraphInput {
+export function graphToReplayInput(
+  nodes: Node[],
+  edges: Edge[]
+): ReplayGraphInput {
   const kept = nodes.filter(
     (n) => !n.parentId && !NON_STEP_NODE_TYPES.has(n.type ?? '')
   );
@@ -110,7 +113,11 @@ export function useReplayModel(
     enabled: !!workflowId && !!instanceId && (options.enabled ?? true),
     staleTime: 30_000,
     queryFn: async (token: string) => {
-      const instance = await getWorkflowInstance(token, workflowId!, instanceId!);
+      const instance = await getWorkflowInstance(
+        token,
+        workflowId!,
+        instanceId!
+      );
       const version = instance.usedVersion;
 
       // The graph the instance actually ran (not the current editor draft).

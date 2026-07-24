@@ -185,7 +185,13 @@ test.describe('report table column fit (mocked)', () => {
       errors: [],
     };
 
-    await bootstrapReport(page, mockApi as MockApi, FIT_REPORT_ID, definition, render);
+    await bootstrapReport(
+      page,
+      mockApi as MockApi,
+      FIT_REPORT_ID,
+      definition,
+      render
+    );
     await page.goto(appPath(`/reports/${FIT_REPORT_ID}`));
     await expect(page.locator('table.table-fixed')).toBeVisible();
 

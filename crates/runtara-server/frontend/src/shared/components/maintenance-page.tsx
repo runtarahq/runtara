@@ -22,7 +22,7 @@ export function MaintenancePage() {
   return (
     <div className="relative flex min-h-screen items-center justify-center overflow-hidden bg-white p-4">
       {/* Ambient glow */}
-      <div className="pointer-events-none absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2">
+      <div className="pointer-events-none absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2">
         <div className="h-[600px] w-[600px] rounded-full bg-blue-500/[0.06] blur-[120px]" />
       </div>
 
@@ -37,7 +37,7 @@ export function MaintenancePage() {
           {/* Gradient top accent line */}
           <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-blue-500 to-transparent" />
 
-          <div className="px-8 pt-10 pb-8">
+          <div className="px-8 pb-8 pt-10">
             {/* Animated pulse indicator */}
             <div className="mx-auto mb-8 flex h-14 w-14 items-center justify-center">
               <span className="absolute inline-flex h-10 w-10 animate-ping rounded-full bg-blue-500/10" />

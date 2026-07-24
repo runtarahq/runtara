@@ -102,7 +102,7 @@ export function ConfigurationField(props: any) {
         {pairs.map((pair, index) => (
           <div
             key={index}
-            className="grid grid-cols-[1fr_1fr_auto] gap-2 items-center"
+            className="grid grid-cols-[1fr_1fr_auto] items-center gap-2"
           >
             <Input
               placeholder="Key"
@@ -135,7 +135,7 @@ export function ConfigurationField(props: any) {
           disabled={disabled}
           className="mt-2"
         >
-          <Plus className="h-4 w-4 mr-2" />
+          <Plus className="mr-2 h-4 w-4" />
           Add Key/Value Pair
         </Button>
       </div>

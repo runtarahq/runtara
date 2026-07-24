@@ -161,7 +161,7 @@ export function VariablePickerModal({
         <div className="space-y-4">
           {/* Search input */}
           <div className="relative">
-            <Icons.search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+            <Icons.search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
             <Input
               placeholder="Search variables..."
               value={searchQuery}
@@ -172,7 +172,7 @@ export function VariablePickerModal({
           </div>
 
           {/* Variable list */}
-          <div className="max-h-[400px] overflow-y-auto space-y-4">
+          <div className="max-h-[400px] space-y-4 overflow-y-auto">
             {/* Free-text path entry: any legal reference path can be used
                 even when it is not in the suggestion list */}
             {searchQuery.trim() !== '' &&
@@ -188,21 +188,21 @@ export function VariablePickerModal({
                       group: 'Workflow Inputs',
                     })
                   }
-                  className="w-full flex items-center gap-2 px-2 py-1.5 rounded border border-dashed hover:bg-accent text-left transition-colors text-muted-foreground hover:text-foreground"
+                  className="flex w-full items-center gap-2 rounded border border-dashed px-2 py-1.5 text-left text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
                 >
-                  <div className="flex-1 min-w-0">
-                    <p className="font-mono text-sm truncate">
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate font-mono text-sm">
                       {searchQuery.trim()}
                     </p>
-                    <p className="text-xs truncate opacity-70">
+                    <p className="truncate text-xs opacity-70">
                       Use as custom reference path
                     </p>
                   </div>
                 </button>
               )}
             {filteredSuggestions.length === 0 ? (
-              <div className="text-center py-8 text-muted-foreground">
-                <Icons.inbox className="h-8 w-8 mx-auto mb-2 opacity-50" />
+              <div className="py-8 text-center text-muted-foreground">
+                <Icons.inbox className="mx-auto mb-2 h-8 w-8 opacity-50" />
                 <p>No variables found</p>
               </div>
             ) : (
@@ -210,7 +210,7 @@ export function VariablePickerModal({
                 {/* Uniform iteration context (Split and While scopes) */}
                 {groupedSuggestions['Iteration Context'].length > 0 && (
                   <div>
-                    <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">
+                    <h4 className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
                       Iteration Context
                     </h4>
                     <div className="space-y-0.5">
@@ -220,21 +220,21 @@ export function VariablePickerModal({
                             key={suggestion.value}
                             type="button"
                             onClick={() => handleSelect(suggestion)}
-                            className="w-full flex items-center gap-2 px-2 py-1.5 rounded hover:bg-accent text-left transition-colors text-muted-foreground hover:text-foreground"
+                            className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
                           >
                             {getIconForType(suggestion.type, suggestion.value)}
-                            <div className="flex-1 min-w-0">
-                              <p className="font-mono text-sm truncate">
+                            <div className="min-w-0 flex-1">
+                              <p className="truncate font-mono text-sm">
                                 {suggestion.label}
                               </p>
                               {suggestion.description && (
-                                <p className="text-xs truncate opacity-70">
+                                <p className="truncate text-xs opacity-70">
                                   {suggestion.description}
                                 </p>
                               )}
                             </div>
                             {suggestion.type && (
-                              <span className="text-[11px] font-mono px-1.5 py-0.5 rounded shrink-0 text-muted-foreground bg-black/5 dark:bg-white/10">
+                              <span className="shrink-0 rounded bg-black/5 px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground dark:bg-white/10">
                                 {suggestion.type}
                               </span>
                             )}
@@ -248,7 +248,7 @@ export function VariablePickerModal({
                 {/* Loop Context (While loop scope) */}
                 {groupedSuggestions['Loop Context'].length > 0 && (
                   <div>
-                    <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">
+                    <h4 className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
                       Loop Context
                     </h4>
                     <div className="space-y-0.5">
@@ -257,21 +257,21 @@ export function VariablePickerModal({
                           key={suggestion.value}
                           type="button"
                           onClick={() => handleSelect(suggestion)}
-                          className="w-full flex items-center gap-2 px-2 py-1.5 rounded hover:bg-accent text-left transition-colors text-muted-foreground hover:text-foreground"
+                          className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
                         >
                           {getIconForType(suggestion.type, suggestion.value)}
-                          <div className="flex-1 min-w-0">
-                            <p className="font-mono text-sm truncate">
+                          <div className="min-w-0 flex-1">
+                            <p className="truncate font-mono text-sm">
                               {suggestion.label}
                             </p>
                             {suggestion.description && (
-                              <p className="text-xs truncate opacity-70">
+                              <p className="truncate text-xs opacity-70">
                                 {suggestion.description}
                               </p>
                             )}
                           </div>
                           {suggestion.type && (
-                            <span className="text-[11px] font-mono px-1.5 py-0.5 rounded shrink-0 text-muted-foreground bg-black/5 dark:bg-white/10">
+                            <span className="shrink-0 rounded bg-black/5 px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground dark:bg-white/10">
                               {suggestion.type}
                             </span>
                           )}
@@ -284,7 +284,7 @@ export function VariablePickerModal({
                 {/* Split Scope (Split iteration variables) */}
                 {groupedSuggestions['Split Scope'].length > 0 && (
                   <div>
-                    <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">
+                    <h4 className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
                       Split Scope
                     </h4>
                     <div className="space-y-0.5">
@@ -293,21 +293,21 @@ export function VariablePickerModal({
                           key={suggestion.value}
                           type="button"
                           onClick={() => handleSelect(suggestion)}
-                          className="w-full flex items-center gap-2 px-2 py-1.5 rounded hover:bg-accent text-left transition-colors text-muted-foreground hover:text-foreground"
+                          className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
                         >
                           {getIconForType(suggestion.type, suggestion.value)}
-                          <div className="flex-1 min-w-0">
-                            <p className="font-mono text-sm truncate">
+                          <div className="min-w-0 flex-1">
+                            <p className="truncate font-mono text-sm">
                               {suggestion.label}
                             </p>
                             {suggestion.description && (
-                              <p className="text-xs truncate opacity-70">
+                              <p className="truncate text-xs opacity-70">
                                 {suggestion.description}
                               </p>
                             )}
                           </div>
                           {suggestion.type && (
-                            <span className="text-[11px] font-mono px-1.5 py-0.5 rounded shrink-0 text-muted-foreground bg-black/5 dark:bg-white/10">
+                            <span className="shrink-0 rounded bg-black/5 px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground dark:bg-white/10">
                               {suggestion.type}
                             </span>
                           )}
@@ -320,7 +320,7 @@ export function VariablePickerModal({
                 {/* Wait Scope (WaitForSignal onWait variables) */}
                 {groupedSuggestions['Wait Scope'].length > 0 && (
                   <div>
-                    <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">
+                    <h4 className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
                       Wait Scope
                     </h4>
                     <div className="space-y-0.5">
@@ -329,21 +329,21 @@ export function VariablePickerModal({
                           key={suggestion.value}
                           type="button"
                           onClick={() => handleSelect(suggestion)}
-                          className="w-full flex items-center gap-2 px-2 py-1.5 rounded hover:bg-accent text-left transition-colors text-muted-foreground hover:text-foreground"
+                          className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
                         >
                           {getIconForType(suggestion.type, suggestion.value)}
-                          <div className="flex-1 min-w-0">
-                            <p className="font-mono text-sm truncate">
+                          <div className="min-w-0 flex-1">
+                            <p className="truncate font-mono text-sm">
                               {suggestion.label}
                             </p>
                             {suggestion.description && (
-                              <p className="text-xs truncate opacity-70">
+                              <p className="truncate text-xs opacity-70">
                                 {suggestion.description}
                               </p>
                             )}
                           </div>
                           {suggestion.type && (
-                            <span className="text-[11px] font-mono px-1.5 py-0.5 rounded shrink-0 text-muted-foreground bg-black/5 dark:bg-white/10">
+                            <span className="shrink-0 rounded bg-black/5 px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground dark:bg-white/10">
                               {suggestion.type}
                             </span>
                           )}
@@ -356,7 +356,7 @@ export function VariablePickerModal({
                 {/* Workflow Inputs */}
                 {groupedSuggestions['Workflow Inputs'].length > 0 && (
                   <div>
-                    <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">
+                    <h4 className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
                       Workflow Inputs
                     </h4>
                     <div className="space-y-0.5">
@@ -366,21 +366,21 @@ export function VariablePickerModal({
                             key={suggestion.value}
                             type="button"
                             onClick={() => handleSelect(suggestion)}
-                            className="w-full flex items-center gap-2 px-2 py-1.5 rounded hover:bg-accent text-left transition-colors text-muted-foreground hover:text-foreground"
+                            className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
                           >
                             {getIconForType(suggestion.type, suggestion.value)}
-                            <div className="flex-1 min-w-0">
-                              <p className="font-mono text-sm truncate">
+                            <div className="min-w-0 flex-1">
+                              <p className="truncate font-mono text-sm">
                                 {suggestion.label}
                               </p>
                               {suggestion.description && (
-                                <p className="text-xs truncate opacity-70">
+                                <p className="truncate text-xs opacity-70">
                                   {suggestion.description}
                                 </p>
                               )}
                             </div>
                             {suggestion.type && (
-                              <span className="text-[11px] font-mono px-1.5 py-0.5 rounded shrink-0 text-muted-foreground bg-black/5 dark:bg-white/10">
+                              <span className="shrink-0 rounded bg-black/5 px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground dark:bg-white/10">
                                 {suggestion.type}
                               </span>
                             )}
@@ -394,7 +394,7 @@ export function VariablePickerModal({
                 {/* Variables */}
                 {groupedSuggestions['Variables'].length > 0 && (
                   <div>
-                    <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">
+                    <h4 className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
                       Variables
                     </h4>
                     <div className="space-y-0.5">
@@ -403,21 +403,21 @@ export function VariablePickerModal({
                           key={suggestion.value}
                           type="button"
                           onClick={() => handleSelect(suggestion)}
-                          className="w-full flex items-center gap-2 px-2 py-1.5 rounded hover:bg-accent text-left transition-colors text-muted-foreground hover:text-foreground"
+                          className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
                         >
                           {getIconForType(suggestion.type, suggestion.value)}
-                          <div className="flex-1 min-w-0">
-                            <p className="font-mono text-sm truncate">
+                          <div className="min-w-0 flex-1">
+                            <p className="truncate font-mono text-sm">
                               {suggestion.label}
                             </p>
                             {suggestion.description && (
-                              <p className="text-xs truncate opacity-70">
+                              <p className="truncate text-xs opacity-70">
                                 {suggestion.description}
                               </p>
                             )}
                           </div>
                           {suggestion.type && (
-                            <span className="text-[11px] font-mono px-1.5 py-0.5 rounded shrink-0 text-muted-foreground bg-black/5 dark:bg-white/10">
+                            <span className="shrink-0 rounded bg-black/5 px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground dark:bg-white/10">
                               {suggestion.type}
                             </span>
                           )}
@@ -430,7 +430,7 @@ export function VariablePickerModal({
                 {/* Step Outputs */}
                 {groupedSuggestions['Step Outputs'].length > 0 && (
                   <div>
-                    <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">
+                    <h4 className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
                       Step Outputs
                     </h4>
                     <div className="space-y-0.5">
@@ -439,11 +439,11 @@ export function VariablePickerModal({
                           key={suggestion.value}
                           type="button"
                           onClick={() => handleSelect(suggestion)}
-                          className="w-full flex items-center gap-2 px-2 py-1.5 rounded hover:bg-accent text-left transition-colors text-muted-foreground hover:text-foreground"
+                          className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
                         >
                           {getIconForType(suggestion.type, suggestion.value)}
-                          <div className="flex-1 min-w-0">
-                            <p className="text-sm truncate">
+                          <div className="min-w-0 flex-1">
+                            <p className="truncate text-sm">
                               <span className="font-medium">
                                 {suggestion.stepName || suggestion.description}
                               </span>
@@ -457,13 +457,13 @@ export function VariablePickerModal({
                               )}
                             </p>
                             {suggestion.stepId && (
-                              <p className="text-[11px] font-mono truncate opacity-50">
+                              <p className="truncate font-mono text-[11px] opacity-50">
                                 {suggestion.stepId}
                               </p>
                             )}
                           </div>
                           {suggestion.type && (
-                            <span className="text-[11px] font-mono px-1.5 py-0.5 rounded shrink-0 bg-black/5 dark:bg-white/10">
+                            <span className="shrink-0 rounded bg-black/5 px-1.5 py-0.5 font-mono text-[11px] dark:bg-white/10">
                               {suggestion.type}
                             </span>
                           )}

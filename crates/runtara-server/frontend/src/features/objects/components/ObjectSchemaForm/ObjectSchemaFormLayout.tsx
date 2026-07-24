@@ -35,24 +35,24 @@ export function ObjectSchemaFormLayout(props: ObjectSchemaFormLayoutProps) {
   return (
     <div className="min-h-screen bg-slate-50/50 dark:bg-background">
       {/* Sticky Header */}
-      <header className="sticky top-0 z-10 bg-slate-50/80 backdrop-blur-sm border-b border-slate-200/60 dark:bg-background/80 dark:border-slate-700/60">
+      <header className="sticky top-0 z-10 border-b border-slate-200/60 bg-slate-50/80 backdrop-blur-sm dark:border-slate-700/60 dark:bg-background/80">
         <div className="px-6 py-4">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
               <Link
                 to={cancelHref}
-                className="p-1.5 -ml-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition-colors dark:hover:text-slate-300 dark:hover:bg-slate-800"
+                className="-ml-1.5 rounded-lg p-1.5 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-slate-800 dark:hover:text-slate-300"
               >
-                <ArrowLeft className="w-5 h-5" />
+                <ArrowLeft className="h-5 w-5" />
               </Link>
               <div>
-                <p className="text-xs font-semibold text-blue-600 uppercase tracking-wider">
+                <p className="text-xs font-semibold uppercase tracking-wider text-blue-600">
                   Objects
                 </p>
                 <h1 className="text-lg font-semibold text-slate-900 dark:text-slate-100">
                   {title}
                   {schemaName && (
-                    <span className="text-slate-400 ml-1">{schemaName}</span>
+                    <span className="ml-1 text-slate-400">{schemaName}</span>
                   )}
                 </h1>
               </div>
@@ -65,12 +65,12 @@ export function ObjectSchemaFormLayout(props: ObjectSchemaFormLayoutProps) {
                   size="sm"
                   onClick={onDelete}
                   disabled={isDeleting}
-                  className="text-red-600 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-900/30"
+                  className="text-red-600 hover:bg-red-50 hover:text-red-700 dark:hover:bg-red-900/30"
                 >
                   {isDeleting ? (
-                    <Loader2 className="w-4 h-4 mr-1.5 animate-spin" />
+                    <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
                   ) : (
-                    <Trash2 className="w-4 h-4 mr-1.5" />
+                    <Trash2 className="mr-1.5 h-4 w-4" />
                   )}
                   Delete
                 </Button>
@@ -93,12 +93,12 @@ export function ObjectSchemaFormLayout(props: ObjectSchemaFormLayoutProps) {
               >
                 {isLoading ? (
                   <>
-                    <Loader2 className="w-4 h-4 mr-1.5 animate-spin" />
+                    <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
                     {loadingLabel || 'Saving...'}
                   </>
                 ) : (
                   <>
-                    <Save className="w-4 h-4 mr-1.5" />
+                    <Save className="mr-1.5 h-4 w-4" />
                     {submitLabel}
                   </>
                 )}
@@ -109,25 +109,25 @@ export function ObjectSchemaFormLayout(props: ObjectSchemaFormLayoutProps) {
       </header>
 
       {/* Form Content */}
-      <div className="px-6 py-5 max-w-4xl">
+      <div className="max-w-4xl px-6 py-5">
         {/* Object Type Header */}
-        <div className="flex items-center gap-3 mb-5">
-          <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center shadow-sm">
-            <Database className="w-5 h-5 text-white" />
+        <div className="mb-5 flex items-center gap-3">
+          <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-gradient-to-br from-blue-500 to-indigo-600 shadow-sm">
+            <Database className="h-5 w-5 text-white" />
           </div>
           <div>
             <h2 className="text-base font-semibold text-slate-900 dark:text-slate-100">
               Object Type Definition
             </h2>
             {metadata && metadata.filter(Boolean).length > 0 && (
-              <div className="flex items-center gap-2 mt-0.5">
+              <div className="mt-0.5 flex items-center gap-2">
                 {metadata.filter(Boolean).map((item, index) => (
                   <span
                     key={index}
-                    className="text-sm text-slate-500 dark:text-slate-400 flex items-center gap-2"
+                    className="flex items-center gap-2 text-sm text-slate-500 dark:text-slate-400"
                   >
                     {index > 0 && (
-                      <span className="w-1 h-1 bg-slate-300 rounded-full dark:bg-slate-600" />
+                      <span className="h-1 w-1 rounded-full bg-slate-300 dark:bg-slate-600" />
                     )}
                     {item}
                   </span>

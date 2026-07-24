@@ -96,7 +96,8 @@ export function EditTrigger() {
     // non-APPLICATION types). Merge over the loaded trigger's configuration
     // so API-authored keys survive an edit-save.
     const existingConfiguration: Record<string, unknown> =
-      triggerData?.configuration && typeof triggerData.configuration === 'object'
+      triggerData?.configuration &&
+      typeof triggerData.configuration === 'object'
         ? { ...triggerData.configuration }
         : {};
 
@@ -106,7 +107,9 @@ export function EditTrigger() {
       case 'CRON':
         finalConfiguration = buildCronConfiguration({
           existing: existingConfiguration,
-          expression: scheduleConfig ? scheduleToCron(scheduleConfig) : undefined,
+          expression: scheduleConfig
+            ? scheduleToCron(scheduleConfig)
+            : undefined,
           inputsText: cronInputs,
           debug: cronDebug,
         });

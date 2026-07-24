@@ -5,10 +5,7 @@ import { Button } from '@/shared/components/ui/button';
 import { fileToFileData, formatFileSize } from '@/shared/utils/file-utils';
 import { MAX_FILE_SIZE_BYTES } from '@/shared/types/file';
 import type { FileData } from '@/shared/types/file';
-import {
-  ReportBlockDefinition,
-  ReportWorkflowActionConfig,
-} from '../../types';
+import { ReportBlockDefinition, ReportWorkflowActionConfig } from '../../types';
 import {
   useReportWorkflowAction,
   type ReportWorkflowActionResult,

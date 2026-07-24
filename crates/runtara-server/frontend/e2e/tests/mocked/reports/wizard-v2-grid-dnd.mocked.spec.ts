@@ -4,11 +4,7 @@
 // the pointer moves 4px, so we use real mouse.down/move/up rather
 // than Playwright's higher-level `dragTo`.
 import type { Page, Route } from '@playwright/test';
-import {
-  buildObjectModelConnection,
-  expect,
-  test,
-} from '../../../fixtures';
+import { buildObjectModelConnection, expect, test } from '../../../fixtures';
 import { appPath } from '../../../utils/app-path';
 import type { Schema } from '../../../../src/generated/RuntaraRuntimeApi';
 import type {
@@ -199,11 +195,9 @@ test.describe('wizard v2 grid drag-and-drop (mocked)', () => {
     );
     // Move into C's card with many intermediate steps so dnd-kit's
     // collision detection updates `over` along the way.
-    await page.mouse.move(
-      cBox.x + cBox.width / 2,
-      cBox.y + cBox.height / 2,
-      { steps: 25 }
-    );
+    await page.mouse.move(cBox.x + cBox.width / 2, cBox.y + cBox.height / 2, {
+      steps: 25,
+    });
     // Settle on the target before releasing.
     await page.waitForTimeout(50);
     await page.mouse.up();

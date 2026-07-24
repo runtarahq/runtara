@@ -196,7 +196,7 @@ export function CompositeArrayEditor({
   return (
     <div className="flex flex-col">
       {/* Header */}
-      <div className="flex items-center justify-between px-4 py-3 border-b bg-muted/20">
+      <div className="flex items-center justify-between border-b bg-muted/20 px-4 py-3">
         <div className="flex items-center gap-2">
           <List className="h-4 w-4 text-green-600" />
           <span className="text-sm font-medium">{title}</span>
@@ -218,10 +218,10 @@ export function CompositeArrayEditor({
       </div>
 
       {/* Items */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-3">
+      <div className="flex-1 space-y-3 overflow-y-auto p-4">
         {value.length === 0 && (
-          <div className="text-center py-8 text-muted-foreground">
-            <List className="h-8 w-8 mx-auto mb-2 opacity-50" />
+          <div className="py-8 text-center text-muted-foreground">
+            <List className="mx-auto mb-2 h-8 w-8 opacity-50" />
             <p className="text-sm">No items in array.</p>
             <p className="text-xs">Click "Add Item" to get started.</p>
           </div>
@@ -252,7 +252,7 @@ export function CompositeArrayEditor({
 
       {/* Footer with add button */}
       {!disabled && (
-        <div className="px-4 py-3 border-t bg-muted/10">
+        <div className="border-t bg-muted/10 px-4 py-3">
           {value.length === 0 ? (
             /* First item: show dropdown to pick type */
             <DropdownMenu>
@@ -262,7 +262,7 @@ export function CompositeArrayEditor({
                   variant="outline"
                   className="w-full border-dashed"
                 >
-                  <Plus className="h-4 w-4 mr-2" />
+                  <Plus className="mr-2 h-4 w-4" />
                   Add Item
                 </Button>
               </DropdownMenuTrigger>
@@ -275,7 +275,7 @@ export function CompositeArrayEditor({
                       onSelect={() => handleAddItem(option.value)}
                       className="cursor-pointer"
                     >
-                      <IconComponent className="h-4 w-4 mr-2" />
+                      <IconComponent className="mr-2 h-4 w-4" />
                       <div className="flex flex-col">
                         <span>{option.label}</span>
                         <span className="text-xs text-muted-foreground">
@@ -296,7 +296,7 @@ export function CompositeArrayEditor({
                 className="flex-1 border-dashed"
                 onClick={handleAddItemDefault}
               >
-                <Plus className="h-4 w-4 mr-2" />
+                <Plus className="mr-2 h-4 w-4" />
                 Add Item
               </Button>
               <DropdownMenu>
@@ -318,7 +318,7 @@ export function CompositeArrayEditor({
                         onSelect={() => handleAddItem(option.value)}
                         className="cursor-pointer"
                       >
-                        <IconComponent className="h-4 w-4 mr-2" />
+                        <IconComponent className="mr-2 h-4 w-4" />
                         <div className="flex flex-col">
                           <span>{option.label}</span>
                           <span className="text-xs text-muted-foreground">

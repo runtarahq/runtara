@@ -97,21 +97,21 @@ export function CompositeValueEditor({
     title || (isArray ? 'Composite Array' : 'Composite Object');
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex h-full flex-col">
       {/* Mode switcher (if enabled) */}
       {showModeSwitcher && (
-        <div className="flex gap-2 px-4 py-3 border-b shrink-0">
+        <div className="flex shrink-0 gap-2 border-b px-4 py-3">
           <button
             type="button"
             onClick={() => handleModeChange('object')}
             disabled={disabled}
             className={cn(
-              'flex-1 flex items-center justify-center gap-2 px-4 py-2',
-              'text-sm border rounded-md transition-colors',
+              'flex flex-1 items-center justify-center gap-2 px-4 py-2',
+              'rounded-md border text-sm transition-colors',
               mode === 'object'
-                ? 'bg-green-50 border-green-300 text-green-700 dark:bg-green-950 dark:border-green-800 dark:text-green-400'
-                : 'bg-background border-input text-muted-foreground hover:bg-muted/50',
-              disabled && 'opacity-50 cursor-not-allowed'
+                ? 'border-green-300 bg-green-50 text-green-700 dark:border-green-800 dark:bg-green-950 dark:text-green-400'
+                : 'border-input bg-background text-muted-foreground hover:bg-muted/50',
+              disabled && 'cursor-not-allowed opacity-50'
             )}
           >
             <Braces className="h-4 w-4" />
@@ -122,12 +122,12 @@ export function CompositeValueEditor({
             onClick={() => handleModeChange('array')}
             disabled={disabled}
             className={cn(
-              'flex-1 flex items-center justify-center gap-2 px-4 py-2',
-              'text-sm border rounded-md transition-colors',
+              'flex flex-1 items-center justify-center gap-2 px-4 py-2',
+              'rounded-md border text-sm transition-colors',
               mode === 'array'
-                ? 'bg-green-50 border-green-300 text-green-700 dark:bg-green-950 dark:border-green-800 dark:text-green-400'
-                : 'bg-background border-input text-muted-foreground hover:bg-muted/50',
-              disabled && 'opacity-50 cursor-not-allowed'
+                ? 'border-green-300 bg-green-50 text-green-700 dark:border-green-800 dark:bg-green-950 dark:text-green-400'
+                : 'border-input bg-background text-muted-foreground hover:bg-muted/50',
+              disabled && 'cursor-not-allowed opacity-50'
             )}
           >
             <List className="h-4 w-4" />
@@ -138,7 +138,7 @@ export function CompositeValueEditor({
 
       {/* Validation summary */}
       {!validationResult.isValid && (
-        <div className="px-4 py-2 bg-destructive/10 border-b border-destructive/20">
+        <div className="border-b border-destructive/20 bg-destructive/10 px-4 py-2">
           <p className="text-sm text-destructive">
             {validationResult.errors.length} validation{' '}
             {validationResult.errors.length === 1 ? 'error' : 'errors'}

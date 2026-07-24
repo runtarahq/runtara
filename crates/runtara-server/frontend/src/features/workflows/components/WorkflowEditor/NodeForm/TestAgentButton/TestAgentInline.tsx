@@ -212,14 +212,14 @@ export function TestAgentInline() {
     // understands why the panel is inert.
     if (stepType === 'Agent' && agentId && !agentAllowed) {
       return (
-        <div className="text-center text-muted-foreground py-8">
+        <div className="py-8 text-center text-muted-foreground">
           Agent <span className="font-medium">{agentId}</span> is not enabled
           for this tenant. Testing is unavailable.
         </div>
       );
     }
     return (
-      <div className="text-center text-muted-foreground py-8">
+      <div className="py-8 text-center text-muted-foreground">
         Select an agent and capability to test
       </div>
     );
@@ -238,7 +238,7 @@ export function TestAgentInline() {
           hideReferenceToggle
         />
       ) : (
-        <div className="text-center text-muted-foreground py-4 text-sm">
+        <div className="py-4 text-center text-sm text-muted-foreground">
           This capability requires no input parameters
         </div>
       )}
@@ -268,7 +268,7 @@ export function TestAgentInline() {
                   <Textarea
                     value={testError}
                     readOnly
-                    className="font-mono text-sm min-h-[150px] max-h-[300px] mt-2 bg-destructive/5 border-destructive/20 text-destructive resize-none"
+                    className="mt-2 max-h-[300px] min-h-[150px] resize-none border-destructive/20 bg-destructive/5 font-mono text-sm text-destructive"
                   />
                 </AlertDescription>
               </Alert>
@@ -277,7 +277,7 @@ export function TestAgentInline() {
                 <div className="grid grid-cols-2 gap-4">
                   {testResult.executionTimeMs != null && (
                     <div className="rounded-lg bg-muted p-3">
-                      <p className="text-xs text-muted-foreground mb-1">
+                      <p className="mb-1 text-xs text-muted-foreground">
                         Execution Time
                       </p>
                       <p className="text-lg font-semibold">
@@ -287,7 +287,7 @@ export function TestAgentInline() {
                   )}
                   {testResult.maxMemoryMb != null && (
                     <div className="rounded-lg bg-muted p-3">
-                      <p className="text-xs text-muted-foreground mb-1">
+                      <p className="mb-1 text-xs text-muted-foreground">
                         Memory Used
                       </p>
                       <p className="text-lg font-semibold">
@@ -301,7 +301,7 @@ export function TestAgentInline() {
           ) : (
             <>
               <div>
-                <div className="flex items-center justify-between mb-2">
+                <div className="mb-2 flex items-center justify-between">
                   <Label>Output</Label>
                   <Button
                     type="button"
@@ -310,7 +310,7 @@ export function TestAgentInline() {
                     onClick={handleCopyOutput}
                     className="h-8"
                   >
-                    <Copy className="h-3 w-3 mr-1" />
+                    <Copy className="mr-1 h-3 w-3" />
                     Copy
                   </Button>
                 </div>
@@ -323,14 +323,14 @@ export function TestAgentInline() {
                       : 'No output'
                   }
                   readOnly
-                  className="font-mono text-sm min-h-[200px]"
+                  className="min-h-[200px] font-mono text-sm"
                 />
               </div>
 
               <div className="grid grid-cols-2 gap-4">
                 {testResult?.executionTimeMs != null && (
                   <div className="rounded-lg bg-muted p-3">
-                    <p className="text-xs text-muted-foreground mb-1">
+                    <p className="mb-1 text-xs text-muted-foreground">
                       Execution Time
                     </p>
                     <p className="text-lg font-semibold">
@@ -340,7 +340,7 @@ export function TestAgentInline() {
                 )}
                 {testResult?.maxMemoryMb != null && (
                   <div className="rounded-lg bg-muted p-3">
-                    <p className="text-xs text-muted-foreground mb-1">
+                    <p className="mb-1 text-xs text-muted-foreground">
                       Memory Used
                     </p>
                     <p className="text-lg font-semibold">

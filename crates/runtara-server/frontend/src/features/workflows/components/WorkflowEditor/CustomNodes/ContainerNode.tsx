@@ -203,7 +203,7 @@ function Container({
     <>
       {/* Step name label - positioned above the container */}
       {data.name && (
-        <div className="absolute -top-6 left-0 text-sm font-medium text-foreground pointer-events-none">
+        <div className="pointer-events-none absolute -top-6 left-0 text-sm font-medium text-foreground">
           {data.name}
         </div>
       )}
@@ -216,9 +216,9 @@ function Container({
       >
         {/* Placeholder button when container is empty - hidden during execution */}
         {!hasChildren && !isExecuting && (
-          <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+          <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
             <Button
-              className="pointer-events-auto nodrag nopan"
+              className="nodrag nopan pointer-events-auto"
               variant="outline"
               size="sm"
               onClick={handleOpenCreateInside}
@@ -234,7 +234,7 @@ function Container({
         type="target"
         id="target"
         position={Position.Left}
-        className="!w-2 !h-2 !rounded-full !bg-muted-foreground/40 !border-0"
+        className="!h-2 !w-2 !rounded-full !border-0 !bg-muted-foreground/40"
         isConnectable={isConnectable && !isExecuting}
       />
       <ButtonHandle
@@ -246,7 +246,7 @@ function Container({
         className="!bg-muted-foreground/40"
       >
         <Button
-          className="w-4 h-4 rounded-full [&_svg]:size-2 shadow-sm"
+          className="h-4 w-4 rounded-full shadow-sm [&_svg]:size-2"
           variant="outline"
           size="icon"
           onClick={handleOpenCreate}
@@ -269,7 +269,7 @@ function Container({
         className={selected ? '!bg-destructive/40' : '!opacity-0'}
       >
         <Button
-          className="w-4 h-4 rounded-full [&_svg]:size-2 shadow-sm bg-destructive/10 hover:bg-destructive/20"
+          className="h-4 w-4 rounded-full bg-destructive/10 shadow-sm hover:bg-destructive/20 [&_svg]:size-2"
           variant="outline"
           size="icon"
           onClick={handleOpenCreateError}

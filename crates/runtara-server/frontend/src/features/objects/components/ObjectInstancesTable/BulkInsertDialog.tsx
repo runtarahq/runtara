@@ -182,7 +182,7 @@ export function BulkInsertDialog({
               <Label>
                 Conflict columns <span className="text-destructive">*</span>
               </Label>
-              <div className="grid grid-cols-2 gap-2 max-h-40 overflow-y-auto rounded border p-2">
+              <div className="grid max-h-40 grid-cols-2 gap-2 overflow-y-auto rounded border p-2">
                 {columnNames.map((name) => (
                   <label key={name} className="flex items-center gap-2 text-sm">
                     <Checkbox
@@ -206,7 +206,7 @@ export function BulkInsertDialog({
           )}
 
           {result && (
-            <div className="rounded border bg-muted/40 p-3 space-y-1 text-sm">
+            <div className="space-y-1 rounded border bg-muted/40 p-3 text-sm">
               <div>
                 <strong>{result.createdCount}</strong> created,{' '}
                 <strong>{result.skippedCount}</strong> skipped
@@ -217,7 +217,7 @@ export function BulkInsertDialog({
                     {result.errors.length} row error
                     {result.errors.length === 1 ? '' : 's'}
                   </summary>
-                  <ul className="mt-1 list-disc pl-5 space-y-0.5 max-h-40 overflow-y-auto">
+                  <ul className="mt-1 max-h-40 list-disc space-y-0.5 overflow-y-auto pl-5">
                     {result.errors.map((e, i) => (
                       <li key={`${e.index}-${i}`}>
                         <span className="font-mono">#{e.index}</span>:{' '}

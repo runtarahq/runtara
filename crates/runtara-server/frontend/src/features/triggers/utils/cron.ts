@@ -3,11 +3,7 @@
 
 // Schedule types for the enhanced scheduler
 export type ScheduleType =
-  | 'interval'
-  | 'daily'
-  | 'weekly'
-  | 'monthly'
-  | 'custom';
+  'interval' | 'daily' | 'weekly' | 'monthly' | 'custom';
 
 export type IntervalUnit = 'minutes' | 'hours' | 'days' | 'months';
 

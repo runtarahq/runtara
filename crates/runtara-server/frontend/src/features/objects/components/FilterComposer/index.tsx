@@ -156,7 +156,7 @@ export const FilterComposer = ({
     <div className="w-full space-y-2">
       {condition ? (
         <>
-          <div className="flex justify-between items-center">
+          <div className="flex items-center justify-between">
             <div className="text-sm font-medium">Filter Expression</div>
             <Button
               type="button"
@@ -165,7 +165,7 @@ export const FilterComposer = ({
               onClick={handleClear}
               className="h-7"
             >
-              <X className="h-3 w-3 mr-1" />
+              <X className="mr-1 h-3 w-3" />
               Clear Filter
             </Button>
           </div>
@@ -174,7 +174,7 @@ export const FilterComposer = ({
             onChange={handleConditionChange}
             schemaDefinition={schemaDefinition}
           />
-          <div className="mt-2 p-2 rounded bg-muted/50 text-xs text-muted-foreground font-mono">
+          <div className="mt-2 rounded bg-muted/50 p-2 font-mono text-xs text-muted-foreground">
             {renderConditionReadable(condition)}
           </div>
         </>
@@ -188,7 +188,7 @@ export const FilterComposer = ({
           }
           className="w-full"
         >
-          <PlusCircle className="h-4 w-4 mr-2" />
+          <PlusCircle className="mr-2 h-4 w-4" />
           Add Filter Condition
         </Button>
       )}
@@ -320,10 +320,10 @@ const ConditionBuilder = ({
 
   return (
     <Card className={`my-2 border shadow-sm ${depth > 0 ? 'ml-4' : ''}`}>
-      <CardContent className="p-3 space-y-2">
+      <CardContent className="space-y-2 p-3">
         <div className="flex items-center gap-2">
           <Select value={op} onValueChange={handleOperatorChange}>
-            <SelectTrigger className="w-[280px] h-8 text-sm">
+            <SelectTrigger className="h-8 w-[280px] text-sm">
               <SelectValue placeholder="Operator" />
               <ChevronDown className="ml-auto h-4 w-4 opacity-50" />
             </SelectTrigger>
@@ -341,7 +341,7 @@ const ConditionBuilder = ({
               variant="ghost"
               size="icon"
               onClick={handleRemoveCondition}
-              className="h-8 w-8 ml-auto"
+              className="ml-auto h-8 w-8"
             >
               <X className="h-4 w-4" />
             </Button>
@@ -368,7 +368,7 @@ const ConditionBuilder = ({
                     value={arg as string}
                     onValueChange={(value) => handleArgChange(index, value)}
                   >
-                    <SelectTrigger className="flex-1 h-8 text-sm">
+                    <SelectTrigger className="h-8 flex-1 text-sm">
                       <SelectValue placeholder="Select field..." />
                     </SelectTrigger>
                     <SelectContent>
@@ -386,7 +386,7 @@ const ConditionBuilder = ({
                   </Select>
                 ) : (
                   <Input
-                    className="flex-1 h-8 text-sm"
+                    className="h-8 flex-1 text-sm"
                     type={index > 0 && isDateField ? 'datetime-local' : 'text'}
                     value={arg as string}
                     onChange={(e) => handleArgChange(index, e.target.value)}
@@ -442,9 +442,9 @@ const ConditionBuilder = ({
             variant="outline"
             size="sm"
             onClick={handleAddArgument}
-            className="text-xs w-full"
+            className="w-full text-xs"
           >
-            <PlusCircle className="h-4 w-4 mr-1" /> Add Condition
+            <PlusCircle className="mr-1 h-4 w-4" /> Add Condition
           </Button>
         )}
       </CardContent>

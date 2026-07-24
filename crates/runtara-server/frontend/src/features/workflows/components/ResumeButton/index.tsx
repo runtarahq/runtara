@@ -8,12 +8,7 @@ import { useToken } from '@/shared/hooks';
 type Props = {
   instanceId: string;
   variant?:
-    | 'default'
-    | 'outline'
-    | 'secondary'
-    | 'ghost'
-    | 'link'
-    | 'destructive';
+    'default' | 'outline' | 'secondary' | 'ghost' | 'link' | 'destructive';
   size?: 'default' | 'sm' | 'lg' | 'icon';
   className?: string;
 };

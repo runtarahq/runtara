@@ -11,7 +11,7 @@ export const BaseHandle = forwardRef<HTMLDivElement, BaseHandleProps>(
       <Handle
         ref={ref}
         {...props}
-        className={cn('!w-2 !h-2 !rounded-full', className)}
+        className={cn('!h-2 !w-2 !rounded-full', className)}
         {...props}
       >
         {children}

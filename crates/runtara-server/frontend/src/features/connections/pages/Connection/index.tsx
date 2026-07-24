@@ -42,10 +42,7 @@ interface ConnectionConflictState {
   loadingLatest: boolean;
 }
 
-function changedReadableFields(
-  opened: unknown,
-  latest: unknown
-): string[] {
+function changedReadableFields(opened: unknown, latest: unknown): string[] {
   const before = opened as {
     title?: unknown;
     editProjection?: EditProjection;

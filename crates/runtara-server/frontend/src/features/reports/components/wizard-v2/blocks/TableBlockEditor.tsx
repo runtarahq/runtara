@@ -60,13 +60,12 @@ export function TableBlockEditor({
   const columns = table.columns ?? [];
   const schemaName = block.source?.schema;
   const schema = schemas.find((s) => s.name === schemaName);
-  const availableFields =
-    schema?.columns.map((column) => column.name) ?? [];
+  const availableFields = schema?.columns.map((column) => column.name) ?? [];
 
   const updateTable = (
-    updater: (current: NonNullable<ReportBlockDefinition['table']>) => NonNullable<
-      ReportBlockDefinition['table']
-    >
+    updater: (
+      current: NonNullable<ReportBlockDefinition['table']>
+    ) => NonNullable<ReportBlockDefinition['table']>
   ) => onChange({ ...block, table: updater(table) });
 
   const updateColumns = (next: ReportTableColumn[]) =>
@@ -173,10 +172,9 @@ export function TableBlockEditor({
                               return {
                                 ...c,
                                 type: nextType,
-                                interactionButtons:
-                                  c.interactionButtons ?? [
-                                    createDefaultInteractionButton(),
-                                  ],
+                                interactionButtons: c.interactionButtons ?? [
+                                  createDefaultInteractionButton(),
+                                ],
                               };
                             }
                             return { ...c, type: nextType };
@@ -237,9 +235,7 @@ export function TableBlockEditor({
                       onChange={(action) =>
                         updateColumns(
                           columns.map((c, i) =>
-                            i === index
-                              ? { ...c, workflowAction: action }
-                              : c
+                            i === index ? { ...c, workflowAction: action } : c
                           )
                         )
                       }
@@ -317,10 +313,7 @@ export function TableBlockEditor({
               onClick={() =>
                 updateTable((t) => ({
                   ...t,
-                  actions: [
-                    ...(t.actions ?? []),
-                    createDefaultTableAction(),
-                  ],
+                  actions: [...(t.actions ?? []), createDefaultTableAction()],
                 }))
               }
             >
@@ -349,9 +342,7 @@ export function TableBlockEditor({
                     onChange({
                       ...block,
                       interactions: (block.interactions ?? []).map((i, idx) =>
-                        idx === index
-                          ? { ...i, id: event.target.value }
-                          : i
+                        idx === index ? { ...i, id: event.target.value } : i
                       ),
                     })
                   }

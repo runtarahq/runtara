@@ -53,7 +53,7 @@ export function PasswordField(props: Props) {
                   variant="link"
                   onClick={toggle}
                 >
-                  <Icon className="w-4 h-4" />
+                  <Icon className="h-4 w-4" />
                 </Button>
               </div>
             </FormControl>

@@ -19,11 +19,7 @@ export type LayoutPoint = { x: number; y: number };
 export type LayoutSize = { width: number; height: number };
 
 export type LayoutNodeType =
-  | 'basic'
-  | 'conditional'
-  | 'switch'
-  | 'container'
-  | 'note';
+  'basic' | 'conditional' | 'switch' | 'container' | 'note';
 
 export type LayoutPort = {
   id: string;

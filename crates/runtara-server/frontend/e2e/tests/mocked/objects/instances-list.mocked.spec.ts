@@ -46,7 +46,9 @@ test.describe('Object instances list (mocked)', () => {
     const view = new ManageInstancesPage(page, 'Customers');
     await view.goto();
 
-    await expect(page.getByRole('columnheader', { name: 'search_tsv' })).toHaveCount(0);
+    await expect(
+      page.getByRole('columnheader', { name: 'search_tsv' })
+    ).toHaveCount(0);
     await runA11y(page, { exclude: ['[data-sonner-toaster]'] });
     await view.expectMatchesSnapshot('objects-instances-list');
   });

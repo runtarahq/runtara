@@ -27,7 +27,11 @@ export interface TimeMap {
   /** display ms -> model ms */
   toModel: (displayT: number) => number;
   /** Parked/compressed gaps, in display space, for rendering markers. */
-  gaps: Array<{ displayStart: number; displayEnd: number; modelDurationMs: number }>;
+  gaps: Array<{
+    displayStart: number;
+    displayEnd: number;
+    modelDurationMs: number;
+  }>;
 }
 
 const DEFAULTS = {
@@ -90,7 +94,10 @@ function interpolate(
   return last[outEndKey];
 }
 
-export function buildTimeMap(model: ReplayModel, options: TimeMapOptions): TimeMap {
+export function buildTimeMap(
+  model: ReplayModel,
+  options: TimeMapOptions
+): TimeMap {
   const opts = { ...DEFAULTS, ...options };
   const tEnd = model.tEnd;
 
@@ -121,7 +128,8 @@ export function buildTimeMap(model: ReplayModel, options: TimeMapOptions): TimeM
       boundaries.push({ start: s, end: e, isGap: false });
       cursor = e;
     }
-    if (cursor < tEnd) boundaries.push({ start: cursor, end: tEnd, isGap: true });
+    if (cursor < tEnd)
+      boundaries.push({ start: cursor, end: tEnd, isGap: true });
   }
 
   // Assign display lengths.
@@ -164,7 +172,10 @@ export function buildTimeMap(model: ReplayModel, options: TimeMapOptions): TimeM
   // Degenerate run (single instant step / zero span): give the scrubber range.
   let displayEnd = displayCursor;
   if (segments.length === 0 || displayEnd <= 0) {
-    displayEnd = Math.max(displayEnd, options.pacing === 'even' ? opts.evenSliceMs : 1);
+    displayEnd = Math.max(
+      displayEnd,
+      options.pacing === 'even' ? opts.evenSliceMs : 1
+    );
     segments.push({
       modelStart: 0,
       modelEnd: Math.max(tEnd, 1),

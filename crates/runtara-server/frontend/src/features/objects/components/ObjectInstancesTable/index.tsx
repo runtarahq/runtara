@@ -2,14 +2,7 @@ import { useCallback, useMemo, useState, memo, useRef, useEffect } from 'react';
 import { RowSelectionState, SortingState } from '@tanstack/react-table';
 import { Button } from '@/shared/components/ui/button';
 import { Can } from '@/shared/components/Can';
-import {
-  Download,
-  Loader2,
-  Pencil,
-  Plus,
-  Trash2,
-  Upload,
-} from 'lucide-react';
+import { Download, Loader2, Pencil, Plus, Trash2, Upload } from 'lucide-react';
 import { DataTable } from '@/shared/components/table';
 import {
   Breadcrumb,
@@ -60,7 +53,7 @@ const AddRowButton = memo(({ onClick }: { onClick: () => void }) => {
   return (
     <button
       type="button"
-      className={`w-full text-center py-3 border-t border-slate-200 transition-colors cursor-pointer dark:border-slate-700 ${
+      className={`w-full cursor-pointer border-t border-slate-200 py-3 text-center transition-colors dark:border-slate-700 ${
         isHovering
           ? 'bg-slate-100/80 dark:bg-slate-800/50'
           : 'bg-slate-50/50 dark:bg-slate-800/20'
@@ -674,9 +667,9 @@ export function ObjectInstanceDtosTable({
             {isMissingSchemaName && (
               <Alert variant="destructive" className="m-3">
                 <AlertDescription>
-                  This schema does not have a name defined. Filtering and sorting
-                  are not available. Please contact your administrator to add a
-                  name to this schema.
+                  This schema does not have a name defined. Filtering and
+                  sorting are not available. Please contact your administrator
+                  to add a name to this schema.
                 </AlertDescription>
               </Alert>
             )}

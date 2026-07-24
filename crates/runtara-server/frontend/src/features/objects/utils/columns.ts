@@ -1,13 +1,7 @@
 import type { ColumnDefinition } from '@/generated/RuntaraRuntimeApi';
 
 export type ColumnDataType =
-  | 'string'
-  | 'integer'
-  | 'boolean'
-  | 'decimal'
-  | 'timestamp'
-  | 'json'
-  | 'enum';
+  'string' | 'integer' | 'boolean' | 'decimal' | 'timestamp' | 'json' | 'enum';
 
 export function isGeneratedObjectColumn(column: ColumnDefinition): boolean {
   return column.type === 'tsvector';

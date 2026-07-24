@@ -24,7 +24,10 @@ export function MarkdownBlockEditor({
         onChange={(event) =>
           onChange({
             ...block,
-            markdown: { ...(block.markdown ?? {}), content: event.target.value },
+            markdown: {
+              ...(block.markdown ?? {}),
+              content: event.target.value,
+            },
           })
         }
         placeholder="Markdown supports headings, lists, links…"

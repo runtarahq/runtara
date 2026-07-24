@@ -5,7 +5,11 @@ import { buildTimeMap } from './timeMap';
 const BASE = 1_700_000_000_000;
 const iso = (relMs: number) => new Date(BASE + relMs).toISOString();
 
-function sum(stepId: string, startRel: number, durationMs: number): StepSummaryLike {
+function sum(
+  stepId: string,
+  startRel: number,
+  durationMs: number
+): StepSummaryLike {
   return {
     stepId,
     stepType: 'Agent',
@@ -20,10 +24,10 @@ const gid = (a: string) => ({ id: a, stepType: 'Agent', name: a });
 
 describe('buildTimeMap', () => {
   it('real pacing without compression is identity', () => {
-    const model = buildReplayModel(
-      [sum('a', 0, 300), sum('b', 300, 300)],
-      { nodes: [gid('a'), gid('b')], edges: [] }
-    );
+    const model = buildReplayModel([sum('a', 0, 300), sum('b', 300, 300)], {
+      nodes: [gid('a'), gid('b')],
+      edges: [],
+    });
     const map = buildTimeMap(model, { pacing: 'real', compressIdle: false });
     expect(map.displayEnd).toBe(600);
     expect(map.toDisplay(0)).toBe(0);
@@ -34,10 +38,10 @@ describe('buildTimeMap', () => {
 
   it('real pacing compresses a long idle (parked) gap', () => {
     // a:[0,300], then a 5s park, then b:[5300,5600].
-    const model = buildReplayModel(
-      [sum('a', 0, 300), sum('b', 5300, 300)],
-      { nodes: [gid('a'), gid('b')], edges: [] }
-    );
+    const model = buildReplayModel([sum('a', 0, 300), sum('b', 5300, 300)], {
+      nodes: [gid('a'), gid('b')],
+      edges: [],
+    });
     const map = buildTimeMap(model, {
       pacing: 'real',
       compressIdle: true,
@@ -54,10 +58,10 @@ describe('buildTimeMap', () => {
   });
 
   it('even pacing gives every inter-event interval equal screen time', () => {
-    const model = buildReplayModel(
-      [sum('a', 0, 300), sum('b', 300, 300)],
-      { nodes: [gid('a'), gid('b')], edges: [] }
-    );
+    const model = buildReplayModel([sum('a', 0, 300), sum('b', 300, 300)], {
+      nodes: [gid('a'), gid('b')],
+      edges: [],
+    });
     const map = buildTimeMap(model, { pacing: 'even', evenSliceMs: 900 });
     // boundaries {0,300,600} -> 2 slices.
     expect(map.displayEnd).toBe(1800);
@@ -82,7 +86,10 @@ describe('buildTimeMap', () => {
   });
 
   it('gives a degenerate single-instant run a usable scrubber range', () => {
-    const model = buildReplayModel([sum('a', 0, 0)], { nodes: [gid('a')], edges: [] });
+    const model = buildReplayModel([sum('a', 0, 0)], {
+      nodes: [gid('a')],
+      edges: [],
+    });
     const real = buildTimeMap(model, { pacing: 'real', compressIdle: false });
     expect(real.displayEnd).toBeGreaterThan(0);
     const even = buildTimeMap(model, { pacing: 'even' });

@@ -199,7 +199,9 @@ export function ObjectSchemaDtoForm({
   // Capture each existing column's original name keyed by the field's stable
   // client-side `__id`, so we can tell a rename (same field, changed name) from
   // a drop + add when submitting. Initialized once from the loaded fields.
-  const originalNamesByIdRef = React.useRef<Record<string, string> | null>(null);
+  const originalNamesByIdRef = React.useRef<Record<string, string> | null>(
+    null
+  );
   if (originalNamesByIdRef.current === null) {
     originalNamesByIdRef.current = Object.fromEntries(
       fields.filter((f) => f.name.trim()).map((f) => [f.__id, f.name])
@@ -561,7 +563,7 @@ export function ObjectSchemaDtoForm({
               onAddField={addField}
             />
             {touched.fields && errors.fields && (
-              <p className="text-xs text-red-500 mt-2">{errors.fields}</p>
+              <p className="mt-2 text-xs text-red-500">{errors.fields}</p>
             )}
           </FormSection>
 

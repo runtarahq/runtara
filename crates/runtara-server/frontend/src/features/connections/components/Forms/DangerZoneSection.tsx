@@ -15,7 +15,9 @@ export function DangerZoneSection({
 }: DangerZoneSectionProps) {
   return (
     <section className="rounded-lg border border-red-200/70 bg-card px-4 py-4 dark:border-red-900/40">
-      <h3 className="font-medium text-red-700 dark:text-red-400">Danger zone</h3>
+      <h3 className="font-medium text-red-700 dark:text-red-400">
+        Danger zone
+      </h3>
       <div className="mt-3 flex items-center gap-4">
         <div className="min-w-0 flex-1">
           <p className="text-sm font-medium">Delete this connection</p>

@@ -55,9 +55,7 @@ export function ObjectModelConnectionSelector() {
           size="icon"
           className="h-9 w-9 shrink-0"
           aria-label="Database connection"
-          title={
-            current ? `Database: ${current.title}` : 'Database connection'
-          }
+          title={current ? `Database: ${current.title}` : 'Database connection'}
         >
           <Database className="h-4 w-4" />
         </Button>

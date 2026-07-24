@@ -395,10 +395,10 @@ export function ImprovedEdge({
               pointerEvents: 'all',
               zIndex: 1002,
             }}
-            className="nodrag nopan px-1 py-px rounded text-[9px] font-normal text-muted-foreground/60 flex items-center gap-0.5 bg-background/80 backdrop-blur-sm"
+            className="nodrag nopan flex items-center gap-0.5 rounded bg-background/80 px-1 py-px text-[9px] font-normal text-muted-foreground/60 backdrop-blur-sm"
           >
-            {isMemoryEdge && <Brain className="w-2.5 h-2.5" />}
-            {isToolEdge && <Wrench className="w-2.5 h-2.5" />}
+            {isMemoryEdge && <Brain className="h-2.5 w-2.5" />}
+            {isToolEdge && <Wrench className="h-2.5 w-2.5" />}
             {label}
           </div>
         )}
@@ -420,7 +420,7 @@ export function ImprovedEdge({
               onMouseLeave={() => setIsHovered(false)}
             >
               <Button
-                className="w-4 h-4 rounded-full [&_svg]:size-2 shadow-sm hover:shadow-md transition-all"
+                className="h-4 w-4 rounded-full shadow-sm transition-all hover:shadow-md [&_svg]:size-2"
                 variant="outline"
                 size="icon"
                 onClick={handleInsertClick}

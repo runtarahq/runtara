@@ -63,17 +63,17 @@ export const invocationHistoryColumns: ColumnDef<ExecutionHistoryItem>[] = [
           {workflowName ? (
             <Link
               to={`/workflows/${workflowId}`}
-              className="text-sm font-medium text-slate-900 hover:text-blue-600 inline-flex items-center gap-1.5 group/link dark:text-slate-100 dark:hover:text-blue-400"
+              className="group/link inline-flex items-center gap-1.5 text-sm font-medium text-slate-900 hover:text-blue-600 dark:text-slate-100 dark:hover:text-blue-400"
             >
               {workflowName}
-              <ExternalLink className="w-3 h-3 text-slate-400 group-hover/link:text-blue-500 transition-colors dark:group-hover/link:text-blue-400" />
+              <ExternalLink className="h-3 w-3 text-slate-400 transition-colors group-hover/link:text-blue-500 dark:group-hover/link:text-blue-400" />
             </Link>
           ) : (
-            <span className="text-sm font-medium text-slate-400 italic dark:text-slate-500">
+            <span className="text-sm font-medium italic text-slate-400 dark:text-slate-500">
               Ad-hoc invocation
             </span>
           )}
-          <span className="text-xs text-slate-400 font-mono dark:text-slate-500">
+          <span className="font-mono text-xs text-slate-400 dark:text-slate-500">
             {instanceId}
           </span>
         </div>
@@ -127,10 +127,10 @@ export const invocationHistoryColumns: ColumnDef<ExecutionHistoryItem>[] = [
           {hasPendingInput && (
             <Link
               to={`/workflows/${row.original.workflowId}/chat/${row.original.instanceId}`}
-              className="inline-flex items-center gap-1 px-2 py-1 text-xs font-medium rounded-full text-amber-700 bg-amber-50 border border-amber-200/60 hover:bg-amber-100 dark:text-amber-400 dark:bg-amber-900/30 dark:border-amber-700/40 dark:hover:bg-amber-900/50 transition-colors"
+              className="inline-flex items-center gap-1 rounded-full border border-amber-200/60 bg-amber-50 px-2 py-1 text-xs font-medium text-amber-700 transition-colors hover:bg-amber-100 dark:border-amber-700/40 dark:bg-amber-900/30 dark:text-amber-400 dark:hover:bg-amber-900/50"
               title="Continue chat"
             >
-              <MessageSquare className="w-3 h-3" />
+              <MessageSquare className="h-3 w-3" />
               Input
             </Link>
           )}
@@ -148,7 +148,7 @@ export const invocationHistoryColumns: ColumnDef<ExecutionHistoryItem>[] = [
 
       return (
         <div className="flex items-center gap-2">
-          <Zap className={`w-3.5 h-3.5 ${colorClass}`} />
+          <Zap className={`h-3.5 w-3.5 ${colorClass}`} />
           <span className={`text-sm font-medium tabular-nums ${colorClass}`}>
             {formatDuration(duration)}
           </span>
@@ -163,7 +163,7 @@ export const invocationHistoryColumns: ColumnDef<ExecutionHistoryItem>[] = [
     cell: ({ row }) => {
       const version = row.original.version;
       return version !== undefined ? (
-        <span className="inline-flex items-center px-2 py-0.5 text-xs font-medium text-slate-500 bg-slate-100 rounded dark:text-slate-400 dark:bg-slate-800">
+        <span className="inline-flex items-center rounded bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-500 dark:bg-slate-800 dark:text-slate-400">
           v{version}
         </span>
       ) : null;
@@ -184,16 +184,16 @@ export const invocationHistoryColumns: ColumnDef<ExecutionHistoryItem>[] = [
       const shouldShowStop = isActiveStatus(status);
 
       return (
-        <div className="flex items-center justify-end gap-1 opacity-0 group-hover:opacity-100 transition-opacity duration-150">
+        <div className="flex items-center justify-end gap-1 opacity-0 transition-opacity duration-150 group-hover:opacity-100">
           {status === 'suspended' && (
             <Link to={`/workflows/${workflowId}?attachInstance=${instanceId}`}>
               <Button
                 variant="ghost"
                 size="icon"
-                className="p-2 h-auto w-auto text-orange-500 hover:text-orange-600 hover:bg-orange-50 dark:hover:bg-orange-900/30 dark:hover:text-orange-400 rounded-lg transition-colors"
+                className="h-auto w-auto rounded-lg p-2 text-orange-500 transition-colors hover:bg-orange-50 hover:text-orange-600 dark:hover:bg-orange-900/30 dark:hover:text-orange-400"
                 title="Open in editor — resume debugging"
               >
-                <Bug className="w-4 h-4" />
+                <Bug className="h-4 w-4" />
               </Button>
             </Link>
           )}
@@ -202,10 +202,10 @@ export const invocationHistoryColumns: ColumnDef<ExecutionHistoryItem>[] = [
               <Button
                 variant="ghost"
                 size="icon"
-                className="p-2 h-auto w-auto text-amber-500 hover:text-amber-600 hover:bg-amber-50 dark:hover:bg-amber-900/30 dark:hover:text-amber-400 rounded-lg transition-colors"
+                className="h-auto w-auto rounded-lg p-2 text-amber-500 transition-colors hover:bg-amber-50 hover:text-amber-600 dark:hover:bg-amber-900/30 dark:hover:text-amber-400"
                 title="Continue chat"
               >
-                <MessageSquare className="w-4 h-4" />
+                <MessageSquare className="h-4 w-4" />
               </Button>
             </Link>
           )}
@@ -213,10 +213,10 @@ export const invocationHistoryColumns: ColumnDef<ExecutionHistoryItem>[] = [
             <Button
               variant="ghost"
               size="icon"
-              className="p-2 h-auto w-auto text-slate-400 hover:text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-900/30 dark:hover:text-blue-400 rounded-lg transition-colors"
+              className="h-auto w-auto rounded-lg p-2 text-slate-400 transition-colors hover:bg-blue-50 hover:text-blue-600 dark:hover:bg-blue-900/30 dark:hover:text-blue-400"
               title="View details"
             >
-              <Eye className="w-4 h-4" />
+              <Eye className="h-4 w-4" />
             </Button>
           </Link>
           {shouldShowStop ? (
@@ -224,7 +224,7 @@ export const invocationHistoryColumns: ColumnDef<ExecutionHistoryItem>[] = [
               instanceId={instanceId}
               variant="ghost"
               size="icon"
-              className="p-2 h-auto w-auto text-slate-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/30 dark:hover:text-red-400 rounded-lg transition-colors"
+              className="h-auto w-auto rounded-lg p-2 text-slate-400 transition-colors hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-900/30 dark:hover:text-red-400"
             />
           ) : (
             <>
@@ -233,14 +233,14 @@ export const invocationHistoryColumns: ColumnDef<ExecutionHistoryItem>[] = [
                   instanceId={instanceId}
                   variant="ghost"
                   size="icon"
-                  className="p-2 h-auto w-auto text-slate-400 hover:text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-900/30 dark:hover:text-blue-400 rounded-lg transition-colors"
+                  className="h-auto w-auto rounded-lg p-2 text-slate-400 transition-colors hover:bg-blue-50 hover:text-blue-600 dark:hover:bg-blue-900/30 dark:hover:text-blue-400"
                 />
               )}
               <ReplayButton
                 instanceId={instanceId}
                 variant="ghost"
                 size="icon"
-                className="p-2 h-auto w-auto text-slate-400 hover:text-emerald-600 hover:bg-emerald-50 dark:hover:bg-emerald-900/30 dark:hover:text-emerald-400 rounded-lg transition-colors"
+                className="h-auto w-auto rounded-lg p-2 text-slate-400 transition-colors hover:bg-emerald-50 hover:text-emerald-600 dark:hover:bg-emerald-900/30 dark:hover:text-emerald-400"
               />
             </>
           )}

@@ -24,10 +24,14 @@ describe('useOAuthPopup', () => {
 
   it('rejects with OAuthPopupClosedError shortly after the popup is closed', async () => {
     const popup = mockPopup();
-    openSpy = vi.spyOn(window, 'open').mockReturnValue(popup as unknown as Window);
+    openSpy = vi
+      .spyOn(window, 'open')
+      .mockReturnValue(popup as unknown as Window);
 
     const { result } = renderHook(() => useOAuthPopup());
-    const promise = result.current.openOAuthPopup('https://provider.example/auth');
+    const promise = result.current.openOAuthPopup(
+      'https://provider.example/auth'
+    );
     const assertion = expect(promise).rejects.toBeInstanceOf(
       OAuthPopupClosedError
     );
@@ -43,10 +47,14 @@ describe('useOAuthPopup', () => {
 
   it('resolves on a success message even if the popup closes right after', async () => {
     const popup = mockPopup();
-    openSpy = vi.spyOn(window, 'open').mockReturnValue(popup as unknown as Window);
+    openSpy = vi
+      .spyOn(window, 'open')
+      .mockReturnValue(popup as unknown as Window);
 
     const { result } = renderHook(() => useOAuthPopup());
-    const promise = result.current.openOAuthPopup('https://provider.example/auth');
+    const promise = result.current.openOAuthPopup(
+      'https://provider.example/auth'
+    );
 
     // Completion posts back and the popup closes at about the same time.
     popup.closed = true;

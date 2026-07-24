@@ -75,7 +75,9 @@ const TableHeader = React.forwardRef<
     <thead
       ref={ref}
       className={cn(
-        variant === 'console' ? 'bg-transparent' : '[&_tr]:border-b bg-muted/50',
+        variant === 'console'
+          ? 'bg-transparent'
+          : 'bg-muted/50 [&_tr]:border-b',
         className
       )}
       {...props}

@@ -18,9 +18,7 @@ type ConnectionSaveBarProps = {
 function changesSummary(dirtyCount: number, clearedCount: number): string {
   const parts: string[] = [];
   if (dirtyCount > 0) {
-    parts.push(
-      `${dirtyCount} unsaved change${dirtyCount === 1 ? '' : 's'}`
-    );
+    parts.push(`${dirtyCount} unsaved change${dirtyCount === 1 ? '' : 's'}`);
   }
   if (clearedCount > 0) {
     parts.push(
@@ -44,18 +42,18 @@ export function ConnectionSaveBar({
   const summary = changesSummary(dirtyCount, clearedCount);
 
   return (
-    <div className="sticky bottom-0 z-10 border-t border-slate-200/60 bg-slate-50/80 backdrop-blur-sm dark:bg-background/80 dark:border-slate-700/60">
-      <div className="mx-auto w-full max-w-2xl px-4 sm:px-6 py-3 flex items-center gap-3">
+    <div className="sticky bottom-0 z-10 border-t border-slate-200/60 bg-slate-50/80 backdrop-blur-sm dark:border-slate-700/60 dark:bg-background/80">
+      <div className="mx-auto flex w-full max-w-2xl items-center gap-3 px-4 py-3 sm:px-6">
         {summary && (
-          <div className="flex items-center gap-2 min-w-0 text-sm text-slate-600 dark:text-slate-400">
+          <div className="flex min-w-0 items-center gap-2 text-sm text-slate-600 dark:text-slate-400">
             <span
-              className="w-1.5 h-1.5 rounded-full bg-amber-500 flex-shrink-0"
+              className="h-1.5 w-1.5 flex-shrink-0 rounded-full bg-amber-500"
               aria-hidden
             />
             <span className="truncate">{summary}</span>
           </div>
         )}
-        <div className="flex items-center gap-2 ml-auto flex-shrink-0">
+        <div className="ml-auto flex flex-shrink-0 items-center gap-2">
           {showDiscard && (
             <Button
               type="button"
@@ -76,12 +74,12 @@ export function ConnectionSaveBar({
           >
             {isLoading ? (
               <>
-                <Loader2 className="w-4 h-4 mr-1.5 animate-spin" />
+                <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
                 {loadingLabel || 'Saving...'}
               </>
             ) : (
               <>
-                <Save className="w-4 h-4 mr-1.5" />
+                <Save className="mr-1.5 h-4 w-4" />
                 {submitLabel}
               </>
             )}

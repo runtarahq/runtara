@@ -51,15 +51,15 @@ export function EditObjectSchema() {
 
   if (isLoading) {
     return (
-      <div className="min-h-screen bg-slate-50/50 dark:bg-background flex items-center justify-center">
-        <Loader2 className="w-8 h-8 text-slate-400 animate-spin" />
+      <div className="flex min-h-screen items-center justify-center bg-slate-50/50 dark:bg-background">
+        <Loader2 className="h-8 w-8 animate-spin text-slate-400" />
       </div>
     );
   }
 
   if (!objectSchemaDto) {
     return (
-      <div className="min-h-screen bg-slate-50/50 dark:bg-background flex items-center justify-center">
+      <div className="flex min-h-screen items-center justify-center bg-slate-50/50 dark:bg-background">
         <p className="text-slate-500 dark:text-slate-400">
           Object type not found
         </p>

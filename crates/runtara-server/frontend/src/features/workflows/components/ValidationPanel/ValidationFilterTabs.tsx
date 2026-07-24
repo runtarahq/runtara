@@ -21,17 +21,17 @@ export function ValidationFilterTabs() {
   ];
 
   return (
-    <div className="flex gap-1 px-4 py-2 border-b bg-muted/20">
+    <div className="flex gap-1 border-b bg-muted/20 px-4 py-2">
       {tabs.map(({ filter, label, count }) => (
         <button
           key={filter}
           type="button"
           onClick={() => setActiveFilter(filter)}
           className={cn(
-            'px-3 py-1 text-xs font-medium rounded-md transition-colors',
+            'rounded-md px-3 py-1 text-xs font-medium transition-colors',
             activeFilter === filter
               ? 'bg-background text-foreground shadow-sm'
-              : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
+              : 'text-muted-foreground hover:bg-muted/50 hover:text-foreground'
           )}
         >
           {label} ({count})

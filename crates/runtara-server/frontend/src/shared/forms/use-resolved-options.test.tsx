@@ -74,7 +74,9 @@ describe('useResolvedOptions', () => {
   });
 
   it('surfaces resolver failures and clears the loading state', async () => {
-    const resolver = vi.fn().mockRejectedValue(new Error('Provider unavailable'));
+    const resolver = vi
+      .fn()
+      .mockRejectedValue(new Error('Provider unavailable'));
     render(<Harness company="acme" resolver={resolver} />);
 
     expect(await screen.findByText('Provider unavailable')).toBeInTheDocument();

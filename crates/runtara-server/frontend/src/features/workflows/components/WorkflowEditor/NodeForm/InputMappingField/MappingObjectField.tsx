@@ -161,7 +161,7 @@ export function MappingObjectField({
       {structuredEditable && !showJson && (
         <div className="space-y-2">
           {keys.length === 0 && !isAddingField && (
-            <p className="text-xs text-muted-foreground italic">
+            <p className="text-xs italic text-muted-foreground">
               No fields defined.
             </p>
           )}
@@ -201,7 +201,7 @@ export function MappingObjectField({
                     }
                   }}
                   placeholder="Field name..."
-                  className="flex-1 h-8 text-sm"
+                  className="h-8 flex-1 text-sm"
                   autoFocus
                 />
                 <Button
@@ -226,7 +226,7 @@ export function MappingObjectField({
                 </Button>
               </div>
               {addError && (
-                <p className="text-xs text-destructive mt-1">{addError}</p>
+                <p className="mt-1 text-xs text-destructive">{addError}</p>
               )}
             </div>
           )}
@@ -239,7 +239,7 @@ export function MappingObjectField({
               className="w-full border-dashed"
               onClick={() => setIsAddingField(true)}
             >
-              <Plus className="h-3.5 w-3.5 mr-1.5" />
+              <Plus className="mr-1.5 h-3.5 w-3.5" />
               Add Field
             </Button>
           )}
@@ -262,7 +262,9 @@ export function MappingObjectField({
       {jsonVisible && (
         <Textarea
           value={formatMappingObjectJson(value)}
-          onChange={(event) => onChange(parseMappingObjectJson(event.target.value))}
+          onChange={(event) =>
+            onChange(parseMappingObjectJson(event.target.value))
+          }
           placeholder={jsonPlaceholder}
           disabled={disabled}
           className="min-h-24 font-mono text-sm"
@@ -277,7 +279,9 @@ interface MappingObjectRowProps {
   entry: MappingObjectEntry;
   existingKeys: string[];
   disabled: boolean;
-  onPatch: (updater: (current: MappingObjectEntry) => MappingObjectEntry) => void;
+  onPatch: (
+    updater: (current: MappingObjectEntry) => MappingObjectEntry
+  ) => void;
   onRename: (newKey: string) => void;
   onRemove: () => void;
 }
@@ -403,7 +407,7 @@ function MappingObjectRow({
       : {};
 
   return (
-    <div className="rounded-md border bg-background p-2 space-y-1">
+    <div className="space-y-1 rounded-md border bg-background p-2">
       <div className="flex items-start gap-2">
         <div className="w-36 shrink-0">
           <Input
@@ -439,7 +443,7 @@ function MappingObjectRow({
             onValueChange={handleTypeHintChange}
             disabled={disabled}
           >
-            <SelectTrigger className="h-9 w-[92px] text-xs shrink-0">
+            <SelectTrigger className="h-9 w-[92px] shrink-0 text-xs">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -452,14 +456,15 @@ function MappingObjectRow({
           </Select>
         )}
 
-        <div className="flex-1 min-w-0">
+        <div className="min-w-0 flex-1">
           <MappingValueInput
             value={
               isComposite
                 ? ''
                 : typeof entry.value === 'object' && entry.value !== null
                   ? JSON.stringify(entry.value, null, 2)
-                  : (entry.value as string | number | boolean | null | undefined)
+                  : (entry.value as
+                      string | number | boolean | null | undefined)
             }
             onChange={handleValueChange}
             valueType={entry.valueType}

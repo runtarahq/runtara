@@ -65,8 +65,7 @@ export function isStructuredError(value: unknown): value is StructuredError {
     'message' in value &&
     typeof value.message === 'string' &&
     'category' in value &&
-    (value.category === 'transient' ||
-      value.category === 'permanent') &&
+    (value.category === 'transient' || value.category === 'permanent') &&
     'severity' in value &&
     (value.severity === 'info' ||
       value.severity === 'warning' ||

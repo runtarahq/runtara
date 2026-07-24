@@ -247,9 +247,7 @@ function DatasetCard({
             </Button>
           </div>
           {dimensions.length === 0 ? (
-            <p className="text-xs text-muted-foreground">
-              No dimensions yet.
-            </p>
+            <p className="text-xs text-muted-foreground">No dimensions yet.</p>
           ) : (
             <div className="grid gap-2">
               {dimensions.map((dim, index) => (
@@ -292,9 +290,7 @@ function DatasetCard({
                       onChange((d) => ({
                         ...d,
                         dimensions: d.dimensions.map((x, i) =>
-                          i === index
-                            ? { ...x, label: event.target.value }
-                            : x
+                          i === index ? { ...x, label: event.target.value } : x
                         ),
                       }))
                     }
@@ -397,10 +393,7 @@ function DatasetCard({
           ) : (
             <div className="grid gap-2">
               {measures.map((measure, index) => (
-                <div
-                  key={measure.id}
-                  className="grid gap-2 rounded border p-2"
-                >
+                <div key={measure.id} className="grid gap-2 rounded border p-2">
                   <div className="grid grid-cols-[1fr_1fr_minmax(0,auto)] items-center gap-2">
                     <Input
                       value={measure.id}

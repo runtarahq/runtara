@@ -182,7 +182,9 @@ export function getCellDisplayValue(
 
 function headerFloorPx(column: TableColumn): number {
   const label = column.label ?? humanizeFieldName(column.key);
-  return Math.ceil(Array.from(label).length * HEADER_GLYPH_PX) + HEADER_EXTRA_PX;
+  return (
+    Math.ceil(Array.from(label).length * HEADER_GLYPH_PX) + HEADER_EXTRA_PX
+  );
 }
 
 function textWidthPx(chars: number): number {
@@ -302,7 +304,10 @@ function inferColumnSpec(
     return { idealPx: ideal, minPx: min, flexible: true };
   }
 
-  if (RIGID_VALUE_FORMATS.has(formatName) && !hasPositiveMaxChars(column.maxChars)) {
+  if (
+    RIGID_VALUE_FORMATS.has(formatName) &&
+    !hasPositiveMaxChars(column.maxChars)
+  ) {
     const measured =
       maxLen > 0 ? textWidthPx(maxLen) : FORMAT_FALLBACK_WIDTHS[formatName];
     return rigid(Math.max(measured, header));

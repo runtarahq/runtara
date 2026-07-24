@@ -138,7 +138,7 @@ export function WorkflowActionsForm(props: Props) {
   return (
     <div className="flex flex-col items-center">
       {/* Workflow name as separate h1 */}
-      <h1 className="mt-3 mb-2 text-lg font-semibold text-slate-900/90 drop-shadow-sm">
+      <h1 className="mb-2 mt-3 text-lg font-semibold text-slate-900/90 drop-shadow-sm">
         {workflowName || 'Untitled Workflow'}
       </h1>
 
@@ -248,71 +248,73 @@ export function WorkflowActionsForm(props: Props) {
             )}
 
             <Can permission="workflow:execute">
-            {/* Start button */}
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              className="h-7 w-7 rounded p-0 text-blue-600 hover:bg-blue-50 hover:text-blue-700"
-              disabled={isLoading || isExecuting || isDirty}
-              onClick={onSchedule}
-              title={
-                isDirty
-                  ? 'Please save your changes before starting execution'
-                  : 'Start workflow'
-              }
-            >
-              <Play className="h-4 w-4" />
-            </Button>
-
-            {/* Debug execute button (server-side with breakpoints) */}
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              className="h-7 w-7 rounded p-0 text-orange-600 hover:bg-orange-50 hover:text-orange-700"
-              disabled={isLoading || isExecuting || isDirty || !hasBreakpoints}
-              onClick={onDebugExecute}
-              title={
-                isDirty
-                  ? 'Please save your changes before debugging'
-                  : !hasBreakpoints
-                    ? 'Set breakpoints on steps first (right-click a step node)'
-                    : 'Debug workflow (pause at breakpoints)'
-              }
-            >
-              <Bug className="h-4 w-4" />
-            </Button>
-
-            {/* Resume button - only show when suspended at breakpoint */}
-            {isSuspended && (
+              {/* Start button */}
               <Button
                 type="button"
                 variant="ghost"
                 size="sm"
-                className="h-7 w-7 rounded p-0 text-green-600 hover:bg-green-50 hover:text-green-700"
-                disabled={isLoading || isResuming}
-                onClick={onResume}
-                title="Continue execution to next breakpoint"
+                className="h-7 w-7 rounded p-0 text-blue-600 hover:bg-blue-50 hover:text-blue-700"
+                disabled={isLoading || isExecuting || isDirty}
+                onClick={onSchedule}
+                title={
+                  isDirty
+                    ? 'Please save your changes before starting execution'
+                    : 'Start workflow'
+                }
               >
-                <SkipForward className="h-4 w-4" />
+                <Play className="h-4 w-4" />
               </Button>
-            )}
 
-            {/* Stop button - only show when executing */}
-            {isExecutionActive && (
+              {/* Debug execute button (server-side with breakpoints) */}
               <Button
                 type="button"
                 variant="ghost"
                 size="sm"
-                className="h-7 w-7 rounded p-0 text-red-600 hover:bg-red-50 hover:text-red-700"
-                disabled={isLoading}
-                onClick={onStop}
-                title="Stop execution"
+                className="h-7 w-7 rounded p-0 text-orange-600 hover:bg-orange-50 hover:text-orange-700"
+                disabled={
+                  isLoading || isExecuting || isDirty || !hasBreakpoints
+                }
+                onClick={onDebugExecute}
+                title={
+                  isDirty
+                    ? 'Please save your changes before debugging'
+                    : !hasBreakpoints
+                      ? 'Set breakpoints on steps first (right-click a step node)'
+                      : 'Debug workflow (pause at breakpoints)'
+                }
               >
-                <Square className="h-3.5 w-3.5" />
+                <Bug className="h-4 w-4" />
               </Button>
-            )}
+
+              {/* Resume button - only show when suspended at breakpoint */}
+              {isSuspended && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 w-7 rounded p-0 text-green-600 hover:bg-green-50 hover:text-green-700"
+                  disabled={isLoading || isResuming}
+                  onClick={onResume}
+                  title="Continue execution to next breakpoint"
+                >
+                  <SkipForward className="h-4 w-4" />
+                </Button>
+              )}
+
+              {/* Stop button - only show when executing */}
+              {isExecutionActive && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 w-7 rounded p-0 text-red-600 hover:bg-red-50 hover:text-red-700"
+                  disabled={isLoading}
+                  onClick={onStop}
+                  title="Stop execution"
+                >
+                  <Square className="h-3.5 w-3.5" />
+                </Button>
+              )}
             </Can>
 
             {/* Details button - only show when executing */}
@@ -347,17 +349,17 @@ export function WorkflowActionsForm(props: Props) {
 
             {/* Save button */}
             <Can permission="workflow:update">
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              className="h-7 w-7 rounded p-0 text-foreground/70 hover:bg-muted hover:text-foreground"
-              disabled={isLoading || isExecuting || !isDirty}
-              title={isDirty ? 'Save changes' : 'No changes to save'}
-              onClick={form.handleSubmit(onSubmit)}
-            >
-              <Save className="h-4 w-4" />
-            </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="h-7 w-7 rounded p-0 text-foreground/70 hover:bg-muted hover:text-foreground"
+                disabled={isLoading || isExecuting || !isDirty}
+                title={isDirty ? 'Save changes' : 'No changes to save'}
+                onClick={form.handleSubmit(onSubmit)}
+              >
+                <Save className="h-4 w-4" />
+              </Button>
             </Can>
 
             <div className="mx-1 h-4 w-px bg-border" />

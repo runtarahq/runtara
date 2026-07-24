@@ -24,8 +24,7 @@ export async function getAllExecutions(
 ) {
   // Params are the last element of the hierarchical key
   const params = context.queryKey[context.queryKey.length - 1] as
-    | ExecutionsQueryParams
-    | undefined;
+    ExecutionsQueryParams | undefined;
   const pageIndex = params?.pageIndex ?? 0;
   const pageSize = params?.pageSize ?? 10;
   const filters = params?.filters ?? ({} as ExecutionHistoryFilters);

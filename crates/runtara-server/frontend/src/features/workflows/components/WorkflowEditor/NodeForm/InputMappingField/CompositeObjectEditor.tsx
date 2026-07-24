@@ -140,7 +140,7 @@ export function CompositeObjectEditor({
   return (
     <div className="flex flex-col">
       {/* Header */}
-      <div className="flex items-center justify-between px-4 py-3 border-b bg-muted/20">
+      <div className="flex items-center justify-between border-b bg-muted/20 px-4 py-3">
         <div className="flex items-center gap-2">
           <Braces className="h-4 w-4 text-green-600" />
           <span className="text-sm font-medium">{title}</span>
@@ -162,10 +162,10 @@ export function CompositeObjectEditor({
       </div>
 
       {/* Fields */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-3">
+      <div className="flex-1 space-y-3 overflow-y-auto p-4">
         {fieldNames.length === 0 && !isAddingField && (
-          <div className="text-center py-8 text-muted-foreground">
-            <Braces className="h-8 w-8 mx-auto mb-2 opacity-50" />
+          <div className="py-8 text-center text-muted-foreground">
+            <Braces className="mx-auto mb-2 h-8 w-8 opacity-50" />
             <p className="text-sm">No fields defined yet.</p>
             <p className="text-xs">Click "Add Field" to get started.</p>
           </div>
@@ -224,7 +224,7 @@ export function CompositeObjectEditor({
                   }
                 }}
                 placeholder="Enter field name..."
-                className="flex-1 h-8"
+                className="h-8 flex-1"
                 autoFocus
               />
               <Button
@@ -253,7 +253,7 @@ export function CompositeObjectEditor({
 
       {/* Footer with add button */}
       {!disabled && (
-        <div className="px-4 py-3 border-t bg-muted/10">
+        <div className="border-t bg-muted/10 px-4 py-3">
           <Button
             type="button"
             variant="outline"
@@ -261,7 +261,7 @@ export function CompositeObjectEditor({
             onClick={() => setIsAddingField(true)}
             disabled={isAddingField}
           >
-            <Plus className="h-4 w-4 mr-2" />
+            <Plus className="mr-2 h-4 w-4" />
             Add Field
           </Button>
         </div>

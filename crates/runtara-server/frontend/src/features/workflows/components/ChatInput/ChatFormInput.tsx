@@ -119,7 +119,7 @@ export function ChatFormInput({
   return (
     <div className="border-t bg-background px-4 py-3">
       {waitingForInput.message && (
-        <div className="mb-3 rounded-lg bg-amber-50 dark:bg-amber-900/20 border border-amber-200/60 dark:border-amber-700/40 px-3 py-2 text-xs text-amber-700 dark:text-amber-400">
+        <div className="mb-3 rounded-lg border border-amber-200/60 bg-amber-50 px-3 py-2 text-xs text-amber-700 dark:border-amber-700/40 dark:bg-amber-900/20 dark:text-amber-400">
           {waitingForInput.message}
         </div>
       )}
@@ -153,9 +153,9 @@ export function ChatFormInput({
         size="sm"
       >
         {isSubmitting ? (
-          <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+          <Loader2 className="mr-2 h-4 w-4 animate-spin" />
         ) : (
-          <Send className="h-4 w-4 mr-2" />
+          <Send className="mr-2 h-4 w-4" />
         )}
         Submit
       </Button>

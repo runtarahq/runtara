@@ -5,11 +5,7 @@
 // blocks array. Phase 10 made the root layout a single mandatory grid;
 // authors no longer add floating siblings at the report root.
 import type { Page, Route } from '@playwright/test';
-import {
-  buildObjectModelConnection,
-  expect,
-  test,
-} from '../../../fixtures';
+import { buildObjectModelConnection, expect, test } from '../../../fixtures';
 import { appPath } from '../../../utils/app-path';
 import type { Schema } from '../../../../src/generated/RuntaraRuntimeApi';
 import type {
@@ -146,9 +142,9 @@ test.describe('wizard v2 grid layout author flow (mocked)', () => {
     // Root grid header label reads "Report layout · 1×1" for empty reports.
     await expect(page.getByText(/Report layout · 1×1/)).toBeVisible();
     // No "Remove grid" button on the root grid — it cannot be removed.
-    await expect(
-      page.getByRole('button', { name: 'Remove grid' })
-    ).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Remove grid' })).toHaveCount(
+      0
+    );
   });
 
   test('add a block into the root grid → save persists it as a root grid item', async ({
@@ -182,9 +178,7 @@ test.describe('wizard v2 grid layout author flow (mocked)', () => {
     const child = definition.layout.items[0].child;
     expect(child.type).toBe('block');
     if (child.type !== 'block') return;
-    const matchingBlock = definition.blocks.find(
-      (b) => b.id === child.blockId
-    );
+    const matchingBlock = definition.blocks.find((b) => b.id === child.blockId);
     expect(matchingBlock).toBeDefined();
     expect(matchingBlock?.type).toBe('markdown');
   });
@@ -242,12 +236,13 @@ test.describe('wizard v2 grid layout author flow (mocked)', () => {
     const emptyCells = page.getByTestId('empty-cell-root');
     await expect(emptyCells).toHaveCount(6);
     // Click the "+ Add block" inside the last empty cell.
-    await emptyCells.nth(5).getByRole('button', { name: /Add block/i }).click();
+    await emptyCells
+      .nth(5)
+      .getByRole('button', { name: /Add block/i })
+      .click();
 
     // The inline editor should open immediately for the new block.
-    await expect(
-      page.locator('[data-testid^="inline-editor-"]')
-    ).toBeVisible();
+    await expect(page.locator('[data-testid^="inline-editor-"]')).toBeVisible();
 
     // Dismiss the inline editor (Done) and save.
     await page.getByRole('button', { name: /^Done$/ }).click();

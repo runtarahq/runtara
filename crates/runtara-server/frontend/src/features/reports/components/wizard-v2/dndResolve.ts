@@ -21,8 +21,7 @@ export interface ResolveDropArgs {
 }
 
 export type ResolveDropResult =
-  | { apply: false }
-  | { apply: true; target: LayoutTarget };
+  { apply: false } | { apply: true; target: LayoutTarget };
 
 /** Walks `definition.layout` to figure out where the dragged node
  *  should land. Returns `apply: false` when the drop is a no-op (source

@@ -129,7 +129,7 @@ export function AddCustomFieldDialog({
             />
             <p className="text-xs text-muted-foreground">
               Use dots to build nested objects, e.g.{' '}
-              <code className="bg-muted px-1 rounded">payload.user.name</code>.
+              <code className="rounded bg-muted px-1">payload.user.name</code>.
             </p>
             {error && <p className="text-sm text-destructive">{error}</p>}
           </div>

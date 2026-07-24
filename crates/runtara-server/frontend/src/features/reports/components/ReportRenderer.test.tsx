@@ -49,7 +49,11 @@ function buildDefinition(): ReportDefinition {
       columns: 4,
       items: blocks.map((block, i) => ({
         id: `root_i${i}`,
-        child: { id: `n_${block.id}`, type: 'block' as const, blockId: block.id },
+        child: {
+          id: `n_${block.id}`,
+          type: 'block' as const,
+          blockId: block.id,
+        },
       })),
     },
     filters: [],

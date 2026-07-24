@@ -145,11 +145,11 @@ export function HistoryPanelContent({ workflowId }: HistoryPanelContentProps) {
           {[...Array(3)].map((_, i) => (
             <div
               key={i}
-              className="flex items-center gap-3 py-2 px-2 rounded bg-muted/30"
+              className="flex items-center gap-3 rounded bg-muted/30 px-2 py-2"
             >
-              <div className="h-6 w-20 rounded bg-muted/60 animate-pulse" />
-              <div className="h-4 flex-1 rounded bg-muted/60 animate-pulse" />
-              <div className="h-4 w-16 rounded bg-muted/60 animate-pulse" />
+              <div className="h-6 w-20 animate-pulse rounded bg-muted/60" />
+              <div className="h-4 flex-1 animate-pulse rounded bg-muted/60" />
+              <div className="h-4 w-16 animate-pulse rounded bg-muted/60" />
             </div>
           ))}
         </div>
@@ -160,7 +160,7 @@ export function HistoryPanelContent({ workflowId }: HistoryPanelContentProps) {
   if (!data || data.length === 0) {
     return (
       <div className="flex flex-1 flex-col items-center justify-center text-muted-foreground">
-        <Icons.inbox className="h-8 w-8 mb-2 opacity-60" />
+        <Icons.inbox className="mb-2 h-8 w-8 opacity-60" />
         <p className="text-sm font-medium">No executions yet</p>
         <p className="text-xs">Run the workflow to see history here</p>
       </div>
@@ -175,11 +175,11 @@ export function HistoryPanelContent({ workflowId }: HistoryPanelContentProps) {
     : false;
 
   return (
-    <div className="flex flex-1 min-h-0 overflow-hidden">
+    <div className="flex min-h-0 flex-1 overflow-hidden">
       {/* Left panel - Invocations list */}
-      <div className="w-72 border-r flex-shrink-0 flex flex-col overflow-hidden">
-        <div className="flex items-center justify-between px-3 py-1.5 border-b bg-muted/20">
-          <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
+      <div className="flex w-72 flex-shrink-0 flex-col overflow-hidden border-r">
+        <div className="flex items-center justify-between border-b bg-muted/20 px-3 py-1.5">
+          <span className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
             Recent Executions
           </span>
           <Link
@@ -200,20 +200,20 @@ export function HistoryPanelContent({ workflowId }: HistoryPanelContentProps) {
               <div
                 key={instance.instanceId}
                 className={cn(
-                  'grid grid-cols-[1fr_auto] items-center gap-2 px-3 py-2 border-b cursor-pointer transition-colors',
+                  'grid cursor-pointer grid-cols-[1fr_auto] items-center gap-2 border-b px-3 py-2 transition-colors',
                   'hover:bg-muted/50',
-                  isSelected && 'bg-accent border-l-2 border-l-primary'
+                  isSelected && 'border-l-2 border-l-primary bg-accent'
                 )}
                 onClick={() => setSelectedInstanceId(instance.instanceId)}
               >
                 <div className="min-w-0">
-                  <div className="text-xs font-medium truncate">
+                  <div className="truncate text-xs font-medium">
                     {formatDate(instance.createdAt)}
                   </div>
-                  <div className="flex items-center gap-1.5 text-xs text-muted-foreground mt-0.5">
+                  <div className="mt-0.5 flex items-center gap-1.5 text-xs text-muted-foreground">
                     <Badge
                       variant="outline"
-                      className="text-[10px] px-1 py-0 h-4"
+                      className="h-4 px-1 py-0 text-[10px]"
                     >
                       v{instance.version}
                     </Badge>
@@ -226,7 +226,7 @@ export function HistoryPanelContent({ workflowId }: HistoryPanelContentProps) {
                   </div>
                 </div>
 
-                <div className="flex items-center gap-1 flex-shrink-0">
+                <div className="flex flex-shrink-0 items-center gap-1">
                   {instance.status === 'suspended' && (
                     <button
                       type="button"
@@ -250,7 +250,7 @@ export function HistoryPanelContent({ workflowId }: HistoryPanelContentProps) {
                   )}
                   <Badge variant={statusInfo.variant} className="text-[10px]">
                     {isActive && statusInfo.showSpinner && (
-                      <Loader2 className="h-2.5 w-2.5 mr-1 animate-spin" />
+                      <Loader2 className="mr-1 h-2.5 w-2.5 animate-spin" />
                     )}
                     {statusInfo.text}
                   </Badge>
@@ -262,9 +262,9 @@ export function HistoryPanelContent({ workflowId }: HistoryPanelContentProps) {
       </div>
 
       {/* Right panel - Events history */}
-      <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
+      <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
         {/* Events header */}
-        <div className="flex items-center justify-between px-3 py-1.5 border-b bg-muted/20">
+        <div className="flex items-center justify-between border-b bg-muted/20 px-3 py-1.5">
           <div className="flex items-center gap-2">
             <div className="rounded bg-amber-500/10 p-1">
               <Zap className="h-3.5 w-3.5 text-amber-600" />
@@ -280,36 +280,36 @@ export function HistoryPanelContent({ workflowId }: HistoryPanelContentProps) {
 
         {/* Loading bar for active executions */}
         {isSelectedActive && (
-          <div className="h-0.5 bg-muted relative overflow-hidden flex-shrink-0">
-            <div className="absolute inset-0 w-1/2 bg-gradient-to-r from-transparent via-primary to-transparent animate-loading" />
+          <div className="relative h-0.5 flex-shrink-0 overflow-hidden bg-muted">
+            <div className="absolute inset-0 w-1/2 animate-loading bg-gradient-to-r from-transparent via-primary to-transparent" />
           </div>
         )}
 
         {/* Events table */}
         <div className="flex-1 overflow-y-auto">
           {stepsLoading && stepSummaries.length === 0 ? (
-            <div className="flex items-center justify-center h-full">
+            <div className="flex h-full items-center justify-center">
               <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
             </div>
           ) : stepSummaries.length === 0 ? (
-            <div className="flex flex-col items-center justify-center h-full text-center">
-              <ChevronRight className="h-6 w-6 text-muted-foreground/30 mb-1" />
+            <div className="flex h-full flex-col items-center justify-center text-center">
+              <ChevronRight className="mb-1 h-6 w-6 text-muted-foreground/30" />
               <p className="text-xs text-muted-foreground">No events yet</p>
             </div>
           ) : (
             <table className="w-full text-xs">
-              <thead className="bg-background sticky top-0 z-10 shadow-sm">
+              <thead className="sticky top-0 z-10 bg-background shadow-sm">
                 <tr className="border-b">
-                  <th className="text-left font-medium text-muted-foreground px-3 py-1.5 w-10 bg-background">
+                  <th className="w-10 bg-background px-3 py-1.5 text-left font-medium text-muted-foreground">
                     #
                   </th>
-                  <th className="text-left font-medium text-muted-foreground px-3 py-1.5 bg-background">
+                  <th className="bg-background px-3 py-1.5 text-left font-medium text-muted-foreground">
                     Step Name
                   </th>
-                  <th className="text-right font-medium text-muted-foreground px-3 py-1.5 w-20 bg-background">
+                  <th className="w-20 bg-background px-3 py-1.5 text-right font-medium text-muted-foreground">
                     Duration
                   </th>
-                  <th className="text-right font-medium text-muted-foreground px-3 py-1.5 w-24 bg-background">
+                  <th className="w-24 bg-background px-3 py-1.5 text-right font-medium text-muted-foreground">
                     Status
                   </th>
                 </tr>
@@ -352,10 +352,7 @@ function EventRow({ step, sequence }: { step: StepSummary; sequence: number }) {
   const hasOutputs = step.outputs != null;
 
   const getBadgeVariant = ():
-    | 'default'
-    | 'secondary'
-    | 'destructive'
-    | 'outline' => {
+    'default' | 'secondary' | 'destructive' | 'outline' => {
     if (isFailed) return 'destructive';
     if (isCompleted) return 'default';
     if (isRunning) return 'secondary';
@@ -384,7 +381,7 @@ function EventRow({ step, sequence }: { step: StepSummary; sequence: number }) {
     <>
       <tr
         className={cn(
-          'border-b cursor-pointer hover:bg-muted/50 transition-colors',
+          'cursor-pointer border-b transition-colors hover:bg-muted/50',
           getRowClass()
         )}
         onClick={() => setIsExpanded(!isExpanded)}
@@ -400,7 +397,7 @@ function EventRow({ step, sequence }: { step: StepSummary; sequence: number }) {
           </div>
         </td>
         <td className="px-3 py-1.5">
-          <span className="truncate block" title={step.stepName || step.stepId}>
+          <span className="block truncate" title={step.stepName || step.stepId}>
             {step.stepName || step.stepId}
           </span>
         </td>
@@ -412,10 +409,10 @@ function EventRow({ step, sequence }: { step: StepSummary; sequence: number }) {
         <td className="px-3 py-1.5 text-right">
           <Badge
             variant={getBadgeVariant()}
-            className="text-[10px] px-1.5 py-0"
+            className="px-1.5 py-0 text-[10px]"
           >
             {isRunning && (
-              <Loader2 className="h-2.5 w-2.5 mr-0.5 animate-spin" />
+              <Loader2 className="mr-0.5 h-2.5 w-2.5 animate-spin" />
             )}
             {getStatusLabel()}
           </Badge>
@@ -433,21 +430,21 @@ function EventRow({ step, sequence }: { step: StepSummary; sequence: number }) {
 
               {hasInputs && (
                 <div>
-                  <div className="flex items-center justify-between mb-1">
-                    <span className="text-[10px] font-semibold text-muted-foreground flex items-center gap-1">
+                  <div className="mb-1 flex items-center justify-between">
+                    <span className="flex items-center gap-1 text-[10px] font-semibold text-muted-foreground">
                       <Database className="h-2.5 w-2.5" />
                       Inputs
                     </span>
                     <Button
                       variant="ghost"
                       size="sm"
-                      className="h-5 text-[10px] px-1"
+                      className="h-5 px-1 text-[10px]"
                       onClick={(e) => {
                         e.stopPropagation();
                         handleCopy(step.inputs, 'Inputs');
                       }}
                     >
-                      <Copy className="h-2.5 w-2.5 mr-0.5" />
+                      <Copy className="mr-0.5 h-2.5 w-2.5" />
                       Copy
                     </Button>
                   </div>
@@ -461,21 +458,21 @@ function EventRow({ step, sequence }: { step: StepSummary; sequence: number }) {
 
               {hasOutputs && (
                 <div>
-                  <div className="flex items-center justify-between mb-1">
-                    <span className="text-[10px] font-semibold text-muted-foreground flex items-center gap-1">
+                  <div className="mb-1 flex items-center justify-between">
+                    <span className="flex items-center gap-1 text-[10px] font-semibold text-muted-foreground">
                       <Sparkles className="h-2.5 w-2.5" />
                       Outputs
                     </span>
                     <Button
                       variant="ghost"
                       size="sm"
-                      className="h-5 text-[10px] px-1"
+                      className="h-5 px-1 text-[10px]"
                       onClick={(e) => {
                         e.stopPropagation();
                         handleCopy(step.outputs, 'Outputs');
                       }}
                     >
-                      <Copy className="h-2.5 w-2.5 mr-0.5" />
+                      <Copy className="mr-0.5 h-2.5 w-2.5" />
                       Copy
                     </Button>
                   </div>

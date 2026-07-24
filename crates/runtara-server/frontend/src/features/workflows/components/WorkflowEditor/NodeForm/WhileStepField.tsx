@@ -112,9 +112,9 @@ export function WhileStepField({ name }: WhileStepFieldProps) {
         <Label className="text-sm font-medium">Loop Condition</Label>
         <p className="text-xs text-muted-foreground">
           The loop repeats while this condition is true. Use{' '}
-          <code className="bg-muted px-1 rounded">iteration.index</code> for the
+          <code className="rounded bg-muted px-1">iteration.index</code> for the
           current iteration or{' '}
-          <code className="bg-muted px-1 rounded">loop.outputs</code> for the
+          <code className="rounded bg-muted px-1">loop.outputs</code> for the
           previous iteration&apos;s Finish outputs.
         </p>
         <ConditionEditor

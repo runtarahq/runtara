@@ -64,7 +64,11 @@ export function StatusPill({
         <Loader2 className="h-3 w-3 animate-spin" />
       ) : dot ? (
         <span
-          className={cn('h-1.5 w-1.5 rounded-full', t.dot, pulse && 'animate-pulse')}
+          className={cn(
+            'h-1.5 w-1.5 rounded-full',
+            t.dot,
+            pulse && 'animate-pulse'
+          )}
         />
       ) : null}
       {label}

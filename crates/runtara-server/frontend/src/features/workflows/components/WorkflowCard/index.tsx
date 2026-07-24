@@ -106,20 +106,20 @@ export function WorkflowCard({
       <TableCell className="text-right">
         <div className="flex items-center justify-end gap-1 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100">
           <Can permission="workflow:execute">
-          <Button
-            variant="ghost"
-            size="icon"
-            onClick={() => onSchedule(workflow)}
-            title="Start"
-            className="h-7 w-7 text-muted-foreground"
-            disabled={isScheduling}
-          >
-            {isScheduling ? (
-              <Loader2 className="w-4 h-4 animate-spin" />
-            ) : (
-              <Play className="w-4 h-4" />
-            )}
-          </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={() => onSchedule(workflow)}
+              title="Start"
+              className="h-7 w-7 text-muted-foreground"
+              disabled={isScheduling}
+            >
+              {isScheduling ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <Play className="h-4 w-4" />
+              )}
+            </Button>
           </Can>
           {onChat && (
             <Button
@@ -129,69 +129,69 @@ export function WorkflowCard({
               title="Chat"
               className="h-7 w-7 text-muted-foreground"
             >
-              <MessageSquare className="w-4 h-4" />
+              <MessageSquare className="h-4 w-4" />
             </Button>
           )}
           <Can permission="workflow:update">
-          <Button
-            variant="ghost"
-            size="icon"
-            onClick={() => onUpdate(workflow)}
-            title="Edit"
-            className="h-7 w-7 text-muted-foreground"
-          >
-            <Pencil className="w-4 h-4" />
-          </Button>
-          </Can>
-          {showMoveAction && onMoveToFolder && (
-            <Can permission="workflow:update">
             <Button
               variant="ghost"
               size="icon"
-              onClick={() => onMoveToFolder(workflow)}
-              title="Move to folder"
+              onClick={() => onUpdate(workflow)}
+              title="Edit"
               className="h-7 w-7 text-muted-foreground"
-              disabled={isMoving}
             >
-              {isMoving ? (
-                <Loader2 className="w-4 h-4 animate-spin" />
-              ) : (
-                <FolderInput className="w-4 h-4" />
-              )}
+              <Pencil className="h-4 w-4" />
             </Button>
+          </Can>
+          {showMoveAction && onMoveToFolder && (
+            <Can permission="workflow:update">
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={() => onMoveToFolder(workflow)}
+                title="Move to folder"
+                className="h-7 w-7 text-muted-foreground"
+                disabled={isMoving}
+              >
+                {isMoving ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <FolderInput className="h-4 w-4" />
+                )}
+              </Button>
             </Can>
           )}
           <Can permission="workflow:create">
-          <Button
-            variant="ghost"
-            size="icon"
-            onClick={() => onClone(workflow)}
-            title="Duplicate"
-            className="h-7 w-7 text-muted-foreground"
-            disabled={isCloning}
-          >
-            {isCloning ? (
-              <Loader2 className="w-4 h-4 animate-spin" />
-            ) : (
-              <Copy className="w-4 h-4" />
-            )}
-          </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={() => onClone(workflow)}
+              title="Duplicate"
+              className="h-7 w-7 text-muted-foreground"
+              disabled={isCloning}
+            >
+              {isCloning ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <Copy className="h-4 w-4" />
+              )}
+            </Button>
           </Can>
           <Can permission="workflow:delete">
-          <Button
-            variant="ghost"
-            size="icon"
-            onClick={() => onDelete(workflow)}
-            title="Delete"
-            className="h-7 w-7 text-muted-foreground hover:text-destructive"
-            disabled={isDeleting}
-          >
-            {isDeleting ? (
-              <Loader2 className="w-4 h-4 animate-spin" />
-            ) : (
-              <Trash2 className="w-4 h-4" />
-            )}
-          </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={() => onDelete(workflow)}
+              title="Delete"
+              className="h-7 w-7 text-muted-foreground hover:text-destructive"
+              disabled={isDeleting}
+            >
+              {isDeleting ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <Trash2 className="h-4 w-4" />
+              )}
+            </Button>
           </Can>
         </div>
       </TableCell>

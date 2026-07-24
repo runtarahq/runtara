@@ -62,7 +62,7 @@ export function BlockHostInEdit({
             </p>
           </div>
         </div>
-        <div className="flex items-center gap-1 opacity-0 transition-opacity group-hover/wizard-block:opacity-100 focus-within:opacity-100">
+        <div className="flex items-center gap-1 opacity-0 transition-opacity focus-within:opacity-100 group-hover/wizard-block:opacity-100">
           <Button
             type="button"
             variant="ghost"

@@ -54,7 +54,13 @@ describe('buildReplayModel', () => {
   it('computes t0-relative intervals and duration bounds', () => {
     const model = buildReplayModel(
       [sum('a', 0, 300), sum('b', 300, 300)],
-      graph([['a', 'Agent'], ['b', 'Agent']], [['a', 'b']])
+      graph(
+        [
+          ['a', 'Agent'],
+          ['b', 'Agent'],
+        ],
+        [['a', 'b']]
+      )
     );
     expect(model.hasEvents).toBe(true);
     expect(model.t0).toBe(BASE);
@@ -92,7 +98,17 @@ describe('buildReplayModel', () => {
     // Three 2ms steps back-to-back — a linear chain, never concurrent.
     const model = buildReplayModel(
       [sum('a', 0, 2), sum('b', 4, 2), sum('c', 8, 2)],
-      graph([['a', 'Agent'], ['b', 'Agent'], ['c', 'Agent']], [['a', 'b'], ['b', 'c']])
+      graph(
+        [
+          ['a', 'Agent'],
+          ['b', 'Agent'],
+          ['c', 'Agent'],
+        ],
+        [
+          ['a', 'b'],
+          ['b', 'c'],
+        ]
+      )
     );
     // At every instant at most one node is running (no false overlap).
     for (let t = 0; t <= 12; t += 0.5) {
@@ -104,7 +120,13 @@ describe('buildReplayModel', () => {
 describe('deriveFrame — sequential', () => {
   const model = buildReplayModel(
     [sum('a', 0, 300), sum('b', 300, 300)],
-    graph([['a', 'Agent'], ['b', 'Agent']], [['a', 'b']])
+    graph(
+      [
+        ['a', 'Agent'],
+        ['b', 'Agent'],
+      ],
+      [['a', 'b']]
+    )
   );
 
   it('a running, b idle mid-a', () => {
@@ -145,8 +167,18 @@ describe('deriveFrame — edges do not stay animated after the run ends', () => 
       sum('f', 360, 20), // short terminal [360,380]
     ],
     graph(
-      [['s', 'Agent'], ['c', 'Agent'], ['b', 'Agent'], ['f', 'Finish']],
-      [['s', 'c'], ['s', 'b'], ['c', 'f'], ['b', 'f']]
+      [
+        ['s', 'Agent'],
+        ['c', 'Agent'],
+        ['b', 'Agent'],
+        ['f', 'Finish'],
+      ],
+      [
+        ['s', 'c'],
+        ['s', 'b'],
+        ['c', 'f'],
+        ['b', 'f'],
+      ]
     )
   );
 
@@ -169,8 +201,15 @@ describe('deriveFrame — parallel overlap IS concurrency', () => {
       sum('b', 200, 300), // [200, 500]
     ],
     graph(
-      [['start', 'Start'], ['a', 'Agent'], ['b', 'Agent']],
-      [['start', 'a'], ['start', 'b']]
+      [
+        ['start', 'Start'],
+        ['a', 'Agent'],
+        ['b', 'Agent'],
+      ],
+      [
+        ['start', 'a'],
+        ['start', 'b'],
+      ]
     )
   );
 
@@ -203,8 +242,15 @@ describe('deriveFrame — real launch/settle overrides the assemble cascade', ()
       sum('b', 300, 300, { launchedAtMs: BASE + 110, settledAtMs: BASE + 590 }),
     ],
     graph(
-      [['start', 'Start'], ['a', 'Agent'], ['b', 'Agent']],
-      [['start', 'a'], ['start', 'b']]
+      [
+        ['start', 'Start'],
+        ['a', 'Agent'],
+        ['b', 'Agent'],
+      ],
+      [
+        ['start', 'a'],
+        ['start', 'b'],
+      ]
     )
   );
 
@@ -231,8 +277,15 @@ describe('deriveFrame — real launch/settle overrides the assemble cascade', ()
         sum('b', 300, 300), // [300,600]
       ],
       graph(
-        [['start', 'Start'], ['a', 'Agent'], ['b', 'Agent']],
-        [['start', 'a'], ['start', 'b']]
+        [
+          ['start', 'Start'],
+          ['a', 'Agent'],
+          ['b', 'Agent'],
+        ],
+        [
+          ['start', 'a'],
+          ['start', 'b'],
+        ]
       )
     );
     // a ends exactly as b begins — they never overlap (only one Agent at a time).
@@ -250,8 +303,15 @@ describe('deriveFrame — failed run', () => {
       sum('b', 300, 300, { status: 'failed', completedAt: null }), // [300,600] failed
     ],
     graph(
-      [['a', 'Agent'], ['b', 'Agent'], ['c', 'Agent']],
-      [['a', 'b'], ['b', 'c']]
+      [
+        ['a', 'Agent'],
+        ['b', 'Agent'],
+        ['c', 'Agent'],
+      ],
+      [
+        ['a', 'b'],
+        ['b', 'c'],
+      ]
     )
   );
 
@@ -278,7 +338,13 @@ describe('deriveFrame — suspended / parked run', () => {
         completedAt: null,
       }), // [300,500]
     ],
-    graph([['a', 'Agent'], ['wait', 'Delay']], [['a', 'wait']])
+    graph(
+      [
+        ['a', 'Agent'],
+        ['wait', 'Delay'],
+      ],
+      [['a', 'wait']]
+    )
   );
 
   it('parked node reads as suspended past its interval', () => {
@@ -298,7 +364,13 @@ describe('deriveFrame — suspended / parked run', () => {
           completedAt: null,
         }),
       ],
-      graph([['a', 'Agent'], ['w', 'WaitForSignal']], [['a', 'w']]),
+      graph(
+        [
+          ['a', 'Agent'],
+          ['w', 'WaitForSignal'],
+        ],
+        [['a', 'w']]
+      ),
       { instanceStatus: 'suspended' }
     );
     expect(deriveFrame(parked, 900).nodeStates.get('w')).toBe('suspended');

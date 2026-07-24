@@ -62,7 +62,8 @@ export function MetricBlockEditor({
             <SelectValue placeholder="Pick an aggregate alias" />
           </SelectTrigger>
           <SelectContent>
-            {metric.valueField && !aggregateAliases.includes(metric.valueField) ? (
+            {metric.valueField &&
+            !aggregateAliases.includes(metric.valueField) ? (
               <SelectItem disabled value={metric.valueField}>
                 {metric.valueField}
               </SelectItem>

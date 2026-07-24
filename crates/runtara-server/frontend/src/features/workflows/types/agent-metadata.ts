@@ -110,13 +110,7 @@ const isFileField = (field: CapabilityField): boolean => {
  * Map backend field type to frontend input component type
  */
 export type InputComponentType =
-  | 'text'
-  | 'number'
-  | 'boolean'
-  | 'select'
-  | 'json'
-  | 'textarea'
-  | 'file';
+  'text' | 'number' | 'boolean' | 'select' | 'json' | 'textarea' | 'file';
 
 export const getInputComponentType = (
   field: CapabilityField

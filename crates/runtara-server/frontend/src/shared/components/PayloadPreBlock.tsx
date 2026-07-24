@@ -18,7 +18,7 @@ export function PayloadPreBlock({
   return (
     <div>
       <pre
-        className={`${textClassName} bg-muted p-2 rounded overflow-x-auto overflow-y-auto font-mono ${className}`}
+        className={`${textClassName} overflow-x-auto overflow-y-auto rounded bg-muted p-2 font-mono ${className}`}
       >
         {text}
       </pre>

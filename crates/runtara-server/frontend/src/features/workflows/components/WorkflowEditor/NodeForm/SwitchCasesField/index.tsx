@@ -588,7 +588,7 @@ export function SwitchCasesField(props: any) {
       </div>
 
       {/* Routing Mode Toggle */}
-      <div className="mb-4 flex items-center justify-between border rounded-lg p-3">
+      <div className="mb-4 flex items-center justify-between rounded-lg border p-3">
         <div className="space-y-0.5">
           <Label className="text-sm font-medium">Routing Mode</Label>
           <div className="text-xs text-muted-foreground">
@@ -611,28 +611,28 @@ export function SwitchCasesField(props: any) {
 
       {/* Cases */}
       <div className="mb-4">
-        <div className="text-sm font-medium text-muted-foreground mb-2">
+        <div className="mb-2 text-sm font-medium text-muted-foreground">
           Cases
         </div>
-        <div className="border rounded-lg">
+        <div className="rounded-lg border">
           <table className="w-full">
             <thead>
               <tr className="border-b">
-                <th className="w-32 text-left p-2 text-sm font-medium text-muted-foreground">
+                <th className="w-32 p-2 text-left text-sm font-medium text-muted-foreground">
                   Match Type
                 </th>
-                <th className="text-left p-2 text-sm font-medium text-muted-foreground">
+                <th className="p-2 text-left text-sm font-medium text-muted-foreground">
                   Match Pattern
                 </th>
-                <th className="text-left p-2 text-sm font-medium text-muted-foreground">
+                <th className="p-2 text-left text-sm font-medium text-muted-foreground">
                   Output
                 </th>
                 {isRoutingMode && (
-                  <th className="w-28 text-left p-2 text-sm font-medium text-muted-foreground">
+                  <th className="w-28 p-2 text-left text-sm font-medium text-muted-foreground">
                     Route
                   </th>
                 )}
-                <th className="w-16 text-center p-2 text-sm font-medium text-muted-foreground">
+                <th className="w-16 p-2 text-center text-sm font-medium text-muted-foreground">
                   Actions
                 </th>
               </tr>
@@ -654,7 +654,7 @@ export function SwitchCasesField(props: any) {
                           updateCaseMatchType(index, value as MatchType)
                         }
                       >
-                        <SelectTrigger className="h-7 text-xs border-0 focus:ring-0">
+                        <SelectTrigger className="h-7 border-0 text-xs focus:ring-0">
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
@@ -671,7 +671,7 @@ export function SwitchCasesField(props: any) {
                                   className="text-xs"
                                 >
                                   <div className="flex items-center gap-2">
-                                    <span className="font-semibold min-w-[24px]">
+                                    <span className="min-w-[24px] font-semibold">
                                       {type.label}
                                     </span>
                                     <span className="text-muted-foreground">
@@ -687,7 +687,7 @@ export function SwitchCasesField(props: any) {
                     </td>
                     <td className="p-2">
                       {isExistence ? (
-                        <span className="text-xs text-muted-foreground italic px-1">
+                        <span className="px-1 text-xs italic text-muted-foreground">
                           No value needed
                         </span>
                       ) : (
@@ -706,7 +706,7 @@ export function SwitchCasesField(props: any) {
                               updateCaseMatch(index, parsed);
                             }}
                             key={`${index}-${matchType}-${formatMatchValue(matchValue, matchType)}`}
-                            className="font-mono text-sm border-0 p-1 h-auto focus-visible:ring-0 focus-visible:ring-offset-0 min-w-0 flex-1"
+                            className="h-auto min-w-0 flex-1 border-0 p-1 font-mono text-sm focus-visible:ring-0 focus-visible:ring-offset-0"
                             placeholder={getMatchPlaceholder(matchType)}
                           />
                           <Button
@@ -744,7 +744,7 @@ export function SwitchCasesField(props: any) {
                               updateCaseOutput(index, e.target.value);
                             }
                           }}
-                          className="font-mono text-sm border-0 p-1 h-auto focus-visible:ring-0 focus-visible:ring-offset-0 min-w-0 flex-1"
+                          className="h-auto min-w-0 flex-1 border-0 p-1 font-mono text-sm focus-visible:ring-0 focus-visible:ring-offset-0"
                           placeholder='{"key": "value"} or simple value'
                         />
                         <Button
@@ -774,12 +774,12 @@ export function SwitchCasesField(props: any) {
                           onChange={(e) =>
                             updateCaseRoute(index, e.target.value)
                           }
-                          className="font-mono text-sm border-0 p-1 h-auto focus-visible:ring-0 focus-visible:ring-offset-0 min-w-0"
+                          className="h-auto min-w-0 border-0 p-1 font-mono text-sm focus-visible:ring-0 focus-visible:ring-offset-0"
                           placeholder={`case_${index + 1}`}
                         />
                       </td>
                     )}
-                    <td className="w-16 text-center p-2">
+                    <td className="w-16 p-2 text-center">
                       <Button
                         type="button"
                         size="icon"
@@ -787,7 +787,7 @@ export function SwitchCasesField(props: any) {
                         onClick={() => removeCase(index)}
                         className="h-8 w-8"
                       >
-                        <Icons.remove className="w-4 h-4" />
+                        <Icons.remove className="h-4 w-4" />
                       </Button>
                     </td>
                   </tr>
@@ -797,7 +797,7 @@ export function SwitchCasesField(props: any) {
                 <tr>
                   <td
                     colSpan={totalColumns}
-                    className="text-center text-muted-foreground p-4"
+                    className="p-4 text-center text-muted-foreground"
                   >
                     No cases added yet. Click "Add Case" to get started.
                   </td>
@@ -809,13 +809,13 @@ export function SwitchCasesField(props: any) {
         <div className="mt-2">
           <Button
             data-testid="switch-add-case"
-            className="w-full flex gap-1 text-sm"
+            className="flex w-full gap-1 text-sm"
             type="button"
             size="sm"
             variant="outline"
             onClick={addCase}
           >
-            <Icons.add className="w-4 h-4" /> Add Case
+            <Icons.add className="h-4 w-4" /> Add Case
           </Button>
         </div>
       </div>
@@ -823,11 +823,11 @@ export function SwitchCasesField(props: any) {
       {/* Default Output — optional. Its presence is semantically meaningful:
           without a default, an unmatched value fails the step at runtime. */}
       <div>
-        <div className="text-sm font-medium text-muted-foreground mb-2">
+        <div className="mb-2 text-sm font-medium text-muted-foreground">
           Default Output
         </div>
         {hasDefaultOutput ? (
-          <div className="flex items-center gap-1 border rounded-lg p-2">
+          <div className="flex items-center gap-1 rounded-lg border p-2">
             <Input
               data-testid="switch-default-output"
               value={
@@ -843,7 +843,7 @@ export function SwitchCasesField(props: any) {
                   updateDefaultOutput(e.target.value);
                 }
               }}
-              className="font-mono text-sm border-0 p-1 h-auto focus-visible:ring-0 focus-visible:ring-offset-0 flex-1"
+              className="h-auto flex-1 border-0 p-1 font-mono text-sm focus-visible:ring-0 focus-visible:ring-offset-0"
               placeholder='{"key": "value"} or simple value'
             />
             <Button
@@ -875,7 +875,7 @@ export function SwitchCasesField(props: any) {
             </Button>
           </div>
         ) : (
-          <div className="flex items-center justify-between gap-2 border rounded-lg p-3">
+          <div className="flex items-center justify-between gap-2 rounded-lg border p-3">
             <div className="text-xs text-muted-foreground">
               No default — execution fails when no case matches.
             </div>
@@ -887,14 +887,14 @@ export function SwitchCasesField(props: any) {
               className="shrink-0"
               onClick={() => updateDefaultOutput({})}
             >
-              <Icons.add className="w-4 h-4" /> Add Default
+              <Icons.add className="h-4 w-4" /> Add Default
             </Button>
           </div>
         )}
       </div>
 
       {error && (
-        <div className="text-[0.8rem] mt-2 font-medium text-destructive">
+        <div className="mt-2 text-[0.8rem] font-medium text-destructive">
           {error.message || error.root?.message}
         </div>
       )}
@@ -927,7 +927,7 @@ export function SwitchCasesField(props: any) {
             <Textarea
               value={editingValue}
               onChange={(e) => setEditingValue(e.target.value)}
-              className="font-mono text-sm min-h-[200px]"
+              className="min-h-[200px] font-mono text-sm"
               placeholder={
                 editingField?.type === 'caseMatch'
                   ? 'Enter match pattern (e.g., US or DE, FR, IT)'

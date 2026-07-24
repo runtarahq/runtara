@@ -266,12 +266,12 @@ export function ExecutionTimeline({
 
   if (isLoadingRoot) {
     return (
-      <div className="py-16 px-6 text-center">
-        <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-purple-500/10 mb-4">
-          <Loader2 className="h-8 w-8 text-purple-600 animate-spin" />
+      <div className="px-6 py-16 text-center">
+        <div className="mb-4 inline-flex h-16 w-16 items-center justify-center rounded-full bg-purple-500/10">
+          <Loader2 className="h-8 w-8 animate-spin text-purple-600" />
         </div>
-        <h3 className="text-lg font-semibold mb-2">Loading Timeline...</h3>
-        <p className="text-sm text-muted-foreground max-w-md mx-auto">
+        <h3 className="mb-2 text-lg font-semibold">Loading Timeline...</h3>
+        <p className="mx-auto max-w-md text-sm text-muted-foreground">
           Fetching execution data for visualization.
         </p>
       </div>
@@ -280,12 +280,12 @@ export function ExecutionTimeline({
 
   if (visibleSteps.length === 0) {
     return (
-      <div className="py-16 px-6 text-center">
-        <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-purple-500/10 mb-4">
+      <div className="px-6 py-16 text-center">
+        <div className="mb-4 inline-flex h-16 w-16 items-center justify-center rounded-full bg-purple-500/10">
           <Clock className="h-8 w-8 text-purple-600" />
         </div>
-        <h3 className="text-lg font-semibold mb-2">No Timeline Events Yet</h3>
-        <p className="text-sm text-muted-foreground max-w-md mx-auto">
+        <h3 className="mb-2 text-lg font-semibold">No Timeline Events Yet</h3>
+        <p className="mx-auto max-w-md text-sm text-muted-foreground">
           Timeline events will appear here as your workflow executes. If your
           workflow is still running, events may appear soon.
         </p>
@@ -296,7 +296,7 @@ export function ExecutionTimeline({
   return (
     <div className="space-y-6">
       {/* Stats Bar */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
         <Card>
           <CardHeader className="pb-2">
             <CardTitle className="text-xs text-muted-foreground">
@@ -384,13 +384,13 @@ export function ExecutionTimeline({
             >
               <RotateCcw className="h-4 w-4" />
             </Button>
-            <div className="flex-1 h-2 bg-muted rounded-full overflow-hidden">
+            <div className="h-2 flex-1 overflow-hidden rounded-full bg-muted">
               <div
-                className="h-full bg-purple-500 transition-all duration-50"
+                className="duration-50 h-full bg-purple-500 transition-all"
                 style={{ width: `${(playhead / totalDuration) * 100}%` }}
               />
             </div>
-            <span className="text-muted-foreground font-mono text-sm w-20 text-right">
+            <span className="w-20 text-right font-mono text-sm text-muted-foreground">
               {formatTime(Math.round(playhead))}
             </span>
           </div>
@@ -401,15 +401,15 @@ export function ExecutionTimeline({
       <Card className="overflow-hidden">
         <CardContent className="p-0">
           {/* Time Scale */}
-          <div className="h-8 bg-muted/50 border-b flex items-center relative">
+          <div className="relative flex h-8 items-center border-b bg-muted/50">
             <div className="w-48 shrink-0 px-4 text-xs text-muted-foreground">
               Time →
             </div>
-            <div className="flex-1 relative">
+            <div className="relative flex-1">
               {[0, 25, 50, 75, 100].map((pct) => (
                 <div
                   key={pct}
-                  className="absolute text-xs text-muted-foreground transform -translate-x-1/2"
+                  className="absolute -translate-x-1/2 transform text-xs text-muted-foreground"
                   style={{ left: `${pct}%` }}
                 >
                   {formatTime(Math.round((pct / 100) * totalDuration))}
@@ -450,18 +450,18 @@ export function ExecutionTimeline({
             return (
               <div
                 key={step.stepId}
-                className="flex items-stretch border-b last:border-b-0 hover:bg-muted/30 transition-colors"
+                className="flex items-stretch border-b transition-colors last:border-b-0 hover:bg-muted/30"
               >
                 {/* Row Label */}
                 <div
-                  className="w-48 shrink-0 py-3 bg-muted/30 border-r flex items-center gap-2"
+                  className="flex w-48 shrink-0 items-center gap-2 border-r bg-muted/30 py-3"
                   style={indentStyle}
                 >
                   {/* Expand/Collapse Button */}
                   {step.hasChildren ? (
                     <button
                       onClick={() => toggleExpand(step)}
-                      className="w-5 h-5 flex items-center justify-center hover:bg-muted rounded transition-colors"
+                      className="flex h-5 w-5 items-center justify-center rounded transition-colors hover:bg-muted"
                       disabled={step.isLoadingChildren}
                     >
                       {step.isLoadingChildren ? (
@@ -478,7 +478,7 @@ export function ExecutionTimeline({
 
                   {/* Step Icon */}
                   <div
-                    className="w-6 h-6 rounded flex items-center justify-center shrink-0"
+                    className="flex h-6 w-6 shrink-0 items-center justify-center rounded"
                     style={{ backgroundColor: config.bg }}
                   >
                     <Icon size={14} style={{ color: config.color }} />
@@ -486,7 +486,7 @@ export function ExecutionTimeline({
 
                   {/* Step Name */}
                   <div className="min-w-0 flex-1">
-                    <div className="text-sm text-foreground truncate">
+                    <div className="truncate text-sm text-foreground">
                       {step.stepName || step.stepId}
                     </div>
                     <div className="text-xs text-muted-foreground">
@@ -502,26 +502,26 @@ export function ExecutionTimeline({
                 </div>
 
                 {/* Timeline Area */}
-                <div className="flex-1 relative h-14">
+                <div className="relative h-14 flex-1">
                   {/* Grid lines */}
                   {[25, 50, 75].map((pct) => (
                     <div
                       key={pct}
-                      className="absolute top-0 bottom-0 w-px bg-border"
+                      className="absolute bottom-0 top-0 w-px bg-border"
                       style={{ left: `${pct}%` }}
                     />
                   ))}
 
                   {/* Playhead */}
                   <div
-                    className="absolute top-0 bottom-0 w-0.5 bg-red-500 z-20 pointer-events-none"
+                    className="pointer-events-none absolute bottom-0 top-0 z-20 w-0.5 bg-red-500"
                     style={{ left: `${(playhead / totalDuration) * 100}%` }}
                   />
 
                   {/* Step Bar */}
                   <div
-                    className={`absolute top-2 bottom-2 rounded cursor-pointer transition-all duration-150 flex items-center gap-2 px-2 overflow-hidden ${
-                      isActive ? 'ring-2 ring-foreground/50 z-10' : ''
+                    className={`absolute bottom-2 top-2 flex cursor-pointer items-center gap-2 overflow-hidden rounded px-2 transition-all duration-150 ${
+                      isActive ? 'z-10 ring-2 ring-foreground/50' : ''
                     } ${isHovered || isSelected ? 'z-10 ring-2 ring-purple-500/50' : ''}`}
                     style={{
                       left: pos.left,
@@ -540,7 +540,7 @@ export function ExecutionTimeline({
                     onMouseLeave={() => setHoveredStep(null)}
                   >
                     <span
-                      className="text-xs font-medium whitespace-nowrap"
+                      className="whitespace-nowrap text-xs font-medium"
                       style={{ color: config.color }}
                     >
                       {formatTime(step.durationMs)}
@@ -555,13 +555,13 @@ export function ExecutionTimeline({
                               ? 'secondary'
                               : 'destructive'
                       }
-                      className={`text-xs px-1.5 py-0 ${displayStatus === 'waiting' ? 'border-amber-500 text-amber-600' : ''}`}
+                      className={`px-1.5 py-0 text-xs ${displayStatus === 'waiting' ? 'border-amber-500 text-amber-600' : ''}`}
                     >
                       {displayStatus === 'running' && (
-                        <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                        <Loader2 className="mr-1 h-3 w-3 animate-spin" />
                       )}
                       {displayStatus === 'waiting' && (
-                        <Hand className="h-3 w-3 mr-1" />
+                        <Hand className="mr-1 h-3 w-3" />
                       )}
                       {displayStatus === 'waiting'
                         ? 'waiting for input'
@@ -575,7 +575,7 @@ export function ExecutionTimeline({
 
           {/* Load More Button */}
           {hasMoreRootSteps && (
-            <div className="p-4 border-t bg-muted/20 text-center">
+            <div className="border-t bg-muted/20 p-4 text-center">
               <Button variant="outline" size="sm" onClick={loadMoreRoot}>
                 Load More Steps
               </Button>
@@ -593,7 +593,7 @@ export function ExecutionTimeline({
             return (
               <div key={key} className="flex items-center gap-2 text-sm">
                 <div
-                  className="w-5 h-5 rounded flex items-center justify-center"
+                  className="flex h-5 w-5 items-center justify-center rounded"
                   style={{
                     backgroundColor: value.bg,
                     border: `1px solid ${value.color}`,
@@ -649,18 +649,18 @@ export function ExecutionTimeline({
 
               return (
                 <div>
-                  <div className="flex items-start gap-4 mb-4">
+                  <div className="mb-4 flex items-start gap-4">
                     <div
-                      className="w-12 h-12 rounded-lg flex items-center justify-center shrink-0"
+                      className="flex h-12 w-12 shrink-0 items-center justify-center rounded-lg"
                       style={{ backgroundColor: config.bg }}
                     >
                       <Icon size={24} style={{ color: config.color }} />
                     </div>
-                    <div className="flex-1 min-w-0">
-                      <h3 className="font-semibold text-lg">
+                    <div className="min-w-0 flex-1">
+                      <h3 className="text-lg font-semibold">
                         {step.stepName || step.stepId}
                       </h3>
-                      <div className="flex flex-wrap gap-x-6 gap-y-1 text-sm mt-1">
+                      <div className="mt-1 flex flex-wrap gap-x-6 gap-y-1 text-sm">
                         <div>
                           <span className="text-muted-foreground">Type:</span>{' '}
                           <span style={{ color: config.color }}>
@@ -715,9 +715,9 @@ export function ExecutionTimeline({
                   </div>
 
                   {/* Inputs/Outputs */}
-                  <div className="grid md:grid-cols-2 gap-4">
+                  <div className="grid gap-4 md:grid-cols-2">
                     <div>
-                      <div className="text-xs text-muted-foreground mb-1 flex items-center gap-1">
+                      <div className="mb-1 flex items-center gap-1 text-xs text-muted-foreground">
                         <ArrowRight size={12} /> Inputs
                       </div>
                       {parsedInputs ? (
@@ -726,13 +726,13 @@ export function ExecutionTimeline({
                           className="max-h-32 p-3"
                         />
                       ) : (
-                        <pre className="bg-muted rounded p-3 text-xs font-mono text-foreground overflow-auto max-h-32">
+                        <pre className="max-h-32 overflow-auto rounded bg-muted p-3 font-mono text-xs text-foreground">
                           (none)
                         </pre>
                       )}
                     </div>
                     <div>
-                      <div className="text-xs text-muted-foreground mb-1 flex items-center gap-1">
+                      <div className="mb-1 flex items-center gap-1 text-xs text-muted-foreground">
                         <ArrowRight size={12} className="rotate-180" /> Outputs
                       </div>
                       {parsedOutputs ? (
@@ -741,7 +741,7 @@ export function ExecutionTimeline({
                           className="max-h-32 p-3"
                         />
                       ) : (
-                        <pre className="bg-muted rounded p-3 text-xs font-mono text-foreground overflow-auto max-h-32">
+                        <pre className="max-h-32 overflow-auto rounded bg-muted p-3 font-mono text-xs text-foreground">
                           (none)
                         </pre>
                       )}
@@ -751,8 +751,8 @@ export function ExecutionTimeline({
                   {/* Error if present */}
                   {step.error && (
                     <div className="mt-4">
-                      <div className="text-xs text-destructive mb-1">Error</div>
-                      <pre className="bg-destructive/10 rounded p-3 text-xs font-mono text-destructive overflow-auto max-h-32">
+                      <div className="mb-1 text-xs text-destructive">Error</div>
+                      <pre className="max-h-32 overflow-auto rounded bg-destructive/10 p-3 font-mono text-xs text-destructive">
                         {typeof step.error === 'string'
                           ? step.error
                           : JSON.stringify(step.error, null, 2)}
@@ -783,7 +783,7 @@ export function ExecutionTimeline({
               return (
                 <div key={type} className="flex items-center gap-2">
                   <div
-                    className="w-3 h-3 rounded-sm"
+                    className="h-3 w-3 rounded-sm"
                     style={{ backgroundColor: config.color }}
                   />
                   <span className="text-muted-foreground">{type}:</span>

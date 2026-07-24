@@ -21,11 +21,7 @@ type StepCreateOptions = {
 
 type TimelineDropPlacement = 'before' | 'after';
 type TimelineRouteHandle =
-  | 'true'
-  | 'false'
-  | 'default'
-  | 'onError'
-  | `case-${number}`;
+  'true' | 'false' | 'default' | 'onError' | `case-${number}`;
 
 function attrValue(value: string): string {
   return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');

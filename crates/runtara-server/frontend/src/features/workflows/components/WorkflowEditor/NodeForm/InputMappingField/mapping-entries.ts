@@ -81,10 +81,7 @@ export function toEditorInitialData(
  * ------------------------------------------------------------------------ */
 
 export type MappingObjectValueType =
-  | 'immediate'
-  | 'reference'
-  | 'template'
-  | 'composite';
+  'immediate' | 'reference' | 'template' | 'composite';
 
 /** UI-format mapping value as edited by MappingObjectField rows. */
 export type MappingObjectEntry = {

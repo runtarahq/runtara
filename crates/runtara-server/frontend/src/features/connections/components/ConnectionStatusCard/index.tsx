@@ -104,7 +104,9 @@ function statusDetail(
 }
 
 /** Token-health line shown for a connected OAuth grant. */
-function grantHealthLine(grantState?: ConnectionGrantState | null): string | null {
+function grantHealthLine(
+  grantState?: ConnectionGrantState | null
+): string | null {
   if (!grantState || !grantState.hasAccessToken) return null;
   const authorized = relativeTime(grantState.authorizedAt ?? undefined);
   const expires = grantState.tokenExpiresAt
@@ -169,9 +171,9 @@ export function ConnectionStatusCard({
       className={!isConnected ? 'shadow-sm shadow-blue-600/20' : undefined}
     >
       {isReconnecting ? (
-        <Loader2 className="w-4 h-4 mr-1.5 animate-spin" />
+        <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
       ) : (
-        <RefreshCw className="w-4 h-4 mr-1.5" />
+        <RefreshCw className="mr-1.5 h-4 w-4" />
       )}
       {reconnectLabel}
     </Button>
@@ -185,7 +187,7 @@ export function ConnectionStatusCard({
     <section className="rounded-lg border border-border/70 bg-card px-4 py-4">
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0 space-y-1.5">
-          <div className="flex items-center gap-2 flex-wrap">
+          <div className="flex flex-wrap items-center gap-2">
             <StatusPill tone={pill.tone} label={pill.label} />
             {identity.map((entry) => (
               <span
@@ -197,9 +199,7 @@ export function ConnectionStatusCard({
               </span>
             ))}
           </div>
-          {detail && (
-            <p className="text-xs text-muted-foreground">{detail}</p>
-          )}
+          {detail && <p className="text-xs text-muted-foreground">{detail}</p>}
           {healthLine && (
             <p className="text-xs text-muted-foreground">{healthLine}</p>
           )}

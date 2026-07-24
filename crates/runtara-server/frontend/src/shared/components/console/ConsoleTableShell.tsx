@@ -1,8 +1,7 @@
 import * as React from 'react';
 import { cn } from '@/lib/utils';
 
-export interface ConsoleTableShellProps
-  extends React.HTMLAttributes<HTMLDivElement> {
+export interface ConsoleTableShellProps extends React.HTMLAttributes<HTMLDivElement> {
   /** Pinned toolbar row(s) at the top. */
   toolbar?: React.ReactNode;
   /** Bottom selection / bulk-action bar (e.g. <SelectionActionBar />). */
@@ -26,7 +25,15 @@ export const ConsoleTableShell = React.forwardRef<
   HTMLDivElement,
   ConsoleTableShellProps
 >(function ConsoleTableShell(
-  { toolbar, selectionBar, footer, children, className, bodyClassName, ...rest },
+  {
+    toolbar,
+    selectionBar,
+    footer,
+    children,
+    className,
+    bodyClassName,
+    ...rest
+  },
   ref
 ) {
   return (

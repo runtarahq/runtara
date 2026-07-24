@@ -145,10 +145,10 @@ function FormTabs() {
           <TabsTrigger value="main">Main</TabsTrigger>
           <TabsTrigger value="testing">Testing</TabsTrigger>
         </TabsList>
-        <TabsContent value="main" className="space-y-4 mt-4">
+        <TabsContent value="main" className="mt-4 space-y-4">
           {/* Main tab content is now rendered below the tabs via mainTabFieldsConfig */}
         </TabsContent>
-        <TabsContent value="testing" className="space-y-4 mt-4">
+        <TabsContent value="testing" className="mt-4 space-y-4">
           <TestAgentInline />
         </TabsContent>
       </Tabs>

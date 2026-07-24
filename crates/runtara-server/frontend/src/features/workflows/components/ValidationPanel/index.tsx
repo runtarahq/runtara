@@ -68,7 +68,7 @@ export function ValidationPanel({
   return (
     <div
       className={cn(
-        'border-t bg-card transition-all duration-200 flex flex-col',
+        'flex flex-col border-t bg-card transition-all duration-200',
         isPanelExpanded ? 'h-[320px]' : 'h-10'
       )}
     >

@@ -283,34 +283,34 @@ export const BaseNode = forwardRef<
       <div
         ref={ref}
         className={cn(
-          'group relative w-full h-full',
-          'bg-card rounded-md text-muted-foreground',
-          'border shadow-sm hover:shadow-md transition-all duration-200',
+          'group relative h-full w-full',
+          'rounded-md bg-card text-muted-foreground',
+          'border shadow-sm transition-all duration-200 hover:shadow-md',
           // Replay mode owns the visual entirely (it is a distinct 'scrub a past
           // run' surface, never shown alongside live execution). Priority
           // otherwise: validation error > warning > execution > selected > unsaved.
           replayState
             ? getReplayNodeClass(replayState)
             : hasValidationError
-            ? 'border-red-500 ring-2 ring-red-500/30 border-2'
-            : hasValidationWarning
-              ? 'border-amber-500 ring-2 ring-amber-500/30 border-2'
-              : executionStatus
-                ? getExecutionBorderClass(executionStatus.status)
-                : selected
-                  ? 'border-primary ring-1 ring-primary/20 shadow-md'
-                  : hasUnsavedChanges
-                    ? 'border-dashed border-orange-500 ring-1 ring-orange-500/20'
-                    : 'border-border',
+              ? 'border-2 border-red-500 ring-2 ring-red-500/30'
+              : hasValidationWarning
+                ? 'border-2 border-amber-500 ring-2 ring-amber-500/30'
+                : executionStatus
+                  ? getExecutionBorderClass(executionStatus.status)
+                  : selected
+                    ? 'border-primary shadow-md ring-1 ring-primary/20'
+                    : hasUnsavedChanges
+                      ? 'border-dashed border-orange-500 ring-1 ring-orange-500/20'
+                      : 'border-border',
           // Subtle glow for suspended (breakpoint hit) nodes
           executionStatus?.status === 'suspended' &&
-            'border-2 animate-glow-pulse',
+            'animate-glow-pulse border-2',
           // Dim unreached nodes during execution
           isExecutionReadOnly && !executionStatus && 'opacity-40',
           // Extra dim for queued (not-yet-reached) nodes when paused at breakpoint
           isSuspendedExecution &&
             executionStatus?.status === 'queued' &&
-            'opacity-25 pointer-events-none',
+            'pointer-events-none opacity-25',
           className
         )}
         tabIndex={0}
@@ -325,14 +325,14 @@ export const BaseNode = forwardRef<
         {breakpoint && (
           <button
             type="button"
-            className="absolute -left-1.5 top-1/2 -translate-y-1/2 z-10 flex items-center justify-center w-3 h-3 rounded-full bg-red-500 hover:bg-red-600 transition-colors cursor-pointer border border-red-600"
+            className="absolute -left-1.5 top-1/2 z-10 flex h-3 w-3 -translate-y-1/2 cursor-pointer items-center justify-center rounded-full border border-red-600 bg-red-500 transition-colors hover:bg-red-600"
             onClick={(e) => {
               e.stopPropagation();
               onToggleBreakpoint?.();
             }}
             title="Remove breakpoint"
           >
-            <Circle className="w-1.5 h-1.5 fill-red-200 text-red-200" />
+            <Circle className="h-1.5 w-1.5 fill-red-200 text-red-200" />
           </button>
         )}
 
@@ -340,21 +340,21 @@ export const BaseNode = forwardRef<
         {!breakpoint && onToggleBreakpoint && !isExecutionReadOnly && (
           <button
             type="button"
-            className="absolute -left-1.5 top-1/2 -translate-y-1/2 z-10 flex items-center justify-center w-3 h-3 rounded-full opacity-0 group-hover:opacity-40 hover:!opacity-100 bg-red-400 hover:bg-red-500 transition-all cursor-pointer border border-red-500/50"
+            className="absolute -left-1.5 top-1/2 z-10 flex h-3 w-3 -translate-y-1/2 cursor-pointer items-center justify-center rounded-full border border-red-500/50 bg-red-400 opacity-0 transition-all hover:bg-red-500 hover:!opacity-100 group-hover:opacity-40"
             onClick={(e) => {
               e.stopPropagation();
               onToggleBreakpoint?.();
             }}
             title="Set breakpoint"
           >
-            <Circle className="w-1.5 h-1.5 fill-red-200 text-red-200" />
+            <Circle className="h-1.5 w-1.5 fill-red-200 text-red-200" />
           </button>
         )}
 
         {/* Graph Replay state badge + iteration counter (top-right) */}
         {replayBadge && (
           <div
-            className="absolute -top-1.5 -right-1.5 z-10 flex items-center gap-0.5"
+            className="absolute -right-1.5 -top-1.5 z-10 flex items-center gap-0.5"
             data-testid="replay-node-badge"
           >
             {replayIteration && replayIteration.total > 0 && (
@@ -368,7 +368,7 @@ export const BaseNode = forwardRef<
             )}
             <span
               className={cn(
-                'flex items-center justify-center w-3.5 h-3.5 rounded-full shadow-sm',
+                'flex h-3.5 w-3.5 items-center justify-center rounded-full shadow-sm',
                 replayBadge.cls
               )}
             >
@@ -379,13 +379,13 @@ export const BaseNode = forwardRef<
 
         {/* Unsaved changes corner dot */}
         {hasUnsavedChanges && !hasValidationError && !hasValidationWarning && (
-          <div className="absolute top-0.5 right-0.5 w-1 h-1 rounded-full bg-orange-500 z-10" />
+          <div className="absolute right-0.5 top-0.5 z-10 h-1 w-1 rounded-full bg-orange-500" />
         )}
 
         {/* Horizontal pill layout: icon left, name + status center/right */}
         {(stepType !== undefined || name) && (
           <div
-            className="flex items-center w-full h-full px-1.5 gap-1.5"
+            className="flex h-full w-full items-center gap-1.5 px-1.5"
             style={
               rightReservedWidth
                 ? { paddingRight: rightReservedWidth }
@@ -396,7 +396,7 @@ export const BaseNode = forwardRef<
             {stepType && (
               <div
                 className={cn(
-                  'flex-shrink-0 w-4 h-4 flex items-center justify-center rounded-sm [&_svg]:w-2.5 [&_svg]:h-2.5',
+                  'flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-sm [&_svg]:h-2.5 [&_svg]:w-2.5',
                   getIconTintClass()
                 )}
               >
@@ -406,17 +406,17 @@ export const BaseNode = forwardRef<
 
             {/* Center: Step name, subtitle, and inline status pill */}
             <div
-              className="flex-1 min-w-0 flex flex-col justify-center"
+              className="flex min-w-0 flex-1 flex-col justify-center"
               title={name}
             >
               {/* Row 1: Name + status pill */}
-              <div className="flex items-center gap-0.5 min-w-0">
+              <div className="flex min-w-0 items-center gap-0.5">
                 {name ? (
-                  <span className="text-[11px] font-normal truncate flex-1 text-foreground leading-tight">
+                  <span className="flex-1 truncate text-[11px] font-normal leading-tight text-foreground">
                     {name}
                   </span>
                 ) : (
-                  <span className="text-[11px] font-normal text-muted-foreground italic flex-1 leading-tight">
+                  <span className="flex-1 text-[11px] font-normal italic leading-tight text-muted-foreground">
                     Unnamed step
                   </span>
                 )}
@@ -428,7 +428,7 @@ export const BaseNode = forwardRef<
                     title="Agent disabled — workflow can't be saved"
                     aria-label="Agent disabled"
                     data-testid="stale-agent-badge"
-                    className="flex items-center gap-0.5 rounded bg-amber-100 dark:bg-amber-950/60 text-amber-700 dark:text-amber-300 px-1 py-0.5 text-[9px] font-medium leading-none shrink-0"
+                    className="flex shrink-0 items-center gap-0.5 rounded bg-amber-100 px-1 py-0.5 text-[9px] font-medium leading-none text-amber-700 dark:bg-amber-950/60 dark:text-amber-300"
                   >
                     <AlertTriangle className="h-2.5 w-2.5" />
                     <span className="hidden md:inline">Agent disabled</span>
@@ -438,7 +438,7 @@ export const BaseNode = forwardRef<
                 {showStatusPill && (
                   <span
                     className={cn(
-                      'inline-flex items-center gap-0.5 px-0.5 rounded-full text-[8px] font-medium whitespace-nowrap flex-shrink-0 leading-none',
+                      'inline-flex flex-shrink-0 items-center gap-0.5 whitespace-nowrap rounded-full px-0.5 text-[8px] font-medium leading-none',
                       getStatusPillClasses(executionStatus.status)
                     )}
                   >
@@ -455,7 +455,7 @@ export const BaseNode = forwardRef<
               {subtitleContent && (
                 <span
                   className={cn(
-                    'text-[9px] truncate block leading-tight',
+                    'block truncate text-[9px] leading-tight',
                     subtitleContent.className
                   )}
                   title={subtitleContent.text}

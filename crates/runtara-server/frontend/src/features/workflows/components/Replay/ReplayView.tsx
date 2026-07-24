@@ -29,20 +29,15 @@ interface ReplayViewProps {
 }
 
 export function ReplayView({ workflowId, instanceId }: ReplayViewProps) {
-  const { model, isLoading, isError, error, hasEvents, truncated } = useReplayModel(
-    workflowId,
-    instanceId
-  );
+  const { model, isLoading, isError, error, hasEvents, truncated } =
+    useReplayModel(workflowId, instanceId);
 
   const [pacing, setPacing] = useState<ReplayPacing>('even');
   const [compressIdle, setCompressIdle] = useState(true);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
 
   const timeMap = useMemo(
-    () =>
-      model
-        ? buildTimeMap(model, { pacing, compressIdle })
-        : null,
+    () => (model ? buildTimeMap(model, { pacing, compressIdle }) : null),
     [model, pacing, compressIdle]
   );
 
@@ -116,7 +111,7 @@ export function ReplayView({ workflowId, instanceId }: ReplayViewProps) {
   }
 
   const selectedState = selectedNodeId
-    ? frame.nodeStates.get(selectedNodeId) ?? 'idle'
+    ? (frame.nodeStates.get(selectedNodeId) ?? 'idle')
     : 'idle';
 
   return (

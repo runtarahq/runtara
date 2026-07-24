@@ -120,7 +120,7 @@ export function ChatInput({
       {isWaiting &&
         !isSimpleMessageSchema &&
         (waitingForInput?.message || schemaFieldDescription) && (
-          <div className="mb-2 rounded-lg bg-amber-50 dark:bg-amber-900/20 border border-amber-200/60 dark:border-amber-700/40 px-3 py-2 text-xs text-amber-700 dark:text-amber-400">
+          <div className="mb-2 rounded-lg border border-amber-200/60 bg-amber-50 px-3 py-2 text-xs text-amber-700 dark:border-amber-700/40 dark:bg-amber-900/20 dark:text-amber-400">
             {waitingForInput?.message || schemaFieldDescription}
           </div>
         )}
@@ -144,7 +144,7 @@ export function ChatInput({
               : schemaFieldDescription || 'Type a message...'
           }
           disabled={isDisabled || isDone}
-          className="min-h-[40px] max-h-[120px] resize-none"
+          className="max-h-[120px] min-h-[40px] resize-none"
           rows={1}
         />
         <Button
