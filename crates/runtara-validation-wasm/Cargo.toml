@@ -2,6 +2,7 @@
 name = "runtara-validation-wasm"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Browser WASM bindings for shared Runtara validation and form evaluation"
@@ -17,7 +18,7 @@ crate-type = ["cdylib", "rlib"]
 # `GET /api/runtime/agents` on app boot. That's why we don't depend on
 # `runtara-agents` anymore.
 runtara-dsl = { path = "../runtara-dsl", version = "8.6" }
-runtara-workflows = { path = "../runtara-workflows", version = "8.6", default-features = false, features = ["wasm-js"] }
+runtara-workflows = { path = "../runtara-workflows", version = "8.6", default-features = false }
 serde = { workspace = true }
 serde_json = { workspace = true }
 wasm-bindgen = "0.2"

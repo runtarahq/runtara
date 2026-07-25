@@ -2,6 +2,7 @@
 name = "runtara-agents"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Native agent implementations for runtara workflows"
@@ -17,13 +18,25 @@ crate-type = ["rlib"]
 default = ["native"]
 
 # Native platform - full agent support including C-dependent agents (SFTP, XLSX, Compression)
+#
+# `ssh2` links libssh2, which needs OpenSSL. By default that resolves against
+# the *system* OpenSSL (libssl-dev on Linux, `brew install openssl@3` on macOS).
+# Building OpenSSL from source instead is a 2-minute serial C compile that lands
+# on the critical path of every cold build — see docs/crates-structure.md §1.2 —
+# so it is opt-in via `vendored-openssl` rather than implied here.
 native = [
     "dep:ssh2",
-    "dep:openssl",
     "dep:calamine",
     "dep:zip",
     "runtara-http/native",
 ]
+
+# Build OpenSSL from vendored source instead of linking the system library.
+# Only needed for a fully static (e.g. musl) link; no target in this repo's
+# release pipeline uses it today — bundles are *-linux-gnu / *-apple-darwin and
+# the Docker image ships a dynamically-linked binary. Kept so a static lane can
+# turn it back on with one flag.
+vendored-openssl = ["dep:openssl"]
 
 # WASI target (wasm32-wasip2) - HTTP via wasi-http, no SFTP
 wasi = ["runtara-http/wasi"]
@@ -43,7 +56,9 @@ strum = { version = "0.26", features = ["derive"] }
 runtara-http = { workspace = true, default-features = false }
 # Native-only agents — C deps that don't compile to WASM
 ssh2 = { version = "0.9", optional = true }
-# Vendored OpenSSL for musl static builds (required by ssh2/libssh2-sys)
+# Pulled in only by the `vendored-openssl` feature. Never referenced from this
+# crate's source — its sole job is to make openssl-sys build OpenSSL from source
+# for ssh2/libssh2-sys instead of linking the system library.
 openssl = { workspace = true, optional = true }
 # ZIP archive support (compression agent)
 zip = { version = "2.2", optional = true }

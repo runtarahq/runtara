@@ -64,7 +64,11 @@ members = [
     # scripts/build-agent-components.sh after `cargo component build`.
     "crates/runtara-agent-bundle-emit",
 ]
-default-members = ["crates/runtara-core"]
+# The primary deliverable, so a bare `cargo build` builds the thing you ship and
+# a bare `cargo run` starts the server (runtara-server sets `default-run`).
+# Previously this was runtara-core, which meant `cargo build` silently checked
+# one leaf library and `cargo run` started the core service instead of the API.
+default-members = ["crates/runtara-server"]
 
 [workspace.package]
 edition = "2024"
@@ -89,7 +93,10 @@ hmac = "0.12"
 # an `encoding_rs::Encoding`, so the two share one vocabulary.
 encoding_rs = "0.8"
 chardetng = "1.0"
-# Vendored OpenSSL for musl static builds
+# Vendored OpenSSL, enabled only via runtara-agents' opt-in `vendored-openssl`
+# feature (for a fully static/musl link). Building OpenSSL from source is a
+# ~2-minute serial C compile on the cold-build critical path, so no default
+# build path enables this — see docs/crates-structure.md §1.2.
 openssl = { version = "0.10", features = ["vendored"] }
 
 # Size-tuned profile for `wasm-pack build --release` outputs (Phase 2 of the

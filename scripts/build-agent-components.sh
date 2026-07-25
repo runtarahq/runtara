@@ -131,11 +131,16 @@ count=0
 wasm_count=0
 meta_count=0
 if [ "${RUNTARA_ONLY_WORKFLOW_COMPONENTS:-}" != "1" ]; then
+    # One cargo invocation with every -p, not one per agent. Cargo already
+    # parallelizes across packages; 27 sequential invocations serialized the
+    # agents behind each other and re-resolved the graph 27 times.
+    agent_pkg_args=()
     for agent in $agents; do
-        echo "==> $agent"
-        cargo build --release --target wasm32-wasip2 -p "$agent"
+        agent_pkg_args+=(-p "$agent")
         count=$((count + 1))
     done
+    echo "==> building $count agent components in one pass"
+    cargo build --release --target wasm32-wasip2 "${agent_pkg_args[@]}"
 fi
 
 echo "==> runtara-workflow-stdlib"

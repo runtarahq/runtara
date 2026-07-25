@@ -20,9 +20,15 @@ FROM ubuntu:22.04
 # the dynamically-linked runtara-server binary.
 #   - ca-certificates: outbound HTTPS (integrations)
 #   - curl:            container HEALTHCHECK only
+#   - libssl3:         libssh2 (SFTP agent) links the system OpenSSL. Declared
+#                      explicitly rather than relied on transitively via
+#                      ca-certificates, because runtara-agents stopped vendoring
+#                      OpenSSL (see its `vendored-openssl` feature) — so this is
+#                      now a hard runtime requirement of the binary, not an
+#                      incidental dependency of another package.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        ca-certificates curl \
+        ca-certificates curl libssl3 \
     && rm -rf /var/lib/apt/lists/*
 
 # Unprivileged runtime user whose primary group is root (GID 0). The bundle
