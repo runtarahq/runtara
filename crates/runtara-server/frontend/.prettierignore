@@ -6,5 +6,8 @@ e2e-results
 playwright-report
 coverage
 src/generated
+# wasm-pack output — generated (src/wasm/validation) or vendored
+# (src/wasm/runtara-report-dsl); never hand-edited.
+src/wasm
 *.tsbuildinfo
 package-lock.json

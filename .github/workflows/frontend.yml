@@ -1,0 +1,209 @@
+name: Frontend
+
+# Ported from crates/runtara-server/frontend/.github/workflows/pr-checks.yml,
+# which had never executed: GitHub Actions only discovers workflows in
+# .github/workflows/ at the REPOSITORY ROOT, and that file sits inside the
+# frontend directory. The frontend was merged into this Rust repo with its
+# CI still written as if it were the repo root, so ~36,600 LOC of frontend
+# tests (90 vitest files / 1,105 cases, plus the Playwright specs) never ran.
+#
+# Every job therefore sets `working-directory: crates/runtara-server/frontend`.
+#
+# Job split rationale:
+#   - lint / format / knip / typecheck / unit  -> Node only. Fast, no Rust.
+#   - build / e2e-mocked                       -> `npm run build` fires the
+#     `prebuild` script, which is `build:wasm-validation` ->
+#     scripts/build-validation-wasm.mjs -> wasm-pack. So these two DO need the
+#     Rust toolchain and wasm-pack, unlike the first five.
+
+on:
+  push:
+    branches:
+      - '**'
+    paths:
+      - 'crates/runtara-server/frontend/**'
+      - '.github/workflows/frontend.yml'
+      # The validation WASM the frontend imports is built from these.
+      - 'crates/runtara-validation-wasm/**'
+      - 'crates/runtara-workflows/**'
+      - 'crates/runtara-dsl/**'
+  pull_request:
+    branches:
+      - main
+
+concurrency:
+  group: frontend-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  FRONTEND_DIR: crates/runtara-server/frontend
+  WASM_PACK_VERSION: "0.13.1"
+
+defaults:
+  run:
+    working-directory: crates/runtara-server/frontend
+
+jobs:
+  # ---------------------------------------------------------------- Node only
+  checks:
+    name: ${{ matrix.check.name }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        check:
+          - { name: lint, cmd: 'npm run lint' }
+          - { name: format, cmd: 'npm run format:check' }
+          - { name: typecheck, cmd: 'npx tsc -b --pretty' }
+          - { name: unit, cmd: 'npm test' }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: crates/runtara-server/frontend/.node-version
+          cache: npm
+          cache-dependency-path: crates/runtara-server/frontend/package-lock.json
+
+      - run: npm ci --no-audit --no-fund
+
+      # `npm run lint` gates on ESLint *errors* (0 today). It is deliberately
+      # NOT run with --max-warnings=0: 26 of the 34 current warnings are
+      # react-refresh/only-export-components, an HMR-ergonomics rule whose fix
+      # is splitting 26 files. The 4 react-hooks/exhaustive-deps warnings are
+      # the ones worth acting on; tighten this once they are addressed.
+      - name: ${{ matrix.check.name }}
+        run: ${{ matrix.check.cmd }}
+
+  # knip (dead-code detection) reports 4 genuinely unused exports today, so it
+  # is informational rather than gating. Flip continue-on-error off once those
+  # are resolved.
+  knip:
+    name: knip (informational)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: crates/runtara-server/frontend/.node-version
+          cache: npm
+          cache-dependency-path: crates/runtara-server/frontend/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - run: npm run knip
+
+  # ------------------------------------------------- Node + Rust (wasm-pack)
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: true
+          cache-workspaces: ". -> target"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: crates/runtara-server/frontend/.node-version
+          cache: npm
+          cache-dependency-path: crates/runtara-server/frontend/package-lock.json
+
+      - name: Add Cargo bin to PATH
+        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Cache wasm-pack binary
+        id: cache-wasm-pack
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/wasm-pack
+          key: wasm-pack-${{ runner.os }}-${{ env.ImageOS }}-${{ runner.arch }}-${{ env.WASM_PACK_VERSION }}
+
+      - name: Install wasm-pack
+        run: |
+          if command -v wasm-pack >/dev/null 2>&1 \
+            && wasm-pack --version | grep -q "wasm-pack ${WASM_PACK_VERSION}"; then
+            echo "wasm-pack ${WASM_PACK_VERSION} already installed"
+          else
+            cargo install wasm-pack --version "$WASM_PACK_VERSION" --locked --force
+          fi
+
+      - run: npm ci --no-audit --no-fund
+
+      # Runs `prebuild` (build:wasm-validation -> wasm-pack) then tsc -b + vite.
+      - run: npm run build
+
+  e2e-mocked:
+    name: E2E (mocked)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: true
+          cache-workspaces: ". -> target"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: crates/runtara-server/frontend/.node-version
+          cache: npm
+          cache-dependency-path: crates/runtara-server/frontend/package-lock.json
+
+      - name: Add Cargo bin to PATH
+        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Cache wasm-pack binary
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/wasm-pack
+          key: wasm-pack-${{ runner.os }}-${{ env.ImageOS }}-${{ runner.arch }}-${{ env.WASM_PACK_VERSION }}
+
+      - name: Install wasm-pack
+        run: |
+          if command -v wasm-pack >/dev/null 2>&1 \
+            && wasm-pack --version | grep -q "wasm-pack ${WASM_PACK_VERSION}"; then
+            echo "wasm-pack ${WASM_PACK_VERSION} already installed"
+          else
+            cargo install wasm-pack --version "$WASM_PACK_VERSION" --locked --force
+          fi
+
+      - run: npm ci --no-audit --no-fund
+
+      - name: Install Playwright browsers
+        run: npx playwright install chromium --with-deps
+
+      - name: Build app
+        run: npm run build
+
+      - name: Serve preview build
+        run: |
+          npm run preview -- --port 8081 &
+          npx wait-on http://localhost:8081 --timeout 60000
+
+      - name: Run mocked Playwright project
+        env:
+          PLAYWRIGHT_BASE_URL: http://localhost:8081
+          CI: 'true'
+        run: npx playwright test --project=mocked
+
+      - name: Upload Playwright artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-mocked-report
+          path: |
+            crates/runtara-server/frontend/e2e-report/
+            crates/runtara-server/frontend/e2e-results/
+          retention-days: 14

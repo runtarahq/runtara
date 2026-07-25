@@ -8,7 +8,8 @@
     "e2e/utils/test-helpers.ts",
     "e2e/fixtures/**",
     "src/generated/**",
-    "src/shared/components/ui/**"
+    "src/shared/components/ui/**",
+    "src/wasm/**"
   ],
   "ignoreDependencies": ["@vitest/coverage-v8"],
   "ignoreExportsUsedInFile": true

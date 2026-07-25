@@ -15,7 +15,10 @@ export default tseslint.config(
       'playwright-report',
       'storybook-static',
       'coverage',
-      'src/wasm/validation',
+      // All wasm-pack output: src/wasm/validation is generated at build time
+      // (gitignored), src/wasm/runtara-report-dsl is a vendored wasm-pack
+      // bundle. Neither is hand-written, so linting it only produces noise.
+      'src/wasm',
     ],
   },
   {
