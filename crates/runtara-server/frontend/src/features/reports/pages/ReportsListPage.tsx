@@ -2,6 +2,7 @@ import { type ReactNode } from 'react';
 import { Link } from 'react-router';
 import { BarChart3, Edit, PlusIcon } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button';
+import { WithTooltip } from '@/shared/components/ui/tooltip';
 import { Can } from '@/shared/components/Can';
 import {
   Table,
@@ -37,7 +38,7 @@ export function ReportsListPage() {
         <Can permission="report:create">
           <Link to="/reports/new">
             <Button>
-              <PlusIcon className="mr-2 h-4 w-4" />
+              <PlusIcon className="mr-2 size-4" />
               New report
             </Button>
           </Link>
@@ -56,7 +57,7 @@ export function ReportsListPage() {
   } else if (reports.length === 0) {
     body = (
       <ConsoleEmptyState
-        icon={<BarChart3 className="mb-4 h-10 w-10 text-muted-foreground" />}
+        icon={<BarChart3 className="mb-4 size-10 text-muted-foreground" />}
         title="No reports yet"
         description="Create a report to render Object Model data as markdown, tables, metrics, and charts."
       />
@@ -104,16 +105,17 @@ export function ReportsListPage() {
                 <div className="flex items-center justify-end gap-1">
                   <Can permission="report:update">
                     <Link to={`/reports/${report.id}?edit=1`}>
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon-sm"
-                        className="text-muted-foreground"
-                        aria-label={`Edit ${report.name}`}
-                        title={`Edit ${report.name}`}
-                      >
-                        <Edit className="h-4 w-4" />
-                      </Button>
+                      <WithTooltip label={`Edit ${report.name}`}>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon-sm"
+                          className="text-muted-foreground"
+                          aria-label={`Edit ${report.name}`}
+                        >
+                          <Edit className="size-4" />
+                        </Button>
+                      </WithTooltip>
                     </Link>
                   </Can>
                   <Can permission="report:delete">

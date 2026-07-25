@@ -62,7 +62,7 @@ export function InlineBlockEditor({
               aria-label="Drag block"
               {...dragHandleProps}
             >
-              <GripVertical className="h-3.5 w-3.5" />
+              <GripVertical className="size-3.5" />
             </button>
           ) : null}
           <div className="min-w-0">
@@ -83,7 +83,7 @@ export function InlineBlockEditor({
             onClick={onDone}
             title="Stop editing (Esc)"
           >
-            <Check className="mr-1 h-3 w-3" /> Done
+            <Check className="mr-1 size-3" /> Done
           </Button>
           <Button
             type="button"
@@ -94,7 +94,7 @@ export function InlineBlockEditor({
             aria-label="Remove block"
             onClick={onDelete}
           >
-            <Trash2 className="h-3.5 w-3.5" />
+            <Trash2 className="size-3.5" />
           </Button>
         </div>
       </header>

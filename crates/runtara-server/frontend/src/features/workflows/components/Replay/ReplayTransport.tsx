@@ -73,9 +73,9 @@ export function ReplayTransport({
           data-playing={clock.playing}
         >
           {clock.playing ? (
-            <Pause className="h-3.5 w-3.5" />
+            <Pause className="size-3.5" />
           ) : (
-            <Play className="h-3.5 w-3.5" />
+            <Play className="size-3.5" />
           )}
         </Button>
 
@@ -90,7 +90,7 @@ export function ReplayTransport({
               aria-label="Restart replay"
               data-testid="replay-restart"
             >
-              <RotateCcw className="h-3.5 w-3.5" />
+              <RotateCcw className="size-3.5" />
             </Button>
           </TooltipTrigger>
           <TooltipContent>Restart</TooltipContent>
@@ -148,7 +148,7 @@ export function ReplayTransport({
             data-testid="replay-running-count"
             title={`${runningCount} branches running concurrently`}
           >
-            <Zap className="h-2.5 w-2.5" />
+            <Zap className="size-2.5" />
             {runningCount} running
           </span>
         )}

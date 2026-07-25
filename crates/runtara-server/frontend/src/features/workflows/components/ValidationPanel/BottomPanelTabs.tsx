@@ -38,7 +38,7 @@ export function BottomPanelTabs({ versionCount = 0 }: BottomPanelTabsProps) {
     {
       id: 'versions',
       label: 'Versions',
-      icon: <Layers className="h-4 w-4" />,
+      icon: <Layers className="size-4" />,
       badge:
         versionCount > 0 ? (
           <Badge variant="secondary" className="h-5 px-1.5">
@@ -49,27 +49,27 @@ export function BottomPanelTabs({ versionCount = 0 }: BottomPanelTabsProps) {
     {
       id: 'settings',
       label: 'Settings',
-      icon: <Settings className="h-4 w-4" />,
+      icon: <Settings className="size-4" />,
     },
     {
       id: 'problems',
       label: 'Problems',
       icon: hasProblems ? (
-        <AlertCircle className="h-4 w-4" />
+        <AlertCircle className="size-4" />
       ) : (
-        <CheckCircle2 className="h-4 w-4 text-success" />
+        <CheckCircle2 className="size-4 text-success" />
       ),
       badge: hasProblems ? (
         <span className="flex items-center gap-1">
           {errorCount > 0 && (
             <Badge variant="destructive" className="h-5 gap-0.5 px-1.5">
-              <AlertCircle className="h-3 w-3" />
+              <AlertCircle className="size-3" />
               {errorCount}
             </Badge>
           )}
           {warningCount > 0 && (
             <Badge variant="warning" className="h-5 gap-0.5 px-1.5">
-              <AlertTriangle className="h-3 w-3" />
+              <AlertTriangle className="size-3" />
               {warningCount}
             </Badge>
           )}
@@ -83,7 +83,7 @@ export function BottomPanelTabs({ versionCount = 0 }: BottomPanelTabsProps) {
     {
       id: 'history',
       label: 'History',
-      icon: <History className="h-4 w-4" />,
+      icon: <History className="size-4" />,
     },
   ];
 

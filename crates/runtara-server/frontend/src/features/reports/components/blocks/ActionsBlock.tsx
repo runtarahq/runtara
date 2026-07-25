@@ -100,7 +100,7 @@ export function ActionsBlock({
             <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
               <div className="min-w-0">
                 <div className="flex items-center gap-2 text-sm font-medium">
-                  <CircleDot className="h-4 w-4 text-warning" />
+                  <CircleDot className="size-4 text-warning" />
                   <span className="truncate">{action.label}</span>
                 </div>
                 {action.message ? (
@@ -111,11 +111,11 @@ export function ActionsBlock({
               </div>
               <div className="flex shrink-0 flex-wrap items-center gap-2">
                 <Badge variant="outline" className="gap-1">
-                  <Wrench className="h-3 w-3" />
+                  <Wrench className="size-3" />
                   {action.actionKind}
                 </Badge>
                 <Badge variant="secondary" className="gap-1">
-                  <CheckCircle2 className="h-3 w-3" />
+                  <CheckCircle2 className="size-3" />
                   {action.status}
                 </Badge>
               </div>

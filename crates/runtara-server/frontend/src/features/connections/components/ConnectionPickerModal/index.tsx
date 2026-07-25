@@ -158,7 +158,7 @@ export function ConnectionPickerModal({
         {/* Search */}
         <div className="border-b p-4">
           <div className="relative">
-            <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+            <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
             <Input
               placeholder="Search connection types..."
               value={searchQuery}
@@ -188,7 +188,7 @@ export function ConnectionPickerModal({
                       onClick={() => handleSelect(ct)}
                       className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left transition-colors hover:bg-muted"
                     >
-                      <Icon className="h-5 w-5 text-muted-foreground" />
+                      <Icon className="size-5 text-muted-foreground" />
                       <div>
                         <div className="font-medium">{ct.displayName}</div>
                         {ct.category && (
@@ -211,7 +211,7 @@ export function ConnectionPickerModal({
                 groupedConnectionTypes.map((group) => (
                   <div key={group.category}>
                     <div className="mb-2 flex items-center gap-2">
-                      <group.Icon className="h-4 w-4 text-muted-foreground" />
+                      <group.Icon className="size-4 text-muted-foreground" />
                       <SectionLabel as="span">{group.label}</SectionLabel>
                     </div>
                     <div className="space-y-1">
@@ -222,7 +222,7 @@ export function ConnectionPickerModal({
                           onClick={() => handleSelect(ct)}
                           className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left transition-colors hover:bg-muted"
                         >
-                          <group.Icon className="h-5 w-5 text-muted-foreground" />
+                          <group.Icon className="size-5 text-muted-foreground" />
                           <div>
                             <div className="font-medium">{ct.displayName}</div>
                           </div>

@@ -44,7 +44,7 @@ export function ObjectSchemaFormLayout(props: ObjectSchemaFormLayoutProps) {
                 to={cancelHref}
                 className="-ml-1.5 rounded-lg p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
               >
-                <ArrowLeft className="h-5 w-5" />
+                <ArrowLeft className="size-5" />
               </Link>
               <div>
                 <p className="text-xs font-semibold uppercase tracking-wider text-primary">
@@ -71,9 +71,9 @@ export function ObjectSchemaFormLayout(props: ObjectSchemaFormLayoutProps) {
                   className="text-destructive hover:bg-destructive/10 hover:text-destructive"
                 >
                   {isDeleting ? (
-                    <Spinner className="mr-1.5 h-4 w-4" />
+                    <Spinner className="mr-1.5 size-4" />
                   ) : (
-                    <Trash2 className="mr-1.5 h-4 w-4" />
+                    <Trash2 className="mr-1.5 size-4" />
                   )}
                   Delete
                 </Button>
@@ -96,12 +96,12 @@ export function ObjectSchemaFormLayout(props: ObjectSchemaFormLayoutProps) {
               >
                 {isLoading ? (
                   <>
-                    <Spinner className="mr-1.5 h-4 w-4" />
+                    <Spinner className="mr-1.5 size-4" />
                     {loadingLabel || 'Saving...'}
                   </>
                 ) : (
                   <>
-                    <Save className="mr-1.5 h-4 w-4" />
+                    <Save className="mr-1.5 size-4" />
                     {submitLabel}
                   </>
                 )}
@@ -115,8 +115,8 @@ export function ObjectSchemaFormLayout(props: ObjectSchemaFormLayoutProps) {
       <div className="max-w-4xl px-6 py-5">
         {/* Object Type Header */}
         <div className="mb-5 flex items-center gap-3">
-          <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-gradient-to-br from-blue-500 to-indigo-600 shadow-sm">
-            <Database className="h-5 w-5 text-white" />
+          <div className="flex size-10 items-center justify-center rounded-lg bg-gradient-to-br from-blue-500 to-indigo-600 shadow-sm">
+            <Database className="size-5 text-white" />
           </div>
           <div>
             <h2 className="text-base font-semibold text-foreground">
@@ -130,7 +130,7 @@ export function ObjectSchemaFormLayout(props: ObjectSchemaFormLayoutProps) {
                     className="flex items-center gap-2 text-sm text-muted-foreground"
                   >
                     {index > 0 && (
-                      <span className="h-1 w-1 rounded-full bg-border" />
+                      <span className="size-1 rounded-full bg-border" />
                     )}
                     {item}
                   </span>

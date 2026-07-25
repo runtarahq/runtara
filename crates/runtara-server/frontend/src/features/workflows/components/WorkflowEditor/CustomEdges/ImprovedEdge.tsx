@@ -360,7 +360,7 @@ export function ImprovedEdge({
       <g
         onMouseEnter={() => setIsHovered(true)}
         onMouseLeave={() => setIsHovered(false)}
-        style={{ cursor: 'pointer' }}
+        className="cursor-pointer"
       >
         <BaseEdge
           id={id}
@@ -385,7 +385,7 @@ export function ImprovedEdge({
           fill="none"
           stroke="transparent"
           strokeWidth={20}
-          style={{ pointerEvents: 'stroke' }}
+          className="[pointer-events:stroke]"
         />
       </g>
       <EdgeLabelRenderer>
@@ -399,8 +399,8 @@ export function ImprovedEdge({
             }}
             className="nodrag nopan flex items-center gap-0.5 rounded bg-background/80 px-1 py-px text-[9px] font-normal text-muted-foreground/60 backdrop-blur-sm"
           >
-            {isMemoryEdge && <Brain className="h-2.5 w-2.5" />}
-            {isToolEdge && <Wrench className="h-2.5 w-2.5" />}
+            {isMemoryEdge && <Brain className="size-2.5" />}
+            {isToolEdge && <Wrench className="size-2.5" />}
             {label}
           </div>
         )}
@@ -422,7 +422,7 @@ export function ImprovedEdge({
               onMouseLeave={() => setIsHovered(false)}
             >
               <Button
-                className="h-4 w-4 rounded-full shadow-sm transition-all hover:shadow-md [&_svg]:size-2"
+                className="size-4 rounded-full shadow-sm transition-all hover:shadow-md [&_svg]:size-2"
                 variant="outline"
                 size="icon"
                 onClick={handleInsertClick}

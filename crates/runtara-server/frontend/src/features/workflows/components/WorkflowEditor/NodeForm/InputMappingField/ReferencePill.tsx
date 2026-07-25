@@ -1,5 +1,6 @@
 import { Icons } from '@/shared/components/icons.tsx';
 import { cn } from '@/lib/utils';
+import { PICKER_TRUNCATE_MAX_WIDTH } from '@/shared/components/picker-dialog';
 
 interface ReferencePillProps {
   path: string;
@@ -26,7 +27,7 @@ function getIconForType(type?: string) {
   const lowerType = type?.toLowerCase() || '';
 
   if (lowerType.includes('string') || lowerType.includes('text')) {
-    return <Icons.type className="h-3 w-3" />;
+    return <Icons.type className="size-3" />;
   }
   if (
     lowerType.includes('number') ||
@@ -34,23 +35,23 @@ function getIconForType(type?: string) {
     lowerType.includes('double') ||
     lowerType.includes('float')
   ) {
-    return <Icons.hash className="h-3 w-3" />;
+    return <Icons.hash className="size-3" />;
   }
   if (lowerType.includes('boolean') || lowerType.includes('bool')) {
-    return <Icons.squareCheck className="h-3 w-3" />;
+    return <Icons.squareCheck className="size-3" />;
   }
   if (lowerType.includes('array') || lowerType.includes('list')) {
-    return <Icons.list className="h-3 w-3" />;
+    return <Icons.list className="size-3" />;
   }
   if (lowerType.includes('object')) {
-    return <Icons.braces className="h-3 w-3" />;
+    return <Icons.braces className="size-3" />;
   }
   if (lowerType.includes('date') || lowerType.includes('time')) {
-    return <Icons.calendar className="h-3 w-3" />;
+    return <Icons.calendar className="size-3" />;
   }
 
   // Unknown / runtime-dependent
-  return <Icons.gitBranch className="h-3 w-3" />;
+  return <Icons.gitBranch className="size-3" />;
 }
 
 /**
@@ -79,7 +80,7 @@ export function ReferencePill({
       title={type ? `${path} — ${type}` : path}
     >
       {getIconForType(type)}
-      <span className="max-w-[200px] truncate">
+      <span className={cn(PICKER_TRUNCATE_MAX_WIDTH, 'truncate')}>
         {hasStepInfo ? (
           <>
             <span className="font-medium">{stepName}</span>
@@ -109,7 +110,7 @@ export function ReferencePill({
           className="ml-0.5 rounded-full p-0.5 transition-colors hover:bg-primary/20"
           aria-label="Remove reference"
         >
-          <Icons.x className="h-3 w-3" />
+          <Icons.x className="size-3" />
         </button>
       )}
     </div>

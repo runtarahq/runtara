@@ -10,7 +10,7 @@ interface PrivateRouteProps {
 
 const PageLoader = () => (
   <div className="flex h-full items-center justify-center">
-    <Spinner className="h-8 w-8 text-primary" />
+    <Spinner className="size-8 text-primary" />
   </div>
 );
 

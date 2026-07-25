@@ -408,12 +408,12 @@ function GridNodeEditor({
           {dragHandleProps && !isRoot ? (
             <button
               type="button"
-              className="shrink-0 cursor-grab rounded p-0.5 text-muted-foreground hover:bg-muted active:cursor-grabbing"
+              className="shrink-0 cursor-grab rounded p-0.5 text-muted-foreground hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring active:cursor-grabbing"
               title="Drag to reorder"
               aria-label="Drag grid"
               {...dragHandleProps}
             >
-              <GripVertical className="h-3.5 w-3.5" />
+              <GripVertical className="size-3.5" />
             </button>
           ) : null}
           <div className="min-w-0">
@@ -471,7 +471,7 @@ function GridNodeEditor({
             aria-label="Grid settings"
             onClick={() => setShowSettings((v) => !v)}
           >
-            <Settings2 className="h-3.5 w-3.5" />
+            <Settings2 className="size-3.5" />
           </Button>
           {isRoot ? null : (
             <Button
@@ -483,7 +483,7 @@ function GridNodeEditor({
               aria-label="Remove grid"
               onClick={handleDelete}
             >
-              <Trash2 className="h-3.5 w-3.5" />
+              <Trash2 className="size-3.5" />
             </Button>
           )}
         </div>
@@ -569,8 +569,8 @@ function GridNodeEditor({
       </SortableContext>
       <p className="mt-2 text-2xs text-muted-foreground">
         Tip: drag the{' '}
-        <GripVertical className="inline h-3 w-3 align-text-bottom" /> grip on
-        any block to reorder.
+        <GripVertical className="inline size-3 align-text-bottom" /> grip on any
+        block to reorder.
       </p>
     </section>
   );
@@ -604,9 +604,9 @@ function DimensionStepper({
         title={decrementDisabledReason ?? `Remove ${label.toLowerCase()}`}
         disabled={!canDecrement}
         onClick={() => canDecrement && onChange(value - 1)}
-        className="rounded p-0.5 text-muted-foreground hover:bg-muted disabled:cursor-not-allowed disabled:opacity-30"
+        className="rounded p-0.5 text-muted-foreground hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-30"
       >
-        <Minus className="h-3 w-3" />
+        <Minus className="size-3" />
       </button>
       <span className="min-w-[1ch] text-center font-medium tabular-nums">
         {value}
@@ -617,9 +617,9 @@ function DimensionStepper({
         title={`Add ${label.toLowerCase()}`}
         disabled={!canIncrement}
         onClick={() => canIncrement && onChange(value + 1)}
-        className="rounded p-0.5 text-muted-foreground hover:bg-muted disabled:cursor-not-allowed disabled:opacity-30"
+        className="rounded p-0.5 text-muted-foreground hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-30"
       >
-        <Plus className="h-3 w-3" />
+        <Plus className="size-3" />
       </button>
     </div>
   );
@@ -674,7 +674,7 @@ function EmptyCellPlaceholder({
           className="h-7 text-xs"
           onClick={onAddBlock}
         >
-          <Plus className="mr-1 h-3 w-3" /> Add block
+          <Plus className="mr-1 size-3" /> Add block
         </Button>
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
@@ -686,7 +686,7 @@ function EmptyCellPlaceholder({
               title="Add nested grid"
               aria-label="Add nested grid"
             >
-              <ChevronDown className="h-3 w-3" />
+              <ChevronDown className="size-3" />
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="center">

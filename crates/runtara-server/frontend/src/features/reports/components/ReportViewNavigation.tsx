@@ -143,7 +143,7 @@ export function ReportViewNavigation({
                 >
                   <span
                     className={cn(
-                      'grid h-8 w-8 place-items-center rounded-full border bg-background transition-[border-color,box-shadow,color,background-color]',
+                      'grid size-8 place-items-center rounded-full border bg-background transition-[border-color,box-shadow,color,background-color]',
                       isComplete &&
                         'border-primary bg-primary text-primary-foreground',
                       isCurrent &&
@@ -157,7 +157,7 @@ export function ReportViewNavigation({
                         'ring-4 ring-muted-foreground/10'
                     )}
                   >
-                    <Icon className="h-4 w-4" aria-hidden="true" />
+                    <Icon className="size-4" aria-hidden="true" />
                   </span>
                   <span
                     className={cn(
@@ -208,7 +208,7 @@ export function ReportViewNavigation({
               }
               className="w-fit justify-self-start px-2 text-muted-foreground hover:text-foreground"
             >
-              <ChevronLeft className="mr-1 h-4 w-4" /> {previousLabel}
+              <ChevronLeft className="mr-1 size-4" /> {previousLabel}
             </Button>
           ) : (
             <span aria-hidden="true" />
@@ -228,7 +228,7 @@ export function ReportViewNavigation({
               }
               className="w-fit justify-self-end px-2 text-muted-foreground hover:text-foreground"
             >
-              {nextLabel} <ChevronRight className="ml-1 h-4 w-4" />
+              {nextLabel} <ChevronRight className="ml-1 size-4" />
             </Button>
           ) : (
             <span aria-hidden="true" />

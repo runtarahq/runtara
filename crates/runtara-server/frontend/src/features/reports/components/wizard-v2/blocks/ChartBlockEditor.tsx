@@ -17,6 +17,7 @@ import {
   ReportSource,
 } from '../../../types';
 import { SourceAggregatesEditor } from './SourceAggregatesEditor';
+import { GRID_COLS_TWO_FIELDS_ACTIONS } from '../grid-templates';
 
 const KINDS: Array<{ value: ReportChartKind; label: string }> = [
   { value: 'bar', label: 'Bar' },
@@ -166,7 +167,7 @@ export function ChartBlockEditor({
               className="h-7"
               onClick={() => updateSeries([...series, { field: '' }])}
             >
-              <Plus className="mr-1 h-3 w-3" /> Add series
+              <Plus className="mr-1 size-3" /> Add series
             </Button>
           )}
         </div>
@@ -179,7 +180,7 @@ export function ChartBlockEditor({
             {(isScatter ? series.slice(0, 1) : series).map((entry, index) => (
               <div
                 key={index}
-                className="grid grid-cols-[1fr_1fr_minmax(0,auto)] items-center gap-2 rounded border p-2"
+                className={`grid ${GRID_COLS_TWO_FIELDS_ACTIONS} items-center gap-2 rounded border p-2`}
               >
                 <Select
                   value={entry.field || ''}
@@ -234,12 +235,12 @@ export function ChartBlockEditor({
                     type="button"
                     variant="ghost"
                     size="icon"
-                    className="h-8 w-8"
+                    className="size-8"
                     onClick={() =>
                       updateSeries(series.filter((_, i) => i !== index))
                     }
                   >
-                    <Trash2 className="h-3.5 w-3.5" />
+                    <Trash2 className="size-3.5" />
                   </Button>
                 )}
               </div>

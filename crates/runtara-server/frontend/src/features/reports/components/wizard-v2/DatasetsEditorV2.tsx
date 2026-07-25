@@ -17,6 +17,10 @@ import {
 import { Plus, Trash2 } from 'lucide-react';
 import { Schema } from '@/generated/RuntaraRuntimeApi';
 import {
+  GRID_COLS_TWO_FIELDS_ACTIONS,
+  GRID_COLS_TWO_FIELDS_TWO_120,
+} from './grid-templates';
+import {
   ReportAggregateFn,
   ReportDatasetDefinition,
   ReportDatasetDimension,
@@ -147,7 +151,7 @@ export function DatasetsEditorV2({
           variant="outline"
           onClick={() => updateDatasets([...datasets, newDataset()])}
         >
-          <Plus className="mr-1 h-3.5 w-3.5" /> Add dataset
+          <Plus className="mr-1 size-3.5" /> Add dataset
         </Button>
       </div>
     </div>
@@ -185,7 +189,7 @@ function DatasetCard({
           className="text-destructive"
           onClick={onDelete}
         >
-          <Trash2 className="h-3.5 w-3.5" />
+          <Trash2 className="size-3.5" />
         </Button>
       </CardHeader>
       <CardContent className="grid gap-4 pt-0">
@@ -243,7 +247,7 @@ function DatasetCard({
                 }));
               }}
             >
-              <Plus className="mr-1 h-3 w-3" /> Add dimension
+              <Plus className="mr-1 size-3" /> Add dimension
             </Button>
           </div>
           {dimensions.length === 0 ? (
@@ -253,7 +257,7 @@ function DatasetCard({
               {dimensions.map((dim, index) => (
                 <div
                   key={index}
-                  className="grid grid-cols-[1fr_1fr_120px_120px_minmax(0,auto)] items-center gap-2 rounded border p-2"
+                  className={`grid ${GRID_COLS_TWO_FIELDS_TWO_120} items-center gap-2 rounded border p-2`}
                 >
                   <Select
                     value={dim.field || ''}
@@ -354,7 +358,7 @@ function DatasetCard({
                     type="button"
                     variant="ghost"
                     size="icon"
-                    className="h-8 w-8"
+                    className="size-8"
                     onClick={() =>
                       onChange((d) => ({
                         ...d,
@@ -362,7 +366,7 @@ function DatasetCard({
                       }))
                     }
                   >
-                    <Trash2 className="h-3.5 w-3.5" />
+                    <Trash2 className="size-3.5" />
                   </Button>
                 </div>
               ))}
@@ -385,7 +389,7 @@ function DatasetCard({
                 }))
               }
             >
-              <Plus className="mr-1 h-3 w-3" /> Add measure
+              <Plus className="mr-1 size-3" /> Add measure
             </Button>
           </div>
           {measures.length === 0 ? (
@@ -394,7 +398,9 @@ function DatasetCard({
             <div className="grid gap-2">
               {measures.map((measure, index) => (
                 <div key={measure.id} className="grid gap-2 rounded border p-2">
-                  <div className="grid grid-cols-[1fr_1fr_minmax(0,auto)] items-center gap-2">
+                  <div
+                    className={`grid ${GRID_COLS_TWO_FIELDS_ACTIONS} items-center gap-2`}
+                  >
                     <Input
                       value={measure.id}
                       className="h-8 text-xs"
@@ -427,7 +433,7 @@ function DatasetCard({
                       type="button"
                       variant="ghost"
                       size="icon"
-                      className="h-8 w-8"
+                      className="size-8"
                       onClick={() =>
                         onChange((d) => ({
                           ...d,
@@ -435,7 +441,7 @@ function DatasetCard({
                         }))
                       }
                     >
-                      <Trash2 className="h-3.5 w-3.5" />
+                      <Trash2 className="size-3.5" />
                     </Button>
                   </div>
                   <div className="grid grid-cols-4 gap-2">

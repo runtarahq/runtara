@@ -567,7 +567,7 @@ export function InputMappingField(props: any) {
       <div className="mb-4">{label}</div>
       <div className="rounded-lg border border-destructive/50 bg-destructive/10 p-4">
         <div className="flex items-start gap-3">
-          <Icons.warning className="mt-0.5 h-5 w-5 shrink-0 text-destructive" />
+          <Icons.warning className="mt-0.5 size-5 shrink-0 text-destructive" />
           <div className="space-y-1">
             <p className="text-sm font-medium text-destructive">
               Missing capability metadata

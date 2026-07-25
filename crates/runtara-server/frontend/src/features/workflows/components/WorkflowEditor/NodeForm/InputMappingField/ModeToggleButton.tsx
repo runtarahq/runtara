@@ -67,7 +67,7 @@ export function ModeToggleButton({
       onClick={onClick}
       disabled={disabled}
       className={cn(
-        'flex h-9 w-9 shrink-0 items-center justify-center rounded-md border transition-colors',
+        'flex size-9 shrink-0 items-center justify-center rounded-md border transition-colors',
         'hover:bg-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring',
         config.activeClass,
         disabled && 'cursor-not-allowed opacity-50',
@@ -76,7 +76,7 @@ export function ModeToggleButton({
       aria-label={config.ariaLabel}
       title={config.title}
     >
-      <IconComponent className="h-4 w-4" />
+      <IconComponent className="size-4" />
     </button>
   );
 }

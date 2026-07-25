@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { CirclePlay, RotateCcw } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button.tsx';
+import { WithTooltip } from '@/shared/components/ui/tooltip.tsx';
 import { replayWorkflow } from '@/features/workflows/queries';
 import { toast } from 'sonner';
 import { useToken } from '@/shared/hooks';
@@ -93,16 +94,18 @@ export function ReplayButton(props: Props) {
   }
 
   return (
-    <Button
-      size={size}
-      variant={variant}
-      onClick={handleClick}
-      disabled={isLoading}
-      className={className}
-      title={tooltipText}
-    >
-      <ButtonIcon size={16} className={size === 'icon' ? '' : 'mr-2'} />
-      {buttonLabel}
-    </Button>
+    <WithTooltip label={tooltipText}>
+      <Button
+        size={size}
+        variant={variant}
+        onClick={handleClick}
+        disabled={isLoading}
+        className={className}
+        aria-label={tooltipText}
+      >
+        <ButtonIcon size={16} className={size === 'icon' ? '' : 'mr-2'} />
+        {buttonLabel}
+      </Button>
+    </WithTooltip>
   );
 }

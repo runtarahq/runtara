@@ -17,11 +17,11 @@ export function ThemeSwitcher() {
         <Button
           variant="ghost"
           size="icon"
-          className="relative h-9 w-9 shrink-0"
+          className="relative size-9 shrink-0"
           aria-label="Toggle theme"
         >
-          <Sun className="h-4 w-4 rotate-0 scale-100 transition-all dark:-rotate-90 dark:scale-0" />
-          <Moon className="absolute h-4 w-4 rotate-90 scale-0 transition-all dark:rotate-0 dark:scale-100" />
+          <Sun className="size-4 rotate-0 scale-100 transition-all dark:-rotate-90 dark:scale-0" />
+          <Moon className="absolute size-4 rotate-90 scale-0 transition-all dark:rotate-0 dark:scale-100" />
           <span className="sr-only">Toggle theme</span>
         </Button>
       </DropdownMenuTrigger>
@@ -30,7 +30,7 @@ export function ThemeSwitcher() {
           onClick={() => setTheme('light')}
           className="flex items-center gap-2"
         >
-          <Sun className="h-4 w-4" />
+          <Sun className="size-4" />
           <span>Light</span>
           {theme === 'light' && (
             <span className="ml-auto text-xs text-muted-foreground">✓</span>
@@ -40,7 +40,7 @@ export function ThemeSwitcher() {
           onClick={() => setTheme('dark')}
           className="flex items-center gap-2"
         >
-          <Moon className="h-4 w-4" />
+          <Moon className="size-4" />
           <span>Dark</span>
           {theme === 'dark' && (
             <span className="ml-auto text-xs text-muted-foreground">✓</span>
@@ -50,7 +50,7 @@ export function ThemeSwitcher() {
           onClick={() => setTheme('system')}
           className="flex items-center gap-2"
         >
-          <Monitor className="h-4 w-4" />
+          <Monitor className="size-4" />
           <span>System</span>
           {theme === 'system' && (
             <span className="ml-auto text-xs text-muted-foreground">✓</span>

@@ -27,6 +27,7 @@ import {
 import { WorkflowCard } from '../WorkflowCard';
 import { Icons } from '@/shared/components/icons.tsx';
 import { Button } from '@/shared/components/ui/button.tsx';
+import { WithTooltip } from '@/shared/components/ui/tooltip.tsx';
 import { Can } from '@/shared/components/Can';
 import { cn } from '@/lib/utils.ts';
 import {
@@ -101,12 +102,12 @@ function SortableHead({
         {label}
         {active ? (
           dir === 'asc' ? (
-            <ArrowUp className="h-3.5 w-3.5 text-primary" />
+            <ArrowUp className="size-3.5 text-primary" />
           ) : (
-            <ArrowDown className="h-3.5 w-3.5 text-primary" />
+            <ArrowDown className="size-3.5 text-primary" />
           )
         ) : (
-          <ArrowUpDown className="h-3.5 w-3.5 text-muted-foreground/40" />
+          <ArrowUpDown className="size-3.5 text-muted-foreground/40" />
         )}
       </span>
     </TableHead>
@@ -395,7 +396,7 @@ export function WorkflowsGrid({
         action={
           <Link to="/workflows/create">
             <Button>
-              <Icons.add className="mr-2 h-4 w-4" />
+              <Icons.add className="mr-2 size-4" />
               Create workflow
             </Button>
           </Link>
@@ -435,7 +436,7 @@ export function WorkflowsGrid({
               >
                 <TableCell className="font-medium text-foreground">
                   <span className="flex items-center gap-2">
-                    <Folder className="h-4 w-4 shrink-0 text-amber-500 dark:text-amber-400" />
+                    <Folder className="size-4 shrink-0 text-amber-500 dark:text-amber-400" />
                     <span className="truncate">{folder.name}</span>
                   </span>
                 </TableCell>
@@ -449,26 +450,30 @@ export function WorkflowsGrid({
                 >
                   <div className="flex items-center justify-end gap-1 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100">
                     <Can permission="workflow:folder_rename">
-                      <Button
-                        variant="ghost"
-                        size="icon-sm"
-                        className="text-muted-foreground"
-                        title="Rename folder"
-                        onClick={() => onFolderRename?.(folder.path)}
-                      >
-                        <Pencil className="h-4 w-4" />
-                      </Button>
+                      <WithTooltip label="Rename folder">
+                        <Button
+                          variant="ghost"
+                          size="icon-sm"
+                          className="text-muted-foreground"
+                          aria-label="Rename folder"
+                          onClick={() => onFolderRename?.(folder.path)}
+                        >
+                          <Pencil className="size-4" />
+                        </Button>
+                      </WithTooltip>
                     </Can>
                     <Can permission="workflow:delete">
-                      <Button
-                        variant="ghost"
-                        size="icon-sm"
-                        className="text-muted-foreground hover:text-destructive"
-                        title="Delete folder"
-                        onClick={() => onFolderDelete?.(folder.path)}
-                      >
-                        <Trash2 className="h-4 w-4" />
-                      </Button>
+                      <WithTooltip label="Delete folder">
+                        <Button
+                          variant="ghost"
+                          size="icon-sm"
+                          className="text-muted-foreground hover:text-destructive"
+                          aria-label="Delete folder"
+                          onClick={() => onFolderDelete?.(folder.path)}
+                        >
+                          <Trash2 className="size-4" />
+                        </Button>
+                      </WithTooltip>
                     </Can>
                   </div>
                 </TableCell>

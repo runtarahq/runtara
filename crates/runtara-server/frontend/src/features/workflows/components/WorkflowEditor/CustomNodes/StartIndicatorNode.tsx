@@ -32,7 +32,7 @@ function StartIndicatorNodeComponent({ data }: NodeProps) {
     >
       {/* Icon */}
       <div className="flex flex-shrink-0 items-center justify-center text-muted-foreground/50">
-        <Play className="h-3 w-3 fill-current" />
+        <Play className="size-3 fill-current" />
       </div>
 
       {/* Label */}
@@ -53,17 +53,10 @@ function StartIndicatorNodeComponent({ data }: NodeProps) {
 
       {/* Add first step button when no entry point */}
       {!hasEntryPoint && (
-        <div
-          className="pointer-events-none absolute flex items-center"
-          style={{
-            right: '-32px',
-            top: '50%',
-            transform: 'translateY(-50%)',
-          }}
-        >
+        <div className="pointer-events-none absolute -right-8 top-1/2 flex -translate-y-1/2 items-center">
           <div className="h-px w-4 bg-border" />
           <Button
-            className="nodrag nopan pointer-events-auto h-5 w-5 rounded-full shadow-md [&_svg]:size-3"
+            className="nodrag nopan pointer-events-auto size-5 rounded-full shadow-md [&_svg]:size-3"
             variant="outline"
             size="icon"
             aria-label="Add first workflow step"

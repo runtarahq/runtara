@@ -89,9 +89,15 @@ test.describe('Step edit Rust validation (mocked)', () => {
     await panel.getByTestId('timeline-node-config-save').click();
 
     await expect(panel).toBeVisible();
-    await expect(page.getByText(/Failed to parse graph/)).toBeVisible({
+    // The parse error surfaces both in the panel and as a toast (toasts render
+    // for real since the sonner migration), so scope to the in-page copy.
+    await expect(
+      page.getByRole('main').getByText(/Failed to parse graph/),
+    ).toBeVisible({
       timeout: 10_000,
     });
-    await expect(page.getByText('Step: Validation Target')).toBeVisible();
+    await expect(
+      page.getByRole('main').getByText('Step: Validation Target'),
+    ).toBeVisible();
   });
 });

@@ -75,7 +75,7 @@ export function RenameFolderDialog({
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
-            <Pencil className="h-5 w-5 text-primary" />
+            <Pencil className="size-5 text-primary" />
             Rename folder
           </DialogTitle>
           <DialogDescription>
@@ -118,7 +118,7 @@ export function RenameFolderDialog({
           >
             {isLoading ? (
               <>
-                <Spinner className="mr-2 h-4 w-4" />
+                <Spinner className="mr-2 size-4" />
                 Renaming...
               </>
             ) : (
@@ -157,7 +157,7 @@ export function DeleteFolderDialog({
       <AlertDialogContent>
         <AlertDialogHeader>
           <AlertDialogTitle className="flex items-center gap-2">
-            <Trash2 className="h-5 w-5 text-destructive" />
+            <Trash2 className="size-5 text-destructive" />
             Delete folder "{folderName}"?
           </AlertDialogTitle>
           <AlertDialogDescription>
@@ -177,11 +177,11 @@ export function DeleteFolderDialog({
           <AlertDialogAction
             onClick={() => onConfirm(folderPath)}
             disabled={isLoading}
-            className="bg-destructive hover:bg-destructive/90 focus:ring-destructive"
+            className="bg-destructive hover:bg-destructive/90 focus-visible:ring-destructive"
           >
             {isLoading ? (
               <>
-                <Spinner className="mr-2 h-4 w-4" />
+                <Spinner className="mr-2 size-4" />
                 Deleting...
               </>
             ) : (
@@ -262,7 +262,7 @@ export function MoveToFolderDialog({
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
-            <Folder className="h-5 w-5 text-amber-500" />
+            <Folder className="size-5 text-amber-500" />
             Move workflow
           </DialogTitle>
           <DialogDescription>
@@ -286,7 +286,7 @@ export function MoveToFolderDialog({
           >
             <FolderPlus
               className={cn(
-                'h-5 w-5',
+                'size-5',
                 isCreatingNew ? 'text-amber-600' : 'text-amber-500'
               )}
             />
@@ -348,7 +348,7 @@ export function MoveToFolderDialog({
           >
             <Home
               className={cn(
-                'h-5 w-5',
+                'size-5',
                 selectedPath === '/' && !isCreatingNew
                   ? 'text-primary'
                   : 'text-muted-foreground'
@@ -394,7 +394,7 @@ export function MoveToFolderDialog({
             >
               <Folder
                 className={cn(
-                  'h-5 w-5',
+                  'size-5',
                   selectedPath === folder.path && !isCreatingNew
                     ? 'text-primary'
                     : 'text-amber-500'
@@ -439,12 +439,12 @@ export function MoveToFolderDialog({
           >
             {isLoading ? (
               <>
-                <Spinner className="mr-2 h-4 w-4" />
+                <Spinner className="mr-2 size-4" />
                 Moving...
               </>
             ) : isCreatingNew ? (
               <>
-                <FolderPlus className="mr-2 h-4 w-4" />
+                <FolderPlus className="mr-2 size-4" />
                 Create & Move
               </>
             ) : (

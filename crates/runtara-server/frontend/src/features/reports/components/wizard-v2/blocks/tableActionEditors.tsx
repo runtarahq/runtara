@@ -27,6 +27,10 @@ import {
   legacyToCanonicalCondition,
   slugify,
 } from '../../../utils';
+import {
+  GRID_COLS_TWO_MINMAX_AUTO,
+  SM_GRID_COLS_TWO_MINMAX_AUTO,
+} from '../grid-templates';
 
 const WORKFLOW_CONTEXT_MODES: Array<{
   value: ReportWorkflowActionContextMode;
@@ -383,7 +387,7 @@ function RowConditionRow({
   return (
     <div className="grid gap-1">
       <SectionLabel size="sm">{label}</SectionLabel>
-      <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] gap-1">
+      <div className={`grid ${GRID_COLS_TWO_MINMAX_AUTO} gap-1`}>
         {fieldOptions.length > 0 ? (
           <Select
             value={simpleField || ROW_CONDITION_FIELD_NONE}
@@ -445,12 +449,12 @@ function RowConditionRow({
           type="button"
           size="icon"
           variant="ghost"
-          className="h-8 w-8"
+          className="size-8"
           disabled={!value}
           onClick={() => onChange(undefined)}
           aria-label={`Clear ${label.toLowerCase()}`}
         >
-          <Trash2 className="h-3.5 w-3.5" />
+          <Trash2 className="size-3.5" />
         </Button>
       </div>
     </div>
@@ -503,7 +507,7 @@ export function InteractionButtonsEditor({
             onChange([...buttons, createDefaultInteractionButton()])
           }
         >
-          <Plus className="mr-1 h-3 w-3" />
+          <Plus className="mr-1 size-3" />
           Add button
         </Button>
       </div>
@@ -568,7 +572,7 @@ export function InteractionButtonsEditor({
                   type="button"
                   size="icon"
                   variant="ghost"
-                  className="mt-5 h-8 w-8"
+                  className="mt-5 size-8"
                   onClick={() =>
                     onChange(
                       buttons.filter(
@@ -578,7 +582,7 @@ export function InteractionButtonsEditor({
                   }
                   aria-label={`Remove ${button.label || 'button'}`}
                 >
-                  <Trash2 className="h-3.5 w-3.5" />
+                  <Trash2 className="size-3.5" />
                 </Button>
               </div>
               <InteractionActionsList
@@ -633,7 +637,7 @@ export function InteractionActionsList({
             ])
           }
         >
-          <Plus className="mr-1 h-3 w-3" />
+          <Plus className="mr-1 size-3" />
           Add action
         </Button>
       </div>
@@ -643,7 +647,7 @@ export function InteractionActionsList({
         actions.map((action, index) => (
           <div
             key={`action-${index}`}
-            className="grid gap-2 rounded-md border bg-muted/10 p-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]"
+            className={`grid gap-2 rounded-md border bg-muted/10 p-2 ${SM_GRID_COLS_TWO_MINMAX_AUTO}`}
           >
             <div className="grid gap-1">
               <SectionLabel size="sm">Action</SectionLabel>
@@ -744,7 +748,7 @@ export function InteractionActionsList({
               type="button"
               size="icon"
               variant="ghost"
-              className="mt-5 h-8 w-8"
+              className="mt-5 size-8"
               onClick={() =>
                 onChange(
                   actions.filter((_, currentIndex) => currentIndex !== index)
@@ -752,7 +756,7 @@ export function InteractionActionsList({
               }
               aria-label="Remove action"
             >
-              <Trash2 className="h-3.5 w-3.5" />
+              <Trash2 className="size-3.5" />
             </Button>
           </div>
         ))
@@ -793,7 +797,7 @@ export function TableBulkActionsEditor({
           className="h-7"
           onClick={() => onChange([...actions, createDefaultTableAction()])}
         >
-          <Plus className="mr-1 h-3 w-3" />
+          <Plus className="mr-1 size-3" />
           Add bulk action
         </Button>
       </div>
@@ -808,7 +812,7 @@ export function TableBulkActionsEditor({
             key={`${action.id}-${index}`}
             className="rounded-md border bg-background p-3"
           >
-            <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]">
+            <div className={`grid gap-2 ${SM_GRID_COLS_TWO_MINMAX_AUTO}`}>
               <div className="grid gap-1">
                 <SectionLabel size="sm">ID</SectionLabel>
                 <Input
@@ -836,7 +840,7 @@ export function TableBulkActionsEditor({
                 type="button"
                 size="icon"
                 variant="ghost"
-                className="mt-5 h-8 w-8"
+                className="mt-5 size-8"
                 onClick={() =>
                   onChange(
                     actions.filter((_, currentIndex) => currentIndex !== index)
@@ -844,7 +848,7 @@ export function TableBulkActionsEditor({
                 }
                 aria-label={`Remove ${action.label || 'bulk action'}`}
               >
-                <Trash2 className="h-3.5 w-3.5" />
+                <Trash2 className="size-3.5" />
               </Button>
             </div>
             <div className="mt-2">

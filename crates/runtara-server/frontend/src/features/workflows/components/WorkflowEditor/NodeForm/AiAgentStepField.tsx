@@ -791,9 +791,9 @@ export function AiAgentStepField({ name }: AiAgentStepFieldProps) {
           onClick={() => setShowAdvanced(!showAdvanced)}
         >
           {showAdvanced ? (
-            <ChevronDown className="h-4 w-4" />
+            <ChevronDown className="size-4" />
           ) : (
-            <ChevronRight className="h-4 w-4" />
+            <ChevronRight className="size-4" />
           )}
           Advanced Settings
         </button>
@@ -946,7 +946,7 @@ export function AiAgentStepField({ name }: AiAgentStepFieldProps) {
       {/* Tools Section */}
       <div className="rounded-lg border">
         <div className="flex items-center gap-2 p-3">
-          <Wrench className="h-4 w-4 text-muted-foreground" />
+          <Wrench className="size-4 text-muted-foreground" />
           <span className="text-sm font-medium">Tools</span>
           <span className="text-xs text-muted-foreground">
             ({allToolNames.length})
@@ -974,10 +974,10 @@ export function AiAgentStepField({ name }: AiAgentStepFieldProps) {
                     type="button"
                     variant="ghost"
                     size="icon"
-                    className="h-6 w-6 opacity-0 transition-opacity group-hover:opacity-100"
+                    className="size-6 opacity-0 transition-opacity group-hover:opacity-100"
                     onClick={() => handleRemoveTool(toolName)}
                   >
-                    <Trash2 className="h-3 w-3" />
+                    <Trash2 className="size-3" />
                   </Button>
                 </div>
               );
@@ -1010,7 +1010,7 @@ export function AiAgentStepField({ name }: AiAgentStepFieldProps) {
               className="h-8"
               onClick={handleAddTool}
             >
-              <Plus className="mr-1 h-3 w-3" />
+              <Plus className="mr-1 size-3" />
               Add
             </Button>
           </div>
@@ -1029,7 +1029,7 @@ export function AiAgentStepField({ name }: AiAgentStepFieldProps) {
       {/* Output Schema Section */}
       <div className="rounded-lg border">
         <div className="flex items-center gap-2 p-3">
-          <ListTree className="h-4 w-4 text-muted-foreground" />
+          <ListTree className="size-4 text-muted-foreground" />
           <span className="text-sm font-medium">Structured Output</span>
         </div>
         <div className="space-y-2 px-3 pb-3">
@@ -1060,7 +1060,7 @@ export function AiAgentStepField({ name }: AiAgentStepFieldProps) {
         <div className="rounded-lg border">
           <div className="flex items-center justify-between p-3">
             <div className="flex items-center gap-2">
-              <Brain className="h-4 w-4 text-muted-foreground" />
+              <Brain className="size-4 text-muted-foreground" />
               <span className="text-sm font-medium">Conversation Memory</span>
             </div>
             <div className="flex items-center gap-2">
@@ -1082,7 +1082,7 @@ export function AiAgentStepField({ name }: AiAgentStepFieldProps) {
                 onClick={handleRemoveMemory}
                 title="Remove conversation memory and its provider step"
               >
-                <Trash2 className="mr-1 h-3.5 w-3.5" />
+                <Trash2 className="mr-1 size-3.5" />
                 Remove memory
               </Button>
             </div>
@@ -1125,9 +1125,9 @@ export function AiAgentStepField({ name }: AiAgentStepFieldProps) {
                 onClick={() => setShowCompaction(!showCompaction)}
               >
                 {showCompaction ? (
-                  <ChevronDown className="h-4 w-4" />
+                  <ChevronDown className="size-4" />
                 ) : (
-                  <ChevronRight className="h-4 w-4" />
+                  <ChevronRight className="size-4" />
                 )}
                 Compaction
               </button>

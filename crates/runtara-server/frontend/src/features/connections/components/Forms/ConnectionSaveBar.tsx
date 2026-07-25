@@ -48,7 +48,7 @@ export function ConnectionSaveBar({
         {summary && (
           <div className="flex min-w-0 items-center gap-2 text-sm text-muted-foreground">
             <span
-              className="h-1.5 w-1.5 flex-shrink-0 rounded-full bg-warning"
+              className="size-1.5 flex-shrink-0 rounded-full bg-warning"
               aria-hidden
             />
             <span className="truncate">{summary}</span>
@@ -75,12 +75,12 @@ export function ConnectionSaveBar({
           >
             {isLoading ? (
               <>
-                <Spinner className="mr-1.5 h-4 w-4" />
+                <Spinner className="mr-1.5 size-4" />
                 {loadingLabel || 'Saving...'}
               </>
             ) : (
               <>
-                <Save className="mr-1.5 h-4 w-4" />
+                <Save className="mr-1.5 size-4" />
                 {submitLabel}
               </>
             )}

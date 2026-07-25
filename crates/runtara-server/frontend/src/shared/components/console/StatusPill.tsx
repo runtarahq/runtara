@@ -75,11 +75,11 @@ export function StatusPill({
       )}
     >
       {spin ? (
-        <Spinner className="h-3 w-3" />
+        <Spinner className="size-3" />
       ) : dot ? (
         <span
           className={cn(
-            'h-1.5 w-1.5 rounded-full',
+            'size-1.5 rounded-full',
             t.dot,
             pulse && 'animate-pulse'
           )}

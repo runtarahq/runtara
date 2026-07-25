@@ -27,4 +27,39 @@ const TooltipContent = React.forwardRef<
 ));
 TooltipContent.displayName = TooltipPrimitive.Content.displayName;
 
-export { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider };
+/**
+ * Self-contained tooltip for icon-only controls. Bundles its own provider so
+ * call sites need no page-level TooltipProvider — drop-in replacement for a
+ * native `title=` attribute, but visible to keyboard users too. The child must
+ * forward refs (Button, Link, and native elements all do). Keep an explicit
+ * `aria-label` on the child when it has no visible text: the tooltip is
+ * hover/focus-only and is not a substitute for an accessible name.
+ */
+function WithTooltip({
+  label,
+  side,
+  children,
+}: {
+  label: React.ReactNode;
+  side?: React.ComponentPropsWithoutRef<
+    typeof TooltipPrimitive.Content
+  >['side'];
+  children: React.ReactNode;
+}) {
+  return (
+    <TooltipProvider delayDuration={300}>
+      <Tooltip>
+        <TooltipTrigger asChild>{children}</TooltipTrigger>
+        <TooltipContent side={side}>{label}</TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  );
+}
+
+export {
+  Tooltip,
+  TooltipTrigger,
+  TooltipContent,
+  TooltipProvider,
+  WithTooltip,
+};

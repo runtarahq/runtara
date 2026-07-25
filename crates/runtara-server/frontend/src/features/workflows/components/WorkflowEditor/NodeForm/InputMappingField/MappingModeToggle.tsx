@@ -66,7 +66,7 @@ export function MappingModeToggle<Mode extends string>({
               disabled && 'cursor-not-allowed opacity-50'
             )}
           >
-            <Icon className="h-4 w-4" />
+            <Icon className="size-4" />
             {option.description ? (
               <span className="flex flex-col items-start text-left">
                 <span>{option.label}</span>

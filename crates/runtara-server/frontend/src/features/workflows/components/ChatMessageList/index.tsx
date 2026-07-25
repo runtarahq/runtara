@@ -24,7 +24,7 @@ export function ChatMessageList({ messages }: ChatMessageListProps) {
         ref={containerRef}
         className="flex flex-1 flex-col items-center justify-center text-center"
       >
-        <MessageSquare className="mb-3 h-10 w-10 text-muted-foreground/40" />
+        <MessageSquare className="mb-3 size-10 text-muted-foreground/40" />
         <p className="text-sm font-medium text-foreground">
           Start a conversation
         </p>

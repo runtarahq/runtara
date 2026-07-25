@@ -220,7 +220,7 @@ function FilterChip({
           >
             <span className="text-muted-foreground">{filter.label}:</span>
             <span className="font-medium">{summary}</span>
-            <ChevronDown className="h-3.5 w-3.5 opacity-50" />
+            <ChevronDown className="size-3.5 opacity-50" />
           </button>
         </PopoverTrigger>
         <PopoverContent className="w-72 p-0" align="start">
@@ -247,7 +247,7 @@ function FilterChip({
         aria-label={`Remove ${filter.label} filter`}
         className="flex h-full items-center border-l px-2 text-muted-foreground hover:bg-muted/40 hover:text-foreground"
       >
-        <X className="h-3.5 w-3.5" />
+        <X className="size-3.5" />
       </button>
     </div>
   );
@@ -272,7 +272,7 @@ function AddFilterMenu({
           size="sm"
           className="h-8 gap-1.5 rounded-full px-3 text-sm font-normal text-muted-foreground"
         >
-          <Plus className="h-3.5 w-3.5" />
+          <Plus className="size-3.5" />
           {hasActive ? 'Add filter' : 'Filter'}
         </Button>
       </PopoverTrigger>
@@ -313,7 +313,7 @@ function SearchFilter({
 }) {
   return (
     <div className="relative w-72">
-      <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+      <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
       <Input
         type="search"
         className="h-8 pl-9"
@@ -399,7 +399,7 @@ function FilterEditor({
                   <span className="flex-1 truncate">
                     {formatOptionLabel(option.label, option.count)}
                   </span>
-                  {checked && <Check className="h-4 w-4 opacity-70" />}
+                  {checked && <Check className="size-4 opacity-70" />}
                 </CommandItem>
               );
             })}

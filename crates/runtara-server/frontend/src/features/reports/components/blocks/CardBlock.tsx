@@ -361,10 +361,10 @@ function CardField({
           <button
             type="button"
             aria-label="Edit field"
-            className="report-print-hidden rounded p-0.5 text-muted-foreground opacity-0 transition-opacity hover:bg-muted hover:text-foreground group-hover/field:opacity-100"
+            className="report-print-hidden rounded p-0.5 text-muted-foreground opacity-0 transition-opacity hover:bg-muted hover:text-foreground focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring group-hover/field:opacity-100"
             onClick={() => onEditField?.(field.field)}
           >
-            <Pencil className="h-3 w-3" />
+            <Pencil className="size-3" />
           </button>
         )}
       </div>
@@ -507,11 +507,7 @@ function WorkflowActionButton({
         });
       }}
     >
-      {phase ? (
-        <Spinner className="h-3.5 w-3.5" />
-      ) : (
-        <Play className="h-3.5 w-3.5" />
-      )}
+      {phase ? <Spinner className="size-3.5" /> : <Play className="size-3.5" />}
       <span className="truncate">
         {phase
           ? workflowActionPhaseLabel(action, phase)
@@ -745,12 +741,12 @@ function CollapseToggle({
     <button
       type="button"
       onClick={onToggle}
-      className="inline-flex items-center gap-1 rounded text-xs font-medium text-muted-foreground hover:text-foreground"
+      className="inline-flex items-center gap-1 rounded text-xs font-medium text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
     >
       {open ? (
-        <ChevronDown className="h-3 w-3" />
+        <ChevronDown className="size-3" />
       ) : (
-        <ChevronRight className="h-3 w-3" />
+        <ChevronRight className="size-3" />
       )}
       <span>{open ? 'Hide' : 'Show'}</span>
       {!open && summary && (
@@ -822,12 +818,12 @@ function JsonField({
       <button
         type="button"
         onClick={() => setOpen((prev) => !prev)}
-        className="inline-flex items-center gap-1 rounded text-xs font-medium text-muted-foreground hover:text-foreground"
+        className="inline-flex items-center gap-1 rounded text-xs font-medium text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
       >
         {open ? (
-          <ChevronDown className="h-3 w-3" />
+          <ChevronDown className="size-3" />
         ) : (
-          <ChevronRight className="h-3 w-3" />
+          <ChevronRight className="size-3" />
         )}
         <span>{open ? 'Hide' : 'Show'}</span>
         {!open && summary && (
@@ -871,12 +867,12 @@ function MarkdownField({
       <button
         type="button"
         onClick={() => setOpen((prev) => !prev)}
-        className="inline-flex items-center gap-1 rounded text-xs font-medium text-muted-foreground hover:text-foreground"
+        className="inline-flex items-center gap-1 rounded text-xs font-medium text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
       >
         {open ? (
-          <ChevronDown className="h-3 w-3" />
+          <ChevronDown className="size-3" />
         ) : (
-          <ChevronRight className="h-3 w-3" />
+          <ChevronRight className="size-3" />
         )}
         <span>{open ? 'Hide' : 'Show'}</span>
       </button>

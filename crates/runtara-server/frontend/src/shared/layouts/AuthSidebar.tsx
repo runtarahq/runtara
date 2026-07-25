@@ -13,7 +13,7 @@ export function AuthSidebar() {
     <Button
       variant="ghost"
       size="icon"
-      className="relative h-9 w-9 shrink-0"
+      className="relative size-9 shrink-0"
       aria-label="Sign out"
       onClick={() => {
         clearUserGroups();
@@ -21,18 +21,18 @@ export function AuthSidebar() {
         signoutRedirect();
       }}
     >
-      <LogOut className="h-4 w-4" />
+      <LogOut className="size-4" />
       <span className="sr-only">Sign out</span>
     </Button>
   ) : (
     <Button
       variant="ghost"
       size="icon"
-      className="relative h-9 w-9 shrink-0"
+      className="relative size-9 shrink-0"
       aria-label="Sign in"
       onClick={() => signinRedirect()}
     >
-      <LogOut className="h-4 w-4" />
+      <LogOut className="size-4" />
       <span className="sr-only">Sign in</span>
     </Button>
   );

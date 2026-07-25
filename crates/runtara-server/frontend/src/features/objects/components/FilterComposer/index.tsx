@@ -165,7 +165,7 @@ export const FilterComposer = ({
               onClick={handleClear}
               className="h-7"
             >
-              <X className="mr-1 h-3 w-3" />
+              <X className="mr-1 size-3" />
               Clear Filter
             </Button>
           </div>
@@ -188,7 +188,7 @@ export const FilterComposer = ({
           }
           className="w-full"
         >
-          <PlusCircle className="mr-2 h-4 w-4" />
+          <PlusCircle className="mr-2 size-4" />
           Add Filter Condition
         </Button>
       )}
@@ -325,7 +325,7 @@ const ConditionBuilder = ({
           <Select value={op} onValueChange={handleOperatorChange}>
             <SelectTrigger className="h-8 w-[280px] text-sm">
               <SelectValue placeholder="Operator" />
-              <ChevronDown className="ml-auto h-4 w-4 opacity-50" />
+              <ChevronDown className="ml-auto size-4 opacity-50" />
             </SelectTrigger>
             <SelectContent>
               {OPERATORS.map((o) => (
@@ -341,9 +341,9 @@ const ConditionBuilder = ({
               variant="ghost"
               size="icon"
               onClick={handleRemoveCondition}
-              className="ml-auto h-8 w-8"
+              className="ml-auto size-8"
             >
-              <X className="h-4 w-4" />
+              <X className="size-4" />
             </Button>
           )}
         </div>
@@ -414,10 +414,10 @@ const ConditionBuilder = ({
                         arguments: ['', ''],
                       })
                     }
-                    className="h-8 w-8"
+                    className="size-8"
                     title="Convert to nested condition"
                   >
-                    <Code2 className="h-4 w-4" />
+                    <Code2 className="size-4" />
                   </Button>
                 )}
                 {operator.arity === 'VARIADIC' && args.length > 1 && (
@@ -426,9 +426,9 @@ const ConditionBuilder = ({
                     variant="ghost"
                     size="icon"
                     onClick={() => handleRemoveArgument(index)}
-                    className="h-8 w-8"
+                    className="size-8"
                   >
-                    <X className="h-4 w-4" />
+                    <X className="size-4" />
                   </Button>
                 )}
               </>
@@ -444,7 +444,7 @@ const ConditionBuilder = ({
             onClick={handleAddArgument}
             className="w-full text-xs"
           >
-            <PlusCircle className="mr-1 h-4 w-4" /> Add Condition
+            <PlusCircle className="mr-1 size-4" /> Add Condition
           </Button>
         )}
       </CardContent>

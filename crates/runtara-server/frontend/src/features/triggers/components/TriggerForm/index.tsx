@@ -167,7 +167,7 @@ export function TriggerForm(props: Props) {
           >
             {isLoading ? (
               <>
-                <Spinner className="mr-2 h-4 w-4" />
+                <Spinner className="mr-2 size-4" />
                 {loadingLabel}
               </>
             ) : (

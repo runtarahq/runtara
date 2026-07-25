@@ -21,6 +21,7 @@ import {
   createDefaultWorkflowAction,
   WorkflowActionEditor,
 } from './tableActionEditors';
+import { GRID_COLS_TWO_FIELDS_TWO_120 } from '../grid-templates';
 
 interface CardBlockEditorProps {
   block: ReportBlockDefinition;
@@ -105,7 +106,7 @@ export function CardBlockEditor({
           className="h-7"
           onClick={() => updateGroups([...groups, newGroup()])}
         >
-          <Plus className="mr-1 h-3 w-3" /> Add group
+          <Plus className="mr-1 size-3" /> Add group
         </Button>
       </div>
     </div>
@@ -159,10 +160,10 @@ function GroupEditor({
           type="button"
           variant="ghost"
           size="icon"
-          className="h-8 w-8 text-destructive"
+          className="size-8 text-destructive"
           onClick={onDelete}
         >
-          <Trash2 className="h-3.5 w-3.5" />
+          <Trash2 className="size-3.5" />
         </Button>
       </div>
       <Input
@@ -187,7 +188,7 @@ function GroupEditor({
               updateFields([...fields, newField(field)]);
             }}
           >
-            <Plus className="mr-1 h-3 w-3" /> Add field
+            <Plus className="mr-1 size-3" /> Add field
           </Button>
         </div>
         {fields.length === 0 ? (
@@ -234,7 +235,9 @@ function FieldEditor({
 
   return (
     <div className="grid gap-1.5 rounded border bg-muted/20 p-2">
-      <div className="grid grid-cols-[1fr_1fr_120px_120px_minmax(0,auto)] items-center gap-2">
+      <div
+        className={`grid ${GRID_COLS_TWO_FIELDS_TWO_120} items-center gap-2`}
+      >
         <Select
           value={field.field || ''}
           onValueChange={(value) => onChange({ ...field, field: value })}
@@ -316,7 +319,7 @@ function FieldEditor({
           className="text-destructive"
           onClick={onDelete}
         >
-          <Trash2 className="h-3.5 w-3.5" />
+          <Trash2 className="size-3.5" />
         </Button>
       </div>
       {hasNested ? (

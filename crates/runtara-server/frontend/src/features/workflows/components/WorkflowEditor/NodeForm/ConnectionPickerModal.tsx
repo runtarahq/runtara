@@ -92,7 +92,7 @@ export function ConnectionPickerModal({
         <div className="space-y-4">
           {/* Search input */}
           <div className="relative">
-            <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+            <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
             <Input
               placeholder="Search connections..."
               value={searchQuery}
@@ -106,7 +106,7 @@ export function ConnectionPickerModal({
           <div className="max-h-[300px] space-y-1 overflow-y-auto">
             {filteredOptions.length === 0 ? (
               <PickerEmpty>
-                <Inbox className="mx-auto mb-2 h-8 w-8 opacity-50" />
+                <Inbox className="mx-auto mb-2 size-8 opacity-50" />
                 <p>No connections found</p>
               </PickerEmpty>
             ) : (
@@ -133,11 +133,11 @@ export function ConnectionPickerModal({
                     }`}
                   >
                     {/* Icon */}
-                    <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-muted">
+                    <div className="flex size-8 shrink-0 items-center justify-center rounded-md bg-muted">
                       {platformIcon ? (
                         <span className="text-lg">{platformIcon}</span>
                       ) : (
-                        <Link className="h-4 w-4 text-muted-foreground" />
+                        <Link className="size-4 text-muted-foreground" />
                       )}
                     </div>
 
@@ -158,7 +158,7 @@ export function ConnectionPickerModal({
 
                     {/* Selected indicator */}
                     {isSelected && (
-                      <Check className="h-4 w-4 shrink-0 text-primary" />
+                      <Check className="size-4 shrink-0 text-primary" />
                     )}
                   </button>
                 );

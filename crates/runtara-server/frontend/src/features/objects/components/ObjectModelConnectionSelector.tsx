@@ -26,11 +26,11 @@ export function ObjectModelConnectionSelector() {
       <Button
         variant="outline"
         size="icon"
-        className="h-9 w-9 shrink-0"
+        className="size-9 shrink-0"
         disabled
         aria-label="Loading database connections"
       >
-        <Spinner className="h-4 w-4" />
+        <Spinner className="size-4" />
       </Button>
     );
   }
@@ -39,7 +39,7 @@ export function ObjectModelConnectionSelector() {
     return (
       <Button asChild variant="outline" size="sm">
         <Link to="/connections/postgres/create">
-          <Database className="mr-2 h-4 w-4" />
+          <Database className="mr-2 size-4" />
           Add database connection
         </Link>
       </Button>
@@ -54,11 +54,11 @@ export function ObjectModelConnectionSelector() {
         <Button
           variant="outline"
           size="icon"
-          className="h-9 w-9 shrink-0"
+          className="size-9 shrink-0"
           aria-label="Database connection"
           title={current ? `Database: ${current.title}` : 'Database connection'}
         >
-          <Database className="h-4 w-4" />
+          <Database className="size-4" />
         </Button>
       </PopoverTrigger>
       <PopoverContent align="end" className="w-72 p-0">
@@ -87,7 +87,7 @@ export function ObjectModelConnectionSelector() {
                     ? ' (default)'
                     : ''}
                 </span>
-                {selected && <Check className="h-4 w-4 shrink-0" />}
+                {selected && <Check className="size-4 shrink-0" />}
               </button>
             );
           })}

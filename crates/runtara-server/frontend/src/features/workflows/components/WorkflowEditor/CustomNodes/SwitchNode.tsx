@@ -358,7 +358,7 @@ function SwitchNodeComponent({
                     >
                       <div className="ml-1 h-px w-6 bg-border" />
                       <Button
-                        className="nodrag nopan pointer-events-auto h-4 w-4 rounded-full shadow-sm [&_svg]:size-2"
+                        className="nodrag nopan pointer-events-auto size-4 rounded-full shadow-sm [&_svg]:size-2"
                         variant="outline"
                         size="icon"
                         onClick={(e) => {
@@ -408,7 +408,7 @@ function SwitchNodeComponent({
               >
                 <div className="ml-1 h-px w-6 bg-border" />
                 <Button
-                  className="nodrag nopan pointer-events-auto h-4 w-4 rounded-full shadow-sm [&_svg]:size-2"
+                  className="nodrag nopan pointer-events-auto size-4 rounded-full shadow-sm [&_svg]:size-2"
                   variant="outline"
                   size="icon"
                   onClick={(e) => {

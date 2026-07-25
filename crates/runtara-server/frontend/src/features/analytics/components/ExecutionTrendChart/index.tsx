@@ -16,6 +16,10 @@ import {
 } from 'recharts';
 import { format } from 'date-fns';
 
+/** Height of the main trend chart, shared by its loading/empty placeholders. */
+const CHART_HEIGHT = 350;
+const CHART_HEIGHT_CLASS = 'h-[350px]';
+
 interface TrendDataPoint {
   timestamp: string;
   executions: number;
@@ -70,7 +74,9 @@ export function ExecutionTrendChart({
           <CardTitle>Execution Trends</CardTitle>
         </CardHeader>
         <CardContent>
-          <div className="h-[350px] animate-pulse rounded bg-muted" />
+          <div
+            className={`${CHART_HEIGHT_CLASS} animate-pulse rounded bg-muted`}
+          />
         </CardContent>
       </Card>
     );
@@ -83,7 +89,9 @@ export function ExecutionTrendChart({
           <CardTitle>Execution Trends</CardTitle>
         </CardHeader>
         <CardContent>
-          <div className="flex h-[350px] items-center justify-center text-muted-foreground">
+          <div
+            className={`flex ${CHART_HEIGHT_CLASS} items-center justify-center text-muted-foreground`}
+          >
             No data available for the selected period
           </div>
         </CardContent>
@@ -106,7 +114,7 @@ export function ExecutionTrendChart({
           <CardTitle>Execution Trends</CardTitle>
         </CardHeader>
         <CardContent>
-          <ResponsiveContainer width="100%" height={350}>
+          <ResponsiveContainer width="100%" height={CHART_HEIGHT}>
             <LineChart
               data={formattedData}
               margin={{ top: 5, right: 30, left: 20, bottom: 5 }}

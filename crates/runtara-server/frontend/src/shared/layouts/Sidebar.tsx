@@ -189,12 +189,12 @@ function FooterMenu() {
         <Button
           variant="ghost"
           size="icon"
-          className="relative h-9 w-9 shrink-0"
+          className="relative size-9 shrink-0"
           aria-label="Manage billing"
           onClick={() => createPortalSession({})}
           disabled={isPending}
         >
-          <DollarSign className="h-4 w-4" />
+          <DollarSign className="size-4" />
           <span className="sr-only">Manage billing</span>
         </Button>
         <ThemeSwitcher />

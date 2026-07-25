@@ -175,7 +175,7 @@ const ArgumentValueTypeSelector = ({
               <button
                 type="button"
                 disabled={disabled}
-                className={`flex h-6 w-6 shrink-0 items-center justify-center rounded border border-current text-[9px] font-bold transition-colors hover:opacity-80 ${getArgumentValueTypeColor(
+                className={`flex size-6 shrink-0 items-center justify-center rounded border border-current text-[9px] font-bold transition-colors hover:opacity-80 ${getArgumentValueTypeColor(
                   value
                 )}`}
               >
@@ -202,7 +202,7 @@ const ArgumentValueTypeSelector = ({
                 >
                   <div className="flex w-full items-center gap-2">
                     <span
-                      className={`flex h-5 w-5 shrink-0 items-center justify-center rounded border text-[8px] font-bold ${getArgumentValueTypeColor(
+                      className={`flex size-5 shrink-0 items-center justify-center rounded border text-[8px] font-bold ${getArgumentValueTypeColor(
                         option.value
                       )} ${isSelected ? 'ring-1 ring-primary' : 'border-current'}`}
                     >
@@ -405,7 +405,7 @@ const ConditionVariablePickerModal = ({
         <div className="space-y-4">
           {/* Search input */}
           <div className="relative">
-            <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+            <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
             <Input
               placeholder="Search variables..."
               value={searchQuery}
@@ -448,7 +448,7 @@ const ConditionVariablePickerModal = ({
               )}
             {filteredSuggestions.length === 0 ? (
               <PickerEmpty>
-                <Inbox className="mx-auto mb-2 h-8 w-8 opacity-50" />
+                <Inbox className="mx-auto mb-2 size-8 opacity-50" />
                 <p>No matching variables</p>
               </PickerEmpty>
             ) : (
@@ -583,7 +583,7 @@ const ReferencePill = ({
           }}
           className="text-success/60 hover:text-success"
         >
-          <X className="h-3 w-3" />
+          <X className="size-3" />
         </button>
       )}
     </span>
@@ -1164,10 +1164,10 @@ const ConditionBuilder = ({
                           type="button"
                           variant="ghost"
                           size="icon"
-                          className="h-6 w-6 text-muted-foreground hover:text-destructive"
+                          className="size-6 text-muted-foreground hover:text-destructive"
                           onClick={() => handleRemoveArgument(index)}
                         >
-                          <Trash2 className="h-3 w-3" />
+                          <Trash2 className="size-3" />
                         </Button>
                       ) : (
                         !disabled && (
@@ -1178,12 +1178,12 @@ const ConditionBuilder = ({
                                   type="button"
                                   variant="ghost"
                                   size="icon"
-                                  className="h-6 w-6 text-muted-foreground hover:text-destructive"
+                                  className="size-6 text-muted-foreground hover:text-destructive"
                                   onClick={() =>
                                     handleClearOperationArgument(index)
                                   }
                                 >
-                                  <Trash2 className="h-3 w-3" />
+                                  <Trash2 className="size-3" />
                                 </Button>
                               </TooltipTrigger>
                               <TooltipContent>
@@ -1229,10 +1229,10 @@ const ConditionBuilder = ({
                       type="button"
                       variant="ghost"
                       size="icon"
-                      className="h-6 w-6 text-muted-foreground hover:text-destructive"
+                      className="size-6 text-muted-foreground hover:text-destructive"
                       onClick={() => handleRemoveArgument(index)}
                     >
-                      <Trash2 className="h-3 w-3" />
+                      <Trash2 className="size-3" />
                     </Button>
                   )}
                 </div>
@@ -1261,10 +1261,10 @@ const ConditionBuilder = ({
                       type="button"
                       variant="ghost"
                       size="icon"
-                      className="h-6 w-6 text-muted-foreground hover:text-destructive"
+                      className="size-6 text-muted-foreground hover:text-destructive"
                       onClick={() => handleRemoveArgument(index)}
                     >
-                      <Trash2 className="h-3 w-3" />
+                      <Trash2 className="size-3" />
                     </Button>
                   )}
                 </div>

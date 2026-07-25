@@ -56,7 +56,7 @@ export function EditObjectSchema() {
   if (isLoading) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-muted/30 dark:bg-background">
-        <Spinner className="h-8 w-8 text-muted-foreground" />
+        <Spinner className="size-8 text-muted-foreground" />
       </div>
     );
   }

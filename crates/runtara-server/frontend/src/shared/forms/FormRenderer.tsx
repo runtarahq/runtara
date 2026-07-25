@@ -132,7 +132,7 @@ export function FormRenderer({
         className="flex items-center gap-2 text-sm text-muted-foreground"
         role="status"
       >
-        <Spinner className="h-4 w-4" />
+        <Spinner className="size-4" />
         Preparing form…
       </div>
     );
@@ -141,7 +141,7 @@ export function FormRenderer({
   if (!analysis.wasmAvailable) {
     return (
       <Alert variant="destructive">
-        <AlertCircle className="h-4 w-4" />
+        <AlertCircle className="size-4" />
         <AlertTitle>Form unavailable</AlertTitle>
         <AlertDescription>
           The shared validation engine could not start. Reload the page before

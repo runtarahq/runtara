@@ -85,7 +85,7 @@ export function ActionForm({
           analysis?.wasmAvailable === false
         }
       >
-        {disabled ? <Spinner className="mr-2 h-4 w-4" /> : null}
+        {disabled ? <Spinner className="mr-2 size-4" /> : null}
         {submitLabel}
       </Button>
     </div>

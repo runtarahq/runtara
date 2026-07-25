@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { PlusIcon, Key, Ban } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button';
+import { WithTooltip } from '@/shared/components/ui/tooltip';
 import {
   Table,
   TableBody,
@@ -60,7 +61,7 @@ export function Settings() {
       actions={
         // API keys are personal: any user may create their own, so this is not role-gated.
         <Button onClick={() => setCreateOpen(true)} disabled={isError}>
-          <PlusIcon className="mr-2 h-4 w-4" />
+          <PlusIcon className="mr-2 size-4" />
           New API Key
         </Button>
       }
@@ -84,7 +85,7 @@ export function Settings() {
     if (!hasContent) {
       return (
         <ConsoleEmptyState
-          icon={<Key className="mb-4 h-10 w-10 text-muted-foreground" />}
+          icon={<Key className="mb-4 size-10 text-muted-foreground" />}
           title="No API keys yet"
           description="Create an API key to connect MCP clients or external integrations."
         />
@@ -129,15 +130,17 @@ export function Settings() {
                 <div className="flex items-center justify-end gap-1">
                   {/* A caller manages only its own keys (server-enforced), so revoke is
                       always available on the keys shown — not role-gated. */}
-                  <Button
-                    variant="ghost"
-                    size="icon-sm"
-                    className="text-muted-foreground hover:text-destructive"
-                    title="Revoke API key"
-                    onClick={() => setRevokeTarget(key)}
-                  >
-                    <Ban className="h-4 w-4" />
-                  </Button>
+                  <WithTooltip label="Revoke API key">
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      className="text-muted-foreground hover:text-destructive"
+                      aria-label="Revoke API key"
+                      onClick={() => setRevokeTarget(key)}
+                    >
+                      <Ban className="size-4" />
+                    </Button>
+                  </WithTooltip>
                 </div>
               </TableCell>
             </TableRow>

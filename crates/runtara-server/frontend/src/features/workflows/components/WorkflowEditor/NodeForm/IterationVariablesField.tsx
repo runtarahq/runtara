@@ -228,7 +228,7 @@ export function IterationVariablesField({
                                   ? `item${itemCount === 1 ? '' : 's'}`
                                   : `field${itemCount === 1 ? '' : 's'}`}
                               </span>
-                              <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />
+                              <ChevronRight className="size-4 shrink-0 text-muted-foreground" />
                             </button>
                           )}
                           <ModeToggleButton
@@ -327,7 +327,7 @@ export function IterationVariablesField({
                           }
                         }}
                       >
-                        <SelectTrigger className="h-7 border-0 focus:ring-0">
+                        <SelectTrigger className="h-7 border-0 focus-visible:ring-0">
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
@@ -349,9 +349,9 @@ export function IterationVariablesField({
                           if (pickerIndex === index) setPickerIndex(null);
                           remove(index);
                         }}
-                        className="h-6 w-6 p-0"
+                        className="size-6 p-0"
                       >
-                        <Trash2 className="h-3 w-3" />
+                        <Trash2 className="size-3" />
                       </Button>
                     </td>
                   </tr>
@@ -429,7 +429,7 @@ export function IterationVariablesField({
         }
         className="w-full"
       >
-        <Plus className="mr-2 h-4 w-4" />
+        <Plus className="mr-2 size-4" />
         Add Variable
       </Button>
     </div>

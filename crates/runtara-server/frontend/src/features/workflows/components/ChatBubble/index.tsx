@@ -40,20 +40,20 @@ function EventDetails({ events }: { events: ChatSSEEvent[] }) {
         className="flex items-center gap-1 text-xs text-muted-foreground transition-colors hover:text-foreground"
       >
         {expanded ? (
-          <ChevronDown className="h-3 w-3" />
+          <ChevronDown className="size-3" />
         ) : (
-          <ChevronRight className="h-3 w-3" />
+          <ChevronRight className="size-3" />
         )}
         <span className="flex items-center gap-1.5">
           {llmEvents.length > 0 && (
             <Badge variant="outline" className="gap-1 py-0 text-3xs">
-              <Brain className="h-2.5 w-2.5" />
+              <Brain className="size-2.5" />
               LLM
             </Badge>
           )}
           {toolCalls.length > 0 && (
             <Badge variant="outline" className="gap-1 py-0 text-3xs">
-              <Wrench className="h-2.5 w-2.5" />
+              <Wrench className="size-2.5" />
               {toolCalls.filter((e) => e.type === 'tool_call').length} tool call
               {toolCalls.filter((e) => e.type === 'tool_call').length !== 1
                 ? 's'
@@ -62,7 +62,7 @@ function EventDetails({ events }: { events: ChatSSEEvent[] }) {
           )}
           {memoryEvents.length > 0 && (
             <Badge variant="outline" className="gap-1 py-0 text-3xs">
-              <Database className="h-2.5 w-2.5" />
+              <Database className="size-2.5" />
               Memory saved
             </Badge>
           )}
@@ -85,7 +85,7 @@ function EventItem({ event }: { event: ChatSSEEvent }) {
     case 'tool_call':
       return (
         <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-          <Wrench className="h-3 w-3 text-primary" />
+          <Wrench className="size-3 text-primary" />
           <span>
             Calling{' '}
             <code className="rounded bg-muted px-1 py-0.5 text-3xs">
@@ -98,7 +98,7 @@ function EventItem({ event }: { event: ChatSSEEvent }) {
       const duration = event.data.duration_ms as number | undefined;
       return (
         <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-          <Check className="h-3 w-3 text-success" />
+          <Check className="size-3 text-success" />
           <span>
             <code className="rounded bg-muted px-1 py-0.5 text-3xs">
               {(event.data.tool_name as string) ?? 'tool'}
@@ -116,7 +116,7 @@ function EventItem({ event }: { event: ChatSSEEvent }) {
       const model = event.data.model as string | undefined;
       return (
         <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-          <Brain className="h-3 w-3 text-violet-500" />
+          <Brain className="size-3 text-violet-500" />
           <span>
             Thinking
             {model && (
@@ -129,14 +129,14 @@ function EventItem({ event }: { event: ChatSSEEvent }) {
     case 'llm_end':
       return (
         <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-          <Check className="h-3 w-3 text-violet-500" />
+          <Check className="size-3 text-violet-500" />
           <span>Done thinking</span>
         </div>
       );
     case 'memory_saved':
       return (
         <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-          <Database className="h-3 w-3 text-success" />
+          <Database className="size-3 text-success" />
           <span>
             Memory saved ({(event.data.message_count as number) ?? '?'}{' '}
             messages)
@@ -166,7 +166,7 @@ export function ChatBubble({ message }: ChatBubbleProps) {
       <div className="flex justify-center">
         <div className="flex items-center gap-1.5 rounded-full bg-muted/50 px-3 py-1 text-xs text-muted-foreground">
           {events.some((e) => e.type === 'waiting_for_input') && (
-            <AlertCircle className="h-3 w-3 text-warning" />
+            <AlertCircle className="size-3 text-warning" />
           )}
           <span>{content}</span>
         </div>
@@ -194,7 +194,7 @@ export function ChatBubble({ message }: ChatBubbleProps) {
           </div>
         ) : isStreaming ? (
           <div className="flex items-center gap-2 text-muted-foreground">
-            <Spinner className="h-3.5 w-3.5" />
+            <Spinner className="size-3.5" />
             <span className="text-xs">Thinking...</span>
           </div>
         ) : null}

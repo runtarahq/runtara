@@ -134,7 +134,7 @@ function KeyValueRow({
         onChange={(e) => onKeyChange(e.target.value)}
         disabled={disabled}
         placeholder={keyPlaceholder}
-        className="flex-1 rounded-lg border border-border/50 bg-background px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-ring focus:ring-offset-0"
+        className="flex-1 rounded-lg border border-border/50 bg-background px-2 py-1 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-0"
       />
       <input
         type="text"
@@ -142,16 +142,16 @@ function KeyValueRow({
         onChange={(e) => onValueChange(e.target.value)}
         disabled={disabled}
         placeholder={valuePlaceholder}
-        className="flex-[2] rounded-lg border border-border/50 bg-background px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-ring focus:ring-offset-0"
+        className="flex-[2] rounded-lg border border-border/50 bg-background px-2 py-1 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-0"
       />
       <button
         type="button"
         onClick={onRemove}
         disabled={disabled}
         aria-label="Remove entry"
-        className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md hover:bg-muted-foreground/10"
+        className="inline-flex size-7 shrink-0 items-center justify-center rounded-md hover:bg-muted-foreground/10"
       >
-        <X className="h-4 w-4" />
+        <X className="size-4" />
       </button>
     </div>
   );
@@ -198,7 +198,7 @@ function AddRow({
         onKeyDown={onKeyDown}
         disabled={disabled}
         placeholder={keyPlaceholder}
-        className="flex-1 rounded-lg border border-border/50 bg-background px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-ring focus:ring-offset-0"
+        className="flex-1 rounded-lg border border-border/50 bg-background px-2 py-1 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-0"
       />
       <input
         type="text"
@@ -207,16 +207,16 @@ function AddRow({
         onKeyDown={onKeyDown}
         disabled={disabled}
         placeholder={valuePlaceholder}
-        className="flex-[2] rounded-lg border border-border/50 bg-background px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-ring focus:ring-offset-0"
+        className="flex-[2] rounded-lg border border-border/50 bg-background px-2 py-1 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-0"
       />
       <button
         type="button"
         onClick={commit}
         aria-label="Add entry"
         disabled={disabled || !draftKey.trim()}
-        className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md hover:bg-muted-foreground/10 disabled:cursor-not-allowed disabled:opacity-40"
+        className="inline-flex size-7 shrink-0 items-center justify-center rounded-md hover:bg-muted-foreground/10 disabled:cursor-not-allowed disabled:opacity-40"
       >
-        <Plus className="h-4 w-4" />
+        <Plus className="size-4" />
       </button>
     </div>
   );

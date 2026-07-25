@@ -321,7 +321,7 @@ export function MappingValueInput({
       const CompositeIcon = isArrayComposite ? Icons.list : Icons.braces;
       return (
         <div className="flex min-h-9 flex-1 items-center rounded-md border border-green-200 bg-green-50 px-3 py-1 dark:border-green-800 dark:bg-green-950/30">
-          <CompositeIcon className="mr-2 h-4 w-4 shrink-0 text-green-600 dark:text-green-400" />
+          <CompositeIcon className="mr-2 size-4 shrink-0 text-green-600 dark:text-green-400" />
           <span className="text-sm text-green-700 dark:text-green-300">
             {isArrayComposite
               ? 'Composite array - configure below'
@@ -500,12 +500,12 @@ export function MappingValueInput({
             type="button"
             variant="ghost"
             size="icon"
-            className="h-9 w-9 shrink-0 text-muted-foreground hover:bg-primary/10 hover:text-primary"
+            className="size-9 shrink-0 text-muted-foreground hover:bg-primary/10 hover:text-primary"
             onClick={() => setIsTemplateEditorOpen(true)}
             disabled={disabled}
             title="Open template editor"
           >
-            <Icons.maximize className="h-4 w-4" />
+            <Icons.maximize className="size-4" />
           </Button>
         )}
         {/* Single toggle cycling: immediate → template → reference → immediate */}

@@ -163,7 +163,7 @@ const NoteNodeComponent = ({ id, data, selected, dragging }: NodeProps) => {
           )}
           title="Delete note"
         >
-          <X className="h-4 w-4" />
+          <X className="size-4" />
         </button>
       )}
 
@@ -181,7 +181,7 @@ const NoteNodeComponent = ({ id, data, selected, dragging }: NodeProps) => {
               'border-none bg-transparent',
               'text-yellow-900 dark:text-yellow-100',
               'placeholder:text-yellow-500 dark:placeholder:text-yellow-600',
-              'focus:outline-none focus:ring-0',
+              'focus:outline-none focus-visible:ring-0',
               'text-3xs leading-snug',
               'select-text'
             )}

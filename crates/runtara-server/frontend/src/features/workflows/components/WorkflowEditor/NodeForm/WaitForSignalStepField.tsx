@@ -265,9 +265,9 @@ export function WaitForSignalStepField({ name }: WaitForSignalStepFieldProps) {
           onClick={() => setShowAdvanced(!showAdvanced)}
         >
           {showAdvanced ? (
-            <ChevronDown className="mr-1 h-3 w-3" />
+            <ChevronDown className="mr-1 size-3" />
           ) : (
-            <ChevronRight className="mr-1 h-3 w-3" />
+            <ChevronRight className="mr-1 size-3" />
           )}
           Advanced Settings
         </Button>
@@ -397,7 +397,7 @@ export function WaitForSignalStepField({ name }: WaitForSignalStepFieldProps) {
                     size="sm"
                     onClick={() => convertNodeToContainer(nodeId)}
                   >
-                    <ListTree className="mr-2 h-4 w-4" />
+                    <ListTree className="mr-2 size-4" />
                     Add on-wait flow
                   </Button>
                 </>

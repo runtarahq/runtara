@@ -216,10 +216,7 @@ export function VersionsPanelContent({
                       title="Force a fresh rebuild of this version"
                     >
                       <RefreshCw
-                        className={cn(
-                          'h-3 w-3',
-                          isRebuilding && 'animate-spin'
-                        )}
+                        className={cn('size-3', isRebuilding && 'animate-spin')}
                       />
                       <span>{isRebuilding ? 'Rebuilding' : 'Rebuild'}</span>
                     </Button>
@@ -241,7 +238,7 @@ export function VersionsPanelContent({
                     }}
                     disabled={isLoading || isActive}
                   >
-                    <Check className="h-3 w-3" />
+                    <Check className="size-3" />
                     <span>{isActive ? 'Active' : 'Activate'}</span>
                   </Button>
                 </div>

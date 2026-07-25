@@ -157,7 +157,7 @@ export const FileInput = React.forwardRef<HTMLInputElement, FileInputProps>(
               disabled && 'cursor-not-allowed opacity-50'
             )}
           >
-            <File className="h-4 w-4 flex-shrink-0 text-muted-foreground" />
+            <File className="size-4 flex-shrink-0 text-muted-foreground" />
             <span className="flex-1 truncate text-sm">
               {fileInfo?.filename || 'File selected'}
             </span>
@@ -167,9 +167,9 @@ export const FileInput = React.forwardRef<HTMLInputElement, FileInputProps>(
                 variant="ghost"
                 size="sm"
                 onClick={handleClear}
-                className="h-5 w-5 p-0 hover:bg-muted"
+                className="size-5 p-0 hover:bg-muted"
               >
-                <X className="h-3 w-3" />
+                <X className="size-3" />
               </Button>
             )}
           </div>
@@ -193,9 +193,9 @@ export const FileInput = React.forwardRef<HTMLInputElement, FileInputProps>(
             )}
           >
             {isLoading ? (
-              <Spinner className="h-4 w-4 text-muted-foreground" />
+              <Spinner className="size-4 text-muted-foreground" />
             ) : (
-              <Upload className="h-4 w-4 text-muted-foreground" />
+              <Upload className="size-4 text-muted-foreground" />
             )}
             <span className="truncate text-sm text-muted-foreground">
               {isLoading ? 'Reading file...' : placeholder}

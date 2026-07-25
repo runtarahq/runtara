@@ -37,6 +37,7 @@ import {
   TooltipContent,
   TooltipProvider,
   TooltipTrigger,
+  WithTooltip,
 } from '@/shared/components/ui/tooltip';
 import { ModalDialog } from '@/shared/components/next-dialog';
 import { Spinner } from '@/shared/components/ui/spinner';
@@ -223,15 +224,17 @@ export function TriggersGrid({
                               {endpoint}
                             </TooltipContent>
                           </Tooltip>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="h-6 w-6 shrink-0 text-muted-foreground"
-                            title="Copy endpoint"
-                            onClick={() => handleCopyEndpoint(endpoint)}
-                          >
-                            <Copy className="h-3.5 w-3.5" />
-                          </Button>
+                          <WithTooltip label="Copy endpoint">
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="size-6 shrink-0 text-muted-foreground"
+                              aria-label="Copy endpoint"
+                              onClick={() => handleCopyEndpoint(endpoint)}
+                            >
+                              <Copy className="size-3.5" />
+                            </Button>
+                          </WithTooltip>
                         </div>
                         {syncEndpoint && (
                           <div className="flex items-center gap-1">
@@ -248,15 +251,17 @@ export function TriggersGrid({
                                 {syncEndpoint}
                               </TooltipContent>
                             </Tooltip>
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              className="h-6 w-6 shrink-0 text-muted-foreground"
-                              title="Copy sync endpoint"
-                              onClick={() => handleCopyEndpoint(syncEndpoint)}
-                            >
-                              <Copy className="h-3.5 w-3.5" />
-                            </Button>
+                            <WithTooltip label="Copy sync endpoint">
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="size-6 shrink-0 text-muted-foreground"
+                                aria-label="Copy sync endpoint"
+                                onClick={() => handleCopyEndpoint(syncEndpoint)}
+                              >
+                                <Copy className="size-3.5" />
+                              </Button>
+                            </WithTooltip>
                           </div>
                         )}
                       </div>
@@ -270,31 +275,35 @@ export function TriggersGrid({
                     <div className="flex items-center justify-end gap-1">
                       <Can permission="trigger:update">
                         <Link to={`/invocation-triggers/${trigger.id}`}>
-                          <Button
-                            variant="ghost"
-                            size="icon-sm"
-                            className="text-muted-foreground"
-                            title="Edit trigger"
-                          >
-                            <Pencil className="h-4 w-4" />
-                          </Button>
+                          <WithTooltip label="Edit trigger">
+                            <Button
+                              variant="ghost"
+                              size="icon-sm"
+                              className="text-muted-foreground"
+                              aria-label="Edit trigger"
+                            >
+                              <Pencil className="size-4" />
+                            </Button>
+                          </WithTooltip>
                         </Link>
                       </Can>
                       <Can permission="trigger:delete">
-                        <Button
-                          variant="ghost"
-                          size="icon-sm"
-                          className="text-muted-foreground hover:text-destructive"
-                          title="Delete trigger"
-                          disabled={deletingId === trigger.id}
-                          onClick={() => setDeleteTarget(trigger)}
-                        >
-                          {deletingId === trigger.id ? (
-                            <Spinner className="h-4 w-4" />
-                          ) : (
-                            <Trash2 className="h-4 w-4" />
-                          )}
-                        </Button>
+                        <WithTooltip label="Delete trigger">
+                          <Button
+                            variant="ghost"
+                            size="icon-sm"
+                            className="text-muted-foreground hover:text-destructive"
+                            aria-label="Delete trigger"
+                            disabled={deletingId === trigger.id}
+                            onClick={() => setDeleteTarget(trigger)}
+                          >
+                            {deletingId === trigger.id ? (
+                              <Spinner className="size-4" />
+                            ) : (
+                              <Trash2 className="size-4" />
+                            )}
+                          </Button>
+                        </WithTooltip>
                       </Can>
                     </div>
                   </TableCell>

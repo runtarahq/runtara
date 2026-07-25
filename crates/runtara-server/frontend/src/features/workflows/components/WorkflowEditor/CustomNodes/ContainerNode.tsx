@@ -224,7 +224,7 @@ function Container({
               onClick={handleOpenCreateInside}
               aria-label={`Add first nested step inside ${data.name || id || 'container'}`}
             >
-              <Plus className="mr-2 h-4 w-4" />
+              <Plus className="mr-2 size-4" />
               Add first step
             </Button>
           </div>
@@ -246,7 +246,7 @@ function Container({
         className="!bg-muted-foreground/40"
       >
         <Button
-          className="h-4 w-4 rounded-full shadow-sm [&_svg]:size-2"
+          className="size-4 rounded-full shadow-sm [&_svg]:size-2"
           variant="outline"
           size="icon"
           onClick={handleOpenCreate}
@@ -269,7 +269,7 @@ function Container({
         className={selected ? '!bg-destructive/40' : '!opacity-0'}
       >
         <Button
-          className="h-4 w-4 rounded-full bg-destructive/10 shadow-sm hover:bg-destructive/20 [&_svg]:size-2"
+          className="size-4 rounded-full bg-destructive/10 shadow-sm hover:bg-destructive/20 [&_svg]:size-2"
           variant="outline"
           size="icon"
           onClick={handleOpenCreateError}

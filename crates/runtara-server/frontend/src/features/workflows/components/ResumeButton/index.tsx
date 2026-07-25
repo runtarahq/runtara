@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { SkipForward } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button.tsx';
+import { WithTooltip } from '@/shared/components/ui/tooltip.tsx';
 import { resumeInstance } from '@/features/workflows/queries';
 import { toast } from 'sonner';
 import { useToken } from '@/shared/hooks';
@@ -41,16 +42,18 @@ export function ResumeButton(props: Props) {
   };
 
   return (
-    <Button
-      size={size}
-      variant={variant}
-      onClick={handleClick}
-      disabled={isLoading}
-      className={className}
-      title="Resume from last checkpoint"
-    >
-      <SkipForward size={16} className={size === 'icon' ? '' : 'mr-2'} />
-      {size !== 'icon' && 'Resume'}
-    </Button>
+    <WithTooltip label="Resume from last checkpoint">
+      <Button
+        size={size}
+        variant={variant}
+        onClick={handleClick}
+        disabled={isLoading}
+        className={className}
+        aria-label="Resume from last checkpoint"
+      >
+        <SkipForward size={16} className={size === 'icon' ? '' : 'mr-2'} />
+        {size !== 'icon' && 'Resume'}
+      </Button>
+    </WithTooltip>
   );
 }

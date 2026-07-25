@@ -136,10 +136,10 @@ export function ArrayMappingEditor({
           type="button"
           variant="ghost"
           size="icon"
-          className="h-9 w-9 shrink-0"
+          className="size-9 shrink-0"
           onClick={handleClose}
         >
-          <X className="h-4 w-4" />
+          <X className="size-4" />
         </Button>
       </div>
 

@@ -249,12 +249,12 @@ export function TestAgentInline() {
           <div className="flex items-center gap-2">
             {testError ? (
               <>
-                <XCircle className="h-5 w-5 text-destructive" />
+                <XCircle className="size-5 text-destructive" />
                 <h3 className="text-sm font-semibold">Test Failed</h3>
               </>
             ) : (
               <>
-                <CheckCircle className="h-5 w-5 text-success" />
+                <CheckCircle className="size-5 text-success" />
                 <h3 className="text-sm font-semibold">Test Successful</h3>
               </>
             )}
@@ -310,7 +310,7 @@ export function TestAgentInline() {
                     onClick={handleCopyOutput}
                     className="h-8"
                   >
-                    <Copy className="mr-1 h-3 w-3" />
+                    <Copy className="mr-1 size-3" />
                     Copy
                   </Button>
                 </div>

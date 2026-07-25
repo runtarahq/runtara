@@ -55,7 +55,7 @@ export function ConnectionFieldFrame({
           aria-label={`Undo clearing stored ${label}`}
           onClick={onUndoClear}
         >
-          <RotateCcw className="mr-1 h-3.5 w-3.5" />
+          <RotateCcw className="mr-1 size-3.5" />
           Undo
         </Button>
       ) : (
@@ -69,7 +69,7 @@ export function ConnectionFieldFrame({
             aria-label={`Clear stored ${label}`}
             onClick={onClear}
           >
-            <Trash2 className="mr-1 h-3.5 w-3.5" />
+            <Trash2 className="mr-1 size-3.5" />
             Clear
           </Button>
         )

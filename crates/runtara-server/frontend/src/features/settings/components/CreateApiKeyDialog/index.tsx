@@ -77,7 +77,7 @@ export function CreateApiKeyDialog({ open, onClose }: CreateApiKeyDialogProps) {
             </DialogHeader>
             <div className="space-y-3">
               <Alert variant="warning">
-                <AlertTriangle className="h-4 w-4" />
+                <AlertTriangle className="size-4" />
                 <AlertDescription>
                   This is the only time the full key will be displayed. Store it
                   securely.
@@ -94,9 +94,9 @@ export function CreateApiKeyDialog({ open, onClose }: CreateApiKeyDialogProps) {
                   className="shrink-0"
                 >
                   {copied ? (
-                    <Check className="h-4 w-4" />
+                    <Check className="size-4" />
                   ) : (
-                    <Copy className="h-4 w-4" />
+                    <Copy className="size-4" />
                   )}
                 </Button>
               </div>

@@ -27,7 +27,7 @@ export function ValidationPanelContent({
   if (!hasAnyMessages) {
     return (
       <div className="flex min-h-0 flex-1 flex-col items-center justify-center text-muted-foreground">
-        <CheckCircle2 className="mb-2 h-8 w-8 text-success" />
+        <CheckCircle2 className="mb-2 size-8 text-success" />
         <p className="text-sm">No problems detected</p>
       </div>
     );

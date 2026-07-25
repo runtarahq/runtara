@@ -140,7 +140,7 @@ export function EmbedWorkflowConfigField({
           </div>
           {!workflowExists && (
             <div className="text-warning" title="Workflow not found">
-              <Icons.warning className="h-4 w-4" />
+              <Icons.warning className="size-4" />
             </div>
           )}
         </div>

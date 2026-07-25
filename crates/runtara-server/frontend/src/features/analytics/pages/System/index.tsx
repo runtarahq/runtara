@@ -44,7 +44,7 @@ export function System() {
               size="sm"
               className="text-muted-foreground"
             >
-              <RefreshCw className="mr-2 h-4 w-4" />
+              <RefreshCw className="mr-2 size-4" />
               Refresh
             </Button>
           }
@@ -59,7 +59,7 @@ export function System() {
               {systemLoading ? (
                 <div className="space-y-3">
                   <div className="flex items-center gap-2">
-                    <Cpu className="h-5 w-5 text-muted-foreground" />
+                    <Cpu className="size-5 text-muted-foreground" />
                     <span className="text-sm font-semibold text-muted-foreground">
                       CPU
                     </span>
@@ -70,7 +70,7 @@ export function System() {
               ) : systemAnalytics?.data?.cpu ? (
                 <div className="space-y-3">
                   <div className="flex items-center gap-2">
-                    <Cpu className="h-5 w-5 text-blue-500" />
+                    <Cpu className="size-5 text-blue-500" />
                     <span className="text-sm font-semibold text-muted-foreground">
                       CPU
                     </span>
@@ -86,7 +86,7 @@ export function System() {
               ) : (
                 <div className="space-y-3">
                   <div className="flex items-center gap-2">
-                    <Cpu className="h-5 w-5 text-muted-foreground" />
+                    <Cpu className="size-5 text-muted-foreground" />
                     <span className="text-sm font-semibold text-muted-foreground">
                       CPU
                     </span>
@@ -103,7 +103,7 @@ export function System() {
               {systemLoading ? (
                 <div className="space-y-3">
                   <div className="flex items-center gap-2">
-                    <MemoryStick className="h-5 w-5 text-muted-foreground" />
+                    <MemoryStick className="size-5 text-muted-foreground" />
                     <span className="text-sm font-semibold text-muted-foreground">
                       Memory
                     </span>
@@ -115,7 +115,7 @@ export function System() {
               ) : systemAnalytics?.data?.memory ? (
                 <div className="space-y-3">
                   <div className="flex items-center gap-2">
-                    <MemoryStick className="h-5 w-5 text-green-500" />
+                    <MemoryStick className="size-5 text-green-500" />
                     <span className="text-sm font-semibold text-muted-foreground">
                       Memory
                     </span>
@@ -144,7 +144,7 @@ export function System() {
               ) : (
                 <div className="space-y-3">
                   <div className="flex items-center gap-2">
-                    <MemoryStick className="h-5 w-5 text-muted-foreground" />
+                    <MemoryStick className="size-5 text-muted-foreground" />
                     <span className="text-sm font-semibold text-muted-foreground">
                       Memory
                     </span>
@@ -161,7 +161,7 @@ export function System() {
               {systemLoading ? (
                 <div className="space-y-3">
                   <div className="flex items-center gap-2">
-                    <HardDrive className="h-5 w-5 text-muted-foreground" />
+                    <HardDrive className="size-5 text-muted-foreground" />
                     <span className="text-sm font-semibold text-muted-foreground">
                       Disk
                     </span>
@@ -173,7 +173,7 @@ export function System() {
               ) : systemAnalytics?.data?.disk ? (
                 <div className="space-y-3">
                   <div className="flex items-center gap-2">
-                    <HardDrive className="h-5 w-5 text-purple-500" />
+                    <HardDrive className="size-5 text-purple-500" />
                     <span className="text-sm font-semibold text-muted-foreground">
                       Disk
                     </span>
@@ -202,7 +202,7 @@ export function System() {
               ) : (
                 <div className="space-y-3">
                   <div className="flex items-center gap-2">
-                    <HardDrive className="h-5 w-5 text-muted-foreground" />
+                    <HardDrive className="size-5 text-muted-foreground" />
                     <span className="text-sm font-semibold text-muted-foreground">
                       Disk
                     </span>

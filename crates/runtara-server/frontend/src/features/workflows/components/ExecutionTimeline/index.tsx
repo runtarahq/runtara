@@ -306,8 +306,8 @@ export function ExecutionTimeline({
   if (isLoadingRoot) {
     return (
       <div className="px-6 py-16 text-center">
-        <div className="mb-4 inline-flex h-16 w-16 items-center justify-center rounded-full bg-purple-500/10">
-          <Spinner className="h-8 w-8 text-purple-600" />
+        <div className="mb-4 inline-flex size-16 items-center justify-center rounded-full bg-purple-500/10">
+          <Spinner className="size-8 text-purple-600" />
         </div>
         <h3 className="mb-2 text-lg font-semibold">Loading Timeline...</h3>
         <p className="mx-auto max-w-md text-sm text-muted-foreground">
@@ -320,8 +320,8 @@ export function ExecutionTimeline({
   if (visibleSteps.length === 0) {
     return (
       <div className="px-6 py-16 text-center">
-        <div className="mb-4 inline-flex h-16 w-16 items-center justify-center rounded-full bg-purple-500/10">
-          <Clock className="h-8 w-8 text-purple-600" />
+        <div className="mb-4 inline-flex size-16 items-center justify-center rounded-full bg-purple-500/10">
+          <Clock className="size-8 text-purple-600" />
         </div>
         <h3 className="mb-2 text-lg font-semibold">No Timeline Events Yet</h3>
         <p className="mx-auto max-w-md text-sm text-muted-foreground">
@@ -407,9 +407,9 @@ export function ExecutionTimeline({
               className="rounded-full"
             >
               {isPlaying ? (
-                <Pause className="h-4 w-4" />
+                <Pause className="size-4" />
               ) : (
-                <Play className="h-4 w-4" />
+                <Play className="size-4" />
               )}
             </Button>
             <Button
@@ -421,7 +421,7 @@ export function ExecutionTimeline({
               }}
               className="rounded-full"
             >
-              <RotateCcw className="h-4 w-4" />
+              <RotateCcw className="size-4" />
             </Button>
             <div className="h-2 flex-1 overflow-hidden rounded-full bg-muted">
               <div
@@ -500,15 +500,15 @@ export function ExecutionTimeline({
                   {step.hasChildren ? (
                     <button
                       onClick={() => toggleExpand(step)}
-                      className="flex h-5 w-5 items-center justify-center rounded transition-colors hover:bg-muted"
+                      className="flex size-5 items-center justify-center rounded transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                       disabled={step.isLoadingChildren}
                     >
                       {step.isLoadingChildren ? (
-                        <Spinner className="h-3 w-3 text-muted-foreground" />
+                        <Spinner className="size-3 text-muted-foreground" />
                       ) : step.isExpanded ? (
-                        <ChevronDown className="h-4 w-4 text-muted-foreground" />
+                        <ChevronDown className="size-4 text-muted-foreground" />
                       ) : (
-                        <ChevronRight className="h-4 w-4 text-muted-foreground" />
+                        <ChevronRight className="size-4 text-muted-foreground" />
                       )}
                     </button>
                   ) : (
@@ -517,7 +517,7 @@ export function ExecutionTimeline({
 
                   {/* Step Icon */}
                   <div
-                    className={`flex h-6 w-6 shrink-0 items-center justify-center rounded ${config.bg}`}
+                    className={`flex size-6 shrink-0 items-center justify-center rounded ${config.bg}`}
                   >
                     <Icon size={14} className={config.text} />
                   </div>
@@ -592,10 +592,10 @@ export function ExecutionTimeline({
                       className={`px-1.5 py-0 text-xs ${displayStatus === 'waiting' ? 'border-warning text-warning' : ''}`}
                     >
                       {displayStatus === 'running' && (
-                        <Spinner className="mr-1 h-3 w-3" />
+                        <Spinner className="mr-1 size-3" />
                       )}
                       {displayStatus === 'waiting' && (
-                        <Hand className="mr-1 h-3 w-3" />
+                        <Hand className="mr-1 size-3" />
                       )}
                       {displayStatus === 'waiting'
                         ? 'waiting for input'
@@ -627,7 +627,7 @@ export function ExecutionTimeline({
             return (
               <div key={key} className="flex items-center gap-2 text-sm">
                 <div
-                  className={`flex h-5 w-5 items-center justify-center rounded border ${value.bg} ${value.border}`}
+                  className={`flex size-5 items-center justify-center rounded border ${value.bg} ${value.border}`}
                 >
                   <Icon size={12} className={value.text} />
                 </div>
@@ -681,7 +681,7 @@ export function ExecutionTimeline({
                 <div>
                   <div className="mb-4 flex items-start gap-4">
                     <div
-                      className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-lg ${config.bg}`}
+                      className={`flex size-12 shrink-0 items-center justify-center rounded-lg ${config.bg}`}
                     >
                       <Icon size={24} className={config.text} />
                     </div>
@@ -808,7 +808,7 @@ export function ExecutionTimeline({
                 : '0';
               return (
                 <div key={type} className="flex items-center gap-2">
-                  <div className={`h-3 w-3 rounded-sm ${config.dot}`} />
+                  <div className={`size-3 rounded-sm ${config.dot}`} />
                   <span className="text-muted-foreground">{type}:</span>
                   <span className="font-mono">{formatTime(duration)}</span>
                   <span className="text-muted-foreground">({percentage}%)</span>

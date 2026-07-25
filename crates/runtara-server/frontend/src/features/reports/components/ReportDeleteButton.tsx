@@ -63,11 +63,11 @@ export function ReportDeleteButton({
         {deleteReport.isPending ? (
           <Spinner
             className={
-              iconOnly ? 'h-4 w-4 animate-spin' : 'mr-2 h-4 w-4 animate-spin'
+              iconOnly ? 'size-4 animate-spin' : 'mr-2 size-4 animate-spin'
             }
           />
         ) : (
-          <Trash2 className={iconOnly ? 'h-4 w-4' : 'mr-2 h-4 w-4'} />
+          <Trash2 className={iconOnly ? 'size-4' : 'mr-2 size-4'} />
         )}
         {iconOnly ? null : 'Delete'}
       </Button>

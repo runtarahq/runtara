@@ -6,6 +6,7 @@ import { queryClient } from '@/main';
 import { useCustomMutation, useCustomQuery } from '@/shared/hooks/api';
 import { queryKeys } from '@/shared/queries/query-keys';
 import { Button } from '@/shared/components/ui/button';
+import { WithTooltip } from '@/shared/components/ui/tooltip';
 import { Can } from '@/shared/components/Can';
 import {
   Table,
@@ -64,7 +65,7 @@ function ConnectionUsage({ connection }: { connection: EnrichedConnection }) {
 
   return (
     <span className="inline-flex items-center gap-1 text-xs">
-      <Activity className="h-3 w-3" />
+      <Activity className="size-3" />
       {statsText}
     </span>
   );
@@ -163,49 +164,55 @@ export function ExistingConnections({ toolbar }: ExistingConnectionsProps) {
                     {connection.connectionType?.oauthConfig &&
                       connection.status === 'REQUIRES_RECONNECTION' && (
                         <Can permission="connection:update">
-                          <Button
-                            variant="ghost"
-                            size="icon-sm"
-                            className="text-warning hover:text-warning"
-                            title="Reconnect (re-authorize with saved credentials)"
-                            disabled={isAuthorizing(connection.id)}
-                            onClick={() => authorize(connection.id)}
-                          >
-                            {isAuthorizing(connection.id) ? (
-                              <Spinner className="h-4 w-4" />
-                            ) : (
-                              <RefreshCw className="h-4 w-4" />
-                            )}
-                          </Button>
+                          <WithTooltip label="Reconnect (re-authorize with saved credentials)">
+                            <Button
+                              variant="ghost"
+                              size="icon-sm"
+                              className="text-warning hover:text-warning"
+                              aria-label="Reconnect (re-authorize with saved credentials)"
+                              disabled={isAuthorizing(connection.id)}
+                              onClick={() => authorize(connection.id)}
+                            >
+                              {isAuthorizing(connection.id) ? (
+                                <Spinner className="size-4" />
+                              ) : (
+                                <RefreshCw className="size-4" />
+                              )}
+                            </Button>
+                          </WithTooltip>
                         </Can>
                       )}
                     <Can permission="connection:update">
                       <Link to={`/connections/${connection.id}`}>
-                        <Button
-                          variant="ghost"
-                          size="icon-sm"
-                          className="text-muted-foreground"
-                          title="Edit connection"
-                        >
-                          <Pencil className="h-4 w-4" />
-                        </Button>
+                        <WithTooltip label="Edit connection">
+                          <Button
+                            variant="ghost"
+                            size="icon-sm"
+                            className="text-muted-foreground"
+                            aria-label="Edit connection"
+                          >
+                            <Pencil className="size-4" />
+                          </Button>
+                        </WithTooltip>
                       </Link>
                     </Can>
                     <Can permission="connection:delete">
-                      <Button
-                        variant="ghost"
-                        size="icon-sm"
-                        className="text-muted-foreground hover:text-destructive"
-                        title="Delete connection"
-                        disabled={deletingId === connection.id}
-                        onClick={() => setDeleteTarget(connection)}
-                      >
-                        {deletingId === connection.id ? (
-                          <Spinner className="h-4 w-4" />
-                        ) : (
-                          <Trash2 className="h-4 w-4" />
-                        )}
-                      </Button>
+                      <WithTooltip label="Delete connection">
+                        <Button
+                          variant="ghost"
+                          size="icon-sm"
+                          className="text-muted-foreground hover:text-destructive"
+                          aria-label="Delete connection"
+                          disabled={deletingId === connection.id}
+                          onClick={() => setDeleteTarget(connection)}
+                        >
+                          {deletingId === connection.id ? (
+                            <Spinner className="size-4" />
+                          ) : (
+                            <Trash2 className="size-4" />
+                          )}
+                        </Button>
+                      </WithTooltip>
                     </Can>
                   </div>
                 </TableCell>

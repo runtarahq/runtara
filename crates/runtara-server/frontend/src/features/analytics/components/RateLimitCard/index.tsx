@@ -98,7 +98,7 @@ export function RateLimitCard({
         {/* Header */}
         <div className="flex items-start justify-between gap-2">
           <div className="flex min-w-0 items-center gap-2">
-            <Link className="h-4 w-4 shrink-0 text-muted-foreground" />
+            <Link className="size-4 shrink-0 text-muted-foreground" />
             <div className="min-w-0">
               <h3 className="truncate text-sm font-semibold">
                 {connectionTitle}
@@ -120,7 +120,7 @@ export function RateLimitCard({
             </Badge>
             {onClick && (
               <ChevronRight
-                className={`h-4 w-4 text-muted-foreground transition-transform ${selected ? 'rotate-90' : ''}`}
+                className={`size-4 text-muted-foreground transition-transform ${selected ? 'rotate-90' : ''}`}
               />
             )}
           </div>
@@ -129,7 +129,7 @@ export function RateLimitCard({
         {/* Redis Unavailable Warning */}
         {!isRedisAvailable && (
           <div className="flex items-center gap-2 rounded-md bg-warning/10 p-2 text-warning">
-            <AlertTriangle className="h-4 w-4 shrink-0" />
+            <AlertTriangle className="size-4 shrink-0" />
             <span className="text-xs font-medium">Redis Unavailable</span>
           </div>
         )}
@@ -176,7 +176,7 @@ export function RateLimitCard({
         {periodStats && (
           <div className="flex gap-4 text-xs">
             <div className="flex items-center gap-1.5">
-              <Activity className="h-3.5 w-3.5 text-muted-foreground" />
+              <Activity className="size-3.5 text-muted-foreground" />
               <span className="text-muted-foreground">Requests:</span>
               <span className="font-medium">
                 {formatNumber(periodStats.totalRequests)}
@@ -184,7 +184,7 @@ export function RateLimitCard({
             </div>
             {periodStats.rateLimitedCount > 0 && (
               <div className="flex items-center gap-1.5">
-                <Clock className="h-3.5 w-3.5 text-muted-foreground" />
+                <Clock className="size-3.5 text-muted-foreground" />
                 <span className="text-muted-foreground">Limited:</span>
                 <span className="font-medium text-warning">
                   {formatNumber(periodStats.rateLimitedCount)}
@@ -223,7 +223,7 @@ export function RateLimitCard({
         {/* Learned Limit Warning */}
         {showLearnedLimitWarning && (
           <div className="flex items-center gap-2 rounded-md bg-info/10 p-2 text-info">
-            <AlertTriangle className="h-4 w-4 shrink-0" />
+            <AlertTriangle className="size-4 shrink-0" />
             <span className="text-xs">
               API reports limit: {state.learnedLimit}
             </span>
@@ -249,7 +249,7 @@ export function RateLimitCardSkeleton() {
       <div className="space-y-4">
         <div className="flex items-start justify-between gap-2">
           <div className="flex items-center gap-2">
-            <div className="h-4 w-4 animate-pulse rounded bg-muted" />
+            <div className="size-4 animate-pulse rounded bg-muted" />
             <div className="space-y-1">
               <div className="h-4 w-32 animate-pulse rounded bg-muted" />
               <div className="h-3 w-24 animate-pulse rounded bg-muted" />

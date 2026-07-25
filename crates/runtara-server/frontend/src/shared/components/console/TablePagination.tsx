@@ -19,7 +19,7 @@ export interface TablePaginationProps {
 }
 
 const navBtn =
-  'grid h-6 w-6 place-items-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-muted-foreground';
+  'grid size-6 place-items-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-muted-foreground';
 
 /** Compact pagination control sized for the console status footer. */
 export function TablePagination({
@@ -62,7 +62,7 @@ export function TablePagination({
           onClick={() => onPageChange?.(0)}
           aria-label="First page"
         >
-          <ChevronFirst className="h-4 w-4" />
+          <ChevronFirst className="size-4" />
         </button>
         <button
           type="button"
@@ -71,7 +71,7 @@ export function TablePagination({
           onClick={() => onPageChange?.(pageIndex - 1)}
           aria-label="Previous page"
         >
-          <ChevronLeft className="h-4 w-4" />
+          <ChevronLeft className="size-4" />
         </button>
         <button
           type="button"
@@ -80,7 +80,7 @@ export function TablePagination({
           onClick={() => onPageChange?.(pageIndex + 1)}
           aria-label="Next page"
         >
-          <ChevronRight className="h-4 w-4" />
+          <ChevronRight className="size-4" />
         </button>
         <button
           type="button"
@@ -89,7 +89,7 @@ export function TablePagination({
           onClick={() => onPageChange?.(totalPages - 1)}
           aria-label="Last page"
         >
-          <ChevronLast className="h-4 w-4" />
+          <ChevronLast className="size-4" />
         </button>
       </div>
     </div>

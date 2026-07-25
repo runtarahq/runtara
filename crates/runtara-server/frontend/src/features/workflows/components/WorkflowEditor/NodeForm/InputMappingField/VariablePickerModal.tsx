@@ -41,7 +41,7 @@ function getIconForType(type?: string, path?: string) {
 
   // Check explicit type first
   if (lowerType.includes('string') || lowerType.includes('text')) {
-    return <Icons.type className="h-4 w-4" />;
+    return <Icons.type className="size-4" />;
   }
   if (
     lowerType.includes('number') ||
@@ -50,16 +50,16 @@ function getIconForType(type?: string, path?: string) {
     lowerType.includes('double') ||
     lowerType.includes('float')
   ) {
-    return <Icons.hash className="h-4 w-4" />;
+    return <Icons.hash className="size-4" />;
   }
   if (lowerType.includes('boolean') || lowerType.includes('bool')) {
-    return <Icons.squareCheck className="h-4 w-4" />;
+    return <Icons.squareCheck className="size-4" />;
   }
   if (lowerType.includes('array') || lowerType.includes('list')) {
-    return <Icons.list className="h-4 w-4" />;
+    return <Icons.list className="size-4" />;
   }
   if (lowerType.includes('object')) {
-    return <Icons.braces className="h-4 w-4" />;
+    return <Icons.braces className="size-4" />;
   }
   if (
     lowerType.includes('date') ||
@@ -67,18 +67,18 @@ function getIconForType(type?: string, path?: string) {
     lowerPath.includes('date') ||
     lowerPath.includes('time')
   ) {
-    return <Icons.calendar className="h-4 w-4" />;
+    return <Icons.calendar className="size-4" />;
   }
 
   // Infer from path
   if (lowerPath.includes('email')) {
-    return <Icons.mail className="h-4 w-4" />;
+    return <Icons.mail className="size-4" />;
   }
   if (lowerPath.includes('name')) {
-    return <Icons.user className="h-4 w-4" />;
+    return <Icons.user className="size-4" />;
   }
   if (lowerPath.includes('id') || lowerPath.includes('key')) {
-    return <Icons.key className="h-4 w-4" />;
+    return <Icons.key className="size-4" />;
   }
   if (
     lowerPath.includes('price') ||
@@ -86,11 +86,11 @@ function getIconForType(type?: string, path?: string) {
     lowerPath.includes('total') ||
     lowerPath.includes('cost')
   ) {
-    return <Icons.dollarSign className="h-4 w-4" />;
+    return <Icons.dollarSign className="size-4" />;
   }
 
   // Default icon
-  return <Icons.gitBranch className="h-4 w-4" />;
+  return <Icons.gitBranch className="size-4" />;
 }
 
 /**
@@ -184,7 +184,7 @@ export function VariablePickerModal({
         <div className="space-y-4">
           {/* Search input */}
           <div className="relative">
-            <Icons.search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+            <Icons.search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
             <Input
               placeholder="Search variables..."
               value={searchQuery}
@@ -227,7 +227,7 @@ export function VariablePickerModal({
               )}
             {filteredSuggestions.length === 0 ? (
               <PickerEmpty>
-                <Icons.inbox className="mx-auto mb-2 h-8 w-8 opacity-50" />
+                <Icons.inbox className="mx-auto mb-2 size-8 opacity-50" />
                 <p>No variables found</p>
               </PickerEmpty>
             ) : (

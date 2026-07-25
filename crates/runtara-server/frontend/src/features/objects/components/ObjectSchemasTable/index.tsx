@@ -4,6 +4,7 @@ import { toast } from 'sonner';
 import { Edit2, Trash2, Database, Plus } from 'lucide-react';
 import { Schema } from '@/generated/RuntaraRuntimeApi';
 import { Button } from '@/shared/components/ui/button';
+import { WithTooltip } from '@/shared/components/ui/tooltip';
 import { Can } from '@/shared/components/Can';
 import {
   Table,
@@ -120,7 +121,7 @@ export function ObjectSchemaDtosTable({
               }
               disabled={isError || !connectionId}
             >
-              <Plus className="mr-2 h-4 w-4" />
+              <Plus className="mr-2 size-4" />
               Create object type
             </Button>
           </Can>
@@ -140,9 +141,7 @@ export function ObjectSchemaDtosTable({
   } else if (!connectionId) {
     body = (
       <ConsoleEmptyState
-        icon={
-          <Icons.warning className="mb-4 h-10 w-10 text-muted-foreground" />
-        }
+        icon={<Icons.warning className="mb-4 size-10 text-muted-foreground" />}
         title="No database connection selected"
         description="Select a database connection to view its object types."
       />
@@ -199,41 +198,47 @@ export function ObjectSchemaDtosTable({
                 </TableCell>
                 <TableCell className="text-right">
                   <div className="flex items-center justify-end gap-1">
-                    <Button
-                      variant="ghost"
-                      size="icon-sm"
-                      className="text-muted-foreground"
-                      title="Manage instances"
-                      onClick={() => handleViewInstances(schema)}
-                    >
-                      <Database className="h-4 w-4" />
-                    </Button>
-                    <Can permission="database:update">
+                    <WithTooltip label="Manage instances">
                       <Button
                         variant="ghost"
                         size="icon-sm"
                         className="text-muted-foreground"
-                        title="Edit object type"
-                        onClick={() => handleEdit(schema)}
+                        aria-label="Manage instances"
+                        onClick={() => handleViewInstances(schema)}
                       >
-                        <Edit2 className="h-4 w-4" />
+                        <Database className="size-4" />
                       </Button>
+                    </WithTooltip>
+                    <Can permission="database:update">
+                      <WithTooltip label="Edit object type">
+                        <Button
+                          variant="ghost"
+                          size="icon-sm"
+                          className="text-muted-foreground"
+                          aria-label="Edit object type"
+                          onClick={() => handleEdit(schema)}
+                        >
+                          <Edit2 className="size-4" />
+                        </Button>
+                      </WithTooltip>
                     </Can>
                     <Can permission="database:delete">
-                      <Button
-                        variant="ghost"
-                        size="icon-sm"
-                        className="text-muted-foreground hover:text-destructive"
-                        title="Delete object type"
-                        disabled={deletingId === schema.id}
-                        onClick={() => setDeleteTarget(schema)}
-                      >
-                        {deletingId === schema.id ? (
-                          <Spinner className="h-4 w-4" />
-                        ) : (
-                          <Trash2 className="h-4 w-4" />
-                        )}
-                      </Button>
+                      <WithTooltip label="Delete object type">
+                        <Button
+                          variant="ghost"
+                          size="icon-sm"
+                          className="text-muted-foreground hover:text-destructive"
+                          aria-label="Delete object type"
+                          disabled={deletingId === schema.id}
+                          onClick={() => setDeleteTarget(schema)}
+                        >
+                          {deletingId === schema.id ? (
+                            <Spinner className="size-4" />
+                          ) : (
+                            <Trash2 className="size-4" />
+                          )}
+                        </Button>
+                      </WithTooltip>
                     </Can>
                   </div>
                 </TableCell>

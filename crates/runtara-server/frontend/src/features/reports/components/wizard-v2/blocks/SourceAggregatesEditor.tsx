@@ -16,6 +16,7 @@
 // the right code path.
 
 import { Schema } from '@/generated/RuntaraRuntimeApi';
+import { GRID_COLS_THREE_MINMAX_AUTO } from '../grid-templates';
 import { Button } from '@/shared/components/ui/button';
 import { Input } from '@/shared/components/ui/input';
 import { Label } from '@/shared/components/ui/label';
@@ -103,7 +104,7 @@ export function SourceAggregatesEditor({
           className="h-7"
           onClick={addAggregate}
         >
-          <Plus className="mr-1 h-3 w-3" /> Add aggregate
+          <Plus className="mr-1 size-3" /> Add aggregate
         </Button>
       </header>
 
@@ -123,7 +124,7 @@ export function SourceAggregatesEditor({
               <div
                 key={index}
                 data-testid={`source-aggregate-row-${index}`}
-                className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)_auto] items-center gap-2"
+                className={`grid ${GRID_COLS_THREE_MINMAX_AUTO} items-center gap-2`}
               >
                 <Input
                   value={agg.alias}
@@ -211,13 +212,13 @@ export function SourceAggregatesEditor({
                   type="button"
                   variant="ghost"
                   size="icon"
-                  className="h-8 w-8 text-destructive"
+                  className="size-8 text-destructive"
                   aria-label="Remove aggregate"
                   onClick={() =>
                     updateAggregates(aggregates.filter((_, i) => i !== index))
                   }
                 >
-                  <Trash2 className="h-3.5 w-3.5" />
+                  <Trash2 className="size-3.5" />
                 </Button>
               </div>
             );

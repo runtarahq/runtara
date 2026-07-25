@@ -57,12 +57,12 @@ export function Connections() {
           >
             {isFetching ? (
               <>
-                <Spinner className="mr-2 h-4 w-4" />
+                <Spinner className="mr-2 size-4" />
                 Loading...
               </>
             ) : (
               <>
-                <Plus className="mr-2 h-4 w-4" />
+                <Plus className="mr-2 size-4" />
                 New connection
               </>
             )}

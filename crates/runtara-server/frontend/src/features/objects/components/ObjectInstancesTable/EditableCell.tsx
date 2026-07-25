@@ -191,7 +191,7 @@ export const EditableCell = memo(function EditableCell({
             setIsEditing(false);
           }}
         >
-          <SelectTrigger className="box-border h-10 w-full rounded-none border-0 px-2 py-2 ring-0 focus:ring-0">
+          <SelectTrigger className="box-border h-10 w-full rounded-none border-0 px-2 py-2 ring-0 focus-visible:ring-0">
             <SelectValue placeholder="Select..." />
           </SelectTrigger>
           <SelectContent>
@@ -281,7 +281,7 @@ function JsonCellEditor({
           className="box-border flex h-10 w-full cursor-pointer items-center gap-1.5 px-2 py-2 hover:bg-muted/50"
           onMouseDown={() => onFocus?.()}
         >
-          <Braces className="h-3.5 w-3.5 shrink-0 text-muted-foreground/60" />
+          <Braces className="size-3.5 shrink-0 text-muted-foreground/60" />
           <span className="truncate font-mono text-xs text-muted-foreground">
             {getJsonPreview(jsonValue)}
           </span>

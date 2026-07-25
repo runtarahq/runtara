@@ -83,7 +83,7 @@ export function RateLimitSection({
         {!rateLimitEnabled && !defaultConfig && (
           <div className="flex flex-col gap-2 rounded-md border border-warning/30 bg-warning/10 px-3 py-2.5">
             <div className="flex items-start gap-2 text-xs text-warning">
-              <ShieldOff className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              <ShieldOff className="mt-0.5 size-3.5 shrink-0" />
               <span>
                 <span className="font-medium">
                   No rate limiting is applied.
@@ -150,7 +150,7 @@ export function RateLimitSection({
           to="/analytics/rate-limits"
           className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
         >
-          <ExternalLink className="h-3 w-3" />
+          <ExternalLink className="size-3" />
           View live rate-limit activity
         </Link>
       </div>

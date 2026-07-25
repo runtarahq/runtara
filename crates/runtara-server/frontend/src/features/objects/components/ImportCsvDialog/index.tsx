@@ -253,7 +253,7 @@ export function ImportCsvDialog({
       <DialogContent className="max-h-[85vh] w-[min(56rem,calc(100vw-2rem))] max-w-none overflow-y-auto overflow-x-hidden">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
-            <FileSpreadsheet className="h-5 w-5" />
+            <FileSpreadsheet className="size-5" />
             Import CSV
           </DialogTitle>
           <DialogDescription>
@@ -278,14 +278,14 @@ export function ImportCsvDialog({
             >
               {previewMutation.isPending ? (
                 <>
-                  <Spinner className="mx-auto mb-3 h-10 w-10 text-muted-foreground" />
+                  <Spinner className="mx-auto mb-3 size-10 text-muted-foreground" />
                   <p className="text-sm text-muted-foreground">
                     Parsing {fileName}...
                   </p>
                 </>
               ) : (
                 <>
-                  <Upload className="mx-auto mb-3 h-10 w-10 text-muted-foreground" />
+                  <Upload className="mx-auto mb-3 size-10 text-muted-foreground" />
                   <p className="text-sm font-medium">
                     Click to select a CSV file
                   </p>
@@ -359,7 +359,7 @@ export function ImportCsvDialog({
                       >
                         {header}
                       </span>
-                      <ArrowRight className="mx-auto h-4 w-4 text-muted-foreground" />
+                      <ArrowRight className="mx-auto size-4 text-muted-foreground" />
                       <Select
                         value={columnMapping[header] || SKIP_COLUMN}
                         onValueChange={(val) =>
@@ -507,7 +507,7 @@ export function ImportCsvDialog({
 
         {step === 'importing' && (
           <div className="flex flex-col items-center justify-center gap-3 py-10">
-            <Spinner className="h-8 w-8 text-muted-foreground" />
+            <Spinner className="size-8 text-muted-foreground" />
             <p className="text-sm text-muted-foreground">Importing data...</p>
           </div>
         )}

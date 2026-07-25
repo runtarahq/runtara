@@ -127,7 +127,7 @@ export function AnimatedSVGEdge({
       <g
         onMouseEnter={() => setIsHovered(true)}
         onMouseLeave={() => setIsHovered(false)}
-        style={{ cursor: 'pointer' }}
+        className="cursor-pointer"
       >
         <BaseEdge
           id={id}
@@ -144,7 +144,7 @@ export function AnimatedSVGEdge({
           fill="none"
           stroke="transparent"
           strokeWidth={20}
-          style={{ pointerEvents: 'stroke' }}
+          className="[pointer-events:stroke]"
         />
       </g>
       <EdgeLabelRenderer>
@@ -175,7 +175,7 @@ export function AnimatedSVGEdge({
             onMouseLeave={() => setIsHovered(false)}
           >
             <Button
-              className="h-4 w-4 rounded-full shadow-sm hover:shadow-md [&_svg]:size-2"
+              className="size-4 rounded-full shadow-sm hover:shadow-md [&_svg]:size-2"
               variant="outline"
               size="icon"
               onClick={handleInsertClick}

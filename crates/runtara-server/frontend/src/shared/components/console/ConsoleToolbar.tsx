@@ -58,7 +58,7 @@ export function Breadcrumb({
               </span>
             )}
             {!last && (
-              <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground/60" />
+              <ChevronRight className="size-3.5 shrink-0 text-muted-foreground/60" />
             )}
           </span>
         );
@@ -112,11 +112,11 @@ export function ToolbarSearch({
       <Button
         variant="outline"
         size="icon"
-        className="h-9 w-9 shrink-0"
+        className="size-9 shrink-0"
         aria-label="Search (⌘F)"
         onClick={openSearch}
       >
-        <Search className="h-4 w-4" />
+        <Search className="size-4" />
       </Button>
     );
   }
@@ -128,7 +128,7 @@ export function ToolbarSearch({
         className
       )}
     >
-      <Search className="h-4 w-4 shrink-0 text-muted-foreground" />
+      <Search className="size-4 shrink-0 text-muted-foreground" />
       <input
         ref={inputRef}
         type="text"
@@ -154,7 +154,7 @@ export function ToolbarSearch({
           setOpen(false);
         }}
       >
-        <X className="h-4 w-4" />
+        <X className="size-4" />
       </button>
     </div>
   );

@@ -51,7 +51,7 @@ export function EditObjectInstance() {
 
         {isSchemaLoading || isRecordLoading ? (
           <div className="flex min-h-[40vh] items-center justify-center px-4 text-muted-foreground sm:px-5">
-            <Spinner className="mr-2 h-4 w-4" />
+            <Spinner className="mr-2 size-4" />
             Loading data...
           </div>
         ) : !objectSchemaDto ? (

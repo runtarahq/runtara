@@ -158,7 +158,7 @@ export function RateLimits() {
                 size="sm"
                 className="text-muted-foreground"
               >
-                <RefreshCw className="mr-2 h-4 w-4" />
+                <RefreshCw className="mr-2 size-4" />
                 Refresh
               </Button>
             </div>
@@ -187,7 +187,7 @@ export function RateLimits() {
                   onClick={() => setSelectedConnectionId(null)}
                   className="h-7 px-2 text-xs"
                 >
-                  <X className="mr-1 h-3 w-3" />
+                  <X className="mr-1 size-3" />
                   Clear selection
                 </Button>
               )}
@@ -200,7 +200,7 @@ export function RateLimits() {
               </div>
             ) : rateLimits.length === 0 ? (
               <ConsoleEmptyState
-                icon={<Link className="mb-4 h-10 w-10 text-muted-foreground" />}
+                icon={<Link className="mb-4 size-10 text-muted-foreground" />}
                 title="No connections found"
                 description="Create a connection to see rate limit status."
                 className="h-auto rounded-lg border bg-muted/20"

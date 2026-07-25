@@ -521,7 +521,7 @@ export function TableBlock({
                     disabled={page.offset <= 0}
                     onClick={() => onPageChange(0, page.size)}
                   >
-                    <ChevronsLeft className="mr-1 h-4 w-4" />
+                    <ChevronsLeft className="mr-1 size-4" />
                     First
                   </Button>
                 ) : null}
@@ -536,7 +536,7 @@ export function TableBlock({
                     )
                   }
                 >
-                  <ChevronLeft className="mr-1 h-4 w-4" />
+                  <ChevronLeft className="mr-1 size-4" />
                   Previous
                 </Button>
                 {currentPage !== undefined && totalPages !== undefined ? (
@@ -553,7 +553,7 @@ export function TableBlock({
                   }
                 >
                   Next
-                  <ChevronRight className="ml-1 h-4 w-4" />
+                  <ChevronRight className="ml-1 size-4" />
                 </Button>
                 {lastPageOffset !== undefined ? (
                   <Button
@@ -563,7 +563,7 @@ export function TableBlock({
                     onClick={() => onPageChange(lastPageOffset, page.size)}
                   >
                     Last
-                    <ChevronsRight className="ml-1 h-4 w-4" />
+                    <ChevronsRight className="ml-1 size-4" />
                   </Button>
                 ) : null}
               </div>
@@ -779,7 +779,7 @@ function TableBodyRow({
                       onEditCell(rowKey, column.key);
                     }}
                   >
-                    <Pencil className="h-3 w-3" />
+                    <Pencil className="size-3" />
                   </button>
                 )}
               </>
@@ -1005,11 +1005,7 @@ function WorkflowActionButton({
         });
       }}
     >
-      {phase ? (
-        <Spinner className="h-3.5 w-3.5" />
-      ) : (
-        <Play className="h-3.5 w-3.5" />
-      )}
+      {phase ? <Spinner className="size-3.5" /> : <Play className="size-3.5" />}
       <span className="truncate">
         {phase
           ? workflowActionPhaseLabel(action, phase)
@@ -1069,7 +1065,7 @@ function InteractionButtonsCell({
               onRun?.(button.actions ?? [], row);
             }}
           >
-            <Icon className="h-3.5 w-3.5" />
+            <Icon className="size-3.5" />
             <span className="truncate">{label}</span>
           </Button>
         );
@@ -1313,7 +1309,7 @@ function AvatarLabelCell({
     <div className="flex min-w-0 items-center gap-2">
       <span
         className={cn(
-          'flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-3xs font-semibold uppercase tracking-wide',
+          'flex size-6 shrink-0 items-center justify-center rounded-full text-3xs font-semibold uppercase tracking-wide',
           colorClass
         )}
         aria-hidden
@@ -1426,7 +1422,7 @@ function PrimaryWithSecondaryCell({
             className="shrink-0 text-muted-foreground hover:text-foreground"
             aria-label="Open link"
           >
-            <ExternalLink className="h-3.5 w-3.5" />
+            <ExternalLink className="size-3.5" />
           </a>
         )}
       </div>
@@ -1571,13 +1567,13 @@ function nextSortForColumn(
 
 function SortIcon({ direction }: { direction?: 'asc' | 'desc' }) {
   if (direction === 'asc') {
-    return <ArrowUp className="h-3.5 w-3.5 text-foreground" />;
+    return <ArrowUp className="size-3.5 text-foreground" />;
   }
   if (direction === 'desc') {
-    return <ArrowDown className="h-3.5 w-3.5 text-foreground" />;
+    return <ArrowDown className="size-3.5 text-foreground" />;
   }
   return (
-    <ArrowUp className="h-3.5 w-3.5 opacity-0 transition-opacity group-hover/h:opacity-40" />
+    <ArrowUp className="size-3.5 opacity-0 transition-opacity group-hover/h:opacity-40" />
   );
 }
 

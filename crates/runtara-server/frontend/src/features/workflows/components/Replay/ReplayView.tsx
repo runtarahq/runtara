@@ -16,6 +16,9 @@ import { ReplayInspector } from './ReplayInspector';
 import type { ReplayFrame } from './types';
 import { Spinner } from '@/shared/components/ui/spinner';
 
+/** Fixed height shared by the replay loading and empty states. */
+const REPLAY_HEIGHT_CLASS = 'h-[520px]';
+
 const EMPTY_FRAME: ReplayFrame = {
   t: 0,
   nodeStates: new Map(),
@@ -75,8 +78,10 @@ export function ReplayView({ workflowId, instanceId }: ReplayViewProps) {
 
   if (isLoading) {
     return (
-      <div className="flex h-[520px] items-center justify-center">
-        <Spinner className="h-8 w-8 text-muted-foreground" />
+      <div
+        className={`flex ${REPLAY_HEIGHT_CLASS} items-center justify-center`}
+      >
+        <Spinner className="size-8 text-muted-foreground" />
       </div>
     );
   }
@@ -84,7 +89,7 @@ export function ReplayView({ workflowId, instanceId }: ReplayViewProps) {
   if (isError) {
     return (
       <EmptyState
-        icon={<GitBranch className="h-6 w-6 text-muted-foreground" />}
+        icon={<GitBranch className="size-6 text-muted-foreground" />}
         title="Couldn't load the replay"
         subtitle={error instanceof Error ? error.message : 'Please try again.'}
       />
@@ -94,7 +99,7 @@ export function ReplayView({ workflowId, instanceId }: ReplayViewProps) {
   if (!model || model.nodeIds.length === 0) {
     return (
       <EmptyState
-        icon={<GitBranch className="h-6 w-6 text-muted-foreground" />}
+        icon={<GitBranch className="size-6 text-muted-foreground" />}
         title="No graph to replay"
         subtitle="The version this run executed has no renderable steps."
       />
@@ -104,7 +109,7 @@ export function ReplayView({ workflowId, instanceId }: ReplayViewProps) {
   if (!hasEvents) {
     return (
       <EmptyState
-        icon={<Radio className="h-6 w-6 text-muted-foreground" />}
+        icon={<Radio className="size-6 text-muted-foreground" />}
         title="Nothing to replay"
         subtitle="Event tracking was off for this run, so there are no step events to animate. Enable step-event tracking on the workflow version to replay future runs."
       />
@@ -169,8 +174,10 @@ function EmptyState({
   subtitle: string;
 }) {
   return (
-    <div className="flex h-[520px] flex-col items-center justify-center p-12 text-center">
-      <div className="mb-3 inline-flex h-12 w-12 items-center justify-center rounded-full bg-muted">
+    <div
+      className={`flex ${REPLAY_HEIGHT_CLASS} flex-col items-center justify-center p-12 text-center`}
+    >
+      <div className="mb-3 inline-flex size-12 items-center justify-center rounded-full bg-muted">
         {icon}
       </div>
       <p className="mb-1 text-sm text-muted-foreground">{title}</p>

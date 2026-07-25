@@ -644,7 +644,7 @@ export function SwitchCasesField(props: any) {
                           updateCaseMatchType(index, value as MatchType)
                         }
                       >
-                        <SelectTrigger className="h-7 border-0 text-xs focus:ring-0">
+                        <SelectTrigger className="h-7 border-0 text-xs focus-visible:ring-0">
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
@@ -703,7 +703,7 @@ export function SwitchCasesField(props: any) {
                             type="button"
                             variant="ghost"
                             size="icon"
-                            className="h-6 w-6 shrink-0"
+                            className="size-6 shrink-0"
                             onClick={() =>
                               openEditDialog(
                                 'caseMatch',
@@ -712,7 +712,7 @@ export function SwitchCasesField(props: any) {
                               )
                             }
                           >
-                            <Icons.edit className="h-3 w-3" />
+                            <Icons.edit className="size-3" />
                           </Button>
                         </div>
                       )}
@@ -741,7 +741,7 @@ export function SwitchCasesField(props: any) {
                           type="button"
                           variant="ghost"
                           size="icon"
-                          className="h-6 w-6 shrink-0"
+                          className="size-6 shrink-0"
                           onClick={() =>
                             openEditDialog(
                               'caseOutput',
@@ -752,7 +752,7 @@ export function SwitchCasesField(props: any) {
                             )
                           }
                         >
-                          <Icons.edit className="h-3 w-3" />
+                          <Icons.edit className="size-3" />
                         </Button>
                       </div>
                     </td>
@@ -775,9 +775,9 @@ export function SwitchCasesField(props: any) {
                         size="icon"
                         variant="ghost"
                         onClick={() => removeCase(index)}
-                        className="h-8 w-8"
+                        className="size-8"
                       >
-                        <Icons.remove className="h-4 w-4" />
+                        <Icons.remove className="size-4" />
                       </Button>
                     </td>
                   </tr>
@@ -805,7 +805,7 @@ export function SwitchCasesField(props: any) {
             variant="outline"
             onClick={addCase}
           >
-            <Icons.add className="h-4 w-4" /> Add Case
+            <Icons.add className="size-4" /> Add Case
           </Button>
         </div>
       </div>
@@ -840,7 +840,7 @@ export function SwitchCasesField(props: any) {
               type="button"
               variant="ghost"
               size="icon"
-              className="h-6 w-6 shrink-0"
+              className="size-6 shrink-0"
               onClick={() =>
                 openEditDialog(
                   'defaultOutput',
@@ -850,18 +850,18 @@ export function SwitchCasesField(props: any) {
                 )
               }
             >
-              <Icons.edit className="h-3 w-3" />
+              <Icons.edit className="size-3" />
             </Button>
             <Button
               data-testid="switch-remove-default"
               type="button"
               variant="ghost"
               size="icon"
-              className="h-6 w-6 shrink-0"
+              className="size-6 shrink-0"
               title="Remove default output (unmatched values will fail)"
               onClick={removeDefaultOutput}
             >
-              <Icons.remove className="h-3 w-3" />
+              <Icons.remove className="size-3" />
             </Button>
           </div>
         ) : (
@@ -877,7 +877,7 @@ export function SwitchCasesField(props: any) {
               className="shrink-0"
               onClick={() => updateDefaultOutput({})}
             >
-              <Icons.add className="h-4 w-4" /> Add Default
+              <Icons.add className="size-4" /> Add Default
             </Button>
           </div>
         )}

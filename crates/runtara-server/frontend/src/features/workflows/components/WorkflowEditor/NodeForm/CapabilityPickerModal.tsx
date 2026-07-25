@@ -298,9 +298,9 @@ export function CapabilityPickerModal({
             <button
               type="button"
               onClick={handleBack}
-              className="rounded p-1 hover:bg-muted"
+              className="rounded p-1 hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             >
-              <ChevronLeft className="h-5 w-5" />
+              <ChevronLeft className="size-5" />
             </button>
           )}
           <div className="flex-1">
@@ -312,7 +312,7 @@ export function CapabilityPickerModal({
         {/* Search */}
         <div className="border-b p-4">
           <div className="relative">
-            <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+            <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
             <Input
               placeholder="Search agents or capabilities..."
               value={searchQuery}
@@ -330,7 +330,7 @@ export function CapabilityPickerModal({
             <div className="space-y-4">
               {someLoading && (
                 <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                  <Spinner className="h-4 w-4" />
+                  <Spinner className="size-4" />
                   Loading more results...
                 </div>
               )}
@@ -356,7 +356,7 @@ export function CapabilityPickerModal({
                               onClick={() =>
                                 handleAgentSelect(agent.id, agent.name || '')
                               }
-                              className="flex w-full items-center justify-between gap-2 rounded-lg px-3 py-2 text-left transition-colors hover:bg-muted"
+                              className="flex w-full items-center justify-between gap-2 rounded-lg px-3 py-2 text-left transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                             >
                               <div className="flex items-center gap-3">
                                 <span className="text-xl">
@@ -373,7 +373,7 @@ export function CapabilityPickerModal({
                                   )}
                                 </div>
                               </div>
-                              <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />
+                              <ChevronRight className="size-4 shrink-0 text-muted-foreground" />
                             </button>
                           );
                         })}
@@ -401,7 +401,7 @@ export function CapabilityPickerModal({
                             }
                             disabled={!result.isSupported}
                             className={cn(
-                              'flex w-full flex-col gap-1 rounded-lg px-3 py-3 text-left transition-colors',
+                              'flex w-full flex-col gap-1 rounded-lg px-3 py-3 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
                               result.isSupported
                                 ? 'hover:bg-muted'
                                 : 'cursor-not-allowed opacity-50'
@@ -442,7 +442,7 @@ export function CapabilityPickerModal({
             // Capabilities List View
             isFetching ? (
               <div className="flex items-center justify-center py-8">
-                <Spinner className="h-6 w-6 text-muted-foreground" />
+                <Spinner className="size-6 text-muted-foreground" />
                 <span className="ml-2 text-muted-foreground">
                   Loading capabilities...
                 </span>
@@ -463,7 +463,7 @@ export function CapabilityPickerModal({
                             capability.id
                           )
                         }
-                        className="flex w-full flex-col gap-1 rounded-lg px-3 py-3 text-left transition-colors hover:bg-muted"
+                        className="flex w-full flex-col gap-1 rounded-lg px-3 py-3 text-left transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                       >
                         <div className="flex items-center gap-2">
                           <span className="font-medium">
@@ -502,7 +502,7 @@ export function CapabilityPickerModal({
                             handleAgentSelect(agent.id, agent.name || '')
                           }
                           className={cn(
-                            'flex w-full items-center justify-between gap-2 rounded-lg px-3 py-2 text-left transition-colors',
+                            'flex w-full items-center justify-between gap-2 rounded-lg px-3 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
                             'hover:bg-muted',
                             selectedAgent?.id === agent.id && 'bg-muted'
                           )}
@@ -518,7 +518,7 @@ export function CapabilityPickerModal({
                               )}
                             </div>
                           </div>
-                          <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />
+                          <ChevronRight className="size-4 shrink-0 text-muted-foreground" />
                         </button>
                       ))}
                     </div>

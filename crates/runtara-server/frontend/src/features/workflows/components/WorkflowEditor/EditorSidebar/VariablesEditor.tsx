@@ -179,7 +179,7 @@ export function VariablesEditor({
                       }
                       disabled={readOnly}
                     >
-                      <SelectTrigger className="h-7 border-0 font-mono text-sm focus:ring-0 focus:ring-offset-0">
+                      <SelectTrigger className="h-7 border-0 font-mono text-sm focus-visible:ring-0 focus-visible:ring-offset-0">
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
@@ -207,7 +207,7 @@ export function VariablesEditor({
                     }
                     disabled={readOnly}
                   >
-                    <SelectTrigger className="h-7 border-0 focus:ring-0 focus:ring-offset-0">
+                    <SelectTrigger className="h-7 border-0 focus-visible:ring-0 focus-visible:ring-offset-0">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
@@ -239,9 +239,9 @@ export function VariablesEditor({
                       variant="ghost"
                       size="sm"
                       onClick={() => handleRemove(index)}
-                      className="h-6 w-6 p-0"
+                      className="size-6 p-0"
                     >
-                      <Trash2 className="h-3 w-3" />
+                      <Trash2 className="size-3" />
                     </Button>
                   </td>
                 )}
@@ -269,7 +269,7 @@ export function VariablesEditor({
           onClick={handleAdd}
           className="w-full"
         >
-          <Plus className="mr-2 h-4 w-4" />
+          <Plus className="mr-2 size-4" />
           Add Variable
         </Button>
       )}

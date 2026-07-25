@@ -632,9 +632,9 @@ export function ObjectInstanceDtosTable({
                         disabled={exportCsvMutation.isPending}
                       >
                         {exportCsvMutation.isPending ? (
-                          <Spinner className="mr-2 h-4 w-4" />
+                          <Spinner className="mr-2 size-4" />
                         ) : (
-                          <Download className="mr-2 h-4 w-4" />
+                          <Download className="mr-2 size-4" />
                         )}
                         Export
                       </Button>
@@ -644,7 +644,7 @@ export function ObjectInstanceDtosTable({
                           size="sm"
                           onClick={() => setShowImportDialog(true)}
                         >
-                          <Upload className="mr-2 h-4 w-4" />
+                          <Upload className="mr-2 size-4" />
                           Import
                         </Button>
                         <Button
@@ -652,7 +652,7 @@ export function ObjectInstanceDtosTable({
                           size="sm"
                           onClick={() => setShowBulkInsertDialog(true)}
                         >
-                          <Plus className="mr-2 h-4 w-4" />
+                          <Plus className="mr-2 size-4" />
                           Bulk insert
                         </Button>
                       </Can>
@@ -683,7 +683,7 @@ export function ObjectInstanceDtosTable({
                 size="sm"
                 onClick={() => setShowBulkEditDialog(true)}
               >
-                <Pencil className="mr-2 h-4 w-4" />
+                <Pencil className="mr-2 size-4" />
                 Edit
               </Button>
             </Can>
@@ -693,7 +693,7 @@ export function ObjectInstanceDtosTable({
                 size="sm"
                 onClick={() => setShowBulkDeleteDialog(true)}
               >
-                <Trash2 className="mr-2 h-4 w-4" />
+                <Trash2 className="mr-2 size-4" />
                 Delete
               </Button>
             </Can>

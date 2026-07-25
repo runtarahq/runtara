@@ -24,12 +24,12 @@ export function HumanInputCard({
     <Card className="border-warning/50 bg-warning/5">
       <CardHeader className="pb-3">
         <CardTitle className="flex items-center gap-2 text-sm font-medium">
-          <MessageSquare className="h-4 w-4 text-warning" />
+          <MessageSquare className="size-4 text-warning" />
           Human Input Required
         </CardTitle>
         <div className="flex items-center gap-2 text-xs text-muted-foreground">
           <Badge variant="outline" className="gap-1 text-xs">
-            <Wrench className="h-3 w-3" />
+            <Wrench className="size-3" />
             {pendingInput.toolName}
           </Badge>
           <span>Iteration {pendingInput.iteration}</span>

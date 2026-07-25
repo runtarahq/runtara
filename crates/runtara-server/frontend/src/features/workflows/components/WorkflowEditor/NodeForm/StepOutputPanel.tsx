@@ -327,7 +327,7 @@ export function StepOutputPanel() {
         data-testid="step-output-panel-trigger"
       >
         <Icons.chevronRight
-          className={`h-3.5 w-3.5 transition-transform ${open ? 'rotate-90' : ''}`}
+          className={`size-3.5 transition-transform ${open ? 'rotate-90' : ''}`}
         />
         Output
         <span className="text-xs font-normal text-muted-foreground">

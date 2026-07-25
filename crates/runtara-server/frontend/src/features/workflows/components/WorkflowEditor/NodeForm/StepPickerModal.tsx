@@ -372,10 +372,10 @@ export function StepPickerPanel({
           <button
             type="button"
             onClick={handleBack}
-            className="rounded p-1 hover:bg-muted"
+            className="rounded p-1 hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             aria-label="Back to step list"
           >
-            <ChevronLeft className="h-4 w-4" />
+            <ChevronLeft className="size-4" />
           </button>
         )}
         <div className="flex-1">
@@ -386,17 +386,17 @@ export function StepPickerPanel({
           <button
             type="button"
             onClick={onCancel}
-            className="rounded p-1 hover:bg-muted"
+            className="rounded p-1 hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             aria-label="Cancel adding step"
           >
-            <X className="h-4 w-4" />
+            <X className="size-4" />
           </button>
         )}
       </div>
 
       <div className="border-b p-4">
         <div className="relative">
-          <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+          <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
           <Input
             placeholder="Search steps or operations..."
             value={searchQuery}
@@ -539,7 +539,7 @@ function StepTypeSection({
   return (
     <div>
       <div className="mb-2 flex items-center gap-2">
-        <Zap className="h-5 w-5 text-muted-foreground" />
+        <Zap className="size-5 text-muted-foreground" />
         <SectionLabel as="span">Step Types</SectionLabel>
       </div>
       <div className="space-y-1">
@@ -549,10 +549,10 @@ function StepTypeSection({
             type="button"
             onClick={() => onStepTypeSelect(stepType)}
             data-testid={`step-picker-step-type-${toTestIdPart(normalizeStepType(stepType))}`}
-            className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left transition-colors hover:bg-muted"
+            className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           >
             <StepTypeIcon
-              className="h-5 w-5 text-muted-foreground"
+              className="size-5 text-muted-foreground"
               type={stepType.name || ''}
             />
             <div>
@@ -585,7 +585,7 @@ function AgentSection({
   return (
     <div>
       <div className="mb-2 flex items-center gap-2">
-        <Bot className="h-5 w-5 text-muted-foreground" />
+        <Bot className="size-5 text-muted-foreground" />
         <SectionLabel as="span">{title}</SectionLabel>
       </div>
       <div className="space-y-1">
@@ -598,11 +598,11 @@ function AgentSection({
               type="button"
               onClick={() => onAgentSelect(agent.id || '', agent.name || '')}
               data-testid={`step-picker-agent-${toTestIdPart(agent.id)}`}
-              className="flex w-full items-center justify-between gap-2 rounded-lg px-3 py-2 text-left transition-colors hover:bg-muted"
+              className="flex w-full items-center justify-between gap-2 rounded-lg px-3 py-2 text-left transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             >
               <div className="flex items-center gap-3">
-                <div className="flex h-5 w-5 shrink-0 items-center justify-center">
-                  <AgentIcon className="h-5 w-5 text-muted-foreground" />
+                <div className="flex size-5 shrink-0 items-center justify-center">
+                  <AgentIcon className="size-5 text-muted-foreground" />
                 </div>
                 <div>
                   <div className="font-medium">{agent.name}</div>
@@ -616,7 +616,7 @@ function AgentSection({
                   )}
                 </div>
               </div>
-              <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />
+              <ChevronRight className="size-4 shrink-0 text-muted-foreground" />
             </button>
           );
         })}
@@ -652,15 +652,15 @@ function CapabilitySearchSection({
               disabled={!result.isSupported}
               data-testid={`step-picker-capability-${toTestIdPart(result.agentId)}-${toTestIdPart(result.capability.id)}`}
               className={cn(
-                'flex w-full flex-col gap-1 rounded-lg px-3 py-3 text-left transition-colors',
+                'flex w-full flex-col gap-1 rounded-lg px-3 py-3 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
                 result.isSupported
                   ? 'hover:bg-muted'
                   : 'cursor-not-allowed opacity-50'
               )}
             >
               <div className="flex items-center gap-2">
-                <div className="flex h-4 w-4 shrink-0 items-center justify-center">
-                  <AgentIcon className="h-3.5 w-3.5 text-muted-foreground" />
+                <div className="flex size-4 shrink-0 items-center justify-center">
+                  <AgentIcon className="size-3.5 text-muted-foreground" />
                 </div>
                 <span className="text-xs text-muted-foreground">
                   {result.agentName}
@@ -703,7 +703,7 @@ function CapabilityList({
   if (!selectedAgentData || !selectedAgentId) {
     return (
       <div className="flex items-center justify-center py-8">
-        <Spinner className="h-6 w-6 text-muted-foreground" />
+        <Spinner className="size-6 text-muted-foreground" />
         <span className="ml-2 text-muted-foreground">
           Loading capabilities...
         </span>
@@ -723,7 +723,7 @@ function CapabilityList({
           type="button"
           onClick={() => onCapabilitySelect(selectedAgentId, capability.id)}
           data-testid={`step-picker-capability-${toTestIdPart(selectedAgentId)}-${toTestIdPart(capability.id)}`}
-          className="flex w-full flex-col gap-1 rounded-lg px-3 py-3 text-left transition-colors hover:bg-muted"
+          className="flex w-full flex-col gap-1 rounded-lg px-3 py-3 text-left transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         >
           <div className="flex items-center gap-2">
             <span className="font-medium">
@@ -747,7 +747,7 @@ function CapabilityList({
 function LoadingMore() {
   return (
     <div className="flex items-center gap-2 text-sm text-muted-foreground">
-      <Spinner className="h-4 w-4" />
+      <Spinner className="size-4" />
       Loading more results...
     </div>
   );

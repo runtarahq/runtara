@@ -158,19 +158,19 @@ export const BaseNode = forwardRef<
       switch (status) {
         case 'running':
         case 'compiling':
-          return <Spinner className="h-2 w-2" />;
+          return <Spinner className="size-2" />;
         case 'completed':
-          return <CheckCircle2 className="h-2 w-2" />;
+          return <CheckCircle2 className="size-2" />;
         case 'failed':
-          return <XCircle className="h-2 w-2" />;
+          return <XCircle className="size-2" />;
         case 'timeout':
-          return <AlertCircle className="h-2 w-2" />;
+          return <AlertCircle className="size-2" />;
         case 'queued':
-          return <Pause className="h-2 w-2" />;
+          return <Pause className="size-2" />;
         case 'suspended':
-          return <Pause className="h-2 w-2" />;
+          return <Pause className="size-2" />;
         case 'cancelled':
-          return <XCircle className="h-2 w-2" />;
+          return <XCircle className="size-2" />;
         default:
           return null;
       }
@@ -231,22 +231,22 @@ export const BaseNode = forwardRef<
       switch (replayState) {
         case 'running':
           return {
-            icon: <Spinner className="h-2.5 w-2.5" />,
+            icon: <Spinner className="size-2.5" />,
             cls: 'bg-info/10 text-info',
           };
         case 'done':
           return {
-            icon: <CheckCircle2 className="h-2.5 w-2.5" />,
+            icon: <CheckCircle2 className="size-2.5" />,
             cls: 'bg-success/10 text-success',
           };
         case 'failed':
           return {
-            icon: <XCircle className="h-2.5 w-2.5" />,
+            icon: <XCircle className="size-2.5" />,
             cls: 'bg-destructive/10 text-destructive',
           };
         case 'suspended':
           return {
-            icon: <Pause className="h-2.5 w-2.5" />,
+            icon: <Pause className="size-2.5" />,
             cls: 'bg-warning/10 text-warning',
           };
         default:
@@ -325,14 +325,14 @@ export const BaseNode = forwardRef<
         {breakpoint && (
           <button
             type="button"
-            className="absolute -left-1.5 top-1/2 z-10 flex h-3 w-3 -translate-y-1/2 cursor-pointer items-center justify-center rounded-full border border-destructive bg-destructive transition-colors hover:bg-destructive/80"
+            className="absolute -left-1.5 top-1/2 z-10 flex size-3 -translate-y-1/2 cursor-pointer items-center justify-center rounded-full border border-destructive bg-destructive transition-colors hover:bg-destructive/80"
             onClick={(e) => {
               e.stopPropagation();
               onToggleBreakpoint?.();
             }}
             title="Remove breakpoint"
           >
-            <Circle className="h-1.5 w-1.5 fill-destructive-foreground/80 text-destructive-foreground/80" />
+            <Circle className="size-1.5 fill-destructive-foreground/80 text-destructive-foreground/80" />
           </button>
         )}
 
@@ -340,14 +340,14 @@ export const BaseNode = forwardRef<
         {!breakpoint && onToggleBreakpoint && !isExecutionReadOnly && (
           <button
             type="button"
-            className="absolute -left-1.5 top-1/2 z-10 flex h-3 w-3 -translate-y-1/2 cursor-pointer items-center justify-center rounded-full border border-destructive/50 bg-destructive/70 opacity-0 transition-all hover:bg-destructive hover:!opacity-100 group-hover:opacity-40"
+            className="absolute -left-1.5 top-1/2 z-10 flex size-3 -translate-y-1/2 cursor-pointer items-center justify-center rounded-full border border-destructive/50 bg-destructive/70 opacity-0 transition-all hover:bg-destructive hover:!opacity-100 group-hover:opacity-40"
             onClick={(e) => {
               e.stopPropagation();
               onToggleBreakpoint?.();
             }}
             title="Set breakpoint"
           >
-            <Circle className="h-1.5 w-1.5 fill-destructive-foreground/80 text-destructive-foreground/80" />
+            <Circle className="size-1.5 fill-destructive-foreground/80 text-destructive-foreground/80" />
           </button>
         )}
 
@@ -368,7 +368,7 @@ export const BaseNode = forwardRef<
             )}
             <span
               className={cn(
-                'flex h-3.5 w-3.5 items-center justify-center rounded-full shadow-sm',
+                'flex size-3.5 items-center justify-center rounded-full shadow-sm',
                 replayBadge.cls
               )}
             >
@@ -379,7 +379,7 @@ export const BaseNode = forwardRef<
 
         {/* Unsaved changes corner dot */}
         {hasUnsavedChanges && !hasValidationError && !hasValidationWarning && (
-          <div className="absolute right-0.5 top-0.5 z-10 h-1 w-1 rounded-full bg-warning" />
+          <div className="absolute right-0.5 top-0.5 z-10 size-1 rounded-full bg-warning" />
         )}
 
         {/* Horizontal pill layout: icon left, name + status center/right */}
@@ -396,7 +396,7 @@ export const BaseNode = forwardRef<
             {stepType && (
               <div
                 className={cn(
-                  'flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-sm [&_svg]:h-2.5 [&_svg]:w-2.5',
+                  'flex size-4 flex-shrink-0 items-center justify-center rounded-sm [&_svg]:h-2.5 [&_svg]:w-2.5',
                   getIconTintClass()
                 )}
               >
@@ -430,7 +430,7 @@ export const BaseNode = forwardRef<
                     data-testid="stale-agent-badge"
                     className="flex shrink-0 items-center gap-0.5 rounded bg-warning/10 px-1 py-0.5 text-[9px] font-medium leading-none text-warning"
                   >
-                    <AlertTriangle className="h-2.5 w-2.5" />
+                    <AlertTriangle className="size-2.5" />
                     <span className="hidden md:inline">Agent disabled</span>
                   </span>
                 )}

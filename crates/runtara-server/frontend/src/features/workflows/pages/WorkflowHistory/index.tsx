@@ -144,10 +144,10 @@ export function WorkflowHistory() {
     const btn = document.getElementById(btnId);
     if (!btn) return;
     btn.innerHTML =
-      '<svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path></svg>';
+      '<svg class="size-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path></svg>';
     setTimeout(() => {
       btn.innerHTML =
-        '<svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path></svg>';
+        '<svg class="size-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path></svg>';
     }, 2000);
   };
 
@@ -294,7 +294,7 @@ export function WorkflowHistory() {
             className="rounded-full hover:bg-muted"
             onClick={handleBack}
           >
-            <ChevronLeft className="h-5 w-5" />
+            <ChevronLeft className="size-5" />
           </Button>
           <div className="flex-1">
             <h1 className="text-3xl font-bold tracking-tight">
@@ -322,7 +322,7 @@ export function WorkflowHistory() {
                   }
                   className="flex items-center gap-2"
                 >
-                  <FileText className="h-4 w-4" />
+                  <FileText className="size-4" />
                   View Logs
                 </Button>
                 {isActiveStatus(data.status) ? (
@@ -377,7 +377,7 @@ export function WorkflowHistory() {
                 const statusInfo = getStatusDisplay(data.status);
                 return (
                   <>
-                    {statusInfo.showSpinner && <Spinner className="h-4 w-4" />}
+                    {statusInfo.showSpinner && <Spinner className="size-4" />}
                     <Badge variant={statusInfo.variant}>
                       {statusInfo.text}
                     </Badge>
@@ -398,7 +398,7 @@ export function WorkflowHistory() {
                       className="flex cursor-help items-center gap-2"
                       title="Termination Type - Provides context for why this execution terminated"
                     >
-                      <Info className="h-4 w-4 text-muted-foreground" />
+                      <Info className="size-4 text-muted-foreground" />
                       <Badge variant={terminationInfo.variant}>
                         {terminationInfo.text}
                       </Badge>
@@ -414,7 +414,7 @@ export function WorkflowHistory() {
                   className="flex cursor-help items-center gap-2 text-sm text-muted-foreground"
                   title="Unique identifier for this workflow execution. Use this ID when reporting issues or tracking specific runs."
                 >
-                  <Hash className="h-4 w-4" />
+                  <Hash className="size-4" />
                   <span className="font-mono">{data.id}</span>
                 </div>
               </>
@@ -449,7 +449,7 @@ export function WorkflowHistory() {
                     className="flex cursor-help items-center gap-2 text-sm font-medium text-muted-foreground"
                     title="The total time spent actively running your workflow, from start to finish. This doesn't include time waiting in queue."
                   >
-                    <Timer className="h-4 w-4" />
+                    <Timer className="size-4" />
                     Execution Time
                   </CardTitle>
                 </CardHeader>
@@ -470,7 +470,7 @@ export function WorkflowHistory() {
                     className="flex cursor-help items-center gap-2 text-sm font-medium text-muted-foreground"
                     title="The time your workflow spent waiting before it could start running. During busy periods, workflows may need to wait for available resources."
                   >
-                    <Clock className="h-4 w-4" />
+                    <Clock className="size-4" />
                     Queue Time
                   </CardTitle>
                 </CardHeader>
@@ -490,7 +490,7 @@ export function WorkflowHistory() {
                   className="flex cursor-help items-center gap-2 text-sm font-medium text-muted-foreground"
                   title="The maximum amount of memory (RAM) used while running this workflow. Higher values indicate more data was being processed at once."
                 >
-                  <MemoryStick className="h-4 w-4" />
+                  <MemoryStick className="size-4" />
                   Max Memory
                 </CardTitle>
               </CardHeader>
@@ -511,7 +511,7 @@ export function WorkflowHistory() {
                     className="flex cursor-help items-center gap-2 text-sm font-medium text-muted-foreground"
                     title="Shows how many times this workflow was retried after encountering issues (current / maximum allowed). Automatic retries help ensure your workflows complete successfully."
                   >
-                    <RotateCw className="h-4 w-4" />
+                    <RotateCw className="size-4" />
                     Retries
                   </CardTitle>
                 </CardHeader>
@@ -528,7 +528,7 @@ export function WorkflowHistory() {
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
-              <Calendar className="h-5 w-5" />
+              <Calendar className="size-5" />
               Timeline & Details
             </CardTitle>
           </CardHeader>
@@ -538,7 +538,7 @@ export function WorkflowHistory() {
               <div className="space-y-4">
                 <div className="flex items-start gap-3">
                   <div className="bg-muted/500/10 mt-0.5 rounded-full p-2">
-                    <Calendar className="h-4 w-4 text-muted-foreground" />
+                    <Calendar className="size-4 text-muted-foreground" />
                   </div>
                   <div className="flex-1 space-y-1">
                     <p className="text-sm font-medium">Created</p>
@@ -556,7 +556,7 @@ export function WorkflowHistory() {
                 {data.metadata?.startedAt && (
                   <div className="flex items-start gap-3">
                     <div className="mt-0.5 rounded-full bg-info/10 p-2">
-                      <Zap className="h-4 w-4 text-info" />
+                      <Zap className="size-4 text-info" />
                     </div>
                     <div className="flex-1 space-y-1">
                       <p className="text-sm font-medium">Started Execution</p>
@@ -573,7 +573,7 @@ export function WorkflowHistory() {
                 {data.metadata?.completedAt && (
                   <div className="flex items-start gap-3">
                     <div className="mt-0.5 rounded-full bg-success/10 p-2">
-                      <Flag className="h-4 w-4 text-success" />
+                      <Flag className="size-4 text-success" />
                     </div>
                     <div className="flex-1 space-y-1">
                       <p className="text-sm font-medium">Completed</p>
@@ -620,7 +620,7 @@ export function WorkflowHistory() {
                       className="flex cursor-help items-center gap-2 text-sm text-muted-foreground"
                       title="A unique identifier for the server that processed this workflow. Useful for troubleshooting and tracking which server handled your request."
                     >
-                      <Server className="h-4 w-4" />
+                      <Server className="size-4" />
                       Worker ID
                     </span>
                     <span className="font-mono text-sm text-muted-foreground">
@@ -635,7 +635,7 @@ export function WorkflowHistory() {
             {data.metadata?.errorMessage && (
               <div className="mt-6">
                 <div className="mb-2 flex items-start gap-2">
-                  <XCircle className="mt-0.5 h-5 w-5 text-destructive" />
+                  <XCircle className="mt-0.5 size-5 text-destructive" />
                   <p className="font-semibold text-destructive">
                     Error Message
                   </p>
@@ -652,7 +652,7 @@ export function WorkflowHistory() {
             {data.tags && data.tags.length > 0 && (
               <div className="mt-6">
                 <div className="mb-3 flex items-center gap-2">
-                  <Tag className="h-4 w-4 text-muted-foreground" />
+                  <Tag className="size-4 text-muted-foreground" />
                   <span className="text-sm font-medium">Tags</span>
                 </div>
                 <div className="flex flex-wrap gap-2">
@@ -678,7 +678,7 @@ export function WorkflowHistory() {
               <div className="flex items-center justify-between">
                 <CardTitle className="flex items-center gap-2 text-lg">
                   <div className="rounded-lg bg-info/10 p-2">
-                    <Database className="h-5 w-5 text-info" />
+                    <Database className="size-5 text-info" />
                   </div>
                   Input Data
                 </CardTitle>
@@ -692,7 +692,7 @@ export function WorkflowHistory() {
                     }
                   >
                     <span id="copy-inputs">
-                      <Copy className="h-4 w-4" />
+                      <Copy className="size-4" />
                     </span>
                     Copy
                   </Button>
@@ -724,8 +724,8 @@ export function WorkflowHistory() {
                 </div>
               ) : (
                 <div className="p-12 text-center">
-                  <div className="mb-3 inline-flex h-12 w-12 items-center justify-center rounded-full bg-muted">
-                    <Database className="h-6 w-6 text-muted-foreground" />
+                  <div className="mb-3 inline-flex size-12 items-center justify-center rounded-full bg-muted">
+                    <Database className="size-6 text-muted-foreground" />
                   </div>
                   <p className="mb-1 text-sm text-muted-foreground">
                     No input data
@@ -743,7 +743,7 @@ export function WorkflowHistory() {
               <div className="flex items-center justify-between">
                 <CardTitle className="flex items-center gap-2 text-lg">
                   <div className="rounded-lg bg-success/10 p-2">
-                    <Sparkles className="h-5 w-5 text-success" />
+                    <Sparkles className="size-5 text-success" />
                   </div>
                   Output Data
                 </CardTitle>
@@ -757,7 +757,7 @@ export function WorkflowHistory() {
                     }
                   >
                     <span id="copy-outputs">
-                      <Copy className="h-4 w-4" />
+                      <Copy className="size-4" />
                     </span>
                     Copy
                   </Button>
@@ -806,8 +806,8 @@ export function WorkflowHistory() {
                 </div>
               ) : (
                 <div className="p-12 text-center">
-                  <div className="mb-3 inline-flex h-12 w-12 items-center justify-center rounded-full bg-muted">
-                    <Sparkles className="h-6 w-6 text-muted-foreground" />
+                  <div className="mb-3 inline-flex size-12 items-center justify-center rounded-full bg-muted">
+                    <Sparkles className="size-6 text-muted-foreground" />
                   </div>
                   <p className="mb-1 text-sm text-muted-foreground">
                     No output data yet
@@ -827,7 +827,7 @@ export function WorkflowHistory() {
             <div className="flex items-center justify-between">
               <CardTitle className="flex items-center gap-2 text-lg">
                 <div className="rounded-lg bg-purple-500/10 p-2">
-                  <ChevronRight className="h-5 w-5 text-purple-600" />
+                  <ChevronRight className="size-5 text-purple-600" />
                 </div>
                 Events
               </CardTitle>
@@ -842,7 +842,7 @@ export function WorkflowHistory() {
                     value="timeline"
                     className="flex items-center gap-1"
                   >
-                    <BarChart3 className="h-4 w-4" />
+                    <BarChart3 className="size-4" />
                     Timeline
                   </TabsTrigger>
                   <TabsTrigger
@@ -850,11 +850,11 @@ export function WorkflowHistory() {
                     className="flex items-center gap-1"
                     data-testid="events-view-graph"
                   >
-                    <Network className="h-4 w-4" />
+                    <Network className="size-4" />
                     Graph
                   </TabsTrigger>
                   <TabsTrigger value="list" className="flex items-center gap-1">
-                    <List className="h-4 w-4" />
+                    <List className="size-4" />
                     List
                   </TabsTrigger>
                 </TabsList>
@@ -875,7 +875,7 @@ export function WorkflowHistory() {
               />
             ) : isListFetching ? (
               <div className="flex items-center justify-center py-16">
-                <Spinner className="h-8 w-8 text-muted-foreground" />
+                <Spinner className="size-8 text-muted-foreground" />
               </div>
             ) : stepSummaries.length > 0 ? (
               <div className="space-y-3">
@@ -925,9 +925,9 @@ export function WorkflowHistory() {
                           className="flex items-center gap-2 font-medium transition-colors hover:text-purple-600"
                         >
                           {isExpanded ? (
-                            <ChevronDown className="h-4 w-4" />
+                            <ChevronDown className="size-4" />
                           ) : (
-                            <ChevronRight className="h-4 w-4" />
+                            <ChevronRight className="size-4" />
                           )}
                           <span className="font-semibold">
                             #{globalSequence + 1} -{' '}
@@ -935,7 +935,7 @@ export function WorkflowHistory() {
                           </span>
                         </button>
                         <Badge variant={getBadgeVariant()}>
-                          {isRunning && <Spinner className="mr-1 h-3 w-3" />}
+                          {isRunning && <Spinner className="mr-1 size-3" />}
                           {getStatusLabel()}
                         </Badge>
                       </div>
@@ -948,7 +948,7 @@ export function WorkflowHistory() {
                           <>
                             <span>•</span>
                             <span className="flex items-center gap-1">
-                              <Calendar className="h-3 w-3" />
+                              <Calendar className="size-3" />
                               {formatDate(step.startedAt)}
                             </span>
                           </>
@@ -958,7 +958,7 @@ export function WorkflowHistory() {
                             <>
                               <span>•</span>
                               <span className="flex items-center gap-1">
-                                <Clock className="h-3 w-3" />
+                                <Clock className="size-3" />
                                 {step.durationMs}ms
                               </span>
                             </>
@@ -980,7 +980,7 @@ export function WorkflowHistory() {
                             <div>
                               <div className="mb-2 flex items-center justify-between">
                                 <span className="flex items-center gap-1 text-sm font-semibold text-muted-foreground">
-                                  <Database className="h-3 w-3" />
+                                  <Database className="size-3" />
                                   Inputs
                                 </span>
                                 <Button
@@ -994,7 +994,7 @@ export function WorkflowHistory() {
                                     toast.success('Inputs copied');
                                   }}
                                 >
-                                  <Copy className="mr-1 h-3 w-3" />
+                                  <Copy className="mr-1 size-3" />
                                   Copy
                                 </Button>
                               </div>
@@ -1009,7 +1009,7 @@ export function WorkflowHistory() {
                             <div>
                               <div className="mb-2 flex items-center justify-between">
                                 <span className="flex items-center gap-1 text-sm font-semibold text-muted-foreground">
-                                  <Sparkles className="h-3 w-3" />
+                                  <Sparkles className="size-3" />
                                   Outputs
                                 </span>
                                 <Button
@@ -1023,7 +1023,7 @@ export function WorkflowHistory() {
                                     toast.success('Outputs copied');
                                   }}
                                 >
-                                  <Copy className="mr-1 h-3 w-3" />
+                                  <Copy className="mr-1 size-3" />
                                   Copy
                                 </Button>
                               </div>
@@ -1062,7 +1062,7 @@ export function WorkflowHistory() {
                         onClick={() => setListPageIndex(0)}
                         disabled={listPageIndex === 0}
                       >
-                        <ChevronsLeft className="h-4 w-4" />
+                        <ChevronsLeft className="size-4" />
                       </Button>
                       <Button
                         variant="outline"
@@ -1072,7 +1072,7 @@ export function WorkflowHistory() {
                         }
                         disabled={listPageIndex === 0}
                       >
-                        <ChevronLeft className="h-4 w-4" />
+                        <ChevronLeft className="size-4" />
                       </Button>
                       <span className="px-2 text-sm text-muted-foreground">
                         Page {listPageIndex + 1} of {totalPages}
@@ -1087,7 +1087,7 @@ export function WorkflowHistory() {
                         }
                         disabled={listPageIndex >= totalPages - 1}
                       >
-                        <ChevronRight className="h-4 w-4" />
+                        <ChevronRight className="size-4" />
                       </Button>
                       <Button
                         variant="outline"
@@ -1095,7 +1095,7 @@ export function WorkflowHistory() {
                         onClick={() => setListPageIndex(totalPages - 1)}
                         disabled={listPageIndex >= totalPages - 1}
                       >
-                        <ChevronsRight className="h-4 w-4" />
+                        <ChevronsRight className="size-4" />
                       </Button>
                     </div>
                   </div>
@@ -1103,8 +1103,8 @@ export function WorkflowHistory() {
               </div>
             ) : (
               <div className="px-6 py-16 text-center">
-                <div className="mb-4 inline-flex h-16 w-16 items-center justify-center rounded-full bg-purple-500/10">
-                  <ChevronRight className="h-8 w-8 text-purple-600" />
+                <div className="mb-4 inline-flex size-16 items-center justify-center rounded-full bg-purple-500/10">
+                  <ChevronRight className="size-8 text-purple-600" />
                 </div>
                 <h3 className="mb-2 text-lg font-semibold">No Events Yet</h3>
                 <p className="mx-auto max-w-md text-sm text-muted-foreground">

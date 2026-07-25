@@ -99,8 +99,8 @@ export function MetricCard({
               getTrendColor()
             )}
           >
-            {trend === 'up' && <ArrowUpIcon className="h-4 w-4" />}
-            {trend === 'down' && <ArrowDownIcon className="h-4 w-4" />}
+            {trend === 'up' && <ArrowUpIcon className="size-4" />}
+            {trend === 'down' && <ArrowDownIcon className="size-4" />}
             <span>
               {`${trend === 'down' ? '-' : '+'}${Math.abs(change).toFixed(1)}%`}
             </span>

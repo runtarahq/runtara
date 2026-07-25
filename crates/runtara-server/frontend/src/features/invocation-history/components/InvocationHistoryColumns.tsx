@@ -4,6 +4,7 @@ import { ExternalLink, Eye, Zap, MessageSquare, Bug } from 'lucide-react';
 import { ExecutionHistoryItem } from '../types';
 import { cn, formatDate } from '@/lib/utils';
 import { Button } from '@/shared/components/ui/button';
+import { WithTooltip } from '@/shared/components/ui/tooltip';
 import {
   StatusPill,
   executionStatusPill,
@@ -70,7 +71,7 @@ export const invocationHistoryColumns: ColumnDef<ExecutionHistoryItem>[] = [
               className="group/link inline-flex items-center gap-1.5 text-sm font-medium text-foreground hover:text-primary"
             >
               {workflowName}
-              <ExternalLink className="h-3 w-3 text-muted-foreground transition-colors group-hover/link:text-primary" />
+              <ExternalLink className="size-3 text-muted-foreground transition-colors group-hover/link:text-primary" />
             </Link>
           ) : (
             <span className="text-sm font-medium italic text-muted-foreground">
@@ -125,17 +126,18 @@ export const invocationHistoryColumns: ColumnDef<ExecutionHistoryItem>[] = [
         <div className="flex items-center gap-1.5">
           <StatusBadge status={status} />
           {hasPendingInput && (
-            <Link
-              to={`/workflows/${row.original.workflowId}/chat/${row.original.instanceId}`}
-              className={cn(
-                'inline-flex items-center gap-1 rounded-full border px-2 py-1 text-xs font-medium transition-colors hover:bg-warning/20',
-                statusToneClasses('warning').pill
-              )}
-              title="Continue chat"
-            >
-              <MessageSquare className="h-3 w-3" />
-              Input
-            </Link>
+            <WithTooltip label="Continue chat">
+              <Link
+                to={`/workflows/${row.original.workflowId}/chat/${row.original.instanceId}`}
+                className={cn(
+                  'inline-flex items-center gap-1 rounded-full border px-2 py-1 text-xs font-medium transition-colors hover:bg-warning/20',
+                  statusToneClasses('warning').pill
+                )}
+              >
+                <MessageSquare className="size-3" />
+                Input
+              </Link>
+            </WithTooltip>
           )}
         </div>
       );
@@ -151,7 +153,7 @@ export const invocationHistoryColumns: ColumnDef<ExecutionHistoryItem>[] = [
 
       return (
         <div className="flex items-center gap-2">
-          <Zap className={`h-3.5 w-3.5 ${colorClass}`} />
+          <Zap className={`size-3.5 ${colorClass}`} />
           <span className={`text-sm font-medium tabular-nums ${colorClass}`}>
             {formatDuration(duration)}
           </span>
@@ -190,37 +192,43 @@ export const invocationHistoryColumns: ColumnDef<ExecutionHistoryItem>[] = [
         <div className="flex items-center justify-end gap-1 opacity-0 transition-opacity duration-150 group-hover:opacity-100">
           {status === 'suspended' && (
             <Link to={`/workflows/${workflowId}?attachInstance=${instanceId}`}>
-              <Button
-                variant="ghost"
-                size="icon"
-                className="h-auto w-auto rounded-lg p-2 text-warning transition-colors hover:bg-warning/10 hover:text-warning"
-                title="Open in editor — resume debugging"
-              >
-                <Bug className="h-4 w-4" />
-              </Button>
+              <WithTooltip label="Open in editor — resume debugging">
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-auto w-auto rounded-lg p-2 text-warning transition-colors hover:bg-warning/10 hover:text-warning"
+                  aria-label="Open in editor — resume debugging"
+                >
+                  <Bug className="size-4" />
+                </Button>
+              </WithTooltip>
             </Link>
           )}
           {hasPendingInput && (
             <Link to={`/workflows/${workflowId}/chat/${instanceId}`}>
-              <Button
-                variant="ghost"
-                size="icon"
-                className="h-auto w-auto rounded-lg p-2 text-warning transition-colors hover:bg-warning/10 hover:text-warning"
-                title="Continue chat"
-              >
-                <MessageSquare className="h-4 w-4" />
-              </Button>
+              <WithTooltip label="Continue chat">
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-auto w-auto rounded-lg p-2 text-warning transition-colors hover:bg-warning/10 hover:text-warning"
+                  aria-label="Continue chat"
+                >
+                  <MessageSquare className="size-4" />
+                </Button>
+              </WithTooltip>
             </Link>
           )}
           <Link to={`/workflows/${workflowId}/history/${instanceId}`}>
-            <Button
-              variant="ghost"
-              size="icon"
-              className="h-auto w-auto rounded-lg p-2 text-muted-foreground transition-colors hover:bg-primary/10 hover:text-primary"
-              title="View details"
-            >
-              <Eye className="h-4 w-4" />
-            </Button>
+            <WithTooltip label="View details">
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-auto w-auto rounded-lg p-2 text-muted-foreground transition-colors hover:bg-primary/10 hover:text-primary"
+                aria-label="View details"
+              >
+                <Eye className="size-4" />
+              </Button>
+            </WithTooltip>
           </Link>
           {shouldShowStop ? (
             <StopButton

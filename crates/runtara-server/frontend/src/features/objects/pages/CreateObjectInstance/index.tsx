@@ -53,13 +53,13 @@ export function CreateObjectInstance() {
 
         {isLoading ? (
           <div className="flex min-h-[40vh] items-center justify-center px-4 text-muted-foreground sm:px-5">
-            <Spinner className="mr-2 h-4 w-4" />
+            <Spinner className="mr-2 size-4" />
             Loading type details...
           </div>
         ) : !objectSchemaDto ? (
           <div className="px-4 sm:px-5">
             <Alert variant="destructive">
-              <AlertCircle className="h-4 w-4" />
+              <AlertCircle className="size-4" />
               <AlertTitle>Object type not found</AlertTitle>
               <AlertDescription>
                 The requested object type could not be loaded. Verify the URL or

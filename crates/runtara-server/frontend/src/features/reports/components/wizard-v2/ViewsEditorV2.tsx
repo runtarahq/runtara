@@ -9,6 +9,7 @@ import {
   CardTitle,
 } from '@/shared/components/ui/card';
 import { ArrowDown, ArrowUp, Plus, Trash2 } from 'lucide-react';
+import { SM_GRID_COLS_TWO_MINMAX_AUTO } from './grid-templates';
 import {
   ReportDefinition,
   ReportViewDefinition,
@@ -184,7 +185,7 @@ export function ViewsEditorV2({ definition, onChange }: ViewsEditorV2Props) {
                     aria-label={`Delete view ${view.title || view.id}`}
                     onClick={() => deleteView(view.id)}
                   >
-                    <Trash2 className="h-3.5 w-3.5" />
+                    <Trash2 className="size-3.5" />
                   </Button>
                 </CardHeader>
                 <CardContent className="grid gap-3 pt-0 md:grid-cols-3">
@@ -256,7 +257,7 @@ export function ViewsEditorV2({ definition, onChange }: ViewsEditorV2Props) {
             variant="outline"
             onClick={() => updateViews([...views, newView()])}
           >
-            <Plus className="mr-1 h-3.5 w-3.5" /> Add view
+            <Plus className="mr-1 size-3.5" /> Add view
           </Button>
         </div>
       </div>
@@ -291,7 +292,7 @@ export function ViewsEditorV2({ definition, onChange }: ViewsEditorV2Props) {
               updateGroups([...groups, newGroup('tabs', definition)])
             }
           >
-            <Plus className="mr-1 h-3.5 w-3.5" /> Add tab group
+            <Plus className="mr-1 size-3.5" /> Add tab group
           </Button>
           <Button
             type="button"
@@ -301,7 +302,7 @@ export function ViewsEditorV2({ definition, onChange }: ViewsEditorV2Props) {
               updateGroups([...groups, newGroup('stages', definition)])
             }
           >
-            <Plus className="mr-1 h-3.5 w-3.5" /> Add stage group
+            <Plus className="mr-1 size-3.5" /> Add stage group
           </Button>
           {views.length < 2 ? (
             <span className="self-center text-xs text-muted-foreground">
@@ -384,7 +385,7 @@ function NavigationGroupEditor({
           aria-label={`Delete navigation group ${group.id}`}
           onClick={onDelete}
         >
-          <Trash2 className="h-3.5 w-3.5" />
+          <Trash2 className="size-3.5" />
         </Button>
       </CardHeader>
       <CardContent className="grid gap-4 pt-0">
@@ -458,7 +459,7 @@ function NavigationGroupEditor({
             ? (group.stages ?? []).map((stage, index) => (
                 <div
                   key={`${stage.viewId}-${index}`}
-                  className="grid gap-2 rounded-md border p-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]"
+                  className={`grid gap-2 rounded-md border p-2 ${SM_GRID_COLS_TWO_MINMAX_AUTO}`}
                 >
                   <NativeSelect
                     aria-label={`View for stage ${index + 1}`}
@@ -556,7 +557,7 @@ function NavigationGroupEditor({
             disabled={!unusedView}
             onClick={addMember}
           >
-            <Plus className="mr-1 h-3.5 w-3.5" /> Add member
+            <Plus className="mr-1 size-3.5" /> Add member
           </Button>
         </div>
 
@@ -683,33 +684,33 @@ function MemberActions({ index, count, onMove, onDelete }: MemberActionsProps) {
         type="button"
         variant="ghost"
         size="icon"
-        className="h-8 w-8"
+        className="size-8"
         aria-label={`Move member ${index + 1} up`}
         disabled={index === 0}
         onClick={() => onMove(index, -1)}
       >
-        <ArrowUp className="h-3.5 w-3.5" />
+        <ArrowUp className="size-3.5" />
       </Button>
       <Button
         type="button"
         variant="ghost"
         size="icon"
-        className="h-8 w-8"
+        className="size-8"
         aria-label={`Move member ${index + 1} down`}
         disabled={index === count - 1}
         onClick={() => onMove(index, 1)}
       >
-        <ArrowDown className="h-3.5 w-3.5" />
+        <ArrowDown className="size-3.5" />
       </Button>
       <Button
         type="button"
         variant="ghost"
         size="icon"
-        className="h-8 w-8 text-destructive"
+        className="size-8 text-destructive"
         aria-label={`Remove member ${index + 1}`}
         onClick={onDelete}
       >
-        <Trash2 className="h-3.5 w-3.5" />
+        <Trash2 className="size-3.5" />
       </Button>
     </div>
   );

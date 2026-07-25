@@ -69,7 +69,7 @@ export function DeleteConnectionDialog({
           >
             {isDeleting ? (
               <>
-                <Spinner className="mr-1.5 h-4 w-4" />
+                <Spinner className="mr-1.5 size-4" />
                 Deleting…
               </>
             ) : (

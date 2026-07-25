@@ -586,7 +586,7 @@ function AdvancedSchemaFieldDialog({
           size="icon-sm"
           aria-label={`Edit advanced schema for ${field.name || 'field'}`}
         >
-          <Settings2 className="h-3.5 w-3.5" />
+          <Settings2 className="size-3.5" />
         </Button>
       </DialogTrigger>
       <DialogContent className="max-h-[85vh] max-w-3xl overflow-y-auto">
@@ -787,7 +787,7 @@ function AdvancedSchemaFieldDialog({
                     size="sm"
                     onClick={addVisibleWhenRow}
                   >
-                    <Plus className="mr-2 h-4 w-4" />
+                    <Plus className="mr-2 size-4" />
                     Add visibility rule
                   </Button>
                 )
@@ -881,7 +881,7 @@ function AdvancedSchemaFieldDialog({
                               })
                             }
                           >
-                            <Trash2 className="h-3 w-3" />
+                            <Trash2 className="size-3" />
                           </Button>
                         )}
                       </div>
@@ -894,7 +894,7 @@ function AdvancedSchemaFieldDialog({
                       size="sm"
                       onClick={addVisibleWhenRow}
                     >
-                      <Plus className="mr-2 h-4 w-4" />
+                      <Plus className="mr-2 size-4" />
                       Add condition
                     </Button>
                   )}
@@ -1097,7 +1097,7 @@ export function SchemaFieldsEditor({
                       }
                       disabled={readOnly}
                     >
-                      <SelectTrigger className="h-7 border-0 focus:ring-0 focus:ring-offset-0">
+                      <SelectTrigger className="h-7 border-0 focus-visible:ring-0 focus-visible:ring-offset-0">
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
@@ -1209,9 +1209,9 @@ export function SchemaFieldsEditor({
                         variant="ghost"
                         size="sm"
                         onClick={() => handleRemove(index)}
-                        className="h-6 w-6 p-0"
+                        className="size-6 p-0"
                       >
-                        <Trash2 className="h-3 w-3" />
+                        <Trash2 className="size-3" />
                       </Button>
                     </td>
                   )}
@@ -1239,7 +1239,7 @@ export function SchemaFieldsEditor({
           onClick={handleAdd}
           className="w-full"
         >
-          <Plus className="mr-2 h-4 w-4" />
+          <Plus className="mr-2 size-4" />
           Add Field
         </Button>
       )}

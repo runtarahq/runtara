@@ -142,7 +142,7 @@ export function CompositeObjectEditor({
       {/* Header */}
       <div className="flex items-center justify-between border-b bg-muted/20 px-4 py-3">
         <div className="flex items-center gap-2">
-          <Braces className="h-4 w-4 text-green-600" />
+          <Braces className="size-4 text-green-600" />
           <span className="text-sm font-medium">{title}</span>
           <span className="text-xs text-muted-foreground">
             ({fieldNames.length} {fieldNames.length === 1 ? 'field' : 'fields'})
@@ -153,10 +153,10 @@ export function CompositeObjectEditor({
             type="button"
             variant="ghost"
             size="icon"
-            className="h-8 w-8"
+            className="size-8"
             onClick={onClose}
           >
-            <X className="h-4 w-4" />
+            <X className="size-4" />
           </Button>
         )}
       </div>
@@ -165,7 +165,7 @@ export function CompositeObjectEditor({
       <div className="flex-1 space-y-3 overflow-y-auto p-4">
         {fieldNames.length === 0 && !isAddingField && (
           <div className="py-8 text-center text-muted-foreground">
-            <Braces className="mx-auto mb-2 h-8 w-8 opacity-50" />
+            <Braces className="mx-auto mb-2 size-8 opacity-50" />
             <p className="text-sm">No fields defined yet.</p>
             <p className="text-xs">Click "Add Field" to get started.</p>
           </div>
@@ -261,7 +261,7 @@ export function CompositeObjectEditor({
             onClick={() => setIsAddingField(true)}
             disabled={isAddingField}
           >
-            <Plus className="mr-2 h-4 w-4" />
+            <Plus className="mr-2 size-4" />
             Add Field
           </Button>
         </div>

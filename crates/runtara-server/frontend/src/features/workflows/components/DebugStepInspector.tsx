@@ -38,9 +38,9 @@ function JsonBlock({
         onClick={() => setOpen(!open)}
       >
         {open ? (
-          <ChevronDown className="h-3 w-3" />
+          <ChevronDown className="size-3" />
         ) : (
-          <ChevronRight className="h-3 w-3" />
+          <ChevronRight className="size-3" />
         )}
         {open ? 'Collapse' : `Expand (${lines} lines)`}
       </button>
@@ -117,10 +117,10 @@ export function DebugStepInspector() {
           type="button"
           variant="ghost"
           size="icon"
-          className="h-6 w-6 shrink-0"
+          className="size-6 shrink-0"
           onClick={() => useWorkflowStore.getState().setSelectedNodeId(null)}
         >
-          <X className="h-3.5 w-3.5" />
+          <X className="size-3.5" />
         </Button>
       </div>
 

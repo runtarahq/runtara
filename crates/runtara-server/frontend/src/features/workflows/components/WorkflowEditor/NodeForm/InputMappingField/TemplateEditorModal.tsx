@@ -163,7 +163,7 @@ function getIconForType(type?: string, path?: string) {
   const lowerPath = path?.toLowerCase() || '';
 
   if (lowerType.includes('string') || lowerType.includes('text')) {
-    return <Icons.type className="h-3.5 w-3.5" />;
+    return <Icons.type className="size-3.5" />;
   }
   if (
     lowerType.includes('number') ||
@@ -171,19 +171,19 @@ function getIconForType(type?: string, path?: string) {
     lowerType.includes('double') ||
     lowerType.includes('float')
   ) {
-    return <Icons.hash className="h-3.5 w-3.5" />;
+    return <Icons.hash className="size-3.5" />;
   }
   if (lowerType.includes('boolean') || lowerType.includes('bool')) {
-    return <Icons.squareCheck className="h-3.5 w-3.5" />;
+    return <Icons.squareCheck className="size-3.5" />;
   }
   if (lowerType.includes('array') || lowerType.includes('list')) {
-    return <Icons.list className="h-3.5 w-3.5" />;
+    return <Icons.list className="size-3.5" />;
   }
   if (lowerType.includes('object')) {
-    return <Icons.braces className="h-3.5 w-3.5" />;
+    return <Icons.braces className="size-3.5" />;
   }
   if (lowerType.includes('reference')) {
-    return <Icons.gitBranch className="h-3.5 w-3.5" />;
+    return <Icons.gitBranch className="size-3.5" />;
   }
   if (
     lowerType.includes('date') ||
@@ -191,16 +191,16 @@ function getIconForType(type?: string, path?: string) {
     lowerPath.includes('date') ||
     lowerPath.includes('time')
   ) {
-    return <Icons.calendar className="h-3.5 w-3.5" />;
+    return <Icons.calendar className="size-3.5" />;
   }
   if (lowerPath.includes('email')) {
-    return <Icons.mail className="h-3.5 w-3.5" />;
+    return <Icons.mail className="size-3.5" />;
   }
   if (lowerPath.includes('name')) {
-    return <Icons.user className="h-3.5 w-3.5" />;
+    return <Icons.user className="size-3.5" />;
   }
 
-  return <Icons.variable className="h-3.5 w-3.5" />;
+  return <Icons.variable className="size-3.5" />;
 }
 
 /**
@@ -365,8 +365,8 @@ export function TemplateEditorModal({
         {/* Header */}
         <DialogHeader className="shrink-0 border-b border-border bg-muted/30 px-6 py-4">
           <div className="flex items-center gap-3">
-            <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary/10">
-              <Icons.code className="h-4 w-4 text-primary" />
+            <div className="flex size-9 items-center justify-center rounded-lg bg-primary/10">
+              <Icons.code className="size-4 text-primary" />
             </div>
             <div>
               <DialogTitle className="text-base">Template Editor</DialogTitle>
@@ -436,15 +436,15 @@ export function TemplateEditorModal({
             >
               <TabsList className="h-8">
                 <TabsTrigger value="editor" className="h-6 gap-1 px-2 text-xs">
-                  <Icons.code className="h-3 w-3" />
+                  <Icons.code className="size-3" />
                   Editor
                 </TabsTrigger>
                 <TabsTrigger value="preview" className="h-6 gap-1 px-2 text-xs">
-                  <Icons.eye className="h-3 w-3" />
+                  <Icons.eye className="size-3" />
                   Preview
                 </TabsTrigger>
                 <TabsTrigger value="split" className="h-6 gap-1 px-2 text-xs">
-                  <Icons.columns className="h-3 w-3" />
+                  <Icons.columns className="size-3" />
                   Split
                 </TabsTrigger>
               </TabsList>
@@ -457,7 +457,7 @@ export function TemplateEditorModal({
               className="h-8 gap-1 px-2 text-xs"
               onClick={() => setShowVariables(!showVariables)}
             >
-              <Icons.variable className="h-3.5 w-3.5" />
+              <Icons.variable className="size-3.5" />
               Variables
             </Button>
           </div>
@@ -490,12 +490,12 @@ export function TemplateEditorModal({
                   >
                     {copied ? (
                       <>
-                        <Icons.check className="mr-1 h-3 w-3" />
+                        <Icons.check className="mr-1 size-3" />
                         Copied!
                       </>
                     ) : (
                       <>
-                        <Icons.copy className="mr-1 h-3 w-3" />
+                        <Icons.copy className="mr-1 size-3" />
                         Copy
                       </>
                     )}
@@ -507,7 +507,7 @@ export function TemplateEditorModal({
                     ref={textareaRef}
                     value={localValue}
                     onChange={(e) => setLocalValue(e.target.value)}
-                    className="absolute inset-0 h-full w-full resize-none bg-background p-3 font-mono text-sm text-foreground focus:outline-none focus:ring-0"
+                    className="absolute inset-0 h-full w-full resize-none bg-background p-3 font-mono text-sm text-foreground focus:outline-none focus-visible:ring-0"
                     placeholder={placeholder}
                     spellCheck={false}
                   />
@@ -524,7 +524,7 @@ export function TemplateEditorModal({
               >
                 {/* Preview header */}
                 <div className="flex shrink-0 items-center gap-2 border-b border-green-100 bg-green-50 px-3 py-1.5 text-xs dark:border-green-900 dark:bg-green-950/30">
-                  <Icons.eye className="h-3 w-3 text-green-600 dark:text-green-400" />
+                  <Icons.eye className="size-3 text-green-600 dark:text-green-400" />
                   <span className="font-medium text-green-700 dark:text-green-400">
                     Preview with sample data
                   </span>
@@ -548,7 +548,7 @@ export function TemplateEditorModal({
             <div className="flex w-64 shrink-0 flex-col border-l border-border bg-muted/20">
               <div className="shrink-0 border-b border-border p-3">
                 <h3 className="mb-1 flex items-center gap-1.5 text-xs font-semibold text-foreground">
-                  <Icons.variable className="h-3.5 w-3.5" />
+                  <Icons.variable className="size-3.5" />
                   Template Variables
                 </h3>
                 <p className="text-2xs text-muted-foreground">
@@ -559,13 +559,13 @@ export function TemplateEditorModal({
                 {/* Search - only show if there are variables */}
                 {templateVariables.length > 0 && (
                   <div className="relative mt-2">
-                    <Icons.search className="absolute left-2 top-1/2 h-3 w-3 -translate-y-1/2 text-muted-foreground" />
+                    <Icons.search className="absolute left-2 top-1/2 size-3 -translate-y-1/2 text-muted-foreground" />
                     <input
                       type="text"
                       placeholder="Search..."
                       value={searchQuery}
                       onChange={(e) => setSearchQuery(e.target.value)}
-                      className="h-7 w-full rounded border border-input bg-background pl-7 pr-2 text-xs focus:outline-none focus:ring-1 focus:ring-ring"
+                      className="h-7 w-full rounded border border-input bg-background pl-7 pr-2 text-xs focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                     />
                   </div>
                 )}
@@ -576,7 +576,7 @@ export function TemplateEditorModal({
                   <div className="py-6 text-center text-xs text-muted-foreground">
                     {templateVariables.length === 0 ? (
                       <div className="space-y-2">
-                        <Icons.inbox className="mx-auto h-8 w-8 opacity-50" />
+                        <Icons.inbox className="mx-auto size-8 opacity-50" />
                         <p>No variables defined</p>
                         <p className="text-2xs">
                           Add variables using the

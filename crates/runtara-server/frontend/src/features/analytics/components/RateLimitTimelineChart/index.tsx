@@ -48,7 +48,7 @@ function TimelineSummary({ buckets }: { buckets: RateLimitTimelineBucket[] }) {
     <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
       <div className="flex items-center gap-3 rounded-lg bg-muted/30 p-3">
         <div className="rounded-full bg-info/10 p-2">
-          <Activity className="h-4 w-4 text-info" />
+          <Activity className="size-4 text-info" />
         </div>
         <div>
           <p className="text-xs text-muted-foreground">Requests</p>
@@ -60,7 +60,7 @@ function TimelineSummary({ buckets }: { buckets: RateLimitTimelineBucket[] }) {
 
       <div className="flex items-center gap-3 rounded-lg bg-muted/30 p-3">
         <div className="rounded-full bg-destructive/10 p-2">
-          <AlertCircle className="h-4 w-4 text-destructive" />
+          <AlertCircle className="size-4 text-destructive" />
         </div>
         <div>
           <p className="text-xs text-muted-foreground">Rate Limited</p>
@@ -72,7 +72,7 @@ function TimelineSummary({ buckets }: { buckets: RateLimitTimelineBucket[] }) {
 
       <div className="flex items-center gap-3 rounded-lg bg-muted/30 p-3">
         <div className="rounded-full bg-warning/10 p-2">
-          <RefreshCw className="h-4 w-4 text-warning" />
+          <RefreshCw className="size-4 text-warning" />
         </div>
         <div>
           <p className="text-xs text-muted-foreground">Retries</p>
@@ -84,7 +84,7 @@ function TimelineSummary({ buckets }: { buckets: RateLimitTimelineBucket[] }) {
 
       <div className="flex items-center gap-3 rounded-lg bg-muted/30 p-3">
         <div className="rounded-full bg-success/10 p-2">
-          <CheckCircle className="h-4 w-4 text-success" />
+          <CheckCircle className="size-4 text-success" />
         </div>
         <div>
           <p className="text-xs text-muted-foreground">Rate Limit %</p>

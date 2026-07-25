@@ -208,7 +208,7 @@ export function FormActions({
             onClick={onDelete}
             data-testid="node-form-delete"
           >
-            <Trash2 className="mr-2 h-4 w-4" />
+            <Trash2 className="mr-2 size-4" />
             Delete
           </Button>
           <Button
@@ -218,7 +218,7 @@ export function FormActions({
             onClick={onReset}
             data-testid="node-form-reset"
           >
-            <RotateCcw className="mr-2 h-4 w-4" />
+            <RotateCcw className="mr-2 size-4" />
             Reset
           </Button>
         </div>
@@ -257,7 +257,7 @@ export function FormActions({
             testHandler?.isPending
           }
         >
-          {testHandler?.isPending && <Spinner className="mr-2 h-4 w-4" />}
+          {testHandler?.isPending && <Spinner className="mr-2 size-4" />}
           Run Test
         </Button>
       </div>

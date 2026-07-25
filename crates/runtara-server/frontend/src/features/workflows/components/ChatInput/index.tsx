@@ -128,7 +128,7 @@ export function ChatInput({
 
       {isDisabled && (
         <div className="mb-2 flex items-center gap-1.5 text-xs text-muted-foreground">
-          <Spinner className="h-3 w-3" />
+          <Spinner className="size-3" />
           AI is thinking...
         </div>
       )}
@@ -152,9 +152,9 @@ export function ChatInput({
           onClick={handleSend}
           disabled={!canSend || isDone}
           size="icon"
-          className="h-10 w-10 shrink-0"
+          className="size-10 shrink-0"
         >
-          <Send className="h-4 w-4" />
+          <Send className="size-4" />
         </Button>
       </div>
     </div>

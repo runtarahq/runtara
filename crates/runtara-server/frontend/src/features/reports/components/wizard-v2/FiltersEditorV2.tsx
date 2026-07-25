@@ -17,6 +17,10 @@ import {
 import { Plus, Trash2 } from 'lucide-react';
 import { Schema } from '@/generated/RuntaraRuntimeApi';
 import {
+  GRID_COLS_TWO_FIELDS_100_ACTIONS,
+  GRID_COLS_TWO_FIELDS_ACTIONS,
+} from './grid-templates';
+import {
   ReportDefinition,
   ReportFilterDefinition,
   ReportFilterOptionsConfig,
@@ -108,7 +112,7 @@ export function FiltersEditorV2({
                     updateFilters(filters.filter((f) => f.id !== filter.id))
                   }
                 >
-                  <Trash2 className="h-3.5 w-3.5" />
+                  <Trash2 className="size-3.5" />
                 </Button>
               </CardHeader>
               <CardContent className="grid gap-3 pt-0">
@@ -216,7 +220,7 @@ export function FiltersEditorV2({
           variant="outline"
           onClick={() => updateFilters([...filters, newFilter()])}
         >
-          <Plus className="mr-1 h-3.5 w-3.5" /> Add filter
+          <Plus className="mr-1 size-3.5" /> Add filter
         </Button>
       </div>
     </div>
@@ -304,7 +308,7 @@ function StaticOptionsEditor({ values, onChange }: StaticOptionsEditorProps) {
           className="h-7"
           onClick={() => onChange([...values, { label: '', value: '' }])}
         >
-          <Plus className="mr-1 h-3 w-3" /> Add value
+          <Plus className="mr-1 size-3" /> Add value
         </Button>
       </div>
       {values.length === 0 ? (
@@ -314,7 +318,7 @@ function StaticOptionsEditor({ values, onChange }: StaticOptionsEditorProps) {
           {values.map((option, index) => (
             <div
               key={index}
-              className="grid grid-cols-[1fr_1fr_minmax(0,auto)] gap-2"
+              className={`grid ${GRID_COLS_TWO_FIELDS_ACTIONS} gap-2`}
             >
               <Input
                 value={String(option.value ?? '')}
@@ -344,10 +348,10 @@ function StaticOptionsEditor({ values, onChange }: StaticOptionsEditorProps) {
                 type="button"
                 variant="ghost"
                 size="icon"
-                className="h-8 w-8"
+                className="size-8"
                 onClick={() => onChange(values.filter((_, i) => i !== index))}
               >
-                <Trash2 className="h-3.5 w-3.5" />
+                <Trash2 className="size-3.5" />
               </Button>
             </div>
           ))}
@@ -480,7 +484,7 @@ function ObjectModelOptionsEditor({
             }
             disabled={otherFilterIds.length === 0}
           >
-            <Plus className="mr-1 h-3 w-3" /> Add filter
+            <Plus className="mr-1 size-3" /> Add filter
           </Button>
         </div>
         {dependsOn.length === 0 ? (
@@ -525,7 +529,7 @@ function ObjectModelOptionsEditor({
                   type="button"
                   variant="ghost"
                   size="icon"
-                  className="h-8 w-8"
+                  className="size-8"
                   onClick={() =>
                     onChange({
                       ...options,
@@ -533,7 +537,7 @@ function ObjectModelOptionsEditor({
                     })
                   }
                 >
-                  <Trash2 className="h-3.5 w-3.5" />
+                  <Trash2 className="size-3.5" />
                 </Button>
               </div>
             ))}
@@ -559,7 +563,7 @@ function ObjectModelOptionsEditor({
               })
             }
           >
-            <Plus className="mr-1 h-3 w-3" /> Add mapping
+            <Plus className="mr-1 size-3" /> Add mapping
           </Button>
         </div>
         {filterMappings.length === 0 ? (
@@ -571,7 +575,7 @@ function ObjectModelOptionsEditor({
             {filterMappings.map((mapping, index) => (
               <div
                 key={index}
-                className="grid grid-cols-[1fr_1fr_100px_minmax(0,auto)] gap-2"
+                className={`grid ${GRID_COLS_TWO_FIELDS_100_ACTIONS} gap-2`}
               >
                 <Select
                   value={mapping.filterId || ''}
@@ -643,7 +647,7 @@ function ObjectModelOptionsEditor({
                   type="button"
                   variant="ghost"
                   size="icon"
-                  className="h-8 w-8"
+                  className="size-8"
                   onClick={() =>
                     onChange({
                       ...options,
@@ -653,7 +657,7 @@ function ObjectModelOptionsEditor({
                     })
                   }
                 >
-                  <Trash2 className="h-3.5 w-3.5" />
+                  <Trash2 className="size-3.5" />
                 </Button>
               </div>
             ))}
@@ -692,7 +696,7 @@ function AppliesToEditor({ filter, blockIds, onChange }: AppliesToEditorProps) {
             })
           }
         >
-          <Plus className="mr-1 h-3 w-3" /> Add target
+          <Plus className="mr-1 size-3" /> Add target
         </Button>
       </div>
       {appliesTo.length === 0 ? (
@@ -705,7 +709,7 @@ function AppliesToEditor({ filter, blockIds, onChange }: AppliesToEditorProps) {
           {appliesTo.map((target: ReportFilterTarget, index: number) => (
             <div
               key={index}
-              className="grid grid-cols-[1fr_1fr_100px_minmax(0,auto)] gap-2"
+              className={`grid ${GRID_COLS_TWO_FIELDS_100_ACTIONS} gap-2`}
             >
               <Select
                 value={target.blockId ?? ''}
@@ -768,7 +772,7 @@ function AppliesToEditor({ filter, blockIds, onChange }: AppliesToEditorProps) {
                 type="button"
                 variant="ghost"
                 size="icon"
-                className="h-8 w-8"
+                className="size-8"
                 onClick={() =>
                   onChange({
                     ...filter,
@@ -776,7 +780,7 @@ function AppliesToEditor({ filter, blockIds, onChange }: AppliesToEditorProps) {
                   })
                 }
               >
-                <Trash2 className="h-3.5 w-3.5" />
+                <Trash2 className="size-3.5" />
               </Button>
             </div>
           ))}

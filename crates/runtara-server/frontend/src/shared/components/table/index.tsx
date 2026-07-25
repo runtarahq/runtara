@@ -255,11 +255,11 @@ export function DataTable<TData, TValue>({
                             )}
                             {canSort &&
                               (sorted === 'asc' ? (
-                                <ArrowUp className="h-3.5 w-3.5 text-primary" />
+                                <ArrowUp className="size-3.5 text-primary" />
                               ) : sorted === 'desc' ? (
-                                <ArrowDown className="h-3.5 w-3.5 text-primary" />
+                                <ArrowDown className="size-3.5 text-primary" />
                               ) : (
-                                <ArrowUpDown className="h-3.5 w-3.5 text-muted-foreground/40" />
+                                <ArrowUpDown className="size-3.5 text-muted-foreground/40" />
                               ))}
                           </div>
                         </div>

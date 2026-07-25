@@ -316,7 +316,7 @@ export function ReportBlockHost({
             {block.dataset && (
               <Link to={explorePath}>
                 <Button variant="outline" size="sm">
-                  <Compass className="mr-2 h-4 w-4" />
+                  <Compass className="mr-2 size-4" />
                   Explore this
                 </Button>
               </Link>
@@ -681,7 +681,7 @@ function BlockError({
         size="sm"
         onClick={onRetry}
       >
-        <RefreshCw className="mr-2 h-4 w-4" />
+        <RefreshCw className="mr-2 size-4" />
         Retry
       </Button>
     </div>

@@ -89,7 +89,7 @@ export function WorkflowCard({
           </button>
           {hasInputs && (
             <span className="inline-flex shrink-0 items-center gap-1 rounded border border-warning/30 bg-warning/10 px-1.5 py-0.5 text-3xs font-medium text-warning">
-              <AlertCircle className="h-2.5 w-2.5" />
+              <AlertCircle className="size-2.5" />
               Inputs
             </span>
           )}
@@ -115,9 +115,9 @@ export function WorkflowCard({
               disabled={isScheduling}
             >
               {isScheduling ? (
-                <Spinner className="h-4 w-4" />
+                <Spinner className="size-4" />
               ) : (
-                <Play className="h-4 w-4" />
+                <Play className="size-4" />
               )}
             </Button>
           </Can>
@@ -129,7 +129,7 @@ export function WorkflowCard({
               title="Chat"
               className="text-muted-foreground"
             >
-              <MessageSquare className="h-4 w-4" />
+              <MessageSquare className="size-4" />
             </Button>
           )}
           <Can permission="workflow:update">
@@ -140,7 +140,7 @@ export function WorkflowCard({
               title="Edit"
               className="text-muted-foreground"
             >
-              <Pencil className="h-4 w-4" />
+              <Pencil className="size-4" />
             </Button>
           </Can>
           {showMoveAction && onMoveToFolder && (
@@ -154,9 +154,9 @@ export function WorkflowCard({
                 disabled={isMoving}
               >
                 {isMoving ? (
-                  <Spinner className="h-4 w-4" />
+                  <Spinner className="size-4" />
                 ) : (
-                  <FolderInput className="h-4 w-4" />
+                  <FolderInput className="size-4" />
                 )}
               </Button>
             </Can>
@@ -171,9 +171,9 @@ export function WorkflowCard({
               disabled={isCloning}
             >
               {isCloning ? (
-                <Spinner className="h-4 w-4" />
+                <Spinner className="size-4" />
               ) : (
-                <Copy className="h-4 w-4" />
+                <Copy className="size-4" />
               )}
             </Button>
           </Can>
@@ -187,9 +187,9 @@ export function WorkflowCard({
               disabled={isDeleting}
             >
               {isDeleting ? (
-                <Spinner className="h-4 w-4" />
+                <Spinner className="size-4" />
               ) : (
-                <Trash2 className="h-4 w-4" />
+                <Trash2 className="size-4" />
               )}
             </Button>
           </Can>

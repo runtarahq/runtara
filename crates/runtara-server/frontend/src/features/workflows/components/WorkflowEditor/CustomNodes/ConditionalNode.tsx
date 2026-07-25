@@ -232,23 +232,17 @@ function ConditionalNodeComponent({
           id={SOURCE_TRUE}
           type="source"
           position={Position.Right}
-          className="!h-2 !w-2 !rounded-full !border-0 !bg-success"
-          style={{ top: '30%', right: '-4px', transform: 'translateY(-50%)' }}
+          className="!-right-1 !top-[30%] !h-2 !w-2 !-translate-y-1/2 !rounded-full !border-0 !bg-success"
           isConnectable={isConnectable && !isExecuting}
         />
         {!trueConnections.length && !isExecuting && (
           <div
-            className="pointer-events-none absolute flex items-center"
-            style={{
-              right: '-32px',
-              top: '30%',
-              transform: 'translateY(-50%)',
-              zIndex: CANVAS_Z.behindNode,
-            }}
+            className="pointer-events-none absolute -right-8 top-[30%] flex -translate-y-1/2 items-center"
+            style={{ zIndex: CANVAS_Z.behindNode }}
           >
             <div className="ml-0.5 h-px w-4 bg-border" />
             <Button
-              className="nodrag nopan pointer-events-auto h-3.5 w-3.5 rounded-full shadow-sm [&_svg]:size-1.5"
+              className="nodrag nopan pointer-events-auto size-3.5 rounded-full shadow-sm [&_svg]:size-1.5"
               variant="outline"
               size="icon"
               aria-label={`Add true branch from ${data.name || id || 'conditional'}`}
@@ -268,23 +262,17 @@ function ConditionalNodeComponent({
           id={SOURCE_FALSE}
           type="source"
           position={Position.Right}
-          className="!h-2 !w-2 !rounded-full !border-0 !bg-destructive"
-          style={{ top: '70%', right: '-4px', transform: 'translateY(-50%)' }}
+          className="!-right-1 !top-[70%] !h-2 !w-2 !-translate-y-1/2 !rounded-full !border-0 !bg-destructive"
           isConnectable={isConnectable && !isExecuting}
         />
         {!falseConnections.length && !isExecuting && (
           <div
-            className="pointer-events-none absolute flex items-center"
-            style={{
-              right: '-32px',
-              top: '70%',
-              transform: 'translateY(-50%)',
-              zIndex: CANVAS_Z.behindNode,
-            }}
+            className="pointer-events-none absolute -right-8 top-[70%] flex -translate-y-1/2 items-center"
+            style={{ zIndex: CANVAS_Z.behindNode }}
           >
             <div className="ml-0.5 h-px w-4 bg-border" />
             <Button
-              className="nodrag nopan pointer-events-auto h-3.5 w-3.5 rounded-full shadow-sm [&_svg]:size-1.5"
+              className="nodrag nopan pointer-events-auto size-3.5 rounded-full shadow-sm [&_svg]:size-1.5"
               variant="outline"
               size="icon"
               aria-label={`Add false branch from ${data.name || id || 'conditional'}`}

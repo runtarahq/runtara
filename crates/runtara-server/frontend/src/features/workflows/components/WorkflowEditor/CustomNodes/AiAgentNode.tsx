@@ -409,16 +409,16 @@ function AiAgentNodeComponent({
     switch (s) {
       case 'running':
       case 'compiling':
-        return <Spinner className="h-3 w-3 text-blue-500" />;
+        return <Spinner className="size-3 text-blue-500" />;
       case 'completed':
-        return <CheckCircle2 className="h-3 w-3 text-green-500" />;
+        return <CheckCircle2 className="size-3 text-green-500" />;
       case 'failed':
       case 'timeout':
-        return <XCircle className="h-3 w-3 text-red-500" />;
+        return <XCircle className="size-3 text-red-500" />;
       case 'queued':
-        return <Pause className="h-3 w-3 text-yellow-500" />;
+        return <Pause className="size-3 text-yellow-500" />;
       case 'cancelled':
-        return <XCircle className="h-3 w-3 text-muted-foreground" />;
+        return <XCircle className="size-3 text-muted-foreground" />;
       default:
         return null;
     }
@@ -443,7 +443,7 @@ function AiAgentNodeComponent({
           {/* Header */}
           <div className="flex items-center gap-1.5 border-b border-border/50 px-2 py-1.5">
             {data.stepType && (
-              <div className="flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-sm bg-muted/30 [&_svg]:h-2.5 [&_svg]:w-2.5">
+              <div className="flex size-4 flex-shrink-0 items-center justify-center rounded-sm bg-muted/30 [&_svg]:h-2.5 [&_svg]:w-2.5">
                 <StepTypeIcon type={data.stepType} />
               </div>
             )}
@@ -462,7 +462,7 @@ function AiAgentNodeComponent({
                 {modelName}
               </span>
             )}
-            <div className="flex h-3 w-3 flex-shrink-0 items-center justify-center">
+            <div className="flex size-3 flex-shrink-0 items-center justify-center">
               {renderStatusIcon()}
             </div>
           </div>
@@ -492,7 +492,7 @@ function AiAgentNodeComponent({
                 >
                   <div
                     className={cn(
-                      'h-1.5 w-1.5 flex-shrink-0 rounded-full',
+                      'size-1.5 flex-shrink-0 rounded-full',
                       'bg-violet-500 dark:bg-violet-400'
                     )}
                   />
@@ -516,12 +516,12 @@ function AiAgentNodeComponent({
                   setStepPickerMode('tool');
                 }}
               >
-                <div className="h-1.5 w-1.5 flex-shrink-0" />
+                <div className="size-1.5 flex-shrink-0" />
                 <span className="flex-1 text-3xs italic text-muted-foreground/60">
                   Add tool…
                 </span>
                 <Button
-                  className="pointer-events-none h-4 w-4 flex-shrink-0 rounded-full shadow-sm [&_svg]:size-2"
+                  className="pointer-events-none size-4 flex-shrink-0 rounded-full shadow-sm [&_svg]:size-2"
                   variant="outline"
                   size="icon"
                   tabIndex={-1}
@@ -548,7 +548,7 @@ function AiAgentNodeComponent({
               >
                 <div
                   className={cn(
-                    'h-1.5 w-1.5 flex-shrink-0 rounded-full',
+                    'size-1.5 flex-shrink-0 rounded-full',
                     'bg-blue-500 dark:bg-blue-400'
                   )}
                 />
@@ -569,12 +569,12 @@ function AiAgentNodeComponent({
                   setStepPickerMode('memory');
                 }}
               >
-                <div className="h-1.5 w-1.5 flex-shrink-0" />
+                <div className="size-1.5 flex-shrink-0" />
                 <span className="flex-1 text-3xs italic text-muted-foreground/60">
                   Add memory…
                 </span>
                 <Button
-                  className="pointer-events-none h-4 w-4 flex-shrink-0 rounded-full shadow-sm [&_svg]:size-2"
+                  className="pointer-events-none size-4 flex-shrink-0 rounded-full shadow-sm [&_svg]:size-2"
                   variant="outline"
                   size="icon"
                   tabIndex={-1}

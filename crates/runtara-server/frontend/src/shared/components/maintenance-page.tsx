@@ -29,7 +29,7 @@ export function MaintenancePage() {
       <div className="relative z-10 w-full max-w-lg text-center">
         {/* Logo */}
         <div className="mb-10 flex justify-center">
-          <img src={logoIcon} alt="Runtara" className="h-12 w-12" />
+          <img src={logoIcon} alt="Runtara" className="size-12" />
         </div>
 
         {/* Card */}
@@ -39,11 +39,11 @@ export function MaintenancePage() {
 
           <div className="px-8 pb-8 pt-10">
             {/* Animated pulse indicator */}
-            <div className="mx-auto mb-8 flex h-14 w-14 items-center justify-center">
-              <span className="absolute inline-flex h-10 w-10 animate-ping rounded-full bg-blue-500/10" />
-              <span className="relative inline-flex h-10 w-10 items-center justify-center rounded-full border border-blue-200 bg-blue-50">
+            <div className="mx-auto mb-8 flex size-14 items-center justify-center">
+              <span className="absolute inline-flex size-10 animate-ping rounded-full bg-blue-500/10" />
+              <span className="relative inline-flex size-10 items-center justify-center rounded-full border border-blue-200 bg-blue-50">
                 <svg
-                  className="h-5 w-5 text-blue-500"
+                  className="size-5 text-blue-500"
                   viewBox="0 0 24 24"
                   fill="none"
                   stroke="currentColor"
@@ -67,9 +67,9 @@ export function MaintenancePage() {
 
             {/* Status row */}
             <div className="mt-8 flex items-center justify-center gap-2 text-sm text-muted-foreground">
-              <span className="relative flex h-2 w-2">
+              <span className="relative flex size-2">
                 <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-warning opacity-75" />
-                <span className="relative inline-flex h-2 w-2 rounded-full bg-warning" />
+                <span className="relative inline-flex size-2 rounded-full bg-warning" />
               </span>
               Maintenance in progress
             </div>
@@ -85,7 +85,7 @@ export function MaintenancePage() {
               {checking ? (
                 <>
                   <svg
-                    className="h-4 w-4 animate-spin"
+                    className="size-4 animate-spin"
                     viewBox="0 0 24 24"
                     fill="none"
                   >

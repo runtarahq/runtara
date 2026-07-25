@@ -47,11 +47,11 @@ export function FilterPopover({
           size="icon"
           aria-label={`${title}${active ? ` (${activeCount} active)` : ''}`}
           className={cn(
-            'relative h-9 w-9 shrink-0',
+            'relative size-9 shrink-0',
             active && 'border-primary/40 text-primary'
           )}
         >
-          <Filter className="h-4 w-4" />
+          <Filter className="size-4" />
           {active && (
             <span className="absolute -right-1.5 -top-1.5 flex h-4 min-w-[16px] items-center justify-center rounded-full bg-primary px-1 text-3xs font-semibold leading-none text-primary-foreground">
               {activeCount}

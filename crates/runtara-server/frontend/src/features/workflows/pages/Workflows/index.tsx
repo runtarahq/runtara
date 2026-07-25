@@ -192,7 +192,7 @@ export function Workflows() {
         <Can permission="workflow:create">
           <Link to="/workflows/create">
             <Button disabled={isError}>
-              <PlusIcon className="mr-2 h-4 w-4" />
+              <PlusIcon className="mr-2 size-4" />
               New workflow
             </Button>
           </Link>

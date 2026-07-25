@@ -330,7 +330,7 @@ export function FinishStepField({ name }: FinishStepFieldProps) {
                                 title={`${typeInfo.full} — click to change`}
                               >
                                 <span>{typeInfo.short}</span>
-                                <ChevronDown className="h-2.5 w-2.5" />
+                                <ChevronDown className="size-2.5" />
                               </button>
                             </DropdownMenuTrigger>
                             <DropdownMenuContent align="start" className="w-32">
@@ -504,7 +504,7 @@ export function FinishStepField({ name }: FinishStepFieldProps) {
                       onClick={() => remove(index)}
                       disabled={isRequired}
                     >
-                      <Trash2 className="h-3 w-3" />
+                      <Trash2 className="size-3" />
                     </Button>
                   </td>
                 </tr>
@@ -537,7 +537,7 @@ export function FinishStepField({ name }: FinishStepFieldProps) {
                 variant="outline"
                 className="flex-1"
               >
-                <Plus className="mr-2 h-4 w-4" />
+                <Plus className="mr-2 size-4" />
                 Add optional field
               </Button>
             </DropdownMenuTrigger>
@@ -582,7 +582,7 @@ export function FinishStepField({ name }: FinishStepFieldProps) {
               })
             }
           >
-            <Plus className="mr-2 h-4 w-4" />
+            <Plus className="mr-2 size-4" />
             Add custom output
           </Button>
         )}

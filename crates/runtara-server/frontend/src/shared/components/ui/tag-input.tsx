@@ -54,9 +54,9 @@ export function TagInput({
             type="button"
             onClick={() => removeTag(tag)}
             disabled={disabled}
-            className="inline-flex h-4 w-4 items-center justify-center rounded-sm hover:bg-muted-foreground/20"
+            className="inline-flex size-4 items-center justify-center rounded-sm hover:bg-muted-foreground/20"
           >
-            <X className="h-3 w-3" />
+            <X className="size-3" />
           </button>
         </span>
       ))}

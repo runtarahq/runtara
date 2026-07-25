@@ -19,6 +19,7 @@ import {
 import { usePageTitle } from '@/shared/hooks/usePageTitle';
 import React, { useEffect, useRef, useState } from 'react';
 import { Input } from '@/shared/components/ui/input';
+import { FILTER_TRIGGER_WIDTH_CLASS } from '@/shared/components/date-range-selector';
 import {
   Select,
   SelectContent,
@@ -46,17 +47,17 @@ import {
 const getLogLevelIcon = (level: string) => {
   switch (level?.toLowerCase()) {
     case 'error':
-      return <AlertCircle className="h-4 w-4 text-destructive" />;
+      return <AlertCircle className="size-4 text-destructive" />;
     case 'systemerror':
-      return <AlertCircle className="h-4 w-4 text-destructive" />;
+      return <AlertCircle className="size-4 text-destructive" />;
     case 'warning':
     case 'warn':
-      return <AlertTriangle className="h-4 w-4 text-warning" />;
+      return <AlertTriangle className="size-4 text-warning" />;
     case 'success':
     case 'info':
-      return <CheckCircle className="h-4 w-4 text-success" />;
+      return <CheckCircle className="size-4 text-success" />;
     default:
-      return <Info className="h-4 w-4 text-muted-foreground" />;
+      return <Info className="size-4 text-muted-foreground" />;
   }
 };
 
@@ -391,7 +392,7 @@ export function WorkflowLogs() {
             className="rounded-full hover:bg-muted"
             onClick={handleBack}
           >
-            <ChevronLeft className="h-5 w-5" />
+            <ChevronLeft className="size-5" />
           </Button>
           <div>
             <h1 className="text-2xl font-bold">Activity Log</h1>
@@ -406,7 +407,7 @@ export function WorkflowLogs() {
       <div className="mb-4 rounded-lg border bg-card p-4">
         <div className="flex gap-3">
           <div className="relative flex-1">
-            <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 transform text-muted-foreground" />
+            <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 transform text-muted-foreground" />
             <Input
               placeholder="Search logs..."
               value={searchInput}
@@ -421,8 +422,8 @@ export function WorkflowLogs() {
               setPageIndex(0); // Reset to first page on filter change
             }}
           >
-            <SelectTrigger className="w-[180px]">
-              <Filter className="mr-2 h-4 w-4" />
+            <SelectTrigger className={FILTER_TRIGGER_WIDTH_CLASS}>
+              <Filter className="mr-2 size-4" />
               <SelectValue placeholder="All logs" />
             </SelectTrigger>
             <SelectContent>
@@ -535,9 +536,9 @@ export function WorkflowLogs() {
                               } hover:text-foreground`}
                             >
                               {expandedContextIds.has(log.id) ? (
-                                <ChevronDown className="mr-1 h-3 w-3" />
+                                <ChevronDown className="mr-1 size-3" />
                               ) : (
-                                <ChevronRight className="mr-1 h-3 w-3" />
+                                <ChevronRight className="mr-1 size-3" />
                               )}
                               Context Data
                               {objectContainsSearchTerm(
@@ -634,7 +635,7 @@ export function WorkflowLogs() {
         ) : (
           /* Empty State */
           <div className="p-16 text-center">
-            <Info className="mx-auto mb-4 h-12 w-12 text-muted-foreground" />
+            <Info className="mx-auto mb-4 size-12 text-muted-foreground" />
             <h3 className="mb-2 text-lg font-semibold">No logs found</h3>
             <p className="text-sm text-muted-foreground">
               {searchTerm || logLevelFilter !== 'all'

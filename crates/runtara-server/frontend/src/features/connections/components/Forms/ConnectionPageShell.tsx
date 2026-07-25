@@ -53,7 +53,7 @@ export function ConnectionPageShell({
                 aria-label="Back to connections"
                 className="-ml-1.5 rounded-lg p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
               >
-                <ArrowLeft className="h-5 w-5" />
+                <ArrowLeft className="size-5" />
               </Link>
               <div className="flex min-w-0 items-center gap-3">
                 {integrationIcon}
@@ -69,11 +69,11 @@ export function ConnectionPageShell({
                         </span>
                       )}
                       {integrationName && integrationCategory && (
-                        <span className="h-1 w-1 rounded-full bg-border" />
+                        <span className="size-1 rounded-full bg-border" />
                       )}
                       {integrationCategory && (
                         <span className="inline-flex items-center gap-1 rounded bg-muted px-1.5 py-0.5 text-xs text-muted-foreground">
-                          <CategoryIcon className="h-3 w-3" />
+                          <CategoryIcon className="size-3" />
                           {getCategoryLabel(integrationCategory)}
                         </span>
                       )}

@@ -2162,10 +2162,9 @@ function BranchLaneGroups({
             <div className="relative flex min-h-10 flex-col items-start">
               <span
                 className={cn(
-                  'relative ml-1 mt-2 inline-flex items-center rounded-sm bg-background px-0.5 py-1 text-3xs font-semibold uppercase leading-none text-muted-foreground',
+                  'relative ml-1 mt-2 inline-flex items-center rounded-sm bg-background px-0.5 py-1 text-3xs font-semibold uppercase leading-none text-muted-foreground [writing-mode:vertical-rl]',
                   isErrorRoute && 'text-destructive'
                 )}
-                style={{ writingMode: 'vertical-rl' }}
               >
                 {edgeLabel}
               </span>

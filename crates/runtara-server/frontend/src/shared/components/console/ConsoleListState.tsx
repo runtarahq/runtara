@@ -62,7 +62,7 @@ export function ConsoleErrorState({
         className
       )}
     >
-      <Icons.warning className="mb-4 h-10 w-10 text-destructive" />
+      <Icons.warning className="mb-4 size-10 text-destructive" />
       <p className="text-base font-semibold text-foreground">
         {isNetworkError ? 'Unable to connect to backend' : 'An error occurred'}
       </p>
@@ -106,7 +106,7 @@ export function ConsoleEmptyState({
         className
       )}
     >
-      {icon ?? <Icons.inbox className="mb-4 h-10 w-10 text-muted-foreground" />}
+      {icon ?? <Icons.inbox className="mb-4 size-10 text-muted-foreground" />}
       <p className="text-base font-semibold text-foreground">{title}</p>
       {description ? (
         <p className="mt-1 text-sm text-muted-foreground">{description}</p>

@@ -161,7 +161,7 @@ export function HistoryPanelContent({ workflowId }: HistoryPanelContentProps) {
   if (!data || data.length === 0) {
     return (
       <div className="flex flex-1 flex-col items-center justify-center text-muted-foreground">
-        <Icons.inbox className="mb-2 h-8 w-8 opacity-60" />
+        <Icons.inbox className="mb-2 size-8 opacity-60" />
         <p className="text-sm font-medium">No executions yet</p>
         <p className="text-xs">Run the workflow to see history here</p>
       </div>
@@ -186,7 +186,7 @@ export function HistoryPanelContent({ workflowId }: HistoryPanelContentProps) {
             className="flex items-center gap-1 text-xs text-primary hover:underline"
           >
             View all
-            <ExternalLink className="h-3 w-3" />
+            <ExternalLink className="size-3" />
           </Link>
         </div>
         <div className="flex-1 overflow-y-auto">
@@ -226,7 +226,7 @@ export function HistoryPanelContent({ workflowId }: HistoryPanelContentProps) {
                   {instance.status === 'suspended' && (
                     <button
                       type="button"
-                      className="inline-flex h-5 w-5 items-center justify-center rounded text-warning hover:bg-warning/10 hover:text-warning"
+                      className="inline-flex size-5 items-center justify-center rounded text-warning hover:bg-warning/10 hover:text-warning"
                       title="Reattach — resume debugging"
                       onClick={(e) => {
                         e.stopPropagation();
@@ -241,12 +241,12 @@ export function HistoryPanelContent({ workflowId }: HistoryPanelContentProps) {
                         }
                       }}
                     >
-                      <Bug className="h-3 w-3" />
+                      <Bug className="size-3" />
                     </button>
                   )}
                   <Badge variant={statusInfo.variant} className="text-3xs">
                     {isActive && statusInfo.showSpinner && (
-                      <Spinner className="mr-1 h-2.5 w-2.5" />
+                      <Spinner className="mr-1 size-2.5" />
                     )}
                     {statusInfo.text}
                   </Badge>
@@ -263,7 +263,7 @@ export function HistoryPanelContent({ workflowId }: HistoryPanelContentProps) {
         <div className="flex items-center justify-between border-b bg-muted/20 px-3 py-1.5">
           <div className="flex items-center gap-2">
             <div className="rounded bg-warning/10 p-1">
-              <Zap className="h-3.5 w-3.5 text-warning" />
+              <Zap className="size-3.5 text-warning" />
             </div>
             <span className="text-xs font-medium">Events</span>
             {stepSummaries.length > 0 && (
@@ -285,11 +285,11 @@ export function HistoryPanelContent({ workflowId }: HistoryPanelContentProps) {
         <div className="flex-1 overflow-y-auto">
           {stepsLoading && stepSummaries.length === 0 ? (
             <div className="flex h-full items-center justify-center">
-              <Spinner className="h-5 w-5 text-muted-foreground" />
+              <Spinner className="size-5 text-muted-foreground" />
             </div>
           ) : stepSummaries.length === 0 ? (
             <div className="flex h-full flex-col items-center justify-center text-center">
-              <ChevronRight className="mb-1 h-6 w-6 text-muted-foreground/30" />
+              <ChevronRight className="mb-1 size-6 text-muted-foreground/30" />
               <p className="text-xs text-muted-foreground">No events yet</p>
             </div>
           ) : (
@@ -385,9 +385,9 @@ function EventRow({ step, sequence }: { step: StepSummary; sequence: number }) {
         <td className="px-3 py-1.5 text-muted-foreground">
           <div className="flex items-center gap-1">
             {isExpanded ? (
-              <ChevronDown className="h-3 w-3" />
+              <ChevronDown className="size-3" />
             ) : (
-              <ChevronRight className="h-3 w-3" />
+              <ChevronRight className="size-3" />
             )}
             {sequence}
           </div>
@@ -404,7 +404,7 @@ function EventRow({ step, sequence }: { step: StepSummary; sequence: number }) {
         </td>
         <td className="px-3 py-1.5 text-right">
           <Badge variant={getBadgeVariant()} className="px-1.5 py-0 text-3xs">
-            {isRunning && <Spinner className="mr-0.5 h-2.5 w-2.5" />}
+            {isRunning && <Spinner className="mr-0.5 size-2.5" />}
             {getStatusLabel()}
           </Badge>
         </td>
@@ -423,7 +423,7 @@ function EventRow({ step, sequence }: { step: StepSummary; sequence: number }) {
                 <div>
                   <div className="mb-1 flex items-center justify-between">
                     <span className="flex items-center gap-1 text-3xs font-semibold text-muted-foreground">
-                      <Database className="h-2.5 w-2.5" />
+                      <Database className="size-2.5" />
                       Inputs
                     </span>
                     <Button
@@ -435,7 +435,7 @@ function EventRow({ step, sequence }: { step: StepSummary; sequence: number }) {
                         handleCopy(step.inputs, 'Inputs');
                       }}
                     >
-                      <Copy className="mr-0.5 h-2.5 w-2.5" />
+                      <Copy className="mr-0.5 size-2.5" />
                       Copy
                     </Button>
                   </div>
@@ -451,7 +451,7 @@ function EventRow({ step, sequence }: { step: StepSummary; sequence: number }) {
                 <div>
                   <div className="mb-1 flex items-center justify-between">
                     <span className="flex items-center gap-1 text-3xs font-semibold text-muted-foreground">
-                      <Sparkles className="h-2.5 w-2.5" />
+                      <Sparkles className="size-2.5" />
                       Outputs
                     </span>
                     <Button
@@ -463,7 +463,7 @@ function EventRow({ step, sequence }: { step: StepSummary; sequence: number }) {
                         handleCopy(step.outputs, 'Outputs');
                       }}
                     >
-                      <Copy className="mr-0.5 h-2.5 w-2.5" />
+                      <Copy className="mr-0.5 size-2.5" />
                       Copy
                     </Button>
                   </div>

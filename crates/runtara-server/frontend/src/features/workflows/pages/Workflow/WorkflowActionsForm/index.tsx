@@ -152,7 +152,7 @@ export function WorkflowActionsForm(props: Props) {
             <input
               type="file"
               ref={fileInputRef}
-              style={{ display: 'none' }}
+              className="hidden"
               accept=".json"
               onChange={handleFileChange}
             />
@@ -165,11 +165,11 @@ export function WorkflowActionsForm(props: Props) {
               <>
                 <div className="flex items-center gap-2 px-1">
                   {compilationStatus.status === 'failed' ? (
-                    <XCircle className="h-3.5 w-3.5 text-destructive" />
+                    <XCircle className="size-3.5 text-destructive" />
                   ) : compilationStatus.status === 'success' ? (
-                    <CheckCircle2 className="h-3.5 w-3.5 text-success" />
+                    <CheckCircle2 className="size-3.5 text-success" />
                   ) : (
-                    <Spinner className="h-3.5 w-3.5 text-info" />
+                    <Spinner className="size-3.5 text-info" />
                   )}
                   <span className="text-xs font-medium text-foreground">
                     {compilationStatus.status === 'success'
@@ -217,9 +217,9 @@ export function WorkflowActionsForm(props: Props) {
               <>
                 <div className="flex items-center gap-2 px-1">
                   {isSuspended ? (
-                    <Pause className="h-3.5 w-3.5 text-warning" />
+                    <Pause className="size-3.5 text-warning" />
                   ) : (
-                    <Lock className="h-3.5 w-3.5 text-muted-foreground" />
+                    <Lock className="size-3.5 text-muted-foreground" />
                   )}
                   <span className="text-xs font-medium text-foreground">
                     {isSuspended
@@ -262,7 +262,7 @@ export function WorkflowActionsForm(props: Props) {
                     : 'Start workflow'
                 }
               >
-                <Play className="h-4 w-4" />
+                <Play className="size-4" />
               </Button>
 
               {/* Debug execute button (server-side with breakpoints) */}
@@ -283,7 +283,7 @@ export function WorkflowActionsForm(props: Props) {
                       : 'Debug workflow (pause at breakpoints)'
                 }
               >
-                <Bug className="h-4 w-4" />
+                <Bug className="size-4" />
               </Button>
 
               {/* Resume button - only show when suspended at breakpoint */}
@@ -297,7 +297,7 @@ export function WorkflowActionsForm(props: Props) {
                   onClick={onResume}
                   title="Continue execution to next breakpoint"
                 >
-                  <SkipForward className="h-4 w-4" />
+                  <SkipForward className="size-4" />
                 </Button>
               )}
 
@@ -312,7 +312,7 @@ export function WorkflowActionsForm(props: Props) {
                   onClick={onStop}
                   title="Stop execution"
                 >
-                  <Square className="h-3.5 w-3.5" />
+                  <Square className="size-3.5" />
                 </Button>
               )}
             </Can>
@@ -327,7 +327,7 @@ export function WorkflowActionsForm(props: Props) {
                 onClick={onViewExecutionDetails}
                 title="View execution details"
               >
-                <Eye className="h-4 w-4" />
+                <Eye className="size-4" />
               </Button>
             )}
 
@@ -341,7 +341,7 @@ export function WorkflowActionsForm(props: Props) {
                 onClick={onClearExecution}
                 title="Clear execution results"
               >
-                <X className="h-4 w-4" />
+                <X className="size-4" />
               </Button>
             )}
 
@@ -358,7 +358,7 @@ export function WorkflowActionsForm(props: Props) {
                 title={isDirty ? 'Save changes' : 'No changes to save'}
                 onClick={form.handleSubmit(onSubmit)}
               >
-                <Save className="h-4 w-4" />
+                <Save className="size-4" />
               </Button>
             </Can>
 
@@ -374,7 +374,7 @@ export function WorkflowActionsForm(props: Props) {
               onClick={onExportJSON}
               title="Export workflow"
             >
-              <Upload className="h-4 w-4" />
+              <Upload className="size-4" />
             </Button>
 
             {/* Import button */}
@@ -387,7 +387,7 @@ export function WorkflowActionsForm(props: Props) {
               onClick={handleImportClick}
               title="Import workflow"
             >
-              <Download className="h-4 w-4" />
+              <Download className="size-4" />
             </Button>
 
             <div className="mx-1 h-4 w-px bg-border" />
@@ -402,7 +402,7 @@ export function WorkflowActionsForm(props: Props) {
               onClick={onAddNote}
               title="Add note"
             >
-              <StickyNote className="h-4 w-4" />
+              <StickyNote className="size-4" />
             </Button>
 
             {/* Auto-layout button */}
@@ -415,7 +415,7 @@ export function WorkflowActionsForm(props: Props) {
               onClick={onAutoLayout}
               title="Auto-layout"
             >
-              <Network className="h-4 w-4" />
+              <Network className="size-4" />
             </Button>
           </>
         )}

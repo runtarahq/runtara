@@ -36,9 +36,9 @@ export function ValidationMessageItem({
       {/* Severity Icon */}
       <div className="mt-0.5 shrink-0">
         {isError ? (
-          <AlertCircle className="h-4 w-4 text-destructive" />
+          <AlertCircle className="size-4 text-destructive" />
         ) : (
-          <AlertTriangle className="h-4 w-4 text-warning" />
+          <AlertTriangle className="size-4 text-warning" />
         )}
       </div>
 
@@ -74,14 +74,14 @@ export function ValidationMessageItem({
         <Button
           variant="ghost"
           size="icon"
-          className="h-6 w-6 shrink-0 opacity-0 transition-opacity group-hover:opacity-100"
+          className="size-6 shrink-0 opacity-0 transition-opacity group-hover:opacity-100"
           onClick={(e) => {
             e.stopPropagation();
             onNavigate(message.stepId!);
           }}
           title="Go to step"
         >
-          <ArrowRight className="h-3 w-3" />
+          <ArrowRight className="size-3" />
         </Button>
       )}
     </div>

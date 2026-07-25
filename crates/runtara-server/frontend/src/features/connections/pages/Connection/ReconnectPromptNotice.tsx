@@ -26,7 +26,7 @@ export function ReconnectPromptNotice({
       role="alert"
     >
       <div className="flex items-start gap-3">
-        <RefreshCw className="mt-0.5 h-5 w-5 shrink-0" />
+        <RefreshCw className="mt-0.5 size-5 shrink-0" />
         <div className="min-w-0 flex-1 space-y-2">
           <div>
             <p className="font-medium">Saved — reconnection needed</p>
@@ -43,9 +43,9 @@ export function ReconnectPromptNotice({
               disabled={isReconnecting}
             >
               {isReconnecting ? (
-                <Spinner className="mr-1.5 h-4 w-4" />
+                <Spinner className="mr-1.5 size-4" />
               ) : (
-                <RefreshCw className="mr-1.5 h-4 w-4" />
+                <RefreshCw className="mr-1.5 size-4" />
               )}
               Reconnect now
             </Button>

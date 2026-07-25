@@ -50,7 +50,7 @@ export function BlockHostInEdit({
               aria-label="Drag block"
               {...dragHandleProps}
             >
-              <GripVertical className="h-3.5 w-3.5" />
+              <GripVertical className="size-3.5" />
             </button>
           ) : null}
           <div className="min-w-0">
@@ -71,7 +71,7 @@ export function BlockHostInEdit({
             aria-label="Edit block"
             onClick={onEdit}
           >
-            <Pencil className="h-3.5 w-3.5" />
+            <Pencil className="size-3.5" />
           </Button>
           <Button
             type="button"
@@ -81,7 +81,7 @@ export function BlockHostInEdit({
             title="Remove block"
             onClick={onDelete}
           >
-            <Trash2 className="h-3.5 w-3.5" />
+            <Trash2 className="size-3.5" />
           </Button>
         </div>
       </div>

@@ -172,9 +172,9 @@ export function ConnectionStatusCard({
       className={!isConnected ? 'shadow-sm shadow-primary/20' : undefined}
     >
       {isReconnecting ? (
-        <Spinner className="mr-1.5 h-4 w-4" />
+        <Spinner className="mr-1.5 size-4" />
       ) : (
-        <RefreshCw className="mr-1.5 h-4 w-4" />
+        <RefreshCw className="mr-1.5 size-4" />
       )}
       {reconnectLabel}
     </Button>

@@ -161,7 +161,7 @@ export function CustomFieldRow({
               className="flex cursor-pointer items-center gap-1 rounded bg-muted/40 px-1.5 py-0.5 font-mono text-2xs text-muted-foreground transition-colors hover:bg-muted/60"
             >
               <span>{getTypeLabel()}</span>
-              <Icons.chevronDown className="h-3 w-3" />
+              <Icons.chevronDown className="size-3" />
             </button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="start">
@@ -242,7 +242,7 @@ export function CustomFieldRow({
           onClick={onRemove}
           title="Remove custom field"
         >
-          <Icons.remove className="h-3.5 w-3.5" />
+          <Icons.remove className="size-3.5" />
         </Button>
       </TableCell>
     </TableRow>

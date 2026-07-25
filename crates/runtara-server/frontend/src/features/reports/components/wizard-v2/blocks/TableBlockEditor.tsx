@@ -11,6 +11,10 @@ import {
 import { Plus, Trash2 } from 'lucide-react';
 import { Schema } from '@/generated/RuntaraRuntimeApi';
 import {
+  GRID_COLS_TWO_FIELDS_ACTIONS,
+  GRID_COLS_TWO_FIELDS_TWO_120,
+} from '../grid-templates';
+import {
   ReportBlockDefinition,
   ReportTableColumn,
   ReportTableColumnType,
@@ -95,7 +99,7 @@ export function TableBlockEditor({
             onClick={addColumn}
             disabled={availableFields.length === 0}
           >
-            <Plus className="mr-1 h-3 w-3" /> Add column
+            <Plus className="mr-1 size-3" /> Add column
           </Button>
         </div>
         {columns.length === 0 ? (
@@ -111,7 +115,9 @@ export function TableBlockEditor({
                   key={`${column.field}_${index}`}
                   className="grid gap-2 rounded border p-2"
                 >
-                  <div className="grid grid-cols-[1fr_1fr_120px_120px_minmax(0,auto)] items-center gap-2">
+                  <div
+                    className={`grid ${GRID_COLS_TWO_FIELDS_TWO_120} items-center gap-2`}
+                  >
                     <Select
                       value={column.field}
                       onValueChange={(value) =>
@@ -220,12 +226,12 @@ export function TableBlockEditor({
                       type="button"
                       variant="ghost"
                       size="icon"
-                      className="h-8 w-8"
+                      className="size-8"
                       onClick={() =>
                         updateColumns(columns.filter((_, i) => i !== index))
                       }
                     >
-                      <Trash2 className="h-3.5 w-3.5" />
+                      <Trash2 className="size-3.5" />
                     </Button>
                   </div>
                   {type === 'workflow_button' && column.workflowAction ? (
@@ -317,7 +323,7 @@ export function TableBlockEditor({
                 }))
               }
             >
-              <Plus className="mr-1 h-3 w-3" /> Add bulk action
+              <Plus className="mr-1 size-3" /> Add bulk action
             </Button>
           </div>
         </div>
@@ -333,7 +339,9 @@ export function TableBlockEditor({
               key={interaction.id || index}
               className="grid gap-2 rounded border p-2"
             >
-              <div className="grid grid-cols-[1fr_1fr_minmax(0,auto)] items-center gap-2">
+              <div
+                className={`grid ${GRID_COLS_TWO_FIELDS_ACTIONS} items-center gap-2`}
+              >
                 <Input
                   value={interaction.id || ''}
                   placeholder="ID"
@@ -378,7 +386,7 @@ export function TableBlockEditor({
                   type="button"
                   variant="ghost"
                   size="icon"
-                  className="h-8 w-8"
+                  className="size-8"
                   onClick={() =>
                     onChange({
                       ...block,
@@ -388,7 +396,7 @@ export function TableBlockEditor({
                     })
                   }
                 >
-                  <Trash2 className="h-3.5 w-3.5" />
+                  <Trash2 className="size-3.5" />
                 </Button>
               </div>
               <InteractionActionsList
@@ -427,7 +435,7 @@ export function TableBlockEditor({
                 })
               }
             >
-              <Plus className="mr-1 h-3 w-3" /> Add interaction
+              <Plus className="mr-1 size-3" /> Add interaction
             </Button>
           </div>
         </div>

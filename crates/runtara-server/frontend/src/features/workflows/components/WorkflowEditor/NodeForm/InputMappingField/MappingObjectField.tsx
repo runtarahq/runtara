@@ -238,7 +238,7 @@ export function MappingObjectField({
               className="w-full border-dashed"
               onClick={() => setIsAddingField(true)}
             >
-              <Plus className="mr-1.5 h-3.5 w-3.5" />
+              <Plus className="mr-1.5 size-3.5" />
               Add Field
             </Button>
           )}
@@ -486,7 +486,7 @@ function MappingObjectRow({
           disabled={disabled}
           title="Remove field"
         >
-          <X className="h-3.5 w-3.5" />
+          <X className="size-3.5" />
         </Button>
       </div>
 

@@ -323,7 +323,7 @@ function FieldRow({
           )}
           {helpText && (
             <Icons.info
-              className="h-3 w-3 shrink-0 cursor-help text-muted-foreground"
+              className="size-3 shrink-0 cursor-help text-muted-foreground"
               title={helpText}
             />
           )}
@@ -342,7 +342,7 @@ function FieldRow({
             <span className="truncate text-muted-foreground">
               {getArrayDisplayValue()}
             </span>
-            <Icons.chevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />
+            <Icons.chevronRight className="size-4 shrink-0 text-muted-foreground" />
           </button>
         ) : showObjectEditor ? (
           // Object/untyped field - show button to open object editor (with composite mode)
@@ -354,7 +354,7 @@ function FieldRow({
             <span className="truncate text-muted-foreground">
               {getObjectDisplayValue()}
             </span>
-            <Icons.chevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />
+            <Icons.chevronRight className="size-4 shrink-0 text-muted-foreground" />
           </button>
         ) : componentType === 'file' ? (
           <div onFocus={onFieldFocus}>
@@ -399,7 +399,7 @@ function FieldRow({
             onClick={onRemove}
             title="Remove field"
           >
-            <Icons.remove className="h-3.5 w-3.5" />
+            <Icons.remove className="size-3.5" />
           </Button>
         )}
       </TableCell>
@@ -846,7 +846,7 @@ export function SimpleInputMappingEditor({
   return (
     <div className="space-y-4">
       <div className="overflow-hidden rounded-lg bg-card">
-        <Table className="w-full" style={{ tableLayout: 'fixed' }}>
+        <Table className="w-full table-fixed">
           <colgroup>
             <col style={{ width: '80px' }} />
             <col style={{ width: '180px' }} />
@@ -1030,7 +1030,7 @@ export function SimpleInputMappingEditor({
               size="sm"
               className="w-full text-muted-foreground hover:text-foreground"
             >
-              <Icons.add className="mr-2 h-4 w-4" />
+              <Icons.add className="mr-2 size-4" />
               Add optional parameter ({availableOptionalFields.length}{' '}
               available)
             </Button>
@@ -1073,7 +1073,7 @@ export function SimpleInputMappingEditor({
           className="w-full border-dashed text-muted-foreground hover:text-foreground"
           onClick={() => setIsAddCustomFieldOpen(true)}
         >
-          <Icons.add className="mr-2 h-4 w-4" />
+          <Icons.add className="mr-2 size-4" />
           Add custom parameter
         </Button>
       )}

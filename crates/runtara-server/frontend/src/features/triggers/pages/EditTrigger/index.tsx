@@ -280,7 +280,7 @@ export function EditTrigger() {
         <section className="space-y-4 px-4 sm:px-5">
           {initValues.triggerType === 'APPLICATION' && (
             <Alert variant="warning">
-              <AlertTriangle className="h-4 w-4" />
+              <AlertTriangle className="size-4" />
               <AlertDescription>
                 Application triggers are not currently fired by the platform.
                 You can still edit this trigger, but it will not launch its

@@ -29,7 +29,7 @@ export function Triggers() {
         <Can permission="trigger:create">
           <Link to="/invocation-triggers/create">
             <Button disabled={isError}>
-              <PlusIcon className="mr-2 h-4 w-4" />
+              <PlusIcon className="mr-2 size-4" />
               New trigger
             </Button>
           </Link>

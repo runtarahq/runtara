@@ -100,7 +100,7 @@ export function GridSettingsPanel({ grid, onChange }: GridSettingsPanelProps) {
               className="h-6"
               onClick={clearColumnWidths}
             >
-              <Trash2 className="mr-1 h-3 w-3" /> Equal split
+              <Trash2 className="mr-1 size-3" /> Equal split
             </Button>
           ) : (
             <Button
@@ -115,7 +115,7 @@ export function GridSettingsPanel({ grid, onChange }: GridSettingsPanelProps) {
                 }))
               }
             >
-              <Plus className="mr-1 h-3 w-3" /> Customize
+              <Plus className="mr-1 size-3" /> Customize
             </Button>
           )}
         </div>

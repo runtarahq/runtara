@@ -213,9 +213,9 @@ function StructuredErrorContent({
               className="flex items-center gap-1 text-xs text-muted-foreground transition-colors hover:text-foreground"
             >
               {attributesExpanded ? (
-                <ChevronDown className="h-3 w-3" />
+                <ChevronDown className="size-3" />
               ) : (
-                <ChevronRight className="h-3 w-3" />
+                <ChevronRight className="size-3" />
               )}
               <span>Additional Details</span>
             </button>

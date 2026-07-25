@@ -40,7 +40,7 @@ export function DatasetReconcileButton({
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
         <Button type="button" variant="outline" size="sm" className="h-7">
-          <RotateCcw className="mr-1 h-3 w-3" /> Reset to dataset schema
+          <RotateCcw className="mr-1 size-3" /> Reset to dataset schema
         </Button>
       </DialogTrigger>
       <DialogContent className="max-w-2xl">

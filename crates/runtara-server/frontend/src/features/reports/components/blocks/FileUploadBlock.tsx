@@ -166,9 +166,9 @@ export function FileUploadBlock({
         )}
       >
         {busy ? (
-          <Spinner className="h-6 w-6 text-muted-foreground" />
+          <Spinner className="size-6 text-muted-foreground" />
         ) : (
-          <Upload className="h-6 w-6 text-muted-foreground" />
+          <Upload className="size-6 text-muted-foreground" />
         )}
         <div className="grid gap-0.5">
           <span className="text-sm font-medium text-foreground">
@@ -194,7 +194,7 @@ export function FileUploadBlock({
 
       {!automatic && selected ? (
         <div className="flex items-center gap-3 rounded-md border border-input bg-background px-3 py-2">
-          <FileIcon className="h-4 w-4 flex-shrink-0 text-muted-foreground" />
+          <FileIcon className="size-4 flex-shrink-0 text-muted-foreground" />
           <span className="min-w-0 flex-1 truncate text-sm">
             {selected.data.filename ?? 'Selected file'}
             <span className="ml-2 text-xs text-muted-foreground">
@@ -206,14 +206,14 @@ export function FileUploadBlock({
               type="button"
               variant="ghost"
               size="sm"
-              className="h-6 w-6 p-0"
+              className="size-6 p-0"
               aria-label="Clear selected file"
               onClick={() => {
                 setSelected(null);
                 setLocalError(null);
               }}
             >
-              <X className="h-3.5 w-3.5" />
+              <X className="size-3.5" />
             </Button>
           ) : null}
           <Button
@@ -225,7 +225,7 @@ export function FileUploadBlock({
           >
             {isRunning ? (
               <>
-                <Spinner className="mr-2 h-3.5 w-3.5" />
+                <Spinner className="mr-2 size-3.5" />
                 {runningLabel}
               </>
             ) : (

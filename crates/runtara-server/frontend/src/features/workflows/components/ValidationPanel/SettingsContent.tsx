@@ -45,25 +45,25 @@ const sections: {
   {
     id: 'general',
     label: 'General',
-    icon: <Settings className="h-4 w-4" />,
+    icon: <Settings className="size-4" />,
     description: 'Name, description, timeouts',
   },
   {
     id: 'variables',
     label: 'Variables',
-    icon: <Variable className="h-4 w-4" />,
+    icon: <Variable className="size-4" />,
     description: 'Workflow constants',
   },
   {
     id: 'input',
     label: 'Input',
-    icon: <Download className="h-4 w-4" />,
+    icon: <Download className="size-4" />,
     description: 'Input schema fields',
   },
   {
     id: 'output',
     label: 'Output',
-    icon: <Upload className="h-4 w-4" />,
+    icon: <Upload className="size-4" />,
     description: 'Output schema fields',
   },
 ];

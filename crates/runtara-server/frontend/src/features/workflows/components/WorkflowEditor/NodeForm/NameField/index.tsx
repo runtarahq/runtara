@@ -94,7 +94,7 @@ function StepIdRow({ stepId }: { stepId: string }) {
             onClick={startEditing}
             className="shrink-0 text-muted-foreground hover:text-primary"
           >
-            <Pencil className="h-3 w-3" />
+            <Pencil className="size-3" />
           </button>
         </div>
       </div>
@@ -132,7 +132,7 @@ function StepIdRow({ stepId }: { stepId: string }) {
           disabled={Boolean(error)}
           className="shrink-0 text-muted-foreground hover:text-primary disabled:opacity-40"
         >
-          <Check className="h-3.5 w-3.5" />
+          <Check className="size-3.5" />
         </button>
         <button
           type="button"
@@ -140,7 +140,7 @@ function StepIdRow({ stepId }: { stepId: string }) {
           onClick={cancelEditing}
           className="shrink-0 text-muted-foreground hover:text-destructive"
         >
-          <X className="h-3.5 w-3.5" />
+          <X className="size-3.5" />
         </button>
       </div>
       {error ? (

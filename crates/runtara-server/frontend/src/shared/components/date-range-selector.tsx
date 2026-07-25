@@ -8,6 +8,12 @@ import {
 
 export type DateRangeOption = '1h' | '24h' | '7d' | '30d' | '90d';
 
+/**
+ * Shared width class for filter-bar select triggers so the date-range
+ * selector and sibling filter dropdowns stay visually aligned.
+ */
+export const FILTER_TRIGGER_WIDTH_CLASS = 'w-[180px]';
+
 interface DateRangeSelectorProps {
   value: DateRangeOption;
   onChange: (value: DateRangeOption) => void;
@@ -36,7 +42,7 @@ export function DateRangeSelector({
       value={value}
       onValueChange={(val) => onChange(val as DateRangeOption)}
     >
-      <SelectTrigger className="w-[180px]">
+      <SelectTrigger className={FILTER_TRIGGER_WIDTH_CLASS}>
         <SelectValue placeholder="Select date range" />
       </SelectTrigger>
       <SelectContent>

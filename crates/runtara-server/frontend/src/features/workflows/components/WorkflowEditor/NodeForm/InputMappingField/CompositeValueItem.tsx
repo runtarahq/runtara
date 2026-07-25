@@ -370,7 +370,7 @@ export function CompositeValueItem({
           getValueTypeBadgeColor(badgeType)
         )}
       >
-        <IconComponent className="h-3 w-3" />
+        <IconComponent className="size-3" />
         <span className="sr-only">{badgeType}</span>
       </span>
     );
@@ -552,9 +552,9 @@ export function CompositeValueItem({
               )}
             >
               {isExpanded ? (
-                <ChevronDown className="h-4 w-4" />
+                <ChevronDown className="size-4" />
               ) : (
-                <ChevronRight className="h-4 w-4" />
+                <ChevronRight className="size-4" />
               )}
               <span>
                 {isArray
@@ -653,7 +653,7 @@ export function CompositeValueItem({
                     key={option.value}
                     onClick={() => handleTypeChange(option.value)}
                   >
-                    <IconComponent className="mr-2 h-4 w-4" />
+                    <IconComponent className="mr-2 size-4" />
                     {option.label}
                   </DropdownMenuItem>
                 );
@@ -671,7 +671,7 @@ export function CompositeValueItem({
         {directError && (
           <Tooltip>
             <TooltipTrigger asChild>
-              <AlertTriangle className="h-4 w-4 shrink-0 text-destructive" />
+              <AlertTriangle className="size-4 shrink-0 text-destructive" />
             </TooltipTrigger>
             <TooltipContent>
               <p>{directError.message}</p>
@@ -688,7 +688,7 @@ export function CompositeValueItem({
             className="shrink-0 text-muted-foreground hover:text-destructive"
             onClick={onRemove}
           >
-            <X className="h-3.5 w-3.5" />
+            <X className="size-3.5" />
           </Button>
         )}
       </div>
@@ -866,7 +866,7 @@ function CompositeArrayEditorInline({
                 key={option.value}
                 onClick={() => handleAddItem(option.value)}
               >
-                <IconComponent className="mr-2 h-4 w-4" />
+                <IconComponent className="mr-2 size-4" />
                 {option.label}
               </DropdownMenuItem>
             );

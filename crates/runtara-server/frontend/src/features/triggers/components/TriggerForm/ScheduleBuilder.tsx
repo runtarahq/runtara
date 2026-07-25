@@ -345,7 +345,7 @@ export function ScheduleBuilder({
               disabled={disabled || (value.times?.length || 0) >= 5}
               className="h-7 px-2 text-xs"
             >
-              <PlusIcon className="mr-1 h-3 w-3" />
+              <PlusIcon className="mr-1 size-3" />
               Add time
             </Button>
           </div>
@@ -393,7 +393,7 @@ export function ScheduleBuilder({
                     onClick={() => handleRemoveTime(index)}
                     disabled={disabled}
                   >
-                    <Cross2Icon className="h-3 w-3" />
+                    <Cross2Icon className="size-3" />
                   </Button>
                 )}
               </div>
@@ -416,7 +416,7 @@ export function ScheduleBuilder({
                   onClick={() => handleDayOfWeekToggle(day.value)}
                   disabled={disabled}
                   className={cn(
-                    'flex h-9 w-9 items-center justify-center rounded-full text-sm font-medium transition-colors',
+                    'flex size-9 items-center justify-center rounded-full text-sm font-medium transition-colors',
                     'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2',
                     isSelected
                       ? 'bg-primary text-primary-foreground'
@@ -452,7 +452,7 @@ export function ScheduleBuilder({
                   onClick={() => handleDayOfMonthToggle(day)}
                   disabled={disabled}
                   className={cn(
-                    'flex h-8 w-8 items-center justify-center rounded text-xs font-medium transition-colors',
+                    'flex size-8 items-center justify-center rounded text-xs font-medium transition-colors',
                     'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1',
                     isSelected
                       ? 'bg-primary text-primary-foreground'

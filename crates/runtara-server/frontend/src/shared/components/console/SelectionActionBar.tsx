@@ -44,7 +44,7 @@ export function SelectionActionBar({
         onClick={onClear}
         className="gap-1.5 text-muted-foreground hover:text-foreground"
       >
-        <X className="h-4 w-4" />
+        <X className="size-4" />
         Clear
       </Button>
     </div>

@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Pause } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button.tsx';
+import { WithTooltip } from '@/shared/components/ui/tooltip.tsx';
 import { pauseInstance } from '@/features/workflows/queries';
 import { toast } from 'sonner';
 import { useToken } from '@/shared/hooks';
@@ -60,21 +61,23 @@ export function PauseButton(props: Props) {
 
   return (
     <>
-      <Button
-        size={size}
-        variant={variant}
-        onClick={() => setConfirmOpen(true)}
-        disabled={isLoading}
-        className={className}
-        title="Pause"
-      >
-        {isLoading ? (
-          <Spinner className={size === 'icon' ? undefined : 'mr-2'} />
-        ) : (
-          <Pause size={16} className={size === 'icon' ? '' : 'mr-2'} />
-        )}
-        {size !== 'icon' && 'Pause'}
-      </Button>
+      <WithTooltip label="Pause">
+        <Button
+          size={size}
+          variant={variant}
+          onClick={() => setConfirmOpen(true)}
+          disabled={isLoading}
+          className={className}
+          aria-label="Pause"
+        >
+          {isLoading ? (
+            <Spinner className={size === 'icon' ? undefined : 'mr-2'} />
+          ) : (
+            <Pause size={16} className={size === 'icon' ? '' : 'mr-2'} />
+          )}
+          {size !== 'icon' && 'Pause'}
+        </Button>
+      </WithTooltip>
 
       <ModalDialog open={confirmOpen} onClose={() => setConfirmOpen(false)}>
         <DialogHeader>

@@ -127,9 +127,9 @@ export function ChatPage() {
           variant="ghost"
           size="icon"
           onClick={handleBack}
-          className="h-8 w-8"
+          className="size-8"
         >
-          <ArrowLeft className="h-4 w-4" />
+          <ArrowLeft className="size-4" />
         </Button>
         <div className="min-w-0 flex-1">
           <h1 className="truncate text-sm font-semibold">{workflowName}</h1>

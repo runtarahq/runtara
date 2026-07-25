@@ -428,7 +428,7 @@ export function ReportExplorePage() {
           <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
             <Link to={`/reports/${report.id}`}>
               <Button variant="outline" className="sm:px-4">
-                <ArrowLeft className="mr-2 h-4 w-4" />
+                <ArrowLeft className="mr-2 size-4" />
                 Report
               </Button>
             </Link>
@@ -478,7 +478,7 @@ export function ReportExplorePage() {
         <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
           <Link to={`/reports/${report.id}`}>
             <Button variant="outline" className="sm:px-4">
-              <ArrowLeft className="mr-2 h-4 w-4" />
+              <ArrowLeft className="mr-2 size-4" />
               Report
             </Button>
           </Link>
@@ -494,7 +494,7 @@ export function ReportExplorePage() {
               handleSaveBlock(canReplaceBlock ? 'replace' : 'append')
             }
           >
-            <Save className="mr-2 h-4 w-4" />
+            <Save className="mr-2 size-4" />
             {canReplaceBlock ? 'Update block' : 'Save as block'}
           </Button>
         </div>
@@ -525,7 +525,7 @@ export function ReportExplorePage() {
             >
               Explore: {fieldLabel(dataset, filter.field)} {filter.op}{' '}
               {formatFilterValue(filter.value)}
-              <X className="ml-2 h-3 w-3" />
+              <X className="ml-2 size-3" />
             </Button>
           ))}
         </div>
@@ -567,7 +567,7 @@ export function ReportExplorePage() {
           </div>
           <div className="border-b p-4">
             <div className="relative">
-              <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+              <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
               <Input
                 value={fieldSearch}
                 onChange={(event) => setFieldSearch(event.target.value)}
@@ -850,7 +850,7 @@ export function ReportExplorePage() {
                 }
                 onClick={addExploreFilter}
               >
-                <Plus className="h-4 w-4" />
+                <Plus className="size-4" />
               </Button>
             </div>
             <div className="space-y-2 rounded-md border bg-muted/20 p-3">
@@ -878,7 +878,7 @@ export function ReportExplorePage() {
                           {filter.op} {formatFilterValue(filter.value)}
                         </span>
                       </span>
-                      <X className="h-4 w-4 shrink-0 text-muted-foreground" />
+                      <X className="size-4 shrink-0 text-muted-foreground" />
                     </button>
                   ))}
                 </div>
@@ -896,7 +896,7 @@ export function ReportExplorePage() {
                 }))
               }
             >
-              <RotateCcw className="mr-2 h-4 w-4" />
+              <RotateCcw className="mr-2 size-4" />
               Reset explore filters
             </Button>
           </section>
@@ -920,7 +920,7 @@ export function ReportExplorePage() {
                 handleSaveBlock(canReplaceBlock ? 'replace' : 'append')
               }
             >
-              <Save className="mr-2 h-4 w-4" />
+              <Save className="mr-2 size-4" />
               {canReplaceBlock ? 'Update report block' : 'Save as report block'}
             </Button>
             {canReplaceBlock && (
@@ -931,7 +931,7 @@ export function ReportExplorePage() {
                 disabled={!canSaveBlock || updateReport.isPending}
                 onClick={() => handleSaveBlock('append')}
               >
-                <Save className="mr-2 h-4 w-4" />
+                <Save className="mr-2 size-4" />
                 Save as copy
               </Button>
             )}
@@ -942,7 +942,7 @@ export function ReportExplorePage() {
               disabled={!savedBlock}
               onClick={handleCopyDefinition}
             >
-              <Copy className="mr-2 h-4 w-4" />
+              <Copy className="mr-2 size-4" />
               Copy definition
             </Button>
             {(savedMessage || copyMessage) && (
@@ -1090,7 +1090,7 @@ function FieldGroup({
                 isSelected ? onRemove(field.id) : onAdd(field.id)
               }
             >
-              <Icon className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
+              <Icon className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
               <span className="min-w-0 flex-1">
                 <span className="block text-sm font-medium text-foreground">
                   {field.label}
@@ -1102,7 +1102,7 @@ function FieldGroup({
               {isSelected && (
                 <Badge variant="secondary">
                   Added
-                  <X className="ml-1 h-3 w-3" />
+                  <X className="ml-1 size-3" />
                 </Badge>
               )}
             </button>
@@ -1143,7 +1143,7 @@ function Shelf({
             onClick={() => onRemove(value.id)}
           >
             {value.label}
-            <X className="ml-2 h-3 w-3" />
+            <X className="ml-2 size-3" />
           </Button>
         ))}
         {values.length === 0 && (

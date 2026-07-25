@@ -484,8 +484,7 @@ export function ReportPage() {
       value={name}
       placeholder="Untitled report"
       onChange={(event) => setName(event.target.value)}
-      className="w-full bg-transparent text-xl font-semibold placeholder:text-muted-foreground focus:outline-none"
-      style={{ border: 'none', outline: 'none', boxShadow: 'none', padding: 0 }}
+      className="w-full border-0 bg-transparent p-0 text-xl font-semibold shadow-none outline-none placeholder:text-muted-foreground"
     />
   ) : (
     <span>{name || 'Untitled report'}</span>
@@ -498,13 +497,7 @@ export function ReportPage() {
           value={description}
           placeholder="Optional description shown in the reports list…"
           onChange={(event) => setDescription(event.target.value)}
-          className="w-full bg-transparent text-sm text-muted-foreground placeholder:text-muted-foreground focus:outline-none"
-          style={{
-            border: 'none',
-            outline: 'none',
-            boxShadow: 'none',
-            padding: 0,
-          }}
+          className="w-full border-0 bg-transparent p-0 text-sm text-muted-foreground shadow-none outline-none placeholder:text-muted-foreground"
         />
       ) : description ? (
         <p className="text-sm text-muted-foreground">{description}</p>
@@ -538,7 +531,7 @@ export function ReportPage() {
         isExisting && reportId ? (
           <Link to={`/reports/${reportId}`} className="w-full sm:w-auto">
             <Button variant="outline" className="w-full sm:px-4">
-              <Eye className="mr-2 h-4 w-4" />
+              <Eye className="mr-2 size-4" />
               View
             </Button>
           </Link>
@@ -554,7 +547,7 @@ export function ReportPage() {
           {explorePath ? (
             <Link to={explorePath} className="w-full sm:w-auto">
               <Button variant="outline" className="w-full sm:px-4">
-                <Compass className="mr-2 h-4 w-4" />
+                <Compass className="mr-2 size-4" />
                 Explore
               </Button>
             </Link>
@@ -565,7 +558,7 @@ export function ReportPage() {
             disabled={renderQuery.isFetching}
             onClick={handlePrint}
           >
-            <Printer className="mr-2 h-4 w-4" />
+            <Printer className="mr-2 size-4" />
             Print
           </Button>
           <Button
@@ -574,7 +567,7 @@ export function ReportPage() {
             disabled={renderQuery.isFetching}
             onClick={() => void handleReportActionRefresh()}
           >
-            <RefreshCw className="mr-2 h-4 w-4" />
+            <RefreshCw className="mr-2 size-4" />
             Refresh
           </Button>
           {isExisting && reportId && existingReport ? (
@@ -592,7 +585,7 @@ export function ReportPage() {
               className="w-full sm:w-auto"
             >
               <Button variant="outline" className="w-full sm:px-4">
-                <Edit className="mr-2 h-4 w-4" />
+                <Edit className="mr-2 size-4" />
                 Edit
               </Button>
             </Link>
@@ -611,7 +604,7 @@ export function ReportPage() {
       {editing ? (
         <Can permission="report:update">
           <Button className="sm:px-4" disabled={!canSave} onClick={handleSave}>
-            <Save className="mr-2 h-4 w-4" />
+            <Save className="mr-2 size-4" />
             Save
           </Button>
         </Can>
@@ -630,7 +623,7 @@ export function ReportPage() {
     >
       {needsReAuthoring ? (
         <Alert variant="warning" className="mb-4">
-          <AlertTriangle className="h-4 w-4" />
+          <AlertTriangle className="size-4" />
           <AlertTitle>This report needs re-authoring</AlertTitle>
           <AlertDescription>
             <p className="mb-2 text-sm">

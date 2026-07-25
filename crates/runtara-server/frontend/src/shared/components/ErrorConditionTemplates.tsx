@@ -43,9 +43,9 @@ export function ErrorConditionTemplates({
           disabled={disabled}
           className="gap-1.5 text-xs"
         >
-          <AlertTriangle className="h-3.5 w-3.5 text-destructive" />
+          <AlertTriangle className="size-3.5 text-destructive" />
           Error Templates
-          <ChevronDown className="h-3 w-3 opacity-50" />
+          <ChevronDown className="size-3 opacity-50" />
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent

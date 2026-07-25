@@ -280,7 +280,7 @@ function LookupEditor({
           className="flex h-8 w-full min-w-40 items-center justify-between gap-2 rounded-md border bg-background px-3 text-left text-sm"
         >
           <span className="truncate">{label}</span>
-          <ChevronDown className="h-3.5 w-3.5 shrink-0 opacity-50" />
+          <ChevronDown className="size-3.5 shrink-0 opacity-50" />
         </button>
       </PopoverTrigger>
       <PopoverContent className="w-80 p-0" align="start">
@@ -310,7 +310,7 @@ function LookupEditor({
                     onSelect={() => commit(option.value)}
                   >
                     <span className="flex-1 truncate">{option.label}</span>
-                    {selected && <Check className="h-4 w-4 opacity-70" />}
+                    {selected && <Check className="size-4 opacity-70" />}
                   </CommandItem>
                 );
               })}

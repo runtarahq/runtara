@@ -192,16 +192,16 @@ function FieldRow({ field, onUpdate, onRemove }: FieldRowProps) {
                   type="button"
                   variant="ghost"
                   size="icon"
-                  className="h-8 w-8 text-muted-foreground hover:text-foreground"
+                  className="size-8 text-muted-foreground hover:text-foreground"
                 >
-                  <Settings2 className="h-4 w-4" />
+                  <Settings2 className="size-4" />
                 </Button>
               </PopoverTrigger>
               <PopoverContent className="w-80" align="end">
                 {field.dataType === 'decimal' && (
                   <div className="space-y-4">
                     <div className="flex items-center gap-2">
-                      <Settings2 className="h-4 w-4 text-muted-foreground" />
+                      <Settings2 className="size-4 text-muted-foreground" />
                       <span className="text-sm font-medium">
                         Decimal Configuration
                       </span>
@@ -252,7 +252,7 @@ function FieldRow({ field, onUpdate, onRemove }: FieldRowProps) {
                 {field.dataType === 'enum' && (
                   <div className="space-y-4">
                     <div className="flex items-center gap-2">
-                      <Settings2 className="h-4 w-4 text-muted-foreground" />
+                      <Settings2 className="size-4 text-muted-foreground" />
                       <span className="text-sm font-medium">Enum Values</span>
                     </div>
                     <TagInput
@@ -268,7 +268,7 @@ function FieldRow({ field, onUpdate, onRemove }: FieldRowProps) {
                 {field.dataType === 'tsvector' && (
                   <div className="space-y-4">
                     <div className="flex items-center gap-2">
-                      <Settings2 className="h-4 w-4 text-muted-foreground" />
+                      <Settings2 className="size-4 text-muted-foreground" />
                       <span className="text-sm font-medium">
                         Text Search Configuration
                       </span>
@@ -304,7 +304,7 @@ function FieldRow({ field, onUpdate, onRemove }: FieldRowProps) {
                 {field.dataType === 'vector' && (
                   <div className="space-y-4">
                     <div className="flex items-center gap-2">
-                      <Settings2 className="h-4 w-4 text-muted-foreground" />
+                      <Settings2 className="size-4 text-muted-foreground" />
                       <span className="text-sm font-medium">
                         Vector Configuration
                       </span>
@@ -369,10 +369,10 @@ function FieldRow({ field, onUpdate, onRemove }: FieldRowProps) {
             variant="ghost"
             size="icon"
             onClick={onRemove}
-            className="h-8 w-8 text-muted-foreground opacity-0 transition-opacity hover:text-destructive group-hover:opacity-100"
+            className="size-8 text-muted-foreground opacity-0 transition-opacity hover:text-destructive group-hover:opacity-100"
             title="Remove column"
           >
-            <Trash2 className="h-4 w-4" />
+            <Trash2 className="size-4" />
           </Button>
         </div>
       </TableCell>
@@ -421,7 +421,7 @@ export function ObjectSchemaFieldsTable({
           className="mt-4 h-10 px-4"
           onClick={onAddField}
         >
-          <Plus className="mr-2 h-4 w-4" />
+          <Plus className="mr-2 size-4" />
           Add your first column
         </Button>
       </div>
@@ -491,7 +491,7 @@ export function ObjectSchemaFieldsTable({
           className="text-muted-foreground hover:text-foreground"
           onClick={onAddField}
         >
-          <Plus className="mr-2 h-4 w-4" />
+          <Plus className="mr-2 size-4" />
           Add column
         </Button>
       </div>

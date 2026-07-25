@@ -31,13 +31,13 @@ export function ValidationPanelHeader({
         <button
           type="button"
           onClick={togglePanel}
-          className="flex h-10 w-10 items-center justify-center text-muted-foreground transition-colors hover:text-foreground"
+          className="flex size-10 items-center justify-center text-muted-foreground transition-colors hover:text-foreground"
           title={isPanelExpanded ? 'Collapse panel' : 'Expand panel'}
         >
           {isPanelExpanded ? (
-            <ChevronDown className="h-4 w-4" />
+            <ChevronDown className="size-4" />
           ) : (
-            <ChevronUp className="h-4 w-4" />
+            <ChevronUp className="size-4" />
           )}
         </button>
         <BottomPanelTabs versionCount={versionCount} />
@@ -54,7 +54,7 @@ export function ValidationPanelHeader({
           }}
           title="Clear all messages"
         >
-          <X className="h-4 w-4" />
+          <X className="size-4" />
         </Button>
       )}
     </div>

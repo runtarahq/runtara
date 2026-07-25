@@ -29,7 +29,7 @@ export function ManageInstances() {
   if (isLoading) {
     return (
       <div className="flex h-dvh items-center justify-center text-muted-foreground">
-        <Spinner className="mr-2 h-4 w-4" />
+        <Spinner className="mr-2 size-4" />
         Loading records...
       </div>
     );
@@ -39,7 +39,7 @@ export function ManageInstances() {
     return (
       <div className="flex h-dvh items-center justify-center p-6">
         <Alert variant="destructive" className="max-w-2xl">
-          <AlertCircle className="h-4 w-4" />
+          <AlertCircle className="size-4" />
           <AlertTitle>Object type not found</AlertTitle>
           <AlertDescription>
             The requested object type could not be loaded. Verify the URL or

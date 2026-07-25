@@ -17,11 +17,11 @@ export function IdColumnCell({ id }: IdColumnCellProps) {
       <Button
         variant="ghost"
         size="icon"
-        className="h-8 w-8"
+        className="size-8"
         onClick={handleCopy}
         title={`Click to copy ID: ${id}`}
       >
-        <Key className="h-4 w-4" />
+        <Key className="size-4" />
       </Button>
     </div>
   );
