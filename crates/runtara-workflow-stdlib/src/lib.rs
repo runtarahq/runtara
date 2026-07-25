@@ -58,13 +58,6 @@ pub use serde_json;
 #[cfg(feature = "sdk-runtime")]
 pub use runtara_sdk;
 
-// Re-export runtara-ai as `ai` for AI Agent step codegen.
-// Generated workflow code references `runtara_workflow_stdlib::ai::completion`,
-// `::message`, `::types`, `::provider`, and `OneOrMany`. Keep this until the
-// AI Agent codegen is migrated to dispatch through the `ai-tools` WIT agent.
-#[cfg(feature = "sdk-runtime")]
-pub use runtara_ai as ai;
-
 // Template rendering for MappingValue::Template
 pub mod template;
 

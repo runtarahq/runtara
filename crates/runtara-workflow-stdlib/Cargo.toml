@@ -16,18 +16,17 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 default = ["native"]
-sdk-runtime = ["dep:runtara-ai", "dep:runtara-http", "dep:runtara-sdk"]
+sdk-runtime = ["dep:runtara-http", "dep:runtara-sdk"]
 direct-component = ["dep:wit-bindgen"]
 
 # Native platform — uses the native SDK backend (blocking ureq HTTP).
-# Also forwards tracing to runtara-sdk and runtara-ai so native consumers
-# (runtara-server) see the full structured logs.
+# Also forwards tracing to runtara-sdk so native consumers (runtara-server)
+# see the full structured logs.
 native = [
     "sdk-runtime",
     "runtara-sdk/native",
     "runtara-sdk/tracing",
     "runtara-http/native",
-    "runtara-ai/tracing",
 ]
 
 # WASI target (wasm32-wasip1/wasip2) — wasi-http transport.
@@ -44,12 +43,6 @@ wit-bindgen = { version = "0.58", optional = true }
 # `runtara-agents` crate into the workflow.
 runtara-sdk = { path = "../runtara-sdk", version = "8.6", default-features = false, features = ["http"], optional = true }
 
-# AI/LLM helpers consumed directly by codegen for AI Agent steps
-# (CompletionModel, ToolDefinition, Message, provider dispatch). Re-exported
-# below as `ai` so generated code can write `runtara_workflow_stdlib::ai::*`.
-# TODO: migrate AI Agent codegen to dispatch through the `ai-tools` WIT agent
-# and drop this dep again (would shrink workflow.wasm).
-runtara-ai = { path = "../runtara-ai", version = "8.6", default-features = false, optional = true }
 
 # Re-exported for workflows
 serde = { workspace = true }
