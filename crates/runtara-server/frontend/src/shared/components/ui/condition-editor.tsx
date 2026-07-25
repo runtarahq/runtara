@@ -42,6 +42,10 @@ import {
 } from '@/shared/components/ui/tooltip';
 import { Search, Inbox, X, Trash2 } from 'lucide-react';
 import { convertConditionArguments } from '@/shared/utils/condition-type-conversion';
+import {
+  carryConditionArgs,
+  type ConditionArity,
+} from './condition-args';
 
 // --- TYPES & CONSTANTS ---
 type Arity = 'UNARY' | 'BINARY' | 'VARIADIC';
@@ -1019,20 +1023,12 @@ const ConditionBuilder = ({
     // Find the operator or default to the first one if not found
     const newOperator = OPERATORS.find((o) => o.key === newOp) || OPERATORS[0];
     const newArity = newOperator.arity;
-    let newArgs: (string | Condition | ConditionArgument)[];
-    if (newArity === 'UNARY')
-      newArgs = [
-        { valueType: 'immediate', value: '', immediateType: 'string' },
-      ];
-    else if (newArity === 'BINARY')
-      newArgs = [
-        { valueType: 'immediate', value: '', immediateType: 'string' },
-        { valueType: 'immediate', value: '', immediateType: 'string' },
-      ];
-    else
-      newArgs = [
-        { valueType: 'immediate', value: '', immediateType: 'string' },
-      ];
+    // Carry the operands across. Changing the operator says something about
+    // the comparison, never about the values being compared — rebuilding the
+    // list from arity alone wiped both sides of EQ->NE and discarded every
+    // nested condition on AND->OR.
+    const newArgs: (string | Condition | ConditionArgument)[] =
+      carryConditionArgs(args, newArity as ConditionArity);
     setOp(newOp);
     setArgs(newArgs);
     if (onChange) {
