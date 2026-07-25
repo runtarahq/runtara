@@ -1,5 +1,6 @@
-import { useState, useContext, useMemo } from 'react';
+import { useState, useContext, useMemo, useEffect, useRef } from 'react';
 import { Input } from '@/shared/components/ui/input';
+import { Textarea } from '@/shared/components/ui/textarea';
 import { Checkbox } from '@/shared/components/ui/checkbox';
 import { Button } from '@/shared/components/ui/button';
 import {
@@ -81,6 +82,26 @@ function fieldTypeSupportsNull(fieldType: string): boolean {
   );
 }
 
+/** Minimum visible rows for a long-form value editor. */
+const LONG_FORM_MIN_ROWS = 3;
+
+/** Autosize ceiling, past which the textarea scrolls internally. */
+const LONG_FORM_MAX_HEIGHT_PX = 320;
+
+/**
+ * Field types whose values are routinely longer than one line: prose prompts,
+ * SQL, and JSON/object/array literals. These get an autosizing textarea rather
+ * than a 36px single-line input.
+ */
+function isLongFormFieldType(lowerFieldType: string): boolean {
+  return (
+    lowerFieldType === 'textarea' ||
+    lowerFieldType === 'json' ||
+    lowerFieldType === 'object' ||
+    lowerFieldType === 'array'
+  );
+}
+
 function isArrayFieldType(fieldType: string): boolean {
   return (
     fieldType === 'array' ||
@@ -140,6 +161,20 @@ export function MappingValueInput({
       : typeof defaultValue === 'string'
         ? defaultValue
         : JSON.stringify(defaultValue);
+  const isLongForm = isLongFormFieldType(lowerFieldType);
+
+  // Autosize the long-form editor to its content, between LONG_FORM_MIN_ROWS
+  // and a cap that keeps a tall value from pushing the form's actions
+  // off-screen — past that the textarea scrolls internally and can still be
+  // dragged taller (resize-y) or opened in the template editor.
+  const autosizeRef = useRef<HTMLTextAreaElement | null>(null);
+  useEffect(() => {
+    const el = autosizeRef.current;
+    if (!el || !isLongForm) return;
+    el.style.height = 'auto';
+    el.style.height = `${Math.min(el.scrollHeight, LONG_FORM_MAX_HEIGHT_PX)}px`;
+  }, [stringValue, isLongForm]);
+
   const isNullValue = value === null;
   const canSetNull =
     allowNull &&
@@ -410,21 +445,25 @@ export function MappingValueInput({
       );
     }
 
-    // JSON, object, array types - use regular text input (same height as other fields)
-    if (
-      lowerFieldType === 'textarea' ||
-      lowerFieldType === 'json' ||
-      lowerFieldType === 'object' ||
-      lowerFieldType === 'array'
-    ) {
+    // Long-form values (prose prompts, SQL, JSON literals) get a real
+    // multi-line control that grows with its content. A 36px single-line box
+    // for an AI system prompt is unusable, and the reason authors moved this
+    // kind of editing out of the form entirely.
+    if (isLongFormFieldType(lowerFieldType)) {
       return (
-        <Input
-          type="text"
+        <Textarea
+          ref={autosizeRef}
           value={stringValue}
           onChange={(e) => onChange(e.target.value)}
           placeholder={placeholder}
           disabled={disabled}
-          className="flex-1 border-0 font-mono shadow-none focus-visible:ring-0 focus-visible:ring-offset-0"
+          rows={LONG_FORM_MIN_ROWS}
+          spellCheck={lowerFieldType === 'textarea'}
+          className={cn(
+            'min-h-0 flex-1 resize-y border-0 py-2 shadow-none focus-visible:ring-0 focus-visible:ring-offset-0',
+            // Structured values read better monospaced; prose does not.
+            lowerFieldType !== 'textarea' && 'font-mono'
+          )}
         />
       );
     }
@@ -475,7 +514,13 @@ export function MappingValueInput({
     <>
       <div className={cn('flex items-start gap-2', className)}>
         {needsGroupedWrapper ? (
-          <div className="flex h-9 flex-1 items-center overflow-hidden rounded-md border border-input bg-background focus-within:ring-1 focus-within:ring-ring">
+          <div
+            className={cn(
+              'flex flex-1 overflow-hidden rounded-md border border-input bg-background focus-within:ring-1 focus-within:ring-ring',
+              // h-9 would clamp the autosizing textarea back to one line.
+              isLongForm ? 'items-stretch' : 'h-9 items-center'
+            )}
+          >
             {renderInput()}
           </div>
         ) : (
