@@ -1,6 +1,7 @@
 import { useState, useContext, useMemo, useEffect, useRef } from 'react';
 import { Input } from '@/shared/components/ui/input';
 import { Textarea } from '@/shared/components/ui/textarea';
+import { coerceValueForMode, nextValueMode } from './value-mode';
 import { Checkbox } from '@/shared/components/ui/checkbox';
 import { Button } from '@/shared/components/ui/button';
 import {
@@ -241,21 +242,15 @@ export function MappingValueInput({
     nodeId,
   ]);
 
-  // Cycle: immediate → template → reference → composite → immediate
+  // Cycle: immediate → template → reference → composite → immediate.
+  // The value carries across; see coerceValueForMode. Switching how a value is
+  // interpreted is not a request to delete it.
   const handleModeToggle = () => {
-    if (valueType === 'immediate') {
-      onValueTypeChange('template');
-      onChange('');
-    } else if (valueType === 'template') {
-      onValueTypeChange('reference');
-      onChange('');
-    } else if (valueType === 'reference') {
-      onValueTypeChange('composite');
-      onChange('');
-    } else {
-      // composite → immediate
-      onValueTypeChange('immediate');
-      onChange('');
+    const next = nextValueMode(valueType);
+    const carried = coerceValueForMode(value, valueType, next, fieldType);
+    onValueTypeChange(next);
+    if (carried.changed) {
+      onChange(carried.value as string | null);
     }
   };
 
@@ -265,9 +260,11 @@ export function MappingValueInput({
     onChange(variable.value);
   };
 
-  // Handle removing reference
+  // Handle removing reference. Clearing the value is the explicit intent of
+  // the button; dropping out of reference mode as well is not, and left the
+  // author in a literal text box when they wanted to pick a different path.
+  // Matches CompositeValueItem, which already stays in reference mode.
   const handleRemoveReference = () => {
-    onValueTypeChange('immediate');
     onChange('');
   };
 
