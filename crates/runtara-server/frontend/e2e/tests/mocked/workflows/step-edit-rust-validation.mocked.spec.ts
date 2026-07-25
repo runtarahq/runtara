@@ -92,12 +92,12 @@ test.describe('Step edit Rust validation (mocked)', () => {
     // The parse error surfaces both in the panel and as a toast (toasts render
     // for real since the sonner migration), so scope to the in-page copy.
     await expect(
-      page.getByRole('main').getByText(/Failed to parse graph/),
+      page.getByRole('main').getByText(/Failed to parse graph/)
     ).toBeVisible({
       timeout: 10_000,
     });
     await expect(
-      page.getByRole('main').getByText('Step: Validation Target'),
+      page.getByRole('main').getByText('Step: Validation Target')
     ).toBeVisible();
   });
 });
