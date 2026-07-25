@@ -20,6 +20,11 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   SQLX_OFFLINE: "true"
+  # Every marker feature that gates a [[test]] target via required-features,
+  # plus embed-ui. Used by the lint and build jobs so `--all-targets` really
+  # means all targets. Static value — no workflow-context interpolation.
+  GATE_FEATURES: >-
+    runtara-server/embed-ui,runtara-server/db-integration-tests,runtara-server/valkey-integration-tests,runtara-server/valkey-tls-integration-tests,runtara-object-store/db-integration-tests,runtara-environment/db-integration-tests,runtara-core/db-integration-tests,runtara-component-host/component-integration-tests,runtara-workflows/direct-wasm-integration-tests
   WASM_PACK_VERSION: "0.13.1"
   WIT_DEPS_VERSION: "0.6.0"
   WASM_TOOLS_VERSION: "1.252.0"
@@ -105,8 +110,15 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
+      # The *-integration-tests features are empty markers that gate [[test]]
+      # targets via required-features. Without them cargo silently drops those
+      # targets, so ~78% of the LOC under tests/ was never linted or even
+      # type-checked here — including the 11k-line direct_wasm_execute.rs.
+      # Enabling them changes no produced binary; it only widens what compiles.
       - name: Run clippy
-        run: cargo clippy --workspace --all-targets --features runtara-server/embed-ui -- -D warnings
+        run: |
+          cargo clippy --workspace --all-targets \
+            --features "$GATE_FEATURES" -- -D warnings
 
   build:
     runs-on: ubuntu-latest
@@ -155,7 +167,9 @@ jobs:
           npm run build
 
       - name: Build
-        run: cargo build --workspace --all-targets --features runtara-server/embed-ui
+        run: |
+          cargo build --workspace --all-targets \
+            --features "$GATE_FEATURES"
 
       - name: Save build cache
         uses: actions/cache/save@v4
@@ -359,16 +373,25 @@ jobs:
           TEST_ENVIRONMENT_DATABASE_URL: postgres://postgres:postgres@localhost:5432/runtara_test
         run: cargo test -p runtara-environment --features db-integration-tests -- --test-threads=1
 
-  # Per-component-crate unit tests for the agent crates plus the legacy
-  # `runtara-agents` parent and the shared agent infrastructure
-  # (`runtara-agent-macro` proc-macro). Distinct from components-build,
-  # which builds .wasm + .meta.json and drives the dispatcher end-to-end —
-  # this job runs the native `cargo test` for each agent crate's logic
-  # (regex, template, transform, sigv4, http response shaping, etc.).
+  # Every crate's inline #[cfg(test)] unit tests, in ONE invocation.
   #
-  # Iterates the workspace members so a newly-added agent crate is picked
-  # up without a CI edit, as long as it lands under `crates/agents/`.
-  test-agents:
+  # `--workspace --lib` needs no Postgres, Valkey or Docker (verified: 3,508
+  # tests, 0 failures on a bare machine), so it is the cheap gate that covers
+  # the whole workspace — including the 14 crates that the other, -p-enumerated
+  # jobs never named and therefore never tested: runtara-dsl (253 test fns),
+  # runtara-workflow-stdlib (190), runtara-management-sdk, runtara-report-dsl,
+  # runtara-text-parser, runtara-sdk-macros, runtara-ai, runtara-validation-wasm,
+  # runtara-http, runtara-agent-encoding, runtara-workflow-runtime,
+  # runtara-workflow-wit and both partially-skipped crates.
+  #
+  # Being workspace-wide rather than a list, a NEW crate is covered on the day
+  # it is added instead of defaulting to untested forever. It also subsumes the
+  # old per-agent loop, which ran `-p <crate> --lib` 27 times and whose glob
+  # (crates/agents/runtara-agent-*) silently missed runtara-agent-encoding,
+  # since that crate lives at crates/runtara-agent-encoding.
+  #
+  # Service-bound integration targets stay in their own jobs below.
+  test-units:
     runs-on: ubuntu-latest
     needs: build
 
@@ -389,30 +412,14 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-${{ github.sha }}
 
-      # Legacy parent: tests for utils, http auth extractors,
-      # integration helpers that aren't owned by any single component
-      # crate.
-      - name: Run runtara-agents (legacy parent) tests
-        run: cargo test -p runtara-agents --lib
+      # Every crate's lib target, workspace-wide, one cargo invocation.
+      - name: Run all workspace unit tests
+        run: cargo test --workspace --lib
 
-      # Shared procedural macro that emits the &'static capability /
-      # input / output metadata each component crate ships.
-      - name: Run runtara-agent-macro tests
-        run: cargo test -p runtara-agent-macro
-
-      # Every component crate under crates/agents/. Looped rather than
-      # listed so adding crates/agents/runtara-agent-foo/ doesn't
-      # require touching CI. Tests run with -p so one failure doesn't
-      # short-circuit the rest; loop fails the job on any non-zero.
-      - name: Run all runtara-agent-* component crate tests
-        run: |
-          set -e
-          for crate_dir in crates/agents/runtara-agent-*; do
-            [ -d "$crate_dir" ] || continue
-            name="$(basename "$crate_dir")"
-            echo "==> $name"
-            cargo test -p "$name" --lib
-          done
+      # runtara-agent-macro also carries a tests/ directory (trybuild-style
+      # expansion checks), which --lib does not cover.
+      - name: Run runtara-agent-macro integration tests
+        run: cargo test -p runtara-agent-macro --tests
 
   # WIT-only sanity: the canonical agent contract package parses and its
   # wasi:* dependency tree resolves. Cheap; catches deps.toml / lockfile drift
@@ -576,7 +583,7 @@ jobs:
       - test-core
       - test-server
       - test-environment
-      - test-agents
+      - test-units
       - wit-package
       - components-build
     if: |
