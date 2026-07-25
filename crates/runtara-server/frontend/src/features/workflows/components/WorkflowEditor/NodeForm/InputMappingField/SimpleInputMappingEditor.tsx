@@ -57,6 +57,8 @@ import { CustomFieldRow } from './CustomFieldRow';
 import { AddCustomFieldDialog } from './AddCustomFieldDialog';
 import { useTabContext } from '../NodeFormItem';
 import { describeArrayValue, describeObjectValue } from './value-display';
+import { formatMappingJson, parseMappingJson } from './mapping-json';
+import { Textarea } from '@/shared/components/ui/textarea';
 
 /** Check if a field type is an array type */
 function isArrayType(type: string | undefined): boolean {
@@ -455,6 +457,42 @@ export function SimpleInputMappingEditor({
     }
   }, [onDataChange, getNodeInputMapping, nodeId]);
 
+  // ---- JSON escape hatch -------------------------------------------------
+  // The structured editor cannot express everything the DSL allows (any-typed
+  // roots, shapes authored via MCP). MappingObjectField has had this toggle
+  // for Log/Error/WaitForSignal all along; this brings it to the surface every
+  // Agent step uses, and makes paste-from-MCP work.
+  const [jsonMode, setJsonMode] = useState(false);
+  const [jsonDraft, setJsonDraft] = useState('');
+  const [jsonError, setJsonError] = useState<string | null>(null);
+
+  const openJsonMode = useCallback(() => {
+    setJsonDraft(formatMappingJson(getNodeInputMapping(nodeId)));
+    setJsonError(null);
+    setJsonMode(true);
+  }, [getNodeInputMapping, nodeId]);
+
+  const handleJsonDraftChange = useCallback(
+    (text: string) => {
+      setJsonDraft(text);
+      const { entries, error } = parseMappingJson(text);
+      setJsonError(error);
+      // Apply as the author types while the document is valid; an invalid
+      // draft is kept on screen rather than reverted, so nothing is lost
+      // mid-edit.
+      if (!error && entries) {
+        loadNodeData(nodeId, entries);
+        onDataChange?.(entries);
+      }
+    },
+    [loadNodeData, nodeId, onDataChange]
+  );
+
+  const closeJsonMode = useCallback(() => {
+    setJsonMode(false);
+    setJsonError(null);
+  }, []);
+
   // Separate required and optional fields
   const requiredFields = useMemo(
     () => fields.filter((f) => f.required),
@@ -806,6 +844,43 @@ export function SimpleInputMappingEditor({
     );
   }
 
+  if (jsonMode) {
+    return (
+      <div className="space-y-2">
+        <Textarea
+          value={jsonDraft}
+          onChange={(e) => handleJsonDraftChange(e.target.value)}
+          spellCheck={false}
+          rows={14}
+          aria-label="Input mapping as JSON"
+          className="font-mono text-xs"
+        />
+        {jsonError ? (
+          <FieldError>{jsonError}</FieldError>
+        ) : (
+          <p className="text-xs text-muted-foreground">
+            Keyed by parameter name. Each value takes{' '}
+            <code className="rounded bg-muted px-1">value</code> and{' '}
+            <code className="rounded bg-muted px-1">valueType</code> (immediate,
+            reference, template or composite); a bare literal is shorthand for
+            an immediate. Changes apply as you type while the JSON is valid.
+          </p>
+        )}
+        <div className="flex justify-end">
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            onClick={closeJsonMode}
+            className="text-muted-foreground hover:text-foreground"
+          >
+            Back to fields
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-4">
       <div className="overflow-hidden rounded-lg bg-card">
@@ -1041,6 +1116,18 @@ export function SimpleInputMappingEditor({
           Add custom parameter
         </Button>
       )}
+
+      <div className="flex justify-end">
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          onClick={openJsonMode}
+          className="text-muted-foreground hover:text-foreground"
+        >
+          Edit as JSON
+        </Button>
+      </div>
 
       {/* Add custom field dialog */}
       <AddCustomFieldDialog
