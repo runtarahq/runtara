@@ -57,8 +57,12 @@ describe('NodeFormItem schema', () => {
 
     expect(result.success).toBe(false);
     if (!result.success) {
-      expect(result.error.issues.map((issue) => issue.message)).toContain(
-        'Invalid JSON format'
+      // The parser's own message is surfaced (it carries a position) rather
+      // than a flat 'Invalid JSON format' the author cannot act on.
+      const messages = result.error.issues.map((issue) => issue.message);
+      expect(messages.some((m) => m.startsWith('Invalid JSON — '))).toBe(true);
+      expect(result.error.issues.map((issue) => issue.path.join('.'))).toContain(
+        'inputMapping.0.value'
       );
     }
   });
@@ -321,9 +325,8 @@ describe('NodeFormItem schema', () => {
     });
     expect(invalid.success).toBe(false);
     if (!invalid.success) {
-      expect(invalid.error.issues.map((issue) => issue.message)).toContain(
-        'Invalid JSON format'
-      );
+      const messages = invalid.error.issues.map((issue) => issue.message);
+      expect(messages.some((m) => m.startsWith('Invalid JSON — '))).toBe(true);
     }
 
     const valid = testSchema.safeParse({

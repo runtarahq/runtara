@@ -117,6 +117,25 @@ export function InputMappingField(props: any) {
   // Ensure watchFieldArray is an array
   const fieldArray = Array.isArray(watchFieldArray) ? watchFieldArray : [];
 
+  // Per-row resolver errors, keyed by field name. `error` for a field array is
+  // index-addressed (`inputMapping.<i>.value`) while the editor renders rows by
+  // field name, so map one to the other via the entry's `type`. Without this
+  // the zod refine on JSON values blocks submit and renders nothing anywhere.
+  const rowErrors = useMemo(() => {
+    const out: Record<string, string> = {};
+    if (!Array.isArray(error)) return out;
+    (error as Array<{ value?: { message?: string } } | undefined>).forEach(
+      (itemError, index) => {
+        const message = itemError?.value?.message;
+        const fieldName = (fieldArray[index] as { type?: string } | undefined)
+          ?.type;
+        if (message && fieldName) out[fieldName] = message;
+      }
+    );
+    return out;
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- fieldArray is a fresh array each render; index->name mapping only changes with the error set
+  }, [error, watchFieldArray]);
+
   // Track if we've initialized the default condition for new Conditional steps
   const hasInitializedConditionRef = useRef(false);
 
@@ -494,6 +513,7 @@ export function InputMappingField(props: any) {
           initialData={initialData}
           onDataChange={handleSimpleEditorDataChange}
           allowCustomFields={true}
+          fieldErrors={rowErrors}
         />
         {error && (
           <FieldError className="mt-2">
@@ -549,6 +569,7 @@ export function InputMappingField(props: any) {
           initialData={initialData}
           onDataChange={handleSimpleEditorDataChange}
           allowCustomFields={true}
+          fieldErrors={rowErrors}
         />
         {error && (
           <FieldError className="mt-2">

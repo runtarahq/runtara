@@ -885,47 +885,49 @@ export const schema = () =>
             // explicit immediate '' values.
             autoSeeded: z.boolean().optional(),
           })
-          .refine(
-            (item) => {
-              // Validate JSON fields contain valid JSON strings
-              // ('object'/'array' are form-level hints — e.g. Finish output
-              // types — that carry the same JSON parse semantics on save)
-              // BUT skip validation for:
-              // - Reference values (they resolve at runtime)
-              // - Template variables (they resolve at runtime)
-              if (
-                (item.typeHint === 'json' ||
-                  item.typeHint === 'object' ||
-                  item.typeHint === 'array') &&
-                typeof item.value === 'string' &&
-                item.value
-              ) {
-                // Skip validation for reference values - they're paths, not JSON
-                if (item.valueType === 'reference') {
-                  return true;
-                }
-
-                // Skip validation if value contains template syntax
-                // Template variables like {{data.node.tags}} will be resolved at runtime
-                if (item.value.includes('{{')) {
-                  return true;
-                }
-
-                // For literal values, validate JSON syntax
-                try {
-                  JSON.parse(item.value);
-                  return true;
-                } catch {
-                  return false;
-                }
+          .superRefine((item, ctx) => {
+            // Validate JSON fields contain valid JSON strings
+            // ('object'/'array' are form-level hints — e.g. Finish output
+            // types — that carry the same JSON parse semantics on save)
+            // BUT skip validation for:
+            // - Reference values (they resolve at runtime)
+            // - Template variables (they resolve at runtime)
+            if (
+              (item.typeHint === 'json' ||
+                item.typeHint === 'object' ||
+                item.typeHint === 'array') &&
+              typeof item.value === 'string' &&
+              item.value
+            ) {
+              // Skip validation for reference values - they're paths, not JSON
+              if (item.valueType === 'reference') {
+                return;
               }
-              return true;
-            },
-            {
-              message: 'Invalid JSON format',
-              path: ['value'],
+
+              // Skip validation if value contains template syntax
+              // Template variables like {{data.node.tags}} will be resolved at runtime
+              if (item.value.includes('{{')) {
+                return;
+              }
+
+              // For literal values, validate JSON syntax. Surface the parser's
+              // own message — it carries a character position — rather than a
+              // flat "Invalid JSON format" the author cannot act on.
+              // CompensationField does the same at its JSON textarea.
+              try {
+                JSON.parse(item.value);
+              } catch (error) {
+                ctx.addIssue({
+                  code: z.ZodIssueCode.custom,
+                  message:
+                    error instanceof SyntaxError
+                      ? `Invalid JSON — ${error.message}`
+                      : 'Invalid JSON format',
+                  path: ['value'],
+                });
+              }
             }
-          )
+          })
       ),
       executionTimeout: z.coerce.number().int().nonnegative(),
       maxRetries: z.coerce.number().int().nonnegative(),

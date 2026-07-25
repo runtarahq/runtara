@@ -14,6 +14,7 @@ import React, {
 } from 'react';
 import { shallow } from 'zustand/shallow';
 import { Icons } from '@/shared/components/icons';
+import { FieldError } from '@/shared/components/ui/form';
 import { Button } from '@/shared/components/ui/button';
 import {
   Table,
@@ -177,6 +178,11 @@ interface SimpleInputMappingEditorProps {
   hideReferenceToggle?: boolean;
   /** Allow adding custom fields not defined in the schema (default: false) */
   allowCustomFields?: boolean;
+  /**
+   * Resolver errors keyed by field name. Without these the zod refine on
+   * `inputMapping.<i>.value` blocks submit with nothing rendered anywhere.
+   */
+  fieldErrors?: Record<string, string>;
 }
 
 // Stable empty object to avoid creating new references on each render
@@ -196,6 +202,7 @@ function FieldRow({
   onEditObject,
   onFieldFocus,
   legacyFieldCount = 0,
+  validationError,
 }: {
   nodeId: string;
   field: CapabilityField;
@@ -209,6 +216,8 @@ function FieldRow({
   onFieldFocus?: () => void;
   /** Number of legacy dot-notation fields for this object field */
   legacyFieldCount?: number;
+  /** Resolver error for this row's value, rendered under the value cell */
+  validationError?: string;
 }) {
   const entry = useNodeFormStore((s) => s.getFieldEntry(nodeId, field.name));
   const setFieldValue = useNodeFormStore((s) => s.setFieldValue);
@@ -336,6 +345,9 @@ function FieldRow({
             />
           </div>
         )}
+        {validationError && (
+          <FieldError className="mt-1">{validationError}</FieldError>
+        )}
       </TableCell>
 
       {/* Actions column */}
@@ -367,6 +379,7 @@ export function SimpleInputMappingEditor({
   onDataChange,
   hideReferenceToggle = false,
   allowCustomFields = false,
+  fieldErrors,
 }: SimpleInputMappingEditorProps) {
   const loadNodeData = useNodeFormStore((s) => s.loadNodeData);
   const initializeField = useNodeFormStore((s) => s.initializeField);
@@ -846,6 +859,7 @@ export function SimpleInputMappingEditor({
                       onEditObject={handleEditObject}
                       onFieldFocus={handleFieldFocus}
                       legacyFieldCount={legacyFields.length}
+                      validationError={fieldErrors?.[field.name]}
                     />
                     {/* Inline array editor - appears below the field row */}
                     {isEditingThisArray && isArrayType(field.type) && (
