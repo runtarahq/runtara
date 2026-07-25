@@ -153,7 +153,7 @@ const IMMEDIATE_TYPE_HINT_OPTIONS: Array<{
 ];
 
 export function CompositeValueItem({
-  value,
+  value: rawValue,
   onChange,
   onRemove,
   label,
@@ -164,6 +164,17 @@ export function CompositeValueItem({
   hideTypeSelector = false,
   disabled = false,
 }: CompositeValueItemProps) {
+  // The prop is typed non-nullable, but a JSON null inside a stored composite
+  // reaches us as `null` at runtime (the DSL allows null members and the
+  // loader passes them through). Dereferencing it during render threw, and
+  // with no error boundary below the router that unmounted the whole editor
+  // route. Render it as an editable immediate null instead.
+  const value = useMemo<CompositeValue>(
+    () =>
+      rawValue ??
+      ({ valueType: 'immediate', value: null } satisfies CompositeValue),
+    [rawValue]
+  );
   const [isPickerOpen, setIsPickerOpen] = useState(false);
   const [isExpanded, setIsExpanded] = useState(true);
   const {

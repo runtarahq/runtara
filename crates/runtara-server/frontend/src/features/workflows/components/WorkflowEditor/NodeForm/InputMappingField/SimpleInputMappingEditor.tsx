@@ -55,6 +55,7 @@ import { ObjectMappingEditor } from './ObjectMappingEditor';
 import { CustomFieldRow } from './CustomFieldRow';
 import { AddCustomFieldDialog } from './AddCustomFieldDialog';
 import { useTabContext } from '../NodeFormItem';
+import { describeArrayValue, describeObjectValue } from './value-display';
 
 /** Check if a field type is an array type */
 function isArrayType(type: string | undefined): boolean {
@@ -246,62 +247,11 @@ function FieldRow({
   };
 
   // Get display value for arrays
-  const getArrayDisplayValue = () => {
-    if (!value) return 'Click to configure...';
-    if (valueType === 'reference') return `Reference: ${value}`;
-    // Handle composite mode - value is the composite structure directly
-    if (valueType === 'composite') {
-      if (Array.isArray(value)) {
-        return `Composite: ${value.length} item${value.length !== 1 ? 's' : ''}`;
-      }
-      return 'Composite Array';
-    }
-    try {
-      const parsed = JSON.parse(String(value));
-      if (Array.isArray(parsed)) {
-        return `${parsed.length} item${parsed.length !== 1 ? 's' : ''}`;
-      }
-    } catch {
-      // Invalid JSON
-    }
-    return 'Click to configure...';
-  };
+  const getArrayDisplayValue = () => describeArrayValue(value, valueType);
 
   // Get display value for objects
-  const getObjectDisplayValue = () => {
-    // Check for legacy dot-notation fields first
-    if (legacyFieldCount > 0) {
-      return `${legacyFieldCount} field${legacyFieldCount !== 1 ? 's' : ''}`;
-    }
-    if (!value) return 'Click to configure...';
-    if (valueType === 'reference') return `Reference: ${value}`;
-    // Handle composite mode - value is the composite structure directly
-    if (valueType === 'composite') {
-      if (
-        typeof value === 'object' &&
-        value !== null &&
-        !Array.isArray(value)
-      ) {
-        const fieldCount = Object.keys(value).length;
-        return `Composite: ${fieldCount} field${fieldCount !== 1 ? 's' : ''}`;
-      }
-      return 'Composite Object';
-    }
-    try {
-      const parsed = JSON.parse(String(value));
-      if (
-        typeof parsed === 'object' &&
-        parsed !== null &&
-        !Array.isArray(parsed)
-      ) {
-        const fieldCount = Object.keys(parsed).length;
-        return `${fieldCount} field${fieldCount !== 1 ? 's' : ''}`;
-      }
-    } catch {
-      // Invalid JSON
-    }
-    return 'Click to configure...';
-  };
+  const getObjectDisplayValue = () =>
+    describeObjectValue(value, valueType, legacyFieldCount);
 
   return (
     <TableRow className="hover:bg-muted/30">
