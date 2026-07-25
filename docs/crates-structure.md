@@ -66,14 +66,37 @@ cranelift-srcgen → cranelift-assembler-x64-meta 3.58 → cranelift-assembler-x
 
 `libssh2-sys` still builds from C (17.75s) but is no longer on the critical path.
 
-**Landed:** A1, A2, A4, A6, B1, B2, B3, B5, D1, D2, D3, plus MSRV (D9's `rust-version` half).
+**Landed:** A1, A2, A4, A6, B1, B2, B3, **B4**, B5, D1, D2, D3, plus MSRV (D9's `rust-version` half).
+
+**B4 was verified and landed after an initial skip.** The first pass deferred it: `lib.rs:62`
+instructed keeping the `runtara_ai as ai` re-export "until the AI Agent codegen is migrated to
+dispatch through the `ai-tools` WIT agent", which looked like a live constraint. On investigation the
+comment is accurate about the *old* codegen and stale about the present:
+
+- `pub use runtara_ai as ai;` was the crate's **only** reference to `runtara_ai`. `direct_json.rs`
+  parses the wire shapes by hand instead (its own comment at `:5138` says so).
+- Nothing anywhere referenced `runtara_workflow_stdlib::ai` — not source, not a string literal, not
+  a template. Only the two comments.
+- The generated Rust that *did* use `ai::{completion, message, provider, types}` came from the
+  native/components compile path the direct-only migration deleted. Surviving examples are untracked
+  residue under `crates/runtara-workflows/.data/`, last written 2026-05-07.
+- No current path emits Rust source or shells out to `cargo`; composition is in-process via wac-graph.
+
+The TODO's other claim — that dropping the dep "would shrink workflow.wasm" — is **false, and could
+not have been true**: the shipped component is built `--no-default-features --features
+direct-component` (`build-agent-components.sh:147`), which leaves `sdk-runtime` off, so `runtara-ai`
+was already absent from the artifact. Measured across the change:
+`runtara_workflow_stdlib.wasm` 2,683,971 → 2,683,969 bytes (name-section noise). The gain is graph
+clarity, not size.
+
+Verified after removal: all four feature configurations the crate is really built with, fmt, gated
+clippy, 3,508 workspace unit tests, a full 27-agent + 2-component wasm build, the entire
+`direct_wasm_execute` suite (**159/159**), and specifically the **19 AI Agent tests** that execute
+composed `workflow.wasm` against a hermetic LLM stub — single-shot, structured output, tool loops,
+memory, breakpoints, durable replay, provider-error routing, retries, turn timeouts. All pass.
+So B4 is an `S`, not the `M` the first pass re-rated it.
+
 **Deliberately not done, with reasons:**
-- **B4** (`runtara-workflow-stdlib → runtara-ai`) — **skipped.** The plan rated this `S` on the
-  premise that it is only a `pub use` re-export. It is not safe: `lib.rs:62` documents that
-  *generated workflow code* references `runtara_workflow_stdlib::ai::completion`, `::message`,
-  `::types`, `::provider` and `OneOrMany`, and instructs keeping it until AI Agent codegen is
-  migrated to the `ai-tools` WIT agent. Removing it risks breaking AI Agent workflow compilation,
-  which cannot be proven safe without an AI-agent e2e run. Re-rate as `M`, gated on that migration.
 - **`--max-warnings=0` on frontend lint** — **not adopted.** 26 of the 34 warnings are
   `react-refresh/only-export-components`, an HMR-ergonomics rule whose fix is splitting 26 files.
   The 4 `react-hooks/exhaustive-deps` warnings are the ones worth acting on. The job gates on
