@@ -1,5 +1,10 @@
 import { expect } from '@playwright/test';
-import { test, buildWorkflow } from '../../../fixtures';
+import {
+  test,
+  buildAgentInfo,
+  buildCapabilityInfo,
+  buildWorkflow,
+} from '../../../fixtures';
 import { appPath } from '../../../utils/app-path';
 
 test.describe('Connection-required Rust validation (mocked)', () => {
@@ -47,6 +52,30 @@ test.describe('Connection-required Rust validation (mocked)', () => {
     });
 
     await mockApi.bootstrap(page);
+    // The Rust validator only knows an agent needs a connection when the
+    // catalog says `supportsConnections: true`
+    // (crates/runtara-workflows/src/validation.rs:3342 —
+    // `agent_capability_requires_connection`). With no catalog it emits
+    // `[E020] unknown agent` instead and E026 can never fire. Ids are folded
+    // canonically (kebab), so `object-model` here matches the workflow's
+    // legacy `object_model` agentId.
+    await mockApi.agents.catalog(page, [
+      buildAgentInfo({
+        id: 'object-model',
+        name: 'Object Model',
+        supportsConnections: true,
+        integrationIds: ['postgres'],
+        capabilities: [
+          buildCapabilityInfo({
+            id: 'query-instances',
+            name: 'Query Instances',
+            displayName: 'Query Instances',
+            inputType: 'QueryInstancesInput',
+            inputs: [{ name: 'schema_name', type: 'string', required: true }],
+          }),
+        ],
+      }),
+    ]);
     await mockApi.workflows.get(page, workflowId, workflow);
     await mockApi.runtime.metadata(page, { step_types: [] });
     await page.route(

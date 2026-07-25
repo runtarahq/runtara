@@ -31,7 +31,7 @@ export function Breadcrumb({
       {items.map((item, i) => {
         const last = i === items.length - 1;
         return (
-          <span key={i} className="flex min-w-0 items-center gap-1">
+          <div key={i} className="flex min-w-0 items-center gap-1">
             {!last && item.to ? (
               <Link
                 to={item.to}
@@ -47,20 +47,25 @@ export function Breadcrumb({
               >
                 {item.label}
               </button>
-            ) : (
-              <span
-                className={cn(
-                  'truncate px-1 py-0.5',
-                  last && 'font-medium text-foreground'
-                )}
+            ) : last ? (
+              // The final crumb is the page title, so it doubles as the page's
+              // h1 — console pages have no other heading, and without one there
+              // is no landmark for screen readers to jump to. Preflight resets
+              // heading font-size/weight/margin, so this renders identically to
+              // the span it replaces.
+              <h1
+                aria-current="page"
+                className="truncate px-1 py-0.5 text-sm font-medium text-foreground"
               >
                 {item.label}
-              </span>
+              </h1>
+            ) : (
+              <span className="truncate px-1 py-0.5">{item.label}</span>
             )}
             {!last && (
               <ChevronRight className="size-3.5 shrink-0 text-muted-foreground/60" />
             )}
-          </span>
+          </div>
         );
       })}
     </nav>

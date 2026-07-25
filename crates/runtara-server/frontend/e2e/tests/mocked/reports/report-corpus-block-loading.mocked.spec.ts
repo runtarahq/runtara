@@ -325,11 +325,15 @@ test.describe('reports corpus — viewer block-type loading (mocked)', () => {
 
     await openReportViewer({ page, mockApi }, { reportId, definition, blocks });
 
-    await expect(
-      page.getByRole('heading', { name: 'Total revenue' })
-    ).toBeVisible();
-    // currency format renders with the locale currency symbol.
-    await expect(page.getByText(/\$\s?199,?500|199,500/).first()).toBeVisible();
+    // `metric.label` deliberately overrides the block title for the in-card
+    // label (MetricBlock label precedence: data.label → metric.label → title),
+    // and ReportBlockHost suppresses its own heading for metric blocks so the
+    // two don't duplicate — so 'Revenue' is what renders, not 'Total revenue'.
+    await expect(page.getByRole('heading', { name: 'Revenue' })).toBeVisible();
+    // Values at/over 100k render in compact notation so the card doesn't
+    // overflow, with the exact figure kept in the accessible name.
+    await expect(page.getByText(/\$\s?199\.5K/i).first()).toBeVisible();
+    await expect(page.getByLabel(/\$\s?199,500/).first()).toBeVisible();
   });
 
   test('card block renders its group fields', async ({ page, mockApi }) => {

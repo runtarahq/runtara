@@ -89,6 +89,7 @@ export function RateLimitCard({
 
   return (
     <Card
+      data-testid="rate-limit-card"
       className={`rounded-lg border bg-card p-4 shadow-none transition-all ${
         onClick ? 'cursor-pointer hover:border-primary/50' : ''
       } ${selected ? 'border-primary ring-1 ring-primary/20' : 'border-border/40'}`}

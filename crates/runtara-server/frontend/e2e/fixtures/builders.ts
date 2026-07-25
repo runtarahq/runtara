@@ -1,5 +1,7 @@
 import type {
+  AgentInfo,
   ApiKey,
+  CapabilityInfo,
   ConnectionDto,
   ConnectionTypeDto,
   Instance,
@@ -137,6 +139,52 @@ export function buildApiKey(overrides: DeepPartial<ApiKey> = {}): ApiKey {
     last_used_at: null,
     ...overrides,
   } as ApiKey;
+}
+
+/**
+ * A capability entry for the agent catalog the Rust/WASM validator consumes.
+ *
+ * `runtara_dsl::agent_meta::CapabilityInfo` deserializes with explicit per-field
+ * renames and NO `#[serde(default)]` on `id`/`name`/`inputType`/`inputs`/
+ * `output`/`hasSideEffects`/`isIdempotent`/`rateLimited`, so all of those must be
+ * present or `AgentCatalog::from_json` rejects the WHOLE catalog.
+ */
+export function buildCapabilityInfo(
+  overrides: DeepPartial<CapabilityInfo> = {}
+): CapabilityInfo {
+  return {
+    id: 'noop',
+    name: 'Noop',
+    displayName: 'Noop',
+    description: 'Mock capability',
+    inputType: 'NoopInput',
+    inputs: [],
+    output: { type: 'object' },
+    hasSideEffects: false,
+    isIdempotent: true,
+    rateLimited: false,
+    ...overrides,
+  } as CapabilityInfo;
+}
+
+/**
+ * An agent entry for the catalog served by `GET /api/runtime/agents/{id}` and
+ * pushed into the WASM validator (see src/shared/lib/rust-validation-wasm.ts:62).
+ * Every field here is required by the Rust deserializer.
+ */
+export function buildAgentInfo(
+  overrides: DeepPartial<AgentInfo> = {}
+): AgentInfo {
+  return {
+    id: 'mock-agent',
+    name: 'Mock Agent',
+    description: 'Mock agent for validation fixtures',
+    hasSideEffects: false,
+    supportsConnections: false,
+    integrationIds: [],
+    capabilities: [],
+    ...overrides,
+  } as AgentInfo;
 }
 
 export const paginated = <T>(

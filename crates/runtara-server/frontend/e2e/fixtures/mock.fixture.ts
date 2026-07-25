@@ -1,6 +1,7 @@
 /* eslint-disable react-hooks/rules-of-hooks */
 import { test as base, Page, Route } from '@playwright/test';
 import type {
+  AgentInfo,
   ApiKey,
   ConnectionDto,
   ConnectionTypeDto,
@@ -137,6 +138,19 @@ export interface MockApi {
   runtime: {
     health: (page: Page, ok?: boolean) => Promise<void>;
     metadata: (page: Page, body?: unknown) => Promise<void>;
+  };
+  /**
+   * Serve the agent catalog the Rust/WASM workflow validator loads on demand.
+   *
+   * `loadAgentCatalogIntoWasm()` (src/shared/lib/rust-validation-wasm.ts:62)
+   * fetches `GET /agents` for the id list, then fans out to `GET /agents/{id}`
+   * for each entry and pushes the raw detail bodies into `initAgentCatalog`.
+   * Without this the bootstrap catch-all answers `{}`, the catalog ends up
+   * EMPTY, and every Agent step fails validation with `[E020] unknown agent` —
+   * which blocks Save in the editor.
+   */
+  agents: {
+    catalog: (page: Page, agents: AgentInfo[]) => Promise<void>;
   };
   invocationHistory: {
     list: (
@@ -348,6 +362,22 @@ const factory: MockApi = {
         fulfill(route, body as JsonBody)
       ),
   },
+  agents: {
+    catalog: async (page, agents) => {
+      // Detail routes first; the list route is registered last so it wins for
+      // the bare `/agents` URL (Playwright matches handlers LIFO).
+      for (const agent of agents) {
+        await page.route(runtimeUrl(`agents/${agent.id}`), (route) =>
+          // The detail endpoint returns a BARE AgentInfo — no data/success
+          // envelope (see crates/runtara-server/src/api/handlers/operators.rs).
+          fulfill(route, agent as unknown as JsonBody)
+        );
+      }
+      await page.route(runtimeUrl('agents'), (route) =>
+        fulfill(route, { agents })
+      );
+    },
+  },
   invocationHistory: {
     list: (page, entries, opts) =>
       page.route(runtimeUrl('executions'), (route) =>
@@ -380,25 +410,36 @@ const factory: MockApi = {
     // that sets `window.__RUNTARA_CONFIG__ = {}` — it always runs AFTER
     // any `addInitScript`, so we have to rewrite the HTML itself to
     // bake in the local-auth config.
-    await page.route(
-      /localhost:8081\/(ui\/[^/]+\/)?(index\.html)?(\?.*)?$/,
-      async (route) => {
-        const response = await route.fetch();
-        const html = await response.text();
-        const patched = html.replace(
-          /window\.__RUNTARA_CONFIG__\s*=\s*\{\s*\}\s*;/,
-          `window.__RUNTARA_CONFIG__={"authMode":"local","tenantId":"org_mocked_e2e","apiBaseUrl":""};`
-        );
-        await route.fulfill({
-          response,
-          body: patched,
-          headers: {
-            ...response.headers(),
-            'content-type': 'text/html; charset=utf-8',
-          },
-        });
+    //
+    // This must match EVERY navigation document, not just the root: the dev
+    // server serves the same index.html for any SPA route, and specs deep-link
+    // (`/settings/api-keys`, `/analytics/usage`, …). When an unpatched document
+    // is served the SPA boots in `oidc` mode, `useTenantUrlGuard` sees a JWT
+    // org_id that can never match the tenant parsed from the URL, and it does
+    // `window.location.replace('/ui/<org>/')` — which is outside the router's
+    // basename, so the spec silently ends up on the `*` 404 route instead of
+    // the page under test.
+    await page.route(/localhost:8081\//, async (route) => {
+      // Only navigations carry the runtime-config script; let assets and XHR
+      // fall through to the API handlers registered below.
+      if (route.request().resourceType() !== 'document') {
+        return route.fallback();
       }
-    );
+      const response = await route.fetch();
+      const html = await response.text();
+      const patched = html.replace(
+        /window\.__RUNTARA_CONFIG__\s*=\s*\{\s*\}\s*;/,
+        `window.__RUNTARA_CONFIG__={"authMode":"local","tenantId":"org_mocked_e2e","apiBaseUrl":""};`
+      );
+      await route.fulfill({
+        response,
+        body: patched,
+        headers: {
+          ...response.headers(),
+          'content-type': 'text/html; charset=utf-8',
+        },
+      });
+    });
     // Register the catch-all FIRST so later handlers (specific endpoints + spec-level
     // overrides) take precedence (Playwright matches page.route handlers LIFO).
     await page.route(/\/api\/runtime\//, (route) => fulfill(route, {}));

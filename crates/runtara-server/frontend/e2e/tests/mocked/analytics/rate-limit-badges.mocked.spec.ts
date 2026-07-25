@@ -90,14 +90,20 @@ test.describe('Analytics / Rate limits badges (mocked)', () => {
     await expect(page.getByText('No limit')).toBeVisible();
     await expect(page.getByText('Not enforced')).toBeVisible();
     await expect(page.getByText('Rate limited')).toBeVisible();
-    await expect(page.getByText('OK')).toBeVisible();
+    // Exact match: 'OK' is otherwise a substring of connection names like
+    // `hubspot_access_token`, which makes an unanchored match ambiguous.
+    await expect(page.getByText('OK', { exact: true }).first()).toBeVisible();
 
     // ...and the unprotected connection's card never claims to be "OK".
+    // Scope to the card itself — a bare `div` filter resolves to an ancestor
+    // that spans several cards, so the assertion below would see a sibling
+    // card's badge.
     const unprotectedCard = page
-      .locator('div', { hasText: 'Unprotected Stripe' })
-      .filter({ hasText: 'No limit' })
-      .first();
+      .getByTestId('rate-limit-card')
+      .filter({ hasText: 'Unprotected Stripe' });
     await expect(unprotectedCard).toBeVisible();
-    await expect(unprotectedCard.getByText('OK')).toHaveCount(0);
+    await expect(unprotectedCard.getByText('OK', { exact: true })).toHaveCount(
+      0
+    );
   });
 });

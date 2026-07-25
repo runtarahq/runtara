@@ -58,6 +58,7 @@ import {
   getReportLayoutBlockIds,
   slugify,
 } from '../utils';
+import { normalizeReportDefinitionForSave } from '../normalizeDefinition';
 import { cacheReportActionRender } from '../reportActionRender';
 
 // Wizard v2 — operates on ReportDefinition directly, no WizardState
@@ -427,8 +428,13 @@ export function ReportPage() {
 
   const handleSave = async () => {
     setSaveError(null);
+    // Write back the inference the DSL readers already apply (action column
+    // types) so the stored definition matches what the renderer and the
+    // wizard's own column editor show. Idempotent and additive — an already
+    // explicit definition round-trips unchanged.
+    const normalizedDefinition = normalizeReportDefinitionForSave(definition);
     const validation = await validateReport.mutateAsync({
-      definition,
+      definition: normalizedDefinition,
     });
     if (!validation.valid) {
       setSaveError(validation.errors?.[0]?.message ?? 'Report is invalid.');
@@ -441,7 +447,7 @@ export function ReportPage() {
       description: description.trim() || null,
       tags: [],
       status: 'published' as const,
-      definition,
+      definition: normalizedDefinition,
     };
     if (isExisting && reportId) {
       const report = await updateReport.mutateAsync({

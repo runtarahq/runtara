@@ -20,6 +20,7 @@ import {
   ReportTableColumnType,
 } from '../../../types';
 import { humanizeFieldName } from '../../../utils';
+import { inferReportTableColumnType } from '../../../normalizeDefinition';
 import {
   InteractionActionsList,
   InteractionButtonsEditor,
@@ -109,7 +110,12 @@ export function TableBlockEditor({
         ) : (
           <div className="grid gap-2">
             {columns.map((column, index) => {
-              const type: ReportTableColumnType = column.type ?? 'value';
+              // `type` is optional in the DSL — a bare `workflowAction` /
+              // `interactionButtons` already renders as an action column, so
+              // the editor infers the same way instead of mislabelling it
+              // "Value" and hiding the action sub-editor below.
+              const type: ReportTableColumnType =
+                inferReportTableColumnType(column);
               return (
                 <div
                   key={`${column.field}_${index}`}

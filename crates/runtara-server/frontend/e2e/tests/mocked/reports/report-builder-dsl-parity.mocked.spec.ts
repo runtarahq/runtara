@@ -202,9 +202,13 @@ async function saveThroughWizard(
   page: Page,
   getSaved: () => UpdateReportRequest | null
 ): Promise<ReportDefinition> {
+  // Phase 11 (in-place block editing): the grid renders blocks as previews,
+  // and the block form only mounts after the per-block Edit pencil is clicked.
+  await page.getByRole('button', { name: 'Edit block' }).first().click();
   const firstBlockTitle = page
-    .locator('input[placeholder="Untitled block"]')
-    .first();
+    .locator('[data-testid^="inline-editor-"]')
+    .first()
+    .getByLabel('Title', { exact: true });
   await expect(firstBlockTitle).toBeVisible();
   const currentTitle = await firstBlockTitle.inputValue();
   await firstBlockTitle.fill(`${currentTitle || 'Block'} parity`);
@@ -768,10 +772,14 @@ test.describe('SYN-410 report builder DSL parity (mocked)', () => {
       measures: ['total_amount'],
       limit: 50,
     });
-    expect(totals.table?.columns?.map((column) => column.field)).toEqual([
-      'status',
-      'total_amount',
-    ]);
+    // Wizard v2 dropped v1's silent on-load reconcile: deriving table columns
+    // from the dataset's dimensions/measures is now an explicit user action
+    // behind `DatasetReconcileButton` ("Reset to dataset schema", which shows
+    // a before/after diff first), and the renderer falls back to the
+    // response's own columns when the block declares none
+    // (`TableBlock.normalizeColumns`). So a column-less dataset block must
+    // save back exactly as authored.
+    expect(totals.table).toBeUndefined();
   });
 
   test('09 saves workflow_runtime and system source kinds', async ({
@@ -883,12 +891,13 @@ test.describe('SYN-410 report builder DSL parity (mocked)', () => {
     });
     const saved = await saveThroughWizard(page, getSaved);
 
-    expect(block(saved, 'orders').source.join).toEqual(
-      join.map((item) => ({
-        ...item,
-        connectionId: DEFAULT_OBJECT_MODEL_CONNECTION_ID,
-      }))
-    );
+    // `ReportSourceJoin.connectionId` is optional in the DSL (Rust
+    // `connection_id: Option<String>` with `skip_serializing_if =
+    // "Option::is_none"`); omitting it means "resolve the dimension schema
+    // through the block's own object-model connection". The wizard never
+    // invents connection ids — test 22 asserts the same for filter options —
+    // so the join must round-trip byte-for-byte.
+    expect(block(saved, 'orders').source.join).toEqual(join);
     expect(block(saved, 'orders').source.condition).toEqual(condition);
   });
 
@@ -1121,9 +1130,15 @@ test.describe('SYN-410 report builder DSL parity (mocked)', () => {
       field: 'id',
       valueField: 'id',
       labelField: 'name',
-      search: true,
       dependsOn: ['country_filter'],
     });
+    // `options.search` (server-side search on the option list) is opt-in and
+    // defaults to false on the backend — `option_bool(options_config,
+    // "search").unwrap_or(false)` in
+    // `crates/runtara-server/src/api/services/reports.rs`. The wizard's
+    // "Server-side search" checkbox mirrors that (`Boolean(options.search)`),
+    // so a definition that never enabled it must not gain it on save.
+    expect(customerFilter.options?.search).toBeUndefined();
     expect(customerFilter.options?.filterMappings).toEqual(filterMappings);
     expect(customerFilter.options?.condition).toEqual(optionsCondition);
   });

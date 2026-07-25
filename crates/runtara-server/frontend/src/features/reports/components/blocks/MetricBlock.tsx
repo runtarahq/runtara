@@ -49,12 +49,16 @@ export function MetricBlock({
 
   return (
     <BlockFrame className="h-full p-4">
-      <p
+      {/* The in-card label is this block's title (ReportBlockHost suppresses
+          its own heading for metrics), so it carries the same heading level a
+          chart or table block gets from the host — otherwise metric cards are
+          the only blocks with no programmatic label to navigate by. */}
+      <h2
         className="truncate text-sm font-medium text-muted-foreground"
         title={label}
       >
         {label}
-      </p>
+      </h2>
       <p
         className="mt-2 text-3xl font-semibold tabular-nums tracking-tight text-foreground"
         title={compact ? full : undefined}

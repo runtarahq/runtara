@@ -65,13 +65,23 @@ export function ObjectModelConnectionSelector() {
         <div className="border-b px-3 py-2 text-sm font-medium">
           Database connection
         </div>
-        <div className="max-h-72 overflow-y-auto p-1">
+        {/* Single-select list: without listbox/option semantics the choices
+            are undifferentiated buttons and the only selection cue is a
+            decorative check icon, so assistive tech cannot tell which
+            database is active. */}
+        <div
+          role="listbox"
+          aria-label="Database connection"
+          className="max-h-72 overflow-y-auto p-1"
+        >
           {connections.map((connection) => {
             const selected = connection.id === selectedConnectionId;
             return (
               <button
                 key={connection.id}
                 type="button"
+                role="option"
+                aria-selected={selected}
                 onClick={() => {
                   setSelectedConnectionId(connection.id);
                   setOpen(false);
@@ -87,7 +97,9 @@ export function ObjectModelConnectionSelector() {
                     ? ' (default)'
                     : ''}
                 </span>
-                {selected && <Check className="size-4 shrink-0" />}
+                {selected && (
+                  <Check aria-hidden="true" className="size-4 shrink-0" />
+                )}
               </button>
             );
           })}
