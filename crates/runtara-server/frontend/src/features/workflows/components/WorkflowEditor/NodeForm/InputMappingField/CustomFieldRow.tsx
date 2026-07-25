@@ -18,17 +18,11 @@ import {
 import { useNodeFormStore } from '@/features/workflows/stores/nodeFormStore';
 import { MappingValueInput, ValueMode } from './MappingValueInput';
 import { FileInputWithReferences } from './FileInputWithReferences';
+import {
+  CUSTOM_FIELD_TYPES,
+  customFieldTypeLabel,
+} from './custom-field-types';
 
-/** Available types for custom fields - values match API ValueType convention */
-const CUSTOM_FIELD_TYPES = [
-  { value: 'string', label: 'String' },
-  { value: 'integer', label: 'Integer' },
-  { value: 'number', label: 'Number' },
-  { value: 'boolean', label: 'Boolean' },
-  { value: 'json', label: 'JSON Object' },
-  { value: 'json', label: 'Array' },
-  { value: 'file', label: 'File' },
-];
 
 interface CustomFieldRowProps {
   nodeId: string;
@@ -144,11 +138,7 @@ export function CustomFieldRow({
   };
 
   // Get short label for compact display
-  const getTypeLabel = () => {
-    const currentType = getDisplayType();
-    const typeInfo = CUSTOM_FIELD_TYPES.find((t) => t.value === currentType);
-    return typeInfo?.label || currentType;
-  };
+  const getTypeLabel = () => customFieldTypeLabel(getDisplayType());
 
   return (
     <TableRow className="bg-warning/5 hover:bg-muted/30">

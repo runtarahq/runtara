@@ -22,17 +22,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/shared/components/ui/select';
+import { CUSTOM_FIELD_TYPES } from './custom-field-types';
 
-/** Available types for custom fields - values match API ValueType convention */
-const CUSTOM_FIELD_TYPES = [
-  { value: 'string', label: 'String' },
-  { value: 'integer', label: 'Integer' },
-  { value: 'number', label: 'Number' },
-  { value: 'boolean', label: 'Boolean' },
-  { value: 'json', label: 'JSON Object' },
-  { value: 'json', label: 'Array' },
-  { value: 'file', label: 'File' },
-];
 
 interface AddCustomFieldDialogProps {
   open: boolean;
