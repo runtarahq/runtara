@@ -36,6 +36,6 @@ fn main() {
     }
 
     println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-changed=../runtara-agent-wit/templates/agent.wit.in");
+    println!("cargo:rerun-if-changed=../../runtara-agent-wit/templates/agent.wit.in");
     println!("cargo:rerun-if-env-changed=CARGO_PKG_NAME");
 }
