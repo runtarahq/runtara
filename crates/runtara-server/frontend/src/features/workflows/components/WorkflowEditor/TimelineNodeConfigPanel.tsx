@@ -1,7 +1,17 @@
-import { useCallback, useRef } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import { Check, X } from 'lucide-react';
 
 import { Button } from '@/shared/components/ui/button';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/shared/components/ui/alert-dialog';
 import { NodeForm } from './NodeForm';
 import { NodeFormProvider } from './NodeForm/NodeFormProvider';
 import * as form from './NodeForm/NodeFormItem';
@@ -44,6 +54,25 @@ export function TimelineNodeConfigPanel({
   isCreate = false,
 }: TimelineNodeConfigPanelProps) {
   const formContainerRef = useRef<HTMLDivElement | null>(null);
+
+  // Unsaved-edit guard for the inline panel. Closing here is one click and the
+  // panel remounts (dropping form state) whenever another row is edited.
+  const [isDirty, setIsDirty] = useState(false);
+  const [confirmDiscardOpen, setConfirmDiscardOpen] = useState(false);
+
+  const requestClose = useCallback(() => {
+    if (isDirty) {
+      setConfirmDiscardOpen(true);
+      return;
+    }
+    onCancel();
+  }, [isDirty, onCancel]);
+
+  const discard = useCallback(() => {
+    setIsDirty(false);
+    setConfirmDiscardOpen(false);
+    onCancel();
+  }, [onCancel]);
 
   const handleSubmit = useCallback(
     async (data: form.SchemaType) => {
@@ -89,7 +118,7 @@ export function TimelineNodeConfigPanel({
           type="button"
           variant="ghost"
           size="icon"
-          onClick={onCancel}
+          onClick={requestClose}
           aria-label="Close inline editor"
         >
           <X aria-hidden="true" />
@@ -110,6 +139,7 @@ export function TimelineNodeConfigPanel({
             isEdit={!isCreate}
             values={nodeData}
             originalValues={originalNodeData}
+            onDirtyChange={setIsDirty}
             onSubmit={handleSubmit}
             onReset={isCreate ? undefined : handleReset}
             onDelete={isCreate ? undefined : handleDelete}
@@ -123,7 +153,7 @@ export function TimelineNodeConfigPanel({
         <Button
           type="button"
           variant="outline"
-          onClick={onCancel}
+          onClick={requestClose}
           data-testid="timeline-node-config-cancel"
         >
           <X aria-hidden="true" />
@@ -138,6 +168,25 @@ export function TimelineNodeConfigPanel({
           Save
         </Button>
       </div>
+
+      <AlertDialog
+        open={confirmDiscardOpen}
+        onOpenChange={setConfirmDiscardOpen}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Discard changes to this step?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This step has edits you have not saved. Closing now throws them
+              away — there is no undo.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Keep editing</AlertDialogCancel>
+            <AlertDialogAction onClick={discard}>Discard</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

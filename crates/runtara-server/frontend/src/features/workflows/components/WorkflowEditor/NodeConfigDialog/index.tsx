@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Dialog,
   DialogContent,
@@ -8,6 +8,16 @@ import {
   DialogFooter,
 } from '@/shared/components/ui/dialog';
 import { Button } from '@/shared/components/ui/button';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/shared/components/ui/alert-dialog';
 import { NodeForm } from '../NodeForm';
 import { NodeFormProvider } from '../NodeForm/NodeFormProvider';
 import * as form from '../NodeForm/NodeFormItem';
@@ -69,6 +79,11 @@ export function NodeConfigDialog({
   // that would reset the form values prop
   const stagedDataRef = useRef<form.SchemaType>(nodeData);
 
+  // Unsaved-edit guard. Esc, a backdrop click and the X all route through
+  // Radix's onOpenChange, so intercepting it covers every close path.
+  const [isDirty, setIsDirty] = useState(false);
+  const [confirmDiscardOpen, setConfirmDiscardOpen] = useState(false);
+
   // Track previous open state using a ref to avoid re-render loops
   const prevOpenRef = useRef(false);
   const formContainerRef = useRef<HTMLDivElement | null>(null);
@@ -121,10 +136,33 @@ export function NodeConfigDialog({
     formElement.requestSubmit();
   }, []);
 
-  const handleCancel = useCallback(() => {
+  const discard = useCallback(() => {
     stagedDataRef.current = originalNodeData;
+    setIsDirty(false);
+    setConfirmDiscardOpen(false);
     onOpenChange(false);
   }, [originalNodeData, onOpenChange]);
+
+  const handleCancel = useCallback(() => {
+    if (isDirty) {
+      setConfirmDiscardOpen(true);
+      return;
+    }
+    discard();
+  }, [isDirty, discard]);
+
+  // Radix calls this for Esc, outside-click and the X button. Saving closes
+  // through handleSubmit, which clears nothing here — the dialog unmounts.
+  const handleOpenChange = useCallback(
+    (next: boolean) => {
+      if (!next && isDirty) {
+        setConfirmDiscardOpen(true);
+        return;
+      }
+      onOpenChange(next);
+    },
+    [isDirty, onOpenChange]
+  );
 
   const handleReset = useCallback(() => {
     // Don't update ref here - the form will handle the reset and call onChange
@@ -148,7 +186,7 @@ export function NodeConfigDialog({
       : '';
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent
         className="flex max-h-[90vh] max-w-4xl flex-col gap-0 p-0"
         data-testid="node-config-dialog"
@@ -182,6 +220,7 @@ export function NodeConfigDialog({
               values={nodeData}
               originalValues={originalNodeData}
               onChange={handleChange}
+              onDirtyChange={setIsDirty}
               onSubmit={handleSubmit}
               onReset={isCreate ? undefined : handleReset}
               onDelete={isCreate ? undefined : handleDelete}
@@ -198,6 +237,25 @@ export function NodeConfigDialog({
           </DialogFooter>
         )}
       </DialogContent>
+
+      <AlertDialog
+        open={confirmDiscardOpen}
+        onOpenChange={setConfirmDiscardOpen}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Discard changes to this step?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This step has edits you have not saved. Closing now throws them
+              away — there is no undo.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Keep editing</AlertDialogCancel>
+            <AlertDialogAction onClick={discard}>Discard</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </Dialog>
   );
 }

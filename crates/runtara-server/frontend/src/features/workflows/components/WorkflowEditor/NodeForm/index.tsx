@@ -18,6 +18,12 @@ type Props = {
   originalValues?: form.SchemaType;
   onSubmit: (data: form.SchemaType) => void | Promise<void>;
   onChange?: (data: form.SchemaType) => void;
+  /**
+   * Notifies the container whether the form holds unsaved edits, so it can
+   * guard destructive closes. Derived from RHF's dirty tracking rather than a
+   * value comparison, so a field edited and edited back still counts as clean.
+   */
+  onDirtyChange?: (isDirty: boolean) => void;
   onReset?: () => void;
   onDelete?: () => void;
   contentScrollable?: boolean;
@@ -30,6 +36,7 @@ export function NodeForm({
   originalValues,
   onSubmit,
   onChange,
+  onDirtyChange,
   onReset,
   onDelete,
   contentScrollable = true,
@@ -88,6 +95,13 @@ export function NodeForm({
       subscription.unsubscribe();
     };
   }, [entireForm, onChange]);
+
+  // Report dirty state upward. `formState.isDirty` is a getter on a Proxy, so
+  // it must be read during render for RHF to subscribe this component to it.
+  const isDirty = entireForm.formState.isDirty;
+  useEffect(() => {
+    onDirtyChange?.(isDirty);
+  }, [isDirty, onDirtyChange]);
 
   const handleSubmit = (data: form.SchemaType) => {
     // console.log("[DEBUG] NodeForm handleSubmit - data.inputMapping:', data.inputMapping);
