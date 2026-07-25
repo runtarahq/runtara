@@ -136,6 +136,34 @@ Effort: **S** ≤1 day · **M** 1–3 days · **L** ~1 week · **XL** multi-week
 
 ---
 
+## Implementation status (2026-07-26)
+
+Most of Wave 1 has landed. Each item was verified live against a running server on the *Price List Import*, *Demo AI* and *Advance report stage* workflows, and each check confirmed the stored workflow was left at version 2 — no probe edit was ever persisted.
+
+| Item | Status | Commit |
+|---|---|---|
+| 1.0 Fold `agentId` canonically | **Landed** | `ae64aed4` |
+| 1.0b Schema when editing, not only creating | **Moot** — see below | — |
+| 1.1 Make Save either work or say why | **Landed** | `570fdcb1` |
+| 1.2 Don't block a step's save on unrelated graph errors | Open | — |
+| 1.3 Dirty guard on close | **Landed** | `5b678fc6` |
+| 1.4 Stop destroying data on click (all four) | **Landed** | `e0af6466`, `f73e1122`, `39efdb42` |
+| 1.5 Show immediate arrays/objects; null guard | **Landed** | `7233f18a` |
+| 1.6 "Edit as JSON" on the primary editor | **Landed** | `250e0cf5` |
+| 1.7 Long-form fields get long-form editors | **Landed** | `bdea3902` |
+| 1.8 Custom-parameter type list | **Landed**; `any`-typed roots still open | `63e0e603` |
+| 1.9 Show all errors in the dialog, named | Open | — |
+
+Three corrections to this document, found while implementing:
+
+- **1.0b is moot, and doing it as written would have been a regression.** The `!isEdit` gate only suppresses *auto-appending* schema rows; it never suppressed rendering. Once 1.0 restored the capability lookup, editing an existing step shows the same labels, types, required markers and optional-field discovery as creating one. Removing the gate would have injected unmapped rows into every step you opened.
+- **1.8's "two-character fix" would have silently discarded the user's choice.** `VALID_VALUE_TYPES` (`CustomNodes/utils.tsx`) is `{string, integer, number, boolean, json, file}` and `isValidValueType` drops anything outside it, so changing the duplicate option to `value: 'array'` would have dropped the type hint on save. The API ValueType vocabulary has no separate array; the two duplicate entries were collapsed into one honest `JSON (object or array)` instead.
+- **Two live-session findings were retracted** — see the retraction note in that section.
+
+Also confirmed live while verifying, not yet fixed: the capability picker's search returns nothing for `bulk-create` even though `bulk-create-instances` exists, because it matches `name`/`displayName` but not the capability id. That sharpens Wave 3's discovery item — the search is not merely whole-phrase, it cannot find a capability by its own id.
+
+---
+
 ## Wave 1 — Stop the bleeding (~2 sprints)
 
 **Thesis:** the owner does not avoid the UI because it lacks features. He avoids it because it *loses work, refuses to save, and gives no reason*. Wave 1 is the minimum that makes the form trustworthy enough to open. Nothing here changes the authoring model; almost all of it is wiring components that already exist.

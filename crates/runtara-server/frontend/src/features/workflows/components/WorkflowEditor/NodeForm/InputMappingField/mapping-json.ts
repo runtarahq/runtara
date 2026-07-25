@@ -113,7 +113,9 @@ export function parseMappingJson(text: string): MappingJsonParseResult {
     }
 
     const valueType = (raw.valueType as string | undefined) ?? 'immediate';
-    if (!['immediate', 'reference', 'template', 'composite'].includes(valueType)) {
+    if (
+      !['immediate', 'reference', 'template', 'composite'].includes(valueType)
+    ) {
       return {
         entries: null,
         error: `"${name}" has an unknown valueType "${valueType}" — expected immediate, reference, template or composite`,

@@ -1,8 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import {
-  CUSTOM_FIELD_TYPES,
-  customFieldTypeLabel,
-} from './custom-field-types';
+import { CUSTOM_FIELD_TYPES, customFieldTypeLabel } from './custom-field-types';
 
 describe('CUSTOM_FIELD_TYPES', () => {
   it('has no duplicate values', () => {

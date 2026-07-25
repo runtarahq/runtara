@@ -42,10 +42,7 @@ import {
 } from '@/shared/components/ui/tooltip';
 import { Search, Inbox, X, Trash2 } from 'lucide-react';
 import { convertConditionArguments } from '@/shared/utils/condition-type-conversion';
-import {
-  carryConditionArgs,
-  type ConditionArity,
-} from './condition-args';
+import { carryConditionArgs, type ConditionArity } from './condition-args';
 
 // --- TYPES & CONSTANTS ---
 type Arity = 'UNARY' | 'BINARY' | 'VARIADIC';

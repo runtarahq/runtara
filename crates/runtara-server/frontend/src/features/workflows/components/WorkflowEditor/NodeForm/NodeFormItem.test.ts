@@ -61,9 +61,9 @@ describe('NodeFormItem schema', () => {
       // than a flat 'Invalid JSON format' the author cannot act on.
       const messages = result.error.issues.map((issue) => issue.message);
       expect(messages.some((m) => m.startsWith('Invalid JSON — '))).toBe(true);
-      expect(result.error.issues.map((issue) => issue.path.join('.'))).toContain(
-        'inputMapping.0.value'
-      );
+      expect(
+        result.error.issues.map((issue) => issue.path.join('.'))
+      ).toContain('inputMapping.0.value');
     }
   });
 

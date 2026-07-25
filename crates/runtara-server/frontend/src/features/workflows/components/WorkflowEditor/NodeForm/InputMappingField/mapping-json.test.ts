@@ -13,7 +13,11 @@ describe('entriesToMappingJson', () => {
   it('keys by field name and keeps the value type', () => {
     expect(
       entriesToMappingJson([
-        entry({ type: 'schema_name', value: 'Product', valueType: 'immediate' }),
+        entry({
+          type: 'schema_name',
+          value: 'Product',
+          valueType: 'immediate',
+        }),
         entry({
           type: 'instances',
           value: 'steps.parse.outputs',
@@ -28,8 +32,18 @@ describe('entriesToMappingJson', () => {
 
   it('omits an auto type hint but keeps a real one', () => {
     const out = entriesToMappingJson([
-      entry({ type: 'a', value: '1', valueType: 'immediate', typeHint: 'auto' }),
-      entry({ type: 'b', value: '1', valueType: 'immediate', typeHint: 'integer' }),
+      entry({
+        type: 'a',
+        value: '1',
+        valueType: 'immediate',
+        typeHint: 'auto',
+      }),
+      entry({
+        type: 'b',
+        value: '1',
+        valueType: 'immediate',
+        typeHint: 'integer',
+      }),
     ]);
     expect(out.a).not.toHaveProperty('typeHint');
     expect(out.b.typeHint).toBe('integer');
@@ -125,7 +139,9 @@ describe('parseMappingJson', () => {
   });
 
   it('rejects a non-object document with guidance', () => {
-    expect(parseMappingJson('[1,2,3]').error).toMatch(/keyed by parameter name/);
+    expect(parseMappingJson('[1,2,3]').error).toMatch(
+      /keyed by parameter name/
+    );
     expect(parseMappingJson('"nope"').error).toMatch(/keyed by parameter name/);
   });
 

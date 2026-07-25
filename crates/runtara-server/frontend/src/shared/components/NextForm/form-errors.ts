@@ -97,7 +97,9 @@ export function describeFirstFormError(
     return null;
   }
 
-  for (const [key, value] of Object.entries(errors as Record<string, unknown>)) {
+  for (const [key, value] of Object.entries(
+    errors as Record<string, unknown>
+  )) {
     if (value === undefined || value === null) continue;
     // `ref`/`types` are RHF bookkeeping, not nested errors.
     if (key === 'ref' || key === 'types') continue;

@@ -18,11 +18,7 @@ import {
 import { useNodeFormStore } from '@/features/workflows/stores/nodeFormStore';
 import { MappingValueInput, ValueMode } from './MappingValueInput';
 import { FileInputWithReferences } from './FileInputWithReferences';
-import {
-  CUSTOM_FIELD_TYPES,
-  customFieldTypeLabel,
-} from './custom-field-types';
-
+import { CUSTOM_FIELD_TYPES, customFieldTypeLabel } from './custom-field-types';
 
 interface CustomFieldRowProps {
   nodeId: string;

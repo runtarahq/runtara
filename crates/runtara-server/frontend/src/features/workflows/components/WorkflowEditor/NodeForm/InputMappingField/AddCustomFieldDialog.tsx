@@ -24,7 +24,6 @@ import {
 } from '@/shared/components/ui/select';
 import { CUSTOM_FIELD_TYPES } from './custom-field-types';
 
-
 interface AddCustomFieldDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;

@@ -42,7 +42,12 @@ describe('coerceValueForMode', () => {
   });
 
   it('seeds an empty array entering composite on an array-typed field', () => {
-    for (const fieldType of ['array', 'array<string>', 'string[]', '[string]']) {
+    for (const fieldType of [
+      'array',
+      'array<string>',
+      'string[]',
+      '[string]',
+    ]) {
       expect(
         coerceValueForMode('', 'immediate', 'composite', fieldType)
       ).toEqual({ changed: true, value: [] });
