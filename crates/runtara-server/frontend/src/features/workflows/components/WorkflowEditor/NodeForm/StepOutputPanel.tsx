@@ -26,6 +26,7 @@ import {
 } from '@/features/workflows/utils/step-output-shapes';
 import { parseSchema } from '@/features/workflows/utils/schema';
 import { NodeFormContext } from './NodeFormContext';
+import { findAgentById } from '@/shared/utils/agent-id';
 
 interface OutputFieldLike {
   name: string;
@@ -104,7 +105,7 @@ function AgentOutputBody({ stepId }: { stepId?: string }) {
   });
 
   const output = useMemo(() => {
-    const agent = agents.find((a) => a.id === agentId);
+    const agent = findAgentById(agents, agentId);
     const capability = agent?.supportedCapabilities?.[capabilityId ?? ''];
     return (capability?.output ?? null) as OutputFieldLike | null;
   }, [agents, agentId, capabilityId]);

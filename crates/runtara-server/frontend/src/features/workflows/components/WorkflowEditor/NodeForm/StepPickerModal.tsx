@@ -31,6 +31,7 @@ import {
 } from '@/shared/components/picker-dialog';
 import { PickerEmpty } from '@/shared/components/picker-item';
 import { Spinner } from '@/shared/components/ui/spinner';
+import { findAgentById } from '@/shared/utils/agent-id';
 
 interface CapabilitySearchResult {
   agentId: string;
@@ -285,9 +286,7 @@ export function StepPickerPanel({
       }
 
       if (!capabilityId) {
-        const agent = filteredAgents.find(
-          (candidate) => candidate.id === agentId
-        );
+        const agent = findAgentById(filteredAgents, agentId);
         if (agent) {
           const capabilities = Object.values(agent.supportedCapabilities);
           const bothTags = capabilities.find(

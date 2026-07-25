@@ -21,6 +21,7 @@ import {
 import { NodeFormContext } from '../NodeFormContext';
 import { CapabilityPickerModal } from '../CapabilityPickerModal';
 import { ConnectionPickerModal } from '../ConnectionPickerModal';
+import { findAgentById } from '@/shared/utils/agent-id';
 
 /**
  * Monospace step-id row with an inline rename editor. Renames apply to the
@@ -172,14 +173,10 @@ export function NameField({ name }: { name: string }) {
     control: form.control,
   });
 
-  // Get agent info (case-insensitive lookup to handle legacy data)
+  // Get agent info (canonical lookup: legacy graphs carry `object_model`
+  // while the catalog advertises `object-model`)
   const { id: agentModuleId, supportsConnections } = useMemo(() => {
-    const agentIdLower = agentId?.toLowerCase();
-    const agent =
-      agents?.find(
-        (ag: ExtendedAgent) => ag.id.toLowerCase() === agentIdLower
-      ) || {};
-    return agent;
+    return findAgentById<ExtendedAgent>(agents, agentId) ?? ({} as never);
   }, [agents, agentId]);
 
   // Fetch connections for agent — use agent.id (module id), not display name
@@ -233,7 +230,7 @@ export function NameField({ name }: { name: string }) {
 
   // Agent steps: editable name as title + agent/capability/connection subtitle
   if (stepType === 'Agent' && capabilityId) {
-    const agent = agents?.find((ag: any) => ag.id === agentId);
+    const agent = findAgentById(agents as any[], agentId);
 
     return (
       <div className="space-y-1">

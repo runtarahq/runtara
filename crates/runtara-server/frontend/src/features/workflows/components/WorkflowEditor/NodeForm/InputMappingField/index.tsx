@@ -14,6 +14,7 @@ import { SimpleInputMappingEditor } from './SimpleInputMappingEditor';
 import { toEditorInitialData, toFormMappingEntries } from './mapping-entries';
 import { ValueType } from '../TypeHintSelector';
 import { parseSchema } from '@/features/workflows/utils/schema';
+import { findAgentById } from '@/shared/utils/agent-id';
 
 interface ParsedField {
   name: string;
@@ -186,8 +187,11 @@ export function InputMappingField(props: any) {
       return;
     }
 
-    // Get schema from agent directly (no API call needed)
-    const agent = agents.find((a) => a.id === agentId);
+    // Get schema from agent directly (no API call needed). Fold the id: steps
+    // authored via MCP or older graphs carry `object_model` while the catalog
+    // advertises `object-model`, and a bare `===` here silently drops the
+    // capability metadata for the whole form.
+    const agent = findAgentById(agents, agentId);
     const capability = agent?.supportedCapabilities?.[capabilityId];
 
     // Use the inputs array from the capability
@@ -501,7 +505,7 @@ export function InputMappingField(props: any) {
   }
 
   // Check if this capability has enhanced metadata (new format with CapabilityField[])
-  const agent = agents?.find((a) => a.id === agentId);
+  const agent = findAgentById(agents, agentId);
   const capability = agent?.supportedCapabilities?.[capabilityId] as any;
   const hasEnhancedMetadata =
     capability &&

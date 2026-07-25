@@ -25,6 +25,7 @@ import { NodeFormContext } from '../NodeFormContext';
 import { parseTestAgentInputs } from '@/features/workflows/types/agent-metadata';
 import { useEntitlements } from '@/shared/hooks/useEntitlements';
 import { agentEnabled } from '@/shared/entitlements';
+import { findAgentById } from '@/shared/utils/agent-id';
 
 // Stable empty object to avoid creating new references on each render
 const EMPTY_NODE_DATA: Record<string, InputMappingEntry> = {};
@@ -76,7 +77,7 @@ export function TestAgentInline() {
   const stepType = watch('stepType');
 
   // Get agent and capability metadata
-  const agent = (agents as any[])?.find((ag) => ag.id === agentId);
+  const agent = findAgentById(agents as any[], agentId);
   const capability = agent?.supportedCapabilities?.[capabilityId] as any;
 
   // Get the actual agent ID (lowercase) for API calls

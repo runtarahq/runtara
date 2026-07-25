@@ -29,6 +29,7 @@ import { getAgents, ExtendedAgent } from '@/features/workflows/queries';
 import { canStepHaveErrorHandler } from '@/features/workflows/utils/step-error-support';
 import { useEntitlements } from '@/shared/hooks/useEntitlements';
 import { agentEnabled, enabledAgentSet } from '@/shared/entitlements';
+import { findAgentById } from '@/shared/utils/agent-id';
 
 // Note: Node editing is now handled by the sidebar (EditorSidebar) via double-click on ReactFlow.
 // The dialogs below are only for creating new nodes via the + button handles.
@@ -109,8 +110,7 @@ function BasicNodeComponent({
     if (data.stepType !== 'Agent' || !data.agentId) return undefined;
     const agents =
       (agentsQuery.data as { agents: ExtendedAgent[] })?.agents || [];
-    const agentIdLower = data.agentId.toLowerCase();
-    const agent = agents.find((a) => a.id.toLowerCase() === agentIdLower);
+    const agent = findAgentById(agents, data.agentId);
     return agent?.name;
   }, [data.stepType, data.agentId, agentsQuery.data]);
 

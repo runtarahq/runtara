@@ -5,6 +5,7 @@ import {
   ShapeFieldJson,
 } from '@/features/workflows/utils/step-output-shapes';
 import { ExecutionGraph } from '../CustomNodes/utils.tsx';
+import { findAgentById } from '@/shared/utils/agent-id';
 
 export type ParameterType =
   | 'string'
@@ -155,7 +156,7 @@ function buildStepInfoList(
 
       // Calculate parameter type if step type is 'Agent'
       if (step.stepType === 'Agent' && step.agentId && step.capabilityId) {
-        const agent = agents.find((a) => a.id === step.agentId);
+        const agent = findAgentById(agents, step.agentId);
 
         if (agent && agent.supportedCapabilities && step.capabilityId) {
           // Access capability directly by key
@@ -185,7 +186,7 @@ function buildStepInfoList(
 
     // Process output to create output StepParameters
     if (step.stepType === 'Agent' && step.agentId && step.capabilityId) {
-      const agent = agents.find((a) => a.id === step.agentId);
+      const agent = findAgentById(agents, step.agentId);
 
       if (agent && agent.supportedCapabilities && step.capabilityId) {
         const capability = agent.supportedCapabilities[step.capabilityId];
