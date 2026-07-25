@@ -18,6 +18,7 @@ import {
 } from '@/shared/components/picker-dialog';
 import { PickerEmpty } from '@/shared/components/picker-item';
 import { Spinner } from '@/shared/components/ui/spinner';
+import { findAgentById, sameAgentId } from '@/shared/utils/agent-id';
 
 interface CapabilitySearchResult {
   agentId: string;
@@ -67,6 +68,7 @@ export function CapabilityPickerModal({
   onOpenChange,
   onSelect,
   currentAgentId,
+  currentCapabilityId,
 }: CapabilityPickerModalProps) {
   const { agents: rawAgents } = useContext(NodeFormContext);
   const entitlements = useEntitlements();
@@ -89,9 +91,7 @@ export function CapabilityPickerModal({
     // Look up against the raw list — if the current step references a
     // now-disabled agent we still want to keep it visually selected (the
     // editor surfaces the stale state separately via the canvas badge).
-    const ag = (rawAgents as ExtendedAgent[])?.find(
-      (a) => a.id === currentAgentId
-    );
+    const ag = findAgentById(rawAgents as ExtendedAgent[], currentAgentId);
     return ag ? { id: ag.id, name: ag.name || '' } : null;
   });
   const [searchQuery, setSearchQuery] = useState('');
@@ -144,9 +144,7 @@ export function CapabilityPickerModal({
     if (!newOpen) {
       setViewMode('browse');
       if (currentAgentId) {
-        const ag = (agents as ExtendedAgent[])?.find(
-          (a) => a.id === currentAgentId
-        );
+        const ag = findAgentById(agents as ExtendedAgent[], currentAgentId);
         setSelectedAgent(ag ? { id: ag.id, name: ag.name || '' } : null);
       } else {
         setSelectedAgent(null);
@@ -453,22 +451,37 @@ export function CapabilityPickerModal({
                   <PickerEmpty>No capabilities found</PickerEmpty>
                 ) : (
                   filteredCapabilities.map((capability: CapabilityInfo) => {
+                    // The picker is also how you *read* which capability a
+                    // step uses, so mark the current one rather than leaving
+                    // every row looking equally unselected.
+                    const isCurrent =
+                      capability.id === currentCapabilityId &&
+                      sameAgentId(selectedAgent?.id, currentAgentId);
                     return (
                       <button
                         key={capability.id}
                         type="button"
+                        aria-current={isCurrent ? 'true' : undefined}
                         onClick={() =>
                           handleCapabilitySelect(
                             selectedAgent!.id,
                             capability.id
                           )
                         }
-                        className="flex w-full flex-col gap-1 rounded-lg px-3 py-3 text-left transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                        className={cn(
+                          'flex w-full flex-col gap-1 rounded-lg px-3 py-3 text-left transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+                          isCurrent && 'bg-muted'
+                        )}
                       >
                         <div className="flex items-center gap-2">
                           <span className="font-medium">
                             {capability.displayName || capability.name}
                           </span>
+                          {isCurrent && (
+                            <span className="rounded bg-primary/10 px-1.5 py-0.5 text-2xs font-medium text-primary">
+                              Current
+                            </span>
+                          )}
                         </div>
                         {capability.description && (
                           <p className="line-clamp-2 text-xs text-muted-foreground">

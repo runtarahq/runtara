@@ -21,7 +21,7 @@ import {
 import { NodeFormContext } from '../NodeFormContext';
 import { CapabilityPickerModal } from '../CapabilityPickerModal';
 import { ConnectionPickerModal } from '../ConnectionPickerModal';
-import { findAgentById } from '@/shared/utils/agent-id';
+import { findAgentById, sameAgentId } from '@/shared/utils/agent-id';
 
 /**
  * Monospace step-id row with an inline rename editor. Renames apply to the
@@ -207,13 +207,24 @@ export function NameField({ name }: { name: string }) {
     newAgentId: string,
     newCapabilityId: string
   ) => {
-    // Update agent if changed
-    if (newAgentId !== agentId) {
+    const agentChanged = !sameAgentId(newAgentId, agentId);
+    const capabilityChanged = newCapabilityId !== capabilityId;
+
+    // Re-selecting what is already selected must not touch anything. The
+    // picker doubles as the only way to *read* which capability a step uses
+    // (it opens from the subtitle), and without this guard confirming the
+    // current selection cleared every input mapping on the step.
+    if (!agentChanged && !capabilityChanged) {
+      return;
+    }
+
+    if (agentChanged) {
       form.setValue('agentId', newAgentId);
       form.setValue('connectionId', ''); // Reset connection when agent changes
     }
-    // Update capability and clear input mapping
     form.setValue('capabilityId', newCapabilityId, { shouldValidate: true });
+    // Mappings are keyed by the previous capability's field names, so they
+    // cannot carry over to a different capability.
     form.setValue('inputMapping', []);
   };
 
