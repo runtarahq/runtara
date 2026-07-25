@@ -2,6 +2,7 @@
 name = "runtara-agent-crypto"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Crypto agent — hashing and HMAC — as a WebAssembly component"

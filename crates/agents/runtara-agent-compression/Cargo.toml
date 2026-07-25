@@ -2,6 +2,7 @@
 name = "runtara-agent-compression"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Compression agent — thin wrapper that proxies to the host's native zip handler"

@@ -2,6 +2,7 @@
 name = "runtara-agent-datetime"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "DateTime agent — date/time manipulation — as a WebAssembly component"

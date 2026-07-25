@@ -2,6 +2,7 @@
 name = "runtara-workflow-runtime"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Workflow runtime component for direct-emitted runtara workflow Wasm"

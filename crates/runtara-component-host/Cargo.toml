@@ -2,6 +2,7 @@
 name = "runtara-component-host"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Embedded wasmtime host for loading and invoking runtara agent components"

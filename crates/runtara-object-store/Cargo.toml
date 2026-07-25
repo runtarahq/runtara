@@ -1,10 +1,13 @@
 [package]
 name = "runtara-object-store"
 version.workspace = true
-edition = "2024"
+edition.workspace = true
+rust-version.workspace = true
 description = "Schema-driven dynamic PostgreSQL object store"
-license = "AGPL-3.0-or-later"
-repository = "https://github.com/runtarahq/runtara-object-store"
+license.workspace = true
+# Was https://github.com/runtarahq/runtara-object-store — this crate has never
+# lived in its own repository; it is a member of the runtara workspace.
+repository.workspace = true
 readme = "README.md"
 keywords = ["postgresql", "schema", "dynamic", "object-store", "database"]
 categories = ["database"]

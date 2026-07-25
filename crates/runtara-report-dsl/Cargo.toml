@@ -2,6 +2,7 @@
 name = "runtara-report-dsl"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Schema, validators, template engine, and row-condition evaluator for the runtara reports DSL"

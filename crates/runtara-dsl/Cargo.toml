@@ -2,6 +2,7 @@
 name = "runtara-dsl"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "DSL for agent metadata definitions in runtara workflows"

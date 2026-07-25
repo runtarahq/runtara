@@ -2,6 +2,7 @@
 name = "runtara-agent-sftp"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "SFTP agent — WebAssembly Component that forwards each invoke to the host's internal native SFTP handler"

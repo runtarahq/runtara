@@ -2,6 +2,7 @@
 name = "runtara-workflow-stdlib"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Standard library for runtara workflow binaries - combines agents and runtime"
