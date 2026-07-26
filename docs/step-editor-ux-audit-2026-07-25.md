@@ -149,16 +149,23 @@ Most of Wave 1 has landed. Each item was verified live against a running server 
 | 1.3 Dirty guard on close | **Landed** | `5b678fc6` |
 | 1.4 Stop destroying data on click (all four) | **Landed** | `e0af6466`, `f73e1122`, `39efdb42` |
 | 1.5 Show immediate arrays/objects; null guard | **Landed** | `7233f18a` |
-| 1.6 "Edit as JSON" on the primary editor | **Landed** | `250e0cf5` |
+| 1.6 "Edit as JSON" on the primary editor | **Reverted** — see below | `250e0cf5`, `b528d047` |
 | 1.7 Long-form fields get long-form editors | **Landed** | `bdea3902` |
-| 1.8 Custom-parameter type list | **Landed**; `any`-typed roots still open | `63e0e603` |
+| 1.8 Custom-parameter type list | **Landed** | `63e0e603` |
+| 1.8b `any`-typed roots get a shape chooser | **Landed** | `009067da` |
+| 2.2 Structured Switch case outputs | **Landed** (pulled forward) | `29d8692a` |
+| 2.8a Custom-field composites render an editor | **Landed** (pulled forward) | `a4253f1f` |
 | 1.9 Show all errors in the dialog, named | Open | — |
+
+**1.6 was reverted on the product owner's call, and the reasoning supersedes this document's.** The hatch was the wrong answer to the right problem. Every gap it was meant to cover is a widget that was never built, not a shape no widget could express — and shipping a JSON textarea beside the fields makes those holes permanent ("there's always Edit as JSON" is how a structured editor stays half-finished). It is also the wrong audience: the people authoring these workflows are integrators, not developers, and `{"valueType": "reference"}` is wire format nobody should need. The three gaps it was covering were built as real UI instead (1.8b, 2.2, 2.8a above). Where Wave 2–4 below still proposes a JSON escape hatch, prefer building the widget.
 
 Three corrections to this document, found while implementing:
 
 - **1.0b is moot, and doing it as written would have been a regression.** The `!isEdit` gate only suppresses *auto-appending* schema rows; it never suppressed rendering. Once 1.0 restored the capability lookup, editing an existing step shows the same labels, types, required markers and optional-field discovery as creating one. Removing the gate would have injected unmapped rows into every step you opened.
 - **1.8's "two-character fix" would have silently discarded the user's choice.** `VALID_VALUE_TYPES` (`CustomNodes/utils.tsx`) is `{string, integer, number, boolean, json, file}` and `isValidValueType` drops anything outside it, so changing the duplicate option to `value: 'array'` would have dropped the type hint on save. The API ValueType vocabulary has no separate array; the two duplicate entries were collapsed into one honest `JSON (object or array)` instead.
 - **Two live-session findings were retracted** — see the retraction note in that section.
+
+Two further defects found and fixed while building the Switch editor: `ModeToggleButton` named a mode it would not switch to once the cycle was restricted, and `caseItem.output || {}` made an empty string, `0` or `false` read as a composite (so a new case opened straight into the object builder). Both are in `29d8692a`.
 
 Also confirmed live while verifying, not yet fixed: the capability picker's search returns nothing for `bulk-create` even though `bulk-create-instances` exists, because it matches `name`/`displayName` but not the capability id. That sharpens Wave 3's discovery item — the search is not merely whole-phrase, it cannot find a capability by its own id.
 
