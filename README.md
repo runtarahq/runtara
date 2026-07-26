@@ -93,7 +93,7 @@ At a high level, the Rust workspace is organized into three layers:
 │  │  ┌──────────────────────────────────────────────────────┐  │  │
 │  │  │  runtara-core + runtara-sdk                          │  │  │
 │  │  │  Durable execution: checkpoints, signals, events,    │  │  │
-│  │  │  durable sleep, compensation                          │  │  │
+│  │  │  durable sleep                                       │  │  │
 │  │  └──────────────────────────────────────────────────────┘  │  │
 │  └────────────────────────────────────────────────────────────┘  │
 └──────────────────────────────────────────────────────────────────┘

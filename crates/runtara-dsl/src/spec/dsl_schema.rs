@@ -113,6 +113,19 @@ pub fn get_dsl_changelog() -> Value {
         "version": DSL_VERSION,
         "changes": [
             {
+                "version": "3.1.0",
+                "date": "2026-07-26",
+                "breaking": true,
+                "changes": [
+                    {
+                        "type": "removed",
+                        "component": "step-field",
+                        "description": "Removed Agent step 'compensation' (saga rollback) config",
+                        "migration": "Use onError routing. Existing definitions still parse; the field is ignored and dropped on next save."
+                    }
+                ]
+            },
+            {
                 "version": "2.0.0",
                 "date": "2024-11-24",
                 "breaking": true,

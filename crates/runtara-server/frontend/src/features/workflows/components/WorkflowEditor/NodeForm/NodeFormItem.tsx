@@ -3,29 +3,9 @@
 // contain JSX (renderFormField, renderComponent) which tightly couples them to components.
 // Separating would require complex refactoring with circular dependency resolution.
 import { z } from 'zod';
-import {
-  useState,
-  createContext,
-  useContext,
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-} from 'react';
+import { useState, createContext, useContext, useCallback } from 'react';
 import { useFormContext, useWatch } from 'react-hook-form';
-import { FieldError } from '@/shared/components/ui/form';
 import { InputMappingField } from './InputMappingField';
-import { MappingObjectField } from './InputMappingField/MappingObjectField';
-import { NodeFormContext } from './NodeFormContext';
-import {
-  COMPENSATION_TRIGGER_OPTIONS,
-  patchCompensation,
-  readCompensationParts,
-  serializeCompensationData,
-  type CompensationPatch,
-} from './compensation';
-import { useWorkflowStore } from '@/features/workflows/stores/workflowStore';
-import { NODE_TYPES } from '@/features/workflows/config/workflow';
 import { TestAgentInline } from './TestAgentButton/TestAgentInline';
 import { EmbedWorkflowConfigField } from './EmbedWorkflowConfigField';
 import { NameField } from './NameField';
@@ -49,15 +29,6 @@ import { DelayStepField } from './DelayStepField';
 import { Input } from '@/shared/components/ui/input';
 import { Label } from '@/shared/components/ui/label';
 import { Switch as ToggleSwitch } from '@/shared/components/ui/switch';
-import { Textarea } from '@/shared/components/ui/textarea';
-import { Button } from '@/shared/components/ui/button';
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/shared/components/ui/select';
 
 // Wrapper component for EmbedWorkflowConfigField that uses react-hook-form
 function EmbedWorkflowFieldRenderer() {
@@ -183,7 +154,6 @@ function StepAdvancedFields() {
 
   const showDurable = DURABLE_STEP_TYPES.has(stepType);
   const showRetries = RETRY_STEP_TYPES.has(stepType);
-  const showCompensation = stepType === 'Agent';
 
   return (
     <div className="space-y-4 rounded-md border p-3">
@@ -278,280 +248,6 @@ function StepAdvancedFields() {
             Timeout is accepted by the DSL for these steps; runtime validation
             currently reports it as warning-only.
           </p>
-        </>
-      )}
-
-      {showCompensation && <CompensationField />}
-    </div>
-  );
-}
-
-// Node types that never represent a referenceable workflow step.
-const NON_STEP_NODE_TYPES = new Set<string>([
-  NODE_TYPES.CreateNode,
-  NODE_TYPES.NoteNode,
-  NODE_TYPES.StartIndicatorNode,
-]);
-
-const COMPENSATION_STEP_NONE = '__none__';
-const COMPENSATION_TRIGGER_DEFAULT = '__default__';
-
-/**
- * Structured editor for Agent.compensation (CompensationConfig in
- * runtara-dsl/src/schema_types.rs: compensationStep / compensationData /
- * trigger / order). The form value stays in the raw DSL shape because the
- * save path passes `compensation` through verbatim for Agent steps — all
- * assembly/clearing logic lives in the pure helpers in ./compensation.ts.
- * A collapsed "Edit as JSON" textarea (the legacy editor) remains bound to
- * the same value for exotic shapes.
- */
-function CompensationField() {
-  const form = useFormContext();
-  const { nodeId } = useContext(NodeFormContext);
-  const compensation = useWatch({
-    name: 'compensation',
-    control: form.control,
-  });
-  const nodes = useWorkflowStore((state) => state.nodes);
-
-  const [showJson, setShowJson] = useState(false);
-  const [jsonDraft, setJsonDraft] = useState('');
-  const [jsonError, setJsonError] = useState<string | null>(null);
-
-  // compensationData as last emitted by MappingObjectField (UI-format
-  // entries, or a raw string while its JSON textarea holds invalid JSON).
-  // Only valid serializations are committed to the form value; the draft
-  // keeps the editor responsive in between.
-  const [dataDraft, setDataDraft] = useState<unknown>(undefined);
-  const lastCommittedData = useRef('null');
-
-  useEffect(() => {
-    setJsonDraft(compensation ? JSON.stringify(compensation, null, 2) : '');
-    setJsonError(null);
-
-    const incoming = readCompensationParts(compensation).compensationData;
-    const incomingKey = JSON.stringify(incoming ?? null) ?? 'null';
-    if (incomingKey !== lastCommittedData.current) {
-      lastCommittedData.current = incomingKey;
-      setDataDraft(incoming);
-    }
-  }, [compensation]);
-
-  const parts = readCompensationParts(compensation);
-
-  const stepOptions = useMemo(
-    () =>
-      nodes
-        .filter(
-          (node) =>
-            node.id !== nodeId && !NON_STEP_NODE_TYPES.has(node.type ?? '')
-        )
-        .map((node) => ({
-          id: node.id,
-          name:
-            typeof node.data?.name === 'string' && node.data.name
-              ? node.data.name
-              : node.id,
-        })),
-    [nodes, nodeId]
-  );
-
-  const commit = (patch: CompensationPatch) => {
-    form.setValue(
-      'compensation',
-      patchCompensation(form.getValues('compensation'), patch),
-      { shouldDirty: true }
-    );
-  };
-
-  const handleDataChange = (value: unknown) => {
-    setDataDraft(value);
-    const result = serializeCompensationData(value);
-    if (!result.ok) return;
-    lastCommittedData.current = JSON.stringify(result.data ?? null) ?? 'null';
-    commit({ compensationData: result.data });
-  };
-
-  const stepKnown =
-    parts.compensationStep === '' ||
-    stepOptions.some((option) => option.id === parts.compensationStep);
-  const triggerKnown =
-    parts.trigger === '' ||
-    COMPENSATION_TRIGGER_OPTIONS.some(
-      (option) => option.value === parts.trigger
-    );
-
-  return (
-    <div className="space-y-3">
-      <div className="space-y-0.5">
-        <Label className="text-sm">Compensation</Label>
-        <p className="text-xs text-warning">
-          Accepted by the DSL; runtime validation reports compensation as
-          warning-only (W070) — it is not enforced at runtime.
-        </p>
-      </div>
-
-      <div className="grid grid-cols-2 gap-3">
-        <div className="space-y-1">
-          <Label className="text-xs text-muted-foreground">
-            Compensation step
-          </Label>
-          <Select
-            value={parts.compensationStep || COMPENSATION_STEP_NONE}
-            onValueChange={(value) =>
-              commit({
-                compensationStep:
-                  value === COMPENSATION_STEP_NONE ? undefined : value,
-              })
-            }
-          >
-            <SelectTrigger className="h-9">
-              <SelectValue placeholder="Select step..." />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value={COMPENSATION_STEP_NONE}>None</SelectItem>
-              {!stepKnown && (
-                <SelectItem value={parts.compensationStep}>
-                  {parts.compensationStep} (not in graph)
-                </SelectItem>
-              )}
-              {stepOptions.map((option) => (
-                <SelectItem key={option.id} value={option.id}>
-                  {option.name}
-                  {option.name !== option.id && (
-                    <span
-                      className="ml-2 font-mono text-xs text-muted-foreground"
-                      title={option.id}
-                    >
-                      {option.id.length > 12
-                        ? `${option.id.slice(0, 12)}…`
-                        : option.id}
-                    </span>
-                  )}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-
-        <div className="space-y-1">
-          <Label className="text-xs text-muted-foreground">Trigger</Label>
-          <Select
-            value={parts.trigger || COMPENSATION_TRIGGER_DEFAULT}
-            onValueChange={(value) =>
-              commit({
-                trigger:
-                  value === COMPENSATION_TRIGGER_DEFAULT ? undefined : value,
-              })
-            }
-          >
-            <SelectTrigger className="h-9">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value={COMPENSATION_TRIGGER_DEFAULT}>
-                Default (on downstream error)
-              </SelectItem>
-              {!triggerKnown && (
-                <SelectItem value={parts.trigger}>{parts.trigger}</SelectItem>
-              )}
-              {COMPENSATION_TRIGGER_OPTIONS.map((option) => (
-                <SelectItem key={option.value} value={option.value}>
-                  {option.label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-      </div>
-
-      <div className="space-y-1">
-        <Label className="text-xs text-muted-foreground">Order</Label>
-        <Input
-          type="number"
-          step={1}
-          value={parts.order}
-          onChange={(event) => {
-            if (event.target.value === '') {
-              commit({ order: undefined });
-              return;
-            }
-            const parsed = Number(event.target.value);
-            if (Number.isNaN(parsed)) return;
-            commit({ order: Math.trunc(parsed) });
-          }}
-        />
-        <p className="text-xs text-muted-foreground">
-          Higher compensates first; defaults to reverse execution order.
-        </p>
-      </div>
-
-      <div className="space-y-1">
-        <Label className="text-xs text-muted-foreground">
-          Compensation data
-        </Label>
-        <MappingObjectField
-          value={dataDraft}
-          onChange={handleDataChange}
-          jsonToggleLabel="Edit data as JSON"
-          jsonPlaceholder={`{"chargeId": {"valueType": "reference", "value": "steps['charge'].outputs.chargeId"}}`}
-        />
-      </div>
-
-      <div className="flex justify-end">
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          className="h-6 px-1 text-xs text-muted-foreground hover:text-foreground"
-          onClick={() => setShowJson(!showJson)}
-        >
-          {showJson
-            ? 'Hide compensation JSON'
-            : 'Edit all compensation as JSON'}
-        </Button>
-      </div>
-
-      {showJson && (
-        <>
-          <Textarea
-            value={jsonDraft}
-            onChange={(event) => {
-              const nextDraft = event.target.value;
-              setJsonDraft(nextDraft);
-
-              if (!nextDraft.trim()) {
-                form.setValue('compensation', undefined, {
-                  shouldDirty: true,
-                });
-                setJsonError(null);
-                return;
-              }
-
-              try {
-                const parsed = JSON.parse(nextDraft);
-                if (
-                  !parsed ||
-                  typeof parsed !== 'object' ||
-                  Array.isArray(parsed)
-                ) {
-                  setJsonError('Compensation must be a JSON object.');
-                  return;
-                }
-
-                form.setValue('compensation', parsed, { shouldDirty: true });
-                setJsonError(null);
-              } catch (error) {
-                setJsonError(
-                  error instanceof Error ? error.message : 'Invalid JSON.'
-                );
-              }
-            }}
-            className="min-h-[120px] font-mono text-xs"
-            spellCheck={false}
-            placeholder='{"compensationStep":"rollback"}'
-          />
-          {jsonError && <FieldError>{jsonError}</FieldError>}
         </>
       )}
     </div>
@@ -849,7 +545,6 @@ export const schema = () =>
       breakpoint: z.boolean().nullable().optional(),
       durable: z.boolean().nullable().optional(),
       timeout: z.any().optional(),
-      compensation: z.any().optional(),
       onWait: z.any().optional(),
       action: z.any().optional(),
       childWorkflowId: z.string().optional(),
@@ -916,7 +611,7 @@ export const schema = () =>
               // For literal values, validate JSON syntax. Surface the parser's
               // own message — it carries a character position — rather than a
               // flat "Invalid JSON format" the author cannot act on.
-              // CompensationField does the same at its JSON textarea.
+              // MappingObjectField does the same at its JSON textarea.
               try {
                 JSON.parse(item.value);
               } catch (error) {
@@ -1202,7 +897,6 @@ export const initialValues: Partial<SchemaType> = {
   breakpoint: undefined,
   durable: undefined,
   timeout: undefined,
-  compensation: undefined,
   onWait: undefined,
   action: undefined,
   inputSchema: undefined,

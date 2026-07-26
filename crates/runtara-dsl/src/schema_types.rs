@@ -15,7 +15,7 @@
 // including module.
 
 /// DSL version - bump when making breaking changes
-pub const DSL_VERSION: &str = "3.0.0";
+pub const DSL_VERSION: &str = "3.1.0";
 
 // ============================================================================
 // Root Types
@@ -422,34 +422,6 @@ pub struct FinishStep {
     pub breakpoint: Option<bool>,
 }
 
-/// Compensation configuration for saga pattern support.
-///
-/// **Not enforced.** This configuration is parsed and stored but the compiler
-/// never emits it, the SDK never receives it, and the host never triggers it —
-/// no compensation step will run on failure (validation flags it with W070).
-/// Model rollback explicitly with `onError` routing instead, which is
-/// enforced end-to-end.
-#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct CompensationConfig {
-    /// Step ID to execute for compensation (rollback)
-    pub compensation_step: String,
-
-    /// Data to pass to compensation step (maps from current step's context)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub compensation_data: Option<InputMapping>,
-
-    /// When to trigger compensation: "on_downstream_error" (default), "on_any_error", "manual"
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub trigger: Option<String>,
-
-    /// Compensation order (higher = compensate first, default = step execution order reversed)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub order: Option<i32>,
-}
-
 /// Executes an agent capability
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -514,12 +486,14 @@ pub struct AgentStep {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout: Option<u64>,
 
-    /// Compensation configuration for saga pattern support.
-    ///
-    /// **Not enforced** — accepted and ignored end-to-end; no rollback runs
+    /// Removed saga-compensation config. Accepted so stored workflows still
+    /// parse, but ignored at runtime and omitted from generated schemas and
+    /// serialization — it is dropped the next time the workflow is saved
     /// (validation warns with W070). Use `onError` routing for rollback logic.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub compensation: Option<CompensationConfig>,
+    #[serde(default, rename = "compensation", skip_serializing)]
+    #[cfg_attr(feature = "json-schema", schemars(skip))]
+    #[cfg_attr(feature = "utoipa", schema(ignore))]
+    pub legacy_compensation: Option<serde_json::Value>,
 
     /// When true, execution pauses before this step in debug mode
     #[serde(default, skip_serializing_if = "Option::is_none")]

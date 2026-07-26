@@ -1,6 +1,6 @@
 {
-  "name": "Agent Compensation",
-  "description": "Direct-emitter fixture: an Agent step carrying a compensation (saga) config. Compensation is a no-op end-to-end in both the generated Rust and direct paths, so the field must be inert and execution must match a plain return-input agent.",
+  "name": "Agent Legacy Compensation",
+  "description": "Back-compat fixture: an Agent step still carrying the removed compensation (saga) config, as saved before the field was removed. AgentStep is deny_unknown_fields, so this must keep parsing and lowering via the legacy_compensation tombstone; execution must match a plain return-input agent.",
   "durable": true,
   "steps": {
     "agent": {

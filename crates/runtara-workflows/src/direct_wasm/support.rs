@@ -828,14 +828,10 @@ fn mark_inert_on_error_edges(
 }
 
 fn supports_agent_step_baseline(_graph: &ExecutionGraph, _step: &AgentStep) -> bool {
-    // Neither `timeout` nor `compensation` is gated: both are no-ops end-to-end
-    // in the generated Rust path too. The generated Agent codegen never reads
-    // `AgentStep.timeout` (no deadline enforcement exists), and compensation is
-    // never emitted, never wired to the SDK (`compensation_step_id: None`), and
-    // never triggered by the host. Generated accepts + ignores both fields, so
-    // direct does too rather than rejecting workflows generated compiles. Real
-    // timeout enforcement is impossible in the synchronous component model (a
-    // running `capabilities.invoke` cannot be preempted) and is out of scope.
+    // `timeout` is not gated: it is a no-op for this step type, accepted and
+    // ignored rather than rejected. Real timeout enforcement is impossible in
+    // the synchronous component model (a running `capabilities.invoke` cannot
+    // be preempted) and is out of scope.
     true
 }
 
@@ -1580,12 +1576,10 @@ fn collect_agent_step_unsupported(
     _step: &AgentStep,
     _unsupported: &mut Vec<UnsupportedWorkflowFeature>,
 ) {
-    // No Agent fields are gated. `timeout` and `compensation` are both parsed
-    // but never honored in the generated Rust path, so direct accepts and
-    // ignores them to keep the accepted-graph set identical to generated.
-    // Timeout enforcement is impossible in the synchronous component model and
-    // real saga compensation is out of scope for the emitter; both would require
-    // host/SDK wiring that exists for neither compilation path.
+    // No Agent fields are gated. `timeout` is parsed but never honored, so the
+    // emitter accepts and ignores it rather than rejecting the workflow.
+    // Enforcement is impossible in the synchronous component model — it would
+    // require host/SDK wiring that does not exist.
 }
 
 fn collect_delay_step_unsupported(
@@ -1666,7 +1660,6 @@ fn step_type_name(step: &Step) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use runtara_dsl::CompensationConfig;
 
     fn fixture(name: &str) -> ExecutionGraph {
         let json = match name {
@@ -3173,22 +3166,19 @@ mod tests {
         assert_eq!(mapping.value["timeout_ms"]["value"], 1_000);
     }
 
-    /// Compensation is dead code end-to-end (codegen never emits it, the SDK
-    /// records `compensation_step_id: None`, the host `CompensationManager` is
-    /// never triggered). Generated Rust accepts + ignores it, so direct must too
-    /// rather than rejecting workflows generated compiles. The field is inert.
+    /// Compensation was removed from the DSL, but definitions saved before the
+    /// removal still carry the key. The emitter must keep compiling them (the
+    /// tombstone field absorbs the value) rather than rejecting a workflow that
+    /// used to compile.
     #[test]
-    fn agent_compensation_is_accepted_as_noop() {
+    fn agent_legacy_compensation_is_accepted_as_noop() {
         let mut graph = fixture("transform");
         let Some(Step::Agent(agent)) = graph.steps.get_mut("transform") else {
             panic!("expected Agent fixture step");
         };
-        agent.compensation = Some(CompensationConfig {
-            compensation_step: "finish".to_string(),
-            compensation_data: None,
-            trigger: None,
-            order: None,
-        });
+        agent.legacy_compensation = Some(serde_json::json!({
+            "compensationStep": "finish",
+        }));
 
         let report = analyze_direct_wasm_support(&graph);
 
@@ -3198,7 +3188,7 @@ mod tests {
                 .unsupported
                 .iter()
                 .any(|feature| feature.feature == "agent-compensation"),
-            "compensation must not produce an unsupported feature"
+            "legacy compensation must not produce an unsupported feature"
         );
     }
 

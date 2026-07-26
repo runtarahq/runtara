@@ -74,21 +74,6 @@ pub struct CheckpointRecord {
     pub state: Vec<u8>,
     /// When the checkpoint was created.
     pub created_at: DateTime<Utc>,
-    /// Whether this checkpoint is marked for compensation (saga pattern).
-    #[sqlx(default)]
-    pub is_compensatable: bool,
-    /// Step ID to execute for compensation/rollback.
-    #[sqlx(default)]
-    pub compensation_step_id: Option<String>,
-    /// Serialized data for the compensation step.
-    #[sqlx(default)]
-    pub compensation_data: Option<Vec<u8>>,
-    /// Current state of compensation (none, pending, triggered, completed, failed).
-    #[sqlx(default)]
-    pub compensation_state: Option<String>,
-    /// Order in which to execute compensation (higher = compensate first).
-    #[sqlx(default)]
-    pub compensation_order: i32,
 }
 
 /// Event record from the persistence layer.
@@ -278,31 +263,6 @@ pub struct ErrorHistoryRecord {
     pub cause_error_id: Option<i64>,
     /// When the error was recorded.
     pub created_at: DateTime<Utc>,
-}
-
-/// Compensation log record for audit trail.
-#[derive(Debug, Clone, sqlx::FromRow)]
-pub struct CompensationLogRecord {
-    /// Database primary key.
-    pub id: i64,
-    /// Instance this compensation is for.
-    pub instance_id: String,
-    /// Checkpoint being compensated.
-    pub checkpoint_id: String,
-    /// Step executed for compensation.
-    pub compensation_step_id: String,
-    /// Attempt number (for retries).
-    pub attempt_number: i32,
-    /// When compensation started.
-    pub started_at: DateTime<Utc>,
-    /// When compensation finished (None if still running).
-    pub finished_at: Option<DateTime<Utc>>,
-    /// Whether compensation succeeded.
-    pub success: Option<bool>,
-    /// Error message if compensation failed.
-    pub error_message: Option<String>,
-    /// Reference to error_history entry.
-    pub error_id: Option<i64>,
 }
 
 /// Wake queue entry from the persistence layer.
@@ -741,80 +701,6 @@ pub trait Persistence: Send + Sync {
     ) -> Result<Vec<ErrorHistoryRecord>, CoreError> {
         // Default: empty list
         Ok(vec![])
-    }
-
-    // ========================================================================
-    // Compensation Framework (optional - default implementations no-op)
-    // ========================================================================
-
-    /// Mark a checkpoint as compensatable (for saga pattern).
-    async fn register_compensatable_checkpoint(
-        &self,
-        _instance_id: &str,
-        _checkpoint_id: &str,
-        _compensation_step_id: &str,
-        _compensation_data: Option<&[u8]>,
-        _compensation_order: i32,
-    ) -> Result<(), CoreError> {
-        // Default: no-op
-        Ok(())
-    }
-
-    /// Get all compensatable checkpoints for an instance (in reverse order).
-    async fn get_compensatable_checkpoints(
-        &self,
-        _instance_id: &str,
-    ) -> Result<Vec<CheckpointRecord>, CoreError> {
-        // Default: empty list
-        Ok(vec![])
-    }
-
-    /// Update the compensation state of a checkpoint.
-    async fn set_checkpoint_compensation_state(
-        &self,
-        _instance_id: &str,
-        _checkpoint_id: &str,
-        _state: &str,
-    ) -> Result<(), CoreError> {
-        // Default: no-op
-        Ok(())
-    }
-
-    /// Update the instance-level compensation state.
-    async fn set_instance_compensation_state(
-        &self,
-        _instance_id: &str,
-        _state: &str,
-        _reason: Option<&str>,
-    ) -> Result<(), CoreError> {
-        // Default: no-op
-        Ok(())
-    }
-
-    /// Log a compensation attempt.
-    async fn log_compensation_attempt(
-        &self,
-        _instance_id: &str,
-        _checkpoint_id: &str,
-        _compensation_step_id: &str,
-        _success: bool,
-        _error_message: Option<&str>,
-        _error_id: Option<i64>,
-    ) -> Result<(), CoreError> {
-        // Default: no-op
-        Ok(())
-    }
-
-    /// Count pending compensations for an instance.
-    async fn count_pending_compensations(&self, _instance_id: &str) -> Result<i64, CoreError> {
-        // Default: 0
-        Ok(0)
-    }
-
-    /// Check if all compensations for an instance succeeded.
-    async fn all_compensations_succeeded(&self, _instance_id: &str) -> Result<bool, CoreError> {
-        // Default: true (no compensations = all succeeded)
-        Ok(true)
     }
 
     // ========================================================================

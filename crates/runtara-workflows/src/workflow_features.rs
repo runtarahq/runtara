@@ -73,8 +73,6 @@ pub enum WorkflowFeature {
     RetryPolicy,
     /// A workflow step declares timeout configuration.
     Timeout,
-    /// A workflow step declares compensation behavior.
-    Compensation,
     /// A workflow step has a debug breakpoint.
     Breakpoint,
     /// A graph declares workflow variables.
@@ -171,7 +169,6 @@ impl WorkflowFeatureSummary {
                     | WorkflowFeature::Durability
                     | WorkflowFeature::RetryPolicy
                     | WorkflowFeature::Timeout
-                    | WorkflowFeature::Compensation
                     | WorkflowFeature::Breakpoint
                     | WorkflowFeature::Connection
             )
@@ -308,9 +305,6 @@ impl FeatureAnalyzer {
                 }
                 if step.timeout.is_some() {
                     self.summary.features.insert(WorkflowFeature::Timeout);
-                }
-                if step.compensation.is_some() {
-                    self.summary.features.insert(WorkflowFeature::Compensation);
                 }
                 if graph_durable && step.durable.unwrap_or(true) {
                     self.summary.features.insert(WorkflowFeature::Durability);

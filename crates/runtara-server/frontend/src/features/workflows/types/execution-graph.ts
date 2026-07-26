@@ -106,7 +106,6 @@ export interface ExecutionGraphStepDto {
   timeout?: number;
   retryStrategy?: 'Linear' | 'Exponential';
   durable?: boolean | null;
-  compensation?: unknown;
   renderingParameters?: ExecutionGraphStepRenderingParametersDto;
   subgraph?: ExecutionGraphDto;
 }

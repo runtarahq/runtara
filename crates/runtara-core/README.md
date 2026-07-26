@@ -8,7 +8,7 @@ Durable execution engine for Runtara: checkpoints, signals, durable sleep, and i
 
 ## What it is
 
-`runtara-core` is the host-side execution engine that workflow instances talk to in order to persist state and progress durably. The `persistence` module defines the `Persistence` trait (with `PostgresPersistence` and `SqlitePersistence` impls) covering instances, checkpoints, events, and signals. The `instance_handlers` and `server` modules expose the instance protocol over HTTP (register, checkpoint, sleep, events, signal poll/ack), and `runtime::CoreRuntime` bundles it into an embeddable service. The `migrations` module ships SQL migrations so embedders can set up the schema, and `compensation` provides saga-style rollback primitives.
+`runtara-core` is the host-side execution engine that workflow instances talk to in order to persist state and progress durably. The `persistence` module defines the `Persistence` trait (with `PostgresPersistence` and `SqlitePersistence` impls) covering instances, checkpoints, events, and signals. The `instance_handlers` and `server` modules expose the instance protocol over HTTP (register, checkpoint, sleep, events, signal poll/ack), and `runtime::CoreRuntime` bundles it into an embeddable service. The `migrations` module ships SQL migrations so embedders can set up the schema.
 
 ## Using it standalone
 

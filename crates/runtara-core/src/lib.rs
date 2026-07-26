@@ -167,9 +167,6 @@ pub mod observability;
 /// Error types for Core operations with RPC error code mapping.
 pub mod error;
 
-/// Compensation framework for saga pattern support.
-pub mod compensation;
-
 // Server-mode modules (require HTTP transport)
 #[cfg(feature = "server")]
 /// Server configuration loaded from environment variables.

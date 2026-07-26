@@ -874,7 +874,7 @@ mod tests {
 
     #[test]
     fn test_dsl_version() {
-        assert_eq!(DSL_VERSION, "3.0.0");
+        assert_eq!(DSL_VERSION, "3.1.0");
     }
 
     // ========================================================================

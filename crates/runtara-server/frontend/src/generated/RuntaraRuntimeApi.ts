@@ -410,13 +410,6 @@ export interface AgentStep {
   /** Capability name (e.g., "random-double", "group-by", "http-request") */
   capabilityId: string;
   /**
-   * Compensation configuration for saga pattern support.
-   *
-   * **Not enforced** — accepted and ignored end-to-end; no rollback runs
-   * (validation warns with W070). Use `onError` routing for rollback logic.
-   */
-  compensation?: null | CompensationConfig;
-  /**
    * Connection ID for agents requiring authentication.
    *
    * A same-tenant literal id, pinned at author time (back-compat). Ignored
@@ -1174,11 +1167,6 @@ export interface CapabilityField {
 
 /** API-compatible capability info */
 export interface CapabilityInfo {
-  /**
-   * Optional compensation hint - suggests how to undo this capability.
-   * This is metadata only; the system never auto-compensates.
-   */
-  compensationHint?: null | CompensationHintInfo;
   description?: string | null;
   displayName?: string | null;
   hasSideEffects: boolean;
@@ -1357,37 +1345,6 @@ export interface CompactionConfig {
    * Default: SlidingWindow
    */
   strategy?: null | CompactionStrategy;
-}
-
-/**
- * Compensation configuration for saga pattern support.
- *
- * **Not enforced.** This configuration is parsed and stored but the compiler
- * never emits it, the SDK never receives it, and the host never triggers it —
- * no compensation step will run on failure (validation flags it with W070).
- * Model rollback explicitly with `onError` routing instead, which is
- * enforced end-to-end.
- */
-export interface CompensationConfig {
-  /** Data to pass to compensation step (maps from current step's context) */
-  compensationData?: null | HashMap;
-  /** Step ID to execute for compensation (rollback) */
-  compensationStep: string;
-  /**
-   * Compensation order (higher = compensate first, default = step execution order reversed)
-   * @format int32
-   */
-  order?: number | null;
-  /** When to trigger compensation: "on_downstream_error" (default), "on_any_error", "manual" */
-  trigger?: string | null;
-}
-
-/** API-compatible compensation hint info */
-export interface CompensationHintInfo {
-  /** Capability ID that reverses this capability's effects */
-  capabilityId: string;
-  /** Human-readable description */
-  description?: string | null;
 }
 
 /**

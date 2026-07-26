@@ -130,7 +130,6 @@ mod tests {
                 has_side_effects: true,
                 is_idempotent: false,
                 rate_limited: true,
-                compensation_hint: None,
                 known_errors: vec![],
                 tags: vec![],
             }],

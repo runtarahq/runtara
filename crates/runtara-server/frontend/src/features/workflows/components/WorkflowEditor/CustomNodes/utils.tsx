@@ -1095,7 +1095,6 @@ function cleanNodeData(steps: Record<string, any>) {
     if (restData.stepType !== 'Agent') {
       delete cleaned[id].agentId;
       delete cleaned[id].capabilityId;
-      delete cleaned[id].compensation;
     }
     if (restData.stepType !== 'Agent' && restData.stepType !== 'AiAgent') {
       delete cleaned[id].connectionId;

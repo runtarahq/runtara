@@ -41,23 +41,6 @@ pub fn execute_capability(
     Err(format!("Unknown capability: {}:{}", module, capability_id))
 }
 
-/// Hint for how to compensate (undo) a capability's effects.
-///
-/// This is **metadata only** - the system never auto-compensates.
-/// Tools can use this to suggest compensation configurations to users.
-///
-/// Note: The actual compensation data mapping is defined by the workflow author
-/// in the workflow definition, not here. This hint only suggests which capability
-/// can reverse the effects - the author decides how to wire up the inputs.
-#[derive(Debug, Clone)]
-pub struct CompensationHint {
-    /// The capability ID that reverses this capability's effects.
-    /// Must be in the same module (e.g., "release" for "reserve").
-    pub capability_id: &'static str,
-    /// Human-readable description of what the compensation does.
-    pub description: Option<&'static str>,
-}
-
 /// Metadata for an agent capability
 #[derive(Debug, Clone)]
 pub struct CapabilityMeta {
@@ -81,9 +64,6 @@ pub struct CapabilityMeta {
     pub is_idempotent: bool,
     /// Whether this capability requires rate limiting (external API calls)
     pub rate_limited: bool,
-    /// Optional compensation hint - suggests how to undo this capability's effects.
-    /// This is metadata only; the system never auto-compensates.
-    pub compensation_hint: Option<CompensationHint>,
     /// Known errors this capability can return.
     /// Used for tooling hints, validation, and documentation generation.
     pub known_errors: &'static [KnownError],
@@ -277,18 +257,6 @@ pub struct AgentInfo {
     pub capabilities: Vec<CapabilityInfo>,
 }
 
-/// API-compatible compensation hint info
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-pub struct CompensationHintInfo {
-    /// Capability ID that reverses this capability's effects
-    #[serde(rename = "capabilityId")]
-    pub capability_id: String,
-    /// Human-readable description
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-}
-
 /// API-compatible known error info
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
@@ -335,10 +303,6 @@ pub struct CapabilityInfo {
     pub is_idempotent: bool,
     #[serde(rename = "rateLimited")]
     pub rate_limited: bool,
-    /// Optional compensation hint - suggests how to undo this capability.
-    /// This is metadata only; the system never auto-compensates.
-    #[serde(rename = "compensationHint", skip_serializing_if = "Option::is_none")]
-    pub compensation_hint: Option<CompensationHintInfo>,
     /// Known errors this capability can return.
     /// Used for tooling hints and documentation.
     #[serde(default, rename = "knownErrors", skip_serializing_if = "Vec::is_empty")]
@@ -1499,15 +1463,6 @@ pub fn capability_to_api_with_types(
         output_type = "any".to_string();
     }
 
-    // Convert compensation hint if present
-    let compensation_hint = cap
-        .compensation_hint
-        .as_ref()
-        .map(|h| CompensationHintInfo {
-            capability_id: h.capability_id.to_string(),
-            description: h.description.map(|s| s.to_string()),
-        });
-
     // Convert known errors
     let known_errors: Vec<KnownErrorInfo> =
         cap.known_errors.iter().map(KnownErrorInfo::from).collect();
@@ -1531,7 +1486,6 @@ pub fn capability_to_api_with_types(
         has_side_effects: cap.has_side_effects,
         is_idempotent: cap.is_idempotent,
         rate_limited: cap.rate_limited,
-        compensation_hint,
         known_errors,
         tags: cap.tags.iter().map(|s| s.to_string()).collect(),
     }
@@ -2065,7 +2019,6 @@ pub fn workflow_agent_info(
             has_side_effects: true,
             is_idempotent: false,
             rate_limited: false,
-            compensation_hint: None,
             known_errors: Vec::new(),
             tags: vec![
                 capability_tags::WORKFLOW_AGENT.to_string(),
@@ -2514,7 +2467,6 @@ mod output_schema_tests {
             has_side_effects: false,
             is_idempotent: true,
             rate_limited: false,
-            compensation_hint: None,
             known_errors: &[],
             tags: &[],
         }
@@ -2588,7 +2540,6 @@ mod catalog_tests {
                 has_side_effects: false,
                 is_idempotent: true,
                 rate_limited: false,
-                compensation_hint: None,
                 known_errors: vec![],
                 tags: vec![],
             }],
@@ -3295,7 +3246,6 @@ mod tests {
             has_side_effects: true,
             is_idempotent: false,
             rate_limited: false,
-            compensation_hint: None,
             known_errors: vec![
                 KnownErrorInfo {
                     code: "NETWORK_ERROR".to_string(),
@@ -3347,7 +3297,6 @@ mod tests {
             has_side_effects: false,
             is_idempotent: true,
             rate_limited: false,
-            compensation_hint: None,
             known_errors: vec![],
             tags: vec![],
         };

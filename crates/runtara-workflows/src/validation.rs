@@ -1215,9 +1215,9 @@ pub enum ValidationWarning {
         to_step: String,
         labels: Vec<String>,
     },
-    /// A step configures `compensation`, but compensation is accepted and
-    /// ignored end-to-end: it is never emitted by the compiler, never wired to
-    /// the SDK, and never triggered by the host. No rollback will run.
+    /// A stored step still carries the removed `compensation` config. It is
+    /// accepted so the definition parses, but ignored, and dropped the next
+    /// time the workflow is saved.
     CompensationNotEnforced { step_id: String },
     /// An Agent or EmbedWorkflow step configures `timeout`, but no deadline
     /// exists anywhere for these step types: a running capability invoke
@@ -1389,8 +1389,9 @@ impl std::fmt::Display for ValidationWarning {
             ValidationWarning::CompensationNotEnforced { step_id } => {
                 write!(
                     f,
-                    "[W070] Step '{}': 'compensation' is accepted but not enforced — no rollback \
-                     will execute on failure. Model rollback explicitly with onError routing.",
+                    "[W070] Step '{}': 'compensation' is no longer supported — it is ignored, and \
+                     will be dropped when this workflow is next saved. Model rollback explicitly \
+                     with onError routing.",
                     step_id
                 )
             }
@@ -1518,7 +1519,8 @@ pub fn validate_workflow(
     // Phase 8: Step name validation
     validate_step_names(graph, &mut result);
 
-    // Phase 9: Compensation validation (W070 — configured compensation is not enforced)
+    // Phase 9: Compensation validation (W070 — compensation was removed; stored
+    // definitions may still carry it)
     validate_compensation(graph, &mut result);
 
     // Phase 9.5: Timeout validation (W071 — Agent/EmbedWorkflow timeouts are not enforced)
@@ -3985,19 +3987,20 @@ fn collect_step_names(graph: &ExecutionGraph, name_to_step_ids: &mut HashMap<Str
 // Phase 9: Compensation Validation
 // ============================================================================
 
-/// W070: warn when a step configures `compensation`.
+/// W070: warn when a stored step still carries the removed `compensation` config.
 ///
-/// Compensation is accepted by the DSL but ignored end-to-end — it is never
-/// emitted by the compiler, never wired to the SDK, and never triggered by
-/// the host, so no rollback runs. Until that changes, any configured
-/// compensation is a false promise; the warning points authors at onError
-/// routing, which is enforced. (The old W060 warning that *suggested* adding
+/// Compensation was a saga-rollback config that never ran: it was never emitted
+/// by the compiler, never wired to the SDK, and never triggered by the host. It
+/// has been removed, and `AgentStep::legacy_compensation` now only exists so
+/// definitions saved before the removal still deserialize. This warning tells
+/// authors their config is being discarded and points them at onError routing,
+/// which is enforced. (The old W060 warning that *suggested* adding
 /// compensation to side-effecting steps was removed for the same reason:
 /// it encouraged configuring a no-op.)
 fn validate_compensation(graph: &ExecutionGraph, result: &mut ValidationResult) {
     for (step_id, step) in &graph.steps {
         if let Step::Agent(agent_step) = step
-            && agent_step.compensation.is_some()
+            && agent_step.legacy_compensation.is_some()
         {
             result
                 .warnings
@@ -6072,7 +6075,7 @@ mod tests {
             max_retries: None,
             retry_delay: None,
             timeout: None,
-            compensation: None,
+            legacy_compensation: None,
             breakpoint: None,
             durable: None,
         })
@@ -6316,7 +6319,7 @@ mod tests {
                 max_retries: None,
                 retry_delay: None,
                 timeout: None,
-                compensation: None,
+                legacy_compensation: None,
                 breakpoint: None,
                 durable: None,
             }),
@@ -6361,7 +6364,7 @@ mod tests {
                 max_retries: None,
                 retry_delay: None,
                 timeout: None,
-                compensation: None,
+                legacy_compensation: None,
                 breakpoint: None,
                 durable: None,
             }),
@@ -6407,7 +6410,7 @@ mod tests {
                 max_retries: None,
                 retry_delay: None,
                 timeout: None,
-                compensation: None,
+                legacy_compensation: None,
                 breakpoint: None,
                 durable: None,
             }),
@@ -6450,7 +6453,7 @@ mod tests {
                 max_retries: None,
                 retry_delay: None,
                 timeout: None,
-                compensation: None,
+                legacy_compensation: None,
                 breakpoint: None,
                 durable: None,
             }),
@@ -6582,7 +6585,7 @@ mod tests {
             max_retries: None,
             retry_delay: None,
             timeout: None,
-            compensation: None,
+            legacy_compensation: None,
             breakpoint: None,
             durable: None,
         })
@@ -6815,7 +6818,7 @@ mod tests {
                 max_retries: Some(100),
                 retry_delay: None,
                 timeout: None,
-                compensation: None,
+                legacy_compensation: None,
                 breakpoint: None,
                 durable: None,
             }),
@@ -7385,7 +7388,7 @@ mod tests {
                 max_retries: None,
                 retry_delay: None,
                 timeout: None,
-                compensation: None,
+                legacy_compensation: None,
                 breakpoint: None,
                 durable: None,
             }),
@@ -7525,7 +7528,7 @@ mod tests {
                 max_retries: None,
                 retry_delay: Some(5_000_000), // 5000 seconds
                 timeout: None,
-                compensation: None,
+                legacy_compensation: None,
                 breakpoint: None,
                 durable: None,
             }),
@@ -7567,7 +7570,7 @@ mod tests {
                 max_retries: Some(3),    // Normal
                 retry_delay: Some(1000), // 1 second - normal
                 timeout: Some(30_000),   // 30 seconds - normal
-                compensation: None,
+                legacy_compensation: None,
                 breakpoint: None,
                 durable: None,
             }),
@@ -9408,7 +9411,7 @@ mod tests {
                 max_retries: None,
                 retry_delay: None,
                 timeout: None,
-                compensation: None,
+                legacy_compensation: None,
                 breakpoint: None,
                 durable: None,
             }),
@@ -9426,7 +9429,7 @@ mod tests {
                 max_retries: None,
                 retry_delay: None,
                 timeout: None,
-                compensation: None,
+                legacy_compensation: None,
                 breakpoint: None,
                 durable: None,
             }),
@@ -9481,7 +9484,7 @@ mod tests {
                 max_retries: None,
                 retry_delay: None,
                 timeout: None,
-                compensation: None,
+                legacy_compensation: None,
                 breakpoint: None,
                 durable: None,
             }),
@@ -9502,7 +9505,7 @@ mod tests {
                 max_retries: None,
                 retry_delay: None,
                 timeout: None,
-                compensation: None,
+                legacy_compensation: None,
                 breakpoint: None,
                 durable: None,
             }),
@@ -9595,7 +9598,7 @@ mod tests {
                 max_retries: None,
                 retry_delay: None,
                 timeout: None,
-                compensation: None,
+                legacy_compensation: None,
                 breakpoint: None,
                 durable: None,
             }),
@@ -9613,7 +9616,7 @@ mod tests {
                 max_retries: None,
                 retry_delay: None,
                 timeout: None,
-                compensation: None,
+                legacy_compensation: None,
                 breakpoint: None,
                 durable: None,
             }),
@@ -9743,7 +9746,7 @@ mod tests {
             max_retries: None,
             retry_delay: None,
             timeout: None,
-            compensation: None,
+            legacy_compensation: None,
             breakpoint: None,
             durable: None,
         })
@@ -9909,7 +9912,7 @@ mod tests {
                 max_retries: None,
                 retry_delay: None,
                 timeout: None,
-                compensation: None,
+                legacy_compensation: None,
                 breakpoint: None,
                 durable: None,
             }),
@@ -11199,7 +11202,7 @@ mod tests {
 
     #[test]
     fn test_compensation_present_warns_w070() {
-        // Compensation is accepted but not enforced; configuring it must warn.
+        // Compensation was removed; a definition still carrying it must warn.
         let mut steps = HashMap::new();
         steps.insert(
             "http_call".to_string(),
@@ -11229,12 +11232,9 @@ mod tests {
                 max_retries: None,
                 retry_delay: None,
                 timeout: None,
-                compensation: Some(runtara_dsl::CompensationConfig {
-                    compensation_step: "rollback_step".to_string(),
-                    compensation_data: None,
-                    trigger: None,
-                    order: None,
-                }),
+                legacy_compensation: Some(serde_json::json!({
+                    "compensationStep": "rollback_step",
+                })),
                 breakpoint: None,
                 durable: None,
             }),
@@ -11267,7 +11267,7 @@ mod tests {
         );
         let display = format!("{}", w070[0]);
         assert!(display.contains("[W070]"), "{display}");
-        assert!(display.contains("not enforced"), "{display}");
+        assert!(display.contains("no longer supported"), "{display}");
         assert!(display.contains("onError"), "{display}");
     }
 
@@ -11290,7 +11290,7 @@ mod tests {
                 max_retries: None,
                 retry_delay: None,
                 timeout: None,
-                compensation: None,
+                legacy_compensation: None,
                 breakpoint: None,
                 durable: None,
             }),
@@ -11357,6 +11357,45 @@ mod tests {
             )),
             "compensation in a Split subgraph must warn W070: {:?}",
             result.warnings
+        );
+    }
+
+    #[test]
+    fn test_legacy_compensation_parses_and_is_dropped_on_reserialize() {
+        // Back-compat contract for the removal: `AgentStep` is
+        // `deny_unknown_fields`, so a definition saved before compensation was
+        // removed must still deserialize (otherwise it fails to compile, and
+        // any parent embedding it fails closure validation with E124). The
+        // value is accepted, warned about, and dropped when re-serialized.
+        let step_json = r##"{
+          "id": "charge",
+          "agentId": "http",
+          "capabilityId": "http-request",
+          "inputMapping": {},
+          "compensation": {
+            "compensationStep": "refund",
+            "compensationData": {
+              "chargeId": {"valueType": "reference", "value": "steps.charge.outputs.id"}
+            },
+            "trigger": "on_any_error",
+            "order": 10
+          }
+        }"##;
+
+        let step: AgentStep = serde_json::from_str(step_json).expect(
+            "a definition saved before the compensation removal must still parse; \
+             AgentStep is deny_unknown_fields, so the tombstone field is what makes this work",
+        );
+        assert!(
+            step.legacy_compensation.is_some(),
+            "the legacy value should be captured, not silently discarded at parse time"
+        );
+
+        let round_tripped = serde_json::to_value(&step).expect("serializes");
+        assert!(
+            round_tripped.get("compensation").is_none(),
+            "re-serializing must drop the removed key so the next save cleans the \
+             definition up: {round_tripped}"
         );
     }
 

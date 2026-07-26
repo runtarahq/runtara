@@ -870,7 +870,7 @@ describe('Backend DSL serialization', () => {
     expect((graph as any).nodes[0].position).toEqual({ x: 24, y: 48 });
   });
 
-  it('round-trips Agent retry, timeout, and compensation fields', () => {
+  it('round-trips Agent retry and timeout fields', () => {
     const graph = makeGraph({
       id: 'agent',
       stepType: 'Agent',
@@ -879,18 +879,6 @@ describe('Backend DSL serialization', () => {
       maxRetries: 2,
       retryDelay: 500,
       timeout: 30_000,
-      compensation: {
-        compensationStep: 'refund',
-        compensationData: {
-          chargeId: {
-            valueType: 'reference',
-            value: "steps['agent'].outputs.chargeId",
-            type: 'string',
-          },
-        },
-        trigger: 'on_downstream_error',
-        order: 10,
-      },
       renderingParameters: { x: 0, y: 0 },
     });
 
@@ -899,18 +887,6 @@ describe('Backend DSL serialization', () => {
       maxRetries: 2,
       retryDelay: 500,
       timeout: 30_000,
-      compensation: {
-        compensationStep: 'refund',
-        compensationData: {
-          chargeId: {
-            valueType: 'reference',
-            value: "steps['agent'].outputs.chargeId",
-            type: 'string',
-          },
-        },
-        trigger: 'on_downstream_error',
-        order: 10,
-      },
     });
   });
 
