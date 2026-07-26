@@ -69,7 +69,10 @@ export function ValidationPanel({
     <div
       className={cn(
         'flex flex-col border-t bg-card transition-all duration-200',
-        isPanelExpanded ? 'h-[320px]' : 'h-10'
+        // Collapsed height is the h-10 header plus this container's 1px
+        // border-t. Plain h-10 makes the shrink-0 header overflow by that 1px,
+        // which surfaces as a scrollbar on the page's scroll container.
+        isPanelExpanded ? 'h-[320px]' : 'h-[calc(2.5rem_+_1px)]'
       )}
     >
       <ValidationPanelHeader versionCount={versions.length} />

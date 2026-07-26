@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use axum::{
     Router,
@@ -9,6 +9,7 @@ use axum::{
     routing::get,
 };
 use bytes::Bytes;
+use regex::Regex;
 use rust_embed::{EmbeddedFile, RustEmbed};
 
 use crate::api::dto::entitlements::EntitlementsDto;
@@ -71,6 +72,21 @@ pub fn router(mount: &str, base_href: &str) -> Router {
         .with_state(state)
 }
 
+/// `<base href="...">`, tolerating attribute spacing and a self-closing `/>`.
+fn base_tag_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r#"<base\s+href="[^"]*"\s*/?>"#).expect("valid base-tag regex"))
+}
+
+/// The runtime-config script element; capture group 1 is its body.
+fn config_script_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r#"(?s)<script\s+id="runtara-runtime-config"[^>]*>(.*?)</script>"#)
+            .expect("valid config-script regex")
+    })
+}
+
 /// Returns the rewritten HTML and the base64-encoded SHA-256 of the inline
 /// `window.__RUNTARA_CONFIG__` script body. The hash goes into the
 /// `script-src` CSP directive so the browser allows the inline script to run.
@@ -90,26 +106,46 @@ fn build_index_html(base_href: &str, entitlements: &EntitlementSnapshot) -> (Byt
 
     // 1. Rewrite `<base href>` so the SPA resolves asset URLs and computes its
     //    React Router basename against the deployed mount prefix.
-    let base_needle = r#"<base href="/">"#;
-    assert!(
-        html.contains(base_needle),
-        "embed-ui: expected `{base_needle}` placeholder in index.html. Check frontend/index.html."
+    //
+    //    Match the tag rather than an exact byte string: index.html is
+    //    Prettier-owned, and a reflow to `<base href="/" />` must not panic the
+    //    server at startup (it did — see commit bc87364d).
+    let base_tag = base_tag_regex().find(html).expect(
+        "embed-ui: expected a `<base href=\"...\">` tag in index.html. \
+         Check frontend/index.html.",
     );
-    let base_replacement = format!(r#"<base href="{base_href}">"#);
-    let step_one = html.replacen(base_needle, &base_replacement, 1);
+    let mut step_one = String::with_capacity(html.len() + base_href.len());
+    step_one.push_str(&html[..base_tag.start()]);
+    step_one.push_str(&format!(r#"<base href="{base_href}">"#));
+    step_one.push_str(&html[base_tag.end()..]);
 
     // 2. Populate `window.__RUNTARA_CONFIG__` so the SPA can read tenant-specific
     //    OIDC/API/analytics/entitlement values at runtime without per-tenant rebuilds.
-    let config_needle = "window.__RUNTARA_CONFIG__={};";
-    assert!(
-        step_one.contains(config_needle),
-        "embed-ui: expected `{config_needle}` placeholder in index.html. Check frontend/index.html."
-    );
+    //
+    //    Replace the script element's whole body, not just the assignment, so the
+    //    body we hash below is byte-for-byte what the browser receives. Prettier
+    //    indents the placeholder across three lines; hashing only the assignment
+    //    would leave that whitespace in the served body and break the CSP hash.
     let inline_script = format!(
         "window.__RUNTARA_CONFIG__={};",
         runtime_config_json(entitlements)
     );
-    let rewritten = step_one.replacen(config_needle, &inline_script, 1);
+    let config_body = config_script_regex()
+        .captures(&step_one)
+        .and_then(|caps| caps.get(1))
+        .expect(
+            "embed-ui: expected a `<script id=\"runtara-runtime-config\">` element in \
+             index.html. Check frontend/index.html.",
+        );
+    assert!(
+        config_body.as_str().contains("__RUNTARA_CONFIG__"),
+        "embed-ui: `<script id=\"runtara-runtime-config\">` in index.html no longer \
+         assigns `window.__RUNTARA_CONFIG__`. Check frontend/index.html."
+    );
+    let mut rewritten = String::with_capacity(step_one.len() + inline_script.len());
+    rewritten.push_str(&step_one[..config_body.start()]);
+    rewritten.push_str(&inline_script);
+    rewritten.push_str(&step_one[config_body.end()..]);
 
     // CSP `script-src 'sha256-...'` matches the hash of the inline script body
     // between the <script> tags (no surrounding whitespace, no tags). The
@@ -518,6 +554,27 @@ mod tests {
         assert_eq!(ents["tenantId"], serde_json::json!("tenant-xyz"));
         assert_eq!(ents["features"]["reports"], serde_json::json!(false));
         assert_eq!(ents["features"]["database"], serde_json::json!(true));
+    }
+
+    /// index.html is Prettier-owned: it reflowed `<base href="/">` to
+    /// `<base href="/" />` (bc87364d) and panicked every `embed-ui` server at
+    /// startup. Assert against the real embedded asset so a future reflow fails
+    /// here rather than in production boot.
+    #[test]
+    fn base_href_is_rewritten_to_the_mount_prefix() {
+        let snap = fixture_snapshot("tenant-base", None);
+        let (html_bytes, _hash) = build_index_html("/ui/tenant-base/", &snap);
+        let html = std::str::from_utf8(&html_bytes).expect("utf-8");
+
+        assert!(
+            html.contains(r#"<base href="/ui/tenant-base/">"#),
+            "base href must be rewritten to the mount prefix; got:\n{}",
+            &html[..html.len().min(400)]
+        );
+        assert!(
+            !html.contains(r#"<base href="/">"#) && !html.contains(r#"<base href="/" />"#),
+            "the placeholder base tag must not survive the rewrite"
+        );
     }
 
     #[test]

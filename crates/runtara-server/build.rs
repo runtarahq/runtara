@@ -248,12 +248,25 @@ fn validation_wasm_inputs(workspace_root: &Path) -> Vec<PathBuf> {
     .collect()
 }
 
+/// Fingerprint the sources that feed the browser validation WASM.
+///
+/// This must stay byte-identical to `computeFingerprint()` in
+/// `frontend/scripts/build-validation-wasm.mjs`: both write the same
+/// `runtara_validation.fingerprint` file, so any disagreement makes each
+/// implementation treat the other's value as stale and rebuild the WASM (and,
+/// from `build.rs`, the whole frontend) on *every* build.
+///
+/// Sort on the path string rather than with `PathBuf`'s `Ord`. `Path` compares
+/// component-wise, so a `foo/` directory sorts before a `foo.rs` sibling, while
+/// the Node script's default `Array::sort` compares whole path strings and puts
+/// `foo.rs` first ('.' < '/'). Hashing is order-sensitive, so the two orderings
+/// yield different fingerprints for the same sources.
 fn validation_wasm_fingerprint(workspace_root: &Path, inputs: &[PathBuf]) -> String {
     let mut files = Vec::new();
     for input in inputs {
         collect_files(input, &mut files);
     }
-    files.sort();
+    files.sort_by(|a, b| a.to_string_lossy().cmp(&b.to_string_lossy()));
 
     let mut hash = Fnv1a64::new();
     hash.write(VALIDATION_WASM_FINGERPRINT_VERSION.as_bytes());

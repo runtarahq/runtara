@@ -83,6 +83,12 @@ function fnv1a64Update(hash, bytes) {
   return value;
 }
 
+// Must stay byte-identical to `validation_wasm_fingerprint` in
+// `crates/runtara-server/build.rs`: both write the same
+// `runtara_validation.fingerprint`, so any disagreement makes each side treat
+// the other's value as stale and rebuild the WASM on every build. `files.sort()`
+// compares whole path strings; the Rust side sorts the same way rather than with
+// `PathBuf`'s component-wise `Ord`.
 function computeFingerprint() {
   const files = [];
   for (const input of inputs) {
