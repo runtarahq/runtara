@@ -72,7 +72,10 @@ export function ReferencePill({
   return (
     <div
       className={cn(
-        'inline-flex items-center gap-1.5 rounded-full px-2 py-1 text-xs',
+        // max-w-full or the pill overflows its container: the label's 200px cap
+        // plus the icon, type badge and remove button is wider than a cell in
+        // the 520px panel, and an inline-flex will not shrink on its own.
+        'inline-flex max-w-full items-center gap-1.5 rounded-full px-2 py-1 text-xs',
         'border border-primary/30 bg-primary/10 text-primary',
         disabled && 'opacity-50',
         className
@@ -80,7 +83,7 @@ export function ReferencePill({
       title={type ? `${path} — ${type}` : path}
     >
       {getIconForType(type)}
-      <span className={cn(PICKER_TRUNCATE_MAX_WIDTH, 'truncate')}>
+      <span className={cn(PICKER_TRUNCATE_MAX_WIDTH, 'min-w-0 truncate')}>
         {hasStepInfo ? (
           <>
             <span className="font-medium">{stepName}</span>

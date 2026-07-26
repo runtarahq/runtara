@@ -26,6 +26,12 @@ import { WaitForSignalStepField } from './WaitForSignalStepField';
 import { LogStepField } from './LogStepField';
 import { WhileStepField } from './WhileStepField';
 import { DelayStepField } from './DelayStepField';
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from '@/shared/components/ui/collapsible';
+import { Icons } from '@/shared/components/icons';
 import { Input } from '@/shared/components/ui/input';
 import { Label } from '@/shared/components/ui/label';
 import { Switch as ToggleSwitch } from '@/shared/components/ui/switch';
@@ -138,9 +144,41 @@ const DURABLE_STEP_TYPES = new Set([
 
 const RETRY_STEP_TYPES = new Set(['Agent', 'EmbedWorkflow']);
 
+/**
+ * One-line answer to "is anything in here worth opening?".
+ *
+ * Collapsing this group is only safe if the header says when a step is not
+ * running on defaults — otherwise a breakpoint or a retry count set weeks ago
+ * is invisible. Only fields the group actually shows are considered.
+ */
+export function summarizeExecution(values: {
+  breakpoint?: unknown;
+  durable?: unknown;
+  maxRetries?: unknown;
+  retryDelay?: unknown;
+  timeout?: unknown;
+  showDurable: boolean;
+  showRetries: boolean;
+}): string {
+  const parts: string[] = [];
+  if (values.breakpoint === true) parts.push('breakpoint on');
+  // Unset means durable; only an explicit false is a deviation.
+  if (values.showDurable && values.durable === false) parts.push('not durable');
+  if (values.showRetries) {
+    if (values.maxRetries != null)
+      parts.push(
+        `${values.maxRetries} ${values.maxRetries === 1 ? 'retry' : 'retries'}`
+      );
+    if (values.retryDelay != null) parts.push(`${values.retryDelay}ms delay`);
+    if (values.timeout != null) parts.push(`${values.timeout}ms timeout`);
+  }
+  return parts.length ? parts.join(' · ') : 'all at defaults';
+}
+
 function StepAdvancedFields() {
   const { activeTab } = useTabContext();
   const form = useFormContext();
+  const [open, setOpen] = useState(false);
   const stepType = useWatch({ name: 'stepType', control: form.control });
   const breakpoint = useWatch({ name: 'breakpoint', control: form.control });
   const durable = useWatch({ name: 'durable', control: form.control });
@@ -156,101 +194,125 @@ function StepAdvancedFields() {
   const showRetries = RETRY_STEP_TYPES.has(stepType);
 
   return (
-    <div className="space-y-4 rounded-md border p-3">
-      <div className="flex items-center justify-between gap-4">
-        <div className="space-y-0.5">
-          <Label className="text-sm">Breakpoint</Label>
-          <p className="text-xs text-muted-foreground">
-            Pause before this step when debugging.
-          </p>
-        </div>
-        <ToggleSwitch
-          checked={breakpoint === true}
-          onCheckedChange={(checked) =>
-            form.setValue('breakpoint', checked, { shouldDirty: true })
-          }
+    <Collapsible open={open} onOpenChange={setOpen}>
+      <CollapsibleTrigger
+        type="button"
+        className="flex w-full items-center gap-1.5 py-1 text-left text-sm font-medium"
+        data-testid="step-execution-trigger"
+      >
+        <Icons.chevronRight
+          className={`size-3.5 shrink-0 transition-transform ${open ? 'rotate-90' : ''}`}
         />
-      </div>
-
-      {showDurable && (
+        Execution
+        <span className="truncate text-xs font-normal text-muted-foreground">
+          —{' '}
+          {summarizeExecution({
+            breakpoint,
+            durable,
+            maxRetries,
+            retryDelay,
+            timeout,
+            showDurable,
+            showRetries,
+          })}
+        </span>
+      </CollapsibleTrigger>
+      <CollapsibleContent className="space-y-4 pb-2 pt-2">
         <div className="flex items-center justify-between gap-4">
           <div className="space-y-0.5">
-            <Label className="text-sm">Durable</Label>
+            <Label className="text-sm">Breakpoint</Label>
             <p className="text-xs text-muted-foreground">
-              Keep this step suspendable and resumable.
+              Pause before this step when debugging.
             </p>
           </div>
           <ToggleSwitch
-            checked={durable !== false}
+            checked={breakpoint === true}
             onCheckedChange={(checked) =>
-              form.setValue('durable', checked, { shouldDirty: true })
+              form.setValue('breakpoint', checked, { shouldDirty: true })
             }
           />
         </div>
-      )}
 
-      {showRetries && (
-        <>
-          <div className="grid grid-cols-3 gap-3">
-            <div className="space-y-1">
-              <Label className="text-sm">Retries</Label>
-              <Input
-                type="number"
-                min={0}
-                value={maxRetries ?? ''}
-                onChange={(event) =>
-                  form.setValue(
-                    'maxRetries',
-                    event.target.value === ''
-                      ? undefined
-                      : Number(event.target.value),
-                    { shouldDirty: true }
-                  )
-                }
-              />
+        {showDurable && (
+          <div className="flex items-center justify-between gap-4">
+            <div className="space-y-0.5">
+              <Label className="text-sm">Durable</Label>
+              <p className="text-xs text-muted-foreground">
+                Keep this step suspendable and resumable.
+              </p>
             </div>
-            <div className="space-y-1">
-              <Label className="text-sm">Retry delay (ms)</Label>
-              <Input
-                type="number"
-                min={0}
-                value={retryDelay ?? ''}
-                onChange={(event) =>
-                  form.setValue(
-                    'retryDelay',
-                    event.target.value === ''
-                      ? undefined
-                      : Number(event.target.value),
-                    { shouldDirty: true }
-                  )
-                }
-              />
-            </div>
-            <div className="space-y-1">
-              <Label className="text-sm">Timeout (ms)</Label>
-              <Input
-                type="number"
-                min={0}
-                value={timeout ?? ''}
-                onChange={(event) =>
-                  form.setValue(
-                    'timeout',
-                    event.target.value === ''
-                      ? undefined
-                      : Number(event.target.value),
-                    { shouldDirty: true }
-                  )
-                }
-              />
-            </div>
+            <ToggleSwitch
+              checked={durable !== false}
+              onCheckedChange={(checked) =>
+                form.setValue('durable', checked, { shouldDirty: true })
+              }
+            />
           </div>
-          <p className="text-xs text-muted-foreground">
-            Timeout is accepted by the DSL for these steps; runtime validation
-            currently reports it as warning-only.
-          </p>
-        </>
-      )}
-    </div>
+        )}
+
+        {showRetries && (
+          <>
+            <div className="grid grid-cols-3 gap-3">
+              <div className="space-y-1">
+                <Label className="text-sm">Retries</Label>
+                <Input
+                  type="number"
+                  min={0}
+                  value={maxRetries ?? ''}
+                  onChange={(event) =>
+                    form.setValue(
+                      'maxRetries',
+                      event.target.value === ''
+                        ? undefined
+                        : Number(event.target.value),
+                      { shouldDirty: true }
+                    )
+                  }
+                />
+              </div>
+              <div className="space-y-1">
+                <Label className="text-sm">Retry delay (ms)</Label>
+                <Input
+                  type="number"
+                  min={0}
+                  value={retryDelay ?? ''}
+                  onChange={(event) =>
+                    form.setValue(
+                      'retryDelay',
+                      event.target.value === ''
+                        ? undefined
+                        : Number(event.target.value),
+                      { shouldDirty: true }
+                    )
+                  }
+                />
+              </div>
+              <div className="space-y-1">
+                <Label className="text-sm">Timeout (ms)</Label>
+                <Input
+                  type="number"
+                  min={0}
+                  value={timeout ?? ''}
+                  onChange={(event) =>
+                    form.setValue(
+                      'timeout',
+                      event.target.value === ''
+                        ? undefined
+                        : Number(event.target.value),
+                      { shouldDirty: true }
+                    )
+                  }
+                />
+              </div>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Timeout is accepted by the DSL for these steps; runtime validation
+              currently reports it as warning-only.
+            </p>
+          </>
+        )}
+      </CollapsibleContent>
+    </Collapsible>
   );
 }
 
