@@ -63,6 +63,11 @@ interface MappingValueInputProps {
    * type-mismatch warning for those call sites.
    */
   scalarsCoerceToString?: boolean;
+  /**
+   * Modes this consumer actually supports, in case the runtime does not honour
+   * all four. Defaults to every mode.
+   */
+  modes?: readonly ValueMode[];
 }
 
 function fieldTypeSupportsNull(fieldType: string): boolean {
@@ -132,6 +137,7 @@ export function MappingValueInput({
   defaultValue,
   onDefaultValueChange,
   scalarsCoerceToString = false,
+  modes,
 }: MappingValueInputProps) {
   const [isPickerOpen, setIsPickerOpen] = useState(false);
   const [isTemplateEditorOpen, setIsTemplateEditorOpen] = useState(false);
@@ -246,7 +252,7 @@ export function MappingValueInput({
   // The value carries across; see coerceValueForMode. Switching how a value is
   // interpreted is not a request to delete it.
   const handleModeToggle = () => {
-    const next = nextValueMode(valueType);
+    const next = nextValueMode(valueType, modes);
     const carried = coerceValueForMode(value, valueType, next, fieldType);
     onValueTypeChange(next);
     if (carried.changed) {
@@ -550,10 +556,12 @@ export function MappingValueInput({
             <Icons.maximize className="size-4" />
           </Button>
         )}
-        {/* Single toggle cycling: immediate → template → reference → immediate */}
+        {/* Single toggle cycling immediate → template → reference → composite,
+            restricted to `modes` where the consumer supports fewer. */}
         {!hideReferenceToggle && (
           <ModeToggleButton
             mode={valueType}
+            nextMode={nextValueMode(valueType, modes)}
             onClick={handleModeToggle}
             disabled={disabled}
           />

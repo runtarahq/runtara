@@ -5,10 +5,24 @@ export type ValueMode = 'immediate' | 'reference' | 'template' | 'composite';
 
 interface ModeToggleButtonProps {
   mode: ValueMode;
+  /**
+   * Where a click actually goes. Consumers may restrict the cycle (a Switch
+   * case output has no template mode), and a button that names a mode it will
+   * not switch to is worse than no label at all.
+   */
+  nextMode?: ValueMode;
   onClick: () => void;
   disabled?: boolean;
   className?: string;
 }
+
+/** Display name for a mode, used to describe where the toggle leads. */
+const MODE_NAME: Record<ValueMode, string> = {
+  immediate: 'immediate',
+  template: 'template',
+  reference: 'reference',
+  composite: 'composite',
+};
 
 const MODE_CONFIG: Record<
   ValueMode,
@@ -54,12 +68,20 @@ const MODE_CONFIG: Record<
  */
 export function ModeToggleButton({
   mode,
+  nextMode,
   onClick,
   disabled = false,
   className,
 }: ModeToggleButtonProps) {
   const config = MODE_CONFIG[mode];
   const IconComponent = Icons[config.icon];
+  const currentName = MODE_NAME[mode];
+  const ariaLabel = nextMode
+    ? `Switch to ${MODE_NAME[nextMode]} mode`
+    : config.ariaLabel;
+  const title = nextMode
+    ? `${currentName.charAt(0).toUpperCase()}${currentName.slice(1)} mode — click to switch to ${MODE_NAME[nextMode]} mode`
+    : config.title;
 
   return (
     <button
@@ -73,8 +95,8 @@ export function ModeToggleButton({
         disabled && 'cursor-not-allowed opacity-50',
         className
       )}
-      aria-label={config.ariaLabel}
-      title={config.title}
+      aria-label={ariaLabel}
+      title={title}
     >
       <IconComponent className="size-4" />
     </button>

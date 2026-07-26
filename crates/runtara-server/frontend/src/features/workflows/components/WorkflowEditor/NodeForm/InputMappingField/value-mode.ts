@@ -90,16 +90,30 @@ function isEmptyStructure(value: unknown): boolean {
   return false;
 }
 
-/** Next mode in the toggle cycle. */
-export function nextValueMode(current: ValueMode): ValueMode {
-  switch (current) {
-    case 'immediate':
-      return 'template';
-    case 'template':
-      return 'reference';
-    case 'reference':
-      return 'composite';
-    default:
-      return 'immediate';
-  }
+/** The full cycle, in toggle order. */
+export const ALL_VALUE_MODES: readonly ValueMode[] = [
+  'immediate',
+  'template',
+  'reference',
+  'composite',
+];
+
+/**
+ * Next mode in the toggle cycle, restricted to `allowed`.
+ *
+ * Not every consumer supports every mode: a Switch case output is resolved by
+ * `process_switch_output`, which handles immediate, reference and nested
+ * structures but passes a `template` wrapper through as a literal object — so
+ * offering template there would let someone build something that silently does
+ * not work.
+ */
+export function nextValueMode(
+  current: ValueMode,
+  allowed: readonly ValueMode[] = ALL_VALUE_MODES
+): ValueMode {
+  const cycle = ALL_VALUE_MODES.filter((mode) => allowed.includes(mode));
+  if (cycle.length === 0) return current;
+  const index = cycle.indexOf(current);
+  // An unknown current mode advances to the first allowed one.
+  return cycle[(index + 1) % cycle.length];
 }

@@ -39,6 +39,14 @@ import { useContext, useEffect, useState } from 'react';
 import { NodeFormContext } from '../NodeFormContext';
 import { ValueType } from '../TypeHintSelector';
 import { EditorTh } from '@/features/workflows/components/WorkflowEditor/EditorTable';
+import { MappingValueInput } from '../InputMappingField/MappingValueInput';
+import { ObjectMappingEditor } from '../InputMappingField/ObjectMappingEditor';
+import {
+  readSwitchOutput,
+  writeSwitchOutput,
+  SWITCH_OUTPUT_MODES,
+  type SwitchOutputMode,
+} from './switch-output';
 
 type MatchType =
   | 'exact'
@@ -141,6 +149,78 @@ const EXISTENCE_OPERATORS = new Set<MatchType>([
   'is_empty',
   'is_not_empty',
 ]);
+
+/**
+ * A Switch case's output value.
+ *
+ * Was a bare <Input> that ran JSON.parse on every keystroke and silently kept
+ * the raw string on failure, paired with a dialog whose description told the
+ * author to type `{"valueType": "reference", "value": "path.to.value"}`. That
+ * is wire format; nobody should need it to route a value.
+ *
+ * Modes are restricted to what `process_switch_output` actually honours —
+ * immediate, reference and nested structures. Template is deliberately absent:
+ * the runtime passes a template wrapper through as a literal object.
+ */
+function SwitchOutputCell({
+  output,
+  onChange,
+  testId,
+}: {
+  output: unknown;
+  onChange: (next: unknown) => void;
+  testId: string;
+}) {
+  const { mode, value } = readSwitchOutput(output);
+
+  if (mode === 'composite') {
+    return (
+      <div className="min-w-0 flex-1" data-testid={testId}>
+        <ObjectMappingEditor
+          value={value as never}
+          valueType="composite"
+          untyped
+          onChange={(next) =>
+            onChange(writeSwitchOutput({ mode: 'composite', value: next }))
+          }
+          onValueTypeChange={(next) => {
+            if (next === 'composite') return;
+            onChange(
+              writeSwitchOutput({
+                mode: next === 'reference' ? 'reference' : 'immediate',
+                value: '',
+              })
+            );
+          }}
+          onClose={() =>
+            onChange(writeSwitchOutput({ mode: 'immediate', value: '' }))
+          }
+        />
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-w-0 flex-1" data-testid={testId}>
+      <MappingValueInput
+        value={value as string}
+        valueType={mode}
+        modes={SWITCH_OUTPUT_MODES}
+        onValueTypeChange={(next) =>
+          onChange(
+            writeSwitchOutput({
+              mode: next as SwitchOutputMode,
+              value: next === mode ? value : '',
+            })
+          )
+        }
+        onChange={(next) => onChange(writeSwitchOutput({ mode, value: next }))}
+        fieldType="text"
+        placeholder="Value, or pick a reference"
+      />
+    </div>
+  );
+}
 
 export function SwitchCasesField(props: any) {
   const { label, name } = props;
@@ -287,7 +367,10 @@ export function SwitchCasesField(props: any) {
   };
 
   const addCase = () => {
-    const newCase: any = { matchType: 'exact', match: '', output: {} };
+    // Seed an empty immediate rather than `{}`: a new case almost always emits
+    // a simple value, and `{}` reads as a composite so the row opened straight
+    // into the object builder.
+    const newCase: any = { matchType: 'exact', match: '', output: '' };
     if (isRoutingMode) {
       newCase.route = `case_${casesArray.length + 1}`;
     }
@@ -631,7 +714,10 @@ export function SwitchCasesField(props: any) {
               {casesArray.map((caseItem: any, index: number) => {
                 const matchType = (caseItem.matchType || 'exact') as MatchType;
                 const matchValue = caseItem.match;
-                const outputValue = caseItem.output || {};
+                // `??` not `||`: an empty string, 0 or false are real outputs.
+                // Falling back to {} made every one of them read as a
+                // composite and open the object builder.
+                const outputValue = caseItem.output ?? '';
                 const routeValue = caseItem.route || '';
                 const isExistence = EXISTENCE_OPERATORS.has(matchType);
 
@@ -719,41 +805,11 @@ export function SwitchCasesField(props: any) {
                     </td>
                     <td className="p-2">
                       <div className="flex items-center gap-1">
-                        <Input
-                          data-testid={`switch-case-output-${index}`}
-                          value={
-                            typeof outputValue === 'object'
-                              ? JSON.stringify(outputValue)
-                              : outputValue
-                          }
-                          onChange={(e) => {
-                            try {
-                              const parsed = JSON.parse(e.target.value);
-                              updateCaseOutput(index, parsed);
-                            } catch {
-                              updateCaseOutput(index, e.target.value);
-                            }
-                          }}
-                          className="h-auto min-w-0 flex-1 border-0 p-1 font-mono text-sm focus-visible:ring-0 focus-visible:ring-offset-0"
-                          placeholder='{"key": "value"} or simple value'
+                        <SwitchOutputCell
+                          testId={`switch-case-output-${index}`}
+                          output={outputValue}
+                          onChange={(next) => updateCaseOutput(index, next)}
                         />
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="icon"
-                          className="size-6 shrink-0"
-                          onClick={() =>
-                            openEditDialog(
-                              'caseOutput',
-                              typeof outputValue === 'object'
-                                ? JSON.stringify(outputValue, null, 2)
-                                : outputValue,
-                              index
-                            )
-                          }
-                        >
-                          <Icons.edit className="size-3" />
-                        </Button>
                       </div>
                     </td>
                     {isRoutingMode && (
@@ -818,40 +874,11 @@ export function SwitchCasesField(props: any) {
         </div>
         {hasDefaultOutput ? (
           <div className="flex items-center gap-1 rounded-lg border p-2">
-            <Input
-              data-testid="switch-default-output"
-              value={
-                typeof defaultOutput === 'object'
-                  ? JSON.stringify(defaultOutput)
-                  : String(defaultOutput ?? '')
-              }
-              onChange={(e) => {
-                try {
-                  const parsed = JSON.parse(e.target.value);
-                  updateDefaultOutput(parsed);
-                } catch {
-                  updateDefaultOutput(e.target.value);
-                }
-              }}
-              className="h-auto flex-1 border-0 p-1 font-mono text-sm focus-visible:ring-0 focus-visible:ring-offset-0"
-              placeholder='{"key": "value"} or simple value'
+            <SwitchOutputCell
+              testId="switch-default-output"
+              output={defaultOutput}
+              onChange={updateDefaultOutput}
             />
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon"
-              className="size-6 shrink-0"
-              onClick={() =>
-                openEditDialog(
-                  'defaultOutput',
-                  typeof defaultOutput === 'object'
-                    ? JSON.stringify(defaultOutput, null, 2)
-                    : String(defaultOutput ?? '')
-                )
-              }
-            >
-              <Icons.edit className="size-3" />
-            </Button>
             <Button
               data-testid="switch-remove-default"
               type="button"
@@ -910,7 +937,7 @@ export function SwitchCasesField(props: any) {
                     const matchType = caseItem?.matchType || 'exact';
                     return getMatchDescription(matchType);
                   })()
-                : 'Enter the output value or JSON object. Moustache templates are not resolved here; for a dynamic value use a {"valueType": "reference", "value": "path.to.value"} object.'}
+                : ''}
             </DialogDescription>
           </DialogHeader>
           <div className="py-4">
