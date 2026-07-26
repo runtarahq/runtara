@@ -370,6 +370,7 @@ export function NodeConfigPanel({
               variant="ghost"
               className="mr-auto text-destructive hover:text-destructive"
               onClick={handleDelete}
+              data-testid="node-config-delete"
             >
               Delete
             </Button>

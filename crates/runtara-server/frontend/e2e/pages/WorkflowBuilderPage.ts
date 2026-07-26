@@ -263,9 +263,9 @@ export class WorkflowBuilderPage {
         name: `Add error handler from ${sourceStepName}`,
       })
       .click();
-    await expect(
-      this.page.getByTestId('timeline-node-config-panel')
-    ).toBeVisible({ timeout: 10000 });
+    await expect(this.page.getByTestId('node-config-dialog')).toBeVisible({
+      timeout: 10000,
+    });
     await this.saveOpenTimelinePanel(options);
   }
 
@@ -273,9 +273,9 @@ export class WorkflowBuilderPage {
     await this.useTimelineOnly();
     await this.page.getByTestId('timeline-add-step').first().click();
     await this.pickStep(kind);
-    await expect(
-      this.page.getByTestId('timeline-node-config-panel')
-    ).toBeVisible({ timeout: 10000 });
+    await expect(this.page.getByTestId('node-config-dialog')).toBeVisible({
+      timeout: 10000,
+    });
   }
 
   async beginTimelineStepAfter(
@@ -290,9 +290,9 @@ export class WorkflowBuilderPage {
       )
       .click();
     await this.pickStep(kind);
-    await expect(
-      this.page.getByTestId('timeline-node-config-panel')
-    ).toBeVisible({ timeout: 10000 });
+    await expect(this.page.getByTestId('node-config-dialog')).toBeVisible({
+      timeout: 10000,
+    });
   }
 
   async beginNestedTimelineStep(
@@ -308,9 +308,9 @@ export class WorkflowBuilderPage {
       .first()
       .click();
     await this.pickStep(kind);
-    await expect(
-      this.page.getByTestId('timeline-node-config-panel')
-    ).toBeVisible({ timeout: 10000 });
+    await expect(this.page.getByTestId('node-config-dialog')).toBeVisible({
+      timeout: 10000,
+    });
   }
 
   async beginTimelineRouteStep(
@@ -325,9 +325,9 @@ export class WorkflowBuilderPage {
       })
       .click();
     await this.pickStep(kind);
-    await expect(
-      this.page.getByTestId('timeline-node-config-panel')
-    ).toBeVisible({ timeout: 10000 });
+    await expect(this.page.getByTestId('node-config-dialog')).toBeVisible({
+      timeout: 10000,
+    });
   }
 
   async beginFirstCanvasStep(kind: AddStepKind): Promise<void> {
@@ -392,7 +392,7 @@ export class WorkflowBuilderPage {
       await nameInput.fill(options.name);
     }
 
-    await dialog.getByRole('button', { name: 'Save' }).click();
+    await dialog.getByTestId('node-config-save').click();
   }
 
   async configureOpenCanvasSplitSource(source = 'data.items') {
@@ -410,22 +410,22 @@ export class WorkflowBuilderPage {
 
   async configureSplitSource(stepName: string, source = 'data.items') {
     await this.editTimelineStep(stepName);
-    const panel = this.page.getByTestId('timeline-node-config-panel');
+    const panel = this.page.getByTestId('node-config-dialog');
     await panel
       .getByPlaceholder("e.g., steps['fetch'].outputs.items")
       .fill(source);
-    await panel.getByTestId('timeline-node-config-save').click();
+    await panel.getByTestId('node-config-save').click();
     await expect(panel).toHaveCount(0);
   }
 
   async configureOpenEmbedWorkflow(childWorkflowName: string) {
-    const panel = this.page.getByTestId('timeline-node-config-panel');
+    const panel = this.page.getByTestId('node-config-dialog');
     await panel.getByRole('combobox').first().click();
     await this.page.getByRole('option', { name: childWorkflowName }).click();
   }
 
   async configureOpenEmbedWorkflowVersion(version: number) {
-    const panel = this.page.getByTestId('timeline-node-config-panel');
+    const panel = this.page.getByTestId('node-config-dialog');
     const versionSelect = panel.getByRole('combobox').nth(1);
     await expect(versionSelect).toBeVisible({ timeout: 15000 });
     await expect(panel.getByText('Loading versions...')).toHaveCount(0, {
@@ -438,7 +438,7 @@ export class WorkflowBuilderPage {
   }
 
   async expectOpenEmbedWorkflowVersion(version: number) {
-    const panel = this.page.getByTestId('timeline-node-config-panel');
+    const panel = this.page.getByTestId('node-config-dialog');
     await expect(panel.getByRole('combobox').nth(1)).toContainText(
       `Version ${version}`,
       { timeout: 15000 }
@@ -446,7 +446,7 @@ export class WorkflowBuilderPage {
   }
 
   async configureOpenCondition(left = 'ready', right = 'ready') {
-    const panel = this.page.getByTestId('timeline-node-config-panel');
+    const panel = this.page.getByTestId('node-config-dialog');
     await panel.getByPlaceholder('Arg 1').fill(left);
     await panel.getByPlaceholder('Arg 2').fill(right);
   }
@@ -455,7 +455,7 @@ export class WorkflowBuilderPage {
     switchValue = 'status',
     firstCaseMatch = 'approved'
   ) {
-    const panel = this.page.getByTestId('timeline-node-config-panel');
+    const panel = this.page.getByTestId('node-config-dialog');
     await panel
       .getByPlaceholder('Enter value or use reference mode...')
       .fill(switchValue);
@@ -470,14 +470,12 @@ export class WorkflowBuilderPage {
     await this.timelineStep(stepName)
       .getByRole('button', { name: `Edit ${stepName}` })
       .click();
-    await expect(
-      this.page.getByTestId('timeline-node-config-panel')
-    ).toBeVisible();
+    await expect(this.page.getByTestId('node-config-dialog')).toBeVisible();
   }
 
   async deleteTimelineStep(stepName: string): Promise<void> {
     await this.editTimelineStep(stepName);
-    await this.page.getByTestId('node-form-delete').click();
+    await this.page.getByTestId('node-config-delete').click();
     await expect(this.timelineStep(stepName)).toHaveCount(0);
   }
 
@@ -648,7 +646,7 @@ export class WorkflowBuilderPage {
   }
 
   async saveOpenTimelinePanel(options: StepCreateOptions = {}): Promise<void> {
-    const panel = this.page.getByTestId('timeline-node-config-panel');
+    const panel = this.page.getByTestId('node-config-dialog');
     await expect(panel).toBeVisible({ timeout: 10000 });
 
     if (options.name) {
@@ -657,12 +655,12 @@ export class WorkflowBuilderPage {
       await nameInput.fill(options.name);
     }
 
-    await panel.getByTestId('timeline-node-config-save').click();
+    await panel.getByTestId('node-config-save').click();
     await expect(panel).toHaveCount(0);
   }
 
   async configureOpenAiAgent(connectionName: string): Promise<void> {
-    const panel = this.page.getByTestId('timeline-node-config-panel');
+    const panel = this.page.getByTestId('node-config-dialog');
     await panel.getByRole('combobox').first().click();
     await this.page.getByRole('option', { name: 'OpenAI' }).click();
 
@@ -693,9 +691,9 @@ export class WorkflowBuilderPage {
       .getByRole('button', { name: `Add tool to ${sourceStepName}` })
       .click();
     await this.pickStep(kind);
-    await expect(
-      this.page.getByTestId('timeline-node-config-panel')
-    ).toBeVisible({ timeout: 10000 });
+    await expect(this.page.getByTestId('node-config-dialog')).toBeVisible({
+      timeout: 10000,
+    });
     await this.saveOpenTimelinePanel(options);
   }
 
@@ -719,7 +717,7 @@ export class WorkflowBuilderPage {
     toolName = 'random_double'
   ): Promise<void> {
     await this.editTimelineStep(stepName);
-    const panel = this.page.getByTestId('timeline-node-config-panel');
+    const panel = this.page.getByTestId('node-config-dialog');
     await expect(panel.getByText(toolName, { exact: true })).toBeVisible({
       timeout: 15000,
     });
@@ -738,7 +736,7 @@ export class WorkflowBuilderPage {
       await nameInput.fill(options.name);
     }
 
-    await dialog.getByRole('button', { name: 'Save' }).click();
+    await dialog.getByTestId('node-config-save').click();
     await expect(dialog).toHaveCount(0);
   }
 
