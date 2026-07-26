@@ -16,11 +16,11 @@ its own repository.
 These have no equivalent at the repo root. They are kept because deleting them
 would destroy the only copy of the configuration, not because they work.
 
-| file | what it was for |
-|---|---|
-| `deploy-bunny.yml` | Build + deploy the frontend to Bunny CDN (260 lines). If the frontend is still deployed this way, this needs porting to the root; if not, it should be deleted deliberately. |
-| `claude.yml` | Claude Code GitHub app integration. |
-| `claude-code-review.yml` | Claude Code automated PR review. |
+| file                     | what it was for                                                                                                                                                              |
+| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `deploy-bunny.yml`       | Build + deploy the frontend to Bunny CDN (260 lines). If the frontend is still deployed this way, this needs porting to the root; if not, it should be deleted deliberately. |
+| `claude.yml`             | Claude Code GitHub app integration.                                                                                                                                          |
+| `claude-code-review.yml` | Claude Code automated PR review.                                                                                                                                             |
 
 To make any of them live, copy it to `/.github/workflows/`, add
 `working-directory: crates/runtara-server/frontend` (or a `defaults.run` block)

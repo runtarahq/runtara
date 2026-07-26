@@ -10,11 +10,23 @@ name: Frontend
 # Every job therefore sets `working-directory: crates/runtara-server/frontend`.
 #
 # Job split rationale:
-#   - lint / format / knip / typecheck / unit  -> Node only. Fast, no Rust.
-#   - build / e2e-mocked                       -> `npm run build` fires the
-#     `prebuild` script, which is `build:wasm-validation` ->
-#     scripts/build-validation-wasm.mjs -> wasm-pack. So these two DO need the
-#     Rust toolchain and wasm-pack, unlike the first five.
+#   - lint / format            -> Node only, no dependencies. Fast feedback.
+#   - typecheck / unit / knip  -> Node only, but they resolve
+#     `@/wasm/validation/runtara_validation.js`, which is *generated* by
+#     wasm-pack and gitignored (see .gitignore). Only `npm run build` builds it,
+#     via the `prebuild` hook -> build:wasm-validation ->
+#     scripts/build-validation-wasm.mjs. `npm test` and `tsc -b` have no such
+#     hook, so without it these jobs fail on an unresolved import (22 of 97
+#     vitest files, 3 tsc errors). They therefore consume the `validation-wasm`
+#     artifact rather than each paying for a Rust toolchain.
+#   - validation-wasm          -> builds that WASM once and uploads it.
+#   - build / e2e-mocked       -> run the real `npm run build`, so they build the
+#     WASM themselves and need Rust + wasm-pack.
+#
+# lint and format deliberately do NOT depend on validation-wasm: eslint.config.js
+# ignores src/wasm outright and prettier is purely syntactic, so neither needs the
+# generated module. Keeping them off the dependency edge preserves ~35s feedback
+# on a formatting slip instead of queueing it behind a Rust build.
 
 on:
   push:
@@ -47,7 +59,61 @@ defaults:
     working-directory: crates/runtara-server/frontend
 
 jobs:
-  # ---------------------------------------------------------------- Node only
+  # ------------------------------------------- Rust: the shared WASM artifact
+  # Builds the browser validation bundle once so the Node-only jobs that import
+  # it don't each need a Rust toolchain. Note this runs the build script
+  # directly and skips `npm ci`: scripts/build-validation-wasm.mjs uses only
+  # node builtins, so node_modules is dead weight here.
+  validation-wasm:
+    name: validation wasm
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: true
+          cache-workspaces: ". -> target"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: crates/runtara-server/frontend/.node-version
+
+      - name: Add Cargo bin to PATH
+        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Cache wasm-pack binary
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/wasm-pack
+          key: wasm-pack-${{ runner.os }}-${{ env.ImageOS }}-${{ runner.arch }}-${{ env.WASM_PACK_VERSION }}
+
+      - name: Install wasm-pack
+        run: |
+          if command -v wasm-pack >/dev/null 2>&1 \
+            && wasm-pack --version | grep -q "wasm-pack ${WASM_PACK_VERSION}"; then
+            echo "wasm-pack ${WASM_PACK_VERSION} already installed"
+          else
+            cargo install wasm-pack --version "$WASM_PACK_VERSION" --locked --force
+          fi
+
+      - name: Build validation WASM
+        run: npm run build:wasm-validation
+
+      # `if-no-files-found: error` so a silently-empty artifact fails here
+      # rather than downstream as a confusing unresolved import.
+      - name: Upload validation WASM
+        uses: actions/upload-artifact@v4
+        with:
+          name: validation-wasm
+          path: crates/runtara-server/frontend/src/wasm/validation/
+          if-no-files-found: error
+          retention-days: 1
+
+  # ------------------------------------------- Node only, no WASM needed
   checks:
     name: ${{ matrix.check.name }}
     runs-on: ubuntu-latest
@@ -57,8 +123,6 @@ jobs:
         check:
           - { name: lint, cmd: 'npm run lint' }
           - { name: format, cmd: 'npm run format:check' }
-          - { name: typecheck, cmd: 'npx tsc -b --pretty' }
-          - { name: unit, cmd: 'npm test' }
     steps:
       - uses: actions/checkout@v4
 
@@ -78,12 +142,45 @@ jobs:
       - name: ${{ matrix.check.name }}
         run: ${{ matrix.check.cmd }}
 
+  # ------------------------------------------- Node only, but needs the WASM
+  checks-wasm:
+    name: ${{ matrix.check.name }}
+    runs-on: ubuntu-latest
+    needs: validation-wasm
+    strategy:
+      fail-fast: false
+      matrix:
+        check:
+          - { name: typecheck, cmd: 'npx tsc -b --pretty' }
+          - { name: unit, cmd: 'npm test' }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: crates/runtara-server/frontend/.node-version
+          cache: npm
+          cache-dependency-path: crates/runtara-server/frontend/package-lock.json
+
+      - name: Download validation WASM
+        uses: actions/download-artifact@v4
+        with:
+          name: validation-wasm
+          path: crates/runtara-server/frontend/src/wasm/validation
+
+      - run: npm ci --no-audit --no-fund
+
+      - name: ${{ matrix.check.name }}
+        run: ${{ matrix.check.cmd }}
+
   # knip (dead-code detection) reports 4 genuinely unused exports today, so it
   # is informational rather than gating. Flip continue-on-error off once those
-  # are resolved.
+  # are resolved. It needs the WASM too, otherwise it also reports the two
+  # generated imports as unresolved.
   knip:
     name: knip (informational)
     runs-on: ubuntu-latest
+    needs: validation-wasm
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
@@ -92,6 +189,11 @@ jobs:
           node-version-file: crates/runtara-server/frontend/.node-version
           cache: npm
           cache-dependency-path: crates/runtara-server/frontend/package-lock.json
+      - name: Download validation WASM
+        uses: actions/download-artifact@v4
+        with:
+          name: validation-wasm
+          path: crates/runtara-server/frontend/src/wasm/validation
       - run: npm ci --no-audit --no-fund
       - run: npm run knip
 
