@@ -56,9 +56,9 @@ afterEach(() => {
   mocks.testHandler = null;
 });
 
-// The regression guard for SYN-548. The create flow (TimelineNodeConfigPanel
-// with isCreate) renders NodeForm with hideActions=true because the panel
-// supplies its own Save/Cancel footer. That must NOT drop the Run Test action,
+// The regression guard for SYN-548. The create flow (NodeConfigPanel with
+// isCreate) renders NodeForm with hideActions=true because the panel supplies
+// its own Save/Cancel footer. That must NOT drop the Run Test action,
 // which is testing-tab-only and provided by no parent footer.
 describe('NodeForm wires the testing-tab Run Test action', () => {
   const renderNodeForm = (hideActions: boolean) =>

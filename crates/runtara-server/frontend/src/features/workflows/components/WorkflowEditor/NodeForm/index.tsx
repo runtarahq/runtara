@@ -204,7 +204,7 @@ export function FormActions({
   }, [activeTab]);
 
   // Main tab: Show Reset button (for edit mode) or Save button (for create mode).
-  // When hideActions is set, the parent (e.g. TimelineNodeConfigPanel) renders
+  // When hideActions is set, the parent (NodeConfigPanel) renders
   // its own Save/Cancel footer, so suppress the form's own main-tab buttons to
   // avoid a duplicate Save. This does not apply to the Run Test action below,
   // which no parent footer provides.

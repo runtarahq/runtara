@@ -181,8 +181,10 @@ export function NodeConfigPanel({
   }, [open, nodeData]);
 
   const docked = isDocked(viewport);
-  // Creating a node has no node on the canvas yet, so nothing to anchor to.
-  const anchorRect = useAnchorRect(nodeId, open && docked && !isCreate);
+  // A pending node has no canvas node, but the timeline renders a placeholder
+  // card for it under the same id — so the lookup is worth attempting either
+  // way, and simply finds nothing on the canvas.
+  const anchorRect = useAnchorRect(nodeId, open && docked);
   const geo = panelGeometry(
     bounds ?? {
       top: 0,

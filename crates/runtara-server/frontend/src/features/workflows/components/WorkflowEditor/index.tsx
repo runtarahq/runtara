@@ -13,7 +13,7 @@ import {
   useStoreApi,
   OnConnectEnd,
 } from '@xyflow/react';
-import { ListTree, Network } from 'lucide-react';
+import { ListTree, Network, Plus } from 'lucide-react';
 import { v4 as uuidv4 } from 'uuid';
 import { useWorkflowStore } from '@/features/workflows/stores/workflowStore.ts';
 import { useExecutionStore } from '@/features/workflows/stores/executionStore';
@@ -75,7 +75,6 @@ import {
   type TimelineAddStepRequest,
   WorkflowTimelineView,
 } from './TimelineView';
-import { TimelineNodeConfigPanel } from './TimelineNodeConfigPanel';
 import { CANVAS_Z } from '@/features/workflows/components/WorkflowEditor/canvas-z';
 import {
   validateNodeEditWithRust,
@@ -325,8 +324,6 @@ function WorkflowEditorContent({
     useState<CreateStepContext | null>(null);
   const [createStepSurface, setCreateStepSurface] =
     useState<NodeEditSurface | null>(null);
-  const [pendingNodeSurface, setPendingNodeSurface] =
-    useState<NodeEditSurface | null>(null);
   const [timelineAddStepRequest, setTimelineAddStepRequest] =
     useState<TimelineAddStepRequest | null>(null);
 
@@ -354,7 +351,6 @@ function WorkflowEditorContent({
         setCreateStepContext(null);
         setCreateStepSurface(null);
         setTimelineAddStepRequest(null);
-        setPendingNodeSurface(null);
         setPendingNewNode(null);
         setEditingNodeId(nodeId);
       }
@@ -367,7 +363,6 @@ function WorkflowEditorContent({
         setCreateStepContext(null);
         setCreateStepSurface(null);
         setTimelineAddStepRequest(null);
-        setPendingNodeSurface(null);
         setPendingNewNode(null);
         setEditingNodeId(nodeId);
       }
@@ -453,8 +448,7 @@ function WorkflowEditorContent({
   // beyond the new right edge becomes invisible *and unhittable*, which reads
   // as "clicks stopped working on the canvas". The canvas lets the panel
   // overlay instead, and the connector hides for a node underneath it.
-  const dockedPanelOpen =
-    !!editingNodeId || (!!pendingNewNode && pendingNodeSurface !== 'timeline');
+  const dockedPanelOpen = !!editingNodeId || !!pendingNewNode;
   const [viewportWidth, setViewportWidth] = useState(() =>
     typeof window === 'undefined' ? 1600 : window.innerWidth
   );
@@ -490,7 +484,6 @@ function WorkflowEditorContent({
     setCreateStepContext(null);
     setCreateStepSurface(null);
     setTimelineAddStepRequest(null);
-    setPendingNodeSurface(null);
     setSelectedEdgeId(null);
     setShowStepPicker(false);
   }, []);
@@ -1084,7 +1077,6 @@ function WorkflowEditorContent({
         : undefined;
 
       setCreateStepSurface('timeline');
-      setPendingNodeSurface(null);
       setPendingNewNode(null);
       setTimelineAddStepRequest(request);
       closeNodeConfig();
@@ -1173,7 +1165,6 @@ function WorkflowEditorContent({
           sourceNodeId: request.sourceNodeId,
           sourceHandle: request.sourceHandle,
         });
-        setPendingNodeSurface('timeline');
         setCreateStepContext(null);
         return;
       }
@@ -1290,14 +1281,6 @@ function WorkflowEditorContent({
         agentId: result.agentId || '',
         capabilityId: result.capabilityId || '',
       } as form.SchemaType;
-      const setPendingNodeForCurrentSurface = (
-        node: Exclude<Parameters<typeof setPendingNewNode>[0], null>
-      ) => {
-        setPendingNewNode(node);
-        setPendingNodeSurface(
-          createStepSurface === 'timeline' ? 'timeline' : 'dialog'
-        );
-      };
       const getPendingPositionFromSource = (sourceNode: Node) => {
         const type = STEP_TYPES[data.stepType] || NODE_TYPES.BasicNode;
         const newNodeSize =
@@ -1364,7 +1347,7 @@ function WorkflowEditorContent({
 
         const { finalPosition, parentId } =
           getPendingPositionFromSource(sourceNode);
-        setPendingNodeForCurrentSurface({
+        setPendingNewNode({
           id: newNodeId,
           data: data as any,
           position: finalPosition,
@@ -1496,7 +1479,7 @@ function WorkflowEditorContent({
           }
         }
 
-        setPendingNodeForCurrentSurface({
+        setPendingNewNode({
           id: newNodeId,
           data: data as any,
           position: finalPosition,
@@ -1535,7 +1518,7 @@ function WorkflowEditorContent({
             });
 
             // Store as pending node instead of creating immediately
-            setPendingNodeForCurrentSurface({
+            setPendingNewNode({
               id: newNodeId,
               data: data as any,
               position: newPosition,
@@ -1550,7 +1533,7 @@ function WorkflowEditorContent({
         }
 
         // Regular insertion between nodes
-        setPendingNodeForCurrentSurface({
+        setPendingNewNode({
           id: newNodeId,
           data: data as any,
           position: createStepContext.position,
@@ -1613,7 +1596,7 @@ function WorkflowEditorContent({
         }
 
         // Store as pending node instead of creating immediately
-        setPendingNodeForCurrentSurface({
+        setPendingNewNode({
           id: newNodeId,
           data: data as any,
           position: finalPosition,
@@ -1660,7 +1643,7 @@ function WorkflowEditorContent({
       }
 
       // Store as pending node instead of creating immediately
-      setPendingNodeForCurrentSurface({
+      setPendingNewNode({
         id: newNodeId,
         data: data as any,
         position: finalPosition,
@@ -1877,7 +1860,6 @@ function WorkflowEditorContent({
       }
 
       setPendingNewNode(null);
-      setPendingNodeSurface(null);
       setTimelineAddStepRequest(null);
       setCreateStepSurface(null);
       return true;
@@ -1897,31 +1879,47 @@ function WorkflowEditorContent({
 
   const handlePendingNodeCancel = useCallback(() => {
     setPendingNewNode(null);
-    setPendingNodeSurface(null);
     setTimelineAddStepRequest(null);
     setCreateStepSurface(null);
   }, [setPendingNewNode]);
 
+  /**
+   * The timeline slot's contents while a step is being added.
+   *
+   * Two states: the picker, then a placeholder for the step being configured.
+   * Configuration itself happens in the docked panel, the same surface that
+   * edits an existing step — the timeline used to render its own inline form
+   * here, which made a third editing surface with its own width, chrome and
+   * save button.
+   *
+   * The placeholder is not decoration. A pending node exists only in the store
+   * until it is saved, so without it the slot collapses to a plain "Add step"
+   * row and nothing on screen says where the step is about to land. It also
+   * gives the panel's connector something to point at, via the same
+   * data-timeline-node-card hook a real step card uses.
+   */
   const renderTimelineInlineAddStep = useCallback(() => {
     if (!workflow) return null;
 
-    if (pendingNewNode && pendingNodeSurface === 'timeline') {
+    if (pendingNewNode) {
+      const data = pendingNewNode.data as unknown as form.SchemaType;
       return (
-        <TimelineNodeConfigPanel
-          nodeId={pendingNewNode.id}
-          nodeData={pendingNewNode.data as unknown as form.SchemaType}
-          originalNodeData={pendingNewNode.data as unknown as form.SchemaType}
-          outputSchemaFields={workflow.outputSchemaFields}
-          inputSchemaFields={workflow.inputSchemaFields}
-          variables={workflow.variables}
-          onSave={handlePendingNodeSave}
-          onCancel={handlePendingNodeCancel}
-          isCreate
-          parentNodeId={
-            pendingNewNode.sourceNodeId || pendingNewNode.insertionEdge?.source
-          }
-          createContainerId={pendingNewNode.parentId ?? null}
-        />
+        <div
+          data-timeline-node-card={pendingNewNode.id}
+          className="flex items-center gap-3 px-4 py-3"
+        >
+          <span className="flex size-7 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
+            <Plus className="size-4" aria-hidden="true" />
+          </span>
+          <div className="min-w-0">
+            <div className="truncate text-sm font-medium text-foreground">
+              {data.name || 'New step'}
+            </div>
+            <div className="truncate text-xs text-muted-foreground">
+              Configuring in the panel — not added yet
+            </div>
+          </div>
+        </div>
       );
     }
 
@@ -1952,9 +1950,6 @@ function WorkflowEditorContent({
   }, [
     workflow,
     pendingNewNode,
-    pendingNodeSurface,
-    handlePendingNodeSave,
-    handlePendingNodeCancel,
     createStepSurface,
     createStepContext,
     timelineAddStepRequest?.pickerMode,
@@ -2183,7 +2178,7 @@ function WorkflowEditorContent({
       )}
 
       {/* Docked step inspector - for creating new nodes */}
-      {pendingNewNode && workflow && pendingNodeSurface !== 'timeline' && (
+      {pendingNewNode && workflow && (
         <NodeConfigPanel
           open={!!pendingNewNode}
           onOpenChange={(open) => {
