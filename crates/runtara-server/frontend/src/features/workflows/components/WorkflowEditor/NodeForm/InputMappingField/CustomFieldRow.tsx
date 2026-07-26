@@ -20,6 +20,7 @@ import { MappingValueInput, ValueMode } from './MappingValueInput';
 import { FileInputWithReferences } from './FileInputWithReferences';
 import { ObjectMappingEditor } from './ObjectMappingEditor';
 import { CUSTOM_FIELD_TYPES, customFieldTypeLabel } from './custom-field-types';
+import { TOGGLE_GUTTER_CLASS, VALUE_CELL_CLASS } from './value-cell-layout';
 
 interface CustomFieldRowProps {
   nodeId: string;
@@ -191,13 +192,15 @@ export function CustomFieldRow({
       </TableCell>
 
       {/* Value column */}
-      <TableCell>
+      <TableCell className={VALUE_CELL_CLASS}>
         {getDisplayType() === 'file' ? (
-          <FileInputWithReferences
-            value={typeof value === 'string' ? value : ''}
-            onChange={handleValueChange}
-            placeholder="Upload a file"
-          />
+          <div className={TOGGLE_GUTTER_CLASS}>
+            <FileInputWithReferences
+              value={typeof value === 'string' ? value : ''}
+              onChange={handleValueChange}
+              placeholder="Upload a file"
+            />
+          </div>
         ) : valueType === 'composite' ? (
           // Render the structure editor right here. MappingValueInput's
           // composite state is only a banner reading 'configure below', and

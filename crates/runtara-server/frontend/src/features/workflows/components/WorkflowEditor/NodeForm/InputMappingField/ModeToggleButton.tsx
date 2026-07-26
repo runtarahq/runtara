@@ -1,5 +1,6 @@
 import { Icons } from '@/shared/components/icons.tsx';
 import { cn } from '@/lib/utils';
+import { TOGGLE_SIZE_CLASS } from './value-cell-layout';
 
 export type ValueMode = 'immediate' | 'reference' | 'template' | 'composite';
 
@@ -89,7 +90,9 @@ export function ModeToggleButton({
       onClick={onClick}
       disabled={disabled}
       className={cn(
-        'flex size-9 shrink-0 items-center justify-center rounded-md border transition-colors',
+        // Size comes from value-cell-layout so the gutter that stands in for
+        // this button, on rows that have none, reserves the right amount.
+        `flex ${TOGGLE_SIZE_CLASS} shrink-0 items-center justify-center rounded-md border transition-colors`,
         'hover:bg-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring',
         config.activeClass,
         disabled && 'cursor-not-allowed opacity-50',

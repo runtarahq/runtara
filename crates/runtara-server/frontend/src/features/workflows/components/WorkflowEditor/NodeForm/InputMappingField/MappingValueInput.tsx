@@ -12,6 +12,7 @@ import {
   SelectValue,
 } from '@/shared/components/ui/select';
 import { Icons } from '@/shared/components/icons';
+import { WithTooltip } from '@/shared/components/ui/tooltip';
 import { ReferencePill } from './ReferencePill';
 import { ModeToggleButton } from './ModeToggleButton';
 import { VariablePickerModal } from './VariablePickerModal';
@@ -329,11 +330,15 @@ export function MappingValueInput({
                   disabled={disabled}
                   className="h-7 font-mono text-xs"
                 />
-                <Icons.info
-                  className="size-3 shrink-0 cursor-help text-muted-foreground"
-                  aria-label="Fallback value help"
-                  title="Used when the referenced path is missing or null"
-                />
+                <WithTooltip label="Used when the referenced path is missing or null">
+                  <button
+                    type="button"
+                    className="shrink-0 cursor-help text-muted-foreground"
+                    aria-label="Fallback value help"
+                  >
+                    <Icons.info className="size-3" aria-hidden="true" />
+                  </button>
+                </WithTooltip>
               </div>
             )}
           </div>

@@ -14,6 +14,7 @@ import React, {
 } from 'react';
 import { shallow } from 'zustand/shallow';
 import { Icons } from '@/shared/components/icons';
+import { WithTooltip } from '@/shared/components/ui/tooltip';
 import { FieldError } from '@/shared/components/ui/form';
 import { Button } from '@/shared/components/ui/button';
 import {
@@ -57,6 +58,8 @@ import { CustomFieldRow } from './CustomFieldRow';
 import { AddCustomFieldDialog } from './AddCustomFieldDialog';
 import { useTabContext } from '../NodeFormItem';
 import { describeArrayValue, describeObjectValue } from './value-display';
+import { TOGGLE_GUTTER_CLASS, VALUE_CELL_CLASS } from './value-cell-layout';
+import { cn } from '@/lib/utils';
 
 /** Check if a field type is an array type */
 function isArrayType(type: string | undefined): boolean {
@@ -274,31 +277,38 @@ function FieldRow({
             <span className="shrink-0 text-xs text-destructive">*</span>
           )}
           {/* The hint carries the declared type as well as the description —
-              see the colgroup note on why there is no Type column. */}
-          <Icons.info
-            className="size-3 shrink-0 cursor-help text-muted-foreground"
-            aria-label={`${label} help`}
-            title={
+              see the colgroup note on why there is no Type column. A `title`
+              attribute would be invisible here: on an <svg> it is not the HTML
+              tooltip attribute, and SVG's own <title> is a child element. */}
+          <WithTooltip
+            label={
               helpText
                 ? `${field.type || 'any'} — ${helpText}`
                 : `Type: ${field.type || 'any'}`
             }
-          />
+          >
+            <button
+              type="button"
+              className="shrink-0 cursor-help text-muted-foreground"
+              aria-label={`${label} help`}
+            >
+              <Icons.info className="size-3" aria-hidden="true" />
+            </button>
+          </WithTooltip>
         </div>
       </TableCell>
 
-      {/* Value column.
-          TableCell zeroes its right padding when the cell contains a
-          [role=checkbox] — meant for a selection column, but a boolean value
-          control trips it too and pushes that one row's controls 12px past
-          every other row's. */}
-      <TableCell className="[&:has([role=checkbox])]:!pr-3">
+      {/* Value column */}
+      <TableCell className={VALUE_CELL_CLASS}>
         {isArray ? (
           // Array field - show button to open array editor
           <button
             type="button"
             onClick={() => onEditArray?.(field)}
-            className="mr-11 flex w-[calc(100%-2.75rem)] items-center justify-between gap-2 rounded-md border bg-muted/30 px-3 py-2 text-left text-sm transition-colors hover:bg-muted/50"
+            className={cn(
+              TOGGLE_GUTTER_CLASS,
+              'flex items-center justify-between gap-2 rounded-md border bg-muted/30 px-3 py-2 text-left text-sm transition-colors hover:bg-muted/50'
+            )}
           >
             <span className="truncate text-muted-foreground">
               {getArrayDisplayValue()}
@@ -310,7 +320,10 @@ function FieldRow({
           <button
             type="button"
             onClick={() => onEditObject?.(field)}
-            className="mr-11 flex w-[calc(100%-2.75rem)] items-center justify-between gap-2 rounded-md border bg-muted/30 px-3 py-2 text-left text-sm transition-colors hover:bg-muted/50"
+            className={cn(
+              TOGGLE_GUTTER_CLASS,
+              'flex items-center justify-between gap-2 rounded-md border bg-muted/30 px-3 py-2 text-left text-sm transition-colors hover:bg-muted/50'
+            )}
           >
             <span className="truncate text-muted-foreground">
               {getObjectDisplayValue()}
@@ -318,7 +331,7 @@ function FieldRow({
             <Icons.chevronRight className="size-4 shrink-0 text-muted-foreground" />
           </button>
         ) : componentType === 'file' ? (
-          <div onFocus={onFieldFocus}>
+          <div onFocus={onFieldFocus} className={TOGGLE_GUTTER_CLASS}>
             <FileInputWithReferences
               value={typeof value === 'string' ? value : ''}
               onChange={handleValueChange}
