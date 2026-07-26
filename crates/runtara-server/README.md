@@ -62,6 +62,17 @@ deployed behind a gateway that routes `/ui/<tenant-id>/…` externally, set
 prefix stays at `/ui` (override via `RUNTARA_UI_MOUNT` only if the gateway
 does not strip the tenant segment before forwarding).
 
+`RUNTARA_UI_DIST_DIR=<path to frontend/dist>` serves the UI from that directory
+at request time instead of from the embedded snapshot. It works with or without
+`embed-ui` and in any profile, and takes precedence when both are available.
+Its point is development: an embedded bundle is fixed at link time, so
+`npm run build:watch` output is invisible to a `--release` server until the
+binary is rebuilt. Pointing at `dist` makes a save plus a reload the whole loop
+— and lets a dev build drop `embed-ui`, which is what stops a running watcher
+from invalidating every cargo build. Assets from a disk source are served
+`no-cache` rather than `immutable`, and a read that lands mid-rebuild returns
+503 rather than a stale page. See `frontend/README.md` for the dev loops.
+
 ## Inside Runtara
 
 - Depends on `runtara-workflows`, `runtara-core` (with the `server` feature),

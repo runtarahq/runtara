@@ -121,7 +121,11 @@ utoipa = { version = "5", features = ["axum_extras", "chrono", "uuid"] }
 # Optional: embedded UI assets (`embed-ui` feature)
 # Debug builds read from disk (no `debug-embed`): `npm run build` changes are picked up
 # on the next HTTP request without a Rust rebuild. Release builds embed.
+# A release build can still serve dist from disk — see RUNTARA_UI_DIST_DIR.
 rust-embed = { version = "8", features = ["mime-guess"], optional = true }
+# Content types for UI assets read from disk (RUNTARA_UI_DIST_DIR). Not optional:
+# the disk source works in builds without `embed-ui`.
+mime_guess = "2"
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }

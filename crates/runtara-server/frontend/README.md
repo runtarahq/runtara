@@ -26,6 +26,46 @@ Cargo build, the server build script also regenerates it if the shared Rust
 validator changed. A running Vite dev/watch process will pick up those generated
 file changes.
 
+## Dev loops
+
+Pick by what you're changing. The thing to avoid is the fourth combination —
+`embed-ui` plus a running watcher — which costs a full Rust recompile and a
+~113MB relink per keystroke.
+
+**Frontend only** → `npm run dev` (:8081). HMR, no Rust in the loop. Needs
+`.env.local` for the API base and auth mode.
+
+**Frontend against the real server surface** — mount prefix, injected
+`<base href>`, CSP, single origin, no CORS — → run the server with
+`RUNTARA_UI_DIST_DIR` and keep a watcher going:
+
+```bash
+RUNTARA_UI_DIST_DIR=$PWD/crates/runtara-server/frontend/dist cargo run -p runtara-server --release
+```
+
+```bash
+cd crates/runtara-server/frontend && npm run build:watch
+```
+
+The server reads `dist/` per request, so a save plus a browser reload is the
+whole loop — no cargo build, no restart. It works in any profile and takes
+precedence over an embedded copy, so `--features embed-ui` is unnecessary here
+(and leaving it off is what keeps the watcher from invalidating your Rust
+builds — see below). `build:watch` skips `prebuild`, so run
+`npm run build:wasm-validation` once if `src/wasm/validation/` is missing.
+
+**Rust only** → build without `embed-ui`. `build.rs` declares
+`rerun-if-changed=frontend/dist` only under that feature, so without it a
+running watcher can't touch your build cache. With it, every `dist` write reruns
+the build script, which recompiles `runtara-server` and relinks the binary — and
+if cargo catches `dist` mid-rebuild, the build fails outright on a missing
+`index.html`.
+
+**Shipping / verifying the real embedded bundle** → stop the watcher, then
+`npm run build && cargo build -p runtara-server --release --features embed-ui`.
+That's the only combination that needs the relink, and it should be a deliberate
+one-shot rather than something in your edit loop.
+
 ## Runtime configuration
 
 The bundle is **mount-agnostic and tenant-agnostic**: one build deploys

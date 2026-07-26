@@ -64,7 +64,15 @@ export default defineConfig({
       },
     },
     chunkSizeWarningLimit: 500,
-    emptyOutDir: true,
+    // Wipe dist for a one-shot `npm run build` (the bundle that gets embedded
+    // must not carry stale chunks), but never under `build:watch`. A watcher
+    // empties dist at the *start* of each rebuild, which leaves the directory
+    // missing for the whole build and indefinitely if the build then fails —
+    // and anything reading dist sees that gap: the server serves 503s, and an
+    // `embed-ui` cargo build panics on the missing index.html. Watch rebuilds
+    // overwrite in place instead; stale hashed chunks accumulate, which is
+    // harmless in dev and cleared by the next full build.
+    emptyOutDir: !process.env.RUNTARA_VITE_WATCH,
     // Optimize for production using esbuild (default)
     minify: 'esbuild',
     reportCompressedSize: false,
