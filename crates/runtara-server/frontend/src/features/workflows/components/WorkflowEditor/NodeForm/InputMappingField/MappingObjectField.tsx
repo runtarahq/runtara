@@ -75,6 +75,13 @@ interface MappingObjectFieldProps {
   onChange: (value: unknown) => void;
   /** Placeholder shown in the JSON textarea. */
   jsonPlaceholder?: string;
+  /**
+   * What this JSON toggle edits, for callers that render their own JSON
+   * toggle nearby. Compensation stacks two identically-labelled toggles with
+   * different scopes — one for this object, one for the whole compensation
+   * config — so at least one of them has to say which is which.
+   */
+  jsonToggleLabel?: string;
   disabled?: boolean;
 }
 
@@ -82,6 +89,7 @@ export function MappingObjectField({
   value,
   onChange,
   jsonPlaceholder,
+  jsonToggleLabel = 'Edit as JSON',
   disabled = false,
 }: MappingObjectFieldProps) {
   const [showJson, setShowJson] = useState(false);
@@ -254,7 +262,7 @@ export function MappingObjectField({
           onClick={() => setShowJson(!showJson)}
           disabled={!structuredEditable}
         >
-          {jsonVisible && structuredEditable ? 'Hide JSON' : 'Edit as JSON'}
+          {jsonVisible && structuredEditable ? 'Hide JSON' : jsonToggleLabel}
         </Button>
       </div>
 

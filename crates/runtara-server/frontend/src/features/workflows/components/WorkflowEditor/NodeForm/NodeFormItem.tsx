@@ -493,6 +493,7 @@ function CompensationField() {
         <MappingObjectField
           value={dataDraft}
           onChange={handleDataChange}
+          jsonToggleLabel="Edit data as JSON"
           jsonPlaceholder={`{"chargeId": {"valueType": "reference", "value": "steps['charge'].outputs.chargeId"}}`}
         />
       </div>
@@ -505,7 +506,9 @@ function CompensationField() {
           className="h-6 px-1 text-xs text-muted-foreground hover:text-foreground"
           onClick={() => setShowJson(!showJson)}
         >
-          {showJson ? 'Hide JSON' : 'Edit as JSON'}
+          {showJson
+            ? 'Hide compensation JSON'
+            : 'Edit all compensation as JSON'}
         </Button>
       </div>
 
