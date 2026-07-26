@@ -18,6 +18,7 @@ import {
 import { useNodeFormStore } from '@/features/workflows/stores/nodeFormStore';
 import { MappingValueInput, ValueMode } from './MappingValueInput';
 import { FileInputWithReferences } from './FileInputWithReferences';
+import { ObjectMappingEditor } from './ObjectMappingEditor';
 import { CUSTOM_FIELD_TYPES, customFieldTypeLabel } from './custom-field-types';
 
 interface CustomFieldRowProps {
@@ -197,6 +198,23 @@ export function CustomFieldRow({
             value={typeof value === 'string' ? value : ''}
             onChange={handleValueChange}
             placeholder="Upload a file"
+          />
+        ) : valueType === 'composite' ? (
+          // Render the structure editor right here. MappingValueInput's
+          // composite state is only a banner reading 'configure below', and
+          // unlike a schema field row this row has no expansion sibling — so
+          // 'below' was nothing at all and the value was unreachable.
+          <ObjectMappingEditor
+            value={
+              typeof value === 'object' && value !== null
+                ? (value as never)
+                : ({} as never)
+            }
+            valueType="composite"
+            untyped
+            onChange={(next) => handleValueChange(next as never)}
+            onValueTypeChange={(next) => handleValueTypeChange(next as never)}
+            onClose={() => handleValueTypeChange('immediate' as never)}
           />
         ) : (
           <MappingValueInput
