@@ -121,7 +121,7 @@ pub fn get_dsl_changelog() -> Value {
                         "type": "removed",
                         "component": "step-field",
                         "description": "Removed Agent step 'compensation' (saga rollback) config",
-                        "migration": "Use onError routing. Existing definitions still parse; the field is ignored and dropped on next save."
+                        "migration": "Use onError routing. AgentStep rejects unknown fields, so a stored definition still carrying 'compensation' will fail to parse — strip the key from any such definition."
                     }
                 ]
             },

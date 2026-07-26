@@ -486,15 +486,6 @@ pub struct AgentStep {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout: Option<u64>,
 
-    /// Removed saga-compensation config. Accepted so stored workflows still
-    /// parse, but ignored at runtime and omitted from generated schemas and
-    /// serialization — it is dropped the next time the workflow is saved
-    /// (validation warns with W070). Use `onError` routing for rollback logic.
-    #[serde(default, rename = "compensation", skip_serializing)]
-    #[cfg_attr(feature = "json-schema", schemars(skip))]
-    #[cfg_attr(feature = "utoipa", schema(ignore))]
-    pub legacy_compensation: Option<serde_json::Value>,
-
     /// When true, execution pauses before this step in debug mode
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub breakpoint: Option<bool>,

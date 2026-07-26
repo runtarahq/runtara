@@ -3166,32 +3166,6 @@ mod tests {
         assert_eq!(mapping.value["timeout_ms"]["value"], 1_000);
     }
 
-    /// Compensation was removed from the DSL, but definitions saved before the
-    /// removal still carry the key. The emitter must keep compiling them (the
-    /// tombstone field absorbs the value) rather than rejecting a workflow that
-    /// used to compile.
-    #[test]
-    fn agent_legacy_compensation_is_accepted_as_noop() {
-        let mut graph = fixture("transform");
-        let Some(Step::Agent(agent)) = graph.steps.get_mut("transform") else {
-            panic!("expected Agent fixture step");
-        };
-        agent.legacy_compensation = Some(serde_json::json!({
-            "compensationStep": "finish",
-        }));
-
-        let report = analyze_direct_wasm_support(&graph);
-
-        assert!(report.supported, "{:?}", report.unsupported);
-        assert!(
-            !report
-                .unsupported
-                .iter()
-                .any(|feature| feature.feature == "agent-compensation"),
-            "legacy compensation must not produce an unsupported feature"
-        );
-    }
-
     #[test]
     fn agent_breakpoints_are_supported_with_direct_pause_lowering() {
         let mut graph = fixture("transform");

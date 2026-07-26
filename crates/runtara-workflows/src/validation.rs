@@ -24,7 +24,6 @@
 //! | 5 | Child workflow validation (version format) |
 //! | 7.5 | Data and variable reference validation |
 //! | 8 | Step name validation (duplicates) |
-//! | 9 | Compensation validation (warnings) |
 //! | 10 | Edge condition validation (priorities) |
 //!
 //! # Cross-Workflow Validation
@@ -1215,10 +1214,6 @@ pub enum ValidationWarning {
         to_step: String,
         labels: Vec<String>,
     },
-    /// A stored step still carries the removed `compensation` config. It is
-    /// accepted so the definition parses, but ignored, and dropped the next
-    /// time the workflow is saved.
-    CompensationNotEnforced { step_id: String },
     /// An Agent or EmbedWorkflow step configures `timeout`, but no deadline
     /// exists anywhere for these step types: a running capability invoke
     /// cannot be preempted in the synchronous component model, so the value
@@ -1386,15 +1381,6 @@ impl std::fmt::Display for ValidationWarning {
                     labels.join(", ")
                 )
             }
-            ValidationWarning::CompensationNotEnforced { step_id } => {
-                write!(
-                    f,
-                    "[W070] Step '{}': 'compensation' is no longer supported — it is ignored, and \
-                     will be dropped when this workflow is next saved. Model rollback explicitly \
-                     with onError routing.",
-                    step_id
-                )
-            }
             ValidationWarning::TimeoutNotEnforced { step_id, step_type } => {
                 write!(
                     f,
@@ -1518,10 +1504,6 @@ pub fn validate_workflow(
 
     // Phase 8: Step name validation
     validate_step_names(graph, &mut result);
-
-    // Phase 9: Compensation validation (W070 — compensation was removed; stored
-    // definitions may still carry it)
-    validate_compensation(graph, &mut result);
 
     // Phase 9.5: Timeout validation (W071 — Agent/EmbedWorkflow timeouts are not enforced)
     validate_unenforced_timeouts(graph, &mut result);
@@ -3983,50 +3965,6 @@ fn collect_step_names(graph: &ExecutionGraph, name_to_step_ids: &mut HashMap<Str
     }
 }
 
-// ============================================================================
-// Phase 9: Compensation Validation
-// ============================================================================
-
-/// W070: warn when a stored step still carries the removed `compensation` config.
-///
-/// Compensation was a saga-rollback config that never ran: it was never emitted
-/// by the compiler, never wired to the SDK, and never triggered by the host. It
-/// has been removed, and `AgentStep::legacy_compensation` now only exists so
-/// definitions saved before the removal still deserialize. This warning tells
-/// authors their config is being discarded and points them at onError routing,
-/// which is enforced. (The old W060 warning that *suggested* adding
-/// compensation to side-effecting steps was removed for the same reason:
-/// it encouraged configuring a no-op.)
-fn validate_compensation(graph: &ExecutionGraph, result: &mut ValidationResult) {
-    for (step_id, step) in &graph.steps {
-        if let Step::Agent(agent_step) = step
-            && agent_step.legacy_compensation.is_some()
-        {
-            result
-                .warnings
-                .push(ValidationWarning::CompensationNotEnforced {
-                    step_id: step_id.clone(),
-                });
-        }
-
-        // Recursively validate subgraphs
-        match step {
-            Step::Split(split_step) => {
-                validate_compensation(&split_step.subgraph, result);
-            }
-            Step::While(while_step) => {
-                validate_compensation(&while_step.subgraph, result);
-            }
-            Step::WaitForSignal(wait_step) => {
-                if let Some(on_wait) = &wait_step.on_wait {
-                    validate_compensation(on_wait, result);
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
 /// W071: warn when an Agent or EmbedWorkflow step configures `timeout`.
 ///
 /// A running capability invoke (or child workflow) cannot be preempted in the
@@ -6075,7 +6013,6 @@ mod tests {
             max_retries: None,
             retry_delay: None,
             timeout: None,
-            legacy_compensation: None,
             breakpoint: None,
             durable: None,
         })
@@ -6319,7 +6256,6 @@ mod tests {
                 max_retries: None,
                 retry_delay: None,
                 timeout: None,
-                legacy_compensation: None,
                 breakpoint: None,
                 durable: None,
             }),
@@ -6364,7 +6300,6 @@ mod tests {
                 max_retries: None,
                 retry_delay: None,
                 timeout: None,
-                legacy_compensation: None,
                 breakpoint: None,
                 durable: None,
             }),
@@ -6410,7 +6345,6 @@ mod tests {
                 max_retries: None,
                 retry_delay: None,
                 timeout: None,
-                legacy_compensation: None,
                 breakpoint: None,
                 durable: None,
             }),
@@ -6453,7 +6387,6 @@ mod tests {
                 max_retries: None,
                 retry_delay: None,
                 timeout: None,
-                legacy_compensation: None,
                 breakpoint: None,
                 durable: None,
             }),
@@ -6585,7 +6518,6 @@ mod tests {
             max_retries: None,
             retry_delay: None,
             timeout: None,
-            legacy_compensation: None,
             breakpoint: None,
             durable: None,
         })
@@ -6818,7 +6750,6 @@ mod tests {
                 max_retries: Some(100),
                 retry_delay: None,
                 timeout: None,
-                legacy_compensation: None,
                 breakpoint: None,
                 durable: None,
             }),
@@ -7388,7 +7319,6 @@ mod tests {
                 max_retries: None,
                 retry_delay: None,
                 timeout: None,
-                legacy_compensation: None,
                 breakpoint: None,
                 durable: None,
             }),
@@ -7528,7 +7458,6 @@ mod tests {
                 max_retries: None,
                 retry_delay: Some(5_000_000), // 5000 seconds
                 timeout: None,
-                legacy_compensation: None,
                 breakpoint: None,
                 durable: None,
             }),
@@ -7570,7 +7499,6 @@ mod tests {
                 max_retries: Some(3),    // Normal
                 retry_delay: Some(1000), // 1 second - normal
                 timeout: Some(30_000),   // 30 seconds - normal
-                legacy_compensation: None,
                 breakpoint: None,
                 durable: None,
             }),
@@ -9411,7 +9339,6 @@ mod tests {
                 max_retries: None,
                 retry_delay: None,
                 timeout: None,
-                legacy_compensation: None,
                 breakpoint: None,
                 durable: None,
             }),
@@ -9429,7 +9356,6 @@ mod tests {
                 max_retries: None,
                 retry_delay: None,
                 timeout: None,
-                legacy_compensation: None,
                 breakpoint: None,
                 durable: None,
             }),
@@ -9484,7 +9410,6 @@ mod tests {
                 max_retries: None,
                 retry_delay: None,
                 timeout: None,
-                legacy_compensation: None,
                 breakpoint: None,
                 durable: None,
             }),
@@ -9505,7 +9430,6 @@ mod tests {
                 max_retries: None,
                 retry_delay: None,
                 timeout: None,
-                legacy_compensation: None,
                 breakpoint: None,
                 durable: None,
             }),
@@ -9598,7 +9522,6 @@ mod tests {
                 max_retries: None,
                 retry_delay: None,
                 timeout: None,
-                legacy_compensation: None,
                 breakpoint: None,
                 durable: None,
             }),
@@ -9616,7 +9539,6 @@ mod tests {
                 max_retries: None,
                 retry_delay: None,
                 timeout: None,
-                legacy_compensation: None,
                 breakpoint: None,
                 durable: None,
             }),
@@ -9746,7 +9668,6 @@ mod tests {
             max_retries: None,
             retry_delay: None,
             timeout: None,
-            legacy_compensation: None,
             breakpoint: None,
             durable: None,
         })
@@ -9912,7 +9833,6 @@ mod tests {
                 max_retries: None,
                 retry_delay: None,
                 timeout: None,
-                legacy_compensation: None,
                 breakpoint: None,
                 durable: None,
             }),
@@ -11195,207 +11115,6 @@ mod tests {
             )),
             "template typo against declared Split inputSchema should warn; got: {:?}",
             result.warnings
-        );
-    }
-
-    // === Compensation Validation Tests (W070) ===
-
-    #[test]
-    fn test_compensation_present_warns_w070() {
-        // Compensation was removed; a definition still carrying it must warn.
-        let mut steps = HashMap::new();
-        steps.insert(
-            "http_call".to_string(),
-            Step::Agent(AgentStep {
-                id: "http_call".to_string(),
-                name: None,
-                agent_id: "http".to_string(),
-                capability_id: "http-request".to_string(),
-                connection_id: None,
-                connection_ref: None,
-                input_mapping: Some({
-                    let mut m = InputMapping::new();
-                    m.insert(
-                        "url".to_string(),
-                        MappingValue::Immediate(runtara_dsl::ImmediateValue {
-                            value: serde_json::json!("https://example.com"),
-                        }),
-                    );
-                    m.insert(
-                        "method".to_string(),
-                        MappingValue::Immediate(runtara_dsl::ImmediateValue {
-                            value: serde_json::json!("POST"),
-                        }),
-                    );
-                    m
-                }),
-                max_retries: None,
-                retry_delay: None,
-                timeout: None,
-                legacy_compensation: Some(serde_json::json!({
-                    "compensationStep": "rollback_step",
-                })),
-                breakpoint: None,
-                durable: None,
-            }),
-        );
-        steps.insert("finish".to_string(), create_finish_step("finish", None));
-
-        let mut graph = create_basic_graph(steps, "http_call");
-        graph.execution_plan = vec![runtara_dsl::ExecutionPlanEdge {
-            from_step: "http_call".to_string(),
-            to_step: "finish".to_string(),
-            label: None,
-            condition: None,
-            priority: None,
-        }];
-
-        let result = validate_workflow(&graph, &test_catalog());
-
-        let w070: Vec<_> = result
-            .warnings
-            .iter()
-            .filter(|w| {
-                matches!(w, ValidationWarning::CompensationNotEnforced { step_id } if step_id == "http_call")
-            })
-            .collect();
-        assert_eq!(
-            w070.len(),
-            1,
-            "configured compensation must warn W070: {:?}",
-            result.warnings
-        );
-        let display = format!("{}", w070[0]);
-        assert!(display.contains("[W070]"), "{display}");
-        assert!(display.contains("no longer supported"), "{display}");
-        assert!(display.contains("onError"), "{display}");
-    }
-
-    #[test]
-    fn test_no_compensation_no_w070_warning() {
-        // No compensation configured (even on a side-effecting capability):
-        // nothing to warn about. The old W060 "consider adding compensation"
-        // suggestion was removed because it encouraged configuring a no-op.
-        let mut steps = HashMap::new();
-        steps.insert(
-            "om_call".to_string(),
-            Step::Agent(AgentStep {
-                id: "om_call".to_string(),
-                name: None,
-                agent_id: "object_model".to_string(),
-                capability_id: "create-instance".to_string(),
-                connection_id: None,
-                connection_ref: None,
-                input_mapping: None,
-                max_retries: None,
-                retry_delay: None,
-                timeout: None,
-                legacy_compensation: None,
-                breakpoint: None,
-                durable: None,
-            }),
-        );
-        steps.insert("finish".to_string(), create_finish_step("finish", None));
-
-        let mut graph = create_basic_graph(steps, "om_call");
-        graph.execution_plan = vec![runtara_dsl::ExecutionPlanEdge {
-            from_step: "om_call".to_string(),
-            to_step: "finish".to_string(),
-            label: None,
-            condition: None,
-            priority: None,
-        }];
-
-        let result = validate_workflow(&graph, &test_catalog());
-
-        assert!(
-            !result
-                .warnings
-                .iter()
-                .any(|w| matches!(w, ValidationWarning::CompensationNotEnforced { .. })),
-            "no compensation configured must not warn W070: {:?}",
-            result.warnings
-        );
-    }
-
-    #[test]
-    fn test_compensation_warns_w070_inside_split_subgraph() {
-        let graph: ExecutionGraph = serde_json::from_str(
-            r##"{
-              "entryPoint": "split",
-              "executionPlan": [
-                {"fromStep":"split","toStep":"finish"}
-              ],
-              "steps": {
-                "split": {"id":"split","stepType":"Split","config":{
-                    "value": {"valueType":"immediate","value":[1,2]}
-                  },
-                  "subgraph": {
-                    "entryPoint": "inner",
-                    "executionPlan": [
-                      {"fromStep":"inner","toStep":"inner_finish"}
-                    ],
-                    "steps": {
-                      "inner": {"id":"inner","stepType":"Agent","agentId":"utils",
-                        "capabilityId":"get-current-iso-datetime","inputMapping":{},
-                        "compensation":{"compensationStep":"inner_finish"}},
-                      "inner_finish": {"id":"inner_finish","stepType":"Finish"}
-                    }
-                  }},
-                "finish": {"id":"finish","stepType":"Finish"}
-              }
-            }"##,
-        )
-        .unwrap();
-
-        let result = validate_workflow(&graph, &test_catalog());
-
-        assert!(
-            result.warnings.iter().any(|w| matches!(
-                w,
-                ValidationWarning::CompensationNotEnforced { step_id } if step_id == "inner"
-            )),
-            "compensation in a Split subgraph must warn W070: {:?}",
-            result.warnings
-        );
-    }
-
-    #[test]
-    fn test_legacy_compensation_parses_and_is_dropped_on_reserialize() {
-        // Back-compat contract for the removal: `AgentStep` is
-        // `deny_unknown_fields`, so a definition saved before compensation was
-        // removed must still deserialize (otherwise it fails to compile, and
-        // any parent embedding it fails closure validation with E124). The
-        // value is accepted, warned about, and dropped when re-serialized.
-        let step_json = r##"{
-          "id": "charge",
-          "agentId": "http",
-          "capabilityId": "http-request",
-          "inputMapping": {},
-          "compensation": {
-            "compensationStep": "refund",
-            "compensationData": {
-              "chargeId": {"valueType": "reference", "value": "steps.charge.outputs.id"}
-            },
-            "trigger": "on_any_error",
-            "order": 10
-          }
-        }"##;
-
-        let step: AgentStep = serde_json::from_str(step_json).expect(
-            "a definition saved before the compensation removal must still parse; \
-             AgentStep is deny_unknown_fields, so the tombstone field is what makes this work",
-        );
-        assert!(
-            step.legacy_compensation.is_some(),
-            "the legacy value should be captured, not silently discarded at parse time"
-        );
-
-        let round_tripped = serde_json::to_value(&step).expect("serializes");
-        assert!(
-            round_tripped.get("compensation").is_none(),
-            "re-serializing must drop the removed key so the next save cleans the \
-             definition up: {round_tripped}"
         );
     }
 

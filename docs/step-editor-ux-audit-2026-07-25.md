@@ -4,7 +4,7 @@
 
 **RC0 below was found only by live testing** — it is invisible to static reading because it depends on the data a real workflow carries. The static sweep did not find it, and it is the single highest value-per-effort fix in this document.
 
-> **Update 2026-07-26 — compensation findings resolved by removal.** §2.6 flagged Compensation as a control that "advertises its own non-functionality" (W070, not enforced at runtime). Compensation has since been removed from the DSL end-to-end, and `CompensationField` in `NodeFormItem.tsx` is deleted along with it. References to `CompensationField` below — including as the exemplar JSON-escape-hatch pattern — are historical; the surviving instance of that pattern is `MappingObjectField.tsx`. The Timeout half of the §2.6 finding still stands.
+> **Update 2026-07-26 — compensation findings resolved by removal.** §2.6 flagged Compensation as a control that "advertises its own non-functionality" (W070, not enforced at runtime). Compensation has since been removed from the DSL end-to-end: the `compensation` field, the `CompensationField` editor in `NodeFormItem.tsx`, and the W070 warning code itself are all gone, and `AgentStep` now rejects the key outright. References to `CompensationField` below — including as the exemplar JSON-escape-hatch pattern — are historical; the surviving instance of that pattern is `MappingObjectField.tsx`. The Timeout half of the §2.6 finding still stands.
 
 ---
 
