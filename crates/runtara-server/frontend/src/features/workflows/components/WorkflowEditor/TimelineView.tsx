@@ -81,7 +81,6 @@ type WorkflowTimelineViewProps = {
   debugInspectMode?: boolean;
   onEditNode?: (nodeId: string) => void;
   editingNodeId?: string | null;
-  renderInlineEditor?: (nodeId: string) => ReactNode;
   activeAddStepRequest?: TimelineAddStepRequest | null;
   renderInlineAddStep?: (request: TimelineAddStepRequest) => ReactNode;
   onAddStep?: (request: TimelineAddStepRequest) => void;
@@ -1717,7 +1716,6 @@ function TimelineItemList({
   onToggleContainer,
   onEditNode,
   editingNodeId,
-  renderInlineEditor,
   activeAddStepRequest,
   renderInlineAddStep,
   onAddStep,
@@ -1734,7 +1732,6 @@ function TimelineItemList({
   onToggleContainer: (nodeId: string) => void;
   onEditNode?: (nodeId: string) => void;
   editingNodeId?: string | null;
-  renderInlineEditor?: (nodeId: string) => ReactNode;
   activeAddStepRequest?: TimelineAddStepRequest | null;
   renderInlineAddStep?: (request: TimelineAddStepRequest) => ReactNode;
   onAddStep?: (request: TimelineAddStepRequest) => void;
@@ -1780,7 +1777,6 @@ function TimelineItemList({
               onToggleContainer={onToggleContainer}
               onEditNode={onEditNode}
               editingNodeId={editingNodeId}
-              renderInlineEditor={renderInlineEditor}
               activeAddStepRequest={activeAddStepRequest}
               renderInlineAddStep={renderInlineAddStep}
               onAddStep={onAddStep}
@@ -2095,7 +2091,6 @@ function BranchLaneGroups({
   onToggleContainer,
   onEditNode,
   editingNodeId,
-  renderInlineEditor,
   activeAddStepRequest,
   renderInlineAddStep,
   onAddStep,
@@ -2112,7 +2107,6 @@ function BranchLaneGroups({
   onToggleContainer: (nodeId: string) => void;
   onEditNode?: (nodeId: string) => void;
   editingNodeId?: string | null;
-  renderInlineEditor?: (nodeId: string) => ReactNode;
   activeAddStepRequest?: TimelineAddStepRequest | null;
   renderInlineAddStep?: (request: TimelineAddStepRequest) => ReactNode;
   onAddStep?: (request: TimelineAddStepRequest) => void;
@@ -2259,7 +2253,6 @@ function BranchLaneGroups({
                 onToggleContainer={onToggleContainer}
                 onEditNode={onEditNode}
                 editingNodeId={editingNodeId}
-                renderInlineEditor={renderInlineEditor}
                 activeAddStepRequest={activeAddStepRequest}
                 renderInlineAddStep={renderInlineAddStep}
                 onAddStep={onAddStep}
@@ -2288,7 +2281,6 @@ function WorkflowTimelineItem({
   onToggleContainer,
   onEditNode,
   editingNodeId,
-  renderInlineEditor,
   activeAddStepRequest,
   renderInlineAddStep,
   onAddStep,
@@ -2304,7 +2296,6 @@ function WorkflowTimelineItem({
   onToggleContainer: (nodeId: string) => void;
   onEditNode?: (nodeId: string) => void;
   editingNodeId?: string | null;
-  renderInlineEditor?: (nodeId: string) => ReactNode;
   activeAddStepRequest?: TimelineAddStepRequest | null;
   renderInlineAddStep?: (request: TimelineAddStepRequest) => ReactNode;
   onAddStep?: (request: TimelineAddStepRequest) => void;
@@ -2322,7 +2313,7 @@ function WorkflowTimelineItem({
   const stepType = getStepType(node);
   const StepIcon = getStepIcon(stepType);
   const isSelected = selectedNodeId === node.id;
-  const isEditingInline = editingNodeId === node.id;
+  const isEditingThisNode = editingNodeId === node.id;
   const isContainer = isTimelineContainerNode(node) || item.children.length > 0;
   const isExpanded = expandedContainers[node.id] ?? true;
   const nestedItemCount = countItems(item.children);
@@ -2381,7 +2372,7 @@ function WorkflowTimelineItem({
             ? 'border-destructive ring-2 ring-destructive/30'
             : executionStatus
               ? getExecutionBorderClass(executionStatus.status)
-              : (isSelected || isEditingInline) &&
+              : (isSelected || isEditingThisNode) &&
                 'border-primary bg-primary/5',
           executionStatus?.status === 'suspended' &&
             'animate-glow-pulse border-2',
@@ -2513,19 +2504,13 @@ function WorkflowTimelineItem({
               size="sm"
               onClick={handleEdit}
               aria-label={`Edit ${getStepName(node)}`}
-              aria-expanded={isEditingInline}
+              aria-expanded={isEditingThisNode}
             >
               <PenLine aria-hidden="true" />
-              {isEditingInline ? 'Editing' : 'Edit'}
+              {isEditingThisNode ? 'Editing' : 'Edit'}
             </Button>
           )}
         </div>
-
-        {isEditingInline && renderInlineEditor && (
-          <div className="border-t bg-card/60">
-            {renderInlineEditor(node.id)}
-          </div>
-        )}
       </div>
 
       <TimelineRouteAddControls
@@ -2550,7 +2535,6 @@ function WorkflowTimelineItem({
         onToggleContainer={onToggleContainer}
         onEditNode={onEditNode}
         editingNodeId={editingNodeId}
-        renderInlineEditor={renderInlineEditor}
         activeAddStepRequest={activeAddStepRequest}
         renderInlineAddStep={renderInlineAddStep}
         onAddStep={onAddStep}
@@ -2570,7 +2554,6 @@ function WorkflowTimelineItem({
             onToggleContainer={onToggleContainer}
             onEditNode={onEditNode}
             editingNodeId={editingNodeId}
-            renderInlineEditor={renderInlineEditor}
             activeAddStepRequest={activeAddStepRequest}
             renderInlineAddStep={renderInlineAddStep}
             onAddStep={onAddStep}
@@ -2594,7 +2577,6 @@ export function WorkflowTimelineView({
   debugInspectMode = false,
   onEditNode,
   editingNodeId,
-  renderInlineEditor,
   activeAddStepRequest,
   renderInlineAddStep,
   onAddStep,
@@ -2987,7 +2969,6 @@ export function WorkflowTimelineView({
           onToggleContainer={toggleContainer}
           onEditNode={onEditNode}
           editingNodeId={editingNodeId}
-          renderInlineEditor={renderInlineEditor}
           activeAddStepRequest={activeAddStepRequest}
           renderInlineAddStep={renderInlineAddStep}
           onAddStep={onAddStep}
