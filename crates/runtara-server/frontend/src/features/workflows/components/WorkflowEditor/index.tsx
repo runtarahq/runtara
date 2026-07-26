@@ -338,7 +338,16 @@ function WorkflowEditorContent({
   const [showStepPicker, setShowStepPicker] = useState(false);
   const [editorView, setEditorView] = useState<WorkflowEditorView>('timeline');
 
+  // Pending new node state from store (for deferred creation until user confirms)
+  const pendingNewNode = useWorkflowStore((state) => state.pendingNewNode);
+  const setPendingNewNode = useWorkflowStore(
+    (state) => state.setPendingNewNode
+  );
+
   // Callback for child node components to open config dialogs (including hidden nodes)
+  // Opening an editor abandons any half-finished create. The pending node has
+  // to go with the rest of that state: it is what the create panel renders
+  // from, and leaving it set puts two config panels on screen at once.
   const openNodeConfig = useCallback(
     (nodeId: string) => {
       if (workflow && !readOnly) {
@@ -346,10 +355,11 @@ function WorkflowEditorContent({
         setCreateStepSurface(null);
         setTimelineAddStepRequest(null);
         setPendingNodeSurface(null);
+        setPendingNewNode(null);
         setEditingNodeId(nodeId);
       }
     },
-    [workflow, readOnly]
+    [workflow, readOnly, setPendingNewNode]
   );
   const openTimelineNodeConfig = useCallback(
     (nodeId: string) => {
@@ -358,10 +368,11 @@ function WorkflowEditorContent({
         setCreateStepSurface(null);
         setTimelineAddStepRequest(null);
         setPendingNodeSurface(null);
+        setPendingNewNode(null);
         setEditingNodeId(nodeId);
       }
     },
-    [debugInspectMode, workflow, readOnly]
+    [debugInspectMode, workflow, readOnly, setPendingNewNode]
   );
   const nodeConfigContextValue = useMemo(
     () => ({ openNodeConfig }),
@@ -370,12 +381,6 @@ function WorkflowEditorContent({
   const timelineNodeConfigContextValue = useMemo(
     () => ({ openNodeConfig: openTimelineNodeConfig }),
     [openTimelineNodeConfig]
-  );
-
-  // Pending new node state from store (for deferred creation until user confirms)
-  const pendingNewNode = useWorkflowStore((state) => state.pendingNewNode);
-  const setPendingNewNode = useWorkflowStore(
-    (state) => state.setPendingNewNode
   );
 
   const ref = useRef(null);
