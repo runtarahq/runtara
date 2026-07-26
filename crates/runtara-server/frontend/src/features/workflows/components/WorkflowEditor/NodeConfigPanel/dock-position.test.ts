@@ -24,22 +24,35 @@ describe('isDocked', () => {
 });
 
 describe('panelGeometry', () => {
-  it('pins to the top and the right gutter', () => {
-    const g = panelGeometry({ width: 1600, height: 1000 }, 520);
-    expect(g.top).toBe(DOCK_GAP);
+  // The editor area, not the window: below a top bar and above a bottom bar.
+  const editor: Rect = { top: 60, bottom: 940, left: 240, right: 1600 };
+
+  it('pins to the top of the editor area and its right gutter', () => {
+    const g = panelGeometry(editor, 520);
+    expect(g.top).toBe(60 + DOCK_GAP);
     expect(g.left).toBe(1600 - 520 - DOCK_GAP);
-    expect(g.maxHeight).toBe(1000 - DOCK_GAP * 2);
   });
 
-  it('does not move with viewport height — the whole point of pinning', () => {
-    const short = panelGeometry({ width: 1600, height: 800 }, 520);
-    const tall = panelGeometry({ width: 1600, height: 1600 }, 520);
+  it('clears the bottom bar instead of overlapping it', () => {
+    const g = panelGeometry(editor, 520);
+    expect(g.top + g.maxHeight).toBe(editor.bottom - DOCK_GAP);
+    expect(g.maxHeight).toBe(940 - 60 - DOCK_GAP * 2);
+  });
+
+  it('keeps an equal margin top and bottom', () => {
+    const g = panelGeometry(editor, 520);
+    expect(g.top - editor.top).toBe(editor.bottom - (g.top + g.maxHeight));
+  });
+
+  it('does not move with editor height — the whole point of pinning', () => {
+    const short = panelGeometry({ ...editor, bottom: 700 }, 520);
+    const tall = panelGeometry({ ...editor, bottom: 1600 }, 520);
     expect(short.top).toBe(tall.top);
     expect(short.left).toBe(tall.left);
   });
 
-  it('never pushes the panel off the left edge on a narrow viewport', () => {
-    const g = panelGeometry({ width: 400, height: 800 }, 520);
+  it('never pushes the panel off the left edge of a narrow editor', () => {
+    const g = panelGeometry({ top: 0, bottom: 800, left: 0, right: 400 }, 520);
     expect(g.left).toBe(DOCK_GAP);
   });
 });

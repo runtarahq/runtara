@@ -86,6 +86,12 @@ function useAnchorRect(nodeId: string, enabled: boolean): Rect | null {
         document.querySelector<HTMLElement>(
           `.react-flow__node[data-id="${id}"]`
         ) ??
+        // The card, not the row wrapper: the wrapper also contains the
+        // add-branch/add-error controls, which drags its centre below the
+        // visible tile.
+        document.querySelector<HTMLElement>(
+          `[data-timeline-node-card="${id}"]`
+        ) ??
         document.querySelector<HTMLElement>(`[data-timeline-node-id="${id}"]`);
       if (!el) {
         setRect(null);
@@ -145,13 +151,27 @@ export function NodeConfigPanel({
     width: typeof window === 'undefined' ? 1600 : window.innerWidth,
     height: typeof window === 'undefined' ? 900 : window.innerHeight,
   }));
+  // The area the panel may occupy: the editor, not the window. Keeps a margin
+  // at the top and clears the bottom bar rather than sitting on top of it.
+  const [bounds, setBounds] = useState<Rect | null>(null);
 
   useEffect(() => {
-    const onResize = () =>
+    const measure = () => {
       setViewport({ width: window.innerWidth, height: window.innerHeight });
-    window.addEventListener('resize', onResize);
-    return () => window.removeEventListener('resize', onResize);
-  }, []);
+      const host = document.querySelector<HTMLElement>(
+        '[data-workflow-editor-root]'
+      );
+      if (!host) {
+        setBounds(null);
+        return;
+      }
+      const r = host.getBoundingClientRect();
+      setBounds({ top: r.top, bottom: r.bottom, left: r.left, right: r.right });
+    };
+    measure();
+    window.addEventListener('resize', measure);
+    return () => window.removeEventListener('resize', measure);
+  }, [open]);
 
   useEffect(() => {
     if (open && !prevOpenRef.current) {
@@ -163,7 +183,15 @@ export function NodeConfigPanel({
   const docked = isDocked(viewport);
   // Creating a node has no node on the canvas yet, so nothing to anchor to.
   const anchorRect = useAnchorRect(nodeId, open && docked && !isCreate);
-  const geo = panelGeometry(viewport, NODE_CONFIG_PANEL_WIDTH);
+  const geo = panelGeometry(
+    bounds ?? {
+      top: 0,
+      bottom: viewport.height,
+      left: 0,
+      right: viewport.width,
+    },
+    NODE_CONFIG_PANEL_WIDTH
+  );
   const panelRect: Rect = {
     top: geo.top,
     bottom: geo.top + (panelRef.current?.offsetHeight ?? geo.maxHeight),

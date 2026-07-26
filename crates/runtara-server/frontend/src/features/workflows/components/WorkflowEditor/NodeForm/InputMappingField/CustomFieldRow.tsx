@@ -139,33 +139,10 @@ export function CustomFieldRow({
 
   return (
     <TableRow className="bg-warning/5 hover:bg-muted/30">
-      {/* Type column - editable with dropdown */}
-      <TableCell className="pt-3 align-top">
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <button
-              type="button"
-              className="flex cursor-pointer items-center gap-1 rounded bg-muted/40 px-1.5 py-0.5 font-mono text-2xs text-muted-foreground transition-colors hover:bg-muted/60"
-            >
-              <span>{getTypeLabel()}</span>
-              <Icons.chevronDown className="size-3" />
-            </button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="start">
-            {CUSTOM_FIELD_TYPES.map((type) => (
-              <DropdownMenuItem
-                key={type.value}
-                onClick={() => handleTypeChange(type.value)}
-                className="text-xs"
-              >
-                {type.label}
-              </DropdownMenuItem>
-            ))}
-          </DropdownMenuContent>
-        </DropdownMenu>
-      </TableCell>
-
-      {/* Name column - editable */}
+      {/* Name column - editable, with the type selector beside it.
+          A custom field's type is editable, so unlike a schema field it cannot
+          collapse into a hint; it sits under the name instead of holding open
+          a column the docked panel cannot spare. */}
       <TableCell className="overflow-hidden pt-3 align-top">
         {isEditingName ? (
           <div>
@@ -183,12 +160,34 @@ export function CustomFieldRow({
           <button
             type="button"
             onClick={handleNameEdit}
-            className="text-left text-sm text-foreground transition-colors hover:text-primary"
+            className="block text-left text-sm text-foreground transition-colors hover:text-primary"
             title="Click to rename"
           >
             {fieldName}
           </button>
         )}
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <button
+              type="button"
+              className="mt-1 flex cursor-pointer items-center gap-1 rounded bg-muted/40 px-1.5 py-0.5 font-mono text-2xs text-muted-foreground transition-colors hover:bg-muted/60"
+            >
+              <span>{getTypeLabel()}</span>
+              <Icons.chevronDown className="size-3" />
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="start">
+            {CUSTOM_FIELD_TYPES.map((type) => (
+              <DropdownMenuItem
+                key={type.value}
+                onClick={() => handleTypeChange(type.value)}
+                className="text-xs"
+              >
+                {type.label}
+              </DropdownMenuItem>
+            ))}
+          </DropdownMenuContent>
+        </DropdownMenu>
       </TableCell>
 
       {/* Value column */}

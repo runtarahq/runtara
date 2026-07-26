@@ -2371,6 +2371,10 @@ function WorkflowTimelineItem({
         />
       )}
       <div
+        // The connector anchors here, not on the row wrapper: the wrapper also
+        // contains the add-branch/add-error controls, so its centre sits below
+        // the visible tile.
+        data-timeline-node-card={node.id}
         className={cn(
           'relative overflow-hidden rounded-md border bg-background transition-colors',
           hasValidationError

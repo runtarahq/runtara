@@ -439,9 +439,15 @@ function WorkflowEditorContent({
     };
   }, [editingNodeId, nodes, stagedNodeChanges]);
 
-  // Reserve the right gutter while the docked inspector is open so it never
-  // covers the nodes it is anchored to. Fixed positioning would otherwise
-  // overlap the canvas.
+  // Reserve the right gutter while the docked inspector is open so it does not
+  // cover the steps it is anchored to.
+  //
+  // Timeline only, deliberately. The timeline is normal flow layout and
+  // reflows into the narrower width. React Flow is a fixed-coordinate viewport:
+  // shrinking its container does not move the nodes, it clips them — a node
+  // beyond the new right edge becomes invisible *and unhittable*, which reads
+  // as "clicks stopped working on the canvas". The canvas lets the panel
+  // overlay instead, and the connector hides for a node underneath it.
   const dockedPanelOpen =
     !!editingNodeId || (!!pendingNewNode && pendingNodeSurface !== 'timeline');
   const [viewportWidth, setViewportWidth] = useState(() =>
@@ -455,7 +461,7 @@ function WorkflowEditorContent({
   const editorInset = canvasInset(
     { width: viewportWidth, height: 0 },
     NODE_CONFIG_PANEL_WIDTH,
-    dockedPanelOpen
+    dockedPanelOpen && editorView === 'timeline'
   );
 
   const closeNodeConfig = useCallback(() => {
@@ -1970,6 +1976,7 @@ function WorkflowEditorContent({
         // No transition on the padding: the connector is measured from live
         // DOM rects, and animating the squeeze leaves it pointing at a stale
         // position for the duration of the animation.
+        data-workflow-editor-root=""
         className="relative h-full w-full"
         style={editorInset ? { paddingRight: editorInset } : undefined}
       >

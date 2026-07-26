@@ -313,7 +313,10 @@ export function MappingValueInput({
               <p className="mt-0.5 text-2xs text-warning">{typeMismatch}</p>
             )}
             {onDefaultValueChange && (
-              <div className="mt-1">
+              // The explanation lives on the info icon rather than a caption:
+              // as a caption it wrapped to three lines on every reference row,
+              // which is most of the row's height for text that never changes.
+              <div className="mt-1 flex items-center gap-1">
                 <Input
                   type="text"
                   value={defaultValueString}
@@ -322,13 +325,15 @@ export function MappingValueInput({
                       e.target.value === '' ? undefined : e.target.value
                     )
                   }
-                  placeholder="Fallback value (optional)"
+                  placeholder="Fallback value"
                   disabled={disabled}
                   className="h-7 font-mono text-xs"
                 />
-                <p className="mt-0.5 text-2xs text-muted-foreground">
-                  Used when the referenced path is missing or null
-                </p>
+                <Icons.info
+                  className="size-3 shrink-0 cursor-help text-muted-foreground"
+                  aria-label="Fallback value help"
+                  title="Used when the referenced path is missing or null"
+                />
               </div>
             )}
           </div>
@@ -527,7 +532,10 @@ export function MappingValueInput({
             {renderInput()}
           </div>
         ) : (
-          renderInput()
+          // Grow the ungrouped controls (checkbox, enum select) too, so the
+          // trailing mode toggle lands at the same x on every row instead of
+          // stepping in and out with the control's natural width.
+          <div className="min-w-0 flex-1">{renderInput()}</div>
         )}
         {canSetNull && !isNullValue && (
           <Button

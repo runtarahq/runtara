@@ -37,16 +37,24 @@ export function isDocked(viewport: Viewport): boolean {
   return viewport.width >= DOCK_MIN_WIDTH;
 }
 
-/** Fixed geometry of the panel itself. */
+/**
+ * Fixed geometry of the panel itself, inset within `bounds`.
+ *
+ * `bounds` is the editor area rather than the raw viewport, so the panel keeps
+ * a margin from the top and clears the bottom bar instead of overlapping it —
+ * the panel scrolls internally, so height it cannot use is not height it
+ * needs.
+ */
 export function panelGeometry(
-  viewport: Viewport,
+  bounds: Rect,
   width: number
 ): { top: number; left: number; width: number; maxHeight: number } {
+  const available = bounds.bottom - bounds.top;
   return {
-    top: DOCK_GAP,
-    left: Math.max(DOCK_GAP, viewport.width - width - DOCK_GAP),
+    top: bounds.top + DOCK_GAP,
+    left: Math.max(bounds.left + DOCK_GAP, bounds.right - width - DOCK_GAP),
     width,
-    maxHeight: Math.max(0, viewport.height - DOCK_GAP * 2),
+    maxHeight: Math.max(0, available - DOCK_GAP * 2),
   };
 }
 

@@ -264,13 +264,6 @@ function FieldRow({
 
   return (
     <TableRow className="hover:bg-muted/30">
-      {/* Type column */}
-      <TableCell className="pt-3 align-top">
-        <span className="block truncate rounded bg-muted/40 px-1.5 py-0.5 font-mono text-2xs text-muted-foreground">
-          {field.type || 'any'}
-        </span>
-      </TableCell>
-
       {/* Name column */}
       <TableCell className="max-w-0 overflow-hidden pt-3 align-top">
         <div className="flex min-w-0 items-center gap-1">
@@ -280,23 +273,32 @@ function FieldRow({
           {field.required && (
             <span className="shrink-0 text-xs text-destructive">*</span>
           )}
-          {helpText && (
-            <Icons.info
-              className="size-3 shrink-0 cursor-help text-muted-foreground"
-              title={helpText}
-            />
-          )}
+          {/* The hint carries the declared type as well as the description —
+              see the colgroup note on why there is no Type column. */}
+          <Icons.info
+            className="size-3 shrink-0 cursor-help text-muted-foreground"
+            aria-label={`${label} help`}
+            title={
+              helpText
+                ? `${field.type || 'any'} — ${helpText}`
+                : `Type: ${field.type || 'any'}`
+            }
+          />
         </div>
       </TableCell>
 
-      {/* Value column */}
-      <TableCell>
+      {/* Value column.
+          TableCell zeroes its right padding when the cell contains a
+          [role=checkbox] — meant for a selection column, but a boolean value
+          control trips it too and pushes that one row's controls 12px past
+          every other row's. */}
+      <TableCell className="[&:has([role=checkbox])]:!pr-3">
         {isArray ? (
           // Array field - show button to open array editor
           <button
             type="button"
             onClick={() => onEditArray?.(field)}
-            className="flex w-full items-center justify-between gap-2 rounded-md border bg-muted/30 px-3 py-2 text-left text-sm transition-colors hover:bg-muted/50"
+            className="mr-11 flex w-[calc(100%-2.75rem)] items-center justify-between gap-2 rounded-md border bg-muted/30 px-3 py-2 text-left text-sm transition-colors hover:bg-muted/50"
           >
             <span className="truncate text-muted-foreground">
               {getArrayDisplayValue()}
@@ -308,7 +310,7 @@ function FieldRow({
           <button
             type="button"
             onClick={() => onEditObject?.(field)}
-            className="flex w-full items-center justify-between gap-2 rounded-md border bg-muted/30 px-3 py-2 text-left text-sm transition-colors hover:bg-muted/50"
+            className="mr-11 flex w-[calc(100%-2.75rem)] items-center justify-between gap-2 rounded-md border bg-muted/30 px-3 py-2 text-left text-sm transition-colors hover:bg-muted/50"
           >
             <span className="truncate text-muted-foreground">
               {getObjectDisplayValue()}
@@ -810,17 +812,16 @@ export function SimpleInputMappingEditor({
     <div className="space-y-4">
       <div className="overflow-hidden rounded-lg bg-card">
         <Table className="w-full table-fixed">
+          {/* No Type column: at the docked panel's width a dedicated column
+              costs more room than it explains, and the value controls were
+              being clipped. The type is in the parameter's info hint. */}
           <colgroup>
-            <col style={{ width: '80px' }} />
-            <col style={{ width: '180px' }} />
+            <col style={{ width: '38%' }} />
             <col />
-            <col style={{ width: '48px' }} />
+            <col style={{ width: '40px' }} />
           </colgroup>
           <TableHeader>
             <TableRow className="border-b border-border/40 hover:bg-transparent">
-              <TableHead className="text-xs font-medium text-muted-foreground">
-                Type
-              </TableHead>
               <TableHead className="text-xs font-medium text-muted-foreground">
                 Parameter
               </TableHead>
@@ -864,7 +865,7 @@ export function SimpleInputMappingEditor({
                     {/* Inline array editor - appears below the field row */}
                     {isEditingThisArray && isArrayType(field.type) && (
                       <TableRow className="hover:bg-transparent">
-                        <TableCell colSpan={4} className="border-t-0 p-0">
+                        <TableCell colSpan={3} className="border-t-0 p-0">
                           <div className="border-t border-primary/20 bg-muted/20">
                             <ArrayMappingEditor
                               arrayType={field.type || 'array'}
@@ -925,7 +926,7 @@ export function SimpleInputMappingEditor({
 
                         return (
                           <TableRow className="hover:bg-transparent">
-                            <TableCell colSpan={4} className="border-t-0 p-0">
+                            <TableCell colSpan={3} className="border-t-0 p-0">
                               <div className="border-t border-primary/20 bg-muted/20">
                                 <ObjectMappingEditor
                                   value={valueForEditor}
@@ -954,7 +955,7 @@ export function SimpleInputMappingEditor({
             ) : visibleFields.length === 0 && customFieldNames.length === 0 ? (
               <TableRow>
                 <TableCell
-                  colSpan={4}
+                  colSpan={3}
                   className="py-8 text-center text-muted-foreground"
                 >
                   {allowCustomFields
