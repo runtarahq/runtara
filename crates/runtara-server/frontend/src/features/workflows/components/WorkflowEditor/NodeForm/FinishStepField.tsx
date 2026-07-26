@@ -1,4 +1,4 @@
-import { useContext, useEffect, useRef, useMemo } from 'react';
+import { Fragment, useContext, useEffect, useRef, useMemo } from 'react';
 import { useFieldArray, useFormContext, useWatch } from 'react-hook-form';
 import { SchemaPreview } from '@/features/workflows/components/SchemaPreview';
 import { inferSchemaFromMapping } from '@/features/workflows/utils/schema';
@@ -315,199 +315,228 @@ export function FinishStepField({ name }: FinishStepFieldProps) {
                 currentValueType !== 'composite';
 
               return (
-                <tr key={field.id} className="border-b hover:bg-muted/30">
-                  <td className="p-2 text-center">
-                    {isTypeEditable ? (
+                <Fragment key={field.id}>
+                  <tr className="border-b hover:bg-muted/30">
+                    <td className="p-2 text-center align-top">
+                      {isTypeEditable ? (
+                        <FormField
+                          control={form.control}
+                          name={`${name}.${index}.typeHint`}
+                          render={({ field: typeHintField }) => (
+                            <DropdownMenu>
+                              <DropdownMenuTrigger asChild>
+                                <button
+                                  type="button"
+                                  className="mx-auto flex cursor-pointer items-center gap-0.5 font-bold text-muted-foreground transition-colors hover:text-foreground"
+                                  title={`${typeInfo.full} — click to change`}
+                                >
+                                  <span>{typeInfo.short}</span>
+                                  <ChevronDown className="size-2.5" />
+                                </button>
+                              </DropdownMenuTrigger>
+                              <DropdownMenuContent
+                                align="start"
+                                className="w-32"
+                              >
+                                {OUTPUT_FIELD_TYPES.map((t) => (
+                                  <DropdownMenuItem
+                                    key={t.value}
+                                    onClick={() =>
+                                      typeHintField.onChange(t.value)
+                                    }
+                                    className="text-xs"
+                                  >
+                                    <span className="w-5 font-bold">
+                                      {t.short}
+                                    </span>
+                                    <span>{t.full}</span>
+                                  </DropdownMenuItem>
+                                ))}
+                              </DropdownMenuContent>
+                            </DropdownMenu>
+                          )}
+                        />
+                      ) : (
+                        <span
+                          className={`cursor-help font-bold ${
+                            isSchemaField
+                              ? 'text-success/70'
+                              : 'text-muted-foreground'
+                          }`}
+                          title={
+                            isSchemaField
+                              ? `${typeInfo.full}${isRequired ? ' (Required)' : ''}${fieldInfo?.description ? ` - ${fieldInfo.description}` : ''}`
+                              : typeInfo.full
+                          }
+                        >
+                          {typeInfo.short}
+                        </span>
+                      )}
+                    </td>
+                    <td className="p-2 align-top">
                       <FormField
                         control={form.control}
-                        name={`${name}.${index}.typeHint`}
-                        render={({ field: typeHintField }) => (
-                          <DropdownMenu>
-                            <DropdownMenuTrigger asChild>
-                              <button
-                                type="button"
-                                className="mx-auto flex cursor-pointer items-center gap-0.5 font-bold text-muted-foreground transition-colors hover:text-foreground"
-                                title={`${typeInfo.full} — click to change`}
-                              >
-                                <span>{typeInfo.short}</span>
-                                <ChevronDown className="size-2.5" />
-                              </button>
-                            </DropdownMenuTrigger>
-                            <DropdownMenuContent align="start" className="w-32">
-                              {OUTPUT_FIELD_TYPES.map((t) => (
-                                <DropdownMenuItem
-                                  key={t.value}
-                                  onClick={() =>
-                                    typeHintField.onChange(t.value)
-                                  }
-                                  className="text-xs"
-                                >
-                                  <span className="w-5 font-bold">
-                                    {t.short}
+                        name={`${name}.${index}.type`}
+                        render={({ field }) => (
+                          <FormItem className="space-y-0">
+                            <FormControl>
+                              <div className="flex items-center gap-1">
+                                <Input
+                                  {...field}
+                                  className={`h-auto border-0 p-1 font-mono text-sm focus-visible:ring-0 ${
+                                    isRequired
+                                      ? 'font-semibold'
+                                      : 'text-muted-foreground'
+                                  }`}
+                                  placeholder="Output name"
+                                  readOnly={isSchemaField}
+                                />
+                                {isRequired && (
+                                  <span className="text-xs text-warning">
+                                    *
                                   </span>
-                                  <span>{t.full}</span>
-                                </DropdownMenuItem>
-                              ))}
-                            </DropdownMenuContent>
-                          </DropdownMenu>
+                                )}
+                              </div>
+                            </FormControl>
+                            <FormMessage />
+                          </FormItem>
                         )}
                       />
-                    ) : (
-                      <span
-                        className={`cursor-help font-bold ${
-                          isSchemaField
-                            ? 'text-success/70'
-                            : 'text-muted-foreground'
-                        }`}
-                        title={
-                          isSchemaField
-                            ? `${typeInfo.full}${isRequired ? ' (Required)' : ''}${fieldInfo?.description ? ` - ${fieldInfo.description}` : ''}`
-                            : typeInfo.full
-                        }
+                    </td>
+                    <td className="p-2 align-top">
+                      <FormField
+                        control={form.control}
+                        name={`${name}.${index}.value`}
+                        render={({ field: valueField }) => (
+                          <FormItem className="space-y-0">
+                            <FormControl>
+                              <div>
+                                <FormField
+                                  control={form.control}
+                                  name={`${name}.${index}.valueType`}
+                                  render={({ field: valueTypeField }) => (
+                                    <>
+                                      <MappingValueInput
+                                        value={
+                                          isCompositeMode
+                                            ? ''
+                                            : valueField.value
+                                        }
+                                        onChange={valueField.onChange}
+                                        valueType={
+                                          (valueTypeField.value as ValueMode) ||
+                                          'immediate'
+                                        }
+                                        onValueTypeChange={
+                                          valueTypeField.onChange
+                                        }
+                                        fieldType={outputFieldType}
+                                        allowNull={allowsNull}
+                                        scalarsCoerceToString
+                                        placeholder="Enter value or select reference..."
+                                        defaultValue={
+                                          fieldArray[index]?.defaultValue
+                                        }
+                                        onDefaultValueChange={(nextDefault) =>
+                                          form.setValue(
+                                            `${name}.${index}.defaultValue`,
+                                            nextDefault,
+                                            { shouldDirty: true }
+                                          )
+                                        }
+                                      />
+                                    </>
+                                  )}
+                                />
+                              </div>
+                            </FormControl>
+                            <FormMessage />
+                          </FormItem>
+                        )}
+                      />
+                    </td>
+                    <td className="p-2 pl-3 text-center align-top">
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon-sm"
+                        onClick={() => remove(index)}
+                        disabled={isRequired}
                       >
-                        {typeInfo.short}
-                      </span>
-                    )}
-                  </td>
-                  <td className="p-2">
-                    <FormField
-                      control={form.control}
-                      name={`${name}.${index}.type`}
-                      render={({ field }) => (
-                        <FormItem className="space-y-0">
-                          <FormControl>
-                            <div className="flex items-center gap-1">
-                              <Input
-                                {...field}
-                                className={`h-auto border-0 p-1 font-mono text-sm focus-visible:ring-0 ${
-                                  isRequired
-                                    ? 'font-semibold'
-                                    : 'text-muted-foreground'
-                                }`}
-                                placeholder="Output name"
-                                readOnly={isSchemaField}
-                              />
-                              {isRequired && (
-                                <span className="text-xs text-warning">*</span>
-                              )}
-                            </div>
-                          </FormControl>
-                          <FormMessage />
-                        </FormItem>
-                      )}
-                    />
-                  </td>
-                  <td className="p-2">
-                    <FormField
-                      control={form.control}
-                      name={`${name}.${index}.value`}
-                      render={({ field: valueField }) => (
-                        <FormItem className="space-y-0">
-                          <FormControl>
-                            <div>
+                        <Trash2 className="size-3" />
+                      </Button>
+                    </td>
+                  </tr>
+
+                  {/* The editor gets the whole table width, not the ~248px
+                      Source cell — the convention every other expandable
+                      mapping row in the editor already follows. In the cell
+                      its mode pill, description and header each wrapped onto
+                      two or more lines and the row grew past 500px tall. */}
+                  {isCompositeMode && (
+                    <tr className="hover:bg-transparent">
+                      <td colSpan={4} className="border-b p-0">
+                        <div className="border-t border-primary/20 bg-muted/20">
+                          <FormField
+                            control={form.control}
+                            name={`${name}.${index}.value`}
+                            render={({ field: valueField }) => (
                               <FormField
                                 control={form.control}
                                 name={`${name}.${index}.valueType`}
                                 render={({ field: valueTypeField }) => (
                                   <>
-                                    <MappingValueInput
-                                      value={
-                                        isCompositeMode ? '' : valueField.value
-                                      }
-                                      onChange={valueField.onChange}
-                                      valueType={
-                                        (valueTypeField.value as ValueMode) ||
-                                        'immediate'
-                                      }
-                                      onValueTypeChange={
-                                        valueTypeField.onChange
-                                      }
-                                      fieldType={outputFieldType}
-                                      allowNull={allowsNull}
-                                      scalarsCoerceToString
-                                      placeholder="Enter value or select reference..."
-                                      defaultValue={
-                                        fieldArray[index]?.defaultValue
-                                      }
-                                      onDefaultValueChange={(nextDefault) =>
-                                        form.setValue(
-                                          `${name}.${index}.defaultValue`,
-                                          nextDefault,
-                                          { shouldDirty: true }
-                                        )
-                                      }
-                                    />
-                                    {isCompositeMode && (
-                                      <div className="mt-2 rounded-b-md border-t border-primary/20 bg-muted/20">
-                                        {isArrayOutput ? (
-                                          <ArrayMappingEditor
-                                            arrayType={outputFieldType}
-                                            value={
-                                              Array.isArray(valueField.value)
-                                                ? (valueField.value as CompositeArrayValue)
-                                                : []
-                                            }
-                                            valueType="composite"
-                                            onChange={(val) =>
-                                              valueField.onChange(val)
-                                            }
-                                            onValueTypeChange={(type) =>
-                                              valueTypeField.onChange(type)
-                                            }
-                                            onClose={() =>
-                                              valueTypeField.onChange(
-                                                'immediate'
-                                              )
-                                            }
-                                          />
-                                        ) : (
-                                          <ObjectMappingEditor
-                                            value={
-                                              typeof valueField.value ===
-                                                'object' &&
-                                              valueField.value !== null &&
-                                              !Array.isArray(valueField.value)
-                                                ? (valueField.value as CompositeObjectValue)
-                                                : {}
-                                            }
-                                            valueType="composite"
-                                            onChange={(val) =>
-                                              valueField.onChange(val)
-                                            }
-                                            onValueTypeChange={(type) =>
-                                              valueTypeField.onChange(type)
-                                            }
-                                            onClose={() =>
-                                              valueTypeField.onChange(
-                                                'immediate'
-                                              )
-                                            }
-                                          />
-                                        )}
-                                      </div>
+                                    {isArrayOutput ? (
+                                      <ArrayMappingEditor
+                                        arrayType={outputFieldType}
+                                        value={
+                                          Array.isArray(valueField.value)
+                                            ? (valueField.value as CompositeArrayValue)
+                                            : []
+                                        }
+                                        valueType="composite"
+                                        onChange={(val) =>
+                                          valueField.onChange(val)
+                                        }
+                                        onValueTypeChange={(type) =>
+                                          valueTypeField.onChange(type)
+                                        }
+                                        onClose={() =>
+                                          valueTypeField.onChange('immediate')
+                                        }
+                                      />
+                                    ) : (
+                                      <ObjectMappingEditor
+                                        value={
+                                          typeof valueField.value ===
+                                            'object' &&
+                                          valueField.value !== null &&
+                                          !Array.isArray(valueField.value)
+                                            ? (valueField.value as CompositeObjectValue)
+                                            : {}
+                                        }
+                                        valueType="composite"
+                                        onChange={(val) =>
+                                          valueField.onChange(val)
+                                        }
+                                        onValueTypeChange={(type) =>
+                                          valueTypeField.onChange(type)
+                                        }
+                                        onClose={() =>
+                                          valueTypeField.onChange('immediate')
+                                        }
+                                      />
                                     )}
                                   </>
                                 )}
                               />
-                            </div>
-                          </FormControl>
-                          <FormMessage />
-                        </FormItem>
-                      )}
-                    />
-                  </td>
-                  <td className="p-2 pl-3 text-center">
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon-sm"
-                      onClick={() => remove(index)}
-                      disabled={isRequired}
-                    >
-                      <Trash2 className="size-3" />
-                    </Button>
-                  </td>
-                </tr>
+                            )}
+                          />
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
               );
             })}
             {fields.length === 0 && (

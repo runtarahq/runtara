@@ -164,11 +164,12 @@ export function CompositeObjectEditor({
       {/* Fields */}
       <div className="flex-1 space-y-3 overflow-y-auto p-4">
         {fieldNames.length === 0 && !isAddingField && (
-          <div className="py-8 text-center text-muted-foreground">
-            <Braces className="mx-auto mb-2 size-8 opacity-50" />
-            <p className="text-sm">No fields defined yet.</p>
-            <p className="text-xs">Click "Add Field" to get started.</p>
-          </div>
+          // One line, not a 156px illustrated panel: the Add Field button is
+          // directly below it and says the same thing.
+          <p className="py-2 text-sm italic text-muted-foreground">
+            No fields yet. Each one can be a value, a reference, or a nested
+            object or list.
+          </p>
         )}
 
         {fieldNames.map((fieldName) => {

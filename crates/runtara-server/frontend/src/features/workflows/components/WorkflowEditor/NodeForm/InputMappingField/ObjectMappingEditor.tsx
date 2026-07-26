@@ -198,10 +198,10 @@ export function ObjectMappingEditor({
         ) : (
           // Build mode - structured object with mixed value types
           <div className="space-y-2">
-            <p className="text-sm text-muted-foreground">
-              Build an object where each field can be an immediate value,
-              reference, or nested object/array.
-            </p>
+            {/* No standing description: what Build mode does is spelled out by
+                the editor's own empty state, which is on screen exactly when
+                the explanation is useful. Once fields exist it is a permanent
+                two-line header restating what the fields already show. */}
             {/* Schema hint if available */}
             {schemaFields.length > 0 && (
               <div className="mb-2 flex flex-wrap items-center gap-2 rounded-md border bg-muted/30 p-2 text-xs">
