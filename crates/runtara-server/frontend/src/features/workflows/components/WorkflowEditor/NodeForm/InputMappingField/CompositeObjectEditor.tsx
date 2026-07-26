@@ -61,33 +61,15 @@ export function CompositeObjectEditor({
 
   const fieldNames = Object.keys(value);
 
-  // Debug: log when component renders with value
-  console.log('[CompositeObjectEditor] render', {
-    fieldNames,
-    value,
-    fieldCount: fieldNames.length,
-  });
-
   // Handle adding a new field
   const handleAddField = useCallback(() => {
     const trimmedName = newFieldName.trim();
-    console.log('[CompositeObjectEditor] handleAddField called', {
-      trimmedName,
-      currentValue: value,
-      fieldCount: Object.keys(value).length,
-    });
     if (!trimmedName) {
-      console.log(
-        '[CompositeObjectEditor] handleAddField: empty name, returning'
-      );
       return;
     }
 
     // Check for duplicate field names
     if (value[trimmedName]) {
-      console.log(
-        '[CompositeObjectEditor] handleAddField: duplicate field name, returning'
-      );
       // Could show an error toast here
       return;
     }
@@ -96,10 +78,6 @@ export function CompositeObjectEditor({
       ...value,
       [trimmedName]: { valueType: 'immediate' as const, value: '' },
     };
-    console.log(
-      '[CompositeObjectEditor] handleAddField: calling onChange with',
-      newValue
-    );
     onChange(newValue);
     setNewFieldName('');
     setIsAddingField(false);
@@ -173,10 +151,6 @@ export function CompositeObjectEditor({
         )}
 
         {fieldNames.map((fieldName) => {
-          console.log('[CompositeObjectEditor] rendering field', {
-            fieldName,
-            fieldValue: value[fieldName],
-          });
           return (
             <div
               key={fieldName}
@@ -211,10 +185,6 @@ export function CompositeObjectEditor({
                 value={newFieldName}
                 onChange={(e) => setNewFieldName(e.target.value)}
                 onKeyDown={(e) => {
-                  console.log('[CompositeObjectEditor] Input onKeyDown', {
-                    key: e.key,
-                    newFieldName,
-                  });
                   if (e.key === 'Enter') {
                     e.preventDefault(); // Prevent form submission
                     handleAddField();
