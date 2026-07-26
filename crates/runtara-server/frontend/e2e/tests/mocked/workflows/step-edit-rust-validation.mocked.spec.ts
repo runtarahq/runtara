@@ -80,13 +80,13 @@ test.describe('Step edit Rust validation (mocked)', () => {
 
     await page.getByRole('button', { name: 'Edit Validation Target' }).click();
 
-    const panel = page.getByTestId('timeline-node-config-panel');
+    const panel = page.getByTestId('node-config-dialog');
     await expect(panel).toBeVisible({ timeout: 5_000 });
     await expect(panel.getByText('Error Code *')).toBeVisible();
 
     await panel.getByPlaceholder('Enter error code...').clear();
     await panel.getByPlaceholder('Enter error message...').clear();
-    await panel.getByTestId('timeline-node-config-save').click();
+    await panel.getByTestId('node-config-save').click();
 
     await expect(panel).toBeVisible();
     // The parse error surfaces both in the panel and as a toast (toasts render

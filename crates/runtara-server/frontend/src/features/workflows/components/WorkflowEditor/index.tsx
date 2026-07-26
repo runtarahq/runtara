@@ -59,7 +59,11 @@ import {
   getNodePositionInsideParent,
   getLayoutedElements,
 } from './CustomNodes/utils.tsx';
-import { NodeConfigDialog } from './NodeConfigDialog';
+import { NodeConfigPanel } from './NodeConfigPanel';
+import {
+  canvasInset,
+  NODE_CONFIG_PANEL_WIDTH,
+} from './NodeConfigPanel/dock-position';
 import { NodeFormProvider } from './NodeForm/NodeFormProvider';
 import {
   StepPickerModal,
@@ -331,9 +335,6 @@ function WorkflowEditorContent({
 
   // Dialog states
   const [editingNodeId, setEditingNodeId] = useState<string | null>(null);
-  const [editingSurface, setEditingSurface] = useState<NodeEditSurface | null>(
-    null
-  );
   const [showStepPicker, setShowStepPicker] = useState(false);
   const [editorView, setEditorView] = useState<WorkflowEditorView>('timeline');
 
@@ -346,7 +347,6 @@ function WorkflowEditorContent({
         setTimelineAddStepRequest(null);
         setPendingNodeSurface(null);
         setEditingNodeId(nodeId);
-        setEditingSurface('dialog');
       }
     },
     [workflow, readOnly]
@@ -359,7 +359,6 @@ function WorkflowEditorContent({
         setTimelineAddStepRequest(null);
         setPendingNodeSurface(null);
         setEditingNodeId(nodeId);
-        setEditingSurface('timeline');
       }
     },
     [debugInspectMode, workflow, readOnly]
@@ -440,9 +439,27 @@ function WorkflowEditorContent({
     };
   }, [editingNodeId, nodes, stagedNodeChanges]);
 
+  // Reserve the right gutter while the docked inspector is open so it never
+  // covers the nodes it is anchored to. Fixed positioning would otherwise
+  // overlap the canvas.
+  const dockedPanelOpen =
+    !!editingNodeId || (!!pendingNewNode && pendingNodeSurface !== 'timeline');
+  const [viewportWidth, setViewportWidth] = useState(() =>
+    typeof window === 'undefined' ? 1600 : window.innerWidth
+  );
+  useEffect(() => {
+    const onResize = () => setViewportWidth(window.innerWidth);
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+  const editorInset = canvasInset(
+    { width: viewportWidth, height: 0 },
+    NODE_CONFIG_PANEL_WIDTH,
+    dockedPanelOpen
+  );
+
   const closeNodeConfig = useCallback(() => {
     setEditingNodeId(null);
-    setEditingSurface(null);
   }, []);
 
   // Keep the config dialog/panel bound to the step being edited when its id
@@ -1874,38 +1891,6 @@ function WorkflowEditorContent({
     setCreateStepSurface(null);
   }, [setPendingNewNode]);
 
-  const renderTimelineInlineEditor = useCallback(
-    (nodeId: string) => {
-      if (!workflow || !editingNodeData || editingNodeData.id !== nodeId) {
-        return null;
-      }
-
-      return (
-        <TimelineNodeConfigPanel
-          nodeId={editingNodeData.id}
-          parentNodeId={editingNodeData.parentId}
-          nodeData={editingNodeData.data}
-          originalNodeData={editingNodeData.originalData}
-          outputSchemaFields={workflow.outputSchemaFields}
-          inputSchemaFields={workflow.inputSchemaFields}
-          variables={workflow.variables}
-          onSave={handleNodeSave}
-          onReset={onResetNodeChanges}
-          onDelete={handleNodeDelete}
-          onCancel={closeNodeConfig}
-        />
-      );
-    },
-    [
-      workflow,
-      editingNodeData,
-      handleNodeSave,
-      onResetNodeChanges,
-      handleNodeDelete,
-      closeNodeConfig,
-    ]
-  );
-
   const renderTimelineInlineAddStep = useCallback(() => {
     if (!workflow) return null;
 
@@ -1981,7 +1966,13 @@ function WorkflowEditorContent({
 
   return (
     <>
-      <div className="relative h-full w-full">
+      <div
+        // No transition on the padding: the connector is measured from live
+        // DOM rects, and animating the squeeze leaves it pointing at a stale
+        // position for the duration of the animation.
+        className="relative h-full w-full"
+        style={editorInset ? { paddingRight: editorInset } : undefined}
+      >
         <Tabs
           value={editorView}
           onValueChange={(value) => setEditorView(value as WorkflowEditorView)}
@@ -2043,7 +2034,6 @@ function WorkflowEditorContent({
                     // Open dialog for editing on double-click
                     if (workflow && !readOnly) {
                       setEditingNodeId(node.id);
-                      setEditingSurface('dialog');
                     }
                   }}
                   onNodeClick={(event, node) => {
@@ -2125,10 +2115,7 @@ function WorkflowEditorContent({
                 readOnly={readOnly}
                 debugInspectMode={debugInspectMode}
                 onEditNode={openTimelineNodeConfig}
-                editingNodeId={
-                  editingSurface === 'timeline' ? editingNodeId : null
-                }
-                renderInlineEditor={renderTimelineInlineEditor}
+                editingNodeId={editingNodeId}
                 activeAddStepRequest={timelineAddStepRequest}
                 renderInlineAddStep={renderTimelineInlineAddStep}
                 onAddStep={handleTimelineAddStep}
@@ -2162,9 +2149,9 @@ function WorkflowEditorContent({
         />
       </NodeFormProvider>
 
-      {/* Node Config Dialog - for editing existing nodes */}
-      {editingNodeData && workflow && editingSurface === 'dialog' && (
-        <NodeConfigDialog
+      {/* Docked step inspector - for editing existing nodes */}
+      {editingNodeData && workflow && (
+        <NodeConfigPanel
           open={!!editingNodeId}
           onOpenChange={(open) => {
             if (!open) closeNodeConfig();
@@ -2183,9 +2170,9 @@ function WorkflowEditorContent({
         />
       )}
 
-      {/* Node Config Dialog - for creating new nodes */}
+      {/* Docked step inspector - for creating new nodes */}
       {pendingNewNode && workflow && pendingNodeSurface !== 'timeline' && (
-        <NodeConfigDialog
+        <NodeConfigPanel
           open={!!pendingNewNode}
           onOpenChange={(open) => {
             if (!open) handlePendingNodeCancel();

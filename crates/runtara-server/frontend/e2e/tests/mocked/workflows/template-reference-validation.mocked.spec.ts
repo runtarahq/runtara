@@ -122,10 +122,10 @@ test.describe('Template reference Rust validation (mocked)', () => {
     });
 
     await page.getByRole('button', { name: 'Edit Source Log' }).click();
-    const panel = page.getByTestId('timeline-node-config-panel');
+    const panel = page.getByTestId('node-config-dialog');
     await expect(panel).toBeVisible({ timeout: 5_000 });
     await panel.getByPlaceholder('Enter log message...').fill('source updated');
-    await panel.getByTestId('timeline-node-config-save').click();
+    await panel.getByTestId('node-config-save').click();
     await expect(panel).toBeHidden({ timeout: 10_000 });
 
     const saveButton = page.getByTitle('Save changes');
