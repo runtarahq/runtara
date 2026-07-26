@@ -19,9 +19,13 @@ name: Frontend
 #     hook, so without it these jobs fail on an unresolved import (22 of 97
 #     vitest files, 3 tsc errors). They therefore consume the `validation-wasm`
 #     artifact rather than each paying for a Rust toolchain.
-#   - validation-wasm          -> builds that WASM once and uploads it.
-#   - build / e2e-mocked       -> run the real `npm run build`, so they build the
-#     WASM themselves and need Rust + wasm-pack.
+#   - validation-wasm          -> the only job with a Rust toolchain. Builds
+#     that WASM once and uploads it.
+#   - build / e2e-mocked       -> run the real `npm run build`. Its `prebuild`
+#     hook re-runs the build script, but the downloaded artifact carries the
+#     fingerprint the script compares against, so it exits early instead of
+#     shelling out to wasm-pack. They consume the artifact for that reason and
+#     need no Rust of their own.
 #
 # lint and format deliberately do NOT depend on validation-wasm: eslint.config.js
 # ignores src/wasm outright and prettier is purely syntactic, so neither needs the
@@ -201,16 +205,11 @@ jobs:
   build:
     name: build
     runs-on: ubuntu-latest
+    needs: validation-wasm
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: true
-
-      - name: Setup Rust toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          cache: true
-          cache-workspaces: ". -> target"
 
       - uses: actions/setup-node@v4
         with:
@@ -218,44 +217,28 @@ jobs:
           cache: npm
           cache-dependency-path: crates/runtara-server/frontend/package-lock.json
 
-      - name: Add Cargo bin to PATH
-        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-
-      - name: Cache wasm-pack binary
-        id: cache-wasm-pack
-        uses: actions/cache@v4
+      - name: Download validation WASM
+        uses: actions/download-artifact@v4
         with:
-          path: ~/.cargo/bin/wasm-pack
-          key: wasm-pack-${{ runner.os }}-${{ env.ImageOS }}-${{ runner.arch }}-${{ env.WASM_PACK_VERSION }}
-
-      - name: Install wasm-pack
-        run: |
-          if command -v wasm-pack >/dev/null 2>&1 \
-            && wasm-pack --version | grep -q "wasm-pack ${WASM_PACK_VERSION}"; then
-            echo "wasm-pack ${WASM_PACK_VERSION} already installed"
-          else
-            cargo install wasm-pack --version "$WASM_PACK_VERSION" --locked --force
-          fi
+          name: validation-wasm
+          path: crates/runtara-server/frontend/src/wasm/validation
 
       - run: npm ci --no-audit --no-fund
 
-      # Runs `prebuild` (build:wasm-validation -> wasm-pack) then tsc -b + vite.
+      # `prebuild` (build:wasm-validation) still runs, but the downloaded output
+      # carries the fingerprint the script compares against, so it exits early
+      # with "up-to-date". That leaves tsc -b + vite — no Rust, no wasm-pack.
       - run: npm run build
 
   e2e-mocked:
     name: E2E (mocked)
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    needs: validation-wasm
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: true
-
-      - name: Setup Rust toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          cache: true
-          cache-workspaces: ". -> target"
 
       - uses: actions/setup-node@v4
         with:
@@ -263,23 +246,11 @@ jobs:
           cache: npm
           cache-dependency-path: crates/runtara-server/frontend/package-lock.json
 
-      - name: Add Cargo bin to PATH
-        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-
-      - name: Cache wasm-pack binary
-        uses: actions/cache@v4
+      - name: Download validation WASM
+        uses: actions/download-artifact@v4
         with:
-          path: ~/.cargo/bin/wasm-pack
-          key: wasm-pack-${{ runner.os }}-${{ env.ImageOS }}-${{ runner.arch }}-${{ env.WASM_PACK_VERSION }}
-
-      - name: Install wasm-pack
-        run: |
-          if command -v wasm-pack >/dev/null 2>&1 \
-            && wasm-pack --version | grep -q "wasm-pack ${WASM_PACK_VERSION}"; then
-            echo "wasm-pack ${WASM_PACK_VERSION} already installed"
-          else
-            cargo install wasm-pack --version "$WASM_PACK_VERSION" --locked --force
-          fi
+          name: validation-wasm
+          path: crates/runtara-server/frontend/src/wasm/validation
 
       - run: npm ci --no-audit --no-fund
 

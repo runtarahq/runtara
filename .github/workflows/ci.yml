@@ -61,7 +61,21 @@ jobs:
           curl -sS --fail-with-body -X POST -H 'Content-Type: application/json' \
             --data "$payload" "$SLACK_WEBHOOK_URL"
 
-  lint:
+  # The `embed-ui` feature (in GATE_FEATURES) makes rust_embed pull
+  # frontend/dist into the server binary, so `lint` and `build` both need a
+  # built frontend. They used to build it themselves — two full `npm ci &&
+  # npm run build` runs, each installing wasm-pack and compiling the
+  # validation WASM. Build it once here and share it instead.
+  #
+  # The artifact carries BOTH outputs on purpose. build.rs re-derives the
+  # validation-WASM fingerprint and, if it disagrees with the one in
+  # src/wasm/validation/, shells out to wasm-pack itself and then re-runs
+  # `npm run build`. Shipping the fingerprint file alongside dist/ keeps it on
+  # the up-to-date path, which is why the consumers below need neither
+  # wasm-pack nor Node. (Verified: build.rs logs "Browser validation WASM is
+  # up-to-date" and never trips its REBUILDING FRONTEND DIST branch.)
+  frontend-embed:
+    name: frontend (embedded UI)
     runs-on: ubuntu-latest
 
     steps:
@@ -106,6 +120,39 @@ jobs:
         run: |
           npm ci --no-audit --no-fund
           npm run build
+
+      # Two paths, so the artifact root is their common ancestor
+      # (crates/runtara-server/frontend) and both trees restore in place.
+      - name: Upload frontend (embedded UI)
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-embed
+          path: |
+            crates/runtara-server/frontend/dist/
+            crates/runtara-server/frontend/src/wasm/validation/
+          if-no-files-found: error
+          retention-days: 1
+
+  lint:
+    runs-on: ubuntu-latest
+    needs: frontend-embed
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: true
+          cache-workspaces: ". -> target"
+
+      - name: Download frontend (embedded UI)
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-embed
+          path: crates/runtara-server/frontend
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -122,6 +169,7 @@ jobs:
 
   build:
     runs-on: ubuntu-latest
+    needs: frontend-embed
 
     steps:
       - uses: actions/checkout@v4
@@ -134,37 +182,11 @@ jobs:
           cache: true
           cache-workspaces: ". -> target"
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - name: Download frontend (embedded UI)
+        uses: actions/download-artifact@v4
         with:
-          node-version-file: crates/runtara-server/frontend/.node-version
-          cache: npm
-          cache-dependency-path: crates/runtara-server/frontend/package-lock.json
-
-      - name: Add Cargo bin to PATH
-        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-
-      - name: Cache wasm-pack binary
-        id: cache-wasm-pack
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/bin/wasm-pack
-          key: wasm-pack-${{ runner.os }}-${{ env.ImageOS }}-${{ runner.arch }}-${{ env.WASM_PACK_VERSION }}
-
-      - name: Install wasm-pack
-        run: |
-          if command -v wasm-pack >/dev/null 2>&1 \
-            && wasm-pack --version | grep -q "wasm-pack ${WASM_PACK_VERSION}"; then
-            echo "wasm-pack ${WASM_PACK_VERSION} already installed"
-          else
-            cargo install wasm-pack --version "$WASM_PACK_VERSION" --locked --force
-          fi
-
-      - name: Build frontend (embedded UI)
-        working-directory: crates/runtara-server/frontend
-        run: |
-          npm ci --no-audit --no-fund
-          npm run build
+          name: frontend-embed
+          path: crates/runtara-server/frontend
 
       - name: Build
         run: |
@@ -576,6 +598,7 @@ jobs:
     # Skipped on cancellation (avoids spurious "failure" pings when a run is
     # superseded by a new push).
     needs:
+      - frontend-embed
       - lint
       - build
       - test-sdk
@@ -603,7 +626,13 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           NEEDS_JSON: ${{ toJSON(needs) }}
         run: |
-          failed=$(echo "$NEEDS_JSON" | jq -r 'to_entries | map(select(.value.result == "failure")) | map(.key) | join(", ")')
+          # "skipped" counts as bad, not neutral. Jobs here now form a chain
+          # (frontend-embed -> lint/build -> test-*), so an early failure leaves
+          # everything downstream "skipped" rather than "failure" — matching only
+          # on "failure" would report a green CI for a run that never compiled.
+          # cancelled() runs are already filtered out by the `if:` above, so a
+          # skip reaching this point always means an upstream job failed.
+          failed=$(echo "$NEEDS_JSON" | jq -r 'to_entries | map(select(.value.result == "failure" or .value.result == "skipped")) | map(.key) | join(", ")')
           if [ -z "$failed" ]; then
             emoji=":white_check_mark:"
             msg="CI passed"
