@@ -940,6 +940,7 @@ export function SimpleInputMappingEditor({
                                     )
                                   }
                                   schema={field.items as any}
+                                  untyped={isUntypedField(field.type)}
                                   onClose={handleObjectClose}
                                 />
                               </div>

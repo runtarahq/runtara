@@ -10,7 +10,7 @@
  */
 
 import { useCallback, useMemo } from 'react';
-import { Link, Layers, X } from 'lucide-react';
+import { Link, Layers, Type, X } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button';
 import { MappingValueInput } from './MappingValueInput';
 import { CompositeValueEditor } from './CompositeValueEditor';
@@ -24,9 +24,21 @@ import type {
   InputMappingValueType,
 } from '@/features/workflows/stores/nodeFormStore';
 
-type ObjectMode = 'reference' | 'build';
+type ObjectMode = 'value' | 'reference' | 'build';
 
 const MODE_OPTIONS: readonly MappingModeToggleOption<ObjectMode>[] = [
+  { value: 'reference', label: 'Reference', icon: Link, tone: 'info' },
+  { value: 'build', label: 'Build', icon: Layers },
+];
+
+/**
+ * An `any`-typed input accepts anything the DSL can express, so its editor has
+ * to offer the whole shape choice — not just object-or-reference. 73 inputs
+ * across 110 of 305 capabilities are `any`, including required ones like
+ * `openai:create-embedding.input` and every HubSpot `filter_groups`.
+ */
+const UNTYPED_MODE_OPTIONS: readonly MappingModeToggleOption<ObjectMode>[] = [
+  { value: 'value', label: 'Value', icon: Type },
   { value: 'reference', label: 'Reference', icon: Link, tone: 'info' },
   { value: 'build', label: 'Build', icon: Layers },
 ];
@@ -53,6 +65,12 @@ interface ObjectMappingEditorProps {
   };
   /** Called when closing the object editor */
   onClose: () => void;
+  /**
+   * The field's declared type is `any`/unknown, so the author picks the shape:
+   * a plain value, a reference, or a built object *or array*. Typed object
+   * fields keep the narrower reference-or-build choice.
+   */
+  untyped?: boolean;
 }
 
 export function ObjectMappingEditor({
@@ -62,9 +80,17 @@ export function ObjectMappingEditor({
   onValueTypeChange,
   schema,
   onClose,
+  untyped = false,
 }: ObjectMappingEditorProps) {
-  // Mode is derived from valueType: reference stays as reference, everything else is build (composite)
-  const mode: ObjectMode = valueType === 'reference' ? 'reference' : 'build';
+  // Mode is derived from valueType. For an untyped field a non-structural
+  // immediate is a plain value; for a typed object field everything that is
+  // not a reference is a build.
+  const mode: ObjectMode =
+    valueType === 'reference'
+      ? 'reference'
+      : untyped && !(typeof value === 'object' && value !== null)
+        ? 'value'
+        : 'build';
 
   // For build mode, get the composite value
   const compositeValue = useMemo(() => {
@@ -90,6 +116,9 @@ export function ObjectMappingEditor({
     if (newMode === 'reference') {
       onValueTypeChange('reference');
       onChange('');
+    } else if (newMode === 'value') {
+      onValueTypeChange('immediate');
+      onChange('');
     } else {
       onValueTypeChange('composite');
       onChange({});
@@ -114,7 +143,7 @@ export function ObjectMappingEditor({
       <div className="flex shrink-0 items-center gap-2 px-4 py-3">
         <MappingModeToggle
           className="flex-1"
-          options={MODE_OPTIONS}
+          options={untyped ? UNTYPED_MODE_OPTIONS : MODE_OPTIONS}
           value={mode}
           onChange={handleModeChange}
         />
@@ -131,7 +160,25 @@ export function ObjectMappingEditor({
 
       {/* Content */}
       <div className="flex-1 overflow-y-auto p-4">
-        {mode === 'reference' ? (
+        {mode === 'value' ? (
+          // Plain value — the common case for an `any` input that just takes
+          // a string, number or boolean.
+          <div className="space-y-2">
+            <p className="text-sm text-muted-foreground">
+              Enter a value directly. Use Build for an object or a list.
+            </p>
+            <MappingValueInput
+              value={typeof value === 'object' && value !== null ? '' : value}
+              onChange={(v) => onChange(v ?? '')}
+              valueType="immediate"
+              onValueTypeChange={onValueTypeChange}
+              fieldType="text"
+              allowNull
+              hideReferenceToggle
+              placeholder="Enter a value..."
+            />
+          </div>
+        ) : mode === 'reference' ? (
           // Reference mode - single reference input
           <div className="space-y-2">
             <p className="text-sm text-muted-foreground">
@@ -180,7 +227,9 @@ export function ObjectMappingEditor({
             <CompositeValueEditor
               value={compositeValue}
               onChange={handleCompositeChange}
-              showModeSwitcher={false}
+              // An untyped root may legitimately be an array; a typed object
+              // field may not, so only `any` gets the object/array switcher.
+              showModeSwitcher={untyped}
               showCloseButton={false}
             />
           </div>
