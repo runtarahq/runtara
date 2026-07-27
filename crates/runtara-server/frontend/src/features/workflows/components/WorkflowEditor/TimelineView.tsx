@@ -2367,7 +2367,9 @@ function WorkflowTimelineItem({
         // the visible tile.
         data-timeline-node-card={node.id}
         className={cn(
-          'relative overflow-hidden rounded-md border bg-background transition-colors',
+          // Same card treatment as a canvas node (BaseNode.tsx): rounded-md,
+          // border, shadow-sm lifting to shadow-md on hover.
+          'relative overflow-hidden rounded-md border bg-card shadow-sm transition-all duration-200 hover:shadow-md',
           hasValidationError
             ? 'border-destructive ring-2 ring-destructive/30'
             : executionStatus
@@ -2601,36 +2603,16 @@ export function WorkflowTimelineView({
   const draggingRef = useRef<DragState>(null);
   const dropTargetRef = useRef<DropTarget>(null);
 
-  const { items, totalSteps, branchCount, containerCount } = useMemo(() => {
-    const hiddenNodeIds = getHiddenNodeIds(nodes, edges);
-    const timelineItems = buildTimelineItems(
-      nodes,
-      edges,
-      undefined,
-      hiddenNodeIds
-    );
-    const renderableNodes = nodes.filter((node) =>
-      isRenderableNode(node, hiddenNodeIds)
-    );
-    const renderableNodeIds = new Set(renderableNodes.map((node) => node.id));
-
-    return {
-      items: timelineItems,
-      totalSteps: countItems(timelineItems),
-      branchCount: edges.filter((edge) => {
-        const label = getEdgeLabel(edge);
-        return (
-          renderableNodeIds.has(edge.source) &&
-          renderableNodeIds.has(edge.target) &&
-          label !== 'next' &&
-          label !== 'source'
-        );
-      }).length,
-      containerCount: renderableNodes.filter((node) =>
-        renderableNodes.some((candidate) => candidate.parentId === node.id)
-      ).length,
-    };
-  }, [nodes, edges]);
+  const items = useMemo(
+    () =>
+      buildTimelineItems(
+        nodes,
+        edges,
+        undefined,
+        getHiddenNodeIds(nodes, edges)
+      ),
+    [nodes, edges]
+  );
 
   const toggleContainer = useCallback((nodeId: string) => {
     setExpandedContainers((prev) => ({
@@ -2940,25 +2922,18 @@ export function WorkflowTimelineView({
 
   return (
     <div
-      className="h-full overflow-auto bg-background"
+      className={cn(
+        'h-full overflow-auto bg-background',
+        // The canvas's dotted surface, reproduced in CSS — the React Flow
+        // <Background> component needs a ReactFlow context this view does not
+        // have. Values track the canvas: SNAP_GRID_SIZE gap, size 1, and the
+        // same #91919a / #262626 the <Background> resolves to per theme.
+        'bg-[radial-gradient(circle,#91919a_0.5px,transparent_0.5px)] [background-size:12px_12px]',
+        'dark:bg-[radial-gradient(circle,#262626_0.5px,transparent_0.5px)]'
+      )}
       data-testid="workflow-timeline"
     >
       <div className="mx-auto flex max-w-5xl flex-col gap-4 p-6 pt-28">
-        <div className="rounded-md border bg-card p-4">
-          <div className="flex flex-wrap items-start justify-between gap-3">
-            <div>
-              <h2 className="text-lg font-semibold text-foreground">
-                Workflow Timeline
-              </h2>
-            </div>
-            <div className="flex flex-wrap items-center gap-2">
-              <Badge variant="secondary">{totalSteps} steps</Badge>
-              <Badge variant="outline">{branchCount} branch edges</Badge>
-              <Badge variant="outline">{containerCount} nested scopes</Badge>
-            </div>
-          </div>
-        </div>
-
         <TimelineItemList
           items={items}
           depth={0}
