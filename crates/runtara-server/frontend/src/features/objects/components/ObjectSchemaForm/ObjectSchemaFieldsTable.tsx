@@ -108,7 +108,7 @@ function FieldRow({ field, onUpdate, onRemove }: FieldRowProps) {
       {/* Type column */}
       <TableCell className="align-middle">
         <span
-          className="cursor-default rounded bg-muted/40 px-1.5 py-0.5 font-mono text-2xs text-muted-foreground"
+          className="cursor-default rounded-full bg-muted/40 px-1.5 py-0.5 font-mono text-2xs text-muted-foreground"
           title={getTypeLabel(field.dataType)}
         >
           {getTypeAbbreviation(field.dataType)}

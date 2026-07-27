@@ -211,7 +211,7 @@ export function ObjectMappingEditor({
                 {schemaFields.map((field) => (
                   <span
                     key={field.name}
-                    className="flex items-center gap-1 rounded border bg-background px-2 py-0.5"
+                    className="flex items-center gap-1 rounded-full border bg-background px-2 py-0.5"
                   >
                     <span className="font-mono">{field.name}</span>
                     {field.required && (

@@ -99,7 +99,7 @@ export function ReferencePill({
         )}
       </span>
       {type && (
-        <span className="shrink-0 rounded bg-primary/20 px-1 py-0.5 font-mono text-3xs leading-none text-primary">
+        <span className="shrink-0 rounded-full bg-primary/20 px-1 py-0.5 font-mono text-3xs leading-none text-primary">
           {type}
         </span>
       )}

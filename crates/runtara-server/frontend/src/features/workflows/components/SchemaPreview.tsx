@@ -25,21 +25,24 @@ function renderField(field: SchemaField) {
         <div className="flex items-center gap-2">
           <span className="font-mono text-sm">{field.name}</span>
           {field.required ? (
-            <Badge variant="default" className="h-5 rounded">
+            <Badge variant="default" className="h-5 rounded-full">
               required
             </Badge>
           ) : (
-            <Badge variant="secondary" className="h-5 rounded">
+            <Badge variant="secondary" className="h-5 rounded-full">
               optional
             </Badge>
           )}
           {field.nullable && (
-            <Badge variant="secondary" className="h-5 rounded">
+            <Badge variant="secondary" className="h-5 rounded-full">
               nullable
             </Badge>
           )}
         </div>
-        <Badge variant="outline" className="h-5 rounded px-2 text-xs uppercase">
+        <Badge
+          variant="outline"
+          className="h-5 rounded-full px-2 text-xs uppercase"
+        >
           {field.type || 'string'}
         </Badge>
       </div>

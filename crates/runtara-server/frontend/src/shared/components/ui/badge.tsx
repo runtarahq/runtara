@@ -4,7 +4,9 @@ import { cva, type VariantProps } from 'class-variance-authority';
 import { cn } from '@/lib/utils.ts';
 
 const badgeVariants = cva(
-  'inline-flex items-center rounded-md px-2 py-0.5 text-xs font-medium transition-colors',
+  // Pill, matching StatusPill and the Database view's chips. A static chip is
+  // a label, not a control — the square-ish radius read as a button.
+  'inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium transition-colors',
   {
     variants: {
       variant: {

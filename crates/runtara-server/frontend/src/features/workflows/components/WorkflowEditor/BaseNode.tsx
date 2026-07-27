@@ -428,7 +428,7 @@ export const BaseNode = forwardRef<
                     title="Agent disabled — workflow can't be saved"
                     aria-label="Agent disabled"
                     data-testid="stale-agent-badge"
-                    className="flex shrink-0 items-center gap-0.5 rounded bg-warning/10 px-1 py-0.5 text-[9px] font-medium leading-none text-warning"
+                    className="flex shrink-0 items-center gap-0.5 rounded-full bg-warning/10 px-1 py-0.5 text-[9px] font-medium leading-none text-warning"
                   >
                     <AlertTriangle className="size-2.5" />
                     <span className="hidden md:inline">Agent disabled</span>

@@ -72,7 +72,7 @@ export function ConnectionPageShell({
                         <span className="size-1 rounded-full bg-border" />
                       )}
                       {integrationCategory && (
-                        <span className="inline-flex items-center gap-1 rounded bg-muted px-1.5 py-0.5 text-xs text-muted-foreground">
+                        <span className="inline-flex items-center gap-1 rounded-full bg-muted px-1.5 py-0.5 text-xs text-muted-foreground">
                           <CategoryIcon className="size-3" />
                           {getCategoryLabel(integrationCategory)}
                         </span>

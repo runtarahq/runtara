@@ -168,7 +168,7 @@ export const invocationHistoryColumns: ColumnDef<ExecutionHistoryItem>[] = [
     cell: ({ row }) => {
       const version = row.original.version;
       return version !== undefined ? (
-        <span className="inline-flex items-center rounded bg-muted px-2 py-0.5 text-xs font-medium text-muted-foreground">
+        <span className="inline-flex items-center rounded-full bg-muted px-2 py-0.5 text-xs font-medium text-muted-foreground">
           v{version}
         </span>
       ) : null;

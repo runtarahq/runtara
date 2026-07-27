@@ -57,7 +57,7 @@ export function PickerTypeChip({
   return (
     <span
       className={cn(
-        'shrink-0 rounded bg-black/5 px-1.5 py-0.5 font-mono text-2xs text-muted-foreground dark:bg-white/10',
+        'shrink-0 rounded-full bg-black/5 px-1.5 py-0.5 font-mono text-2xs text-muted-foreground dark:bg-white/10',
         className
       )}
     >

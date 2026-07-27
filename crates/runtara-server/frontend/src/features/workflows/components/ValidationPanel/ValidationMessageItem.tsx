@@ -61,7 +61,7 @@ export function ValidationMessageItem({
         {/* Step location */}
         {(message.stepName || message.stepId) && (
           <div className="mt-1 flex items-center gap-2 text-xs text-muted-foreground">
-            <span className="inline-flex items-center gap-1 rounded bg-muted px-1.5 py-0.5 text-xs">
+            <span className="inline-flex items-center gap-1 rounded-full bg-muted px-1.5 py-0.5 text-xs">
               Step: {message.stepName || message.stepId}
             </span>
             {message.fieldName && <span>› {message.fieldName}</span>}

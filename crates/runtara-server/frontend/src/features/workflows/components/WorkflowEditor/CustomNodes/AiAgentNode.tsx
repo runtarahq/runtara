@@ -458,7 +458,7 @@ function AiAgentNodeComponent({
               )}
             </span>
             {modelName && (
-              <span className="flex-shrink-0 whitespace-nowrap rounded bg-violet-100 px-1.5 py-0.5 text-[9px] font-medium text-violet-700 dark:bg-violet-900/40 dark:text-violet-300">
+              <span className="flex-shrink-0 whitespace-nowrap rounded-full bg-violet-100 px-1.5 py-0.5 text-[9px] font-medium text-violet-700 dark:bg-violet-900/40 dark:text-violet-300">
                 {modelName}
               </span>
             )}

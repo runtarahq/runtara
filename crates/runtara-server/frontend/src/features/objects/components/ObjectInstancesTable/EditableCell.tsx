@@ -341,7 +341,7 @@ function renderValue(value: any, dataType: string) {
       );
     case 'enum':
       return (
-        <span className="inline-flex rounded-lg bg-muted px-2 py-0.5 text-xs font-medium">
+        <span className="inline-flex rounded-full bg-muted px-2 py-0.5 text-xs font-medium">
           {String(value)}
         </span>
       );

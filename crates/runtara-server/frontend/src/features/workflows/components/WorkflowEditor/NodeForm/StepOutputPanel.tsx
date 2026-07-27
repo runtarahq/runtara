@@ -62,11 +62,11 @@ function FieldRow({
         </div>
         <div className="flex shrink-0 items-center gap-1">
           {field.nullable && (
-            <Badge variant="secondary" className="h-5 rounded text-3xs">
+            <Badge variant="secondary" className="h-5 rounded-full text-3xs">
               nullable
             </Badge>
           )}
-          <Badge variant="outline" className="h-5 rounded px-2 text-3xs">
+          <Badge variant="outline" className="h-5 rounded-full px-2 text-3xs">
             {field.type && field.type !== 'dynamic' ? field.type : 'unknown'}
           </Badge>
         </div>
@@ -131,7 +131,7 @@ function AgentOutputBody({ stepId }: { stepId?: string }) {
     <div className="space-y-2">
       <div className="flex items-center gap-2 text-xs text-muted-foreground">
         <span className="font-mono">{referenceHint(stepId, '.outputs')}</span>
-        <Badge variant="outline" className="h-5 rounded px-2 text-3xs">
+        <Badge variant="outline" className="h-5 rounded-full px-2 text-3xs">
           {containerType}
         </Badge>
       </div>
@@ -258,7 +258,7 @@ function ShapeOutputBody({
       <div className="flex items-center gap-2 text-xs text-muted-foreground">
         <span className="font-mono">{referenceHint(stepId, '.outputs')}</span>
         {kind && (
-          <Badge variant="outline" className="h-5 rounded px-2 text-3xs">
+          <Badge variant="outline" className="h-5 rounded-full px-2 text-3xs">
             {kind === 'dynamic' ? 'runtime-dependent' : kind}
           </Badge>
         )}

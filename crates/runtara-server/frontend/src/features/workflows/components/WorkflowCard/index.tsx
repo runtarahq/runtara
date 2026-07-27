@@ -77,7 +77,7 @@ export function WorkflowCard({
     <TableRow className={cn('group', className)}>
       <TableCell className="font-medium text-foreground">
         <div className="flex items-center gap-2">
-          <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-3xs font-medium text-muted-foreground">
+          <span className="shrink-0 rounded-full bg-muted px-1.5 py-0.5 text-3xs font-medium text-muted-foreground">
             {version !== undefined ? `v${version}` : 'Draft'}
           </span>
           <button
@@ -88,7 +88,7 @@ export function WorkflowCard({
             {title}
           </button>
           {hasInputs && (
-            <span className="inline-flex shrink-0 items-center gap-1 rounded border border-warning/30 bg-warning/10 px-1.5 py-0.5 text-3xs font-medium text-warning">
+            <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-warning/30 bg-warning/10 px-1.5 py-0.5 text-3xs font-medium text-warning">
               <AlertCircle className="size-2.5" />
               Inputs
             </span>
