@@ -107,11 +107,11 @@ export function WorkflowCard({
         <div className="flex items-center justify-end gap-1 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100">
           <Can permission="workflow:execute">
             <Button
-              variant="ghost"
+              variant="quiet"
               size="icon-sm"
               onClick={() => onSchedule(workflow)}
               title="Start"
-              className="text-muted-foreground"
+
               disabled={isScheduling}
             >
               {isScheduling ? (
@@ -123,22 +123,20 @@ export function WorkflowCard({
           </Can>
           {onChat && (
             <Button
-              variant="ghost"
+              variant="quiet"
               size="icon-sm"
               onClick={() => onChat(workflow)}
               title="Chat"
-              className="text-muted-foreground"
             >
               <MessageSquare className="size-4" />
             </Button>
           )}
           <Can permission="workflow:update">
             <Button
-              variant="ghost"
+              variant="quiet"
               size="icon-sm"
               onClick={() => onUpdate(workflow)}
               title="Edit"
-              className="text-muted-foreground"
             >
               <Pencil className="size-4" />
             </Button>
@@ -146,11 +144,11 @@ export function WorkflowCard({
           {showMoveAction && onMoveToFolder && (
             <Can permission="workflow:update">
               <Button
-                variant="ghost"
+                variant="quiet"
                 size="icon-sm"
                 onClick={() => onMoveToFolder(workflow)}
                 title="Move to folder"
-                className="text-muted-foreground"
+
                 disabled={isMoving}
               >
                 {isMoving ? (
@@ -163,11 +161,11 @@ export function WorkflowCard({
           )}
           <Can permission="workflow:create">
             <Button
-              variant="ghost"
+              variant="quiet"
               size="icon-sm"
               onClick={() => onClone(workflow)}
               title="Duplicate"
-              className="text-muted-foreground"
+
               disabled={isCloning}
             >
               {isCloning ? (
@@ -179,11 +177,11 @@ export function WorkflowCard({
           </Can>
           <Can permission="workflow:delete">
             <Button
-              variant="ghost"
+              variant="quietDestructive"
               size="icon-sm"
               onClick={() => onDelete(workflow)}
               title="Delete"
-              className="text-muted-foreground hover:text-destructive"
+
               disabled={isDeleting}
             >
               {isDeleting ? (

@@ -196,7 +196,7 @@ export function ReportViewNavigation({
           {showPrevious ? (
             <Button
               type="button"
-              variant="ghost"
+              variant="quiet"
               size="sm"
               aria-label={group.previousLabel?.trim() || 'Previous stage'}
               disabled={
@@ -206,7 +206,7 @@ export function ReportViewNavigation({
                 previous &&
                 onNavigateView?.(previous.viewId, { replace: false })
               }
-              className="w-fit justify-self-start px-2 text-muted-foreground hover:text-foreground"
+              className="w-fit justify-self-start px-2"
             >
               <ChevronLeft className="mr-1 size-4" /> {previousLabel}
             </Button>
@@ -219,14 +219,14 @@ export function ReportViewNavigation({
           {showNext ? (
             <Button
               type="button"
-              variant="ghost"
+              variant="quiet"
               size="sm"
               aria-label={group.nextLabel?.trim() || 'Next stage'}
               disabled={isCurrentOnly || !next || !accessible.has(next.viewId)}
               onClick={() =>
                 next && onNavigateView?.(next.viewId, { replace: false })
               }
-              className="w-fit justify-self-end px-2 text-muted-foreground hover:text-foreground"
+              className="w-fit justify-self-end px-2"
             >
               {nextLabel} <ChevronRight className="ml-1 size-4" />
             </Button>
