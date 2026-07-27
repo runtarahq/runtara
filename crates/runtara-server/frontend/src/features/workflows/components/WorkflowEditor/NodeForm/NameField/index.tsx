@@ -233,7 +233,8 @@ export function NameField({ name }: { name: string }) {
     <button
       type="button"
       onClick={() => setConnectionPickerOpen(true)}
-      className="text-primary hover:text-primary/80 hover:underline"
+      className="min-w-0 truncate text-left text-primary hover:text-primary/80 hover:underline"
+      title={selectedConnection?.title || 'Select connection'}
     >
       {selectedConnection?.title || 'Select connection'}
     </button>
@@ -262,18 +263,22 @@ export function NameField({ name }: { name: string }) {
             </FormItem>
           )}
         />
-        {/* Agent → capability • connection subtitle - all clickable */}
+        {/* Agent → capability • connection subtitle - all clickable.
+            One line that truncates rather than two blocks of wrapped text: a
+            <button> centres its own text, so a wrapped label reads as a ragged
+            centred paragraph with the separator floating beside it. */}
         <div className="flex items-center gap-2 text-sm text-muted-foreground">
           <button
             type="button"
             onClick={() => setCapabilityPickerOpen(true)}
-            className="text-primary hover:text-primary/80 hover:underline"
+            className="min-w-0 truncate text-left text-primary hover:text-primary/80 hover:underline"
+            title={`${agent?.name || agentId} → ${capabilityId}`}
           >
             {agent?.name || agentId} → {capabilityId}
           </button>
           {supportsConnections && (
             <>
-              <span>•</span>
+              <span className="shrink-0">•</span>
               {connectionSelector}
             </>
           )}

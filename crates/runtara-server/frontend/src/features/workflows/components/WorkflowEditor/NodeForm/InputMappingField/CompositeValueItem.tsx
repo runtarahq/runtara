@@ -643,7 +643,13 @@ export function CompositeValueItem({
       <div className="flex items-center gap-2">
         {/* Label */}
         {label && (
-          <span className="min-w-[60px] truncate font-mono text-sm text-muted-foreground">
+          // Fixed width, not min-width: these rows are siblings, so a label
+          // sized to its own text starts every following control at a
+          // different x and the column staircases.
+          <span
+            className="w-32 shrink-0 truncate font-mono text-sm text-muted-foreground"
+            title={label}
+          >
             {label}
           </span>
         )}
