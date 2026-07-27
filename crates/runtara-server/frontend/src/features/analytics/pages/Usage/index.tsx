@@ -17,34 +17,14 @@ import { MetricCard } from '@/shared/components/metric-card';
 import { ExecutionTrendChart } from '../../components/ExecutionTrendChart';
 import { useTenantMetrics } from '../../hooks/useAnalytics';
 import {
-  calculatePercentageChange,
-  determineTrend,
   formatDurationSeconds,
   formatMemory,
   formatNumber,
 } from '../../utils';
-
-// Unified metrics data point type supporting both old (camelCase) and new (snake_case) API formats
-interface MetricsDataPoint {
-  // New API format (snake_case)
-  invocation_count?: number | null;
-  success_count?: number | null;
-  failure_count?: number | null;
-  avg_duration_seconds?: number | null;
-  avg_memory_bytes?: number | null;
-  cancelled_count?: number | null;
-  bucket_time?: string | null;
-  success_rate_percent?: number | null;
-  // Old API format (camelCase)
-  invocationCount?: number | null;
-  successCount?: number | null;
-  failureCount?: number | null;
-  avgDurationSeconds?: number | null;
-  avgMemoryMb?: number | null;
-  timeoutCount?: number | null;
-  dayBucket?: string | null;
-  successRatePercent?: number | null;
-}
+import {
+  computeMetricTrends,
+  type MetricsDataPoint,
+} from '../../utils/metric-trends';
 
 const VALID_DATE_RANGES: DateRangeOption[] = ['1h', '24h', '7d', '30d', '90d'];
 
@@ -185,101 +165,13 @@ export function Usage() {
     };
   }, [tenantMetrics]);
 
-  const trends = useMemo(() => {
-    if (
-      !tenantMetrics?.data?.metrics ||
-      tenantMetrics.data.metrics.length < 2
-    ) {
-      return {
-        executionsTrend: 'stable' as const,
-        executionsChange: 0,
-        successTrend: 'stable' as const,
-        durationTrend: 'stable' as const,
-        memoryTrend: 'stable' as const,
-        cancelledTrend: 'stable' as const,
-      };
-    }
-
-    const dataPoints = tenantMetrics.data.metrics as MetricsDataPoint[];
-    const midPoint = Math.floor(dataPoints.length / 2);
-    const firstHalf = dataPoints.slice(0, midPoint);
-    const secondHalf = dataPoints.slice(midPoint);
-
-    const firstHalfExecutions = firstHalf.reduce(
-      (sum, p) => sum + (p.invocation_count ?? p.invocationCount ?? 0),
-      0
-    );
-    const secondHalfExecutions = secondHalf.reduce(
-      (sum, p) => sum + (p.invocation_count ?? p.invocationCount ?? 0),
-      0
-    );
-
-    const firstHalfSuccesses = firstHalf.reduce(
-      (sum, p) => sum + (p.success_count ?? p.successCount ?? 0),
-      0
-    );
-    const secondHalfSuccesses = secondHalf.reduce(
-      (sum, p) => sum + (p.success_count ?? p.successCount ?? 0),
-      0
-    );
-
-    const firstHalfSuccessRate =
-      firstHalfExecutions > 0
-        ? (firstHalfSuccesses / firstHalfExecutions) * 100
-        : 0;
-    const secondHalfSuccessRate =
-      secondHalfExecutions > 0
-        ? (secondHalfSuccesses / secondHalfExecutions) * 100
-        : 0;
-
-    const firstHalfDuration =
-      firstHalf.reduce(
-        (sum, p) => sum + (p.avg_duration_seconds ?? p.avgDurationSeconds ?? 0),
-        0
-      ) / firstHalf.length;
-    const secondHalfDuration =
-      secondHalf.reduce(
-        (sum, p) => sum + (p.avg_duration_seconds ?? p.avgDurationSeconds ?? 0),
-        0
-      ) / secondHalf.length;
-
-    const getMemoryMb = (p: MetricsDataPoint): number => {
-      if (p.avg_memory_bytes !== undefined && p.avg_memory_bytes !== null) {
-        return p.avg_memory_bytes / (1024 * 1024);
-      }
-      return p.avgMemoryMb ?? 0;
-    };
-
-    const firstHalfMemory =
-      firstHalf.reduce((sum, p) => sum + getMemoryMb(p), 0) / firstHalf.length;
-    const secondHalfMemory =
-      secondHalf.reduce((sum, p) => sum + getMemoryMb(p), 0) /
-      secondHalf.length;
-
-    const firstHalfCancelled = firstHalf.reduce(
-      (sum, p) => sum + (p.cancelled_count ?? p.timeoutCount ?? 0),
-      0
-    );
-    const secondHalfCancelled = secondHalf.reduce(
-      (sum, p) => sum + (p.cancelled_count ?? p.timeoutCount ?? 0),
-      0
-    );
-
-    return {
-      executionsTrend: determineTrend(
-        secondHalfExecutions,
-        firstHalfExecutions
+  const trends = useMemo(
+    () =>
+      computeMetricTrends(
+        tenantMetrics?.data?.metrics as MetricsDataPoint[] | undefined
       ),
-      executionsChange: calculatePercentageChange(
-        secondHalfExecutions,
-        firstHalfExecutions
-      ),
-      successTrend: determineTrend(secondHalfSuccessRate, firstHalfSuccessRate),
-      durationTrend: determineTrend(firstHalfDuration, secondHalfDuration),
-      memoryTrend: determineTrend(firstHalfMemory, secondHalfMemory),
-      cancelledTrend: determineTrend(firstHalfCancelled, secondHalfCancelled),
-    };
-  }, [tenantMetrics]);
+    [tenantMetrics]
+  );
 
   const chartData = useMemo(() => {
     if (!tenantMetrics?.data?.metrics) return [];
@@ -375,43 +267,43 @@ export function Usage() {
             <MetricCard
               title="Total Executions"
               value={formatNumber(metrics.totalExecutions)}
-              change={trends.executionsChange}
-              trend={trends.executionsTrend}
+              change={trends.executions.change}
+              trend={trends.executions.trend}
               loading={metricsLoading}
             />
             <MetricCard
               title="Success Rate"
               value={`${metrics.successRate.toFixed(1)}%`}
-              change={Math.abs(trends.executionsChange * 0.1)}
-              trend={trends.successTrend}
+              change={trends.successRate.change}
+              trend={trends.successRate.trend}
               loading={metricsLoading}
             />
             <MetricCard
               title="Avg Duration"
               value={formatDurationSeconds(metrics.avgDurationSeconds)}
-              change={Math.abs(trends.executionsChange * 0.05)}
-              trend={trends.durationTrend}
+              change={trends.duration.change}
+              trend={trends.duration.trend}
               loading={metricsLoading}
             />
             <MetricCard
               title="Avg Memory"
               value={formatMemory(metrics.avgMemory)}
-              change={Math.abs(trends.executionsChange * 0.08)}
-              trend={trends.memoryTrend}
+              change={trends.memory.change}
+              trend={trends.memory.trend}
               loading={metricsLoading}
             />
             <MetricCard
               title="Failed Executions"
               value={formatNumber(metrics.failureCount)}
-              change={Math.abs(trends.executionsChange * 0.15)}
-              trend={metrics.failureCount > 0 ? 'down' : 'stable'}
+              change={trends.failures.change}
+              trend={trends.failures.trend}
               loading={metricsLoading}
             />
             <MetricCard
               title="Cancelled"
               value={formatNumber(metrics.cancelledCount)}
-              change={Math.abs(trends.executionsChange * 0.12)}
-              trend={trends.cancelledTrend}
+              change={trends.cancelled.change}
+              trend={trends.cancelled.trend}
               loading={metricsLoading}
             />
           </section>
