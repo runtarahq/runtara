@@ -759,10 +759,18 @@ pub struct ReportWorkflowActionConfig {
     pub reload_block: bool,
     /// Optional row-level condition. When set, the frontend renders the button
     /// only for rows that match this condition.
+    ///
+    /// Accepts either condition wire-shape and normalizes to the tagged one;
+    /// see [`crate::condition_convert`].
     #[serde(
         default,
         rename = "visibleWhen",
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::condition_convert::deserialize_condition_expression_opt"
+    )]
+    #[cfg_attr(
+        feature = "json-schema",
+        schemars(schema_with = "crate::condition_convert::condition_expression_opt_schema")
     )]
     pub visible_when: Option<ConditionExpression>,
     /// Optional row-level condition. When set, the frontend hides the button
@@ -770,7 +778,12 @@ pub struct ReportWorkflowActionConfig {
     #[serde(
         default,
         rename = "hiddenWhen",
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::condition_convert::deserialize_condition_expression_opt"
+    )]
+    #[cfg_attr(
+        feature = "json-schema",
+        schemars(schema_with = "crate::condition_convert::condition_expression_opt_schema")
     )]
     pub hidden_when: Option<ConditionExpression>,
     /// Optional row-level condition. When set, the frontend renders the button
@@ -778,7 +791,12 @@ pub struct ReportWorkflowActionConfig {
     #[serde(
         default,
         rename = "disabledWhen",
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::condition_convert::deserialize_condition_expression_opt"
+    )]
+    #[cfg_attr(
+        feature = "json-schema",
+        schemars(schema_with = "crate::condition_convert::condition_expression_opt_schema")
     )]
     pub disabled_when: Option<ConditionExpression>,
     #[serde(default)]
@@ -1059,7 +1077,17 @@ pub struct ReportSource {
     pub instance_id: Option<String>,
     #[serde(default = "default_source_mode")]
     pub mode: ReportSourceMode,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Accepts either condition wire-shape and normalizes to the flat one the
+    /// SQL builder consumes; see [`crate::condition_convert`].
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::condition_convert::deserialize_condition_opt"
+    )]
+    #[cfg_attr(
+        feature = "json-schema",
+        schemars(schema_with = "crate::condition_convert::condition_opt_schema")
+    )]
     pub condition: Option<Condition>,
     #[serde(default, rename = "filterMappings")]
     pub filter_mappings: Vec<ReportFilterTarget>,
@@ -1367,22 +1395,40 @@ pub struct ReportTableInteractionButtonConfig {
     pub label: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
+    /// Row-level visibility conditions. Each accepts either condition
+    /// wire-shape and normalizes to the tagged one; see
+    /// [`crate::condition_convert`].
     #[serde(
         default,
         rename = "visibleWhen",
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::condition_convert::deserialize_condition_expression_opt"
+    )]
+    #[cfg_attr(
+        feature = "json-schema",
+        schemars(schema_with = "crate::condition_convert::condition_expression_opt_schema")
     )]
     pub visible_when: Option<ConditionExpression>,
     #[serde(
         default,
         rename = "hiddenWhen",
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::condition_convert::deserialize_condition_expression_opt"
+    )]
+    #[cfg_attr(
+        feature = "json-schema",
+        schemars(schema_with = "crate::condition_convert::condition_expression_opt_schema")
     )]
     pub hidden_when: Option<ConditionExpression>,
     #[serde(
         default,
         rename = "disabledWhen",
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::condition_convert::deserialize_condition_expression_opt"
+    )]
+    #[cfg_attr(
+        feature = "json-schema",
+        schemars(schema_with = "crate::condition_convert::condition_expression_opt_schema")
     )]
     pub disabled_when: Option<ConditionExpression>,
     #[serde(default)]
@@ -1460,7 +1506,17 @@ pub struct ReportLookupConfig {
     #[serde(default, rename = "searchFields")]
     pub search_fields: Vec<String>,
     /// Optional Object Model condition applied to the lookup option query.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Accepts either condition wire-shape and normalizes to the flat one; see
+    /// [`crate::condition_convert`].
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::condition_convert::deserialize_condition_opt"
+    )]
+    #[cfg_attr(
+        feature = "json-schema",
+        schemars(schema_with = "crate::condition_convert::condition_opt_schema")
+    )]
     pub condition: Option<Condition>,
     /// Optional mappings from report/block filters into lookup schema fields.
     #[serde(default, rename = "filterMappings")]
@@ -1541,7 +1597,17 @@ pub struct ReportTableColumnSource {
     pub connection_id: Option<String>,
     #[serde(default = "default_source_mode")]
     pub mode: ReportSourceMode,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Accepts either condition wire-shape and normalizes to the flat one the
+    /// SQL builder consumes; see [`crate::condition_convert`].
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::condition_convert::deserialize_condition_opt"
+    )]
+    #[cfg_attr(
+        feature = "json-schema",
+        schemars(schema_with = "crate::condition_convert::condition_opt_schema")
+    )]
     pub condition: Option<Condition>,
     #[serde(default, rename = "filterMappings")]
     pub filter_mappings: Vec<ReportFilterTarget>,

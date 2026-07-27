@@ -1,0 +1,117 @@
+{
+  "definitionVersion": 1,
+  "layout": {
+    "id": "root",
+    "columns": 1,
+    "items": [
+      {
+        "id": "root_i0",
+        "child": { "id": "n_orders", "type": "block", "blockId": "interop_orders" }
+      }
+    ]
+  },
+  "filters": [
+    {
+      "id": "status",
+      "label": "Status",
+      "type": "multi_select",
+      "default": ["pending_review"],
+      "options": {
+        "source": "static",
+        "values": [
+          { "label": "Pending review", "value": "pending_review" },
+          { "label": "On hold", "value": "on_hold" }
+        ]
+      },
+      "appliesTo": [
+        { "blockId": "interop_orders", "field": "status", "op": "in" }
+      ]
+    }
+  ],
+  "blocks": [
+    {
+      "id": "interop_orders",
+      "type": "table",
+      "title": "Orders",
+      "source": {
+        "schema": "Order",
+        "mode": "filter",
+        "condition": {
+          "type": "operation",
+          "op": "NE",
+          "arguments": [
+            { "valueType": "reference", "value": "status" },
+            { "valueType": "immediate", "value": "cancelled" }
+          ]
+        }
+      },
+      "table": {
+        "columns": [
+          { "field": "order_id", "label": "Order", "descriptive": true },
+          { "field": "customer_name", "label": "Customer" },
+          {
+            "field": "total_amount",
+            "label": "Total",
+            "format": "currency",
+            "align": "right"
+          },
+          {
+            "field": "status",
+            "label": "Status",
+            "format": "pill",
+            "pillVariants": {
+              "pending_review": "warning",
+              "on_hold": "muted"
+            }
+          },
+          {
+            "field": "approve",
+            "label": "Approve",
+            "type": "workflow_button",
+            "workflowAction": {
+              "id": "approve_order",
+              "workflowId": "wf_approve_order",
+              "label": "Approve",
+              "reloadBlock": true,
+              "visibleWhen": {
+                "op": "EQ",
+                "arguments": ["status", "pending_review"]
+              },
+              "disabledWhen": {
+                "op": "LT",
+                "arguments": ["total_amount", 0]
+              },
+              "context": {
+                "mode": "row"
+              }
+            }
+          },
+          {
+            "field": "actions",
+            "label": "Actions",
+            "type": "interaction_buttons",
+            "interactionButtons": [
+              {
+                "id": "clear_status",
+                "label": "Clear status",
+                "hiddenWhen": {
+                  "op": "AND",
+                  "arguments": [
+                    { "op": "EQ", "arguments": ["status", "on_hold"] },
+                    { "op": "IS_NOT_EMPTY", "arguments": ["customer_name"] }
+                  ]
+                },
+                "actions": [
+                  { "type": "clear_filter", "filterId": "status" }
+                ]
+              }
+            ]
+          }
+        ],
+        "defaultSort": [
+          { "field": "created_at", "direction": "asc" }
+        ]
+      }
+    }
+  ]
+}

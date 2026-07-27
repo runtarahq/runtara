@@ -10886,6 +10886,104 @@ mod tests {
         assert!(matches!(error, ReportServiceError::Conflict(_)));
     }
 
+    /// A row condition authored in the source-filter wire-shape must survive
+    /// normalization as a working condition, not merely a well-formed one: run
+    /// it through the same evaluator the render path uses.
+    #[test]
+    fn flat_row_condition_is_evaluated_after_normalization() {
+        let action: ReportWorkflowActionConfig = serde_json::from_value(json!({
+            "id": "advance_stage",
+            "workflowId": "advance_case",
+            "disabledWhen": { "op": "EQ", "arguments": ["stage", "published"] }
+        }))
+        .unwrap();
+
+        let error = ensure_report_workflow_action_enabled(
+            &action,
+            &json!({"id": "case-123", "stage": "published"}),
+        )
+        .expect_err("a published row must be disabled");
+        assert!(matches!(error, ReportServiceError::Conflict(_)));
+
+        ensure_report_workflow_action_enabled(
+            &action,
+            &json!({"id": "case-123", "stage": "draft"}),
+        )
+        .expect("a draft row must stay enabled");
+    }
+
+    /// Save-time validation of row conditions runs against the normalized
+    /// expression, so a flat payload must reach it with its field reference
+    /// intact — including the unknown-field rejection.
+    #[test]
+    fn flat_row_condition_passes_save_time_validation() {
+        let action: ReportWorkflowActionConfig = serde_json::from_value(json!({
+            "id": "advance_stage",
+            "workflowId": "advance_case",
+            "visibleWhen": { "op": "EQ", "arguments": ["stage", "review"] }
+        }))
+        .unwrap();
+        let condition = action.visible_when.as_ref().expect("visibleWhen present");
+
+        validate_report_workflow_action_row_condition(
+            condition,
+            &|field| field == "stage",
+            "block 'cases'",
+            "workflowAction.visibleWhen",
+        )
+        .expect("a known field must validate");
+
+        let error = validate_report_workflow_action_row_condition(
+            condition,
+            &|_| false,
+            "block 'cases'",
+            "workflowAction.visibleWhen",
+        )
+        .expect_err("an unknown field must still be rejected");
+        assert!(
+            matches!(&error, ReportServiceError::Validation(message) if message.contains("stage")),
+            "the normalized condition should surface the field name: {error:?}"
+        );
+    }
+
+    /// The mirror case: a source filter authored in the row-visibility
+    /// wire-shape must reach the field-ref validator as a flat condition, which
+    /// is what the SQL builder consumes.
+    #[test]
+    fn expression_source_condition_passes_field_ref_validation() {
+        let source: ReportSource = serde_json::from_value(json!({
+            "schema": "Case",
+            "mode": "filter",
+            "condition": {
+                "type": "operation",
+                "op": "NE",
+                "arguments": [
+                    {"valueType": "reference", "value": "stage"},
+                    {"valueType": "immediate", "value": "archived"}
+                ]
+            }
+        }))
+        .unwrap();
+
+        validate_report_condition_field_refs(
+            source.condition.as_ref(),
+            &|field| field == "stage",
+            "block 'cases'",
+        )
+        .expect("a known field must validate");
+
+        let error = validate_report_condition_field_refs(
+            source.condition.as_ref(),
+            &|_| false,
+            "block 'cases'",
+        )
+        .expect_err("an unknown field must still be rejected");
+        assert!(
+            format!("{error:?}").contains("UNKNOWN_CONDITION_FIELD"),
+            "normalization must preserve the field operand: {error:?}"
+        );
+    }
+
     #[test]
     fn navigation_stage_value_supports_card_rows() {
         let result = ReportBlockRenderResult {

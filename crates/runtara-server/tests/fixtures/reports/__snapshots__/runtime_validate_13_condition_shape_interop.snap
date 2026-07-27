@@ -1,0 +1,16 @@
+---
+source: crates/runtara-server/tests/reports_runtime_corpus.rs
+expression: response
+---
+{
+  "valid": false,
+  "errors": [
+    {
+      "path": "$",
+      "code": "VALIDATION_ERROR",
+      "message": "Schema not found",
+      "hint": "Use validate_report with mode='all' for syntax plus semantic checks."
+    }
+  ],
+  "warnings": []
+}
