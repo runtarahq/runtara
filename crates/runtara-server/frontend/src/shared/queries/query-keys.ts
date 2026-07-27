@@ -115,8 +115,6 @@ export const queryKeys = {
       [...queryKeys.workflows.byId(workflowId), 'invocationTriggers'] as const,
     // Folder operations
     folders: () => [...queryKeys.workflows.all, 'folders'] as const,
-    folderCount: (path: string) =>
-      [...queryKeys.workflows.folders(), 'count', path] as const,
     inFolder: (path: string, includeSubfolders?: boolean) =>
       [
         ...queryKeys.workflows.all,

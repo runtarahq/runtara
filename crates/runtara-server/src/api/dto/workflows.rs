@@ -1309,12 +1309,27 @@ pub struct RenameFolderRequest {
     pub new_path: String,
 }
 
+/// Workflows held directly at one folder path
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FolderWorkflowCount {
+    /// Folder path (e.g., "/Sales/")
+    pub path: String,
+    /// Workflows whose `path` is exactly this folder — not including subfolders.
+    /// Callers wanting a recursive total sum every entry whose path starts with
+    /// this one.
+    pub workflow_count: i64,
+}
+
 /// Response for listing folders
 #[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct FoldersResponse {
     /// List of distinct folder paths
     pub folders: Vec<String>,
+    /// Per-path workflow counts, so callers do not have to page the whole
+    /// tenant (or issue a request per folder) just to show how full a folder is
+    pub counts: Vec<FolderWorkflowCount>,
 }
 
 /// Response for move workflow operation

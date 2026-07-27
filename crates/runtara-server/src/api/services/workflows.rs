@@ -1304,13 +1304,22 @@ impl WorkflowService {
 
     /// List all distinct folders for a tenant
     pub async fn list_folders(&self, tenant_id: &str) -> Result<FoldersResponse, ServiceError> {
-        let folders = self
+        let rows = self
             .repository
             .list_folders(tenant_id)
             .await
             .map_err(|e| ServiceError::DatabaseError(e.to_string()))?;
 
-        Ok(FoldersResponse { folders })
+        let folders = rows.iter().map(|(path, _)| path.clone()).collect();
+        let counts = rows
+            .into_iter()
+            .map(|(path, workflow_count)| FolderWorkflowCount {
+                path,
+                workflow_count,
+            })
+            .collect();
+
+        Ok(FoldersResponse { folders, counts })
     }
 
     /// Rename a folder (updates all workflows with paths starting with old_path)

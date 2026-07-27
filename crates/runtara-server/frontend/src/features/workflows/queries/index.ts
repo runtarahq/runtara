@@ -729,28 +729,6 @@ export async function getWorkflowsInFolder(
 }
 
 /**
- * Count every workflow under a folder, including nested subfolders.
- *
- * Asks the server for the count rather than tallying a page of workflows on the
- * client: `pageSize: 1` keeps the payload to a single row while `totalElements`
- * carries the authoritative total, so the number stays correct no matter how
- * many workflows the tenant has.
- */
-export async function getFolderWorkflowCount(
-  token: string,
-  path: string
-): Promise<number> {
-  const response = await getWorkflowsInFolder(token, {
-    path,
-    recursive: true,
-    page: 1,
-    pageSize: 1,
-  });
-  return (response as { data?: { totalElements?: number } })?.data
-    ?.totalElements ?? 0;
-}
-
-/**
  * Move a workflow to a different folder
  */
 export async function moveWorkflowToFolder(

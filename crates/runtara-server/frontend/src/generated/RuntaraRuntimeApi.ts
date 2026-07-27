@@ -2466,8 +2466,26 @@ export interface FinishStep {
   name?: string | null;
 }
 
+/** Workflows held directly at one folder path */
+export interface FolderWorkflowCount {
+  /** Folder path (e.g., "/Sales/") */
+  path: string;
+  /**
+   * Workflows whose `path` is exactly this folder — not including subfolders.
+   * Callers wanting a recursive total sum every entry whose path starts with
+   * this one.
+   * @format int64
+   */
+  workflowCount: number;
+}
+
 /** Response for listing folders */
 export interface FoldersResponse {
+  /**
+   * Per-path workflow counts, so callers do not have to page the whole
+   * tenant (or issue a request per folder) just to show how full a folder is
+   */
+  counts: FolderWorkflowCount[];
   /** List of distinct folder paths */
   folders: string[];
 }
@@ -4119,7 +4137,11 @@ export interface ReportLookupBlockMetadata {
 }
 
 export interface ReportLookupConfig {
-  /** Optional Object Model condition applied to the lookup option query. */
+  /**
+   * Optional Object Model condition applied to the lookup option query.
+   * Accepts either condition wire-shape and normalizes to the flat one; see
+   * [`crate::condition_convert`].
+   */
   condition?: null | Condition;
   /** Optional connection ID for connection-scoped lookup schemas. */
   connectionId?: string | null;
@@ -4222,6 +4244,10 @@ export interface ReportRenderResponse {
 
 export interface ReportSource {
   aggregates?: ReportAggregateSpec[];
+  /**
+   * Accepts either condition wire-shape and normalizes to the flat one the
+   * SQL builder consumes; see [`crate::condition_convert`].
+   */
   condition?: null | Condition;
   connectionId?: string | null;
   entity?: null | ReportWorkflowRuntimeEntity;
@@ -4422,6 +4448,10 @@ export interface ReportTableColumnJoin {
 
 export interface ReportTableColumnSource {
   aggregates?: ReportAggregateSpec[];
+  /**
+   * Accepts either condition wire-shape and normalizes to the flat one the
+   * SQL builder consumes; see [`crate::condition_convert`].
+   */
   condition?: null | Condition;
   connectionId?: string | null;
   filterMappings?: ReportFilterTarget[];
@@ -4453,6 +4483,11 @@ export interface ReportTableInteractionButtonConfig {
   icon?: string | null;
   id: string;
   label?: string | null;
+  /**
+   * Row-level visibility conditions. Each accepts either condition
+   * wire-shape and normalizes to the tagged one; see
+   * [`crate::condition_convert`].
+   */
   visibleWhen?: null | ConditionExpression;
 }
 
@@ -4603,6 +4638,9 @@ export interface ReportWorkflowActionConfig {
   /**
    * Optional row-level condition. When set, the frontend renders the button
    * only for rows that match this condition.
+   *
+   * Accepts either condition wire-shape and normalizes to the tagged one;
+   * see [`crate::condition_convert`].
    */
   visibleWhen?: null | ConditionExpression;
   workflowId: string;

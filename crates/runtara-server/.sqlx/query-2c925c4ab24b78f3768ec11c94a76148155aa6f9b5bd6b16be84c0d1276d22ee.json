@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT path, COUNT(*) AS \"workflow_count!\"\n            FROM workflows\n            WHERE tenant_id = $1 AND deleted_at IS NULL\n            GROUP BY path\n            ORDER BY path\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "path",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 1,
+        "name": "workflow_count!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      null
+    ]
+  },
+  "hash": "2c925c4ab24b78f3768ec11c94a76148155aa6f9b5bd6b16be84c0d1276d22ee"
+}

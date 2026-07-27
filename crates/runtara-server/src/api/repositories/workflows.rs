@@ -938,14 +938,19 @@ impl WorkflowRepository {
         Ok(())
     }
 
-    /// List all distinct folder paths for a tenant
-    /// Returns paths in alphabetical order
-    pub async fn list_folders(&self, tenant_id: &str) -> Result<Vec<String>, sqlx::Error> {
+    /// List every distinct folder path for a tenant with the number of
+    /// workflows sitting directly at each, in alphabetical order.
+    ///
+    /// The count rides along with the path because callers invariably want
+    /// both, and this is already a full scan of the tenant's workflows —
+    /// grouping is free next to fetching the workflows themselves.
+    pub async fn list_folders(&self, tenant_id: &str) -> Result<Vec<(String, i64)>, sqlx::Error> {
         let rows = sqlx::query!(
             r#"
-            SELECT DISTINCT path
+            SELECT path, COUNT(*) AS "workflow_count!"
             FROM workflows
             WHERE tenant_id = $1 AND deleted_at IS NULL
+            GROUP BY path
             ORDER BY path
             "#,
             tenant_id
@@ -953,7 +958,10 @@ impl WorkflowRepository {
         .fetch_all(&self.pool)
         .await?;
 
-        Ok(rows.into_iter().map(|r| r.path).collect())
+        Ok(rows
+            .into_iter()
+            .map(|r| (r.path, r.workflow_count))
+            .collect())
     }
 
     /// Rename a folder by updating all workflow paths that start with the old path

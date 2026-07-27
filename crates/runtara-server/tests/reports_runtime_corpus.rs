@@ -604,6 +604,21 @@ async fn mcp_workflow_move_list_folders_delete_round_trip() {
         "expected '/Sales/' in folders: {folders_body:#}"
     );
 
+    // ...and carries its workflow count, so callers do not have to page the
+    // whole tenant (or issue a request per folder) to show how full it is.
+    let counts = folders_body["counts"]
+        .as_array()
+        .unwrap_or_else(|| panic!("counts not an array: {folders_body:#}"));
+    let sales_count = counts
+        .iter()
+        .find(|entry| entry["path"] == json!("/Sales/"))
+        .unwrap_or_else(|| panic!("no count entry for '/Sales/': {folders_body:#}"));
+    assert_eq!(
+        sales_count["workflowCount"],
+        json!(1),
+        "counts: {folders_body:#}"
+    );
+
     // 4. Soft-delete the workflow.
     let deleted = delete_workflow(
         &server,
