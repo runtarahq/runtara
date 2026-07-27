@@ -300,6 +300,13 @@ jobs:
       - name: Download all bundle artifacts
         uses: actions/download-artifact@v4
         with:
+          # Scoped to bundle-*: an unfiltered download also pulls the
+          # `*.dockerbuild` build records that docker/build-push-action uploads
+          # from the parallel `docker` jobs, and those fail to download —
+          # failing this job over artifacts it never uses. Whether they are
+          # visible yet is a race on a first run, but on any re-run every
+          # artifact in the run exists, so re-running could never go green.
+          pattern: bundle-*
           path: artifacts
           merge-multiple: true
 
