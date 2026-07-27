@@ -1,0 +1,58 @@
+- generic [ref=f5e2]:
+  - generic [ref=f5e4]:
+    - generic [ref=f5e7]:
+      - link "Runtara logo Runtara" [ref=f5e9] [cursor=pointer]:
+        - /url: /
+        - img "Runtara logo" [ref=f5e11]
+        - generic [ref=f5e12]:
+          - generic [ref=f5e13]: Runtara
+          - link
+      - list [ref=f5e15]:
+        - generic [ref=f5e16]:
+          - listitem [ref=f5e17]:
+            - link "Workflows" [ref=f5e18] [cursor=pointer]:
+              - /url: /workflows
+          - listitem [ref=f5e24]:
+            - link "Invocation History" [ref=f5e25] [cursor=pointer]:
+              - /url: /invocation-history
+          - listitem [ref=f5e31]:
+            - link "Database" [ref=f5e32] [cursor=pointer]:
+              - /url: /objects/types
+          - listitem [ref=f5e38]:
+            - link "Reports" [ref=f5e39] [cursor=pointer]:
+              - /url: /reports
+          - listitem [ref=f5e44]:
+            - link "Triggers" [ref=f5e45] [cursor=pointer]:
+              - /url: /invocation-triggers
+          - listitem [ref=f5e49]:
+            - link "Connections" [ref=f5e50] [cursor=pointer]:
+              - /url: /connections
+          - listitem [ref=f5e55]:
+            - link "Analytics" [ref=f5e56] [cursor=pointer]:
+              - /url: /analytics/usage
+            - list [ref=f5e60]:
+              - listitem [ref=f5e61]:
+                - link "Usage" [ref=f5e62] [cursor=pointer]:
+                  - /url: /analytics/usage
+              - listitem [ref=f5e63]:
+                - link "System" [ref=f5e64] [cursor=pointer]:
+                  - /url: /analytics/system
+              - listitem [ref=f5e65]:
+                - link "Rate Limits" [ref=f5e66] [cursor=pointer]:
+                  - /url: /analytics/rate-limits
+          - listitem [ref=f5e67]:
+            - link "Settings" [ref=f5e68] [cursor=pointer]:
+              - /url: /settings
+            - list [ref=f5e73]:
+              - listitem [ref=f5e74]:
+                - link "API Keys" [ref=f5e75] [cursor=pointer]:
+                  - /url: /settings/api-keys
+      - generic [ref=f5e77]:
+        - generic [ref=f5e78]:
+          - button "Sign in" [ref=f5e79] [cursor=pointer]
+          - button "Manage billing" [ref=f5e81] [cursor=pointer]
+          - button "Toggle theme" [ref=f5e83] [cursor=pointer]
+          - button "Toggle Sidebar" [ref=f5e85] [cursor=pointer]
+        - generic "Runtara version dev" [ref=f5e87]: dev
+    - main [ref=f5e89]
+  - region "Notifications alt+T"

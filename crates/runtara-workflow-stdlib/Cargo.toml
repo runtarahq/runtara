@@ -41,7 +41,7 @@ wit-bindgen = { version = "0.58", optional = true }
 # Core dependency: the SDK protocol wrapper. Agent dispatch happens via
 # per-agent WIT bindings injected by `wac compose`, not by linking the
 # `runtara-agents` crate into the workflow.
-runtara-sdk = { path = "../runtara-sdk", version = "8.6", default-features = false, features = ["http"], optional = true }
+runtara-sdk = { path = "../runtara-sdk", version = "8.7", default-features = false, features = ["http"], optional = true }
 
 
 # Re-exported for workflows

@@ -28,10 +28,10 @@ tokio = { version = "1", features = ["full"] }
 sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls-ring-webpki", "postgres", "uuid", "chrono", "macros", "migrate"] }
 
 # Core persistence layer (for shared database access)
-runtara-core = { path = "../runtara-core", version = "8.6" }
+runtara-core = { path = "../runtara-core", version = "8.7" }
 
 # Embedded wasmtime workflow execution (EmbeddedWasmRunner)
-runtara-component-host = { path = "../runtara-component-host", version = "8.6" }
+runtara-component-host = { path = "../runtara-component-host", version = "8.7" }
 
 # Configuration
 dotenvy = "0.15"
