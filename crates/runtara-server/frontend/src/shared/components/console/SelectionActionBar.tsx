@@ -38,12 +38,7 @@ export function SelectionActionBar({
       <div className="h-5 w-px shrink-0 bg-border" />
       <div className="flex items-center gap-2">{children}</div>
       <div className="flex-1" />
-      <Button
-        variant="ghost"
-        size="sm"
-        onClick={onClear}
-        className="gap-1.5 text-muted-foreground hover:text-foreground"
-      >
+      <Button variant="quiet" size="sm" onClick={onClear} className="gap-1.5">
         <X className="size-4" />
         Clear
       </Button>

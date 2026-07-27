@@ -1324,9 +1324,9 @@ function TimelineConnectToStepButton({
       <PopoverTrigger asChild>
         <Button
           type="button"
-          variant="outline"
+          variant="quietOutline"
           size="sm"
-          className="h-7 gap-1.5 border-dashed px-2 text-xs text-muted-foreground shadow-none hover:text-foreground"
+          className="h-7 gap-1.5 border-dashed px-2 text-xs shadow-none"
           aria-label={`Connect ${stepName} to an existing step`}
           data-testid="timeline-join-step"
           data-source-node-id={node.id}
@@ -1436,9 +1436,9 @@ function TimelineAddMcpToolsetButton({
       <PopoverTrigger asChild>
         <Button
           type="button"
-          variant="outline"
+          variant="quietOutline"
           size="sm"
-          className="h-7 gap-1.5 border-dashed px-2 text-xs text-muted-foreground shadow-none hover:text-foreground"
+          className="h-7 gap-1.5 border-dashed px-2 text-xs shadow-none"
           aria-label={`Add MCP toolset to ${stepName}`}
           data-testid="timeline-add-mcp-toolset"
           data-source-node-id={node.id}
@@ -1556,9 +1556,9 @@ function TimelineRouteAddControls({
             <Button
               key={action.key}
               type="button"
-              variant="outline"
+              variant="quietOutline"
               size="sm"
-              className="h-7 gap-1.5 border-dashed px-2 text-xs text-muted-foreground shadow-none hover:text-foreground"
+              className="h-7 gap-1.5 border-dashed px-2 text-xs shadow-none"
               onClick={() => {
                 if (action.convertsToContainer) {
                   useWorkflowStore
@@ -1675,9 +1675,9 @@ function TimelineInsertionPoint({
       />
       <Button
         type="button"
-        variant="outline"
+        variant="quietOutline"
         size="sm"
-        className="h-7 border-dashed bg-background px-2 text-xs text-muted-foreground shadow-none transition-colors group-hover:border-primary/60 group-hover:text-foreground"
+        className="h-7 border-dashed bg-background px-2 text-xs shadow-none transition-colors group-hover:border-primary/60 group-hover:text-foreground"
         onClick={() => onAddStep(request)}
         aria-label="Add step here"
         data-testid="timeline-add-step"
@@ -2019,9 +2019,9 @@ function TimelineRouteSettings({
             <Label htmlFor={`route-condition-${edge.id}`}>Condition</Label>
             <Button
               type="button"
-              variant="ghost"
+              variant="quiet"
               size="sm"
-              className="h-6 px-2 text-xs text-muted-foreground"
+              className="h-6 px-2 text-xs"
               onClick={handleToggleConditionMode}
               data-testid="timeline-route-condition-mode"
             >
@@ -2050,9 +2050,9 @@ function TimelineRouteSettings({
         <div className="flex items-center justify-between gap-2">
           <Button
             type="button"
-            variant="ghost"
+            variant="destructiveGhost"
             size="sm"
-            className="gap-1.5 text-destructive hover:text-destructive"
+            className="gap-1.5"
             onClick={handleDelete}
             disabled={disabled}
             aria-label={`Delete ${label} route from ${edge.source} to ${edge.target}`}
@@ -2165,9 +2165,9 @@ function BranchLaneGroups({
               {showConditionalFlip && (
                 <Button
                   type="button"
-                  variant="ghost"
+                  variant="quiet"
                   size="icon"
-                  className="ml-0.5 mt-1 size-6 rounded-sm bg-background text-muted-foreground"
+                  className="ml-0.5 mt-1 size-6 rounded-sm bg-background"
                   disabled={routeControlsDisabled}
                   onClick={(event) => {
                     event.preventDefault();
@@ -2184,9 +2184,9 @@ function BranchLaneGroups({
                 <div className="ml-0.5 mt-1 flex flex-col gap-0.5">
                   <Button
                     type="button"
-                    variant="ghost"
+                    variant="quiet"
                     size="icon"
-                    className="size-5 rounded-sm bg-background text-muted-foreground"
+                    className="size-5 rounded-sm bg-background"
                     disabled={routeControlsDisabled || caseIndex === 0}
                     onClick={(event) => {
                       event.preventDefault();
@@ -2204,9 +2204,9 @@ function BranchLaneGroups({
                   </Button>
                   <Button
                     type="button"
-                    variant="ghost"
+                    variant="quiet"
                     size="icon"
-                    className="size-5 rounded-sm bg-background text-muted-foreground"
+                    className="size-5 rounded-sm bg-background"
                     disabled={
                       routeControlsDisabled || caseIndex >= switchCaseCount - 1
                     }

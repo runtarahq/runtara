@@ -24,6 +24,26 @@ const buttonVariants = cva(
           'bg-secondary text-secondary-foreground hover:bg-secondary/80',
         ghost: 'text-primary-text hover:bg-accent hover:text-accent-foreground',
         link: 'text-primary-text underline-offset-4 hover:underline',
+        // Low-emphasis chrome — row actions, toolbar icons, dismissals. Named
+        // rather than spelled out at each call site: 34 of them had written
+        // this pair by hand, which is how they drifted out of step with the
+        // variants in the first place.
+        quiet: 'text-muted-foreground hover:bg-accent hover:text-foreground',
+        // The bordered form of `quiet` — the timeline's dashed add-controls,
+        // filter and range pickers. Deliberately not brand-coloured: these
+        // repeat many times per screen and are scaffolding, not the action.
+        quietOutline:
+          'border border-input bg-background text-muted-foreground hover:bg-accent hover:text-foreground',
+        // Quiet until you reach for it, then it says what it will do. The
+        // usual shape for a delete icon in a dense table.
+        quietDestructive:
+          'text-muted-foreground hover:bg-destructive/10 hover:text-destructive',
+        // A destructive action that does not warrant the solid fill. Note the
+        // explicit hover text: call sites that wrote `text-destructive` on a
+        // ghost button kept ghost's `hover:text-accent-foreground`, so they
+        // turned cyan on hover.
+        destructiveGhost:
+          'text-destructive hover:bg-destructive/10 hover:text-destructive',
       },
       size: {
         default: 'h-8 px-3 py-1',

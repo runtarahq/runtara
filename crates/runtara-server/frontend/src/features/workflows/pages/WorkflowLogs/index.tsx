@@ -524,7 +524,7 @@ export function WorkflowLogs() {
                         >
                           <CollapsibleTrigger asChild>
                             <Button
-                              variant="ghost"
+                              variant="quiet"
                               size="sm"
                               className={`h-auto p-1 text-xs ${
                                 objectContainsSearchTerm(
@@ -532,8 +532,8 @@ export function WorkflowLogs() {
                                   searchTerm
                                 )
                                   ? 'font-semibold text-warning'
-                                  : 'text-muted-foreground'
-                              } hover:text-foreground`}
+                                  : ''
+                              } `}
                             >
                               {expandedContextIds.has(log.id) ? (
                                 <ChevronDown className="mr-1 size-3" />

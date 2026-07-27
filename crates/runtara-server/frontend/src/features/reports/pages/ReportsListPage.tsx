@@ -108,9 +108,8 @@ export function ReportsListPage() {
                       <WithTooltip label={`Edit ${report.name}`}>
                         <Button
                           type="button"
-                          variant="ghost"
+                          variant="quiet"
                           size="icon-sm"
-                          className="text-muted-foreground"
                           aria-label={`Edit ${report.name}`}
                         >
                           <Edit className="size-4" />

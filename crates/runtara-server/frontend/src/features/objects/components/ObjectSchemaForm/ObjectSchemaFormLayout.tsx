@@ -64,11 +64,11 @@ export function ObjectSchemaFormLayout(props: ObjectSchemaFormLayoutProps) {
               {isEditMode && onDelete && (
                 <Button
                   type="button"
-                  variant="ghost"
+                  variant="destructiveGhost"
                   size="sm"
                   onClick={onDelete}
                   disabled={isDeleting}
-                  className="text-destructive hover:bg-destructive/10 hover:text-destructive"
+                  className="hover:bg-destructive/10"
                 >
                   {isDeleting ? (
                     <Spinner className="mr-1.5 size-4" />
@@ -79,12 +79,7 @@ export function ObjectSchemaFormLayout(props: ObjectSchemaFormLayoutProps) {
                 </Button>
               )}
               <Link to={cancelHref}>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="sm"
-                  className="text-muted-foreground hover:text-foreground"
-                >
+                <Button type="button" variant="quiet" size="sm">
                   Cancel
                 </Button>
               </Link>

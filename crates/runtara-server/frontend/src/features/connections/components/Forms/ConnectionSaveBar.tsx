@@ -58,11 +58,10 @@ export function ConnectionSaveBar({
           {showDiscard && (
             <Button
               type="button"
-              variant="ghost"
+              variant="quiet"
               size="sm"
               onClick={onDiscard}
               disabled={isLoading}
-              className="text-muted-foreground hover:text-foreground"
             >
               Discard
             </Button>

@@ -210,9 +210,9 @@ export function SourceAggregatesEditor({
                 </Select>
                 <Button
                   type="button"
-                  variant="ghost"
+                  variant="destructiveGhost"
                   size="icon"
-                  className="size-8 text-destructive"
+                  className="size-8"
                   aria-label="Remove aggregate"
                   onClick={() =>
                     updateAggregates(aggregates.filter((_, i) => i !== index))

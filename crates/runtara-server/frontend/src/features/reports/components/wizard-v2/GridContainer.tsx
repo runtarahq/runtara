@@ -476,9 +476,9 @@ function GridNodeEditor({
           {isRoot ? null : (
             <Button
               type="button"
-              variant="ghost"
+              variant="destructiveGhost"
               size="icon-sm"
-              className="shrink-0 text-destructive"
+              className="shrink-0"
               title="Remove grid"
               aria-label="Remove grid"
               onClick={handleDelete}
@@ -680,9 +680,9 @@ function EmptyCellPlaceholder({
           <DropdownMenuTrigger asChild>
             <Button
               type="button"
-              variant="ghost"
+              variant="quiet"
               size="sm"
-              className="h-7 px-1.5 text-muted-foreground"
+              className="h-7 px-1.5"
               title="Add nested grid"
               aria-label="Add nested grid"
             >

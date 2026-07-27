@@ -242,9 +242,8 @@ export function CustomFieldRow({
       <TableCell className="pt-2 align-top">
         <Button
           type="button"
-          variant="ghost"
+          variant="quietDestructive"
           size="icon-sm"
-          className="text-muted-foreground hover:text-destructive"
           onClick={onRemove}
           title="Remove custom field"
         >

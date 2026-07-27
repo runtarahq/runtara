@@ -184,9 +184,8 @@ function DatasetCard({
         <CardTitle className="text-sm">{dataset.label}</CardTitle>
         <Button
           type="button"
-          variant="ghost"
+          variant="destructiveGhost"
           size="icon-sm"
-          className="text-destructive"
           onClick={onDelete}
         >
           <Trash2 className="size-3.5" />

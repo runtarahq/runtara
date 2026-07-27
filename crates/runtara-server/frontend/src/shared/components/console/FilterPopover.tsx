@@ -78,9 +78,9 @@ export function FilterPopover({
           <span className="text-sm font-medium">{title}</span>
           {active && onClear && (
             <Button
-              variant="ghost"
+              variant="quiet"
               size="sm"
-              className="h-7 px-2 text-xs text-muted-foreground hover:text-foreground"
+              className="h-7 px-2 text-xs"
               onClick={onClear}
             >
               Clear all

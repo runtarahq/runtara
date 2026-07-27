@@ -367,8 +367,8 @@ export function NodeConfigPanel({
           {!isCreate && onDelete && (
             <Button
               type="button"
-              variant="ghost"
-              className="mr-auto text-destructive hover:text-destructive"
+              variant="destructiveGhost"
+              className="mr-auto"
               onClick={handleDelete}
               data-testid="node-config-delete"
             >

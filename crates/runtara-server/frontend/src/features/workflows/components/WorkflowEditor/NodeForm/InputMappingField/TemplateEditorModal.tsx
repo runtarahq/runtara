@@ -419,9 +419,9 @@ export function TemplateEditorModal({
             </Button>
             <Button
               type="button"
-              variant="ghost"
+              variant="quiet"
               size="sm"
-              className="h-7 px-2 font-mono text-xs text-muted-foreground hover:bg-muted"
+              className="h-7 px-2 font-mono text-xs hover:bg-muted"
               onClick={() => insertSnippet('{# comment #}')}
             >
               comment
@@ -483,9 +483,9 @@ export function TemplateEditorModal({
                   </span>
                   <Button
                     type="button"
-                    variant="ghost"
+                    variant="quiet"
                     size="sm"
-                    className="h-6 px-2 text-xs text-muted-foreground"
+                    className="h-6 px-2 text-xs"
                     onClick={copyToClipboard}
                   >
                     {copied ? (

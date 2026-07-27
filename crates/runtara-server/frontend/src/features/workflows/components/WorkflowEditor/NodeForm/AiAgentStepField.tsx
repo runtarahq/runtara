@@ -1076,9 +1076,9 @@ export function AiAgentStepField({ name }: AiAgentStepFieldProps) {
               </span>
               <Button
                 type="button"
-                variant="ghost"
+                variant="quietDestructive"
                 size="sm"
-                className="h-7 px-2 text-xs text-muted-foreground hover:text-destructive"
+                className="h-7 px-2 text-xs"
                 onClick={handleRemoveMemory}
                 title="Remove conversation memory and its provider step"
               >

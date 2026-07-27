@@ -75,9 +75,8 @@ export function BlockHostInEdit({
           </Button>
           <Button
             type="button"
-            variant="ghost"
+            variant="destructiveGhost"
             size="icon-sm"
-            className="text-destructive"
             title="Remove block"
             onClick={onDelete}
           >

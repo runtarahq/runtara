@@ -152,12 +152,7 @@ export function RateLimits() {
                 onChange={handleDateRangeChange}
                 options={VALID_DATE_RANGES}
               />
-              <Button
-                onClick={handleRefresh}
-                variant="outline"
-                size="sm"
-                className="text-muted-foreground"
-              >
+              <Button onClick={handleRefresh} variant="quietOutline" size="sm">
                 <RefreshCw className="mr-2 size-4" />
                 Refresh
               </Button>

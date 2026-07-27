@@ -63,9 +63,9 @@ export function ConnectionFieldFrame({
         clearable && (
           <Button
             type="button"
-            variant="ghost"
+            variant="destructiveGhost"
             size="sm"
-            className="h-7 shrink-0 px-2 text-xs text-destructive hover:text-destructive"
+            className="h-7 shrink-0 px-2 text-xs"
             aria-label={`Clear stored ${label}`}
             onClick={onClear}
           >

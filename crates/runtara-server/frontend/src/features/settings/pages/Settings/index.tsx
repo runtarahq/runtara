@@ -132,9 +132,8 @@ export function Settings() {
                       always available on the keys shown — not role-gated. */}
                   <WithTooltip label="Revoke API key">
                     <Button
-                      variant="ghost"
+                      variant="quietDestructive"
                       size="icon-sm"
-                      className="text-muted-foreground hover:text-destructive"
                       aria-label="Revoke API key"
                       onClick={() => setRevokeTarget(key)}
                     >

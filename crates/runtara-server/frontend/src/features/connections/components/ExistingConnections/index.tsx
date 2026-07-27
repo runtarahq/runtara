@@ -186,9 +186,8 @@ export function ExistingConnections({ toolbar }: ExistingConnectionsProps) {
                       <Link to={`/connections/${connection.id}`}>
                         <WithTooltip label="Edit connection">
                           <Button
-                            variant="ghost"
+                            variant="quiet"
                             size="icon-sm"
-                            className="text-muted-foreground"
                             aria-label="Edit connection"
                           >
                             <Pencil className="size-4" />
@@ -199,9 +198,8 @@ export function ExistingConnections({ toolbar }: ExistingConnectionsProps) {
                     <Can permission="connection:delete">
                       <WithTooltip label="Delete connection">
                         <Button
-                          variant="ghost"
+                          variant="quietDestructive"
                           size="icon-sm"
-                          className="text-muted-foreground hover:text-destructive"
                           aria-label="Delete connection"
                           disabled={deletingId === connection.id}
                           onClick={() => setDeleteTarget(connection)}

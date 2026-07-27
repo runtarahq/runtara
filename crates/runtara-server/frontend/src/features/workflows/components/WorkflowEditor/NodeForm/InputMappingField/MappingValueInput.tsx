@@ -545,9 +545,9 @@ export function MappingValueInput({
         {canSetNull && !isNullValue && (
           <Button
             type="button"
-            variant="ghost"
+            variant="quiet"
             size="sm"
-            className="h-9 shrink-0 px-2 font-mono text-xs text-muted-foreground hover:text-foreground"
+            className="h-9 shrink-0 px-2 font-mono text-xs"
             onClick={() => onChange(null)}
             disabled={disabled}
             title="Set literal null"

@@ -1155,9 +1155,9 @@ const ConditionBuilder = ({
                       {isVariadicOperator && !disabled ? (
                         <Button
                           type="button"
-                          variant="ghost"
+                          variant="quietDestructive"
                           size="icon"
-                          className="size-6 text-muted-foreground hover:text-destructive"
+                          className="size-6"
                           onClick={() => handleRemoveArgument(index)}
                         >
                           <Trash2 className="size-3" />
@@ -1169,9 +1169,9 @@ const ConditionBuilder = ({
                               <TooltipTrigger asChild>
                                 <Button
                                   type="button"
-                                  variant="ghost"
+                                  variant="quietDestructive"
                                   size="icon"
-                                  className="size-6 text-muted-foreground hover:text-destructive"
+                                  className="size-6"
                                   onClick={() =>
                                     handleClearOperationArgument(index)
                                   }
@@ -1220,9 +1220,9 @@ const ConditionBuilder = ({
                   {isVariadicOperator && !disabled && (
                     <Button
                       type="button"
-                      variant="ghost"
+                      variant="quietDestructive"
                       size="icon"
-                      className="size-6 text-muted-foreground hover:text-destructive"
+                      className="size-6"
                       onClick={() => handleRemoveArgument(index)}
                     >
                       <Trash2 className="size-3" />
@@ -1252,9 +1252,9 @@ const ConditionBuilder = ({
                   {isVariadicOperator && !disabled && (
                     <Button
                       type="button"
-                      variant="ghost"
+                      variant="quietDestructive"
                       size="icon"
-                      className="size-6 text-muted-foreground hover:text-destructive"
+                      className="size-6"
                       onClick={() => handleRemoveArgument(index)}
                     >
                       <Trash2 className="size-3" />

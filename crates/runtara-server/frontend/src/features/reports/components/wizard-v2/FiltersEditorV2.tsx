@@ -105,9 +105,8 @@ export function FiltersEditorV2({
                 <CardTitle className="text-sm">{filter.label}</CardTitle>
                 <Button
                   type="button"
-                  variant="ghost"
+                  variant="destructiveGhost"
                   size="icon-sm"
-                  className="text-destructive"
                   onClick={() =>
                     updateFilters(filters.filter((f) => f.id !== filter.id))
                   }

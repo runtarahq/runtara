@@ -69,9 +69,9 @@ export function WorkflowForm(props: WorkflowFormProps) {
               <Link to="/workflows" className="w-full sm:w-auto">
                 <Button
                   type="button"
-                  variant="ghost"
+                  variant="quiet"
                   disabled={loading}
-                  className="w-full justify-center text-muted-foreground hover:text-foreground"
+                  className="w-full justify-center"
                 >
                   Cancel
                 </Button>

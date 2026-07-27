@@ -200,9 +200,8 @@ export function ObjectSchemaDtosTable({
                   <div className="flex items-center justify-end gap-1">
                     <WithTooltip label="Manage instances">
                       <Button
-                        variant="ghost"
+                        variant="quiet"
                         size="icon-sm"
-                        className="text-muted-foreground"
                         aria-label="Manage instances"
                         onClick={() => handleViewInstances(schema)}
                       >
@@ -212,9 +211,8 @@ export function ObjectSchemaDtosTable({
                     <Can permission="database:update">
                       <WithTooltip label="Edit object type">
                         <Button
-                          variant="ghost"
+                          variant="quiet"
                           size="icon-sm"
-                          className="text-muted-foreground"
                           aria-label="Edit object type"
                           onClick={() => handleEdit(schema)}
                         >
@@ -225,9 +223,8 @@ export function ObjectSchemaDtosTable({
                     <Can permission="database:delete">
                       <WithTooltip label="Delete object type">
                         <Button
-                          variant="ghost"
+                          variant="quietDestructive"
                           size="icon-sm"
-                          className="text-muted-foreground hover:text-destructive"
                           aria-label="Delete object type"
                           disabled={deletingId === schema.id}
                           onClick={() => setDeleteTarget(schema)}

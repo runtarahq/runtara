@@ -155,9 +155,9 @@ export function CronInputsField({
                     <Button
                       key={name}
                       type="button"
-                      variant="ghost"
+                      variant="quiet"
                       size="sm"
-                      className="h-6 px-2 text-xs text-muted-foreground"
+                      className="h-6 px-2 text-xs"
                       aria-label={`Clear ${formField.label ?? name}`}
                       onClick={() => {
                         const { [name]: _removed, ...nextData } =

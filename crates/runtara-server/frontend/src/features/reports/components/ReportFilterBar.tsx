@@ -268,9 +268,9 @@ function AddFilterMenu({
       <PopoverTrigger asChild>
         <Button
           type="button"
-          variant="outline"
+          variant="quietOutline"
           size="sm"
-          className="h-8 gap-1.5 rounded-full px-3 text-sm font-normal text-muted-foreground"
+          className="h-8 gap-1.5 rounded-full px-3 text-sm font-normal"
         >
           <Plus className="size-3.5" />
           {hasActive ? 'Add filter' : 'Filter'}

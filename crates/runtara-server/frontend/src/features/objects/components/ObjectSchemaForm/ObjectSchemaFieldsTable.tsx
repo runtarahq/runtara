@@ -190,9 +190,9 @@ function FieldRow({ field, onUpdate, onRemove }: FieldRowProps) {
               <PopoverTrigger asChild>
                 <Button
                   type="button"
-                  variant="ghost"
+                  variant="quiet"
                   size="icon"
-                  className="size-8 text-muted-foreground hover:text-foreground"
+                  className="size-8"
                 >
                   <Settings2 className="size-4" />
                 </Button>
@@ -366,10 +366,10 @@ function FieldRow({ field, onUpdate, onRemove }: FieldRowProps) {
           )}
           <Button
             type="button"
-            variant="ghost"
+            variant="quietDestructive"
             size="icon"
             onClick={onRemove}
-            className="size-8 text-muted-foreground opacity-0 transition-opacity hover:text-destructive group-hover:opacity-100"
+            className="size-8 opacity-0 transition-opacity group-hover:opacity-100"
             title="Remove column"
           >
             <Trash2 className="size-4" />
@@ -484,13 +484,7 @@ export function ObjectSchemaFieldsTable({
       </div>
 
       <div className="flex justify-end">
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          className="text-muted-foreground hover:text-foreground"
-          onClick={onAddField}
-        >
+        <Button type="button" variant="quiet" size="sm" onClick={onAddField}>
           <Plus className="mr-2 size-4" />
           Add column
         </Button>

@@ -700,9 +700,9 @@ export function CompositeValueItem({
         {removable && onRemove && !disabled && (
           <Button
             type="button"
-            variant="ghost"
+            variant="quietDestructive"
             size="icon-sm"
-            className="shrink-0 text-muted-foreground hover:text-destructive"
+            className="shrink-0"
             onClick={onRemove}
           >
             <X className="size-3.5" />

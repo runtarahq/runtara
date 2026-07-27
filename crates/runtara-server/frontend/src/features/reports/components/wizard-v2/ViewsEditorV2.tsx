@@ -179,9 +179,8 @@ export function ViewsEditorV2({ definition, onChange }: ViewsEditorV2Props) {
                   </CardTitle>
                   <Button
                     type="button"
-                    variant="ghost"
+                    variant="destructiveGhost"
                     size="icon-sm"
-                    className="text-destructive"
                     aria-label={`Delete view ${view.title || view.id}`}
                     onClick={() => deleteView(view.id)}
                   >
@@ -379,9 +378,8 @@ function NavigationGroupEditor({
         </CardTitle>
         <Button
           type="button"
-          variant="ghost"
+          variant="destructiveGhost"
           size="icon-sm"
-          className="text-destructive"
           aria-label={`Delete navigation group ${group.id}`}
           onClick={onDelete}
         >
@@ -704,9 +702,9 @@ function MemberActions({ index, count, onMove, onDelete }: MemberActionsProps) {
       </Button>
       <Button
         type="button"
-        variant="ghost"
+        variant="destructiveGhost"
         size="icon"
-        className="size-8 text-destructive"
+        className="size-8"
         aria-label={`Remove member ${index + 1}`}
         onClick={onDelete}
       >

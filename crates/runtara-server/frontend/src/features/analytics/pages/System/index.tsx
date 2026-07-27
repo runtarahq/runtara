@@ -38,12 +38,7 @@ export function System() {
             />
           }
           actions={
-            <Button
-              onClick={handleRefresh}
-              variant="outline"
-              size="sm"
-              className="text-muted-foreground"
-            >
+            <Button onClick={handleRefresh} variant="quietOutline" size="sm">
               <RefreshCw className="mr-2 size-4" />
               Refresh
             </Button>

@@ -158,9 +158,9 @@ function GroupEditor({
         />
         <Button
           type="button"
-          variant="ghost"
+          variant="destructiveGhost"
           size="icon"
-          className="size-8 text-destructive"
+          className="size-8"
           onClick={onDelete}
         >
           <Trash2 className="size-3.5" />
@@ -314,9 +314,8 @@ function FieldEditor({
         </Select>
         <Button
           type="button"
-          variant="ghost"
+          variant="destructiveGhost"
           size="icon-sm"
-          className="text-destructive"
           onClick={onDelete}
         >
           <Trash2 className="size-3.5" />

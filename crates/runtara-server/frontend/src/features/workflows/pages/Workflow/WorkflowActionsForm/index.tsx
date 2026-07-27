@@ -305,9 +305,9 @@ export function WorkflowActionsForm(props: Props) {
               {isExecutionActive && (
                 <Button
                   type="button"
-                  variant="ghost"
+                  variant="destructiveGhost"
                   size="icon-sm"
-                  className="rounded text-destructive hover:bg-destructive/10 hover:text-destructive"
+                  className="rounded hover:bg-destructive/10"
                   disabled={isLoading}
                   onClick={onStop}
                   title="Stop execution"
@@ -321,9 +321,9 @@ export function WorkflowActionsForm(props: Props) {
             {isExecuting && onViewExecutionDetails && (
               <Button
                 type="button"
-                variant="ghost"
+                variant="quiet"
                 size="icon-sm"
-                className="rounded text-muted-foreground hover:bg-muted hover:text-foreground"
+                className="rounded hover:bg-muted"
                 onClick={onViewExecutionDetails}
                 title="View execution details"
               >
@@ -335,9 +335,9 @@ export function WorkflowActionsForm(props: Props) {
             {isExecuting && onClearExecution && (
               <Button
                 type="button"
-                variant="ghost"
+                variant="quiet"
                 size="icon-sm"
-                className="rounded text-muted-foreground hover:bg-muted hover:text-foreground"
+                className="rounded hover:bg-muted"
                 onClick={onClearExecution}
                 title="Clear execution results"
               >
@@ -367,9 +367,9 @@ export function WorkflowActionsForm(props: Props) {
             {/* Export button */}
             <Button
               type="button"
-              variant="ghost"
+              variant="quiet"
               size="icon-sm"
-              className="rounded text-muted-foreground hover:bg-muted hover:text-foreground"
+              className="rounded hover:bg-muted"
               disabled={isLoading}
               onClick={onExportJSON}
               title="Export workflow"
@@ -380,9 +380,9 @@ export function WorkflowActionsForm(props: Props) {
             {/* Import button */}
             <Button
               type="button"
-              variant="ghost"
+              variant="quiet"
               size="icon-sm"
-              className="rounded text-muted-foreground hover:bg-muted hover:text-foreground"
+              className="rounded hover:bg-muted"
               disabled={isLoading}
               onClick={handleImportClick}
               title="Import workflow"
@@ -395,9 +395,9 @@ export function WorkflowActionsForm(props: Props) {
             {/* Add note button */}
             <Button
               type="button"
-              variant="ghost"
+              variant="quiet"
               size="icon-sm"
-              className="rounded text-muted-foreground hover:bg-muted hover:text-foreground"
+              className="rounded hover:bg-muted"
               disabled={isLoading || isExecuting}
               onClick={onAddNote}
               title="Add note"
@@ -408,9 +408,9 @@ export function WorkflowActionsForm(props: Props) {
             {/* Auto-layout button */}
             <Button
               type="button"
-              variant="ghost"
+              variant="quiet"
               size="icon-sm"
-              className="rounded text-muted-foreground hover:bg-muted hover:text-foreground"
+              className="rounded hover:bg-muted"
               disabled={isLoading || isExecuting}
               onClick={onAutoLayout}
               title="Auto-layout"

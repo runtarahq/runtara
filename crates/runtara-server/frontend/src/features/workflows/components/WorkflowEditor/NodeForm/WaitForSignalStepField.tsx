@@ -259,9 +259,9 @@ export function WaitForSignalStepField({ name }: WaitForSignalStepFieldProps) {
       <div>
         <Button
           type="button"
-          variant="ghost"
+          variant="quiet"
           size="sm"
-          className="px-0 text-xs text-muted-foreground"
+          className="px-0 text-xs"
           onClick={() => setShowAdvanced(!showAdvanced)}
         >
           {showAdvanced ? (

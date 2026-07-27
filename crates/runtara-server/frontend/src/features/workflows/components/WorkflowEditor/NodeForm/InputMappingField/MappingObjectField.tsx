@@ -256,9 +256,9 @@ export function MappingObjectField({
       <div className="flex justify-end">
         <Button
           type="button"
-          variant="ghost"
+          variant="quiet"
           size="sm"
-          className="h-6 px-1 text-xs text-muted-foreground hover:text-foreground"
+          className="h-6 px-1 text-xs"
           onClick={() => setShowJson(!showJson)}
           disabled={!structuredEditable}
         >
@@ -487,9 +487,9 @@ function MappingObjectRow({
 
         <Button
           type="button"
-          variant="ghost"
+          variant="quietDestructive"
           size="icon"
-          className="h-9 w-7 shrink-0 text-muted-foreground hover:text-destructive"
+          className="h-9 w-7 shrink-0"
           onClick={onRemove}
           disabled={disabled}
           title="Remove field"

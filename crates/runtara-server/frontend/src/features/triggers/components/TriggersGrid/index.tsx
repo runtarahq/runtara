@@ -226,9 +226,9 @@ export function TriggersGrid({
                           </Tooltip>
                           <WithTooltip label="Copy endpoint">
                             <Button
-                              variant="ghost"
+                              variant="quiet"
                               size="icon"
-                              className="size-6 shrink-0 text-muted-foreground"
+                              className="size-6 shrink-0"
                               aria-label="Copy endpoint"
                               onClick={() => handleCopyEndpoint(endpoint)}
                             >
@@ -253,9 +253,9 @@ export function TriggersGrid({
                             </Tooltip>
                             <WithTooltip label="Copy sync endpoint">
                               <Button
-                                variant="ghost"
+                                variant="quiet"
                                 size="icon"
-                                className="size-6 shrink-0 text-muted-foreground"
+                                className="size-6 shrink-0"
                                 aria-label="Copy sync endpoint"
                                 onClick={() => handleCopyEndpoint(syncEndpoint)}
                               >
@@ -277,9 +277,8 @@ export function TriggersGrid({
                         <Link to={`/invocation-triggers/${trigger.id}`}>
                           <WithTooltip label="Edit trigger">
                             <Button
-                              variant="ghost"
+                              variant="quiet"
                               size="icon-sm"
-                              className="text-muted-foreground"
                               aria-label="Edit trigger"
                             >
                               <Pencil className="size-4" />
@@ -290,9 +289,8 @@ export function TriggersGrid({
                       <Can permission="trigger:delete">
                         <WithTooltip label="Delete trigger">
                           <Button
-                            variant="ghost"
+                            variant="quietDestructive"
                             size="icon-sm"
-                            className="text-muted-foreground hover:text-destructive"
                             aria-label="Delete trigger"
                             disabled={deletingId === trigger.id}
                             onClick={() => setDeleteTarget(trigger)}
