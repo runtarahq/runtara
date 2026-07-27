@@ -15,12 +15,15 @@ const buttonVariants = cva(
         default: 'bg-primary text-primary-foreground hover:bg-primary/90',
         destructive:
           'bg-destructive text-destructive-foreground hover:bg-destructive/90',
+        // Non-primary actions label themselves in the brand colour rather than
+        // the default foreground. text-primary-text, not text-primary: the
+        // latter is 3.64:1 on white, under the AA bar for text this size.
         outline:
-          'border border-input bg-background hover:bg-accent hover:text-accent-foreground',
+          'border border-input bg-background text-primary-text hover:bg-accent hover:text-accent-foreground',
         secondary:
           'bg-secondary text-secondary-foreground hover:bg-secondary/80',
-        ghost: 'hover:bg-accent hover:text-accent-foreground',
-        link: 'text-primary underline-offset-4 hover:underline',
+        ghost: 'text-primary-text hover:bg-accent hover:text-accent-foreground',
+        link: 'text-primary-text underline-offset-4 hover:underline',
       },
       size: {
         default: 'h-8 px-3 py-1',

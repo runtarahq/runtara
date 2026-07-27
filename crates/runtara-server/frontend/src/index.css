@@ -68,6 +68,11 @@
     --popover-foreground: 214 32% 20%; /* deep blue-gray */
     --primary: 217 91% 60%; /* vibrant blue */
     --primary-foreground: 0 0% 100%; /* white */
+    /* Primary as TEXT on a light surface. --primary itself is 3.64:1 on white,
+       under the 4.5:1 WCAG AA bar for body-sized text, so it may tint a
+       background but must not be a label colour here. 45% lightness is 6.00:1
+       — the same value the print block already uses for this reason. */
+    --primary-text: 217 91% 45%;
     --secondary: 142 76% 93%; /* very light green */
     --secondary-foreground: 142 76% 20%; /* dark green */
     --muted: 210 40% 96%; /* very light blue-gray */
@@ -121,6 +126,9 @@
     --popover-foreground: 0 0% 75%; /* matches --foreground */
     --primary: 217 91% 60%; /* #3b82f6 - Bright blue for CTAs */
     --primary-foreground: 0 0% 100%; /* white */
+    /* On the dark surfaces --primary already clears AA (5.44:1 on background,
+       4.78:1 on card); darkening it here would make it worse. */
+    --primary-text: 217 91% 60%;
     --secondary: 0 0% 7%; /* #111111 - Slightly lighter dark background */
     --secondary-foreground: 0 0% 45%; /* #737373 - Darker gray for secondary text */
     --muted: 0 0% 13%; /* #222222 - Card hover background */
