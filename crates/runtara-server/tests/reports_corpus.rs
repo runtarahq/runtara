@@ -30,7 +30,10 @@ fn collect_condition_shapes(
         Value::Object(values) => {
             for (key, child) in values {
                 let child_path = format!("{path}.{key}");
-                if matches!(key.as_str(), "showWhen" | "visibleWhen" | "disabledWhen") {
+                if matches!(
+                    key.as_str(),
+                    "showWhen" | "visibleWhen" | "hiddenWhen" | "disabledWhen" | "condition"
+                ) {
                     conditions.insert(child_path.clone(), child.clone());
                 }
                 collect_condition_shapes(child, &child_path, conditions);
@@ -127,9 +130,16 @@ fn fixtures_have_no_lint_warnings() {
     }
 }
 
+/// Each condition location accepts either wire-shape and normalizes to its own
+/// canonical one, so the DTO boundary is allowed to *re-encode* a condition —
+/// but never to change what it means or to drop it. A condition that comes out
+/// unchanged was already canonical; one that comes out different must match the
+/// documented normalization exactly, computed here through the same converter
+/// the DTO uses. Anything else is serde drift.
 #[test]
 fn stored_report_condition_shapes_survive_the_dto_boundary_losslessly() {
     let mut audited = 0usize;
+    let mut normalized = 0usize;
     for (name, value) in collect_fixtures() {
         let mut before = std::collections::BTreeMap::new();
         collect_condition_shapes(&value, "$", &mut before);
@@ -138,8 +148,60 @@ fn stored_report_condition_shapes_survive_the_dto_boundary_losslessly() {
         let serialized = serde_json::to_value(dto).unwrap();
         let mut after = std::collections::BTreeMap::new();
         collect_condition_shapes(&serialized, "$", &mut after);
-        assert_eq!(before, after, "{name}: condition wire shape changed");
+
+        assert_eq!(
+            before.keys().collect::<Vec<_>>(),
+            after.keys().collect::<Vec<_>>(),
+            "{name}: a condition was dropped, added, or moved"
+        );
+
+        for (path, original) in &before {
+            let round_tripped = &after[path];
+            if original == round_tripped {
+                continue;
+            }
+            assert_eq!(
+                &expected_normalization(path, original),
+                round_tripped,
+                "{name} {path}: condition changed by something other than \
+                 wire-shape normalization"
+            );
+            normalized += 1;
+        }
         audited += before.len();
     }
     assert!(audited >= 2, "expected representative stored conditions");
+    assert!(
+        normalized >= 2,
+        "expected the corpus to cover conditions authored in the non-canonical \
+         wire-shape, otherwise this test never exercises normalization"
+    );
+}
+
+/// The canonical encoding `path` should end up in: source filters flatten,
+/// row-visibility conditions take the tagged form. `showWhen` is a separate
+/// typed struct and is never re-encoded.
+fn expected_normalization(path: &str, original: &Value) -> Value {
+    let field = path.rsplit('.').next().unwrap_or_default();
+    match field {
+        "condition" => {
+            let expression = serde_json::from_value(original.clone())
+                .unwrap_or_else(|e| panic!("{path}: not a condition expression: {e}"));
+            serde_json::to_value(
+                runtara_report_dsl::expression_to_condition(&expression)
+                    .unwrap_or_else(|e| panic!("{path}: flatten: {e}")),
+            )
+            .unwrap()
+        }
+        "visibleWhen" | "hiddenWhen" | "disabledWhen" => {
+            let condition = serde_json::from_value(original.clone())
+                .unwrap_or_else(|e| panic!("{path}: not a flat condition: {e}"));
+            serde_json::to_value(
+                runtara_report_dsl::condition_to_expression(&condition)
+                    .unwrap_or_else(|e| panic!("{path}: lift: {e}")),
+            )
+            .unwrap()
+        }
+        _ => panic!("{path}: {field} conditions are not re-encoded and must round-trip verbatim"),
+    }
 }

@@ -1,0 +1,36 @@
+---
+source: crates/runtara-server/tests/reports_render_corpus.rs
+expression: snapshot_body
+---
+{
+  "blocks": {
+    "interop_orders": {
+      "error": {
+        "blockId": "interop_orders",
+        "code": "BLOCK_RENDER_FAILED",
+        "message": "Schema not found: Order"
+      },
+      "status": "error",
+      "title": "Orders",
+      "type": "table"
+    }
+  },
+  "errors": [
+    {
+      "blockId": "interop_orders",
+      "code": "BLOCK_RENDER_FAILED",
+      "message": "Schema not found: Order"
+    }
+  ],
+  "navigation": {},
+  "report": {
+    "definitionVersion": 1,
+    "id": "rep_13_condition_shape_interop"
+  },
+  "resolvedFilters": {
+    "status": [
+      "active"
+    ]
+  },
+  "success": true
+}
