@@ -2375,7 +2375,11 @@ function WorkflowTimelineItem({
             : executionStatus
               ? getExecutionBorderClass(executionStatus.status)
               : (isSelected || isEditingThisNode) &&
-                'border-primary bg-primary/5',
+                // Border, shadow and ring — no background tint, matching
+                // BaseNode. cn() is tailwind-merge, so a `bg-primary/5` here
+                // would REPLACE bg-card rather than layer over it, leaving the
+                // card 95% transparent and the dotted surface showing through.
+                'border-primary shadow-md ring-1 ring-primary/20',
           executionStatus?.status === 'suspended' &&
             'animate-glow-pulse border-2',
           !canInspectInDebug && 'opacity-60',
