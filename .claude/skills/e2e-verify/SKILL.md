@@ -5,7 +5,6 @@ description: Use to verify changes to agents, capabilities, integrations, steps,
 
 # Run e2e verification locally
 
-Full reference: [docs/e2e-testing-for-agents.md](../../../docs/e2e-testing-for-agents.md).
 Canonical working script: [e2e/test_obm_query_by_id_workflow.sh](../../../e2e/test_obm_query_by_id_workflow.sh) — self-contained (own DBs, isolated Valkey, server HTTP API end to end). Crib from it.
 
 ## Why
@@ -92,18 +91,29 @@ docker run -d --rm --name runtara-e2e-valkey -p 16390:6379 valkey/valkey:8-alpin
 
 ### 4. Run the in-process e2e suite
 
-The modern compile→register→execute path lives inside two CI-gated cargo test suites in `runtara-workflows`. They drive the same components-mode compiler that the old `runtara-compile` CLI did, then execute the produced WASM in-process. ~35 tests in ~55s, including a 41-case execution smoke.
+The modern compile→register→execute path lives inside two CI-gated cargo test suites in `runtara-workflows`. They drive the same components-mode compiler that the old `runtara-compile` CLI did, then execute the produced WASM in-process. ~174 tests in ~110s (159 in `direct_wasm_execute`, 15 in `validation_integration_test`).
+
+Run from the repo root:
 
 ```bash
 RUNTARA_RUN_DIRECT_WASM_E2E=1 \
-RUNTARA_AGENT_COMPONENTS_DIR=/Users/dmytro/Workspace/runtara/target/wasm32-wasip2/release \
+RUNTARA_AGENT_COMPONENTS_DIR="$PWD/target/wasm32-wasip2/release" \
   cargo test -p runtara-workflows \
+  --features="direct-wasm-integration-tests" \
   --test direct_wasm_execute \
   --test validation_integration_test \
   -- --nocapture --test-threads=1
 ```
 
-Without `RUNTARA_RUN_DIRECT_WASM_E2E=1` the tests are gated out — they show as `ok. 0 passed; 0 ignored` and prove nothing. `RUNTARA_AGENT_COMPONENTS_DIR` must point at the directory step 2 produced.
+`--features="direct-wasm-integration-tests"` is **required** — the `direct_wasm_execute` target declares it via `required-features`, so without the flag cargo refuses to build it:
+
+```
+error: target 'direct_wasm_execute' in package 'runtara-workflows' requires the features: 'direct-wasm-integration-tests'
+```
+
+The cargo feature is the **only** gate. `RUNTARA_RUN_DIRECT_WASM_E2E=1` is a leftover from the old runtime gate — nothing reads it anymore (it survives only in two stale doc comments in `direct_wasm_execute.rs`), and CI sets just the feature. It is kept above as a harmless belt-and-braces; a run without it still executes all 159 tests.
+
+`RUNTARA_AGENT_COMPONENTS_DIR` must point at the directory step 2 produced — it is load-bearing, and the suite fails without staged components.
 
 For agent / capability changes: read the assertions in `crates/runtara-workflows/tests/direct_wasm_execute.rs` (and any new tests you added) to confirm the output reflects the logic you added, not a stale cached binary. If you added a new agent or capability, add a case that exercises it.
 
@@ -203,6 +213,7 @@ Override grace with `RUNTARA_SHUTDOWN_GRACE_MS=5000`. After a restart, suspended
 | Symptom | Fix |
 |---|---|
 | `AddrInUse` on boot — or health passes but behavior looks stale | A leftover e2e server still holds the port and answers the health check from the **old** process. `kill -9 $(lsof -ti tcp:17001)` before rerunning (step 0) |
+| `target 'direct_wasm_execute' ... requires the features: 'direct-wasm-integration-tests'` | Add `--features="direct-wasm-integration-tests"` to the `cargo test` invocation (step 4) |
 | `agent component '<x>' missing — expected at .../runtara_agent_<x>.wasm` | Build components (step 2): `scripts/build-agent-components.sh`, or the single-agent path + `emit-meta` |
 | Compile succeeds but output shows old agent logic | Rebuild the component + `emit-meta`, then **recompile** the workflow — components are composed in at compile time (step 7) |
 | 401 / auth error from `/api/runtime` | Set `AUTH_PROVIDER=local`, `SESSION_TOKEN_SECRET`, and `TENANT_ID` in the server env (step 4) |
