@@ -138,7 +138,8 @@ interface DeleteFolderDialogProps {
   onOpenChange: (open: boolean) => void;
   onConfirm: (path: string) => void;
   folderPath: string;
-  workflowCount: number;
+  /** Undefined while the count is still being fetched. */
+  workflowCount: number | undefined;
   isLoading?: boolean;
 }
 
@@ -161,7 +162,13 @@ export function DeleteFolderDialog({
             Delete folder "{folderName}"?
           </AlertDialogTitle>
           <AlertDialogDescription>
-            {workflowCount > 0 ? (
+            {workflowCount === undefined ? (
+              // Never claim the folder is empty on a count we do not have yet.
+              <>
+                Any workflows in this folder will be moved to the root level.
+                This action cannot be undone.
+              </>
+            ) : workflowCount > 0 ? (
               <>
                 This folder contains {workflowCount} workflow
                 {workflowCount !== 1 ? 's' : ''}. Deleting the folder will move

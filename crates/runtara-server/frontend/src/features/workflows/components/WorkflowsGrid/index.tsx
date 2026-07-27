@@ -17,6 +17,7 @@ import {
 } from '@/shared/hooks/api';
 import { queryKeys } from '@/shared/queries/query-keys.ts';
 import { queryClient } from '@/main.tsx';
+import { folderCountLabel } from './folder-count-label';
 import {
   cloneWorkflow,
   getWorkflowsInFolder,
@@ -427,7 +428,7 @@ export function WorkflowsGrid({
         </TableHeader>
         <TableBody>
           {folders.map((folder) => {
-            const count = folderWorkflowCounts[folder.path] || 0;
+            const count = folderWorkflowCounts[folder.path];
             return (
               <TableRow
                 key={`folder-${folder.path}`}
@@ -441,7 +442,7 @@ export function WorkflowsGrid({
                   </span>
                 </TableCell>
                 <TableCell className="text-muted-foreground">
-                  {count} workflow{count !== 1 ? 's' : ''}
+                  {folderCountLabel(count)}
                 </TableCell>
                 <TableCell className="text-muted-foreground">—</TableCell>
                 <TableCell

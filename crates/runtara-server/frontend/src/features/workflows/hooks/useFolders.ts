@@ -1,7 +1,14 @@
-import { useQueryClient } from '@tanstack/react-query';
+import { useQueries, useQueryClient } from '@tanstack/react-query';
+import { useAuth } from 'react-oidc-context';
 import { queryKeys } from '@/shared/queries/query-keys';
 import { useCustomQuery, useCustomMutation } from '@/shared/hooks/api';
-import { getFolders, renameFolder, deleteFolder } from '../queries';
+import { isOidcAuth } from '@/shared/config/runtimeConfig';
+import {
+  getFolders,
+  getFolderWorkflowCount,
+  renameFolder,
+  deleteFolder,
+} from '../queries';
 
 /**
  * Represents a parsed folder with its path and display information
@@ -114,6 +121,47 @@ export function useFolders() {
     ...result,
     data: transformedData,
   };
+}
+
+/**
+ * Hook to fetch the workflow count for each of the given folders.
+ *
+ * One count query per folder, asked of the server with `recursive: true`. This
+ * is deliberately not derived from a page of workflows on the client: any such
+ * page is capped, so once a tenant holds more workflows than the cap the tally
+ * silently undercounts (folders holding workflows read "0 workflows"). Counting
+ * recursively also means a folder whose workflows all live in subfolders
+ * reports what it actually contains instead of 0.
+ *
+ * Keyed under `workflows.folders()`, so the existing
+ * `invalidateQueries({ queryKey: queryKeys.workflows.all })` in the folder and
+ * workflow mutations refreshes these counts too.
+ */
+export function useFolderWorkflowCounts(
+  folderPaths: string[]
+): Record<string, number> {
+  const auth = useAuth();
+  const token = auth.user?.access_token;
+
+  return useQueries({
+    queries: folderPaths.map((path) => ({
+      queryKey: queryKeys.workflows.folderCount(path),
+      queryFn: () => getFolderWorkflowCount(token as string, path),
+      enabled: !!token || !isOidcAuth,
+      refetchOnWindowFocus: false,
+    })),
+    // `combine` keeps the returned record referentially stable between renders.
+    combine: (results) => {
+      const counts: Record<string, number> = {};
+      folderPaths.forEach((path, index) => {
+        const count = results[index]?.data;
+        if (typeof count === 'number') {
+          counts[path] = count;
+        }
+      });
+      return counts;
+    },
+  });
 }
 
 /**

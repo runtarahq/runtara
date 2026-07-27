@@ -21,11 +21,11 @@ import { queryKeys } from '@/shared/queries/query-keys';
 import { getWorkflows } from '@/features/workflows/queries';
 import {
   useFolders,
+  useFolderWorkflowCounts,
   useRenameFolder,
   useDeleteFolder,
   getChildFolders,
 } from '../../hooks/useFolders';
-import { WorkflowDto } from '@/generated/RuntaraRuntimeApi';
 
 export function Workflows() {
   usePageTitle('Workflows');
@@ -62,25 +62,13 @@ export function Workflows() {
     return getChildFolders(foldersData.parsed, currentFolderPath);
   }, [foldersData?.parsed, currentFolderPath]);
 
-  // Get workflows data for folder counts (uses recursive to get all workflows)
-  const { data: workflowsResponse } = useCustomQuery({
-    queryKey: queryKeys.workflows.all,
-    queryFn: getWorkflows,
-  });
-  const workflows = useMemo(
-    () => (workflowsResponse?.data?.content || []) as WorkflowDto[],
-    [workflowsResponse?.data?.content]
+  const childFolderPaths = useMemo(
+    () => childFolders.map((folder) => folder.path),
+    [childFolders]
   );
 
-  // Count workflows per folder
-  const folderWorkflowCounts = useMemo(() => {
-    const counts: Record<string, number> = {};
-    workflows.forEach((workflow) => {
-      const folderPath = (workflow as any).path || '/';
-      counts[folderPath] = (counts[folderPath] || 0) + 1;
-    });
-    return counts;
-  }, [workflows]);
+  // Counts come from the server, one recursive count per visible folder.
+  const folderWorkflowCounts = useFolderWorkflowCounts(childFolderPaths);
 
   // Folder navigation - updates URL to enable browser back/forward navigation
   const handleFolderNavigate = useCallback(
@@ -229,7 +217,9 @@ export function Workflows() {
         onConfirm={handleDeleteFolder}
         folderPath={deleteFolderTarget || '/'}
         workflowCount={
-          deleteFolderTarget ? folderWorkflowCounts[deleteFolderTarget] || 0 : 0
+          deleteFolderTarget
+            ? folderWorkflowCounts[deleteFolderTarget]
+            : undefined
         }
         isLoading={deleteFolderMutation.isPending}
       />
