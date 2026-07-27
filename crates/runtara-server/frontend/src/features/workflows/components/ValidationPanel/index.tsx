@@ -24,7 +24,6 @@ interface ValidationPanelProps {
   /** Currently selected/viewing version */
   selectedVersion?: number;
   /** Currently active (deployed) version */
-  currentVersionNumber?: number;
   /** Callback when user selects a different version to view */
   onVersionChange?: (version: number | undefined) => void;
   /** Callback when user activates a version */
@@ -55,7 +54,6 @@ export function ValidationPanel({
   readOnly = false,
   versions = [],
   selectedVersion,
-  currentVersionNumber,
   onVersionChange,
   onVersionActivate,
   onVersionRebuild,
@@ -95,7 +93,6 @@ export function ValidationPanel({
             <VersionsPanelContent
               versions={versions}
               selectedVersion={selectedVersion}
-              currentVersionNumber={currentVersionNumber}
               onVersionChange={onVersionChange ?? (() => {})}
               onVersionActivate={onVersionActivate ?? (() => {})}
               onVersionRebuild={onVersionRebuild}

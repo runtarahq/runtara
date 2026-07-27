@@ -2234,7 +2234,6 @@ export function Workflow() {
         readOnly={!!executingInstanceId}
         versions={versionsWithDebug}
         selectedVersion={selectedVersion}
-        currentVersionNumber={data.currentVersionNumber}
         onVersionChange={handleVersionChange}
         onVersionActivate={handleVersionActivate}
         onVersionRebuild={handleVersionRebuild}

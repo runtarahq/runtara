@@ -9,7 +9,6 @@ import { WorkflowVersionInfoDto } from '@/features/workflows/queries';
 interface VersionsPanelContentProps {
   versions: WorkflowVersionInfoDto[];
   selectedVersion?: number;
-  currentVersionNumber?: number;
   onVersionChange: (version: number | undefined) => void;
   onVersionActivate: (version: number) => void;
   /** Force-recompile a previously compiled version. The handler invalidates
@@ -63,7 +62,6 @@ function getRelativeTime(dateString?: string): string {
 export function VersionsPanelContent({
   versions,
   selectedVersion,
-  currentVersionNumber,
   onVersionChange,
   onVersionActivate,
   onVersionRebuild,
@@ -98,7 +96,14 @@ export function VersionsPanelContent({
         </div>
         <div className="flex-1 overflow-y-auto">
           {sortedVersions.map((version) => {
-            const isActive = currentVersionNumber === version.versionNumber;
+            // Trust the server's own answer. It resolves the active version as
+            // `current_version` falling back to `latest_version`, so a freshly
+            // saved version can become the one that executes without anything
+            // calling set_current_version. Comparing against the separately
+            // cached `currentVersionNumber` — which the save path deliberately
+            // leaves untouched — put the "Active" badge on the previous
+            // version while runs were already going to the new one.
+            const isActive = version.isActive;
             const isSelected = selectedVersion === version.versionNumber;
             // The DB-backed `compiled` flag flips false while a rebuild is
             // mid-flight (the handler deletes the row before the worker
