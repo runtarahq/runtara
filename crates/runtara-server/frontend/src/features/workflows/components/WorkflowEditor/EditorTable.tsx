@@ -23,6 +23,8 @@ export function EditorTh({
   );
 }
 
+/** @lintignore Public row recipe exported alongside EditorTh so editors don't
+ *  retype the border/hover classes. */
 export function EditorRow({
   className,
   ...props

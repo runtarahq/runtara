@@ -6,11 +6,10 @@
   "ignore": [
     "e2e/utils/seed.ts",
     "e2e/utils/test-helpers.ts",
-    "e2e/fixtures/**",
     "src/generated/**",
     "src/shared/components/ui/**",
     "src/wasm/**"
   ],
-  "ignoreDependencies": ["@vitest/coverage-v8"],
+  "ignoreDependencies": ["@vitest/coverage-v8", "wait-on"],
   "ignoreExportsUsedInFile": true
 }

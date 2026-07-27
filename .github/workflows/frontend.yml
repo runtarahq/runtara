@@ -177,10 +177,12 @@ jobs:
       - name: ${{ matrix.check.name }}
         run: ${{ matrix.check.cmd }}
 
-  # knip (dead-code detection) reports 4 genuinely unused exports today, so it
-  # is informational rather than gating. Flip continue-on-error off once those
-  # are resolved. It needs the WASM too, otherwise it also reports the two
-  # generated imports as unresolved.
+  # knip (dead-code detection) reports clean today. It stays informational
+  # rather than gating for now; flip continue-on-error off to make it block.
+  # It needs the WASM, otherwise it also reports the two generated imports as
+  # unresolved. Note `wait-on` is in knip's ignoreDependencies because it is
+  # used below via `npx wait-on` in the mocked-Playwright job — knip does not
+  # parse workflow YAML and would otherwise call it unused.
   knip:
     name: knip (informational)
     runs-on: ubuntu-latest

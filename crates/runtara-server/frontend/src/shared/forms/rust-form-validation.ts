@@ -43,6 +43,9 @@ function unavailable(error: unknown): FormAnalysisResult {
   };
 }
 
+/** @lintignore Public definition-only half of the Rust validation bridge,
+ *  exported alongside analyzeFormWithRust so callers can check a form
+ *  definition without supplying data. */
 export async function validateFormDefinitionWithRust(
   definition: FormDefinition
 ): Promise<FormAnalysisResult> {
