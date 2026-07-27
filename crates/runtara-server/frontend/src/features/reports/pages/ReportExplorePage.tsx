@@ -427,7 +427,7 @@ export function ReportExplorePage() {
         action={
           <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
             <Link to={`/reports/${report.id}`}>
-              <Button variant="outline" className="sm:px-4">
+              <Button variant="secondary" bordered className="sm:px-4">
                 <ArrowLeft className="mr-2 size-4" />
                 Report
               </Button>
@@ -477,7 +477,7 @@ export function ReportExplorePage() {
       action={
         <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
           <Link to={`/reports/${report.id}`}>
-            <Button variant="outline" className="sm:px-4">
+            <Button variant="secondary" bordered className="sm:px-4">
               <ArrowLeft className="mr-2 size-4" />
               Report
             </Button>
@@ -518,7 +518,8 @@ export function ReportExplorePage() {
             <Button
               key={filter.id}
               type="button"
-              variant="outline"
+              variant="secondary"
+              bordered
               size="sm"
               className="h-7 rounded-full px-3 text-xs"
               onClick={() => removeExploreFilter(filter.id)}
@@ -843,7 +844,8 @@ export function ReportExplorePage() {
               />
               <Button
                 type="button"
-                variant="outline"
+                variant="secondary"
+                bordered
                 size="icon"
                 disabled={
                   !draftFilterField || draftFilterValue.trim().length === 0
@@ -886,7 +888,8 @@ export function ReportExplorePage() {
             </div>
             <Button
               type="button"
-              variant="outline"
+              variant="secondary"
+              bordered
               className="w-full"
               onClick={() =>
                 updateState((current) => ({
@@ -926,7 +929,8 @@ export function ReportExplorePage() {
             {canReplaceBlock && (
               <Button
                 type="button"
-                variant="outline"
+                variant="secondary"
+                bordered
                 className="w-full"
                 disabled={!canSaveBlock || updateReport.isPending}
                 onClick={() => handleSaveBlock('append')}
@@ -937,7 +941,8 @@ export function ReportExplorePage() {
             )}
             <Button
               type="button"
-              variant="outline"
+              variant="secondary"
+              bordered
               className="w-full"
               disabled={!savedBlock}
               onClick={handleCopyDefinition}
@@ -1137,7 +1142,8 @@ function Shelf({
           <Button
             key={value.id}
             type="button"
-            variant="outline"
+            variant="secondary"
+            bordered
             size="sm"
             className="h-8 rounded-full px-3 text-xs"
             onClick={() => onRemove(value.id)}

@@ -96,7 +96,8 @@ export function RateLimitSection({
             <div>
               <Button
                 type="button"
-                variant="outline"
+                variant="secondary"
+                bordered
                 size="sm"
                 onClick={applySafeLimit}
               >

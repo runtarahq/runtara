@@ -166,7 +166,8 @@ export function ConnectionStatusCard({
     <Button
       type="button"
       size="sm"
-      variant={isConnected ? 'outline' : 'default'}
+      variant={isConnected ? 'secondary' : 'primary'}
+      bordered={isConnected}
       onClick={handleReconnectClick}
       disabled={isReconnecting}
       className={!isConnected ? 'shadow-sm shadow-primary/20' : undefined}
@@ -231,7 +232,8 @@ export function ConnectionStatusCard({
             {!hasReauthChanges && onReconnect && (
               <Button
                 type="button"
-                variant="outline"
+                variant="secondary"
+                bordered
                 onClick={() => {
                   setGuardOpen(false);
                   onReconnect();

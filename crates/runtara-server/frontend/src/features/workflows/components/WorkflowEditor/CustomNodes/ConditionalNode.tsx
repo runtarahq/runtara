@@ -243,11 +243,12 @@ function ConditionalNodeComponent({
             <div className="ml-0.5 h-px w-4 bg-border" />
             <Button
               className="nodrag nopan pointer-events-auto size-3.5 rounded-full shadow-sm [&_svg]:size-1.5"
-              variant="outline"
+              variant="secondary"
+              bordered
               size="icon"
               aria-label={`Add true branch from ${data.name || id || 'conditional'}`}
               onClick={(e) => {
-                e.stopPropagation(); // Prevent node selection when clicking "+"
+                e.stopPropagation(); // Prevent node selection when clicking"+"
                 setActiveSource(SOURCE_TRUE);
                 setShowStepPicker(true);
               }}
@@ -273,11 +274,12 @@ function ConditionalNodeComponent({
             <div className="ml-0.5 h-px w-4 bg-border" />
             <Button
               className="nodrag nopan pointer-events-auto size-3.5 rounded-full shadow-sm [&_svg]:size-1.5"
-              variant="outline"
+              variant="secondary"
+              bordered
               size="icon"
               aria-label={`Add false branch from ${data.name || id || 'conditional'}`}
               onClick={(e) => {
-                e.stopPropagation(); // Prevent node selection when clicking "+"
+                e.stopPropagation(); // Prevent node selection when clicking"+"
                 setActiveSource(SOURCE_FALSE);
                 setShowStepPicker(true);
               }}

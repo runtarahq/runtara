@@ -154,7 +154,7 @@ export function TriggerForm(props: Props) {
           <Link to={cancelHref} className="w-full sm:w-auto">
             <Button
               type="button"
-              variant="quiet"
+              variant="secondary"
               className="w-full justify-center"
             >
               Cancel

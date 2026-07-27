@@ -972,7 +972,7 @@ export function AiAgentStepField({ name }: AiAgentStepFieldProps) {
                   )}
                   <Button
                     type="button"
-                    variant="ghost"
+                    variant="secondary"
                     size="icon"
                     className="size-6 opacity-0 transition-opacity group-hover:opacity-100"
                     onClick={() => handleRemoveTool(toolName)}
@@ -1005,7 +1005,8 @@ export function AiAgentStepField({ name }: AiAgentStepFieldProps) {
             />
             <Button
               type="button"
-              variant="outline"
+              variant="secondary"
+              bordered
               size="sm"
               className="h-8"
               onClick={handleAddTool}
@@ -1076,7 +1077,7 @@ export function AiAgentStepField({ name }: AiAgentStepFieldProps) {
               </span>
               <Button
                 type="button"
-                variant="quietDestructive"
+                variant="secondaryDestructive"
                 size="sm"
                 className="h-7 px-2 text-xs"
                 onClick={handleRemoveMemory}

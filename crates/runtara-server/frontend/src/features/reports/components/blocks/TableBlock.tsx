@@ -516,7 +516,8 @@ export function TableBlock({
               <div className="flex items-center gap-2">
                 {lastPageOffset !== undefined ? (
                   <Button
-                    variant="outline"
+                    variant="secondary"
+                    bordered
                     size="sm"
                     disabled={page.offset <= 0}
                     onClick={() => onPageChange(0, page.size)}
@@ -526,7 +527,8 @@ export function TableBlock({
                   </Button>
                 ) : null}
                 <Button
-                  variant="outline"
+                  variant="secondary"
+                  bordered
                   size="sm"
                   disabled={page.offset <= 0}
                   onClick={() =>
@@ -545,7 +547,8 @@ export function TableBlock({
                   </span>
                 ) : null}
                 <Button
-                  variant="outline"
+                  variant="secondary"
+                  bordered
                   size="sm"
                   disabled={!page.hasNextPage}
                   onClick={() =>
@@ -557,7 +560,8 @@ export function TableBlock({
                 </Button>
                 {lastPageOffset !== undefined ? (
                   <Button
-                    variant="outline"
+                    variant="secondary"
+                    bordered
                     size="sm"
                     disabled={page.offset >= lastPageOffset}
                     onClick={() => onPageChange(lastPageOffset, page.size)}
@@ -988,7 +992,8 @@ function WorkflowActionButton({
   return (
     <Button
       type="button"
-      variant="outline"
+      variant="secondary"
+      bordered
       size="sm"
       className="report-print-hidden h-8 max-w-full gap-1.5"
       disabled={Boolean(phase) || disabled}
@@ -1055,7 +1060,8 @@ function InteractionButtonsCell({
           <Button
             key={button.id}
             type="button"
-            variant="outline"
+            variant="secondary"
+            bordered
             size="sm"
             className="h-8 max-w-full gap-1.5 px-2.5"
             disabled={disabled}

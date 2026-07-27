@@ -164,7 +164,7 @@ export const FileInput = React.forwardRef<HTMLInputElement, FileInputProps>(
             {!disabled && (
               <Button
                 type="button"
-                variant="ghost"
+                variant="secondary"
                 size="sm"
                 onClick={handleClear}
                 className="size-5 p-0 hover:bg-muted"

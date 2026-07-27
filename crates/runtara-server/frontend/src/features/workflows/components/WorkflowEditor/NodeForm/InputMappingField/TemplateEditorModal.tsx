@@ -386,23 +386,23 @@ export function TemplateEditorModal({
             <span className="mr-1 text-xs text-muted-foreground">Insert:</span>
             <Button
               type="button"
-              variant="ghost"
+              variant="secondary"
               size="sm"
               className="h-7 px-2 font-mono text-xs text-purple-600 hover:bg-purple-50 dark:text-purple-400 dark:hover:bg-purple-950"
               onClick={() =>
-                insertSnippet('{% if condition %}\n  \n{% endif %}')
+                insertSnippet('{% if condition %}\n \n{% endif %}')
               }
             >
               if
             </Button>
             <Button
               type="button"
-              variant="ghost"
+              variant="secondary"
               size="sm"
               className="h-7 px-2 font-mono text-xs text-purple-600 hover:bg-purple-50 dark:text-purple-400 dark:hover:bg-purple-950"
               onClick={() =>
                 insertSnippet(
-                  '{% for item in items %}\n  {{ item }}\n{% endfor %}'
+                  '{% for item in items %}\n {{ item }}\n{% endfor %}'
                 )
               }
             >
@@ -410,16 +410,16 @@ export function TemplateEditorModal({
             </Button>
             <Button
               type="button"
-              variant="ghost"
+              variant="secondary"
               size="sm"
-              className="h-7 px-2 font-mono text-xs text-primary hover:bg-primary/10"
+              className="h-7 px-2 font-mono text-xs hover:bg-primary/10"
               onClick={() => insertSnippet('{{ value | default("") }}')}
             >
               default
             </Button>
             <Button
               type="button"
-              variant="quiet"
+              variant="secondary"
               size="sm"
               className="h-7 px-2 font-mono text-xs hover:bg-muted"
               onClick={() => insertSnippet('{# comment #}')}
@@ -452,7 +452,7 @@ export function TemplateEditorModal({
 
             <Button
               type="button"
-              variant={showVariables ? 'secondary' : 'ghost'}
+              variant={showVariables ? 'primary' : 'secondary'}
               size="sm"
               className="h-8 gap-1 px-2 text-xs"
               onClick={() => setShowVariables(!showVariables)}
@@ -483,7 +483,7 @@ export function TemplateEditorModal({
                   </span>
                   <Button
                     type="button"
-                    variant="quiet"
+                    variant="secondary"
                     size="sm"
                     className="h-6 px-2 text-xs"
                     onClick={copyToClipboard}
@@ -636,7 +636,7 @@ export function TemplateEditorModal({
               `${stats.controls} control${stats.controls !== 1 ? 's' : ''}`}
           </div>
           <div className="flex items-center gap-2">
-            <Button type="button" variant="ghost" onClick={handleCancel}>
+            <Button type="button" variant="secondary" onClick={handleCancel}>
               Cancel
             </Button>
             <Button type="button" onClick={handleSave}>

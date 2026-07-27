@@ -115,7 +115,7 @@ export function DebugStepInspector() {
         </div>
         <Button
           type="button"
-          variant="ghost"
+          variant="secondary"
           size="icon"
           className="size-6 shrink-0"
           onClick={() => useWorkflowStore.getState().setSelectedNodeId(null)}

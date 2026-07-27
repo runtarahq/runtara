@@ -107,7 +107,7 @@ export function WorkflowCard({
         <div className="flex items-center justify-end gap-1 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100">
           <Can permission="workflow:execute">
             <Button
-              variant="quiet"
+              variant="secondary"
               size="icon-sm"
               onClick={() => onSchedule(workflow)}
               title="Start"
@@ -123,7 +123,7 @@ export function WorkflowCard({
           </Can>
           {onChat && (
             <Button
-              variant="quiet"
+              variant="secondary"
               size="icon-sm"
               onClick={() => onChat(workflow)}
               title="Chat"
@@ -133,7 +133,7 @@ export function WorkflowCard({
           )}
           <Can permission="workflow:update">
             <Button
-              variant="quiet"
+              variant="secondary"
               size="icon-sm"
               onClick={() => onUpdate(workflow)}
               title="Edit"
@@ -144,7 +144,7 @@ export function WorkflowCard({
           {showMoveAction && onMoveToFolder && (
             <Can permission="workflow:update">
               <Button
-                variant="quiet"
+                variant="secondary"
                 size="icon-sm"
                 onClick={() => onMoveToFolder(workflow)}
                 title="Move to folder"
@@ -161,7 +161,7 @@ export function WorkflowCard({
           )}
           <Can permission="workflow:create">
             <Button
-              variant="quiet"
+              variant="secondary"
               size="icon-sm"
               onClick={() => onClone(workflow)}
               title="Duplicate"
@@ -177,7 +177,7 @@ export function WorkflowCard({
           </Can>
           <Can permission="workflow:delete">
             <Button
-              variant="quietDestructive"
+              variant="secondaryDestructive"
               size="icon-sm"
               onClick={() => onDelete(workflow)}
               title="Delete"

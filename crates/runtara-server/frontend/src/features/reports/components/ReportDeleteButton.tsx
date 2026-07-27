@@ -85,7 +85,7 @@ export function ReportDeleteButton({
         </div>
         <DialogFooter className="gap-2 sm:gap-0">
           <DialogClose asChild>
-            <Button type="button" variant="outline">
+            <Button type="button" variant="secondary" bordered>
               Cancel
             </Button>
           </DialogClose>

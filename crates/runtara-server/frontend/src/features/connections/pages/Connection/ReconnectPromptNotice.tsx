@@ -52,7 +52,7 @@ export function ReconnectPromptNotice({
             <Button
               type="button"
               size="sm"
-              variant="ghost"
+              variant="secondary"
               onClick={onLater}
               disabled={isReconnecting}
             >

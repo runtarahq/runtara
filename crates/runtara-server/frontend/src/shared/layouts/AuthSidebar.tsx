@@ -11,7 +11,7 @@ export function AuthSidebar() {
 
   return isAuthenticated ? (
     <Button
-      variant="ghost"
+      variant="secondary"
       size="icon"
       className="relative size-9 shrink-0"
       aria-label="Sign out"
@@ -26,7 +26,7 @@ export function AuthSidebar() {
     </Button>
   ) : (
     <Button
-      variant="ghost"
+      variant="secondary"
       size="icon"
       className="relative size-9 shrink-0"
       aria-label="Sign in"

@@ -289,7 +289,7 @@ export function WorkflowHistory() {
       <div className="mb-8">
         <div className="mb-4 flex items-center gap-3">
           <Button
-            variant="ghost"
+            variant="secondary"
             size="icon"
             className="rounded-full hover:bg-muted"
             onClick={handleBack}
@@ -315,7 +315,8 @@ export function WorkflowHistory() {
             {data && data.id && (
               <>
                 <Button
-                  variant="outline"
+                  variant="secondary"
+                  bordered
                   size="sm"
                   onClick={() =>
                     navigate(`/workflows/${workflowId}/history/${data.id}/logs`)
@@ -333,13 +334,13 @@ export function WorkflowHistory() {
                     {data.status?.toLowerCase() === 'running' && (
                       <PauseButton
                         instanceId={data.id}
-                        variant="outline"
+                        variant="secondary"
                         size="sm"
                       />
                     )}
                     <StopButton
                       instanceId={data.id}
-                      variant="outline"
+                      variant="secondary"
                       size="sm"
                     />
                   </>
@@ -349,14 +350,14 @@ export function WorkflowHistory() {
                       data.status === 'cancelled') && (
                       <ResumeButton
                         instanceId={data.id}
-                        variant="outline"
+                        variant="secondary"
                         size="sm"
                       />
                     )}
                     <ReplayButton
                       instanceId={data.id}
                       error={data.metadata?.errorMessage}
-                      variant="outline"
+                      variant="secondary"
                       size="sm"
                     />
                   </>
@@ -595,7 +596,7 @@ export function WorkflowHistory() {
                     <span className="text-sm text-muted-foreground">
                       Version
                     </span>
-                    <Badge variant="outline">v{data.usedVersion}</Badge>
+                    <Badge variant="secondary">v{data.usedVersion}</Badge>
                   </div>
                 )}
 
@@ -684,7 +685,7 @@ export function WorkflowHistory() {
                 </CardTitle>
                 {data.inputs && (
                   <Button
-                    variant="ghost"
+                    variant="secondary"
                     size="sm"
                     className="h-8 gap-2"
                     onClick={() =>
@@ -714,7 +715,7 @@ export function WorkflowHistory() {
                   {hasElidedPayload(data.inputs) && (
                     <div className="px-6 pb-3">
                       <Badge
-                        variant="outline"
+                        variant="secondary"
                         className="text-3xs text-muted-foreground"
                       >
                         Large values elided — use Copy for the full value
@@ -749,7 +750,7 @@ export function WorkflowHistory() {
                 </CardTitle>
                 {data.outputs && (
                   <Button
-                    variant="ghost"
+                    variant="secondary"
                     size="sm"
                     className="h-8 gap-2"
                     onClick={() =>
@@ -796,7 +797,7 @@ export function WorkflowHistory() {
                   {hasElidedPayload(data.outputs) && (
                     <div className="px-6 pb-3">
                       <Badge
-                        variant="outline"
+                        variant="secondary"
                         className="text-3xs text-muted-foreground"
                       >
                         Large values elided — use Copy for the full value
@@ -941,7 +942,10 @@ export function WorkflowHistory() {
                       </div>
 
                       <div className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
-                        <Badge variant="outline" className="font-mono text-xs">
+                        <Badge
+                          variant="secondary"
+                          className="font-mono text-xs"
+                        >
                           {step.stepType}
                         </Badge>
                         {step.startedAt && (
@@ -984,7 +988,7 @@ export function WorkflowHistory() {
                                   Inputs
                                 </span>
                                 <Button
-                                  variant="ghost"
+                                  variant="secondary"
                                   size="sm"
                                   className="h-6 text-xs"
                                   onClick={() => {
@@ -1013,7 +1017,7 @@ export function WorkflowHistory() {
                                   Outputs
                                 </span>
                                 <Button
-                                  variant="ghost"
+                                  variant="secondary"
                                   size="sm"
                                   className="h-6 text-xs"
                                   onClick={() => {
@@ -1057,7 +1061,8 @@ export function WorkflowHistory() {
                     </div>
                     <div className="flex items-center gap-2">
                       <Button
-                        variant="outline"
+                        variant="secondary"
+                        bordered
                         size="sm"
                         onClick={() => setListPageIndex(0)}
                         disabled={listPageIndex === 0}
@@ -1065,7 +1070,8 @@ export function WorkflowHistory() {
                         <ChevronsLeft className="size-4" />
                       </Button>
                       <Button
-                        variant="outline"
+                        variant="secondary"
+                        bordered
                         size="sm"
                         onClick={() =>
                           setListPageIndex((prev) => Math.max(0, prev - 1))
@@ -1078,7 +1084,8 @@ export function WorkflowHistory() {
                         Page {listPageIndex + 1} of {totalPages}
                       </span>
                       <Button
-                        variant="outline"
+                        variant="secondary"
+                        bordered
                         size="sm"
                         onClick={() =>
                           setListPageIndex((prev) =>
@@ -1090,7 +1097,8 @@ export function WorkflowHistory() {
                         <ChevronRight className="size-4" />
                       </Button>
                       <Button
-                        variant="outline"
+                        variant="secondary"
+                        bordered
                         size="sm"
                         onClick={() => setListPageIndex(totalPages - 1)}
                         disabled={listPageIndex >= totalPages - 1}

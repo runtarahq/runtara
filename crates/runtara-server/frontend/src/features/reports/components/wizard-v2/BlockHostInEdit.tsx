@@ -65,7 +65,7 @@ export function BlockHostInEdit({
         <div className="flex items-center gap-1 opacity-0 transition-opacity focus-within:opacity-100 group-hover/wizard-block:opacity-100">
           <Button
             type="button"
-            variant="ghost"
+            variant="secondary"
             size="icon-sm"
             title="Edit block"
             aria-label="Edit block"
@@ -75,7 +75,7 @@ export function BlockHostInEdit({
           </Button>
           <Button
             type="button"
-            variant="destructiveGhost"
+            variant="secondaryDestructive"
             size="icon-sm"
             title="Remove block"
             onClick={onDelete}

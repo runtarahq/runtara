@@ -17,8 +17,7 @@ import {
 
 type Props = {
   instanceId: string;
-  variant?:
-    'default' | 'outline' | 'secondary' | 'ghost' | 'link' | 'destructive';
+  variant?: 'primary' | 'secondary' | 'secondaryDestructive' | 'destructive';
   size?: 'default' | 'sm' | 'lg' | 'icon';
   className?: string;
 };
@@ -31,7 +30,7 @@ type Props = {
 export function PauseButton(props: Props) {
   const {
     instanceId,
-    variant = 'default',
+    variant = 'primary',
     size = 'default',
     className = '',
   } = props;
@@ -89,7 +88,7 @@ export function PauseButton(props: Props) {
         </DialogHeader>
         <DialogFooter className="gap-2 sm:gap-0">
           <DialogClose asChild>
-            <Button type="button" variant="outline">
+            <Button type="button" variant="secondary" bordered>
               Cancel
             </Button>
           </DialogClose>

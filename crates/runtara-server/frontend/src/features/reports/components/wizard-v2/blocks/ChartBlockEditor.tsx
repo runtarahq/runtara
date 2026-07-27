@@ -162,7 +162,8 @@ export function ChartBlockEditor({
           {isScatter ? null : (
             <Button
               type="button"
-              variant="outline"
+              variant="secondary"
+              bordered
               size="sm"
               className="h-7"
               onClick={() => updateSeries([...series, { field: '' }])}
@@ -233,7 +234,7 @@ export function ChartBlockEditor({
                 ) : (
                   <Button
                     type="button"
-                    variant="ghost"
+                    variant="secondary"
                     size="icon"
                     className="size-8"
                     onClick={() =>
@@ -413,7 +414,8 @@ export function ChartBlockEditor({
                       key={field}
                       type="button"
                       size="sm"
-                      variant={selected ? 'default' : 'outline'}
+                      variant={selected ? 'primary' : 'secondary'}
+                      bordered={!selected}
                       className="h-7"
                       onClick={() => {
                         const current = chart.tooltipFields ?? [];

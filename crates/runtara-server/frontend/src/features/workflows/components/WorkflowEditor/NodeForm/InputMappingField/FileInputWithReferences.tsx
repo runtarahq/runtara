@@ -81,7 +81,7 @@ export function FileInputWithReferences({
       <div className="flex gap-1">
         <Button
           type="button"
-          variant={effectiveMode === 'upload' ? 'secondary' : 'ghost'}
+          variant={effectiveMode === 'upload' ? 'primary' : 'secondary'}
           size="sm"
           onClick={() => handleModeChange('upload')}
           disabled={disabled}
@@ -92,7 +92,7 @@ export function FileInputWithReferences({
         </Button>
         <Button
           type="button"
-          variant={effectiveMode === 'reference' ? 'secondary' : 'ghost'}
+          variant={effectiveMode === 'reference' ? 'primary' : 'secondary'}
           size="sm"
           onClick={() => handleModeChange('reference')}
           disabled={disabled}

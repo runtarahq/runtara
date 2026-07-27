@@ -200,7 +200,7 @@ export function ObjectSchemaDtosTable({
                   <div className="flex items-center justify-end gap-1">
                     <WithTooltip label="Manage instances">
                       <Button
-                        variant="quiet"
+                        variant="secondary"
                         size="icon-sm"
                         aria-label="Manage instances"
                         onClick={() => handleViewInstances(schema)}
@@ -211,7 +211,7 @@ export function ObjectSchemaDtosTable({
                     <Can permission="database:update">
                       <WithTooltip label="Edit object type">
                         <Button
-                          variant="quiet"
+                          variant="secondary"
                           size="icon-sm"
                           aria-label="Edit object type"
                           onClick={() => handleEdit(schema)}
@@ -223,7 +223,7 @@ export function ObjectSchemaDtosTable({
                     <Can permission="database:delete">
                       <WithTooltip label="Delete object type">
                         <Button
-                          variant="quietDestructive"
+                          variant="secondaryDestructive"
                           size="icon-sm"
                           aria-label="Delete object type"
                           disabled={deletingId === schema.id}
@@ -278,7 +278,7 @@ export function ObjectSchemaDtosTable({
         </div>
         <DialogFooter className="gap-2 sm:gap-0">
           <DialogClose asChild>
-            <Button type="button" variant="outline">
+            <Button type="button" variant="secondary" bordered>
               Cancel
             </Button>
           </DialogClose>

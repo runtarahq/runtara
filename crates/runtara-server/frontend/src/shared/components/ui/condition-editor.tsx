@@ -1155,7 +1155,7 @@ const ConditionBuilder = ({
                       {isVariadicOperator && !disabled ? (
                         <Button
                           type="button"
-                          variant="quietDestructive"
+                          variant="secondaryDestructive"
                           size="icon"
                           className="size-6"
                           onClick={() => handleRemoveArgument(index)}
@@ -1169,7 +1169,7 @@ const ConditionBuilder = ({
                               <TooltipTrigger asChild>
                                 <Button
                                   type="button"
-                                  variant="quietDestructive"
+                                  variant="secondaryDestructive"
                                   size="icon"
                                   className="size-6"
                                   onClick={() =>
@@ -1220,7 +1220,7 @@ const ConditionBuilder = ({
                   {isVariadicOperator && !disabled && (
                     <Button
                       type="button"
-                      variant="quietDestructive"
+                      variant="secondaryDestructive"
                       size="icon"
                       className="size-6"
                       onClick={() => handleRemoveArgument(index)}
@@ -1252,7 +1252,7 @@ const ConditionBuilder = ({
                   {isVariadicOperator && !disabled && (
                     <Button
                       type="button"
-                      variant="quietDestructive"
+                      variant="secondaryDestructive"
                       size="icon"
                       className="size-6"
                       onClick={() => handleRemoveArgument(index)}

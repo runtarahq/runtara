@@ -342,7 +342,7 @@ export function IterationVariablesField({
                     <td className="w-16 p-2 text-center">
                       <Button
                         type="button"
-                        variant="ghost"
+                        variant="secondary"
                         size="sm"
                         onClick={() => {
                           if (editingIndex === index) setEditingIndex(null);
@@ -417,7 +417,8 @@ export function IterationVariablesField({
       </div>
       <Button
         type="button"
-        variant="outline"
+        variant="secondary"
+        bordered
         size="sm"
         onClick={() =>
           append({

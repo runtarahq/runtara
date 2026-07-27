@@ -166,7 +166,7 @@ export function ExistingConnections({ toolbar }: ExistingConnectionsProps) {
                         <Can permission="connection:update">
                           <WithTooltip label="Reconnect (re-authorize with saved credentials)">
                             <Button
-                              variant="ghost"
+                              variant="secondary"
                               size="icon-sm"
                               className="text-warning hover:text-warning"
                               aria-label="Reconnect (re-authorize with saved credentials)"
@@ -186,7 +186,7 @@ export function ExistingConnections({ toolbar }: ExistingConnectionsProps) {
                       <Link to={`/connections/${connection.id}`}>
                         <WithTooltip label="Edit connection">
                           <Button
-                            variant="quiet"
+                            variant="secondary"
                             size="icon-sm"
                             aria-label="Edit connection"
                           >
@@ -198,7 +198,7 @@ export function ExistingConnections({ toolbar }: ExistingConnectionsProps) {
                     <Can permission="connection:delete">
                       <WithTooltip label="Delete connection">
                         <Button
-                          variant="quietDestructive"
+                          variant="secondaryDestructive"
                           size="icon-sm"
                           aria-label="Delete connection"
                           disabled={deletingId === connection.id}
@@ -253,7 +253,7 @@ export function ExistingConnections({ toolbar }: ExistingConnectionsProps) {
         </div>
         <DialogFooter className="gap-2 sm:gap-0">
           <DialogClose asChild>
-            <Button type="button" variant="outline">
+            <Button type="button" variant="secondary" bordered>
               Cancel
             </Button>
           </DialogClose>

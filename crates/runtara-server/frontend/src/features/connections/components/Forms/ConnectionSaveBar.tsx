@@ -58,7 +58,7 @@ export function ConnectionSaveBar({
           {showDiscard && (
             <Button
               type="button"
-              variant="quiet"
+              variant="secondary"
               size="sm"
               onClick={onDiscard}
               disabled={isLoading}

@@ -148,7 +148,8 @@ export function DatasetsEditorV2({
       <div>
         <Button
           type="button"
-          variant="outline"
+          variant="secondary"
+          bordered
           onClick={() => updateDatasets([...datasets, newDataset()])}
         >
           <Plus className="mr-1 size-3.5" /> Add dataset
@@ -184,7 +185,7 @@ function DatasetCard({
         <CardTitle className="text-sm">{dataset.label}</CardTitle>
         <Button
           type="button"
-          variant="destructiveGhost"
+          variant="secondaryDestructive"
           size="icon-sm"
           onClick={onDelete}
         >
@@ -232,7 +233,8 @@ function DatasetCard({
             <Label className="text-xs">Dimensions ({dimensions.length})</Label>
             <Button
               type="button"
-              variant="outline"
+              variant="secondary"
+              bordered
               size="sm"
               className="h-7"
               disabled={fields.length === 0}
@@ -355,7 +357,7 @@ function DatasetCard({
                   </Select>
                   <Button
                     type="button"
-                    variant="ghost"
+                    variant="secondary"
                     size="icon"
                     className="size-8"
                     onClick={() =>
@@ -378,7 +380,8 @@ function DatasetCard({
             <Label className="text-xs">Measures ({measures.length})</Label>
             <Button
               type="button"
-              variant="outline"
+              variant="secondary"
+              bordered
               size="sm"
               className="h-7"
               onClick={() =>
@@ -430,7 +433,7 @@ function DatasetCard({
                     />
                     <Button
                       type="button"
-                      variant="ghost"
+                      variant="secondary"
                       size="icon"
                       className="size-8"
                       onClick={() =>

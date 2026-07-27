@@ -34,7 +34,7 @@ export function FeatureDisabled({ feature }: FeatureDisabledProps) {
         The <strong>{label}</strong> feature isn&apos;t included in your current
         plan. Contact your administrator if you believe this is unexpected.
       </p>
-      <Button asChild variant="outline">
+      <Button asChild variant="secondary" bordered>
         <Link to="/workflows">Back to workflows</Link>
       </Button>
     </section>

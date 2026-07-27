@@ -48,7 +48,8 @@ export function ConnectionConflictNotice({
             <Button
               type="button"
               size="sm"
-              variant="outline"
+              variant="secondary"
+              bordered
               disabled={!canRecover}
               onClick={onReload}
             >

@@ -329,7 +329,7 @@ export function ObjectInstanceDtoForm({
         <div className="flex flex-col gap-3 sm:flex-row">
           <Button
             type="button"
-            variant="ghost"
+            variant="secondary"
             onClick={onSuccess}
             className="rounded-full"
           >

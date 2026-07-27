@@ -219,7 +219,8 @@ function Container({
           <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
             <Button
               className="nodrag nopan pointer-events-auto"
-              variant="outline"
+              variant="secondary"
+              bordered
               size="sm"
               onClick={handleOpenCreateInside}
               aria-label={`Add first nested step inside ${data.name || id || 'container'}`}
@@ -247,7 +248,8 @@ function Container({
       >
         <Button
           className="size-4 rounded-full shadow-sm [&_svg]:size-2"
-          variant="outline"
+          variant="secondary"
+          bordered
           size="icon"
           onClick={handleOpenCreate}
           aria-label={`Add step after ${data.name || id || 'container'}`}
@@ -270,7 +272,8 @@ function Container({
       >
         <Button
           className="size-4 rounded-full bg-destructive/10 shadow-sm hover:bg-destructive/20 [&_svg]:size-2"
-          variant="outline"
+          variant="secondary"
+          bordered
           size="icon"
           onClick={handleOpenCreateError}
           title="Add error handler"

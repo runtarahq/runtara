@@ -306,7 +306,7 @@ export function TestAgentInline() {
                   <Label>Output</Label>
                   <Button
                     type="button"
-                    variant="ghost"
+                    variant="secondary"
                     size="sm"
                     onClick={handleCopyOutput}
                     className="h-8"

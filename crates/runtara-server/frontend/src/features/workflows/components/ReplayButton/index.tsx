@@ -22,8 +22,7 @@ type Props = {
   instanceId: string;
   /** Optional error string to enable smart retry logic */
   error?: string | null;
-  variant?:
-    'default' | 'outline' | 'secondary' | 'ghost' | 'link' | 'destructive';
+  variant?: 'primary' | 'secondary' | 'secondaryDestructive' | 'destructive';
   size?: 'default' | 'sm' | 'lg' | 'icon';
   className?: string;
 };
@@ -32,7 +31,7 @@ export function ReplayButton(props: Props) {
   const {
     instanceId,
     error,
-    variant = 'default',
+    variant = 'primary',
     size = 'default',
     className = '',
   } = props;

@@ -99,7 +99,8 @@ export function SourceAggregatesEditor({
         </div>
         <Button
           type="button"
-          variant="outline"
+          variant="secondary"
+          bordered
           size="sm"
           className="h-7"
           onClick={addAggregate}
@@ -210,7 +211,7 @@ export function SourceAggregatesEditor({
                 </Select>
                 <Button
                   type="button"
-                  variant="destructiveGhost"
+                  variant="secondaryDestructive"
                   size="icon"
                   className="size-8"
                   aria-label="Remove aggregate"

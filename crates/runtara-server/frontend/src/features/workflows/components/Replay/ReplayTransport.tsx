@@ -66,7 +66,7 @@ export function ReplayTransport({
         <Button
           type="button"
           size="icon-sm"
-          variant="default"
+          variant="primary"
           onClick={clock.toggle}
           aria-label={clock.playing ? 'Pause replay' : 'Play replay'}
           data-testid="replay-play-pause"
@@ -85,7 +85,7 @@ export function ReplayTransport({
             <Button
               type="button"
               size="icon-sm"
-              variant="ghost"
+              variant="secondary"
               onClick={clock.restart}
               aria-label="Restart replay"
               data-testid="replay-restart"

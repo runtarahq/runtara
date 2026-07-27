@@ -57,7 +57,8 @@ function StartIndicatorNodeComponent({ data }: NodeProps) {
           <div className="h-px w-4 bg-border" />
           <Button
             className="nodrag nopan pointer-events-auto size-5 rounded-full shadow-md [&_svg]:size-3"
-            variant="outline"
+            variant="secondary"
+            bordered
             size="icon"
             aria-label="Add first workflow step"
             onClick={(e) => {

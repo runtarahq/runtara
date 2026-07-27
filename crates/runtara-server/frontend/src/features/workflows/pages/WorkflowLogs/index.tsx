@@ -387,7 +387,7 @@ export function WorkflowLogs() {
       <div className="mb-6 flex items-center justify-between bg-background">
         <div className="flex items-center gap-3">
           <Button
-            variant="ghost"
+            variant="secondary"
             size="icon"
             className="rounded-full hover:bg-muted"
             onClick={handleBack}
@@ -524,7 +524,7 @@ export function WorkflowLogs() {
                         >
                           <CollapsibleTrigger asChild>
                             <Button
-                              variant="quiet"
+                              variant="secondary"
                               size="sm"
                               className={`h-auto p-1 text-xs ${
                                 objectContainsSearchTerm(
@@ -594,7 +594,8 @@ export function WorkflowLogs() {
                 </div>
                 <div className="flex items-center gap-2">
                   <Button
-                    variant="outline"
+                    variant="secondary"
+                    bordered
                     size="sm"
                     onClick={() => setPageIndex(Math.max(0, pageIndex - 1))}
                     disabled={pageIndex === 0}
@@ -609,8 +610,9 @@ export function WorkflowLogs() {
                         <Button
                           key={pageNum}
                           variant={
-                            pageNum === pageIndex ? 'default' : 'outline'
+                            pageNum === pageIndex ? 'primary' : 'secondary'
                           }
+                          bordered={pageNum !== pageIndex}
                           size="sm"
                           onClick={() => setPageIndex(pageNum)}
                           className="w-10"
@@ -621,7 +623,8 @@ export function WorkflowLogs() {
                     }).filter(Boolean)}
                   </div>
                   <Button
-                    variant="outline"
+                    variant="secondary"
+                    bordered
                     size="sm"
                     onClick={() => setPageIndex(pageIndex + 1)}
                     disabled={pageIndex >= totalPages - 1}

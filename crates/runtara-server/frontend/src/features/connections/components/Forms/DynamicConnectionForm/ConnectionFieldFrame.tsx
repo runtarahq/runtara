@@ -49,7 +49,7 @@ export function ConnectionFieldFrame({
       {cleared ? (
         <Button
           type="button"
-          variant="ghost"
+          variant="secondary"
           size="sm"
           className="h-7 shrink-0 px-2 text-xs"
           aria-label={`Undo clearing stored ${label}`}
@@ -63,7 +63,7 @@ export function ConnectionFieldFrame({
         clearable && (
           <Button
             type="button"
-            variant="destructiveGhost"
+            variant="secondaryDestructive"
             size="sm"
             className="h-7 shrink-0 px-2 text-xs"
             aria-label={`Clear stored ${label}`}

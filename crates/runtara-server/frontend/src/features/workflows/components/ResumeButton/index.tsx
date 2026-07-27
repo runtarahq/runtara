@@ -8,8 +8,7 @@ import { useToken } from '@/shared/hooks';
 
 type Props = {
   instanceId: string;
-  variant?:
-    'default' | 'outline' | 'secondary' | 'ghost' | 'link' | 'destructive';
+  variant?: 'primary' | 'secondary' | 'secondaryDestructive' | 'destructive';
   size?: 'default' | 'sm' | 'lg' | 'icon';
   className?: string;
 };
@@ -17,7 +16,7 @@ type Props = {
 export function ResumeButton(props: Props) {
   const {
     instanceId,
-    variant = 'default',
+    variant = 'primary',
     size = 'default',
     className = '',
   } = props;

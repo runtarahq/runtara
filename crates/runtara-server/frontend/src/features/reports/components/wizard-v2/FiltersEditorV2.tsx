@@ -105,7 +105,7 @@ export function FiltersEditorV2({
                 <CardTitle className="text-sm">{filter.label}</CardTitle>
                 <Button
                   type="button"
-                  variant="destructiveGhost"
+                  variant="secondaryDestructive"
                   size="icon-sm"
                   onClick={() =>
                     updateFilters(filters.filter((f) => f.id !== filter.id))
@@ -216,7 +216,8 @@ export function FiltersEditorV2({
       <div>
         <Button
           type="button"
-          variant="outline"
+          variant="secondary"
+          bordered
           onClick={() => updateFilters([...filters, newFilter()])}
         >
           <Plus className="mr-1 size-3.5" /> Add filter
@@ -302,7 +303,8 @@ function StaticOptionsEditor({ values, onChange }: StaticOptionsEditorProps) {
         <Label className="text-xs">Values</Label>
         <Button
           type="button"
-          variant="outline"
+          variant="secondary"
+          bordered
           size="sm"
           className="h-7"
           onClick={() => onChange([...values, { label: '', value: '' }])}
@@ -345,7 +347,7 @@ function StaticOptionsEditor({ values, onChange }: StaticOptionsEditorProps) {
               />
               <Button
                 type="button"
-                variant="ghost"
+                variant="secondary"
                 size="icon"
                 className="size-8"
                 onClick={() => onChange(values.filter((_, i) => i !== index))}
@@ -475,7 +477,8 @@ function ObjectModelOptionsEditor({
           <Label className="text-xs">Depends on</Label>
           <Button
             type="button"
-            variant="outline"
+            variant="secondary"
+            bordered
             size="sm"
             className="h-7"
             onClick={() =>
@@ -526,7 +529,7 @@ function ObjectModelOptionsEditor({
                 </Select>
                 <Button
                   type="button"
-                  variant="ghost"
+                  variant="secondary"
                   size="icon"
                   className="size-8"
                   onClick={() =>
@@ -549,7 +552,8 @@ function ObjectModelOptionsEditor({
           <Label className="text-xs">Filter mappings</Label>
           <Button
             type="button"
-            variant="outline"
+            variant="secondary"
+            bordered
             size="sm"
             className="h-7"
             onClick={() =>
@@ -644,7 +648,7 @@ function ObjectModelOptionsEditor({
                 </Select>
                 <Button
                   type="button"
-                  variant="ghost"
+                  variant="secondary"
                   size="icon"
                   className="size-8"
                   onClick={() =>
@@ -682,7 +686,8 @@ function AppliesToEditor({ filter, blockIds, onChange }: AppliesToEditorProps) {
         <Label className="text-xs">Applies to</Label>
         <Button
           type="button"
-          variant="outline"
+          variant="secondary"
+          bordered
           size="sm"
           className="h-7"
           onClick={() =>
@@ -769,7 +774,7 @@ function AppliesToEditor({ filter, blockIds, onChange }: AppliesToEditorProps) {
               </Select>
               <Button
                 type="button"
-                variant="ghost"
+                variant="secondary"
                 size="icon"
                 className="size-8"
                 onClick={() =>

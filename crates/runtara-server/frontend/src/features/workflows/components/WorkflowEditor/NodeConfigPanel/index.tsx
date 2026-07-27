@@ -327,7 +327,7 @@ export function NodeConfigPanel({
           </div>
           <Button
             type="button"
-            variant="ghost"
+            variant="secondary"
             size="icon-sm"
             onClick={requestClose}
             aria-label="Close step configuration"
@@ -367,7 +367,7 @@ export function NodeConfigPanel({
           {!isCreate && onDelete && (
             <Button
               type="button"
-              variant="destructiveGhost"
+              variant="secondaryDestructive"
               className="mr-auto"
               onClick={handleDelete}
               data-testid="node-config-delete"
@@ -377,7 +377,8 @@ export function NodeConfigPanel({
           )}
           <Button
             type="button"
-            variant="outline"
+            variant="secondary"
+            bordered
             onClick={requestClose}
             data-testid="node-config-cancel"
           >

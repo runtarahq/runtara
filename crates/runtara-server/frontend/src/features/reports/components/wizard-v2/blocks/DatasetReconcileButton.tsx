@@ -39,7 +39,13 @@ export function DatasetReconcileButton({
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
-        <Button type="button" variant="outline" size="sm" className="h-7">
+        <Button
+          type="button"
+          variant="secondary"
+          bordered
+          size="sm"
+          className="h-7"
+        >
           <RotateCcw className="mr-1 size-3" /> Reset to dataset schema
         </Button>
       </DialogTrigger>
@@ -68,7 +74,7 @@ export function DatasetReconcileButton({
         )}
 
         <DialogFooter>
-          <Button variant="outline" onClick={() => setOpen(false)}>
+          <Button variant="secondary" bordered onClick={() => setOpen(false)}>
             Cancel
           </Button>
           <Button

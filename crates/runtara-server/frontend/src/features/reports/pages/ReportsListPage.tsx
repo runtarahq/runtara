@@ -108,7 +108,7 @@ export function ReportsListPage() {
                       <WithTooltip label={`Edit ${report.name}`}>
                         <Button
                           type="button"
-                          variant="quiet"
+                          variant="secondary"
                           size="icon-sm"
                           aria-label={`Edit ${report.name}`}
                         >
@@ -123,7 +123,7 @@ export function ReportsListPage() {
                       reportName={report.name}
                       iconOnly
                       navigateAfterDelete={false}
-                      triggerVariant="ghost"
+                      triggerVariant="secondaryDestructive"
                       triggerSize="icon-sm"
                       className="text-muted-foreground hover:text-destructive"
                     />

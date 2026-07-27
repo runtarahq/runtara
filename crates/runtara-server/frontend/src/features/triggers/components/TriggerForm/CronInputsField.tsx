@@ -109,7 +109,7 @@ export function CronInputsField({
         {structuredAvailable && (
           <Button
             type="button"
-            variant="ghost"
+            variant="secondary"
             size="sm"
             className="h-6 px-2 text-xs"
             disabled={!structuredActive && !analysis.representable}
@@ -155,7 +155,7 @@ export function CronInputsField({
                     <Button
                       key={name}
                       type="button"
-                      variant="quiet"
+                      variant="secondary"
                       size="sm"
                       className="h-6 px-2 text-xs"
                       aria-label={`Clear ${formField.label ?? name}`}

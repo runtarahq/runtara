@@ -187,7 +187,7 @@ function FooterMenu() {
       <div className="flex items-center justify-center gap-2 group-data-[state=collapsed]:flex-col group-data-[state=collapsed]:gap-1">
         <AuthSidebar />
         <Button
-          variant="ghost"
+          variant="secondary"
           size="icon"
           className="relative size-9 shrink-0"
           aria-label="Manage billing"

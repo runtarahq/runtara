@@ -194,7 +194,7 @@ export const invocationHistoryColumns: ColumnDef<ExecutionHistoryItem>[] = [
             <Link to={`/workflows/${workflowId}?attachInstance=${instanceId}`}>
               <WithTooltip label="Open in editor — resume debugging">
                 <Button
-                  variant="ghost"
+                  variant="secondary"
                   size="icon"
                   className="h-auto w-auto rounded-lg p-2 text-warning transition-colors hover:bg-warning/10 hover:text-warning"
                   aria-label="Open in editor — resume debugging"
@@ -208,7 +208,7 @@ export const invocationHistoryColumns: ColumnDef<ExecutionHistoryItem>[] = [
             <Link to={`/workflows/${workflowId}/chat/${instanceId}`}>
               <WithTooltip label="Continue chat">
                 <Button
-                  variant="ghost"
+                  variant="secondary"
                   size="icon"
                   className="h-auto w-auto rounded-lg p-2 text-warning transition-colors hover:bg-warning/10 hover:text-warning"
                   aria-label="Continue chat"
@@ -221,9 +221,9 @@ export const invocationHistoryColumns: ColumnDef<ExecutionHistoryItem>[] = [
           <Link to={`/workflows/${workflowId}/history/${instanceId}`}>
             <WithTooltip label="View details">
               <Button
-                variant="ghost"
+                variant="secondary"
                 size="icon"
-                className="h-auto w-auto rounded-lg p-2 text-muted-foreground transition-colors hover:bg-primary/10 hover:text-primary"
+                className="h-auto w-auto rounded-lg p-2 transition-colors hover:bg-primary/10"
                 aria-label="View details"
               >
                 <Eye className="size-4" />
@@ -233,7 +233,7 @@ export const invocationHistoryColumns: ColumnDef<ExecutionHistoryItem>[] = [
           {shouldShowStop ? (
             <StopButton
               instanceId={instanceId}
-              variant="ghost"
+              variant="secondary"
               size="icon"
               className="h-auto w-auto rounded-lg p-2 text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive"
             />
@@ -242,14 +242,14 @@ export const invocationHistoryColumns: ColumnDef<ExecutionHistoryItem>[] = [
               {(status === 'failed' || status === 'cancelled') && (
                 <ResumeButton
                   instanceId={instanceId}
-                  variant="ghost"
+                  variant="secondary"
                   size="icon"
                   className="h-auto w-auto rounded-lg p-2 text-muted-foreground transition-colors hover:bg-primary/10 hover:text-primary"
                 />
               )}
               <ReplayButton
                 instanceId={instanceId}
-                variant="ghost"
+                variant="secondary"
                 size="icon"
                 className="h-auto w-auto rounded-lg p-2 text-muted-foreground transition-colors hover:bg-success/10 hover:text-success"
               />

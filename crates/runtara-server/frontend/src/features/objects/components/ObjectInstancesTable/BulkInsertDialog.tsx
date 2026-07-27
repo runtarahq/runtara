@@ -233,7 +233,8 @@ export function BulkInsertDialog({
 
         <DialogFooter>
           <Button
-            variant="outline"
+            variant="secondary"
+            bordered
             onClick={() => handleOpenChange(false)}
             disabled={isSubmitting}
           >

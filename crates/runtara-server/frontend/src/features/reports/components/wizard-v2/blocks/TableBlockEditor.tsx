@@ -94,7 +94,8 @@ export function TableBlockEditor({
           <Label className="text-xs">Columns</Label>
           <Button
             type="button"
-            variant="outline"
+            variant="secondary"
+            bordered
             size="sm"
             className="h-7"
             onClick={addColumn}
@@ -230,7 +231,7 @@ export function TableBlockEditor({
                     </Select>
                     <Button
                       type="button"
-                      variant="ghost"
+                      variant="secondary"
                       size="icon"
                       className="size-8"
                       onClick={() =>
@@ -319,7 +320,8 @@ export function TableBlockEditor({
           <div className="mt-1">
             <Button
               type="button"
-              variant="outline"
+              variant="secondary"
+              bordered
               size="sm"
               className="h-7"
               onClick={() =>
@@ -390,7 +392,7 @@ export function TableBlockEditor({
                 </Select>
                 <Button
                   type="button"
-                  variant="ghost"
+                  variant="secondary"
                   size="icon"
                   className="size-8"
                   onClick={() =>
@@ -422,7 +424,8 @@ export function TableBlockEditor({
           <div>
             <Button
               type="button"
-              variant="outline"
+              variant="secondary"
+              bordered
               size="sm"
               className="h-7"
               onClick={() =>

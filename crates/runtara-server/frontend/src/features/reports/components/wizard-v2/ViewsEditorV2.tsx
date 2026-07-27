@@ -179,7 +179,7 @@ export function ViewsEditorV2({ definition, onChange }: ViewsEditorV2Props) {
                   </CardTitle>
                   <Button
                     type="button"
-                    variant="destructiveGhost"
+                    variant="secondaryDestructive"
                     size="icon-sm"
                     aria-label={`Delete view ${view.title || view.id}`}
                     onClick={() => deleteView(view.id)}
@@ -253,7 +253,8 @@ export function ViewsEditorV2({ definition, onChange }: ViewsEditorV2Props) {
         <div>
           <Button
             type="button"
-            variant="outline"
+            variant="secondary"
+            bordered
             onClick={() => updateViews([...views, newView()])}
           >
             <Plus className="mr-1 size-3.5" /> Add view
@@ -285,7 +286,8 @@ export function ViewsEditorV2({ definition, onChange }: ViewsEditorV2Props) {
         <div className="flex flex-wrap gap-2">
           <Button
             type="button"
-            variant="outline"
+            variant="secondary"
+            bordered
             disabled={views.length < 2}
             onClick={() =>
               updateGroups([...groups, newGroup('tabs', definition)])
@@ -295,7 +297,8 @@ export function ViewsEditorV2({ definition, onChange }: ViewsEditorV2Props) {
           </Button>
           <Button
             type="button"
-            variant="outline"
+            variant="secondary"
+            bordered
             disabled={views.length < 2}
             onClick={() =>
               updateGroups([...groups, newGroup('stages', definition)])
@@ -378,7 +381,7 @@ function NavigationGroupEditor({
         </CardTitle>
         <Button
           type="button"
-          variant="destructiveGhost"
+          variant="secondaryDestructive"
           size="icon-sm"
           aria-label={`Delete navigation group ${group.id}`}
           onClick={onDelete}
@@ -549,7 +552,8 @@ function NavigationGroupEditor({
               ))}
           <Button
             type="button"
-            variant="outline"
+            variant="secondary"
+            bordered
             size="sm"
             className="w-fit"
             disabled={!unusedView}
@@ -680,7 +684,7 @@ function MemberActions({ index, count, onMove, onDelete }: MemberActionsProps) {
     <div className="flex items-center justify-end gap-1">
       <Button
         type="button"
-        variant="ghost"
+        variant="secondary"
         size="icon"
         className="size-8"
         aria-label={`Move member ${index + 1} up`}
@@ -691,7 +695,7 @@ function MemberActions({ index, count, onMove, onDelete }: MemberActionsProps) {
       </Button>
       <Button
         type="button"
-        variant="ghost"
+        variant="secondary"
         size="icon"
         className="size-8"
         aria-label={`Move member ${index + 1} down`}
@@ -702,7 +706,7 @@ function MemberActions({ index, count, onMove, onDelete }: MemberActionsProps) {
       </Button>
       <Button
         type="button"
-        variant="destructiveGhost"
+        variant="secondaryDestructive"
         size="icon"
         className="size-8"
         aria-label={`Remove member ${index + 1}`}

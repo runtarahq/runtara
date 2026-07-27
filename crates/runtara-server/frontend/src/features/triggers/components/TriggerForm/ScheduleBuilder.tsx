@@ -339,7 +339,7 @@ export function ScheduleBuilder({
             </FormLabel>
             <Button
               type="button"
-              variant="ghost"
+              variant="secondary"
               size="sm"
               onClick={handleAddTime}
               disabled={disabled || (value.times?.length || 0) >= 5}
@@ -388,7 +388,7 @@ export function ScheduleBuilder({
                 {(value.times?.length || 0) > 1 && (
                   <Button
                     type="button"
-                    variant="ghost"
+                    variant="secondary"
                     size="icon-sm"
                     onClick={() => handleRemoveTime(index)}
                     disabled={disabled}

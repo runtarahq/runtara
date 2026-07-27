@@ -582,7 +582,7 @@ function AdvancedSchemaFieldDialog({
       <DialogTrigger asChild>
         <Button
           type="button"
-          variant={hasAdvanced ? 'secondary' : 'ghost'}
+          variant={hasAdvanced ? 'primary' : 'secondary'}
           size="icon-sm"
           aria-label={`Edit advanced schema for ${field.name || 'field'}`}
         >
@@ -783,7 +783,8 @@ function AdvancedSchemaFieldDialog({
                 !readOnly && (
                   <Button
                     type="button"
-                    variant="outline"
+                    variant="secondary"
+                    bordered
                     size="sm"
                     onClick={addVisibleWhenRow}
                   >
@@ -870,7 +871,7 @@ function AdvancedSchemaFieldDialog({
                         {!readOnly && (
                           <Button
                             type="button"
-                            variant="ghost"
+                            variant="secondary"
                             size="icon-sm"
                             aria-label="Remove visibility condition"
                             onClick={() =>
@@ -890,7 +891,7 @@ function AdvancedSchemaFieldDialog({
                   {!readOnly && draft.visibleWhenRows.length < 2 && (
                     <Button
                       type="button"
-                      variant="ghost"
+                      variant="secondary"
                       size="sm"
                       onClick={addVisibleWhenRow}
                     >
@@ -936,7 +937,8 @@ function AdvancedSchemaFieldDialog({
         <DialogFooter>
           <Button
             type="button"
-            variant="outline"
+            variant="secondary"
+            bordered
             onClick={() => setOpen(false)}
           >
             Cancel
@@ -1206,7 +1208,7 @@ export function SchemaFieldsEditor({
                     <td className="w-16 p-2 text-center align-top">
                       <Button
                         type="button"
-                        variant="ghost"
+                        variant="secondary"
                         size="sm"
                         onClick={() => handleRemove(index)}
                         className="size-6 p-0"
@@ -1234,7 +1236,8 @@ export function SchemaFieldsEditor({
       {!readOnly && (
         <Button
           type="button"
-          variant="outline"
+          variant="secondary"
+          bordered
           size="sm"
           onClick={handleAdd}
           className="w-full"

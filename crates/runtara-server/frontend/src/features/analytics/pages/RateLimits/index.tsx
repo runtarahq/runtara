@@ -152,7 +152,12 @@ export function RateLimits() {
                 onChange={handleDateRangeChange}
                 options={VALID_DATE_RANGES}
               />
-              <Button onClick={handleRefresh} variant="quietOutline" size="sm">
+              <Button
+                onClick={handleRefresh}
+                variant="secondary"
+                bordered
+                size="sm"
+              >
                 <RefreshCw className="mr-2 size-4" />
                 Refresh
               </Button>
@@ -177,7 +182,7 @@ export function RateLimits() {
               </h2>
               {selectedConnectionId && (
                 <Button
-                  variant="ghost"
+                  variant="secondary"
                   size="sm"
                   onClick={() => setSelectedConnectionId(null)}
                   className="h-7 px-2 text-xs"

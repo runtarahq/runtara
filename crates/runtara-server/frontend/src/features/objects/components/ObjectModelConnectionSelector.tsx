@@ -24,7 +24,8 @@ export function ObjectModelConnectionSelector() {
   if (isLoading) {
     return (
       <Button
-        variant="outline"
+        variant="secondary"
+        bordered
         size="icon"
         className="size-9 shrink-0"
         disabled
@@ -37,7 +38,7 @@ export function ObjectModelConnectionSelector() {
 
   if (isError || connections.length === 0) {
     return (
-      <Button asChild variant="outline" size="sm">
+      <Button asChild variant="secondary" bordered size="sm">
         <Link to="/connections/postgres/create">
           <Database className="mr-2 size-4" />
           Add database connection
@@ -52,7 +53,8 @@ export function ObjectModelConnectionSelector() {
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
         <Button
-          variant="outline"
+          variant="secondary"
+          bordered
           size="icon"
           className="size-9 shrink-0"
           aria-label="Database connection"

@@ -259,7 +259,7 @@ export function WaitForSignalStepField({ name }: WaitForSignalStepFieldProps) {
       <div>
         <Button
           type="button"
-          variant="quiet"
+          variant="secondary"
           size="sm"
           className="px-0 text-xs"
           onClick={() => setShowAdvanced(!showAdvanced)}
@@ -393,7 +393,8 @@ export function WaitForSignalStepField({ name }: WaitForSignalStepFieldProps) {
                   </FormDescription>
                   <Button
                     type="button"
-                    variant="outline"
+                    variant="secondary"
+                    bordered
                     size="sm"
                     onClick={() => convertNodeToContainer(nodeId)}
                   >

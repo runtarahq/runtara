@@ -217,8 +217,9 @@ export function FormActions({
         <div className="mt-auto flex justify-between border-t pt-4">
           <Button
             type="button"
-            variant="outline"
-            className="px-6 text-destructive hover:bg-destructive/10 hover:text-destructive"
+            variant="secondary"
+            bordered
+            className="px-6 hover:bg-destructive/10"
             onClick={onDelete}
             data-testid="node-form-delete"
           >
@@ -227,7 +228,8 @@ export function FormActions({
           </Button>
           <Button
             type="button"
-            variant="outline"
+            variant="secondary"
+            bordered
             className="px-6"
             onClick={onReset}
             data-testid="node-form-reset"

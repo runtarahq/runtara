@@ -115,7 +115,8 @@ export function ToolbarSearch({
   if (!expanded) {
     return (
       <Button
-        variant="outline"
+        variant="secondary"
+        bordered
         size="icon"
         className="size-9 shrink-0"
         aria-label="Search (⌘F)"

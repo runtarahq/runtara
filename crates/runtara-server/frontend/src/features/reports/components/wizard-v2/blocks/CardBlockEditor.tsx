@@ -101,7 +101,8 @@ export function CardBlockEditor({
       <div>
         <Button
           type="button"
-          variant="outline"
+          variant="secondary"
+          bordered
           size="sm"
           className="h-7"
           onClick={() => updateGroups([...groups, newGroup()])}
@@ -158,7 +159,7 @@ function GroupEditor({
         />
         <Button
           type="button"
-          variant="destructiveGhost"
+          variant="secondaryDestructive"
           size="icon"
           className="size-8"
           onClick={onDelete}
@@ -179,7 +180,8 @@ function GroupEditor({
           <Label className="text-xs">Fields</Label>
           <Button
             type="button"
-            variant="outline"
+            variant="secondary"
+            bordered
             size="sm"
             className="h-7"
             onClick={() => {
@@ -314,7 +316,7 @@ function FieldEditor({
         </Select>
         <Button
           type="button"
-          variant="destructiveGhost"
+          variant="secondaryDestructive"
           size="icon-sm"
           onClick={onDelete}
         >

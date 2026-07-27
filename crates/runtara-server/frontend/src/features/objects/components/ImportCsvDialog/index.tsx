@@ -574,7 +574,8 @@ export function ImportCsvDialog({
         {step === 'mapping' && (
           <DialogFooter>
             <Button
-              variant="outline"
+              variant="secondary"
+              bordered
               onClick={() => {
                 setStep('upload');
                 setPreview(null);

@@ -134,7 +134,7 @@ export function ArrayMappingEditor({
         />
         <Button
           type="button"
-          variant="ghost"
+          variant="secondary"
           size="icon"
           className="size-9 shrink-0"
           onClick={handleClose}

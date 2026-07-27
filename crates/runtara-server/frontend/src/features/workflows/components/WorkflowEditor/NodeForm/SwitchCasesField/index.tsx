@@ -787,7 +787,7 @@ export function SwitchCasesField(props: any) {
                           />
                           <Button
                             type="button"
-                            variant="ghost"
+                            variant="secondary"
                             size="icon"
                             className="size-6 shrink-0"
                             onClick={() =>
@@ -829,7 +829,7 @@ export function SwitchCasesField(props: any) {
                       <Button
                         type="button"
                         size="icon"
-                        variant="ghost"
+                        variant="secondary"
                         onClick={() => removeCase(index)}
                         className="size-8"
                       >
@@ -858,7 +858,8 @@ export function SwitchCasesField(props: any) {
             className="flex w-full gap-1 text-sm"
             type="button"
             size="sm"
-            variant="outline"
+            variant="secondary"
+            bordered
             onClick={addCase}
           >
             <Icons.add className="size-4" /> Add Case
@@ -882,7 +883,7 @@ export function SwitchCasesField(props: any) {
             <Button
               data-testid="switch-remove-default"
               type="button"
-              variant="ghost"
+              variant="secondary"
               size="icon"
               className="size-6 shrink-0"
               title="Remove default output (unmatched values will fail)"
@@ -900,7 +901,8 @@ export function SwitchCasesField(props: any) {
               data-testid="switch-add-default"
               type="button"
               size="sm"
-              variant="outline"
+              variant="secondary"
+              bordered
               className="shrink-0"
               onClick={() => updateDefaultOutput({})}
             >
@@ -953,7 +955,11 @@ export function SwitchCasesField(props: any) {
             />
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setEditDialogOpen(false)}>
+            <Button
+              variant="secondary"
+              bordered
+              onClick={() => setEditDialogOpen(false)}
+            >
               Cancel
             </Button>
             <Button onClick={handleDialogSave}>Save</Button>

@@ -129,7 +129,7 @@ export function CompositeObjectEditor({
         {showCloseButton && onClose && (
           <Button
             type="button"
-            variant="ghost"
+            variant="secondary"
             size="icon"
             className="size-8"
             onClick={onClose}
@@ -208,7 +208,7 @@ export function CompositeObjectEditor({
               </Button>
               <Button
                 type="button"
-                variant="ghost"
+                variant="secondary"
                 size="sm"
                 onClick={() => {
                   setIsAddingField(false);
@@ -227,7 +227,8 @@ export function CompositeObjectEditor({
         <div className="border-t bg-muted/10 px-4 py-3">
           <Button
             type="button"
-            variant="outline"
+            variant="secondary"
+            bordered
             className="w-full border-dashed"
             onClick={() => setIsAddingField(true)}
             disabled={isAddingField}

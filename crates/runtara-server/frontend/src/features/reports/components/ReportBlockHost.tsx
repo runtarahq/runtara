@@ -315,7 +315,7 @@ export function ReportBlockHost({
           <div className="report-print-hidden flex items-center gap-2">
             {block.dataset && (
               <Link to={explorePath}>
-                <Button variant="outline" size="sm">
+                <Button variant="secondary" bordered size="sm">
                   <Compass className="mr-2 size-4" />
                   Explore this
                 </Button>
@@ -677,7 +677,8 @@ function BlockError({
       </p>
       <Button
         className="report-print-hidden mt-3"
-        variant="outline"
+        variant="secondary"
+        bordered
         size="sm"
         onClick={onRetry}
       >

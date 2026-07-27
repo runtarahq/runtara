@@ -251,9 +251,9 @@ export function WorkflowActionsForm(props: Props) {
               {/* Start button */}
               <Button
                 type="button"
-                variant="ghost"
+                variant="secondary"
                 size="icon-sm"
-                className="rounded text-primary hover:bg-primary/10 hover:text-primary"
+                className="rounded hover:bg-primary/10"
                 disabled={isLoading || isExecuting || isDirty}
                 onClick={onSchedule}
                 title={
@@ -268,7 +268,7 @@ export function WorkflowActionsForm(props: Props) {
               {/* Debug execute button (server-side with breakpoints) */}
               <Button
                 type="button"
-                variant="ghost"
+                variant="secondary"
                 size="icon-sm"
                 className="rounded text-warning hover:bg-warning/10 hover:text-warning"
                 disabled={
@@ -290,7 +290,7 @@ export function WorkflowActionsForm(props: Props) {
               {isSuspended && (
                 <Button
                   type="button"
-                  variant="ghost"
+                  variant="secondary"
                   size="icon-sm"
                   className="rounded text-success hover:bg-success/10 hover:text-success"
                   disabled={isLoading || isResuming}
@@ -305,7 +305,7 @@ export function WorkflowActionsForm(props: Props) {
               {isExecutionActive && (
                 <Button
                   type="button"
-                  variant="destructiveGhost"
+                  variant="secondaryDestructive"
                   size="icon-sm"
                   className="rounded hover:bg-destructive/10"
                   disabled={isLoading}
@@ -321,7 +321,7 @@ export function WorkflowActionsForm(props: Props) {
             {isExecuting && onViewExecutionDetails && (
               <Button
                 type="button"
-                variant="quiet"
+                variant="secondary"
                 size="icon-sm"
                 className="rounded hover:bg-muted"
                 onClick={onViewExecutionDetails}
@@ -335,7 +335,7 @@ export function WorkflowActionsForm(props: Props) {
             {isExecuting && onClearExecution && (
               <Button
                 type="button"
-                variant="quiet"
+                variant="secondary"
                 size="icon-sm"
                 className="rounded hover:bg-muted"
                 onClick={onClearExecution}
@@ -351,9 +351,9 @@ export function WorkflowActionsForm(props: Props) {
             <Can permission="workflow:update">
               <Button
                 type="button"
-                variant="ghost"
+                variant="secondary"
                 size="icon-sm"
-                className="rounded text-foreground/70 hover:bg-muted hover:text-foreground"
+                className="rounded text-foreground/70 hover:bg-muted"
                 disabled={isLoading || isExecuting || !isDirty}
                 title={isDirty ? 'Save changes' : 'No changes to save'}
                 onClick={form.handleSubmit(onSubmit)}
@@ -367,7 +367,7 @@ export function WorkflowActionsForm(props: Props) {
             {/* Export button */}
             <Button
               type="button"
-              variant="quiet"
+              variant="secondary"
               size="icon-sm"
               className="rounded hover:bg-muted"
               disabled={isLoading}
@@ -380,7 +380,7 @@ export function WorkflowActionsForm(props: Props) {
             {/* Import button */}
             <Button
               type="button"
-              variant="quiet"
+              variant="secondary"
               size="icon-sm"
               className="rounded hover:bg-muted"
               disabled={isLoading}
@@ -395,7 +395,7 @@ export function WorkflowActionsForm(props: Props) {
             {/* Add note button */}
             <Button
               type="button"
-              variant="quiet"
+              variant="secondary"
               size="icon-sm"
               className="rounded hover:bg-muted"
               disabled={isLoading || isExecuting}
@@ -408,7 +408,7 @@ export function WorkflowActionsForm(props: Props) {
             {/* Auto-layout button */}
             <Button
               type="button"
-              variant="quiet"
+              variant="secondary"
               size="icon-sm"
               className="rounded hover:bg-muted"
               disabled={isLoading || isExecuting}

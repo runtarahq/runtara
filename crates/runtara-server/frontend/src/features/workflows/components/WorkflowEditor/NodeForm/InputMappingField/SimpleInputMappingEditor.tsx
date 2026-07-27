@@ -370,7 +370,7 @@ function FieldRow({
         {isOptional && onRemove && (
           <Button
             type="button"
-            variant="quietDestructive"
+            variant="secondaryDestructive"
             size="icon-sm"
             onClick={onRemove}
             title="Remove field"
@@ -1002,7 +1002,12 @@ export function SimpleInputMappingEditor({
       {availableOptionalFields.length > 0 && (
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
-            <Button type="button" variant="quiet" size="sm" className="w-full">
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              className="w-full"
+            >
               <Icons.add className="mr-2 size-4" />
               Add optional parameter ({availableOptionalFields.length}{' '}
               available)
@@ -1041,7 +1046,8 @@ export function SimpleInputMappingEditor({
       {allowCustomFields && (
         <Button
           type="button"
-          variant="quietOutline"
+          variant="secondary"
+          bordered
           size="sm"
           className="w-full border-dashed"
           onClick={() => setIsAddCustomFieldOpen(true)}

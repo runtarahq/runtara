@@ -124,7 +124,7 @@ export function ChatPage() {
       {/* Header */}
       <div className="flex items-center gap-3 border-b px-4 py-3">
         <Button
-          variant="ghost"
+          variant="secondary"
           size="icon"
           onClick={handleBack}
           className="size-8"

@@ -522,7 +522,8 @@ function AiAgentNodeComponent({
                 </span>
                 <Button
                   className="pointer-events-none size-4 flex-shrink-0 rounded-full shadow-sm [&_svg]:size-2"
-                  variant="outline"
+                  variant="secondary"
+                  bordered
                   size="icon"
                   tabIndex={-1}
                 >
@@ -575,7 +576,8 @@ function AiAgentNodeComponent({
                 </span>
                 <Button
                   className="pointer-events-none size-4 flex-shrink-0 rounded-full shadow-sm [&_svg]:size-2"
-                  variant="outline"
+                  variant="secondary"
+                  bordered
                   size="icon"
                   tabIndex={-1}
                 >

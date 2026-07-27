@@ -492,7 +492,8 @@ function WorkflowActionButton({
   return (
     <Button
       type="button"
-      variant="outline"
+      variant="secondary"
+      bordered
       size="sm"
       className="report-print-hidden h-8 max-w-full gap-1.5"
       disabled={Boolean(phase) || disabled || !onRun}

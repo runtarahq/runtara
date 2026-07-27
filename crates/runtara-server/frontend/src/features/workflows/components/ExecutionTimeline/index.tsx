@@ -401,7 +401,8 @@ export function ExecutionTimeline({
         <CardContent className="py-4">
           <div className="flex items-center gap-4">
             <Button
-              variant="outline"
+              variant="secondary"
+              bordered
               size="icon"
               onClick={() => setIsPlaying(!isPlaying)}
               className="rounded-full"
@@ -413,7 +414,8 @@ export function ExecutionTimeline({
               )}
             </Button>
             <Button
-              variant="outline"
+              variant="secondary"
+              bordered
               size="icon"
               onClick={() => {
                 setPlayhead(0);
@@ -610,7 +612,12 @@ export function ExecutionTimeline({
           {/* Load More Button */}
           {hasMoreRootSteps && (
             <div className="border-t bg-muted/20 p-4 text-center">
-              <Button variant="outline" size="sm" onClick={loadMoreRoot}>
+              <Button
+                variant="secondary"
+                bordered
+                size="sm"
+                onClick={loadMoreRoot}
+              >
                 Load More Steps
               </Button>
             </div>

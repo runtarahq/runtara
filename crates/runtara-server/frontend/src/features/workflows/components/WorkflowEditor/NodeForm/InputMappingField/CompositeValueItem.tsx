@@ -700,7 +700,7 @@ export function CompositeValueItem({
         {removable && onRemove && !disabled && (
           <Button
             type="button"
-            variant="quietDestructive"
+            variant="secondaryDestructive"
             size="icon-sm"
             className="shrink-0"
             onClick={onRemove}
@@ -787,7 +787,8 @@ function CompositeObjectEditorInline({
         />
         <Button
           type="button"
-          variant="outline"
+          variant="secondary"
+          bordered
           size="sm"
           onClick={handleAddField}
           disabled={!newFieldName.trim()}
@@ -868,7 +869,8 @@ function CompositeArrayEditorInline({
         <DropdownMenuTrigger asChild>
           <Button
             type="button"
-            variant="outline"
+            variant="secondary"
+            bordered
             size="sm"
             className="w-full border-dashed"
           >

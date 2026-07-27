@@ -72,7 +72,7 @@ export function ValidationMessageItem({
       {/* Quick action - navigate to step */}
       {hasStep && (
         <Button
-          variant="ghost"
+          variant="secondary"
           size="icon"
           className="size-6 shrink-0 opacity-0 transition-opacity group-hover:opacity-100"
           onClick={(e) => {

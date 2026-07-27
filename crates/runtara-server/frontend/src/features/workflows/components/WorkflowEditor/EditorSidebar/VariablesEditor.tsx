@@ -236,7 +236,7 @@ export function VariablesEditor({
                   <td className="p-2 text-center">
                     <Button
                       type="button"
-                      variant="ghost"
+                      variant="secondary"
                       size="sm"
                       onClick={() => handleRemove(index)}
                       className="size-6 p-0"
@@ -264,7 +264,8 @@ export function VariablesEditor({
       {!readOnly && (
         <Button
           type="button"
-          variant="outline"
+          variant="secondary"
+          bordered
           size="sm"
           onClick={handleAdd}
           className="w-full"

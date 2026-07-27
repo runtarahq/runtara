@@ -15,7 +15,7 @@ export function IdColumnCell({ id }: IdColumnCellProps) {
   return (
     <div className="pl-3">
       <Button
-        variant="ghost"
+        variant="secondary"
         size="icon"
         className="size-8"
         onClick={handleCopy}

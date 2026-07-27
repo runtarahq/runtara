@@ -204,7 +204,7 @@ export function FileUploadBlock({
           {!isRunning ? (
             <Button
               type="button"
-              variant="ghost"
+              variant="secondary"
               size="sm"
               className="size-6 p-0"
               aria-label="Clear selected file"

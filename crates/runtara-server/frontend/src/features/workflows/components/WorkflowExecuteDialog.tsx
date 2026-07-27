@@ -177,7 +177,8 @@ export function WorkflowExecuteDialog({
 
         <DialogFooter>
           <Button
-            variant="outline"
+            variant="secondary"
+            bordered
             onClick={() => onOpenChange(false)}
             disabled={isSubmitting}
           >

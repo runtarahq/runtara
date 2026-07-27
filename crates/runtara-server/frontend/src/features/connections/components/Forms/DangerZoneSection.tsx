@@ -27,11 +27,12 @@ export function DangerZoneSection({
         </div>
         <Button
           type="button"
-          variant="outline"
+          variant="secondary"
+          bordered
           size="sm"
           onClick={onRequestDelete}
           disabled={isDeleting}
-          className="flex-shrink-0 border-destructive/40 text-destructive hover:bg-destructive/10 hover:text-destructive"
+          className="flex-shrink-0 border-destructive/40 hover:bg-destructive/10"
         >
           Delete…
         </Button>

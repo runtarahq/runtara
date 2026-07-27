@@ -118,7 +118,7 @@ export function ConfigurationField(props: any) {
             />
             <Button
               type="button"
-              variant="ghost"
+              variant="secondary"
               size="icon"
               onClick={() => removePair(index)}
               disabled={disabled}
@@ -129,7 +129,8 @@ export function ConfigurationField(props: any) {
         ))}
         <Button
           type="button"
-          variant="outline"
+          variant="secondary"
+          bordered
           size="sm"
           onClick={addPair}
           disabled={disabled}

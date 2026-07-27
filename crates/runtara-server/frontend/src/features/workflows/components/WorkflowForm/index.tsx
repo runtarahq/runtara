@@ -69,7 +69,7 @@ export function WorkflowForm(props: WorkflowFormProps) {
               <Link to="/workflows" className="w-full sm:w-auto">
                 <Button
                   type="button"
-                  variant="quiet"
+                  variant="secondary"
                   disabled={loading}
                   className="w-full justify-center"
                 >

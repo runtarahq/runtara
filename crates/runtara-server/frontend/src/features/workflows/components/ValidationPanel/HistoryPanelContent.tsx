@@ -427,7 +427,7 @@ function EventRow({ step, sequence }: { step: StepSummary; sequence: number }) {
                       Inputs
                     </span>
                     <Button
-                      variant="ghost"
+                      variant="secondary"
                       size="sm"
                       className="h-5 px-1 text-3xs"
                       onClick={(e) => {
@@ -455,7 +455,7 @@ function EventRow({ step, sequence }: { step: StepSummary; sequence: number }) {
                       Outputs
                     </span>
                     <Button
-                      variant="ghost"
+                      variant="secondary"
                       size="sm"
                       className="h-5 px-1 text-3xs"
                       onClick={(e) => {

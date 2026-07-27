@@ -452,7 +452,7 @@ export function WorkflowsGrid({
                     <Can permission="workflow:folder_rename">
                       <WithTooltip label="Rename folder">
                         <Button
-                          variant="quiet"
+                          variant="secondary"
                           size="icon-sm"
                           aria-label="Rename folder"
                           onClick={() => onFolderRename?.(folder.path)}
@@ -464,7 +464,7 @@ export function WorkflowsGrid({
                     <Can permission="workflow:delete">
                       <WithTooltip label="Delete folder">
                         <Button
-                          variant="quietDestructive"
+                          variant="secondaryDestructive"
                           size="icon-sm"
                           aria-label="Delete folder"
                           onClick={() => onFolderDelete?.(folder.path)}

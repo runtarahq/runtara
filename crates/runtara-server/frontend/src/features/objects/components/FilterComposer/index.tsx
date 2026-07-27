@@ -160,7 +160,7 @@ export const FilterComposer = ({
             <div className="text-sm font-medium">Filter Expression</div>
             <Button
               type="button"
-              variant="ghost"
+              variant="secondary"
               size="sm"
               onClick={handleClear}
               className="h-7"
@@ -181,7 +181,8 @@ export const FilterComposer = ({
       ) : (
         <Button
           type="button"
-          variant="outline"
+          variant="secondary"
+          bordered
           size="sm"
           onClick={() =>
             handleConditionChange({ op: 'EQ', arguments: ['', ''] })
@@ -338,7 +339,7 @@ const ConditionBuilder = ({
           {depth > 0 && canRemove && (
             <Button
               type="button"
-              variant="ghost"
+              variant="secondary"
               size="icon"
               onClick={handleRemoveCondition}
               className="ml-auto size-8"
@@ -406,7 +407,7 @@ const ConditionBuilder = ({
                 {operator.arity === 'VARIADIC' && (
                   <Button
                     type="button"
-                    variant="ghost"
+                    variant="secondary"
                     size="icon"
                     onClick={() =>
                       handleArgChange(index, {
@@ -423,7 +424,7 @@ const ConditionBuilder = ({
                 {operator.arity === 'VARIADIC' && args.length > 1 && (
                   <Button
                     type="button"
-                    variant="ghost"
+                    variant="secondary"
                     size="icon"
                     onClick={() => handleRemoveArgument(index)}
                     className="size-8"
@@ -439,7 +440,8 @@ const ConditionBuilder = ({
         {operator.arity === 'VARIADIC' && (
           <Button
             type="button"
-            variant="outline"
+            variant="secondary"
+            bordered
             size="sm"
             onClick={handleAddArgument}
             className="w-full text-xs"

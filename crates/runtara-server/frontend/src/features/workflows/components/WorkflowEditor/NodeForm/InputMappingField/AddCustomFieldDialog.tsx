@@ -143,7 +143,12 @@ export function AddCustomFieldDialog({
         </div>
 
         <DialogFooter>
-          <Button type="button" variant="outline" onClick={handleClose}>
+          <Button
+            type="button"
+            variant="secondary"
+            bordered
+            onClick={handleClose}
+          >
             Cancel
           </Button>
           <Button type="button" onClick={handleAdd}>

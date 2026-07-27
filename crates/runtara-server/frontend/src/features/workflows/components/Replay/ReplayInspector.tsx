@@ -151,7 +151,7 @@ export function ReplayInspector({
         </div>
         <Button
           type="button"
-          variant="ghost"
+          variant="secondary"
           size="icon"
           className="size-6 shrink-0"
           onClick={onClose}

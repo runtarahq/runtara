@@ -223,7 +223,7 @@ export function MappingObjectField({
                 </Button>
                 <Button
                   type="button"
-                  variant="ghost"
+                  variant="secondary"
                   size="sm"
                   onClick={() => {
                     setIsAddingField(false);
@@ -241,7 +241,8 @@ export function MappingObjectField({
           {!disabled && !isAddingField && (
             <Button
               type="button"
-              variant="outline"
+              variant="secondary"
+              bordered
               size="sm"
               className="w-full border-dashed"
               onClick={() => setIsAddingField(true)}
@@ -256,7 +257,7 @@ export function MappingObjectField({
       <div className="flex justify-end">
         <Button
           type="button"
-          variant="quiet"
+          variant="secondary"
           size="sm"
           className="h-6 px-1 text-xs"
           onClick={() => setShowJson(!showJson)}
@@ -487,7 +488,7 @@ function MappingObjectRow({
 
         <Button
           type="button"
-          variant="quietDestructive"
+          variant="secondaryDestructive"
           size="icon"
           className="h-9 w-7 shrink-0"
           onClick={onRemove}

@@ -95,7 +95,7 @@ export function GridSettingsPanel({ grid, onChange }: GridSettingsPanelProps) {
           {widths && widths.length > 0 ? (
             <Button
               type="button"
-              variant="ghost"
+              variant="secondary"
               size="sm"
               className="h-6"
               onClick={clearColumnWidths}
@@ -105,7 +105,7 @@ export function GridSettingsPanel({ grid, onChange }: GridSettingsPanelProps) {
           ) : (
             <Button
               type="button"
-              variant="ghost"
+              variant="secondary"
               size="sm"
               className="h-6"
               onClick={() =>

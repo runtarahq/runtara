@@ -416,7 +416,8 @@ function BasicNodeComponent({
           >
             <Button
               className="size-4 rounded-full shadow-sm [&_svg]:size-2"
-              variant="outline"
+              variant="secondary"
+              bordered
               size="icon"
               onClick={handleOpenCreate}
               aria-label={`Add step after ${data.name || id || 'step'}`}
@@ -438,7 +439,8 @@ function BasicNodeComponent({
           >
             <Button
               className="size-4 rounded-full shadow-sm [&_svg]:size-2"
-              variant="outline"
+              variant="secondary"
+              bordered
               size="icon"
               onClick={handleOpenCreateBefore}
               aria-label={`Add step before ${data.name || id || 'step'}`}
@@ -463,7 +465,8 @@ function BasicNodeComponent({
           >
             <Button
               className="size-4 rounded-full bg-destructive/10 shadow-sm hover:bg-destructive/20 [&_svg]:size-2"
-              variant="outline"
+              variant="secondary"
+              bordered
               size="icon"
               onClick={handleOpenCreateError}
               title="Add error handler"

@@ -15,7 +15,7 @@ export function ThemeSwitcher() {
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
         <Button
-          variant="ghost"
+          variant="secondary"
           size="icon"
           className="relative size-9 shrink-0"
           aria-label="Toggle theme"

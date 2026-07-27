@@ -536,14 +536,14 @@ export function ReportPage() {
       {editing ? (
         isExisting && reportId ? (
           <Link to={`/reports/${reportId}`} className="w-full sm:w-auto">
-            <Button variant="outline" className="w-full sm:px-4">
+            <Button variant="secondary" bordered className="w-full sm:px-4">
               <Eye className="mr-2 size-4" />
               View
             </Button>
           </Link>
         ) : (
           <Link to="/reports" className="w-full sm:w-auto">
-            <Button variant="outline" className="w-full sm:px-4">
+            <Button variant="secondary" bordered className="w-full sm:px-4">
               Cancel
             </Button>
           </Link>
@@ -552,14 +552,15 @@ export function ReportPage() {
         <>
           {explorePath ? (
             <Link to={explorePath} className="w-full sm:w-auto">
-              <Button variant="outline" className="w-full sm:px-4">
+              <Button variant="secondary" bordered className="w-full sm:px-4">
                 <Compass className="mr-2 size-4" />
                 Explore
               </Button>
             </Link>
           ) : null}
           <Button
-            variant="outline"
+            variant="secondary"
+            bordered
             className="sm:px-4"
             disabled={renderQuery.isFetching}
             onClick={handlePrint}
@@ -568,7 +569,8 @@ export function ReportPage() {
             Print
           </Button>
           <Button
-            variant="outline"
+            variant="secondary"
+            bordered
             className="sm:px-4"
             disabled={renderQuery.isFetching}
             onClick={() => void handleReportActionRefresh()}
@@ -590,7 +592,7 @@ export function ReportPage() {
               to={`/reports/${reportId}?edit=1`}
               className="w-full sm:w-auto"
             >
-              <Button variant="outline" className="w-full sm:px-4">
+              <Button variant="secondary" bordered className="w-full sm:px-4">
                 <Edit className="mr-2 size-4" />
                 Edit
               </Button>
@@ -644,7 +646,8 @@ export function ReportPage() {
             {editing ? (
               <Button
                 type="button"
-                variant="outline"
+                variant="secondary"
+                bordered
                 size="sm"
                 onClick={() => setReAuthoringAccepted(true)}
                 disabled={reAuthoringAccepted}

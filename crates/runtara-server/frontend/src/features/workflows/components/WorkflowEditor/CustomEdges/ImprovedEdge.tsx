@@ -423,7 +423,8 @@ export function ImprovedEdge({
             >
               <Button
                 className="size-4 rounded-full shadow-sm transition-all hover:shadow-md [&_svg]:size-2"
-                variant="outline"
+                variant="secondary"
+                bordered
                 size="icon"
                 onClick={handleInsertClick}
               >

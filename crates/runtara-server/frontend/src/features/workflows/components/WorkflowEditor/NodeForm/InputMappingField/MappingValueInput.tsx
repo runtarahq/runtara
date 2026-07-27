@@ -403,7 +403,7 @@ export function MappingValueInput({
           <span className="font-mono text-sm text-muted-foreground">null</span>
           <Button
             type="button"
-            variant="ghost"
+            variant="secondary"
             size="sm"
             className="h-7 px-2 text-xs"
             onClick={() => onChange('')}
@@ -545,7 +545,7 @@ export function MappingValueInput({
         {canSetNull && !isNullValue && (
           <Button
             type="button"
-            variant="quiet"
+            variant="secondary"
             size="sm"
             className="h-9 shrink-0 px-2 font-mono text-xs"
             onClick={() => onChange(null)}
@@ -559,9 +559,9 @@ export function MappingValueInput({
         {showTemplateEditor && !isReference && !isComposite && !isNullValue && (
           <Button
             type="button"
-            variant="ghost"
+            variant="secondary"
             size="icon"
-            className="size-9 shrink-0 text-muted-foreground hover:bg-primary/10 hover:text-primary"
+            className="size-9 shrink-0 hover:bg-primary/10"
             onClick={() => setIsTemplateEditorOpen(true)}
             disabled={disabled}
             title="Open template editor"

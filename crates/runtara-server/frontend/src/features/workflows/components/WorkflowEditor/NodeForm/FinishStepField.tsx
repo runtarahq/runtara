@@ -248,7 +248,8 @@ export function FinishStepField({ name }: FinishStepFieldProps) {
           <Button
             type="button"
             size="sm"
-            variant="outline"
+            variant="secondary"
+            bordered
             className="mt-2"
             onClick={() => {
               const newFields = missingRequiredFields.map((field) => ({
@@ -458,7 +459,7 @@ export function FinishStepField({ name }: FinishStepFieldProps) {
                     <td className="p-2 pl-3 text-center align-top">
                       <Button
                         type="button"
-                        variant="ghost"
+                        variant="secondary"
                         size="icon-sm"
                         onClick={() => remove(index)}
                         disabled={isRequired}
@@ -563,7 +564,8 @@ export function FinishStepField({ name }: FinishStepFieldProps) {
               <Button
                 type="button"
                 size="sm"
-                variant="outline"
+                variant="secondary"
+                bordered
                 className="flex-1"
               >
                 <Plus className="mr-2 size-4" />
@@ -600,7 +602,8 @@ export function FinishStepField({ name }: FinishStepFieldProps) {
           <Button
             type="button"
             size="sm"
-            variant="outline"
+            variant="secondary"
+            bordered
             className="flex-1"
             onClick={() =>
               append({

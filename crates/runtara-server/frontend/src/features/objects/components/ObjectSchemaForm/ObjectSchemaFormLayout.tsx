@@ -64,7 +64,7 @@ export function ObjectSchemaFormLayout(props: ObjectSchemaFormLayoutProps) {
               {isEditMode && onDelete && (
                 <Button
                   type="button"
-                  variant="destructiveGhost"
+                  variant="secondaryDestructive"
                   size="sm"
                   onClick={onDelete}
                   disabled={isDeleting}
@@ -79,7 +79,7 @@ export function ObjectSchemaFormLayout(props: ObjectSchemaFormLayoutProps) {
                 </Button>
               )}
               <Link to={cancelHref}>
-                <Button type="button" variant="quiet" size="sm">
+                <Button type="button" variant="secondary" size="sm">
                   Cancel
                 </Button>
               </Link>

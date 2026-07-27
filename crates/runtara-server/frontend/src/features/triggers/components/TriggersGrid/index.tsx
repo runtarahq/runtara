@@ -226,7 +226,7 @@ export function TriggersGrid({
                           </Tooltip>
                           <WithTooltip label="Copy endpoint">
                             <Button
-                              variant="quiet"
+                              variant="secondary"
                               size="icon"
                               className="size-6 shrink-0"
                               aria-label="Copy endpoint"
@@ -253,7 +253,7 @@ export function TriggersGrid({
                             </Tooltip>
                             <WithTooltip label="Copy sync endpoint">
                               <Button
-                                variant="quiet"
+                                variant="secondary"
                                 size="icon"
                                 className="size-6 shrink-0"
                                 aria-label="Copy sync endpoint"
@@ -277,7 +277,7 @@ export function TriggersGrid({
                         <Link to={`/invocation-triggers/${trigger.id}`}>
                           <WithTooltip label="Edit trigger">
                             <Button
-                              variant="quiet"
+                              variant="secondary"
                               size="icon-sm"
                               aria-label="Edit trigger"
                             >
@@ -289,7 +289,7 @@ export function TriggersGrid({
                       <Can permission="trigger:delete">
                         <WithTooltip label="Delete trigger">
                           <Button
-                            variant="quietDestructive"
+                            variant="secondaryDestructive"
                             size="icon-sm"
                             aria-label="Delete trigger"
                             disabled={deletingId === trigger.id}
@@ -345,7 +345,7 @@ export function TriggersGrid({
         </div>
         <DialogFooter className="gap-2 sm:gap-0">
           <DialogClose asChild>
-            <Button type="button" variant="outline">
+            <Button type="button" variant="secondary" bordered>
               Cancel
             </Button>
           </DialogClose>

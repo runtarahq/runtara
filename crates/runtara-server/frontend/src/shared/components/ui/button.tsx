@@ -7,43 +7,38 @@ import { cva, type VariantProps } from 'class-variance-authority';
 
 import { cn } from '@/lib/utils.ts';
 
+/**
+ * Four action types, and nothing else:
+ *
+ *   primary               the one action the screen is for
+ *   destructive           primary, and it destroys something
+ *   secondary             any other action
+ *   secondaryDestructive  a non-primary action that destroys something
+ *
+ * Whether a button carries a border is a separate question from what kind of
+ * action it is — a table-row delete icon and a dialog's Cancel are both
+ * secondary, but only one of them wants an outline. So `bordered` is its own
+ * axis rather than a second family of variants.
+ */
 const buttonVariants = cva(
   'inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0',
   {
     variants: {
       variant: {
-        default: 'bg-primary text-primary-foreground hover:bg-primary/90',
+        primary: 'bg-primary text-primary-foreground hover:bg-primary/90',
         destructive:
           'bg-destructive text-destructive-foreground hover:bg-destructive/90',
-        // Non-primary actions label themselves in the brand colour rather than
-        // the default foreground. text-primary-text, not text-primary: the
-        // latter is 3.64:1 on white, under the AA bar for text this size.
-        outline:
-          'border border-input bg-background text-primary-text hover:bg-accent hover:text-accent-foreground',
+        // text-primary-text, not text-primary: the latter is 3.64:1 on white,
+        // under the AA bar for text at these sizes.
         secondary:
-          'bg-secondary text-secondary-foreground hover:bg-secondary/80',
-        ghost: 'text-primary-text hover:bg-accent hover:text-accent-foreground',
-        link: 'text-primary-text underline-offset-4 hover:underline',
-        // Low-emphasis chrome — row actions, toolbar icons, dismissals. Named
-        // rather than spelled out at each call site: 34 of them had written
-        // this pair by hand, which is how they drifted out of step with the
-        // variants in the first place.
-        quiet: 'text-muted-foreground hover:bg-accent hover:text-foreground',
-        // The bordered form of `quiet` — the timeline's dashed add-controls,
-        // filter and range pickers. Deliberately not brand-coloured: these
-        // repeat many times per screen and are scaffolding, not the action.
-        quietOutline:
-          'border border-input bg-background text-muted-foreground hover:bg-accent hover:text-foreground',
-        // Quiet until you reach for it, then it says what it will do. The
-        // usual shape for a delete icon in a dense table.
-        quietDestructive:
-          'text-muted-foreground hover:bg-destructive/10 hover:text-destructive',
-        // A destructive action that does not warrant the solid fill. Note the
-        // explicit hover text: call sites that wrote `text-destructive` on a
-        // ghost button kept ghost's `hover:text-accent-foreground`, so they
-        // turned cyan on hover.
-        destructiveGhost:
+          'text-primary-text hover:bg-accent hover:text-accent-foreground',
+        secondaryDestructive:
           'text-destructive hover:bg-destructive/10 hover:text-destructive',
+      },
+      /** Outline the button. Only meaningful on the secondary types. */
+      bordered: {
+        true: 'border bg-background',
+        false: '',
       },
       size: {
         default: 'h-8 px-3 py-1',
@@ -53,9 +48,18 @@ const buttonVariants = cva(
         'icon-sm': 'size-7',
       },
     },
+    compoundVariants: [
+      { variant: 'secondary', bordered: true, class: 'border-input' },
+      {
+        variant: 'secondaryDestructive',
+        bordered: true,
+        class: 'border-destructive/40',
+      },
+    ],
     defaultVariants: {
-      variant: 'default',
+      variant: 'primary',
       size: 'default',
+      bordered: false,
     },
   }
 );
@@ -68,11 +72,11 @@ interface ButtonProps
 }
 
 const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
-  ({ className, variant, size, asChild = false, ...props }, ref) => {
+  ({ className, variant, size, bordered, asChild = false, ...props }, ref) => {
     const Comp = asChild ? Slot : 'button';
     return (
       <Comp
-        className={cn(buttonVariants({ variant, size, className }))}
+        className={cn(buttonVariants({ variant, size, bordered, className }))}
         ref={ref}
         {...props}
       />

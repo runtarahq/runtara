@@ -77,7 +77,7 @@ export function InlineBlockEditor({
         <div className="flex items-center gap-1">
           <Button
             type="button"
-            variant="default"
+            variant="primary"
             size="sm"
             className="h-7 px-2"
             onClick={onDone}
@@ -87,7 +87,7 @@ export function InlineBlockEditor({
           </Button>
           <Button
             type="button"
-            variant="destructiveGhost"
+            variant="secondaryDestructive"
             size="icon-sm"
             title="Remove block"
             aria-label="Remove block"

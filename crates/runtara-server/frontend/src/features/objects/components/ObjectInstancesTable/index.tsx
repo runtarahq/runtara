@@ -626,7 +626,8 @@ export function ObjectInstanceDtosTable({
                   {objectSchemaDto.name && (
                     <>
                       <Button
-                        variant="outline"
+                        variant="secondary"
+                        bordered
                         size="sm"
                         onClick={handleExportCsv}
                         disabled={exportCsvMutation.isPending}
@@ -640,7 +641,8 @@ export function ObjectInstanceDtosTable({
                       </Button>
                       <Can permission="database:create">
                         <Button
-                          variant="outline"
+                          variant="secondary"
+                          bordered
                           size="sm"
                           onClick={() => setShowImportDialog(true)}
                         >
@@ -648,7 +650,8 @@ export function ObjectInstanceDtosTable({
                           Import
                         </Button>
                         <Button
-                          variant="outline"
+                          variant="secondary"
+                          bordered
                           size="sm"
                           onClick={() => setShowBulkInsertDialog(true)}
                         >
@@ -679,7 +682,8 @@ export function ObjectInstanceDtosTable({
           >
             <Can permission="database:update">
               <Button
-                variant="outline"
+                variant="secondary"
+                bordered
                 size="sm"
                 onClick={() => setShowBulkEditDialog(true)}
               >

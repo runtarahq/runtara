@@ -196,7 +196,7 @@ export function ReportViewNavigation({
           {showPrevious ? (
             <Button
               type="button"
-              variant="quiet"
+              variant="secondary"
               size="sm"
               aria-label={group.previousLabel?.trim() || 'Previous stage'}
               disabled={
@@ -219,7 +219,7 @@ export function ReportViewNavigation({
           {showNext ? (
             <Button
               type="button"
-              variant="quiet"
+              variant="secondary"
               size="sm"
               aria-label={group.nextLabel?.trim() || 'Next stage'}
               disabled={isCurrentOnly || !next || !accessible.has(next.viewId)}

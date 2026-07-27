@@ -373,7 +373,7 @@ function RowConditionRow({
           <Button
             type="button"
             size="sm"
-            variant="ghost"
+            variant="secondary"
             className="h-6 px-2"
             onClick={() => onChange(undefined)}
           >
@@ -448,7 +448,7 @@ function RowConditionRow({
         <Button
           type="button"
           size="icon"
-          variant="ghost"
+          variant="secondary"
           className="size-8"
           disabled={!value}
           onClick={() => onChange(undefined)}
@@ -500,7 +500,8 @@ export function InteractionButtonsEditor({
         <SectionLabel size="sm">Buttons</SectionLabel>
         <Button
           type="button"
-          variant="outline"
+          variant="secondary"
+          bordered
           size="sm"
           className="h-7"
           onClick={() =>
@@ -571,7 +572,7 @@ export function InteractionButtonsEditor({
                 <Button
                   type="button"
                   size="icon"
-                  variant="ghost"
+                  variant="secondary"
                   className="mt-5 size-8"
                   onClick={() =>
                     onChange(
@@ -625,7 +626,8 @@ export function InteractionActionsList({
         <Button
           type="button"
           size="sm"
-          variant="outline"
+          variant="secondary"
+          bordered
           className="h-7"
           onClick={() =>
             onChange([
@@ -747,7 +749,7 @@ export function InteractionActionsList({
             <Button
               type="button"
               size="icon"
-              variant="ghost"
+              variant="secondary"
               className="mt-5 size-8"
               onClick={() =>
                 onChange(
@@ -793,7 +795,8 @@ export function TableBulkActionsEditor({
         <Button
           type="button"
           size="sm"
-          variant="outline"
+          variant="secondary"
+          bordered
           className="h-7"
           onClick={() => onChange([...actions, createDefaultTableAction()])}
         >
@@ -839,7 +842,7 @@ export function TableBulkActionsEditor({
               <Button
                 type="button"
                 size="icon"
-                variant="ghost"
+                variant="secondary"
                 className="mt-5 size-8"
                 onClick={() =>
                   onChange(

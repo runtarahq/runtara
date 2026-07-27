@@ -204,7 +204,8 @@ export function VersionsPanelContent({
                        no double-rebuilds. */}
                   {(isCompiled || isFailed) && onVersionRebuild && (
                     <Button
-                      variant="outline"
+                      variant="secondary"
+                      bordered
                       size="sm"
                       className="h-6 gap-1 px-2.5 text-3xs"
                       onClick={() => {
@@ -224,7 +225,8 @@ export function VersionsPanelContent({
 
                   {/* Activate button */}
                   <Button
-                    variant={isActive ? 'outline' : 'default'}
+                    variant={isActive ? 'secondary' : 'primary'}
+                    bordered={isActive}
                     size="sm"
                     className={cn(
                       'h-6 gap-1 px-2.5 text-3xs',

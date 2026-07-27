@@ -268,7 +268,8 @@ function AddFilterMenu({
       <PopoverTrigger asChild>
         <Button
           type="button"
-          variant="quietOutline"
+          variant="secondary"
+          bordered
           size="sm"
           className="h-8 gap-1.5 rounded-full px-3 text-sm font-normal"
         >

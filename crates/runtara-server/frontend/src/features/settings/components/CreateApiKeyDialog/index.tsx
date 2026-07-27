@@ -88,7 +88,8 @@ export function CreateApiKeyDialog({ open, onClose }: CreateApiKeyDialogProps) {
                   {createdKey}
                 </code>
                 <Button
-                  variant="outline"
+                  variant="secondary"
+                  bordered
                   size="icon"
                   onClick={handleCopy}
                   className="shrink-0"

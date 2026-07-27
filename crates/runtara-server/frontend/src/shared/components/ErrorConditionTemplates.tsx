@@ -38,7 +38,8 @@ export function ErrorConditionTemplates({
     <DropdownMenu open={open} onOpenChange={setOpen}>
       <DropdownMenuTrigger asChild>
         <Button
-          variant="outline"
+          variant="secondary"
+          bordered
           size="sm"
           disabled={disabled}
           className="gap-1.5 text-xs"

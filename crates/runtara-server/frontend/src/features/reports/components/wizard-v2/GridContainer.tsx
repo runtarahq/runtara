@@ -464,7 +464,7 @@ function GridNodeEditor({
           />
           <Button
             type="button"
-            variant="ghost"
+            variant="secondary"
             size="icon-sm"
             className="shrink-0"
             title="More grid settings"
@@ -476,7 +476,7 @@ function GridNodeEditor({
           {isRoot ? null : (
             <Button
               type="button"
-              variant="destructiveGhost"
+              variant="secondaryDestructive"
               size="icon-sm"
               className="shrink-0"
               title="Remove grid"
@@ -669,7 +669,7 @@ function EmptyCellPlaceholder({
       <div className="flex items-center gap-1">
         <Button
           type="button"
-          variant="ghost"
+          variant="secondary"
           size="sm"
           className="h-7 text-xs"
           onClick={onAddBlock}
@@ -680,7 +680,7 @@ function EmptyCellPlaceholder({
           <DropdownMenuTrigger asChild>
             <Button
               type="button"
-              variant="quiet"
+              variant="secondary"
               size="sm"
               className="h-7 px-1.5"
               title="Add nested grid"

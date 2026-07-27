@@ -628,7 +628,7 @@ export function SplitStepField({ name }: SplitStepFieldProps) {
                       <td className="w-16 p-2 text-center">
                         <Button
                           type="button"
-                          variant="ghost"
+                          variant="secondary"
                           size="sm"
                           onClick={() => {
                             if (editingVariableIndex === index) {
@@ -720,7 +720,8 @@ export function SplitStepField({ name }: SplitStepFieldProps) {
         </div>
         <Button
           type="button"
-          variant="outline"
+          variant="secondary"
+          bordered
           size="sm"
           onClick={() =>
             appendVariableField({

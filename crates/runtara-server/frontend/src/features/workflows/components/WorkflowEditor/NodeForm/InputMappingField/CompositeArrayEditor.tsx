@@ -207,7 +207,7 @@ export function CompositeArrayEditor({
         {showCloseButton && onClose && (
           <Button
             type="button"
-            variant="ghost"
+            variant="secondary"
             size="icon"
             className="size-8"
             onClick={onClose}
@@ -259,7 +259,8 @@ export function CompositeArrayEditor({
               <DropdownMenuTrigger asChild>
                 <Button
                   type="button"
-                  variant="outline"
+                  variant="secondary"
+                  bordered
                   className="w-full border-dashed"
                 >
                   <Plus className="mr-2 size-4" />
@@ -292,7 +293,8 @@ export function CompositeArrayEditor({
             <div className="flex gap-1">
               <Button
                 type="button"
-                variant="outline"
+                variant="secondary"
+                bordered
                 className="flex-1 border-dashed"
                 onClick={handleAddItemDefault}
               >
@@ -303,7 +305,8 @@ export function CompositeArrayEditor({
                 <DropdownMenuTrigger asChild>
                   <Button
                     type="button"
-                    variant="outline"
+                    variant="secondary"
+                    bordered
                     className="border-dashed px-2"
                   >
                     <ChevronDown className="size-4" />

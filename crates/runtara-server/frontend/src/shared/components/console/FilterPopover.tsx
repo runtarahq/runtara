@@ -43,12 +43,13 @@ export function FilterPopover({
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
         <Button
-          variant="outline"
+          variant="secondary"
+          bordered
           size="icon"
           aria-label={`${title}${active ? ` (${activeCount} active)` : ''}`}
           className={cn(
             'relative size-9 shrink-0',
-            active && 'border-primary/40 text-primary'
+            active && 'border-primary/40'
           )}
         >
           <Filter className="size-4" />
@@ -78,7 +79,7 @@ export function FilterPopover({
           <span className="text-sm font-medium">{title}</span>
           {active && onClear && (
             <Button
-              variant="quiet"
+              variant="secondary"
               size="sm"
               className="h-7 px-2 text-xs"
               onClick={onClear}

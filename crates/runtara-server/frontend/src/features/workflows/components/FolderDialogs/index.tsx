@@ -106,7 +106,7 @@ export function RenameFolderDialog({
         </div>
         <DialogFooter>
           <Button
-            variant="ghost"
+            variant="secondary"
             onClick={() => onOpenChange(false)}
             disabled={isLoading}
           >
@@ -423,7 +423,7 @@ export function MoveToFolderDialog({
         </div>
         <DialogFooter>
           <Button
-            variant="ghost"
+            variant="secondary"
             onClick={() => onOpenChange(false)}
             disabled={isLoading}
           >

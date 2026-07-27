@@ -1324,7 +1324,8 @@ function TimelineConnectToStepButton({
       <PopoverTrigger asChild>
         <Button
           type="button"
-          variant="quietOutline"
+          variant="secondary"
+          bordered
           size="sm"
           className="h-7 gap-1.5 border-dashed px-2 text-xs shadow-none"
           aria-label={`Connect ${stepName} to an existing step`}
@@ -1346,7 +1347,7 @@ function TimelineConnectToStepButton({
               <Button
                 key={target.id}
                 type="button"
-                variant="ghost"
+                variant="secondary"
                 size="sm"
                 className="h-auto justify-start gap-2 px-2 py-1.5 text-left"
                 onClick={() => {
@@ -1436,7 +1437,8 @@ function TimelineAddMcpToolsetButton({
       <PopoverTrigger asChild>
         <Button
           type="button"
-          variant="quietOutline"
+          variant="secondary"
+          bordered
           size="sm"
           className="h-7 gap-1.5 border-dashed px-2 text-xs shadow-none"
           aria-label={`Add MCP toolset to ${stepName}`}
@@ -1478,7 +1480,7 @@ function TimelineAddMcpToolsetButton({
         <div className="flex justify-end gap-2">
           <Button
             type="button"
-            variant="ghost"
+            variant="secondary"
             size="sm"
             onClick={() => setOpen(false)}
           >
@@ -1556,7 +1558,8 @@ function TimelineRouteAddControls({
             <Button
               key={action.key}
               type="button"
-              variant="quietOutline"
+              variant="secondary"
+              bordered
               size="sm"
               className="h-7 gap-1.5 border-dashed px-2 text-xs shadow-none"
               onClick={() => {
@@ -1675,7 +1678,8 @@ function TimelineInsertionPoint({
       />
       <Button
         type="button"
-        variant="quietOutline"
+        variant="secondary"
+        bordered
         size="sm"
         className="h-7 border-dashed bg-background px-2 text-xs shadow-none transition-colors group-hover:border-primary/60 group-hover:text-foreground"
         onClick={() => onAddStep(request)}
@@ -1973,11 +1977,11 @@ function TimelineRouteSettings({
       <PopoverTrigger asChild>
         <Button
           type="button"
-          variant="ghost"
+          variant="secondary"
           size="icon"
           className={cn(
-            'ml-0.5 mt-1 size-6 rounded-sm bg-background text-muted-foreground',
-            hasMetadata && 'text-primary',
+            'ml-0.5 mt-1 size-6 rounded-sm bg-background',
+            hasMetadata && '',
             className
           )}
           disabled={disabled}
@@ -2019,7 +2023,7 @@ function TimelineRouteSettings({
             <Label htmlFor={`route-condition-${edge.id}`}>Condition</Label>
             <Button
               type="button"
-              variant="quiet"
+              variant="secondary"
               size="sm"
               className="h-6 px-2 text-xs"
               onClick={handleToggleConditionMode}
@@ -2050,7 +2054,7 @@ function TimelineRouteSettings({
         <div className="flex items-center justify-between gap-2">
           <Button
             type="button"
-            variant="destructiveGhost"
+            variant="secondaryDestructive"
             size="sm"
             className="gap-1.5"
             onClick={handleDelete}
@@ -2064,7 +2068,7 @@ function TimelineRouteSettings({
           <div className="flex gap-2">
             <Button
               type="button"
-              variant="ghost"
+              variant="secondary"
               size="sm"
               onClick={handleClear}
             >
@@ -2165,7 +2169,7 @@ function BranchLaneGroups({
               {showConditionalFlip && (
                 <Button
                   type="button"
-                  variant="quiet"
+                  variant="secondary"
                   size="icon"
                   className="ml-0.5 mt-1 size-6 rounded-sm bg-background"
                   disabled={routeControlsDisabled}
@@ -2184,7 +2188,7 @@ function BranchLaneGroups({
                 <div className="ml-0.5 mt-1 flex flex-col gap-0.5">
                   <Button
                     type="button"
-                    variant="quiet"
+                    variant="secondary"
                     size="icon"
                     className="size-5 rounded-sm bg-background"
                     disabled={routeControlsDisabled || caseIndex === 0}
@@ -2204,7 +2208,7 @@ function BranchLaneGroups({
                   </Button>
                   <Button
                     type="button"
-                    variant="quiet"
+                    variant="secondary"
                     size="icon"
                     className="size-5 rounded-sm bg-background"
                     disabled={
@@ -2506,7 +2510,8 @@ function WorkflowTimelineItem({
           {!readOnly && (
             <Button
               type="button"
-              variant="outline"
+              variant="secondary"
+              bordered
               size="sm"
               onClick={handleEdit}
               aria-label={`Edit ${getStepName(node)}`}

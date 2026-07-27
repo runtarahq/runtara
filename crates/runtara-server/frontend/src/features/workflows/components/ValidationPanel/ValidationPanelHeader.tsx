@@ -45,7 +45,7 @@ export function ValidationPanelHeader({
 
       {showClearButton && (
         <Button
-          variant="ghost"
+          variant="secondary"
           size="icon-sm"
           className="mr-2"
           onClick={(e) => {
