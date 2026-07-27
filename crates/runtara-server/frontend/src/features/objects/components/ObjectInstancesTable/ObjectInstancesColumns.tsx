@@ -14,6 +14,8 @@ interface ObjectInstancesColumnsProps {
   onUpdate: (instanceId: string, data: any) => void;
   enableSelection?: boolean;
   onCellFocus?: (rowId: string) => void;
+  /** Flush a row's pending edits to the server now. */
+  onCommitRow?: (rowId: string) => void;
   editingCellId: string | null;
   setEditingCellId: (cellId: string | null) => void;
 }
@@ -23,6 +25,7 @@ export const objectInstancesColumns = ({
   onUpdate,
   enableSelection = false,
   onCellFocus,
+  onCommitRow,
   editingCellId,
   setEditingCellId,
 }: ObjectInstancesColumnsProps): ColumnDef<Instance>[] => {
@@ -127,6 +130,7 @@ export const objectInstancesColumns = ({
               dataType={dataType}
               enumValues={enumValues}
               onFocus={() => onCellFocus?.(props.row.original.id!)}
+              onCommitRow={() => onCommitRow?.(props.row.original.id!)}
               isEditing={editingCellId === cellId}
               setIsEditing={(editing) =>
                 setEditingCellId(editing ? cellId : null)

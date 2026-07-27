@@ -35,6 +35,8 @@ interface EditableCellProps {
     | 'enum';
   enumValues?: string[];
   onFocus?: () => void;
+  /** Flush this row's pending edits to the server now. */
+  onCommitRow?: () => void;
   isEditing: boolean;
   setIsEditing: (editing: boolean) => void;
 }
@@ -47,6 +49,7 @@ export const EditableCell = memo(function EditableCell({
   dataType,
   enumValues,
   onFocus,
+  onCommitRow,
   isEditing,
   setIsEditing,
 }: EditableCellProps) {
@@ -132,7 +135,13 @@ export const EditableCell = memo(function EditableCell({
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter') {
+      // Enter is the grid's commit gesture, so it has to do what leaving the
+      // row does: record the edit, write it, and close the editor. It used to
+      // only mark the row dirty and leave the input open, so the change sat
+      // unsent with nothing on screen to say so.
       onBlur();
+      setIsEditing(false);
+      onCommitRow?.();
     } else if (e.key === 'Escape') {
       setValue(initialValueRef.current);
       currentValueRef.current = initialValueRef.current;

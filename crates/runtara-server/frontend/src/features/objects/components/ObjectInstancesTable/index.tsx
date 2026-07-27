@@ -4,6 +4,7 @@ import { Button } from '@/shared/components/ui/button';
 import { Can } from '@/shared/components/Can';
 import { Download, Pencil, Plus, Trash2, Upload } from 'lucide-react';
 import { DataTable } from '@/shared/components/table';
+import { clickLandedInGrid } from './click-target';
 import {
   Breadcrumb,
   ConsoleTableShell,
@@ -394,17 +395,14 @@ export function ObjectInstanceDtosTable({
     }
   }, []);
 
-  // Save when clicking outside the table
+  // Save when clicking away from the grid
   const tableRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
       if (!lastFocusedRowRef.current) return;
 
-      const target = e.target as HTMLElement;
-      const clickedInTable = target.closest('[data-table-container]');
-
-      if (!clickedInTable) {
+      if (!clickLandedInGrid(e.target as Node | null, tableRef.current)) {
         // Capture ref value before the async delay
         const rowId = lastFocusedRowRef.current;
         // Small delay to let any pending handleSave complete
@@ -535,6 +533,16 @@ export function ObjectInstanceDtosTable({
     [saveDirtyRow]
   );
 
+  // `handleUpdate` only records the edit; the write happens here. Deferring by
+  // a tick lets that state update land first, the same way the click-away
+  // handler waits before flushing.
+  const commitRow = useCallback(
+    (rowId: string) => {
+      setTimeout(() => saveDirtyRow(rowId), 0);
+    },
+    [saveDirtyRow]
+  );
+
   const columns = useMemo(
     () =>
       objectInstancesColumns({
@@ -542,10 +550,11 @@ export function ObjectInstanceDtosTable({
         onUpdate: handleUpdate,
         enableSelection: true,
         onCellFocus: handleCellFocus,
+        onCommitRow: commitRow,
         editingCellId,
         setEditingCellId,
       }),
-    [objectSchemaDto, handleUpdate, handleCellFocus, editingCellId]
+    [objectSchemaDto, handleUpdate, handleCellFocus, commitRow, editingCellId]
   );
 
   // Convert schema columns to filter schema definition format
@@ -591,7 +600,6 @@ export function ObjectInstanceDtosTable({
     <>
       <ConsoleTableShell
         ref={tableRef}
-        data-table-container
         onKeyDown={handleKeyDown}
         tabIndex={0}
         className="outline-none"
