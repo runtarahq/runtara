@@ -77,15 +77,83 @@ function toExtendedAgent(agentInfo: AgentInfo): ExtendedAgent {
   };
 }
 
-export async function getWorkflows(token: string) {
+/** The runtime API hard-caps `pageSize` at 100 (see workflows.rs). */
+const WORKFLOW_PAGE_SIZE = 100;
+
+/**
+ * Ceiling on how many pages `getWorkflows` will walk, so a pathologically large
+ * tenant cannot turn one picker into hundreds of requests. 20 pages covers
+ * 2,000 workflows; past that the pickers need server-side search instead.
+ */
+const MAX_WORKFLOW_PAGES = 20;
+
+async function fetchWorkflowPage(token: string, page: number) {
   const result = await RuntimeREST.api.listWorkflowsHandler(
-    { recursive: true, pageSize: 100 }, // Use max page size to get all workflows for dropdowns
+    { recursive: true, page, pageSize: WORKFLOW_PAGE_SIZE } as any,
     createAuthHeaders(token)
   );
-
-  // Return the full wrapped response (ApiResponsePageWorkflowDto)
-  // The response structure is: { data: { content: WorkflowDto[], totalElements, ... }, message, success }
   return result.data;
+}
+
+/**
+ * Every workflow in the tenant, for the pickers and name lookups that need a
+ * complete list (trigger create/edit, the trigger list's id→name map, the
+ * Start Workflow child picker, invocation-history filters, report workflow
+ * actions).
+ *
+ * `pageSize` cannot be raised past 100, so a single request silently omitted
+ * every workflow beyond the first 100 — they became unselectable, and the
+ * trigger list fell back to rendering raw workflow UUIDs. Walk the pages
+ * instead: page 1 reports `totalPages`, and the remainder are fetched together.
+ *
+ * Returns the same `{ data: { content, … }, message, success }` envelope as a
+ * single page, with the pagination fields restated to describe the aggregate.
+ */
+export async function getWorkflows(token: string) {
+  const first = await fetchWorkflowPage(token, 1);
+  const firstPage = (first as { data?: Record<string, any> } | undefined)?.data;
+  const totalPages: number = firstPage?.totalPages ?? 1;
+
+  if (!firstPage || totalPages <= 1) {
+    return first;
+  }
+
+  const pagesToFetch = Math.min(totalPages, MAX_WORKFLOW_PAGES);
+  if (totalPages > MAX_WORKFLOW_PAGES) {
+    console.warn(
+      `[runtara] ${totalPages} pages of workflows exceeds the ${MAX_WORKFLOW_PAGES}-page ceiling; ` +
+        `workflow pickers will show the first ${MAX_WORKFLOW_PAGES * WORKFLOW_PAGE_SIZE}.`
+    );
+  }
+
+  const laterPages = await Promise.all(
+    Array.from({ length: pagesToFetch - 1 }, (_, index) =>
+      fetchWorkflowPage(token, index + 2)
+    )
+  );
+
+  const content = [
+    ...(firstPage.content ?? []),
+    ...laterPages.flatMap(
+      (page) =>
+        (page as { data?: { content?: unknown[] } } | undefined)?.data
+          ?.content ?? []
+    ),
+  ];
+
+  return {
+    ...(first as object),
+    data: {
+      ...firstPage,
+      content,
+      number: 0,
+      size: content.length,
+      numberOfElements: content.length,
+      totalPages: 1,
+      first: true,
+      last: totalPages <= MAX_WORKFLOW_PAGES,
+    },
+  } as typeof first;
 }
 
 export async function createWorkflow(

@@ -16,9 +16,7 @@ import {
   DeleteFolderDialog,
 } from '../../components/FolderDialogs';
 import { usePageTitle } from '@/shared/hooks/usePageTitle';
-import { useCustomQuery, useDebounce } from '@/shared/hooks';
-import { queryKeys } from '@/shared/queries/query-keys';
-import { getWorkflows } from '@/features/workflows/queries';
+import { useDebounce } from '@/shared/hooks';
 import {
   useFolders,
   useFolderWorkflowCounts,
@@ -44,13 +42,12 @@ export function Workflows() {
     null
   );
 
-  const { isError } = useCustomQuery({
-    queryKey: queryKeys.workflows.all,
-    queryFn: getWorkflows,
-  });
-
-  // Folder data
-  const { data: foldersData } = useFolders();
+  // Folder data. Its error also gates "New workflow": it is the cheapest signal
+  // on this page that the runtime API is reachable, and the grid renders its own
+  // error state for the workflow list itself. Gating on a full workflow listing
+  // would mean paging the entire tenant just to decide whether a button is
+  // clickable.
+  const { data: foldersData, isError } = useFolders();
 
   // Mutations for folder operations
   const renameFolderMutation = useRenameFolder();
