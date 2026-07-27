@@ -147,6 +147,8 @@ export function getDefaultReportViewTarget(
   return stageGroup?.id ?? viewId;
 }
 
+/** @lintignore Public view-group helper exported alongside
+ *  getDefaultReportViewId / getCanonicalReportViewTarget for consumer use. */
 export function getReportViewGroupViewIds(
   definition: ReportDefinition,
   groupId: string

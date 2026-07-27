@@ -208,7 +208,10 @@ export function useUpdateReport() {
 /** Canonical partial-mutation hook backed by `POST /reports/{id}/edit`.
  *  Applies a batch of `ReportEditOp`s atomically server-side. Prefer this
  *  over `useUpdateReport` (full PUT) for targeted edits — MCP authoring
- *  flows and any future per-block UIs should route through here. */
+ *  flows and any future per-block UIs should route through here.
+ *
+ *  @lintignore Public binding for the edit endpoint, kept ahead of the
+ *  per-block UIs that will consume it. */
 export function useEditReport() {
   const queryClient = useQueryClient();
 
