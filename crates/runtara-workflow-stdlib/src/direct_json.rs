@@ -2840,12 +2840,21 @@ impl DirectJsonManifest {
             .get(&log_id)
             .ok_or_else(|| format!("unknown direct Log id {log_id}"))?;
         let details = apply_log(&log.value, &source)?;
+        // A Log emits no step-debug pair, so this event is the only trace it
+        // leaves. Carry the same scope keys `debug_event_base` attaches, so a
+        // consumer reconstructing Log steps can place one that ran inside a
+        // Split/While iteration in its own scope instead of at the root.
+        let (scope_id, parent_scope_id, loop_indices) = scope_keys(&source);
         serde_json::to_vec(&serde_json::json!({
             "step_id": log.step_id,
             "step_name": log.name.as_deref().unwrap_or("Unnamed"),
+            "step_type": "Log",
             "level": details.level,
             "message": details.message,
             "context": details.context,
+            "scope_id": scope_id,
+            "parent_scope_id": parent_scope_id,
+            "loop_indices": loop_indices,
             "timestamp_ms": timestamp_ms(),
         }))
         .map_err(|err| format!("failed to serialize log event payload: {err}"))
@@ -4899,17 +4908,16 @@ fn timestamp_ms() -> i64 {
         .unwrap_or(0)
 }
 
-fn debug_event_base(
-    step: &DirectJsonStep,
-    source: &Value,
-    timestamp_ms: i64,
-) -> Map<String, Value> {
-    // Scope/loop context lives in the runtime variables: each Split/While
-    // iteration sets a distinct `_scope_id` (plus `_parent_scope_id` /
-    // `_loop_indices`). Surface them so step-debug events from parallel
-    // iterations are distinguishable — otherwise the paired-summary query joins
-    // start/end by (step_id, scope_id) alone and cross-products every
-    // iteration's events (9 phantom rows + negative durations for 3 iterations).
+/// Scope/loop context for one step event, read from the runtime variables.
+///
+/// Each Split/While iteration sets a distinct `_scope_id` (plus
+/// `_parent_scope_id` / `_loop_indices`). Surfacing them keeps events from
+/// parallel iterations distinguishable — otherwise the paired-summary query
+/// joins start/end by (step_id, scope_id) alone and cross-products every
+/// iteration's events (9 phantom rows + negative durations for 3 iterations).
+///
+/// Returns `(scope_id, parent_scope_id, loop_indices)`.
+fn scope_keys(source: &Value) -> (Value, Value, Value) {
     let variables = source.get("variables").and_then(Value::as_object);
     let scope_id = variables
         .and_then(|vars| vars.get("_scope_id"))
@@ -4924,6 +4932,15 @@ fn debug_event_base(
         .filter(|value| value.is_array())
         .cloned()
         .unwrap_or_else(|| Value::Array(Vec::new()));
+    (scope_id, parent_scope_id, loop_indices)
+}
+
+fn debug_event_base(
+    step: &DirectJsonStep,
+    source: &Value,
+    timestamp_ms: i64,
+) -> Map<String, Value> {
+    let (scope_id, parent_scope_id, loop_indices) = scope_keys(source);
 
     let mut payload = Map::new();
     payload.insert("step_id".to_string(), Value::String(step.id.clone()));
@@ -12502,6 +12519,51 @@ mod tests {
             steps["log"]["outputs"],
             json!({ "level": "warn", "message": "Starting workflow" })
         );
+    }
+
+    #[test]
+    fn log_event_carries_scope_so_loop_body_logs_are_placeable() {
+        // A Log emits no step-debug pair, so this event is its only trace. A
+        // consumer rebuilding Log steps needs the same scope keys the debug
+        // events carry, or a log from inside a Split/While iteration lands at
+        // the root instead of in its own scope.
+        let manifest = DirectJsonManifest::parse(&log_manifest(json!({
+            "id": "log",
+            "stepType": "Log",
+            "name": "Iteration log",
+            "message": "inside the loop"
+        })))
+        .expect("manifest");
+        let source = build_source(
+            br#"{"input":"hello"}"#,
+            br#"{"_scope_id":"scope-1","_parent_scope_id":"root","_loop_indices":[2]}"#,
+            b"{}",
+        )
+        .expect("source");
+
+        let payload = manifest.log_event(0, &source).expect("log payload");
+        let payload: Value = serde_json::from_slice(&payload).expect("payload json");
+        assert_eq!(payload["scope_id"], json!("scope-1"));
+        assert_eq!(payload["parent_scope_id"], json!("root"));
+        assert_eq!(payload["loop_indices"], json!([2]));
+        assert_eq!(payload["step_type"], json!("Log"));
+    }
+
+    #[test]
+    fn log_event_at_the_root_reports_no_scope() {
+        let manifest = DirectJsonManifest::parse(&log_manifest(json!({
+            "id": "log",
+            "stepType": "Log",
+            "message": "top level"
+        })))
+        .expect("manifest");
+        let source = build_source(br#"{"input":"hello"}"#, b"{}", b"{}").expect("source");
+
+        let payload = manifest.log_event(0, &source).expect("log payload");
+        let payload: Value = serde_json::from_slice(&payload).expect("payload json");
+        assert_eq!(payload["scope_id"], Value::Null);
+        assert_eq!(payload["parent_scope_id"], Value::Null);
+        assert_eq!(payload["loop_indices"], json!([]));
     }
 
     #[test]

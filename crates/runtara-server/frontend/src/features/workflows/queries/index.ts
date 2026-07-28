@@ -14,6 +14,11 @@ import { executionGraphToReactFlow } from '@/features/workflows/components/Workf
 import { ExecutionGraphDto } from '@/features/workflows/types/execution-graph';
 import { parseSchema } from '@/features/workflows/utils/schema';
 import {
+  mergeLogSteps,
+  type StepSummaryLike,
+  type WorkflowLogEvent,
+} from '@/features/workflows/utils/merge-log-steps';
+import {
   getStaticAgentWithRust,
   getStaticAgentsWithRust,
   getStaticStepTypesWithRust,
@@ -657,21 +662,98 @@ export async function getStepEvents(
   return result.data;
 }
 
+/** Cap on log events pulled alongside a page of summaries (endpoint max). */
+const LOG_EVENT_FETCH_LIMIT = 1000;
+
+/**
+ * Step summaries for one instance, with Log steps folded in.
+ *
+ * A Log step emits no step-debug start/end pair, so the summary endpoint — which
+ * pairs those events — never reports one. Every view built on summaries
+ * (Timeline, Graph, List) therefore dropped Log steps silently: a run of six
+ * steps reported three, and a workflow built only from Log steps showed an
+ * empty Events view while its log events sat in the database.
+ *
+ * The log events carry step id, name, time and scope, which is enough to stand
+ * in for a summary, so they are merged here — one seam, inherited by all three
+ * views, and it works for runs that already happened.
+ */
 export async function getStepSummaries(
   token: string,
   workflowId: string,
   instanceId: string,
   filters?: StepSummariesFilters
 ) {
-  const result = await RuntimeREST.api.getStepSummaries(
-    workflowId,
-    instanceId,
-    filters ?? {},
-    createAuthHeaders(token)
-  );
+  const [result, logEvents] = await Promise.all([
+    RuntimeREST.api.getStepSummaries(
+      workflowId,
+      instanceId,
+      filters ?? {},
+      createAuthHeaders(token)
+    ),
+    fetchWorkflowLogEvents(token, workflowId, instanceId, filters),
+  ]);
 
-  // Return the full wrapped response { data: StepSummariesResponseData, message, success }
-  return result.data;
+  const response = result.data as unknown as {
+    data?: {
+      steps?: StepSummaryLike[];
+      count?: number;
+      totalCount?: number;
+    };
+  };
+  const page = response?.data;
+  if (!page || !Array.isArray(page.steps) || logEvents.length === 0) {
+    return result.data;
+  }
+
+  const offset = filters?.offset ?? 0;
+  const totalCount = page.totalCount ?? page.steps.length;
+
+  const steps = mergeLogSteps(page.steps, logEvents, {
+    // Only interleave when this response holds the whole run — see
+    // `mergeLogSteps` for why a partial page cannot be merged safely.
+    isCompleteSet: offset === 0 && page.steps.length >= totalCount,
+    sortOrder: filters?.sortOrder ?? 'desc',
+  });
+
+  // `totalCount` stays the server's summary total: it drives pagination, which
+  // is still served by summary offsets. Only `count` reflects the rows handed
+  // back for this page.
+  return {
+    ...response,
+    data: { ...page, steps, count: steps.length },
+  } as unknown as typeof result.data;
+}
+
+/**
+ * The instance's `workflow_log` events, matching the scope the caller asked
+ * summaries for. Returns an empty list on failure — a Log step missing from the
+ * views is a smaller problem than the views failing to render.
+ */
+async function fetchWorkflowLogEvents(
+  token: string,
+  workflowId: string,
+  instanceId: string,
+  filters?: StepSummariesFilters
+): Promise<WorkflowLogEvent[]> {
+  try {
+    const response = await getStepEvents(token, workflowId, instanceId, {
+      subtype: 'workflow_log',
+      limit: LOG_EVENT_FETCH_LIMIT,
+      sortOrder: 'asc',
+      ...(filters?.scopeId ? { scopeId: filters.scopeId } : {}),
+      ...(filters?.parentScopeId
+        ? { parentScopeId: filters.parentScopeId }
+        : {}),
+      ...(filters?.rootScopesOnly ? { rootScopesOnly: true } : {}),
+    } as StepEventsFilters);
+
+    const events = (response as { data?: { events?: WorkflowLogEvent[] } })
+      ?.data?.events;
+    return Array.isArray(events) ? events : [];
+  } catch {
+    return [];
+  }
 }
 
 export async function toggleTrackEvents(
