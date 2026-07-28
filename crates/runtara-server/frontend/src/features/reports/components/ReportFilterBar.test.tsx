@@ -28,7 +28,8 @@ const definition = {
 
 function renderBar(
   values: Record<string, unknown>,
-  visibleBlockIds: Set<string> | null = null
+  visibleBlockIds: Set<string> | null = null,
+  reportDefinition: ReportDefinition = definition
 ) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
@@ -37,7 +38,7 @@ function renderBar(
     <QueryClientProvider client={queryClient}>
       <ReportFilterBar
         reportId="report-1"
-        definition={definition}
+        definition={reportDefinition}
         values={values}
         onChange={vi.fn()}
         visibleBlockIds={visibleBlockIds}
@@ -56,6 +57,9 @@ describe('ReportFilterBar dynamic options', () => {
         disconnect() {}
       }
     );
+    // The filter picker is built on cmdk, which scrolls its active item into
+    // view. jsdom has no layout, so the method does not exist.
+    Element.prototype.scrollIntoView = vi.fn();
   });
   beforeEach(() => vi.clearAllMocks());
 
@@ -110,5 +114,84 @@ describe('ReportFilterBar dynamic options', () => {
     expect(
       screen.getByRole('button', { name: /Status:/i })
     ).toBeInTheDocument();
+  });
+
+  it('shows a filter a visible block reaches through its source condition', () => {
+    // The report editor documents an empty `appliesTo` as "the filter targets
+    // all blocks via their source's condition". Treating it as "targets
+    // nothing" hid the control, so the block gated on it could never be
+    // populated.
+    const conditionDefinition = {
+      filters: [
+        {
+          id: 'period',
+          label: 'Period',
+          type: 'time_range',
+          appliesTo: [],
+        },
+      ],
+      blocks: [
+        {
+          id: 'trend',
+          source: {
+            condition: {
+              op: 'AND',
+              arguments: [
+                {
+                  op: 'GTE',
+                  arguments: ['snapshot_date', { filter: 'period', path: 'from' }],
+                },
+              ],
+            },
+          },
+        },
+      ],
+    } as unknown as ReportDefinition;
+
+    renderBar({}, new Set(['trend']), conditionDefinition);
+
+    // An unset filter lives behind the "+ Filter" picker — which is precisely
+    // where Period never appeared, leaving it impossible to set.
+    fireEvent.click(screen.getByRole('button', { name: /^Filter$/i }));
+    expect(screen.getByText('Period')).toBeInTheDocument();
+  });
+
+  it('keeps that filter hidden when the block using it is not in view', () => {
+    const conditionDefinition = {
+      filters: [
+        { id: 'period', label: 'Period', type: 'time_range', appliesTo: [] },
+      ],
+      blocks: [
+        {
+          id: 'trend',
+          source: {
+            condition: {
+              op: 'GTE',
+              arguments: ['snapshot_date', { filter: 'period', path: 'from' }],
+            },
+          },
+        },
+      ],
+    } as unknown as ReportDefinition;
+
+    renderBar({}, new Set(['something-else']), conditionDefinition);
+
+    // No visible block references it, so the bar renders nothing at all.
+    expect(
+      screen.queryByRole('button', { name: /^Filter$/i })
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText('Period')).not.toBeInTheDocument();
+  });
+
+  it('survives a definition that carries no blocks', () => {
+    // The FE type marks `blocks` non-optional, but definitions reaching this
+    // component do not always include it.
+    const noBlocks = {
+      filters: [
+        { id: 'period', label: 'Period', type: 'time_range', appliesTo: [] },
+      ],
+    } as unknown as ReportDefinition;
+
+    expect(() => renderBar({}, new Set(['trend']), noBlocks)).not.toThrow();
   });
 });

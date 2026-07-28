@@ -40,8 +40,9 @@ type ReportFilterBarProps = {
   values: Record<string, unknown>;
   onChange: (filterId: string, value: unknown) => void;
   /**
-   * Block ids visible in the current view. When provided, filters whose
-   * `appliesTo` does not reference any visible block are hidden from the bar.
+   * Block ids visible in the current view. When provided, a filter is shown
+   * only if some visible block uses it — either through the filter's
+   * `appliesTo` or through that block's own `source.condition`.
    * Pass `null` to disable the heuristic (legacy behavior).
    */
   visibleBlockIds?: Set<string> | null;
@@ -58,10 +59,17 @@ export function ReportFilterBar({
 }: ReportFilterBarProps) {
   const [activatedIds, setActivatedIds] = useState<Set<string>>(new Set());
 
+  // Filters that visible blocks reach through their `source.condition` rather
+  // than through the filter's own `appliesTo`.
+  const conditionFilterIds = useMemo(
+    () => collectConditionFilterIds(definition.blocks, visibleBlockIds),
+    [definition.blocks, visibleBlockIds]
+  );
+
   if (definition.filters.length === 0) return null;
 
   const visibleFilters = definition.filters.filter((filter) =>
-    isFilterVisible(filter, visibleBlockIds)
+    isFilterVisible(filter, visibleBlockIds, conditionFilterIds)
   );
   if (visibleFilters.length === 0) return null;
 
@@ -482,16 +490,69 @@ function FilterEditor({
   );
 }
 
+/**
+ * Every filter id referenced from inside a value, at any depth.
+ *
+ * A condition nests arbitrarily (`{op, arguments: [...]}`) and its arguments
+ * are untyped, so this walks structurally and picks up anything shaped like a
+ * filter reference — `{ filter: "period", path: "from" }`.
+ */
+function collectFilterRefs(node: unknown, into: Set<string>): void {
+  if (!node || typeof node !== 'object') return;
+
+  if (Array.isArray(node)) {
+    node.forEach((child) => collectFilterRefs(child, into));
+    return;
+  }
+
+  const record = node as Record<string, unknown>;
+  if (typeof record.filter === 'string') {
+    into.add(record.filter);
+  }
+  Object.values(record).forEach((child) => collectFilterRefs(child, into));
+}
+
+function collectConditionFilterIds(
+  // The FE type tightens `blocks` to non-optional, but definitions reaching
+  // this component do not always carry it — so treat it as possibly absent
+  // rather than letting the whole filter bar throw.
+  blocks: ReportDefinition['blocks'] | undefined,
+  visibleBlockIds: Set<string> | null
+): Set<string> {
+  const ids = new Set<string>();
+  if (visibleBlockIds === null || !Array.isArray(blocks)) return ids;
+
+  blocks.forEach((block) => {
+    if (!block?.id || !visibleBlockIds.has(block.id)) return;
+    collectFilterRefs((block as { source?: unknown }).source, ids);
+  });
+
+  return ids;
+}
+
 function isFilterVisible(
   filter: ReportFilterDefinition,
-  visibleBlockIds: Set<string> | null
+  visibleBlockIds: Set<string> | null,
+  conditionFilterIds: Set<string>
 ): boolean {
   if (visibleBlockIds === null) return true;
+
   const appliesTo = filter.appliesTo ?? [];
-  if (appliesTo.length === 0) return false;
-  return appliesTo.some(
-    (target) => target.blockId && visibleBlockIds.has(target.blockId)
-  );
+  if (
+    appliesTo.some(
+      (target) => target.blockId && visibleBlockIds.has(target.blockId)
+    )
+  ) {
+    return true;
+  }
+
+  // A filter can also be consumed by a block's `source.condition`, which is
+  // what an empty `appliesTo` means — the report editor states as much:
+  // "Empty applies-to means the filter targets all blocks via their source's
+  // condition." Treating an empty list as "targets nothing" hid such filters
+  // from the bar entirely, so the control could never be set and any block
+  // gated on it stayed empty for good.
+  return filter.id ? conditionFilterIds.has(filter.id) : false;
 }
 
 function describeFilterValue(
