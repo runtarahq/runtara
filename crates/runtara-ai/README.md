@@ -43,7 +43,7 @@ For proxied credentials, use `provider::create_openai_model_with_connection` wit
 
 - Consumed by `runtara-workflows` (workflow codegen emits calls against `CompletionModel`) and `runtara-workflow-stdlib` (stdlib helpers that wrap completions, structured output, and tool-using agent loops).
 - Built on `runtara-http::HttpClient` so the same binary runs natively and under WASI — no reqwest, no tokio.
-- `provider::structured_output_params` shapes JSON Schema into the provider-specific envelope (OpenAI's `response_format.json_schema`, Anthropic's `response_format.schema`).
+- `provider::structured_output_params` shapes JSON Schema into the provider-specific envelope (OpenAI's `response_format.json_schema`, Bedrock's `outputConfig.textFormat`).
 - Errors are surfaced through `CompletionError` (`HttpError`, `JsonError`, `RequestError`, `ResponseError`, `ProviderError`) so the workflow runtime can distinguish transport, parse, and upstream failures.
 - Designed to be called from the WASM guest; the host-side proxy resolves `connection_id` to real credentials, keeping API keys out of workflow code.
 

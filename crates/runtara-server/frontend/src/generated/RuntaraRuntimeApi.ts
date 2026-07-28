@@ -584,7 +584,7 @@ export interface AiAgentConfig {
    *
    * When set, the LLM is instructed to return JSON matching this schema
    * via the provider's structured output feature (e.g., OpenAI `response_format`,
-   * Anthropic `response_format`).
+   * Bedrock `outputConfig`).
    *
    * Uses the same `SchemaField` format as workflow `inputSchema`/`outputSchema`.
    *
@@ -705,7 +705,7 @@ export interface AiAgentStep {
   /** AI Agent configuration */
   config?: null | AiAgentConfig;
   /**
-   * Connection ID for the LLM provider (e.g., OpenAI, Anthropic).
+   * Connection ID for the LLM provider (e.g., OpenAI, Bedrock).
    *
    * A same-tenant literal id, pinned at author time (back-compat). Ignored
    * when `connection_ref` is set — the ref then supplies the id at runtime.
