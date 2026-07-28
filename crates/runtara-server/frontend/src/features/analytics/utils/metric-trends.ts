@@ -92,11 +92,17 @@ function compare(
   };
 }
 
-function sum(points: MetricsDataPoint[], pick: (p: MetricsDataPoint) => number) {
+function sum(
+  points: MetricsDataPoint[],
+  pick: (p: MetricsDataPoint) => number
+) {
   return points.reduce((total, point) => total + pick(point), 0);
 }
 
-function mean(points: MetricsDataPoint[], pick: (p: MetricsDataPoint) => number) {
+function mean(
+  points: MetricsDataPoint[],
+  pick: (p: MetricsDataPoint) => number
+) {
   return points.length === 0 ? 0 : sum(points, pick) / points.length;
 }
 

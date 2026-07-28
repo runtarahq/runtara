@@ -1,9 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import {
-  computeMetricTrends,
-  type MetricsDataPoint,
-} from './metric-trends';
+import { computeMetricTrends, type MetricsDataPoint } from './metric-trends';
 
 /** Two buckets: an earlier half and a later half. */
 function series(

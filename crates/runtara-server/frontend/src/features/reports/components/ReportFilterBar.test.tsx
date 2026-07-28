@@ -139,7 +139,10 @@ describe('ReportFilterBar dynamic options', () => {
               arguments: [
                 {
                   op: 'GTE',
-                  arguments: ['snapshot_date', { filter: 'period', path: 'from' }],
+                  arguments: [
+                    'snapshot_date',
+                    { filter: 'period', path: 'from' },
+                  ],
                 },
               ],
             },

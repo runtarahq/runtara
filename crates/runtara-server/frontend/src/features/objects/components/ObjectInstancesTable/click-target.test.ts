@@ -30,7 +30,9 @@ describe('clickLandedInGrid', () => {
   });
 
   it('counts a click on a cell as inside the grid', () => {
-    expect(clickLandedInGrid(document.querySelector('#cell'), shell)).toBe(true);
+    expect(clickLandedInGrid(document.querySelector('#cell'), shell)).toBe(
+      true
+    );
   });
 
   it('counts the breadcrumb as outside, so a pending edit gets flushed', () => {
@@ -57,7 +59,9 @@ describe('clickLandedInGrid', () => {
   });
 
   it('is safe before the shell has mounted', () => {
-    expect(clickLandedInGrid(document.querySelector('#cell'), null)).toBe(false);
+    expect(clickLandedInGrid(document.querySelector('#cell'), null)).toBe(
+      false
+    );
     expect(clickLandedInGrid(null, shell)).toBe(false);
   });
 

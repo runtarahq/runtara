@@ -16,11 +16,7 @@ import {
 import { MetricCard } from '@/shared/components/metric-card';
 import { ExecutionTrendChart } from '../../components/ExecutionTrendChart';
 import { useTenantMetrics } from '../../hooks/useAnalytics';
-import {
-  formatDurationSeconds,
-  formatMemory,
-  formatNumber,
-} from '../../utils';
+import { formatDurationSeconds, formatMemory, formatNumber } from '../../utils';
 import {
   computeMetricTrends,
   type MetricsDataPoint,

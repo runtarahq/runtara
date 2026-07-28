@@ -68,8 +68,9 @@ describe('VersionsPanelContent', () => {
       .getAllByText('v2')
       .find((node) => node.tagName === 'SPAN');
     const activeButton = [
-      ...(label?.closest('div[class*="border-b"]')?.querySelectorAll('button') ??
-        []),
+      ...(label
+        ?.closest('div[class*="border-b"]')
+        ?.querySelectorAll('button') ?? []),
     ].find((button) => button.textContent?.trim() === 'Active');
 
     expect(activeButton).toBeDefined();
