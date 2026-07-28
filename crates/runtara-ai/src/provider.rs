@@ -110,7 +110,7 @@ pub fn create_openai_model_with_connection(
 /// Takes a standard JSON Schema and wraps it in the format required by
 /// each LLM provider's structured output feature:
 /// - OpenAI: `response_format: { type: "json_schema", json_schema: { ... } }`
-/// - Anthropic: `response_format: { type: "json", schema: { ... } }`
+/// - Bedrock: `outputConfig: { textFormat: { type: "json_schema", ... } }`
 ///
 /// Returns `None` for unsupported providers (structured output will be
 /// best-effort via prompt instructions).
@@ -124,12 +124,6 @@ pub fn structured_output_params(integration_id: &str, json_schema: Value) -> Opt
                     "strict": true,
                     "schema": json_schema
                 }
-            }
-        })),
-        "anthropic_api_key" => Some(json!({
-            "response_format": {
-                "type": "json",
-                "schema": json_schema
             }
         })),
         PROVIDER_BEDROCK | "aws_credentials" => Some(json!({
@@ -218,6 +212,33 @@ mod tests {
             "aws_credentials"
         ));
         assert!(compatible_integration_ids_for_provider("unknown").is_none());
+    }
+
+    #[test]
+    fn structured_output_is_offered_only_for_dispatchable_providers() {
+        // An id may carry a structured-output envelope only if the dispatcher
+        // can actually build a model for it. Anything else is dead shape: the
+        // request fails at model creation before structured output is reached.
+        let params = json!({ "api_key": "test-key" });
+        for id in [
+            PROVIDER_OPENAI,
+            PROVIDER_BEDROCK,
+            "openai_api_key",
+            "aws_credentials",
+            "anthropic_api_key",
+            "sqs_credentials",
+            "",
+        ] {
+            let has_envelope = structured_output_params(id, json!({"type": "object"})).is_some();
+            let dispatchable = !matches!(
+                create_completion_model_with_connection(id, &params, None, Some("conn-1")),
+                Err(ProviderError::UnsupportedProvider(_)),
+            );
+            assert_eq!(
+                has_envelope, dispatchable,
+                "structured-output support and provider dispatch disagree for '{id}'"
+            );
+        }
     }
 
     #[test]
