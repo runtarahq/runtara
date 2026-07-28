@@ -899,6 +899,11 @@ impl ConnectionService {
             return Err(ServiceError::NotFound("Connection not found".to_string()));
         }
 
+        // The row is gone, so nothing may still resolve auth from its cached tokens.
+        // Evicting only after the guarded delete succeeds keeps a failed delete from
+        // discarding credentials for a connection that is still live.
+        crate::auth::provider_auth::evict_connection_token_caches(id);
+
         Ok(())
     }
 
