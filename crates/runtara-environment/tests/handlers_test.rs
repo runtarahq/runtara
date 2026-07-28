@@ -1347,26 +1347,38 @@ async fn test_spawn_container_monitor_timeout_enforcement() {
         DrainController::new(),
     );
 
-    // Wait for the timeout to trigger (100ms timeout + some buffer for processing)
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    // Poll for the terminal status instead of sleeping a fixed budget. The
+    // monitor waits 50ms before it starts watching and only then arms the
+    // 100ms timeout, so nothing can land before ~150ms; it then stops the
+    // runner and writes the status. A fixed sleep has to cover the DB
+    // round-trip too, and on a loaded runner it does not, which read as
+    // status "running" and failed the assert. Locally this settles in well
+    // under 300ms; give CI runners 5s of headroom.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut timed_out_instance = None;
+    while std::time::Instant::now() < deadline {
+        let current = persistence
+            .get_instance(&instance_id)
+            .await
+            .expect("Failed to get instance")
+            .expect("Instance not found");
+        if current.status == "failed" {
+            timed_out_instance = Some(current);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
 
-    // Verify the runner was stopped
-    assert!(
-        !runner.is_running(&handle).await,
-        "Runner should be stopped after timeout"
-    );
+    // The monitor stops the runner *before* writing the status, so observing
+    // the terminal status means the stop has already happened.
+    let runner_stopped = !runner.is_running(&handle).await;
 
-    // Verify instance status was updated to failed
-    let instance = persistence
-        .get_instance(&instance_id)
-        .await
-        .expect("Failed to get instance")
-        .expect("Instance not found");
+    // Clean up before asserting so a failure does not leak the row.
+    cleanup(&pool, Some(&instance_id), None).await;
 
-    assert_eq!(
-        instance.status, "failed",
-        "Instance status should be 'failed'"
-    );
+    let instance = timed_out_instance
+        .expect("Instance status never became 'failed' within 5s of the 100ms execution timeout");
+    assert!(runner_stopped, "Runner should be stopped after timeout");
     assert!(
         instance
             .error
@@ -1375,9 +1387,6 @@ async fn test_spawn_container_monitor_timeout_enforcement() {
         "Error should mention timeout, got: {:?}",
         instance.error
     );
-
-    // Cleanup
-    cleanup(&pool, Some(&instance_id), None).await;
 }
 
 /// Test that spawn_container_monitor does NOT timeout when container completes quickly.
