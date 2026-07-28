@@ -3129,6 +3129,37 @@ impl DirectJsonManifest {
                     }),
                 ))
             }
+            "WaitForSignal" => {
+                // A wait normally emits its start through the dedicated
+                // `wait_debug_start`, which the compiler routes it to so the
+                // payload can carry the runtime `signal_id`. This arm is the
+                // fallback for any path that reaches the generic emitter
+                // instead: the same input shape minus `signal_id`, which is
+                // derived from the instance id at the call site and is not
+                // knowable from the step and source alone.
+                let timeout_ms = step
+                    .body
+                    .get("timeoutMs")
+                    .and_then(|timeout| apply_mapping_value(timeout, source).ok())
+                    .unwrap_or(Value::Null);
+                // Tolerate a malformed poll interval (see the Agent arm) rather
+                // than failing the start; the paired end carries the real error.
+                let poll_interval_ms = self
+                    .wait_poll_interval_ms(step.id.as_str())
+                    .map_or(Value::Null, |ms| Value::Number(ms.into()));
+                Ok((
+                    serde_json::json!({
+                        "timeout_ms": timeout_ms,
+                        "poll_interval_ms": poll_interval_ms,
+                        "response_schema": step
+                            .body
+                            .get("responseSchema")
+                            .cloned()
+                            .unwrap_or(Value::Null),
+                    }),
+                    None,
+                ))
+            }
             "Error" => Ok((Value::Null, None)),
             "Log" => {
                 let log = self
@@ -3156,9 +3187,14 @@ impl DirectJsonManifest {
                 let inputs = while_debug_inputs(while_step, source)?;
                 Ok((inputs, None))
             }
-            other => Err(format!(
-                "direct step-debug-start does not support step type '{other}'"
-            )),
+            // Fail-safe: a debug payload must never be the thing that kills a
+            // run. `step-debug-start` is lowered with a fail-on-error guard, so
+            // returning `Err` for an unrecognised step type does not just drop
+            // the diagnostic — it aborts the instance with no event to explain
+            // why (exactly how AiAgent and Split each surfaced, see their
+            // regression tests below). Emit a start with null inputs instead;
+            // the type itself still rides the event's `step_type`.
+            _ => Ok((Value::Null, None)),
         }
     }
 
@@ -10730,6 +10766,75 @@ mod tests {
             })
         );
         assert!(end["duration_ms"].as_i64().is_some_and(|value| value >= 0));
+    }
+
+    #[test]
+    fn wait_for_signal_generic_debug_start_is_supported() {
+        // The generic `step_debug_start` must build a WaitForSignal payload
+        // rather than hitting the catch-all, matching the WaitForSignal arm
+        // `step_debug_end` already carries. The compiler routes waits to the
+        // dedicated `wait_debug_start`, so this is defence in depth for any
+        // path that reaches the generic emitter instead.
+        let manifest = DirectJsonManifest::parse(&wait_manifest(json!({
+            "id": "wait",
+            "stepType": "WaitForSignal",
+            "name": "Review Input",
+            "pollIntervalMs": 250,
+            "timeoutMs": { "valueType": "immediate", "value": 500 },
+            "responseSchema": {
+                "approved": { "type": "boolean", "required": true }
+            }
+        })))
+        .expect("manifest");
+        let source = build_source(br#"{"case_id":"case-42"}"#, b"{}", b"{}").expect("source");
+
+        let start = manifest
+            .step_debug_start("wait", &source)
+            .expect("WaitForSignal debug start should be supported");
+        let start: Value = serde_json::from_slice(&start).expect("start json");
+
+        assert_eq!(start["step_id"], json!("wait"));
+        assert_eq!(start["step_type"], json!("WaitForSignal"));
+        assert_eq!(start["inputs"]["timeout_ms"], json!(500));
+        assert_eq!(start["inputs"]["poll_interval_ms"], json!(250));
+        assert_eq!(
+            start["inputs"]["response_schema"]["approved"]["type"],
+            json!("boolean")
+        );
+        // `signal_id` is derived from the runtime instance id, so only the
+        // dedicated `wait_debug_start` can supply it.
+        assert!(start["inputs"].get("signal_id").is_none());
+    }
+
+    #[test]
+    fn unsupported_step_type_debug_start_is_fail_safe() {
+        // The catch-all must degrade, not fail: `step-debug-start` is lowered
+        // with a fail-on-error guard, so an `Err` here aborts the instance with
+        // no event explaining why — the failure mode AiAgent and Split each hit.
+        let manifest = DirectJsonManifest::parse(
+            &serde_json::to_vec(&json!({
+                "graph": {
+                    "steps": [{
+                        "id": "mystery",
+                        "stepType": "SomeFutureStepType",
+                        "name": "Mystery",
+                        "body": {}
+                    }]
+                }
+            }))
+            .expect("manifest json"),
+        )
+        .expect("manifest");
+        let source = build_source(b"{}", b"{}", b"{}").expect("source");
+
+        let start = manifest
+            .step_debug_start("mystery", &source)
+            .expect("an unrecognised step type must still emit a start event");
+        let start: Value = serde_json::from_slice(&start).expect("start json");
+
+        assert_eq!(start["step_id"], json!("mystery"));
+        assert_eq!(start["step_type"], json!("SomeFutureStepType"));
+        assert_eq!(start["inputs"], Value::Null);
     }
 
     #[test]
