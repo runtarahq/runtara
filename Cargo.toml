@@ -77,7 +77,7 @@ edition = "2024"
 # reports a clear "requires rustc X" instead of a random type error on an older
 # compiler.
 rust-version = "1.97"
-version = "8.7.2"
+version = "8.7.3"
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/runtarahq/runtara"
 homepage = "https://runtara.com"
