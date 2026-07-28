@@ -6,6 +6,7 @@ use runtara_dsl::agent_meta::TokenEndpointAuth;
 use serde_json::Value;
 use std::sync::Arc;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicI64, Ordering};
 use tokio::sync::Mutex as AsyncMutex;
 
 pub(crate) const TOKEN_REFRESH_MARGIN_SECS: i64 = 300;
@@ -14,6 +15,13 @@ pub(crate) const DEFAULT_CLIENT_CREDENTIALS_TTL_SECONDS: i64 = 24 * 60 * 60;
 /// single-flight lock right after a failure inherit the error instead of each
 /// re-hammering the provider under a persistent outage.
 const REFRESH_ERROR_COOLDOWN_SECS: i64 = 5;
+/// Ceiling on entries in each of the three credential caches. One process serves one
+/// tenant, so this sits far above any real connection count — it exists so that key
+/// churn (connection create/delete cycles, or one connection minting a token per
+/// scope) cannot grow the maps without end.
+const MAX_CACHE_ENTRIES: usize = 1024;
+/// Minimum spacing between expiry sweeps of the credential caches.
+const CACHE_SWEEP_INTERVAL_SECS: i64 = 300;
 
 /// Classified credential-resolution failure.
 ///
@@ -106,9 +114,22 @@ pub(crate) enum TokenRequestBody {
     FormUrlEncoded(Vec<(String, String)>),
 }
 
+/// Key into the process-global credential caches.
+///
+/// `digest` discriminates between the distinct credentials one connection can mint
+/// (scope, token endpoint, base URL, …). The connection id is carried beside the
+/// digest instead of being hashed into it so that a connection's entries can be found
+/// and dropped when it goes away — a bare digest is not reversible, and re-deriving it
+/// would mean reconstructing every key shape from parameters that are already gone.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub(crate) struct TokenCacheKey {
+    connection_id: String,
+    digest: String,
+}
+
 pub(crate) enum DeferredAuth {
     OAuth2ClientCredentials {
-        cache_key: String,
+        cache_key: TokenCacheKey,
         token_url: String,
         header_name: String,
         header_value_prefix: Option<String>,
@@ -120,7 +141,7 @@ pub(crate) enum DeferredAuth {
         default_ttl_seconds: i64,
     },
     OAuth2RefreshToken {
-        cache_key: String,
+        cache_key: TokenCacheKey,
         token_url: String,
         header_name: String,
         client_id: String,
@@ -133,7 +154,7 @@ pub(crate) enum DeferredAuth {
     },
 }
 
-static TOKEN_CACHE: OnceLock<DashMap<String, CachedAccessToken>> = OnceLock::new();
+static TOKEN_CACHE: OnceLock<DashMap<TokenCacheKey, CachedAccessToken>> = OnceLock::new();
 
 pub(crate) async fn resolve_deferred_auth(
     client: &Client,
@@ -279,7 +300,7 @@ pub(crate) async fn resolve_deferred_auth(
 }
 
 async fn resolve_cached_token<F, Fut>(
-    cache_key: &str,
+    cache_key: &TokenCacheKey,
     fetch: F,
 ) -> Result<String, AuthResolutionError>
 where
@@ -463,11 +484,11 @@ pub(crate) fn token_is_fresh(expires_at: Option<DateTime<Utc>>) -> bool {
         .is_some_and(|expiry| expiry > Utc::now() + Duration::seconds(TOKEN_REFRESH_MARGIN_SECS))
 }
 
-fn token_cache() -> &'static DashMap<String, CachedAccessToken> {
+fn token_cache() -> &'static DashMap<TokenCacheKey, CachedAccessToken> {
     TOKEN_CACHE.get_or_init(DashMap::new)
 }
 
-fn get_fresh_cached_token(cache_key: &str) -> Option<String> {
+fn get_fresh_cached_token(cache_key: &TokenCacheKey) -> Option<String> {
     token_cache().get(cache_key).and_then(|entry| {
         if token_is_fresh(entry.expires_at) {
             Some(entry.access_token.clone())
@@ -477,8 +498,10 @@ fn get_fresh_cached_token(cache_key: &str) -> Option<String> {
     })
 }
 
-fn cache_token(cache_key: &str, token: CachedAccessToken) {
-    token_cache().insert(cache_key.to_string(), token);
+fn cache_token(cache_key: &TokenCacheKey, token: CachedAccessToken) {
+    maybe_sweep();
+    make_room(token_cache(), MAX_CACHE_ENTRIES);
+    token_cache().insert(cache_key.clone(), token);
 }
 
 /// Drop the cached access token for an OAuth refresh-token connection so the next
@@ -490,35 +513,125 @@ pub(crate) fn invalidate_oauth_refresh_cache(
     integration_id: &str,
     token_url: &str,
 ) {
-    let key = build_token_cache_key(&["oauth_refresh", connection_id, integration_id, token_url]);
+    let key = build_token_cache_key(connection_id, &["oauth_refresh", integration_id, token_url]);
     token_cache().remove(&key);
+}
+
+/// Drop every cached credential belonging to a connection — access tokens, negative-cache
+/// entries and single-flight locks alike. Called when the connection row itself is
+/// removed, so that a still-fresh cached token cannot outlive the connection it
+/// authenticates, and so a deleted connection leaves nothing behind in the maps.
+pub(crate) fn evict_connection(connection_id: &str) {
+    token_cache().retain(|key, _| key.connection_id != connection_id);
+    refresh_errors().retain(|key, _| key.connection_id != connection_id);
+    retain_refresh_locks(|key| key.connection_id != connection_id);
+}
+
+// ── Expiry sweep and size bounds ─────────────────────────────────────────────
+// Nothing in the resolution path removes an entry once it goes stale: an expired
+// token just makes `get_fresh_cached_token` return `None` while the row lingers.
+// In a long-lived process, connection churn and per-scope client-credentials keys
+// would accumulate indefinitely, so writes drive a periodic sweep and a hard cap.
+
+static LAST_SWEEP_AT: AtomicI64 = AtomicI64::new(0);
+
+/// Run [`sweep_expired`] at most once per [`CACHE_SWEEP_INTERVAL_SECS`].
+///
+/// Driven by cache writes rather than a background task: a process that stops
+/// minting tokens also stops accumulating them, so a timer would find nothing the
+/// next write does not.
+fn maybe_sweep() {
+    let now = Utc::now().timestamp();
+    let last = LAST_SWEEP_AT.load(Ordering::Relaxed);
+    if now - last < CACHE_SWEEP_INTERVAL_SECS {
+        return;
+    }
+    // Only the writer that wins the swap sweeps; concurrent writers carry on.
+    if LAST_SWEEP_AT
+        .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+        .is_ok()
+    {
+        sweep_expired();
+    }
+}
+
+/// Drop everything the three caches can no longer serve: access tokens past their
+/// refresh margin (already dead to `get_fresh_cached_token`), refresh errors past
+/// their cooldown, and single-flight locks nobody is holding.
+fn sweep_expired() {
+    token_cache().retain(|_, token| token_is_fresh(token.expires_at));
+    sweep_stale_refresh_errors();
+    retain_refresh_locks(|_| false);
+}
+
+/// Free a slot in `cache` once it holds `max` entries. Expired entries go first; if it
+/// is still full of live tokens, those nearest expiry are dropped — they are the
+/// cheapest to re-mint.
+fn make_room(cache: &DashMap<TokenCacheKey, CachedAccessToken>, max: usize) {
+    if cache.len() < max {
+        return;
+    }
+    cache.retain(|_, token| token_is_fresh(token.expires_at));
+    if cache.len() < max {
+        return;
+    }
+
+    let mut by_expiry: Vec<(TokenCacheKey, Option<DateTime<Utc>>)> = cache
+        .iter()
+        .map(|entry| (entry.key().clone(), entry.expires_at))
+        .collect();
+    // `None` sorts first, which is what we want: a token with no known expiry is never
+    // reclaimed by the sweep, so it is the most likely to be stale.
+    by_expiry.sort_by_key(|(_, expires_at)| *expires_at);
+    let excess = by_expiry.len() + 1 - max;
+    for (key, _) in by_expiry.into_iter().take(excess) {
+        cache.remove(&key);
+    }
 }
 
 // ── Single-flight refresh lock ───────────────────────────────────────────────
 // One async mutex per cache key so a rotating provider can't self-invalidate by
-// refreshing concurrently with the same one-time-use refresh token. Bounded by
-// the tenant's connection count (one process per tenant).
-static REFRESH_LOCKS: OnceLock<DashMap<String, Arc<AsyncMutex<()>>>> = OnceLock::new();
+// refreshing concurrently with the same one-time-use refresh token. Connection churn
+// mints new keys rather than reusing old ones, so the map is held down by the sweep
+// and the cap above rather than by the tenant's live connection count.
+static REFRESH_LOCKS: OnceLock<DashMap<TokenCacheKey, Arc<AsyncMutex<()>>>> = OnceLock::new();
 
-fn refresh_lock(cache_key: &str) -> Arc<AsyncMutex<()>> {
+fn refresh_locks() -> &'static DashMap<TokenCacheKey, Arc<AsyncMutex<()>>> {
+    REFRESH_LOCKS.get_or_init(DashMap::new)
+}
+
+fn refresh_lock(cache_key: &TokenCacheKey) -> Arc<AsyncMutex<()>> {
+    let locks = refresh_locks();
+    if locks.len() >= MAX_CACHE_ENTRIES {
+        // An unheld lock carries no state, so discarding it always makes room.
+        retain_refresh_locks(|_| false);
+    }
     // `.clone()` copies the Arc out; the DashMap shard guard is a temporary dropped
     // when this function returns, so it is never held across the caller's `.await`.
-    REFRESH_LOCKS
-        .get_or_init(DashMap::new)
-        .entry(cache_key.to_string())
+    locks
+        .entry(cache_key.clone())
         .or_insert_with(|| Arc::new(AsyncMutex::new(())))
         .clone()
 }
 
+/// Retain the locks `keep` selects, plus every lock currently held by an in-flight
+/// refresh regardless of what `keep` says. Dropping a held lock would let the next
+/// caller install a *second* mutex under the same key and split the single flight, so
+/// a strong count above the map's own reference is always a keep. `entry` and `retain`
+/// contend on the same shard lock, so the count cannot go stale mid-check.
+fn retain_refresh_locks(keep: impl Fn(&TokenCacheKey) -> bool) {
+    refresh_locks().retain(|key, lock| Arc::strong_count(lock) > 1 || keep(key));
+}
+
 // ── Negative cache for recent refresh failures ───────────────────────────────
-static REFRESH_ERRORS: OnceLock<DashMap<String, (DateTime<Utc>, AuthResolutionError)>> =
+static REFRESH_ERRORS: OnceLock<DashMap<TokenCacheKey, (DateTime<Utc>, AuthResolutionError)>> =
     OnceLock::new();
 
-fn refresh_errors() -> &'static DashMap<String, (DateTime<Utc>, AuthResolutionError)> {
+fn refresh_errors() -> &'static DashMap<TokenCacheKey, (DateTime<Utc>, AuthResolutionError)> {
     REFRESH_ERRORS.get_or_init(DashMap::new)
 }
 
-fn recent_refresh_error(cache_key: &str) -> Option<AuthResolutionError> {
+fn recent_refresh_error(cache_key: &TokenCacheKey) -> Option<AuthResolutionError> {
     refresh_errors().get(cache_key).and_then(|entry| {
         let (at, msg) = entry.value();
         if *at + Duration::seconds(REFRESH_ERROR_COOLDOWN_SECS) > Utc::now() {
@@ -529,11 +642,26 @@ fn recent_refresh_error(cache_key: &str) -> Option<AuthResolutionError> {
     })
 }
 
-fn record_refresh_error(cache_key: &str, msg: &AuthResolutionError) {
-    refresh_errors().insert(cache_key.to_string(), (Utc::now(), msg.clone()));
+fn sweep_stale_refresh_errors() {
+    let cutoff = Utc::now() - Duration::seconds(REFRESH_ERROR_COOLDOWN_SECS);
+    refresh_errors().retain(|_, (at, _)| *at > cutoff);
 }
 
-fn clear_refresh_error(cache_key: &str) {
+fn record_refresh_error(cache_key: &TokenCacheKey, msg: &AuthResolutionError) {
+    let errors = refresh_errors();
+    if errors.len() >= MAX_CACHE_ENTRIES {
+        sweep_stale_refresh_errors();
+        // Still full means more than the cap's worth of connections failed inside the
+        // cooldown window. The negative cache is an optimisation, not correctness, so
+        // dropping live entries costs at most one extra provider round-trip each.
+        if errors.len() >= MAX_CACHE_ENTRIES {
+            errors.clear();
+        }
+    }
+    errors.insert(cache_key.clone(), (Utc::now(), msg.clone()));
+}
+
+fn clear_refresh_error(cache_key: &TokenCacheKey) {
     refresh_errors().remove(cache_key);
 }
 
@@ -543,14 +671,20 @@ pub(crate) fn parse_expiry(value: Option<&str>) -> Option<DateTime<Utc>> {
         .map(|dt| dt.with_timezone(&Utc))
 }
 
-pub(crate) fn build_token_cache_key(parts: &[&str]) -> String {
+/// Build a cache key for `connection_id` from the parts that distinguish this
+/// particular credential (integration, token endpoint, scope, …). `parts` must NOT
+/// repeat the connection id — it is carried on the key itself.
+pub(crate) fn build_token_cache_key(connection_id: &str, parts: &[&str]) -> TokenCacheKey {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     for part in parts {
         hasher.update(part.as_bytes());
         hasher.update([0u8]);
     }
-    hex::encode(hasher.finalize())
+    TokenCacheKey {
+        connection_id: connection_id.to_string(),
+        digest: hex::encode(hasher.finalize()),
+    }
 }
 
 fn form_urlencoded(fields: &[(String, String)]) -> String {
@@ -565,14 +699,27 @@ fn form_urlencoded(fields: &[(String, String)]) -> String {
 mod tests {
     use super::*;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::AtomicUsize;
+
+    /// A cache key for `connection_id`, discriminated by `tag` so tests that share a
+    /// connection id can still hold independent entries.
+    fn key(connection_id: &str, tag: &str) -> TokenCacheKey {
+        build_token_cache_key(connection_id, &[tag])
+    }
+
+    fn token_expiring_in(minutes: i64) -> CachedAccessToken {
+        CachedAccessToken {
+            access_token: "token".to_string(),
+            expires_at: Some(Utc::now() + Duration::minutes(minutes)),
+        }
+    }
 
     #[tokio::test]
     async fn resolve_cached_token_uses_cache() {
         let call_count = Arc::new(AtomicUsize::new(0));
 
         let first_counter = Arc::clone(&call_count);
-        let first = resolve_cached_token("cache-key", move || async move {
+        let first = resolve_cached_token(&key("conn-cached", "cache-key"), move || async move {
             first_counter.fetch_add(1, Ordering::SeqCst);
             Ok(CachedAccessToken {
                 access_token: "token-123".to_string(),
@@ -584,7 +731,7 @@ mod tests {
         assert_eq!(first, "token-123");
 
         let second_counter = Arc::clone(&call_count);
-        let second = resolve_cached_token("cache-key", move || async move {
+        let second = resolve_cached_token(&key("conn-cached", "cache-key"), move || async move {
             second_counter.fetch_add(1, Ordering::SeqCst);
             Err(AuthResolutionError::transient(
                 "should not be called when cache is fresh",
@@ -600,7 +747,7 @@ mod tests {
     async fn refresh_auth_uses_fallback_access_token_when_still_fresh() {
         let client = Client::new();
         let auth = DeferredAuth::OAuth2RefreshToken {
-            cache_key: "hubspot-cache".to_string(),
+            cache_key: key("conn-1", "hubspot-cache"),
             token_url: "https://example.com/token".to_string(),
             header_name: "Authorization".to_string(),
             client_id: "id".to_string(),
@@ -639,9 +786,9 @@ mod tests {
         format!("http://{addr}/token")
     }
 
-    fn client_credentials_auth(cache_key: &str, token_url: String) -> DeferredAuth {
+    fn client_credentials_auth(cache_key: TokenCacheKey, token_url: String) -> DeferredAuth {
         DeferredAuth::OAuth2ClientCredentials {
-            cache_key: cache_key.to_string(),
+            cache_key,
             token_url,
             header_name: "Authorization".to_string(),
             header_value_prefix: Some("Bearer ".to_string()),
@@ -666,7 +813,7 @@ mod tests {
         .await;
         let err = resolve_deferred_auth(
             &Client::new(),
-            client_credentials_auth("perm-401-cache", url),
+            client_credentials_auth(key("conn-p1", "perm-401-cache"), url),
             &None,
             "conn-p1",
             "teams_bot",
@@ -685,7 +832,7 @@ mod tests {
             mock_token_endpoint("503 Service Unavailable", r#"{"error":"server_error"}"#).await;
         let err = resolve_deferred_auth(
             &Client::new(),
-            client_credentials_auth("trans-503-cache", url),
+            client_credentials_auth(key("conn-t1", "trans-503-cache"), url),
             &None,
             "conn-t1",
             "teams_bot",
@@ -703,7 +850,7 @@ mod tests {
         .await;
         let err = resolve_deferred_auth(
             &Client::new(),
-            client_credentials_auth("trans-429-cache", url),
+            client_credentials_auth(key("conn-t2", "trans-429-cache"), url),
             &None,
             "conn-t2",
             "teams_bot",
@@ -754,7 +901,7 @@ mod tests {
         // actual refresh is attempted. `token_url` is unreachable, so the refresh *fails* — but
         // the event must still fire (it's emitted regardless of outcome), with success=false.
         let auth = DeferredAuth::OAuth2RefreshToken {
-            cache_key: "rec-refresh-cache".to_string(),
+            cache_key: key("conn-42", "rec-refresh-cache"),
             token_url: "http://127.0.0.1:1/token".to_string(),
             header_name: "Authorization".to_string(),
             client_id: "id".to_string(),
@@ -796,7 +943,7 @@ mod tests {
         let client = Client::new();
 
         let auth = DeferredAuth::OAuth2RefreshToken {
-            cache_key: "rec-fallback-cache".to_string(),
+            cache_key: key("conn-1", "rec-fallback-cache"),
             token_url: "https://example.com/token".to_string(),
             header_name: "Authorization".to_string(),
             client_id: "id".to_string(),
@@ -828,7 +975,7 @@ mod tests {
         let client = Client::new();
 
         let make_auth = || DeferredAuth::OAuth2RefreshToken {
-            cache_key: "neg-cache-test".to_string(),
+            cache_key: key("conn-neg", "neg-cache-test"),
             token_url: "http://127.0.0.1:1/token".to_string(),
             header_name: "Authorization".to_string(),
             client_id: "id".to_string(),
@@ -850,6 +997,184 @@ mod tests {
             recorder.events.lock().unwrap().len(),
             1,
             "the second refresh must be short-circuited by the negative cache"
+        );
+    }
+
+    // ── Cache eviction, sweeping and bounds ──────────────────────────────────
+    // These share the process-global maps with every other test in this binary, so
+    // they key off connection ids nobody else uses. Sweeping is safe to run
+    // concurrently by construction: it only drops entries that are already unusable
+    // (expired tokens, cooled-down errors) or stateless (unheld locks).
+
+    #[tokio::test]
+    async fn evict_connection_drops_only_the_named_connections_entries() {
+        let doomed = key("evict-doomed", "grant");
+        let bystander = key("evict-bystander", "grant");
+        for k in [&doomed, &bystander] {
+            cache_token(k, token_expiring_in(30));
+            record_refresh_error(k, &AuthResolutionError::transient("boom"));
+            drop(refresh_lock(k));
+        }
+
+        evict_connection("evict-doomed");
+
+        assert!(token_cache().get(&doomed).is_none(), "token evicted");
+        assert!(refresh_errors().get(&doomed).is_none(), "error evicted");
+        assert!(refresh_locks().get(&doomed).is_none(), "lock evicted");
+
+        assert!(
+            token_cache().get(&bystander).is_some(),
+            "another connection's token must survive"
+        );
+        assert!(
+            refresh_errors().get(&bystander).is_some(),
+            "another connection's negative-cache entry must survive"
+        );
+        assert!(
+            refresh_locks().get(&bystander).is_some(),
+            "another connection's lock must survive"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_held_refresh_lock_survives_eviction_and_sweeping() {
+        // Dropping a lock somebody is holding would let the next caller install a
+        // second mutex under the same key, so two refreshes could run concurrently
+        // with the same one-time-use refresh token. The strong-count guard prevents it.
+        let held = key("evict-inflight", "grant");
+        let lock = refresh_lock(&held);
+        let _guard = lock.lock().await;
+
+        evict_connection("evict-inflight");
+        sweep_expired();
+
+        let still_mapped = refresh_locks()
+            .get(&held)
+            .map(|entry| Arc::ptr_eq(entry.value(), &lock));
+        assert_eq!(
+            still_mapped,
+            Some(true),
+            "an in-flight refresh must keep the very same mutex, not a replacement"
+        );
+    }
+
+    #[tokio::test]
+    async fn sweep_reclaims_expired_tokens_stale_errors_and_unheld_locks() {
+        let expired = key("sweep-expired", "grant");
+        let live = key("sweep-live", "grant");
+        // Inside TOKEN_REFRESH_MARGIN_SECS of expiry counts as expired: `token_is_fresh`
+        // already refuses to serve it, so the entry is pure residue.
+        token_cache().insert(
+            expired.clone(),
+            CachedAccessToken {
+                access_token: "stale".to_string(),
+                expires_at: Some(Utc::now() + Duration::seconds(TOKEN_REFRESH_MARGIN_SECS / 2)),
+            },
+        );
+        token_cache().insert(live.clone(), token_expiring_in(30));
+
+        let cooled_down = key("sweep-cooled", "grant");
+        refresh_errors().insert(
+            cooled_down.clone(),
+            (
+                Utc::now() - Duration::seconds(REFRESH_ERROR_COOLDOWN_SECS + 1),
+                AuthResolutionError::transient("long gone"),
+            ),
+        );
+        let recent = key("sweep-recent", "grant");
+        record_refresh_error(&recent, &AuthResolutionError::transient("just now"));
+
+        let unheld = key("sweep-unheld", "grant");
+        drop(refresh_lock(&unheld));
+
+        sweep_expired();
+
+        assert!(
+            token_cache().get(&expired).is_none(),
+            "expired token dropped"
+        );
+        assert!(token_cache().get(&live).is_some(), "fresh token kept");
+        assert!(
+            refresh_errors().get(&cooled_down).is_none(),
+            "cooled-down error dropped"
+        );
+        assert!(
+            refresh_errors().get(&recent).is_some(),
+            "error still inside its cooldown kept"
+        );
+        assert!(
+            refresh_locks().get(&unheld).is_none(),
+            "unheld lock dropped"
+        );
+    }
+
+    #[test]
+    fn token_cache_never_exceeds_its_size_bound() {
+        // On a local map so the bound is exercised without evicting entries that the
+        // other tests in this binary are relying on.
+        let cache: DashMap<TokenCacheKey, CachedAccessToken> = DashMap::new();
+        let max = 8;
+
+        for i in 0..(max * 4) {
+            let k = key(&format!("bound-{i}"), "grant");
+            make_room(&cache, max);
+            cache.insert(k, token_expiring_in(30));
+            assert!(
+                cache.len() <= max,
+                "cache grew past its bound at insert {i}: {}",
+                cache.len()
+            );
+        }
+        assert_eq!(cache.len(), max, "the bound is a ceiling, not a flush");
+    }
+
+    #[test]
+    fn size_bound_evicts_the_tokens_nearest_expiry_first() {
+        let cache: DashMap<TokenCacheKey, CachedAccessToken> = DashMap::new();
+        let max = 3;
+        let soonest = key("bound-soonest", "grant");
+        let middle = key("bound-middle", "grant");
+        let latest = key("bound-latest", "grant");
+        cache.insert(soonest.clone(), token_expiring_in(10));
+        cache.insert(latest.clone(), token_expiring_in(90));
+        cache.insert(middle.clone(), token_expiring_in(50));
+
+        make_room(&cache, max);
+
+        assert!(
+            cache.get(&soonest).is_none(),
+            "the token nearest expiry is the cheapest to re-mint, so it goes first"
+        );
+        assert!(cache.get(&middle).is_some());
+        assert!(cache.get(&latest).is_some());
+    }
+
+    #[test]
+    fn size_bound_drops_expired_entries_before_live_ones() {
+        let cache: DashMap<TokenCacheKey, CachedAccessToken> = DashMap::new();
+        let live = key("bound-live", "grant");
+        cache.insert(
+            key("bound-expired-a", "grant"),
+            CachedAccessToken {
+                access_token: "stale".to_string(),
+                expires_at: Some(Utc::now() - Duration::minutes(1)),
+            },
+        );
+        cache.insert(
+            key("bound-expired-b", "grant"),
+            CachedAccessToken {
+                access_token: "stale".to_string(),
+                expires_at: Some(Utc::now() - Duration::minutes(2)),
+            },
+        );
+        cache.insert(live.clone(), token_expiring_in(30));
+
+        make_room(&cache, 3);
+
+        assert_eq!(cache.len(), 1, "both expired entries reclaimed");
+        assert!(
+            cache.get(&live).is_some(),
+            "a live token must not be evicted while expired ones are still present"
         );
     }
 

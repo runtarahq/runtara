@@ -389,12 +389,10 @@ fn describe_shopify_client_credentials_auth(
     }
 
     Some(DeferredAuth::OAuth2ClientCredentials {
-        cache_key: token_cache::build_token_cache_key(&[
-            "shopify_client_credentials",
+        cache_key: token_cache::build_token_cache_key(
             connection_id,
-            shop_domain,
-            &scopes,
-        ]),
+            &["shopify_client_credentials", shop_domain, &scopes],
+        ),
         token_url: format!("https://{shop_domain}/admin/oauth/access_token"),
         header_name: "X-Shopify-Access-Token".to_string(),
         header_value_prefix: None,
@@ -421,14 +419,16 @@ fn describe_microsoft_entra_client_credentials_auth(
         .to_string();
 
     Some(DeferredAuth::OAuth2ClientCredentials {
-        cache_key: token_cache::build_token_cache_key(&[
-            "microsoft_entra_client_credentials",
+        cache_key: token_cache::build_token_cache_key(
             connection_id,
-            &authority_host,
-            &tenant_id,
-            &client_id,
-            &scope,
-        ]),
+            &[
+                "microsoft_entra_client_credentials",
+                &authority_host,
+                &tenant_id,
+                &client_id,
+                &scope,
+            ],
+        ),
         token_url: format!("{authority_host}/{tenant_id}/oauth2/v2.0/token"),
         header_name: "Authorization".to_string(),
         header_value_prefix: Some("Bearer ".to_string()),
@@ -477,14 +477,16 @@ fn describe_teams_bot_auth(connection_id: &str, params: &Value) -> Option<Deferr
         .to_string();
 
     Some(DeferredAuth::OAuth2ClientCredentials {
-        cache_key: token_cache::build_token_cache_key(&[
-            "teams_bot",
+        cache_key: token_cache::build_token_cache_key(
             connection_id,
-            &authority_host,
-            &tenant,
-            &app_id,
-            BOT_FRAMEWORK_SCOPE,
-        ]),
+            &[
+                "teams_bot",
+                &authority_host,
+                &tenant,
+                &app_id,
+                BOT_FRAMEWORK_SCOPE,
+            ],
+        ),
         token_url: format!("{authority_host}/{tenant}/oauth2/v2.0/token"),
         header_name: "Authorization".to_string(),
         header_value_prefix: Some("Bearer ".to_string()),
@@ -564,6 +566,14 @@ pub fn invalidate_connection_token_caches(
             &effective.token_url,
         );
     }
+}
+
+/// Evict *all* in-memory credential state for a connection — every grant type, not
+/// just the refresh-token one the params can address. Called when the connection row
+/// is deleted: without it a still-fresh cached access token keeps being served for a
+/// connection that no longer exists, and the entries are never reclaimed.
+pub fn evict_connection_token_caches(connection_id: &str) {
+    token_cache::evict_connection(connection_id);
 }
 
 /// Descriptor-driven auth for OAuth2 authorization-code integrations: resolves the
@@ -687,14 +697,16 @@ fn describe_http_oauth2_client_credentials_auth(
     }
 
     Some(DeferredAuth::OAuth2ClientCredentials {
-        cache_key: token_cache::build_token_cache_key(&[
-            "http_oauth2_client_credentials",
+        cache_key: token_cache::build_token_cache_key(
             connection_id,
-            &token_url,
-            &base_url,
-            &client_id,
-            &scope,
-        ]),
+            &[
+                "http_oauth2_client_credentials",
+                &token_url,
+                &base_url,
+                &client_id,
+                &scope,
+            ],
+        ),
         token_url,
         header_name: "Authorization".to_string(),
         header_value_prefix: Some("Bearer ".to_string()),
@@ -723,12 +735,10 @@ fn describe_oauth_refresh_auth(
     Some(DeferredAuth::OAuth2RefreshToken {
         // token_url in the key so an endpoint edit on a params-driven connection
         // naturally misses stale cache entries.
-        cache_key: token_cache::build_token_cache_key(&[
-            "oauth_refresh",
+        cache_key: token_cache::build_token_cache_key(
             connection_id,
-            integration_id,
-            &effective.token_url,
-        ]),
+            &["oauth_refresh", integration_id, &effective.token_url],
+        ),
         token_url: effective.token_url,
         header_name: header_name.to_string(),
         client_id,
