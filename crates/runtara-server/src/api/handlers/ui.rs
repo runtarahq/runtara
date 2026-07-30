@@ -113,16 +113,28 @@ struct Asset {
     mime: HeaderValue,
 }
 
+/// A rewritten index.html together with the CSP that matches it. The CSP
+/// whitelists every inline `<script>` body in exactly these bytes by hash, so
+/// the two only make sense as a pair: serving one build's HTML with another
+/// build's CSP is how inline scripts get blocked by the browser.
+#[derive(Clone)]
+struct RenderedIndex {
+    html: Bytes,
+    csp: Arc<str>,
+}
+
 #[derive(Clone)]
 pub struct UiState {
     /// Where to read asset bytes from.
     source: AssetSource,
     /// index.html with `<base href>` rewritten to match the deployed mount
-    /// prefix. Populated only for an immutable source; a mutable one rebuilds
-    /// per request so `npm run build:watch` output is picked up without a
-    /// restart. Asset hashes in index.html change on every frontend build, so a
-    /// cache over a mutable source would go stale within seconds.
-    index_html: Option<Bytes>,
+    /// prefix, plus its matching CSP. Populated only for an immutable source; a
+    /// mutable one rebuilds per request so `npm run build:watch` output is
+    /// picked up without a restart. Asset hashes in index.html change on every
+    /// frontend build, so a cache over a mutable source would go stale within
+    /// seconds — and dist owns inline script bodies (e.g. the pre-paint theme
+    /// applier), so the CSP must be rebuilt with the HTML it covers.
+    index: Option<RenderedIndex>,
     /// `<base href>` value to inject into index.html. Needed on every request
     /// when the source is mutable.
     base_href: Arc<str>,
@@ -133,12 +145,11 @@ pub struct UiState {
     /// Mount prefix (e.g. `/ui`), stripped from the request URI before looking
     /// up the asset. Lets multi-segment mounts like `/ui/foo` work correctly.
     mount: Arc<str>,
-    /// CSP header for HTML responses. Contains a SHA-256 hash of the inline
-    /// `window.__RUNTARA_CONFIG__` script so the browser lets it execute.
-    /// Computed once at startup from the script body we inject, which is derived
-    /// from env vars and entitlements that don't change during process lifetime
-    /// — so the hash stays valid however often index.html is rewritten.
-    html_csp: Arc<str>,
+    /// CSP header for non-HTML asset responses. Script hashes only matter on
+    /// documents — an asset response never executes an inline script — so this
+    /// carries just the startup-computed config-script hash and doesn't need to
+    /// track dist rebuilds the way the HTML CSP does.
+    asset_csp: Arc<str>,
 }
 
 /// Build a router that serves the embedded UI under `mount` (e.g. `/ui`).
@@ -149,15 +160,17 @@ pub struct UiState {
 /// slashes (`/ui` matches but `/ui/` 404s). Registering explicit routes at the
 /// outer level dodges the quirk.
 pub fn router(mount: &str, base_href: &str, source: AssetSource) -> Router {
-    // Snapshot the inline config script once. The CSP hash covers this exact
-    // string and `build_index_html` splices in this exact string, so the two
-    // cannot drift. It also means boot doesn't read index.html at all — a `Disk`
-    // source may legitimately be mid-rebuild when the server starts.
+    // Snapshot the inline config script once. `build_index_html` splices in
+    // this exact string and hashes it (along with every other inline script
+    // body) into the CSP it returns, so the two cannot drift. It also means
+    // boot doesn't read index.html at all — a `Disk` source may legitimately be
+    // mid-rebuild when the server starts.
     let inline_script = inline_config_script(crate::config::entitlements());
-    let inline_script_hash = inline_config_script_sha256_b64(&inline_script);
+    let inline_script_hash = sha256_b64(&inline_script);
 
-    // Cache the rewritten HTML only when the bytes behind it cannot change.
-    let index_html =
+    // Cache the rewritten HTML (and its CSP) only when the bytes behind it
+    // cannot change.
+    let index =
         if source.is_mutable() {
             None
         } else {
@@ -168,11 +181,11 @@ pub fn router(mount: &str, base_href: &str, source: AssetSource) -> Router {
 
     let state = UiState {
         source,
-        index_html,
+        index,
         base_href: Arc::from(base_href),
         inline_script: Arc::from(inline_script.as_str()),
         mount: Arc::from(mount),
-        html_csp: Arc::from(build_html_csp(&inline_script_hash).as_str()),
+        asset_csp: Arc::from(build_html_csp(&[inline_script_hash]).as_str()),
     };
     let wild = format!("{mount}/{{*path}}");
     let with_slash = format!("{mount}/");
@@ -198,6 +211,47 @@ fn config_script_regex() -> &'static Regex {
     })
 }
 
+/// Any script element; capture group 1 is its attributes, group 2 its body.
+/// External scripts are filtered out by attribute (the regex crate has no
+/// lookahead to exclude `src=` in the pattern itself).
+fn script_element_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r#"(?s)<script(\s[^>]*)?>(.*?)</script>"#).expect("valid script-element regex")
+    })
+}
+
+/// A `src` attribute inside a script tag's attribute list.
+fn src_attr_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r#"(?:^|\s)src\s*="#).expect("valid src-attr regex"))
+}
+
+/// SHA-256 hashes (base64) of every inline `<script>` body in `html`, deduped.
+/// These go into `script-src` so the browser executes each inline script the
+/// served HTML actually contains — both the spliced config script and anything
+/// dist ships, like the pre-paint theme applier in index.html.
+fn inline_script_hashes(html: &str) -> Vec<String> {
+    let mut hashes = Vec::new();
+    for caps in script_element_regex().captures_iter(html) {
+        let external = caps
+            .get(1)
+            .is_some_and(|attrs| src_attr_regex().is_match(attrs.as_str()));
+        if external {
+            continue;
+        }
+        let body = caps.get(2).map_or("", |body| body.as_str());
+        if body.is_empty() {
+            continue;
+        }
+        let hash = sha256_b64(body);
+        if !hashes.contains(&hash) {
+            hashes.push(hash);
+        }
+    }
+    hashes
+}
+
 /// The inline `window.__RUNTARA_CONFIG__` script body that gets spliced into
 /// index.html. Derived purely from env vars and the entitlement snapshot, so it
 /// is stable for the process lifetime and can be hashed for the CSP without
@@ -214,24 +268,28 @@ fn inline_config_script(entitlements: &EntitlementSnapshot) -> String {
     )
 }
 
-/// Base64-encoded SHA-256 of the inline config script body. Goes into the
-/// `script-src` CSP directive so the browser allows the inline script to run.
-fn inline_config_script_sha256_b64(inline_script: &str) -> String {
+/// Base64-encoded SHA-256 of an inline script body, the form CSP `script-src`
+/// hash sources use.
+fn sha256_b64(script_body: &str) -> String {
     use base64::Engine;
     use sha2::Digest;
 
-    let digest = sha2::Sha256::digest(inline_script.as_bytes());
+    let digest = sha2::Sha256::digest(script_body.as_bytes());
     base64::engine::general_purpose::STANDARD.encode(digest)
 }
 
-/// Rewrite index.html for the deployed mount prefix, or `None` when it can't be
-/// read or parsed.
+/// Rewrite index.html for the deployed mount prefix and build the CSP that
+/// matches the result, or `None` when it can't be read or parsed.
 ///
 /// Fallible rather than panicking because a `Disk` source is read per request
 /// and `vite build --watch` legitimately leaves dist absent or half-written for
 /// a moment on every rebuild. Callers turn `None` into a 503; a panic here would
 /// take down the request handler on a routine frontend save.
-fn build_index_html(source: &AssetSource, base_href: &str, inline_script: &str) -> Option<Bytes> {
+fn build_index_html(
+    source: &AssetSource,
+    base_href: &str,
+    inline_script: &str,
+) -> Option<RenderedIndex> {
     let raw = match read_asset(source, "index.html") {
         Some(asset) => asset,
         None => {
@@ -306,10 +364,17 @@ fn build_index_html(source: &AssetSource, base_href: &str, inline_script: &str) 
     rewritten.push_str(inline_script);
     rewritten.push_str(&step_one[config_body.end()..]);
 
-    // The CSP `script-src 'sha256-...'` set at startup hashes exactly this body —
-    // between the <script> tags, no surrounding whitespace, no tags — so what we
-    // splice in here must stay byte-identical to `inline_config_script`.
-    Some(Bytes::from(rewritten.into_bytes()))
+    // 3. Hash every inline script body in the final HTML — the config script we
+    //    just spliced plus whatever dist ships (the pre-paint theme applier) —
+    //    and build the CSP over exactly these bytes. A hash computed against
+    //    anything other than the HTML being served blocks the script in the
+    //    browser, which is why the CSP is built here and not once at startup.
+    let csp = build_html_csp(&inline_script_hashes(&rewritten));
+
+    Some(RenderedIndex {
+        html: Bytes::from(rewritten.into_bytes()),
+        csp: Arc::from(csp.as_str()),
+    })
 }
 
 /// Read one asset from the configured source.
@@ -372,19 +437,19 @@ fn safe_relative_path(path: &str) -> Option<PathBuf> {
     Some(safe)
 }
 
-/// CSP for HTML responses. Parameterized by the base64 SHA-256 hash of the
-/// inline config script we just injected so the browser allows it to run.
-/// Operators tightening for production should front the server with a reverse
-/// proxy that overrides this header.
-fn build_html_csp(inline_script_sha256_b64: &str) -> String {
+/// CSP for HTML responses. Parameterized by the base64 SHA-256 hashes of the
+/// inline script bodies in the HTML being served so the browser allows each of
+/// them to run. Operators tightening for production should front the server
+/// with a reverse proxy that overrides this header.
+fn build_html_csp(inline_script_hashes_b64: &[String]) -> String {
     build_html_csp_with_plausible_source(
-        inline_script_sha256_b64,
+        inline_script_hashes_b64,
         plausible_script_src_from_env().as_deref(),
     )
 }
 
 fn build_html_csp_with_plausible_source(
-    inline_script_sha256_b64: &str,
+    inline_script_hashes_b64: &[String],
     plausible_script_src: Option<&str>,
 ) -> String {
     let mut script_sources = vec!["'self'".to_string(), "https://plausible.io".to_string()];
@@ -394,7 +459,9 @@ fn build_html_csp_with_plausible_source(
         script_sources.push(source.to_string());
     }
     script_sources.push("'wasm-unsafe-eval'".to_string());
-    script_sources.push(format!("'sha256-{inline_script_sha256_b64}'"));
+    for hash in inline_script_hashes_b64 {
+        script_sources.push(format!("'sha256-{hash}'"));
+    }
 
     format!(
         "default-src 'self'; \
@@ -591,15 +658,16 @@ async fn serve(uri: Uri, State(state): State<UiState>) -> Response {
     index_response(&state)
 }
 
-/// Return the index.html body to serve for this request.
+/// Return the index.html body to serve for this request, with the CSP that
+/// hashes its inline scripts.
 ///
-/// An immutable source reuses the bytes built at startup. A mutable one — a
-/// `Disk` source, or a debug build reading the compile-time dist path — rebuilds
-/// per request so `npm run build:watch` output is picked up without a restart.
-/// Asset hashes in index.html change on every frontend build, so caching over a
-/// mutable source would go stale within seconds.
+/// An immutable source reuses the HTML and CSP built at startup. A mutable one
+/// — a `Disk` source, or a debug build reading the compile-time dist path —
+/// rebuilds both per request so `npm run build:watch` output is picked up
+/// without a restart. Asset hashes in index.html change on every frontend
+/// build, so caching over a mutable source would go stale within seconds.
 fn index_response(state: &UiState) -> Response {
-    let html = match &state.index_html {
+    let rendered = match &state.index {
         Some(cached) => Some(cached.clone()),
         None => build_index_html(
             &state.source,
@@ -608,8 +676,8 @@ fn index_response(state: &UiState) -> Response {
         ),
     };
 
-    match html {
-        Some(body) => html_response(body, &state.html_csp),
+    match rendered {
+        Some(index) => html_response(index.html, &index.csp),
         // Reachable when a `Disk` source is mid-rebuild: `vite build --watch`
         // rewrites dist on every save. Say so plainly instead of 500ing, and
         // never cache it — the next reload should get the real page.
@@ -669,7 +737,7 @@ fn asset_response(path: &str, asset: Asset, state: &UiState) -> Response {
         .header(header::CACHE_CONTROL, cache_control)
         .header(
             header::CONTENT_SECURITY_POLICY,
-            HeaderValue::from_str(&state.html_csp).expect("CSP header must be ASCII"),
+            HeaderValue::from_str(&state.asset_csp).expect("CSP header must be ASCII"),
         )
         .body(Body::from(asset.data))
         .unwrap()
@@ -681,7 +749,7 @@ mod tests {
 
     #[test]
     fn csp_allows_wasm_validation_without_general_eval() {
-        let csp = build_html_csp("inline-config-hash");
+        let csp = build_html_csp(&["inline-config-hash".to_string()]);
 
         assert!(csp.contains("'wasm-unsafe-eval'"));
         assert!(!csp.contains("'unsafe-eval'"));
@@ -690,7 +758,7 @@ mod tests {
     #[test]
     fn csp_allows_custom_plausible_host() {
         let csp = build_html_csp_with_plausible_source(
-            "inline-config-hash",
+            &["inline-config-hash".to_string()],
             Some("https://metrics.syncmyorders.com"),
         );
 
@@ -806,13 +874,13 @@ mod tests {
     #[test]
     fn base_href_is_rewritten_to_the_mount_prefix() {
         let snap = fixture_snapshot("tenant-base", None);
-        let html_bytes = build_index_html(
+        let rendered = build_index_html(
             &AssetSource::Embedded,
             "/ui/tenant-base/",
             &inline_config_script(&snap),
         )
         .expect("embedded index.html builds");
-        let html = std::str::from_utf8(&html_bytes).expect("utf-8");
+        let html = std::str::from_utf8(&rendered.html).expect("utf-8");
 
         assert!(
             html.contains(r#"<base href="/ui/tenant-base/">"#),
@@ -829,10 +897,10 @@ mod tests {
     #[test]
     fn inlined_script_contains_entitlements_payload() {
         let snap = fixture_snapshot("tenant-html", None);
-        let html_bytes =
+        let rendered =
             build_index_html(&AssetSource::Embedded, "/ui/", &inline_config_script(&snap))
                 .expect("embedded index.html builds");
-        let html = std::str::from_utf8(&html_bytes).expect("utf-8");
+        let html = std::str::from_utf8(&rendered.html).expect("utf-8");
 
         // The inline script is `window.__RUNTARA_CONFIG__={...};` — locate the body
         // between the assignment and the trailing semicolon.
@@ -855,27 +923,23 @@ mod tests {
         assert!(ents["limits"].is_object());
     }
 
-    /// The CSP hash is computed at startup from `inline_config_script`, while the
-    /// body the browser receives is spliced in by `build_index_html`. Nothing in
-    /// the type system ties those two together, so assert they agree: drift means
-    /// the browser refuses to run the config script and the SPA boots blank.
+    /// The config body the browser receives is spliced in by `build_index_html`
+    /// and the CSP is built from the same rewritten HTML. Assert the served CSP
+    /// really whitelists the spliced body: drift means the browser refuses to
+    /// run the config script and the SPA boots blank.
     #[cfg(feature = "embed-ui")]
     #[test]
     fn csp_hash_covers_entitlements_payload() {
-        use base64::Engine;
-        use sha2::Digest;
-
         let snap = fixture_snapshot("tenant-csp", None);
-        let hash_b64 = inline_config_script_sha256_b64(&inline_config_script(&snap));
-        let html_bytes =
+        let rendered =
             build_index_html(&AssetSource::Embedded, "/ui/", &inline_config_script(&snap))
                 .expect("embedded index.html builds");
-        let html = std::str::from_utf8(&html_bytes).expect("utf-8");
+        let html = std::str::from_utf8(&rendered.html).expect("utf-8");
 
         // Locate the exact inline script body — everything between
         // `window.__RUNTARA_CONFIG__=` and the terminating `;` that build_index_html
-        // splices in. The hash in the CSP must equal SHA-256 of THIS string,
-        // including the trailing semicolon (see build_index_html's `inline_script`).
+        // splices in. The CSP must carry the SHA-256 of THIS string, including
+        // the trailing semicolon (see build_index_html's `inline_script`).
         let needle_start = "window.__RUNTARA_CONFIG__=";
         let start_idx = html.find(needle_start).expect("config assignment present");
         // The script body in build_index_html ends at the `;` that closes the
@@ -884,24 +948,92 @@ mod tests {
         let semi = after.find(';').expect("semicolon terminator present");
         let inline_script = &after[..=semi];
 
-        let expected = base64::engine::general_purpose::STANDARD
-            .encode(sha2::Sha256::digest(inline_script.as_bytes()));
-        assert_eq!(
-            hash_b64, expected,
-            "CSP hash must match SHA-256 of the inlined script body — drift would break CSP"
+        assert!(
+            rendered
+                .csp
+                .contains(&format!("'sha256-{}'", sha256_b64(inline_script))),
+            "CSP must whitelist the SHA-256 of the inlined config body — drift would break CSP; \
+             csp: {}",
+            rendered.csp
         );
     }
 
+    /// The regression behind the dark-mode flash: index.html ships a second
+    /// inline script (the pre-paint theme applier) whose bytes are owned by
+    /// dist, not generated by the server. Its hash must be in the CSP or the
+    /// browser blocks exactly the script that exists to prevent the flash.
+    ///
+    /// The body is located here by hand (substring search around
+    /// `theme-storage`) rather than via `inline_script_hashes`, so this fails
+    /// if the scan ever stops finding the theme script.
+    #[cfg(feature = "embed-ui")]
+    #[test]
+    fn csp_hash_covers_the_pre_paint_theme_script() {
+        let snap = fixture_snapshot("tenant-theme", None);
+        let rendered =
+            build_index_html(&AssetSource::Embedded, "/ui/", &inline_config_script(&snap))
+                .expect("embedded index.html builds");
+        let html = std::str::from_utf8(&rendered.html).expect("utf-8");
+
+        let marker = html
+            .find("theme-storage")
+            .expect("pre-paint theme script present in dist index.html");
+        let body_start = html[..marker]
+            .rfind("<script>")
+            .expect("theme script has a bare <script> tag")
+            + "<script>".len();
+        let body_end = marker
+            + html[marker..]
+                .find("</script>")
+                .expect("theme script closes");
+        let theme_body = &html[body_start..body_end];
+
+        assert!(
+            rendered
+                .csp
+                .contains(&format!("'sha256-{}'", sha256_b64(theme_body))),
+            "CSP must whitelist the pre-paint theme script body; csp: {}",
+            rendered.csp
+        );
+    }
+
+    #[test]
+    fn inline_script_scan_skips_external_scripts_and_dedupes() {
+        let html = r#"<html><head>
+            <script id="cfg">window.__RUNTARA_CONFIG__={};</script>
+            <script>console.log("theme")</script>
+            <script>console.log("theme")</script>
+            <script type="module" crossorigin src="./assets/index-abc.js"></script>
+        </head><body></body></html>"#;
+
+        let hashes = inline_script_hashes(html);
+        assert_eq!(
+            hashes.len(),
+            2,
+            "two distinct inline bodies expected: {hashes:?}"
+        );
+        assert!(hashes.contains(&sha256_b64("window.__RUNTARA_CONFIG__={};")));
+        assert!(hashes.contains(&sha256_b64(r#"console.log("theme")"#)));
+    }
+
+    /// The theme-applier stand-in inline script `write_fake_dist` puts into its
+    /// index.html — dist-owned bytes the server does not generate.
+    const FAKE_THEME_SCRIPT: &str = "document.documentElement.classList.add('dark')";
+
     /// Minimal stand-in for a vite `dist/`: enough of index.html for both
-    /// rewrites to apply.
+    /// rewrites to apply, plus a dist-owned inline script like the real
+    /// pre-paint theme applier.
     fn write_fake_dist(root: &Path) {
         std::fs::write(
             root.join("index.html"),
-            "<!doctype html><html><head><base href=\"/\">\
-             <script id=\"runtara-runtime-config\">\n      window.__RUNTARA_CONFIG__={};\n    \
-             </script>\
-             <script type=\"module\" src=\"./assets/index-abc123.js\"></script>\
-             </head><body></body></html>",
+            format!(
+                "<!doctype html><html><head><base href=\"/\">\
+                 <script id=\"runtara-runtime-config\">\n      window.__RUNTARA_CONFIG__={{}};\n    \
+                 </script>\
+                 <script>{FAKE_THEME_SCRIPT}</script>\
+                 <script type=\"module\" src=\"./assets/index-abc123.js\"></script>\
+                 </head><body></body></html>"
+            ),
         )
         .expect("write index.html");
         std::fs::create_dir_all(root.join("assets")).expect("create assets dir");
@@ -916,13 +1048,47 @@ mod tests {
         let source = AssetSource::Disk(Arc::from(dir.path().to_path_buf().into_boxed_path()));
 
         let snap = fixture_snapshot("tenant-disk", None);
-        let html_bytes =
-            build_index_html(&source, "/ui/tenant-disk/", &inline_config_script(&snap))
-                .expect("disk index.html builds");
-        let html = std::str::from_utf8(&html_bytes).expect("utf-8");
+        let rendered = build_index_html(&source, "/ui/tenant-disk/", &inline_config_script(&snap))
+            .expect("disk index.html builds");
+        let html = std::str::from_utf8(&rendered.html).expect("utf-8");
 
         assert!(html.contains(r#"<base href="/ui/tenant-disk/">"#));
         assert!(html.contains("\"tenantId\":\"tenant-disk\""));
+    }
+
+    /// A `Disk` source rebuilds per request, so the CSP must whitelist the
+    /// inline scripts of the dist actually on disk — including bodies the
+    /// server didn't generate. External `src=` scripts are not hash sources.
+    #[test]
+    fn disk_source_csp_covers_dist_owned_inline_scripts() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_fake_dist(dir.path());
+        let source = AssetSource::Disk(Arc::from(dir.path().to_path_buf().into_boxed_path()));
+
+        let snap = fixture_snapshot("tenant-csp-disk", None);
+        let inline = inline_config_script(&snap);
+        let rendered = build_index_html(&source, "/ui/", &inline).expect("disk index.html builds");
+
+        assert!(
+            rendered
+                .csp
+                .contains(&format!("'sha256-{}'", sha256_b64(&inline))),
+            "CSP must whitelist the spliced config body; csp: {}",
+            rendered.csp
+        );
+        assert!(
+            rendered
+                .csp
+                .contains(&format!("'sha256-{}'", sha256_b64(FAKE_THEME_SCRIPT))),
+            "CSP must whitelist the dist-owned inline script; csp: {}",
+            rendered.csp
+        );
+        assert_eq!(
+            rendered.csp.matches("'sha256-").count(),
+            2,
+            "exactly the two inline bodies should be hashed; csp: {}",
+            rendered.csp
+        );
     }
 
     /// `vite build --watch` rewrites dist on every save. A read landing in that
@@ -988,13 +1154,11 @@ mod tests {
         UiState {
             source: AssetSource::Disk(Arc::from(root.to_path_buf().into_boxed_path())),
             // Mutable source: no cached index.html, exactly as `router` builds it.
-            index_html: None,
+            index: None,
             base_href: Arc::from("/ui/"),
             inline_script: Arc::from(inline_script.as_str()),
             mount: Arc::from("/ui"),
-            html_csp: Arc::from(
-                build_html_csp(&inline_config_script_sha256_b64(&inline_script)).as_str(),
-            ),
+            asset_csp: Arc::from(build_html_csp(&[sha256_b64(&inline_script)]).as_str()),
         }
     }
 
