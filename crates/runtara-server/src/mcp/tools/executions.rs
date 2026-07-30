@@ -1555,6 +1555,35 @@ pub async fn inspect_step(
     json_result(response)
 }
 
+/// Build the `trace_reference` response for a `variables.*` reference from a
+/// fetched instance execution record. Split out of the tool arm so the
+/// resolution semantics stay unit-testable: the value must come from the
+/// instance's runtime variable state via the shared resolver, never from the
+/// static defaults in the workflow definition graph.
+fn trace_variables_response(reference: &str, execution: &serde_json::Value) -> serde_json::Value {
+    let resolved =
+        resolve_reference_value(reference, &synthetic_summaries(Vec::new()), execution, None)
+            .unwrap_or(json!(null));
+
+    // Same lookup order as the resolver's variables arm, surfaced whole for
+    // context alongside the resolved value.
+    let variables = execution
+        .pointer("/data/inputs/variables")
+        .or_else(|| execution.pointer("/data/variables"))
+        .cloned()
+        .unwrap_or(json!({}));
+
+    json!({
+        "reference": reference,
+        "resolved": !resolved.is_null(),
+        "value": resolved,
+        "source": {
+            "type": "variable",
+            "allVariables": variables,
+        }
+    })
+}
+
 pub async fn trace_reference(
     server: &SmoMcpServer,
     params: TraceReferenceParams,
@@ -1738,30 +1767,24 @@ pub async fn trace_reference(
             }))
         }
         "variables" => {
-            let var_name = parts[1..].join(".");
-            let workflow = api_get(
+            // Workflow variables are per-instance runtime state, not the
+            // static defaults in the definition graph — an instance launched
+            // with variable overrides diverges from the definition
+            // immediately. Resolve against the instance record through the
+            // shared resolver so this can never disagree with inspect_step or
+            // the runtime (see resolve_reference_value). `?full=true`: the
+            // reference may point into a large variable value the lean
+            // default fetch elides.
+            let execution = api_get(
                 server,
-                &format!("/api/runtime/workflows/{}", params.workflow_id),
+                &format!(
+                    "/api/runtime/workflows/instances/{}?full=true",
+                    params.instance_id
+                ),
             )
             .await?;
 
-            let variables = workflow
-                .pointer("/data/definition/executionGraph/variables")
-                .or_else(|| workflow.pointer("/data/executionGraph/variables"))
-                .cloned()
-                .unwrap_or(json!({}));
-
-            let resolved = resolve_json_path(&variables, &var_name).unwrap_or(json!(null));
-
-            json_result(json!({
-                "reference": params.reference,
-                "resolved": !resolved.is_null(),
-                "value": resolved,
-                "source": {
-                    "type": "variable",
-                    "allVariables": variables,
-                }
-            }))
+            json_result(trace_variables_response(&params.reference, &execution))
         }
         _ => Err(rmcp::ErrorData::invalid_params(
             format!(
@@ -2548,6 +2571,43 @@ mod tests {
             resolve_reference_value("loop.index", &summaries(), &execution(), None),
             None
         );
+    }
+
+    #[test]
+    fn trace_variables_resolves_from_instance_state() {
+        // The variables arm must report the running instance's value (an
+        // instance launched with overrides diverges from the definition
+        // immediately), never the static default from the definition graph —
+        // reading the definition is exactly what made this arm disagree with
+        // inspect_step for the same reference.
+        let response = trace_variables_response("variables.limit", &execution());
+        assert_eq!(response["resolved"], json!(true));
+        assert_eq!(response["value"], json!(10));
+        assert_eq!(response["source"]["allVariables"], json!({ "limit": 10 }));
+    }
+
+    #[test]
+    fn trace_variables_matches_shared_resolver() {
+        // Drift guard: the tool arm routes through resolve_reference_value, so
+        // the two can never report different values for the same reference.
+        let execution = execution();
+        for path in ["variables.limit", "variables.missing"] {
+            let via_tool = trace_variables_response(path, &execution)["value"].clone();
+            let via_shared =
+                resolve_reference_value(path, &synthetic_summaries(Vec::new()), &execution, None)
+                    .unwrap_or(json!(null));
+            assert_eq!(
+                via_tool, via_shared,
+                "trace_reference variables arm diverged from resolve_reference_value for {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn trace_variables_unknown_name_is_unresolved() {
+        let response = trace_variables_response("variables.missing", &execution());
+        assert_eq!(response["resolved"], json!(false));
+        assert_eq!(response["value"], json!(null));
     }
 
     #[test]
