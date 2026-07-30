@@ -83,7 +83,6 @@ impl OAuthRepository {
     }
 
     /// Delete expired state tokens (housekeeping).
-    #[allow(dead_code)]
     pub async fn cleanup_expired(&self) -> Result<u64, sqlx::Error> {
         let result = sqlx::query("DELETE FROM oauth_state WHERE expires_at < NOW()")
             .execute(&self.pool)

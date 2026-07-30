@@ -5,11 +5,15 @@
 //! Deletes terminal `workflow_executions` older than `max_age` in batches.
 //! `workflow_execution_events` and `side_effect_usage` are removed via FK
 //! CASCADE on `instance_id`. Aggregated `workflow_metrics_hourly` rows are
-//! pruned on a separate, longer retention (analytics history).
+//! pruned on a separate, longer retention (analytics history). Expired
+//! `oauth_state` CSRF rows are swept in the same cycle — the consume path
+//! only deletes the single row it matches, so abandoned authorization flows
+//! would otherwise accumulate forever.
 
 use std::time::Duration;
 
 use chrono::Utc;
+use runtara_connections::repository::oauth::OAuthRepository;
 use runtara_core::config::parse_enabled_env;
 use sqlx::PgPool;
 use tracing::{debug, error, info, warn};
@@ -95,6 +99,7 @@ impl InvocationCleanupWorkerConfig {
 /// Background worker that prunes old invocation data from the server database.
 pub struct InvocationCleanupWorker {
     pool: PgPool,
+    oauth_repo: OAuthRepository,
     config: InvocationCleanupWorkerConfig,
     shutdown: ShutdownSignal,
 }
@@ -106,6 +111,7 @@ impl InvocationCleanupWorker {
         shutdown: ShutdownSignal,
     ) -> Self {
         Self {
+            oauth_repo: OAuthRepository::new(pool.clone()),
             pool,
             config,
             shutdown,
@@ -165,21 +171,23 @@ impl InvocationCleanupWorker {
         }
     }
 
-    /// Run a single cleanup cycle: executions first, then metrics.
-    pub async fn cleanup_once(&self) -> Result<(u64, u64), sqlx::Error> {
+    /// Run a single cleanup cycle: executions, then metrics, then expired
+    /// OAuth CSRF state.
+    pub async fn cleanup_once(&self) -> Result<(u64, u64, u64), sqlx::Error> {
         let executions_deleted = self.cleanup_old_executions().await?;
         let metrics_deleted = self.cleanup_old_metrics().await?;
+        let oauth_states_deleted = self.oauth_repo.cleanup_expired().await?;
 
-        if executions_deleted > 0 || metrics_deleted > 0 {
+        if executions_deleted > 0 || metrics_deleted > 0 || oauth_states_deleted > 0 {
             info!(
                 executions_deleted,
-                metrics_deleted, "Invocation cleanup cycle completed"
+                metrics_deleted, oauth_states_deleted, "Invocation cleanup cycle completed"
             );
         } else {
             debug!("Invocation cleanup cycle completed, nothing to delete");
         }
 
-        Ok((executions_deleted, metrics_deleted))
+        Ok((executions_deleted, metrics_deleted, oauth_states_deleted))
     }
 
     /// Phase 1: delete terminal `workflow_executions` older than `max_age`.
