@@ -144,6 +144,38 @@ async fn insert_metric(
     .expect("insert metric");
 }
 
+async fn insert_oauth_state(
+    pool: &PgPool,
+    state: &str,
+    tenant_id: &str,
+    expires_at: chrono::DateTime<Utc>,
+) {
+    sqlx::query(
+        r#"
+        INSERT INTO oauth_state (
+            state, tenant_id, connection_id, integration_id, redirect_uri, expires_at
+        )
+        VALUES ($1, $2, 'conn-1', 'integration-1', 'https://example.invalid/cb', $3)
+        "#,
+    )
+    .bind(state)
+    .bind(tenant_id)
+    .bind(expires_at)
+    .execute(pool)
+    .await
+    .expect("insert oauth_state");
+}
+
+async fn oauth_state_exists(pool: &PgPool, state: &str) -> bool {
+    let row: Option<(bool,)> =
+        sqlx::query_as("SELECT EXISTS(SELECT 1 FROM oauth_state WHERE state = $1)")
+            .bind(state)
+            .fetch_optional(pool)
+            .await
+            .expect("query oauth_state");
+    row.map(|r| r.0).unwrap_or(false)
+}
+
 async fn execution_exists(pool: &PgPool, instance_id: Uuid) -> bool {
     let row: Option<(bool,)> =
         sqlx::query_as("SELECT EXISTS(SELECT 1 FROM workflow_executions WHERE instance_id = $1)")
@@ -304,7 +336,7 @@ async fn test_cleanup_once_deletes_terminal_and_preserves_running() {
     };
     let worker = InvocationCleanupWorker::new(pool.clone(), config, ShutdownSignal::new());
 
-    let (deleted_exec, _) = worker.cleanup_once().await.expect("cleanup_once");
+    let (deleted_exec, _, _) = worker.cleanup_once().await.expect("cleanup_once");
     assert_eq!(
         deleted_exec, 4,
         "Four terminal rows older than cutoff should be deleted"
@@ -354,7 +386,7 @@ async fn test_cleanup_once_prunes_old_metrics_respecting_metrics_ttl() {
     };
     let worker = InvocationCleanupWorker::new(pool.clone(), config, ShutdownSignal::new());
 
-    let (_, deleted_metrics) = worker.cleanup_once().await.expect("cleanup_once");
+    let (_, deleted_metrics, _) = worker.cleanup_once().await.expect("cleanup_once");
     assert_eq!(deleted_metrics, 1, "Ancient metric should be deleted");
     assert_eq!(metric_count(&pool, &tenant_id).await, 1);
 
@@ -395,7 +427,7 @@ async fn test_cleanup_once_respects_batch_size() {
     };
     let worker = InvocationCleanupWorker::new(pool.clone(), config, ShutdownSignal::new());
 
-    let (deleted_exec, _) = worker.cleanup_once().await.expect("cleanup_once");
+    let (deleted_exec, _, _) = worker.cleanup_once().await.expect("cleanup_once");
     assert_eq!(deleted_exec, 12, "All 12 executions deleted via batching");
 
     let remaining: (i64,) =
@@ -520,4 +552,62 @@ async fn test_run_performs_eager_cleanup_on_startup() {
          regressed — without it, cleanup would not fire until \
          `poll_interval` (1h) elapsed."
     );
+}
+
+/// The consume path (`get_and_delete_state`) only removes the single row it
+/// matches, so expired rows from abandoned authorization flows must be swept
+/// by the cleanup cycle.
+#[tokio::test]
+async fn test_cleanup_once_purges_expired_oauth_state() {
+    skip_if_no_db!();
+    let pool = get_test_pool().await.expect("pool");
+    let tenant_id = format!("test-{}", Uuid::new_v4());
+    let expired_state = format!("st-exp-{}", Uuid::new_v4());
+    let live_state = format!("st-live-{}", Uuid::new_v4());
+
+    insert_oauth_state(
+        &pool,
+        &expired_state,
+        &tenant_id,
+        Utc::now() - ChronoDuration::minutes(5),
+    )
+    .await;
+    insert_oauth_state(
+        &pool,
+        &live_state,
+        &tenant_id,
+        Utc::now() + ChronoDuration::minutes(10),
+    )
+    .await;
+    assert!(oauth_state_exists(&pool, &expired_state).await);
+    assert!(oauth_state_exists(&pool, &live_state).await);
+
+    let config = InvocationCleanupWorkerConfig {
+        enabled: true,
+        poll_interval: Duration::from_secs(3600),
+        max_age: Duration::from_secs(7 * 24 * 3600),
+        metrics_max_age: Duration::from_secs(365 * 24 * 3600),
+        batch_size: 100,
+    };
+    let worker = InvocationCleanupWorker::new(pool.clone(), config, ShutdownSignal::new());
+
+    // The sweep is global and other tests in this binary run cleanup cycles
+    // concurrently against the shared database, so assert on row fate rather
+    // than the returned count.
+    worker.cleanup_once().await.expect("cleanup_once");
+
+    assert!(
+        !oauth_state_exists(&pool, &expired_state).await,
+        "Expired oauth_state row should be swept by the cleanup cycle"
+    );
+    assert!(
+        oauth_state_exists(&pool, &live_state).await,
+        "Unexpired oauth_state row must survive the sweep"
+    );
+
+    sqlx::query("DELETE FROM oauth_state WHERE tenant_id = $1")
+        .bind(&tenant_id)
+        .execute(&pool)
+        .await
+        .ok();
 }
