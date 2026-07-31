@@ -1,6 +1,7 @@
 import { ColumnDef } from '@tanstack/react-table';
 import { Checkbox } from '@/shared/components/ui/checkbox';
 import { Instance, Schema } from '@/generated/RuntaraRuntimeApi';
+import { isDraftRow } from './draft-row';
 import { EditableCell } from './EditableCell';
 import { formatDate } from '@/lib/utils';
 import { IdColumnCell } from '@/shared/components/table/IdColumnCell';
@@ -47,7 +48,7 @@ export const objectInstancesColumns = ({
         />
       ),
       cell: ({ row }) => {
-        if (row.original.id?.startsWith('PENDING_')) return null;
+        if (isDraftRow(row.original.id)) return null;
         return (
           <Checkbox
             checked={row.getIsSelected()}
@@ -68,7 +69,14 @@ export const objectInstancesColumns = ({
     size: 80,
     enableSorting: false,
     enableHiding: false,
-    cell: ({ row }) => <IdColumnCell id={row.original.id!} />,
+    cell: ({ row }) =>
+      // A draft has no server id yet; offering to copy its placeholder id
+      // would present it as an existing record.
+      isDraftRow(row.original.id) ? (
+        <div className="pl-3 text-xs italic text-muted-foreground">Draft</div>
+      ) : (
+        <IdColumnCell id={row.original.id!} />
+      ),
     meta: {
       cellClassName: '!px-3',
       headerClassName: '!px-3',

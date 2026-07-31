@@ -5,6 +5,12 @@ import { Can } from '@/shared/components/Can';
 import { Download, Pencil, Plus, Trash2, Upload } from 'lucide-react';
 import { DataTable } from '@/shared/components/table';
 import { clickLandedInGrid } from './click-target';
+import {
+  DRAFT_ID_PREFIX,
+  computeRecordTotals,
+  isDraftRow,
+  makeDraftInstance,
+} from './draft-row';
 import { dropEditsForRows } from './pending-edits';
 import {
   Breadcrumb,
@@ -182,15 +188,8 @@ export function ObjectInstanceDtosTable({
     return [...contentWithDirtyData, ...pendingWithDirtyData];
   }, [data?.content, pendingRecords, dirtyRows]);
 
-  const totalPages =
-    data?.totalPages && data.totalPages > 0
-      ? data.totalPages
-      : data?.totalElements && pageSize > 0
-        ? Math.ceil(data.totalElements / pageSize)
-        : records.length > 0
-          ? Math.ceil(records.length / pageSize)
-          : 1;
-  const totalElements = data?.totalElements || records.length || 0;
+  // Totals come from the server page alone; draft rows must not count.
+  const { totalPages, totalElements } = computeRecordTotals(data, pageSize);
   const currentPage = page;
 
   const [showImportDialog, setShowImportDialog] = useState(false);
@@ -299,7 +298,7 @@ export function ObjectInstanceDtosTable({
         return;
       }
 
-      if (rowId.startsWith('PENDING_')) {
+      if (isDraftRow(rowId)) {
         // Save pending record
         try {
           const newInstance = await createRecord.mutateAsync({
@@ -362,7 +361,7 @@ export function ObjectInstanceDtosTable({
     const propertyEntries = Object.entries(data.properties || {});
     const hasChanges = propertyEntries.length > 0;
 
-    if (instanceId.startsWith('PENDING_')) {
+    if (isDraftRow(instanceId)) {
       // Update pending record immediately in state
       setPendingRecords((prev) => {
         let didUpdate = false;
@@ -443,17 +442,8 @@ export function ObjectInstanceDtosTable({
       saveDirtyRow(lastFocusedRowRef.current);
     }
 
-    const newId = `PENDING_${Date.now()}`;
-    setPendingRecords((prev) => [
-      ...prev,
-      {
-        id: newId,
-        properties: {},
-        tenantId: '',
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      } as Instance,
-    ]);
+    const newId = `${DRAFT_ID_PREFIX}${Date.now()}`;
+    setPendingRecords((prev) => [...prev, makeDraftInstance(newId)]);
   }, [saveDirtyRow]);
 
   const handleFilterChange = (condition: Condition | null) => {
@@ -750,6 +740,12 @@ export function ObjectInstanceDtosTable({
           <TableStatusFooter
             left={`${totalElements.toLocaleString()} record${
               totalElements === 1 ? '' : 's'
+            }${
+              pendingRecords.length > 0
+                ? ` (+${pendingRecords.length} draft${
+                    pendingRecords.length === 1 ? '' : 's'
+                  })`
+                : ''
             }`}
             right={
               <TablePagination
