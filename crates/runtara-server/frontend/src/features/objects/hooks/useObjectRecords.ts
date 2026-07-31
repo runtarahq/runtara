@@ -118,13 +118,17 @@ export function useCreateObjectInstanceDto(connectionId?: string | null) {
 /**
  * Hook to update an existing record with optimistic updates
  */
-export function useUpdateObjectInstanceDto(connectionId?: string | null) {
+export function useUpdateObjectInstanceDto(
+  connectionId?: string | null,
+  options?: { suppressNotFoundToasts?: boolean }
+) {
   const queryClient = useQueryClient();
 
   return useCustomMutation<
     Instance,
     { schemaId: string; instanceId: string; data: UpdateInstanceRequest }
   >({
+    suppressNotFoundToasts: options?.suppressNotFoundToasts,
     mutationFn: (token, { schemaId, instanceId, data }) =>
       updateInstance(token, schemaId, instanceId, data, connectionId),
     onMutate: async ({ schemaId, instanceId, data }) => {

@@ -134,6 +134,8 @@ interface CustomMutationOptions<
   suppressValidationToasts?: boolean;
   /** Caller renders a conflict-specific recovery surface. */
   suppressConflictToasts?: boolean;
+  /** Caller decides whether a missing target is worth surfacing. */
+  suppressNotFoundToasts?: boolean;
 }
 
 /**
@@ -211,10 +213,28 @@ export function isEntitlementDenial(error: unknown): boolean {
   return e?.response?.status === 403 && !!e?.response?.data?.code;
 }
 
+/**
+ * True when an error is an HTTP 404. Checks `status` as well as
+ * `response.status` because axios v1 sets `status` directly even when
+ * response parsing fails.
+ *
+ * For component-level `catch` blocks that treat "the target no longer
+ * exists" differently from a real failure — e.g. a deferred save flushing
+ * against a row the user already deleted, where an error toast would only
+ * announce a row whose disappearance is already visible. Pair with
+ * `suppressNotFoundToasts` so the shared handler stays quiet too. Accepts a
+ * loose type so `error: any` call sites can pass straight through.
+ */
+export function isNotFoundError(error: unknown): boolean {
+  const e = error as ApiError | undefined;
+  return e?.response?.status === 404 || e?.status === 404;
+}
+
 export function useCustomMutation<TData = unknown, TVariables = unknown>({
   mutationFn,
   suppressValidationToasts = false,
   suppressConflictToasts = false,
+  suppressNotFoundToasts = false,
   ...options
 }: CustomMutationOptions<TData, TVariables>) {
   const auth = useAuth();
@@ -285,6 +305,8 @@ export function useCustomMutation<TData = unknown, TVariables = unknown>({
       }
     } else if (error.response?.status === 409 && suppressConflictToasts) {
       // The caller owns a stateful conflict-recovery surface.
+    } else if (isNotFoundError(error) && suppressNotFoundToasts) {
+      // The caller decides whether a missing target is worth surfacing.
     } else if (
       error.response?.status === 403 &&
       handleEntitlementDenial(error)

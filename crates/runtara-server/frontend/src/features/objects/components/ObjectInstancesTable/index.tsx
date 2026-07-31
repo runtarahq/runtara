@@ -5,6 +5,7 @@ import { Can } from '@/shared/components/Can';
 import { Download, Pencil, Plus, Trash2, Upload } from 'lucide-react';
 import { DataTable } from '@/shared/components/table';
 import { clickLandedInGrid } from './click-target';
+import { dropEditsForRows } from './pending-edits';
 import {
   Breadcrumb,
   ConsoleTableShell,
@@ -46,6 +47,7 @@ import { ImportCsvDialog } from '../ImportCsvDialog';
 import { BulkEditDialog } from './BulkEditDialog';
 import { BulkInsertDialog } from './BulkInsertDialog';
 import { toast } from 'sonner';
+import { isNotFoundError } from '@/shared/hooks/api';
 import { Alert, AlertDescription } from '@/shared/components/ui/alert';
 import { Spinner } from '@/shared/components/ui/spinner';
 
@@ -232,7 +234,11 @@ export function ObjectInstanceDtosTable({
     },
     [bulkCreateMutation, objectSchemaDto.id]
   );
-  const updateRecord = useUpdateObjectInstanceDto(connectionId);
+  // A deferred flush can lose the race with a delete and 404; that case is
+  // handled in saveDirtyRow, so the shared 404 toast stays off.
+  const updateRecord = useUpdateObjectInstanceDto(connectionId, {
+    suppressNotFoundToasts: true,
+  });
   const createRecord = useCreateObjectInstanceDto(connectionId);
   const exportCsvMutation = useExportCsv(connectionId);
 
@@ -332,7 +338,19 @@ export function ObjectInstanceDtosTable({
             return updated;
           });
           handleRowAnimationTrigger(rowId);
-        } catch {
+        } catch (error) {
+          if (isNotFoundError(error)) {
+            // The row was deleted while this edit was pending. Its
+            // disappearance is already visible, so drop the edit rather than
+            // announce a failure — and clear it so nothing retries the write.
+            setDirtyRows((prev) => {
+              const updated = new Map(prev);
+              updated.delete(rowId);
+              dirtyRowsRef.current = updated;
+              return updated;
+            });
+            return;
+          }
           toast.error('Failed to update record');
         }
       }
@@ -467,6 +485,23 @@ export function ObjectInstanceDtosTable({
       (key) => rowSelection[key]
     );
     if (selectedIds.length === 0) return;
+
+    // Confirming the delete makes unsaved inline edits to these rows moot.
+    // Drop them before the request goes out: flushes are deferred behind
+    // timeouts, so one can still be queued right now, and it must find
+    // nothing to write rather than target a row that is about to vanish.
+    const pruned = dropEditsForRows(
+      {
+        dirtyRows: dirtyRowsRef.current,
+        lastFocusedRowId: lastFocusedRowRef.current,
+        editingCellId: editingCellIdRef.current,
+      },
+      selectedIds
+    );
+    dirtyRowsRef.current = pruned.dirtyRows;
+    setDirtyRows(pruned.dirtyRows);
+    lastFocusedRowRef.current = pruned.lastFocusedRowId;
+    setEditingCellId(pruned.editingCellId);
 
     try {
       await bulkDeleteMutation.mutateAsync({
