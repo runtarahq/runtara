@@ -7,6 +7,7 @@ import {
   useCustomMutation,
   useTableQuery,
   handleEntitlementDenial,
+  isNotFoundError,
 } from './api';
 
 // Mock react-oidc-context
@@ -306,6 +307,47 @@ describe('useCustomMutation', () => {
     await waitFor(() => expect(result.current.isError).toBe(true));
     expect(mockToastError).not.toHaveBeenCalled();
     expect(callerOnError).toHaveBeenCalled();
+  });
+
+  it('lets a caller silence a 404 without losing its own onError', async () => {
+    // A deferred save can flush after its target row was deleted; the caller
+    // treats that 404 as "nothing left to write", not as a failure to report.
+    const callerOnError = vi.fn();
+    const mockMutationFn = vi.fn().mockRejectedValue({
+      message: 'Request failed with status code 404',
+      response: { status: 404, data: { message: 'Instance not found' } },
+    });
+    const { result } = renderHook(
+      () =>
+        useCustomMutation({
+          mutationFn: mockMutationFn,
+          suppressNotFoundToasts: true,
+          onError: callerOnError,
+        }),
+      { wrapper: createWrapper() }
+    );
+
+    result.current.mutate({});
+    await waitFor(() => expect(result.current.isError).toBe(true));
+    expect(mockToastError).not.toHaveBeenCalled();
+    expect(callerOnError).toHaveBeenCalled();
+  });
+
+  it('still toasts a 404 when suppression is not requested', async () => {
+    const mockMutationFn = vi.fn().mockRejectedValue({
+      message: 'Request failed with status code 404',
+      response: { status: 404, data: { message: 'Instance not found' } },
+    });
+    const { result } = renderHook(
+      () => useCustomMutation({ mutationFn: mockMutationFn }),
+      { wrapper: createWrapper() }
+    );
+
+    result.current.mutate({});
+    await waitFor(() => expect(result.current.isError).toBe(true));
+    expect(mockToastError).toHaveBeenCalledWith('Error: 404', {
+      description: 'Instance not found',
+    });
   });
 
   it('shows validation errors on 400 response with validationErrors', async () => {
@@ -772,5 +814,25 @@ describe('useCustomMutation — 403 entitlement integration', () => {
         description: 'Reports are not enabled for this tenant.',
       })
     );
+  });
+});
+
+describe('isNotFoundError', () => {
+  it('recognises a 404 via response.status', () => {
+    expect(isNotFoundError({ response: { status: 404 } })).toBe(true);
+  });
+
+  it('recognises a 404 via the top-level axios status', () => {
+    expect(isNotFoundError({ status: 404 })).toBe(true);
+  });
+
+  it('rejects other statuses', () => {
+    expect(isNotFoundError({ response: { status: 500 } })).toBe(false);
+    expect(isNotFoundError({ status: 403 })).toBe(false);
+  });
+
+  it('rejects errors with no status at all', () => {
+    expect(isNotFoundError(new Error('network down'))).toBe(false);
+    expect(isNotFoundError(undefined)).toBe(false);
   });
 });
