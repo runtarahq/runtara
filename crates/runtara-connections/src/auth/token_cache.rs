@@ -1013,8 +1013,13 @@ mod tests {
         for k in [&doomed, &bystander] {
             cache_token(k, token_expiring_in(30));
             record_refresh_error(k, &AuthResolutionError::transient("boom"));
-            drop(refresh_lock(k));
         }
+        // The doomed lock stays unheld so eviction is what removes it. The
+        // bystander's Arc must stay alive across the assertions: per the note
+        // above, a sweep from a concurrently running test may reclaim any
+        // unheld lock, so an unheld bystander would make this test racy.
+        drop(refresh_lock(&doomed));
+        let _bystander_lock = refresh_lock(&bystander);
 
         evict_connection("evict-doomed");
 
