@@ -69,7 +69,7 @@ describe('FormRenderer', () => {
     });
   });
 
-  it('uses Rust field state and structured issues', async () => {
+  it('uses Rust field state and keeps issues hidden until a submit attempt', async () => {
     vi.mocked(analyzeFormWithRust).mockResolvedValue(
       result({
         valid: false,
@@ -90,17 +90,69 @@ describe('FormRenderer', () => {
       })
     );
 
-    render(
+    const { rerender } = render(
       <FormRenderer definition={definition} value={{}} onChange={vi.fn()} />
     );
 
     await waitFor(() =>
       expect(screen.queryByLabelText('Token')).not.toBeInTheDocument()
     );
-    expect(screen.getByText('Expected string')).toBeInTheDocument();
+    expect(screen.queryByText('Expected string')).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Managed ID')).not.toHaveAttribute(
+      'aria-invalid'
+    );
+
+    rerender(
+      <FormRenderer
+        definition={definition}
+        value={{}}
+        onChange={vi.fn()}
+        submitAttempt={1}
+      />
+    );
+    expect(await screen.findByText('Expected string')).toBeInTheDocument();
     expect(screen.getByLabelText('Managed ID')).toHaveAttribute(
       'aria-invalid',
       'true'
+    );
+  });
+
+  it('reveals issues for a field once the user edits it', async () => {
+    vi.mocked(analyzeFormWithRust).mockResolvedValue(
+      result({
+        valid: false,
+        status: 'invalid',
+        issues: [
+          {
+            code: 'FORM_FIELD_REQUIRED',
+            path: 'data.token',
+            message: 'Token is required',
+            severity: 'error',
+          },
+          {
+            code: 'FORM_FIELD_TYPE_MISMATCH',
+            path: 'data.managed_id',
+            message: 'Expected string',
+            severity: 'error',
+          },
+        ],
+      })
+    );
+
+    render(
+      <FormRenderer definition={definition} value={{}} onChange={vi.fn()} />
+    );
+
+    const token = await screen.findByLabelText('Token*');
+    expect(screen.queryByText('Token is required')).not.toBeInTheDocument();
+
+    fireEvent.change(token, { target: { value: 'x' } });
+
+    expect(await screen.findByText('Token is required')).toBeInTheDocument();
+    expect(token).toHaveAttribute('aria-invalid', 'true');
+    expect(screen.queryByText('Expected string')).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Managed ID')).not.toHaveAttribute(
+      'aria-invalid'
     );
   });
 

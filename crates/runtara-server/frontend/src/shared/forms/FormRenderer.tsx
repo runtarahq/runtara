@@ -81,6 +81,7 @@ export function FormRenderer({
   const focusedAttempt = useRef(0);
   const analysisCallback = useRef(onAnalysisChange);
   const [analysis, setAnalysis] = useState<FormAnalysisResult | null>(null);
+  const [touched, setTouched] = useState<Set<string>>(() => new Set());
   const definitionJson = JSON.stringify(definition);
   const valueJson = JSON.stringify(value);
   const resolvedOptions = useResolvedOptions(
@@ -172,6 +173,11 @@ export function FormRenderer({
                 required: Boolean(field.required),
               };
               const fieldIssues = issuesForField(analysis.issues, name);
+              // Analysis runs from mount (it drives visibility and submit
+              // gating), but a pristine field showing its own errors reads as
+              // a broken form — surface them only once the user has edited
+              // the field or tried to submit.
+              const showIssues = submitAttempt > 0 || touched.has(name);
               const inputId = `${formId}-${name.replace(/\./g, '-')}`;
               const labelId = `${inputId}-label`;
               const fieldDisabled =
@@ -200,10 +206,14 @@ export function FormRenderer({
                     field={field}
                     value={value[name]}
                     disabled={fieldDisabled}
-                    invalid={fieldIssues.length > 0}
+                    invalid={showIssues && fieldIssues.length > 0}
                     options={resolvedOptions.options[name]}
                     optionsLoading={resolvedOptions.loading.has(name)}
                     onChange={(next) => {
+                      setTouched((current) => {
+                        if (current.has(name)) return current;
+                        return new Set(current).add(name);
+                      });
                       const nextData = { ...value, [name]: next };
                       if (frame?.commitField) {
                         frame.commitField({
@@ -223,14 +233,15 @@ export function FormRenderer({
                       {resolvedOptions.errors[name]}
                     </p>
                   )}
-                  {fieldIssues.map((issue) => (
-                    <p
-                      key={`${issue.code}-${issue.path}`}
-                      className="text-xs text-destructive"
-                    >
-                      {issue.message}
-                    </p>
-                  ))}
+                  {showIssues &&
+                    fieldIssues.map((issue) => (
+                      <p
+                        key={`${issue.code}-${issue.path}`}
+                        className="text-xs text-destructive"
+                      >
+                        {issue.message}
+                      </p>
+                    ))}
                 </div>
               );
             })}
