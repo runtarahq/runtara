@@ -12,6 +12,7 @@ import type {
   RateLimitStatusDto,
 } from '@/generated/RuntaraRuntimeApi';
 import { NextForm } from '@/shared/components/NextForm';
+import { reportFirstFormError } from '@/shared/components/NextForm/form-errors';
 import { ServiceIcon } from '@/shared/components/service-icon';
 import { useNavigationBlockerStore } from '@/shared/stores/navigationBlockerStore';
 import {
@@ -336,6 +337,13 @@ export function DynamicConnectionForm({
     <NextForm
       form={form}
       onSubmit={handleSubmit}
+      onInvalid={(errors) => {
+        // The frame schema (title, rate limits) can block the submit before
+        // handleSubmit runs, and pristine parameter fields keep their issues
+        // hidden until a submit attempt — count this as one so they surface.
+        setSubmitAttempt((attempt) => attempt + 1);
+        reportFirstFormError(form, errors);
+      }}
       className="w-full"
       renderActions={() => null}
       renderContent={() => (

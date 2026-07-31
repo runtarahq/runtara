@@ -1,8 +1,7 @@
-import { toast } from 'sonner';
 import { cn } from '@/lib/utils.ts';
 import { Form } from '@/shared/components/ui/form.tsx';
 import { FormContent } from './form-content.tsx';
-import { describeFirstFormError } from './form-errors.ts';
+import { reportFirstFormError } from './form-errors.ts';
 
 interface Props {
   className?: string;
@@ -44,17 +43,7 @@ export function NextForm(props: Props) {
       onInvalid(errors);
       return;
     }
-    const first = describeFirstFormError(errors);
-    if (!first) return;
-    toast.error(first.message, { description: first.label });
-    // Bring the offending control into view; not every path maps to a
-    // registered input (nested editors render their own controls), so this is
-    // best-effort.
-    try {
-      form.setFocus?.(first.path);
-    } catch {
-      // No registered field at that path — the toast still names it.
-    }
+    reportFirstFormError(form, errors);
   };
 
   return (

@@ -12,6 +12,8 @@
  * so "first" is stable and matches reading order closely enough to be useful.
  */
 
+import { toast } from 'sonner';
+
 export interface FirstFormError {
   /** Dotted path, e.g. `inputMapping.2.value`. */
   path: string;
@@ -109,4 +111,27 @@ export function describeFirstFormError(
   }
 
   return null;
+}
+
+/**
+ * Default reporting for a validation-blocked submit: toast the first failing
+ * field and focus it. `NextForm` uses this when no `onInvalid` is given;
+ * exported for overrides that add behavior but still want the standard
+ * reporting.
+ */
+export function reportFirstFormError(
+  form: { setFocus?: (path: string) => void },
+  errors: Record<string, unknown>
+) {
+  const first = describeFirstFormError(errors);
+  if (!first) return;
+  toast.error(first.message, { description: first.label });
+  // Bring the offending control into view; not every path maps to a
+  // registered input (nested editors render their own controls), so this is
+  // best-effort.
+  try {
+    form.setFocus?.(first.path);
+  } catch {
+    // No registered field at that path — the toast still names it.
+  }
 }
