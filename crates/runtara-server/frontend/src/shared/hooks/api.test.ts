@@ -22,8 +22,27 @@ vi.mock('sonner', () => ({
   },
 }));
 
+// Pin the auth mode instead of inheriting it from the environment: Vite feeds
+// the developer's .env.local into vitest, and a local
+// VITE_RUNTARA_AUTH_MODE=trust_proxy would flip `isOidcAuth` — and with it the
+// token-gating behavior these tests assert — making the suite pass in CI but
+// fail on dev machines. The getter lets individual tests exercise the
+// non-oidc branch explicitly.
+const authModeState = vi.hoisted(() => ({ isOidcAuth: true }));
+
+vi.mock('@/shared/config/runtimeConfig', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/shared/config/runtimeConfig')>()),
+  get isOidcAuth() {
+    return authModeState.isOidcAuth;
+  },
+}));
+
 import { useAuth } from 'react-oidc-context';
 import { toast } from 'sonner';
+
+beforeEach(() => {
+  authModeState.isOidcAuth = true;
+});
 
 const mockUseAuth = vi.mocked(useAuth);
 const mockToastError = vi.mocked(toast.error);
@@ -124,6 +143,30 @@ describe('useCustomQuery', () => {
     // Query should not execute without a token
     expect(result.current.fetchStatus).toBe('idle');
     expect(mockQueryFn).not.toHaveBeenCalled();
+  });
+
+  it('fires without a token when the auth mode is not oidc', async () => {
+    // trust_proxy / local setups have no browser-side token at all — the
+    // query must run anyway and pass the (undefined) token through.
+    authModeState.isOidcAuth = false;
+    mockUseAuth.mockReturnValue({
+      user: null,
+    } as ReturnType<typeof useAuth>);
+
+    const mockQueryFn = vi.fn().mockResolvedValue({ data: 'test' });
+
+    renderHook(
+      () =>
+        useCustomQuery({
+          queryKey: ['test-no-token-non-oidc'],
+          queryFn: mockQueryFn,
+        }),
+      { wrapper: createWrapper() }
+    );
+
+    await waitFor(() => {
+      expect(mockQueryFn).toHaveBeenCalledWith(undefined, expect.any(Object));
+    });
   });
 
   it('sets refetchOnWindowFocus to false by default', async () => {
