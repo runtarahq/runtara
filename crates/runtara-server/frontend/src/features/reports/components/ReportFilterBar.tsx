@@ -554,7 +554,9 @@ function TimeRangeFilterEditor({
       </Command>
       {showCustom && (
         <div className="space-y-2 border-t p-3">
-          <div className="grid grid-cols-2 gap-2">
+          {/* Stacked, not side-by-side: half the popover is too narrow for a
+              native date input — the picker icon clips under the border. */}
+          <div className="grid gap-2">
             <div className="space-y-1">
               <label
                 htmlFor={`report-filter-${filter.id}-from`}
