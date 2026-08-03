@@ -538,6 +538,9 @@ async fn mcp_workflow_move_list_folders_delete_round_trip() {
             },
         ));
 
+    // Kept for direct HTTP calls below; `SmoMcpServer::new` consumes the original.
+    let http_router = internal_router.clone();
+
     let server = runtara_server::mcp::server::SmoMcpServer::new(
         fixture.server_pool.clone(),
         manager.clone(),
@@ -650,6 +653,79 @@ async fn mcp_workflow_move_list_folders_delete_round_trip() {
     assert!(
         after.is_err(),
         "deleted workflow must not be fetchable, got: {after:?}"
+    );
+
+    // 6. HTTP create accepts an optional folder path — the workflow is born in
+    //    the folder atomically, instead of being created at root and moved.
+    use tower::ServiceExt;
+
+    let create_in_folder = |path_value: serde_json::Value| {
+        axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/runtime/workflows/create")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(
+                json!({
+                    "name": "Born in folder",
+                    "description": "created with a folder path",
+                    "path": path_value
+                })
+                .to_string(),
+            ))
+            .expect("build create request")
+    };
+
+    let created_response = http_router
+        .clone()
+        .oneshot(create_in_folder(json!("/Sales/Q3/")))
+        .await
+        .expect("create with path");
+    assert_eq!(created_response.status(), axum::http::StatusCode::OK);
+    let created_bytes = axum::body::to_bytes(created_response.into_body(), usize::MAX)
+        .await
+        .expect("read create body");
+    let created_in_folder_body: serde_json::Value =
+        serde_json::from_slice(&created_bytes).expect("create-with-path JSON");
+    assert_eq!(
+        created_in_folder_body["data"]["path"],
+        json!("/Sales/Q3/"),
+        "create body: {created_in_folder_body:#}"
+    );
+
+    // The folder materializes in the folders listing with no separate move.
+    let folders = list_workflow_folders(&server, ListWorkflowFoldersParams {})
+        .await
+        .expect("list_workflow_folders after create-with-path");
+    let folders_body: serde_json::Value =
+        serde_json::from_str(extract_text(&folders)).expect("folders JSON");
+    assert!(
+        folders_body["folders"]
+            .as_array()
+            .unwrap_or_else(|| panic!("folders not an array: {folders_body:#}"))
+            .iter()
+            .any(|p| p == &json!("/Sales/Q3/")),
+        "expected '/Sales/Q3/' in folders: {folders_body:#}"
+    );
+
+    // 7. An invalid path is rejected up front (400) and creates no row —
+    //    not silently accepted with the workflow landing at root.
+    let rows_before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM workflows")
+        .fetch_one(&fixture.server_pool)
+        .await
+        .expect("count before invalid create");
+    let rejected = http_router
+        .clone()
+        .oneshot(create_in_folder(json!("no-slashes")))
+        .await
+        .expect("create with invalid path");
+    assert_eq!(rejected.status(), axum::http::StatusCode::BAD_REQUEST);
+    let rows_after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM workflows")
+        .fetch_one(&fixture.server_pool)
+        .await
+        .expect("count after invalid create");
+    assert_eq!(
+        rows_before, rows_after,
+        "an invalid path must not create a workflow row"
     );
 
     fixture.cleanup().await;

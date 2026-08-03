@@ -67,6 +67,10 @@ pub struct CreateWorkflowRequest {
     /// the name when absent; a supplied slug that is taken or reserved is a 409.
     #[serde(default)]
     pub slug: Option<String>,
+    /// Folder to create the workflow in. Must start and end with '/'
+    /// (e.g. "/Sales/Q3/"); defaults to the root folder when absent.
+    #[serde(default)]
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -174,6 +178,7 @@ pub async fn create_workflow_handler(
             request.track_events,
             &user_id,
             request.slug,
+            request.path,
         )
         .await
     {
@@ -3145,5 +3150,27 @@ mod capability_walk_tests {
     fn unparseable_graph_yields_no_pairs() {
         // Missing required `steps`/`entryPoint` — best-effort returns empty, never panics.
         assert!(collect_workflow_capabilities(&json!({"nonsense": true})).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod create_request_wire_tests {
+    use super::CreateWorkflowRequest;
+
+    // Clients that predate the `path` field (MCP tool, older UIs) send bodies
+    // without it — those must keep deserializing, with the path defaulting off.
+    #[test]
+    fn create_request_without_path_deserializes_to_none() {
+        let request: CreateWorkflowRequest =
+            serde_json::from_str(r#"{"name": "wf", "description": ""}"#).expect("deserialize");
+        assert_eq!(request.path, None);
+    }
+
+    #[test]
+    fn create_request_with_path_deserializes() {
+        let request: CreateWorkflowRequest =
+            serde_json::from_str(r#"{"name": "wf", "description": "", "path": "/Sales/Q3/"}"#)
+                .expect("deserialize");
+        assert_eq!(request.path.as_deref(), Some("/Sales/Q3/"));
     }
 }

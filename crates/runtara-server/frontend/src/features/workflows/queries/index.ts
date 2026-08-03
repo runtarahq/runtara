@@ -163,12 +163,14 @@ export async function getWorkflows(token: string) {
 
 export async function createWorkflow(
   token: string,
-  workflow: { name: string; description?: string }
+  workflow: { name: string; description?: string; path?: string }
 ) {
   const result = await RuntimeREST.api.createWorkflowHandler(
     {
       name: workflow.name,
       description: workflow.description || '', // Runtime API requires description
+      // Folder to create in; omitted → the server defaults to the root.
+      ...(workflow.path ? { path: workflow.path } : {}),
     },
     createAuthHeaders(token)
   );

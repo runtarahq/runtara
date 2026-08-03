@@ -24,6 +24,7 @@ import {
   useDeleteFolder,
   getChildFolders,
 } from '../../hooks/useFolders';
+import { createWorkflowHref } from '../../folder-nav';
 
 export function Workflows() {
   usePageTitle('Workflows');
@@ -175,7 +176,7 @@ export function Workflows() {
       }
       actions={
         <Can permission="workflow:create">
-          <Link to="/workflows/create">
+          <Link to={createWorkflowHref(currentFolderPath)}>
             <Button disabled={isError}>
               <PlusIcon className="mr-2 size-4" />
               New workflow
