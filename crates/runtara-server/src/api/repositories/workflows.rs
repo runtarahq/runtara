@@ -72,14 +72,15 @@ impl WorkflowRepository {
         workflow_id: &str,
         created_by: Option<&str>,
         slug: &str,
+        path: &str,
     ) -> Result<(DateTime<Utc>, DateTime<Utc>), sqlx::Error> {
-        // Runtime query (not the `query!` macro) so adding `created_by`/`slug` needs no
-        // offline sqlx cache regeneration. `created_by`/`slug` are only set on insert —
-        // the ON CONFLICT branch leaves an existing row's identity untouched.
+        // Runtime query (not the `query!` macro) so adding `created_by`/`slug`/`path` needs
+        // no offline sqlx cache regeneration. `created_by`/`slug`/`path` are only set on
+        // insert — the ON CONFLICT branch leaves an existing row's identity untouched.
         let row: (DateTime<Utc>, DateTime<Utc>) = sqlx::query_as(
             r#"
-            INSERT INTO workflows (tenant_id, workflow_id, version_count, latest_version, created_by, slug)
-            VALUES ($1, $2, 0, 0, $3, $4)
+            INSERT INTO workflows (tenant_id, workflow_id, version_count, latest_version, created_by, slug, path)
+            VALUES ($1, $2, 0, 0, $3, $4, $5)
             ON CONFLICT (tenant_id, workflow_id) DO UPDATE
             SET updated_at = NOW()
             RETURNING created_at, updated_at
@@ -89,6 +90,7 @@ impl WorkflowRepository {
         .bind(workflow_id)
         .bind(created_by)
         .bind(slug)
+        .bind(path)
         .fetch_one(&self.pool)
         .await?;
 

@@ -1,3 +1,4 @@
+import { useMemo } from 'react';
 import { Link } from 'react-router';
 import { useForm } from 'react-hook-form';
 import { z } from 'zod';
@@ -12,21 +13,46 @@ import {
 import { Button } from '@/shared/components/ui/button.tsx';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { Input } from '@/shared/components/ui/input.tsx';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/shared/components/ui/select.tsx';
 import { Spinner } from '@/shared/components/ui/spinner';
 import { PageContainer } from '@/shared/components/page-container';
 import { SectionLabel } from '@/shared/components/section-label';
+import { useFolders } from '@/features/workflows/hooks/useFolders';
+import { workflowsListHref } from '@/features/workflows/folder-nav';
 
 interface WorkflowFormProps {
   title: string;
   loading?: boolean;
+  /** Folder the workflow is created in; preselected in the folder picker. */
+  initialPath?: string;
   onSubmit: (v: any) => void;
 }
 
 export function WorkflowForm(props: WorkflowFormProps) {
-  const { title, loading, onSubmit } = props;
+  const { title, loading, initialPath = '/', onSubmit } = props;
+
+  const { data: foldersData } = useFolders();
+
+  // All known folders, plus the one from the URL if it isn't listed yet
+  // (folders only exist server-side once a workflow lives in them).
+  const folderPaths = useMemo(() => {
+    const paths = (foldersData?.parsed ?? []).map((folder) => folder.path);
+    if (initialPath !== '/' && !paths.includes(initialPath)) {
+      paths.push(initialPath);
+      paths.sort();
+    }
+    return paths;
+  }, [foldersData?.parsed, initialPath]);
 
   const schema = z.object({
     name: z.string().min(1, 'Workflow name is required'),
+    path: z.string(),
   });
 
   type SchemaType = z.infer<typeof schema>;
@@ -35,6 +61,7 @@ export function WorkflowForm(props: WorkflowFormProps) {
     resolver: zodResolver(schema),
     defaultValues: {
       name: '',
+      path: initialPath,
     },
   });
 
@@ -50,7 +77,7 @@ export function WorkflowForm(props: WorkflowFormProps) {
 
         <Form {...form}>
           <form onSubmit={form.handleSubmit(onSubmit)}>
-            <div className="mt-6 rounded-lg bg-card px-4 py-5 shadow-none sm:px-6 sm:py-6">
+            <div className="mt-6 space-y-6 rounded-lg bg-card px-4 py-5 shadow-none sm:px-6 sm:py-6">
               <FormField
                 name="name"
                 render={({ field }) => (
@@ -63,10 +90,38 @@ export function WorkflowForm(props: WorkflowFormProps) {
                   </FormItem>
                 )}
               />
+
+              <FormField
+                name="path"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>Folder</FormLabel>
+                    <Select value={field.value} onValueChange={field.onChange}>
+                      <FormControl>
+                        <SelectTrigger>
+                          <SelectValue />
+                        </SelectTrigger>
+                      </FormControl>
+                      <SelectContent>
+                        <SelectItem value="/">Root (All Workflows)</SelectItem>
+                        {folderPaths.map((path) => (
+                          <SelectItem key={path} value={path}>
+                            {path}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
             </div>
 
             <div className="mt-8 flex flex-col gap-3 px-4 sm:flex-row sm:items-center sm:justify-end sm:px-6">
-              <Link to="/workflows" className="w-full sm:w-auto">
+              <Link
+                to={workflowsListHref(initialPath)}
+                className="w-full sm:w-auto"
+              >
                 <Button
                   type="button"
                   variant="secondary"

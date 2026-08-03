@@ -1,6 +1,7 @@
-import { useNavigate } from 'react-router';
+import { useNavigate, useSearchParams } from 'react-router';
 import { toast } from 'sonner';
 import { WorkflowForm } from '@/features/workflows/components/WorkflowForm';
+import { normalizeFolderParam } from '@/features/workflows/folder-nav';
 import { useCustomMutation } from '@/shared/hooks/api';
 import { usePageTitle } from '@/shared/hooks/usePageTitle';
 import { queryKeys } from '@/shared/queries/query-keys';
@@ -10,7 +11,12 @@ import { createWorkflow } from '@/features/workflows/queries';
 
 export function CreateWorkflow() {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   usePageTitle('Create Workflow');
+
+  // Folder the user was browsing when they clicked "New workflow" — the
+  // created workflow lands there instead of silently at the root.
+  const initialPath = normalizeFolderParam(searchParams.get('folder'));
 
   const { mutate, isPending } = useCustomMutation({
     mutationFn: createWorkflow,
@@ -37,6 +43,7 @@ export function CreateWorkflow() {
       <WorkflowForm
         title="Create workflow"
         loading={isPending}
+        initialPath={initialPath}
         onSubmit={handleSubmit}
       />
     </div>

@@ -55,6 +55,7 @@ async fn seed_workflow(
         &workflow_id,
         created_by,
         &format!("wf-{workflow_id}"),
+        "/",
     )
     .await
     .expect("seed workflow row");

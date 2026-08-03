@@ -139,6 +139,7 @@ impl WorkflowService {
         track_events: Option<bool>,
         created_by: &str,
         requested_slug: Option<String>,
+        path: Option<String>,
     ) -> Result<WorkflowDto, ServiceError> {
         // Validation: name should not be empty
         if name.trim().is_empty() {
@@ -160,6 +161,10 @@ impl WorkflowService {
                 "Workflow description cannot exceed 1000 characters".to_string(),
             ));
         }
+
+        // Folder to create in; same rules as move_workflow.
+        let path = path.unwrap_or_else(|| "/".to_string());
+        validate_path(&path)?;
 
         // Count-before-create against `maxWorkflows`. Counts non-deleted
         // workflow rows for this tenant.
@@ -194,7 +199,7 @@ impl WorkflowService {
         // Create workflow metadata entry (name/description are now in execution graph)
         let (created_at, updated_at) = self
             .repository
-            .create(tenant_id, &workflow_id, Some(created_by), &slug)
+            .create(tenant_id, &workflow_id, Some(created_by), &slug, &path)
             .await
             .map_err(map_slug_db_error)?;
 
@@ -244,8 +249,8 @@ impl WorkflowService {
             last_version_number: 1,
             memory_tier,
             track_events,
-            notes: Vec::new(),     // Empty notes for new workflow
-            path: "/".to_string(), // Default to root folder
+            notes: Vec::new(), // Empty notes for new workflow
+            path,
             slug: Some(slug),
         })
     }
