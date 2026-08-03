@@ -19,7 +19,14 @@ import {
   CommandList,
 } from '@/shared/components/ui/command';
 import { ReportDefinition, ReportFilterDefinition } from '../types';
-import { getFilterDefaultValue, TIME_RANGE_PRESETS } from '../utils';
+import {
+  absoluteTimeRangeToDayRange,
+  dayRangeToAbsoluteTimeRange,
+  describeAbsoluteTimeRange,
+  getFilterDefaultValue,
+  parseAbsoluteTimeRange,
+  TIME_RANGE_PRESETS,
+} from '../utils';
 import {
   FieldControl,
   useResolvedOptions,
@@ -347,25 +354,18 @@ function FilterEditor({
   isLoadingOptions: boolean;
   onChange: (value: unknown) => void;
 }) {
-  const field = reportFilterToFormField(
-    filter,
-    filter.type === 'time_range' ? TIME_RANGE_PRESETS : options
-  );
-  const kind = field.control?.kind;
-
   if (filter.type === 'time_range') {
     return (
-      <div className="p-3">
-        <FieldControl
-          id={`report-filter-${filter.id}`}
-          field={field}
-          value={value ?? 'last_30_days'}
-          disabled={false}
-          onChange={onChange}
-        />
-      </div>
+      <TimeRangeFilterEditor
+        filter={filter}
+        value={value}
+        onChange={onChange}
+      />
     );
   }
+
+  const field = reportFilterToFormField(filter, options);
+  const kind = field.control?.kind;
 
   if (kind === 'number_range') {
     return (
@@ -490,6 +490,121 @@ function FilterEditor({
   );
 }
 
+function TimeRangeFilterEditor({
+  filter,
+  value,
+  onChange,
+}: {
+  filter: ReportFilterDefinition;
+  value: unknown;
+  onChange: (value: unknown) => void;
+}) {
+  const absolute = parseAbsoluteTimeRange(value);
+  const [customOpen, setCustomOpen] = useState(Boolean(absolute));
+  const [draft, setDraft] = useState<[string, string]>(() => {
+    if (!absolute) return ['', ''];
+    const days = absoluteTimeRangeToDayRange(absolute);
+    return [days.from, days.to];
+  });
+
+  const showCustom = customOpen || Boolean(absolute);
+  const selectedPreset = typeof value === 'string' ? value : null;
+  const invalidDraft = Boolean(draft[0] && draft[1] && draft[0] > draft[1]);
+
+  // Commit only complete, ordered ranges; a half-filled draft stays local so
+  // the report never renders against an open-ended window.
+  const setDraftPart = (index: 0 | 1, day: string) => {
+    const next: [string, string] =
+      index === 0 ? [day, draft[1]] : [draft[0], day];
+    setDraft(next);
+    if (next[0] && next[1] && next[0] <= next[1]) {
+      onChange(dayRangeToAbsoluteTimeRange(next[0], next[1]));
+    }
+  };
+
+  return (
+    <div>
+      <Command>
+        <CommandList>
+          <CommandGroup>
+            {TIME_RANGE_PRESETS.map((preset) => (
+              <CommandItem
+                key={preset.value}
+                value={preset.label}
+                onSelect={() => {
+                  setCustomOpen(false);
+                  onChange(preset.value);
+                }}
+              >
+                <span className="flex-1 truncate">{preset.label}</span>
+                {!showCustom && selectedPreset === preset.value && (
+                  <Check className="size-4 opacity-70" />
+                )}
+              </CommandItem>
+            ))}
+            <CommandItem
+              value="Custom range"
+              onSelect={() => setCustomOpen(true)}
+            >
+              <span className="flex-1 truncate">Custom range</span>
+              {showCustom && <Check className="size-4 opacity-70" />}
+            </CommandItem>
+          </CommandGroup>
+        </CommandList>
+      </Command>
+      {showCustom && (
+        <div className="space-y-2 border-t p-3">
+          {/* Stacked, not side-by-side: half the popover is too narrow for a
+              native date input — the picker icon clips under the border. */}
+          <div className="grid gap-2">
+            <div className="space-y-1">
+              <label
+                htmlFor={`report-filter-${filter.id}-from`}
+                className="text-xs text-muted-foreground"
+              >
+                From
+              </label>
+              <Input
+                id={`report-filter-${filter.id}-from`}
+                type="date"
+                className="h-8"
+                value={draft[0]}
+                max={draft[1] || undefined}
+                onChange={(event) => setDraftPart(0, event.target.value)}
+              />
+            </div>
+            <div className="space-y-1">
+              <label
+                htmlFor={`report-filter-${filter.id}-to`}
+                className="text-xs text-muted-foreground"
+              >
+                To
+              </label>
+              <Input
+                id={`report-filter-${filter.id}-to`}
+                type="date"
+                className="h-8"
+                value={draft[1]}
+                min={draft[0] || undefined}
+                onChange={(event) => setDraftPart(1, event.target.value)}
+              />
+            </div>
+          </div>
+          {invalidDraft ? (
+            <p className="text-xs text-destructive" role="alert">
+              End date is before start date.
+            </p>
+          ) : !draft[0] || !draft[1] ? (
+            <p className="text-xs text-muted-foreground">
+              Pick both dates to apply.
+            </p>
+          ) : null}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /**
  * Every filter id referenced from inside a value, at any depth.
  *
@@ -566,6 +681,8 @@ function describeFilterValue(
     return `${value.length} selected`;
   }
   if (filter.type === 'time_range') {
+    const absolute = parseAbsoluteTimeRange(value);
+    if (absolute) return describeAbsoluteTimeRange(absolute);
     const preset = TIME_RANGE_PRESETS.find(
       (option) => option.value === String(value ?? '')
     );

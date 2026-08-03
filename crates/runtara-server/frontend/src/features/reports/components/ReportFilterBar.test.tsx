@@ -198,3 +198,113 @@ describe('ReportFilterBar dynamic options', () => {
     expect(() => renderBar({}, new Set(['trend']), noBlocks)).not.toThrow();
   });
 });
+
+describe('ReportFilterBar time range filters', () => {
+  beforeAll(() => {
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+      }
+    );
+    Element.prototype.scrollIntoView = vi.fn();
+  });
+  beforeEach(() => vi.clearAllMocks());
+
+  const timeRangeDefinition = {
+    filters: [{ id: 'period', label: 'Period', type: 'time_range' }],
+  } as unknown as ReportDefinition;
+
+  function renderTimeRangeBar(value: unknown) {
+    const onChange = vi.fn();
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <ReportFilterBar
+          reportId="report-1"
+          definition={timeRangeDefinition}
+          values={{ period: value }}
+          onChange={onChange}
+        />
+      </QueryClientProvider>
+    );
+    return onChange;
+  }
+
+  const absoluteJuly = {
+    from: '2026-07-01T00:00:00.000Z',
+    to: '2026-08-01T00:00:00.000Z',
+  };
+
+  it('still commits presets as plain strings', () => {
+    const onChange = renderTimeRangeBar('today');
+
+    fireEvent.click(screen.getByRole('button', { name: /Period:/i }));
+    fireEvent.click(screen.getByText('Last 7 days'));
+
+    expect(onChange).toHaveBeenCalledWith('period', 'last_7_days');
+  });
+
+  it('commits a custom range as UTC day boundaries with an exclusive end', () => {
+    const onChange = renderTimeRangeBar('today');
+
+    fireEvent.click(screen.getByRole('button', { name: /Period:/i }));
+    fireEvent.click(screen.getByText('Custom range'));
+
+    // A half-filled draft must not render the report against an open window.
+    fireEvent.change(screen.getByLabelText('From'), {
+      target: { value: '2026-07-01' },
+    });
+    expect(onChange).not.toHaveBeenCalled();
+    expect(screen.getByText('Pick both dates to apply.')).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText('To'), {
+      target: { value: '2026-07-31' },
+    });
+    expect(onChange).toHaveBeenCalledWith('period', absoluteJuly);
+  });
+
+  it('rejects an end date before the start date instead of committing', () => {
+    const onChange = renderTimeRangeBar('today');
+
+    fireEvent.click(screen.getByRole('button', { name: /Period:/i }));
+    fireEvent.click(screen.getByText('Custom range'));
+    fireEvent.change(screen.getByLabelText('From'), {
+      target: { value: '2026-07-31' },
+    });
+    fireEvent.change(screen.getByLabelText('To'), {
+      target: { value: '2026-07-01' },
+    });
+
+    expect(onChange).not.toHaveBeenCalled();
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      'End date is before start date.'
+    );
+  });
+
+  it('summarizes an absolute value as its date range on the chip', () => {
+    renderTimeRangeBar(absoluteJuly);
+
+    const format = new Intl.DateTimeFormat(undefined, {
+      dateStyle: 'medium',
+      timeZone: 'UTC',
+    });
+    const label = `${format.format(new Date('2026-07-01T00:00:00Z'))} – ${format.format(new Date('2026-07-31T00:00:00Z'))}`;
+    expect(
+      screen.getByRole('button', { name: `Period: ${label}` })
+    ).toBeInTheDocument();
+  });
+
+  it('reopens an absolute value in custom mode with the days pre-filled', () => {
+    renderTimeRangeBar(absoluteJuly);
+
+    fireEvent.click(screen.getByRole('button', { name: /Period:/i }));
+
+    expect(screen.getByLabelText('From')).toHaveValue('2026-07-01');
+    expect(screen.getByLabelText('To')).toHaveValue('2026-07-31');
+  });
+});
