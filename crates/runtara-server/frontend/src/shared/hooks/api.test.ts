@@ -31,9 +31,7 @@ vi.mock('sonner', () => ({
 const authModeState = vi.hoisted(() => ({ isOidcAuth: true }));
 
 vi.mock('@/shared/config/runtimeConfig', async (importOriginal) => ({
-  ...(await importOriginal<
-    typeof import('@/shared/config/runtimeConfig')
-  >()),
+  ...(await importOriginal<typeof import('@/shared/config/runtimeConfig')>()),
   get isOidcAuth() {
     return authModeState.isOidcAuth;
   },
