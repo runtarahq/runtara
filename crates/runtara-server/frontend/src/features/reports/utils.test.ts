@@ -1,8 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  absoluteTimeRangeToDayRange,
   canonicalConditionToReportVisibility,
   canonicalToLegacyCondition,
+  dayRangeToAbsoluteTimeRange,
+  describeAbsoluteTimeRange,
   getCanonicalReportViewTarget,
   getDefaultReportViewTarget,
   getReportLayoutBlockIds,
@@ -11,6 +14,7 @@ import {
   isWorkflowActionVisible,
   legacyToCanonicalCondition,
   matchesReportRowCondition,
+  parseAbsoluteTimeRange,
   reportVisibilityToCanonicalCondition,
   truncateCellText,
 } from './utils';
@@ -466,3 +470,73 @@ describe('truncateCellText', () => {
 // `runtara-report-dsl`. End-to-end behavior is covered by the Rust tests in
 // `runtara-report-dsl/src/template.rs` and the Playwright report-corpus suite.
 // Vitest doesn't load the WASM bundle, so we keep no FE-side template tests.
+
+describe('absolute time ranges', () => {
+  it('converts an inclusive day pair to UTC boundaries with an exclusive end', () => {
+    expect(dayRangeToAbsoluteTimeRange('2026-07-01', '2026-07-31')).toEqual({
+      from: '2026-07-01T00:00:00.000Z',
+      to: '2026-08-01T00:00:00.000Z',
+    });
+  });
+
+  it('round-trips a day pair through the wire shape', () => {
+    const range = dayRangeToAbsoluteTimeRange('2026-03-15', '2026-03-15');
+    expect(absoluteTimeRangeToDayRange(range)).toEqual({
+      from: '2026-03-15',
+      to: '2026-03-15',
+    });
+  });
+
+  it('displays a non-midnight end as the day it actually covers', () => {
+    // A hand-edited URL may carry an end mid-way through a day; the range
+    // still covers part of that day, so that day is the inclusive end.
+    expect(
+      absoluteTimeRangeToDayRange({
+        from: '2026-07-01T00:00:00Z',
+        to: '2026-07-31T12:30:00Z',
+      })
+    ).toEqual({ from: '2026-07-01', to: '2026-07-31' });
+  });
+
+  it('accepts only objects with parseable from/to and no preset', () => {
+    expect(
+      parseAbsoluteTimeRange({ from: '2026-07-01', to: '2026-08-01' })
+    ).toEqual({ from: '2026-07-01', to: '2026-08-01' });
+    expect(parseAbsoluteTimeRange('last_30_days')).toBeNull();
+    expect(parseAbsoluteTimeRange({ preset: 'today' })).toBeNull();
+    expect(
+      parseAbsoluteTimeRange({
+        preset: 'today',
+        from: '2026-07-01',
+        to: '2026-08-01',
+      })
+    ).toBeNull();
+    expect(parseAbsoluteTimeRange({ from: 'garbage', to: 'junk' })).toBeNull();
+    expect(parseAbsoluteTimeRange({ from: '2026-07-01' })).toBeNull();
+    expect(parseAbsoluteTimeRange(null)).toBeNull();
+    expect(parseAbsoluteTimeRange(['2026-07-01', '2026-08-01'])).toBeNull();
+  });
+
+  it('labels a range with locale dates over UTC days', () => {
+    const expected = new Intl.DateTimeFormat(undefined, {
+      dateStyle: 'medium',
+      timeZone: 'UTC',
+    });
+    expect(
+      describeAbsoluteTimeRange({
+        from: '2026-07-01T00:00:00.000Z',
+        to: '2026-08-01T00:00:00.000Z',
+      })
+    ).toBe(
+      `${expected.format(new Date('2026-07-01T00:00:00Z'))} – ${expected.format(
+        new Date('2026-07-31T00:00:00Z')
+      )}`
+    );
+    // A single-day range collapses to one date.
+    expect(
+      describeAbsoluteTimeRange(
+        dayRangeToAbsoluteTimeRange('2026-07-01', '2026-07-01')
+      )
+    ).toBe(expected.format(new Date('2026-07-01T00:00:00Z')));
+  });
+});

@@ -25,6 +25,74 @@ export const TIME_RANGE_PRESETS = [
   { label: 'This month', value: 'this_month' },
 ];
 
+/** Absolute time-range filter value. The server resolves preset strings into
+ * this shape and passes it through untouched when sent directly, so the UI
+ * can express historical windows the relative presets cannot reach. */
+export type AbsoluteTimeRange = { from: string; to: string };
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+export function parseAbsoluteTimeRange(
+  value: unknown
+): AbsoluteTimeRange | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const range = value as Record<string, unknown>;
+  // A `preset` key means the server should resolve the relative window.
+  if ('preset' in range) return null;
+  if (typeof range.from !== 'string' || typeof range.to !== 'string') {
+    return null;
+  }
+  if (
+    Number.isNaN(Date.parse(range.from)) ||
+    Number.isNaN(Date.parse(range.to))
+  ) {
+    return null;
+  }
+  return { from: range.from, to: range.to };
+}
+
+/** Convert the editor's inclusive `YYYY-MM-DD` day pair into the wire shape
+ * presets resolve to: UTC day boundaries with an exclusive end, so picking
+ * "to Jul 31" includes the whole of Jul 31. */
+export function dayRangeToAbsoluteTimeRange(
+  fromDay: string,
+  toDay: string
+): AbsoluteTimeRange {
+  return {
+    from: new Date(Date.parse(`${fromDay}T00:00:00Z`)).toISOString(),
+    to: new Date(Date.parse(`${toDay}T00:00:00Z`) + DAY_MS).toISOString(),
+  };
+}
+
+/** Inverse of `dayRangeToAbsoluteTimeRange` for editing and labels. The
+ * inclusive end day is the UTC date containing the last instant of the
+ * range, so a non-midnight-aligned `to` (e.g. a hand-edited URL) still
+ * displays as the day it actually covers. */
+export function absoluteTimeRangeToDayRange(range: AbsoluteTimeRange): {
+  from: string;
+  to: string;
+} {
+  return {
+    from: toUtcDay(Date.parse(range.from)),
+    to: toUtcDay(Date.parse(range.to) - 1),
+  };
+}
+
+function toUtcDay(ms: number): string {
+  return new Date(ms).toISOString().slice(0, 10);
+}
+
+export function describeAbsoluteTimeRange(range: AbsoluteTimeRange): string {
+  const days = absoluteTimeRangeToDayRange(range);
+  const format = new Intl.DateTimeFormat(undefined, {
+    dateStyle: 'medium',
+    timeZone: 'UTC',
+  });
+  const from = format.format(new Date(`${days.from}T00:00:00Z`));
+  const to = format.format(new Date(`${days.to}T00:00:00Z`));
+  return from === to ? from : `${from} – ${to}`;
+}
+
 export function getFilterDefaultValue(filter: ReportFilterDefinition): unknown {
   if (filter.default !== undefined) {
     if (
