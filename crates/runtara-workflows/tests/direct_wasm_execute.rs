@@ -6293,19 +6293,27 @@ fn direct_wasm_query_sql_5xx_retries_then_succeeds() {
 fn direct_wasm_sql_transport_failure_classification() {
     let components_dir = direct_e2e_components_dir();
 
-    // Point the object-model URL at a port nothing listens on: transport
-    // failure on every attempt. query-sql reclassifies transport errors to
-    // transient (retries, then exhausts); execute-sql keeps them permanent
-    // (the statement may have committed).
-    let closed_port = {
-        let probe = TcpListener::bind("127.0.0.1:0").expect("bind probe");
-        let port = probe.local_addr().expect("local_addr").port();
-        drop(probe);
-        port
-    };
+    // Point the object-model URL at a port whose connections are torn down
+    // before any response bytes: transport failure on every attempt. The
+    // listener must stay bound for the whole test — probing a free port and
+    // dropping the listener let the OS hand the same ephemeral port to a
+    // mock server of a concurrently running test, whose HTTP responses then
+    // made this "unreachable" endpoint succeed. Closing an accepted
+    // connection unanswered classifies exactly like a refused one: any
+    // transport-level failure maps to OBJECT_MODEL_HTTP_ERROR, and the
+    // transient/permanent split is per capability. query-sql reclassifies
+    // transport errors to transient (retries, then exhausts); execute-sql
+    // keeps them permanent (the statement may have committed).
+    let dead_listener = TcpListener::bind("127.0.0.1:0").expect("bind dead port");
+    let dead_port = dead_listener.local_addr().expect("local_addr").port();
+    thread::spawn(move || {
+        for stream in dead_listener.incoming() {
+            drop(stream);
+        }
+    });
     let refused_env = vec![(
         "RUNTARA_OBJECT_MODEL_URL".to_string(),
-        format!("http://127.0.0.1:{closed_port}/object-model"),
+        format!("http://127.0.0.1:{dead_port}/object-model"),
     )];
 
     for (capability, expected_category) in
@@ -6326,7 +6334,7 @@ fn direct_wasm_sql_transport_failure_classification() {
 
         assert!(
             !captured.status_success,
-            "{capability}: refused connection must fail the step"
+            "{capability}: dead connection must fail the step"
         );
         let error = captured
             .error_json
