@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import {
+  generateStepId,
+  getStepIdValidationError,
   rewriteStepReferencesInString,
   useWorkflowStore,
 } from './workflowStore';
@@ -372,5 +374,100 @@ describe('workflowStore renameStep', () => {
     expect(state.isDirty).toBe(false);
     expect(state.isStructurallyDirty).toBe(false);
     expect(state.lastStepRename).toBeNull();
+  });
+});
+
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+describe('generateStepId', () => {
+  it('derives a snake_case slug from the display name', () => {
+    expect(generateStepId('Log', [])).toBe('log');
+    expect(generateStepId('Fetch CSV', [])).toBe('fetch_csv');
+    expect(generateStepId('Send e-mail!', [])).toBe('send_e_mail');
+    expect(generateStepId('  Apply   business rules  ', [])).toBe(
+      'apply_business_rules'
+    );
+  });
+
+  it('matches the id shape DSL-authored workflows already use', () => {
+    // DSL/MCP-authored steps read `receive_order`, never a UUID; canvas-created
+    // steps must land on the same shape.
+    expect(generateStepId('Receive order', [])).toBe('receive_order');
+    expect(generateStepId('Receive order', [])).not.toMatch(UUID_RE);
+  });
+
+  it('uniquifies against ids already on the canvas', () => {
+    expect(generateStepId('Log', ['log'])).toBe('log_2');
+    expect(generateStepId('Log', ['log', 'log_2'])).toBe('log_3');
+    // Gaps are skipped rather than reused, so the id stays stable per add.
+    expect(generateStepId('Log', ['log', 'log_2', 'log_3'])).toBe('log_4');
+  });
+
+  it('falls back to `step` when the name yields no slug', () => {
+    expect(generateStepId('', [])).toBe('step');
+    expect(generateStepId(undefined, [])).toBe('step');
+    expect(generateStepId('!!!', [])).toBe('step');
+    expect(generateStepId('???', ['step'])).toBe('step_2');
+  });
+
+  it('qualifies a leading digit so the dot reference form stays legal', () => {
+    // `steps.2fa` is not a legal identifier; `steps.step_2fa` is.
+    expect(generateStepId('2FA check', [])).toBe('step_2fa_check');
+    expect(generateStepId('404', [])).toBe('step_404');
+  });
+
+  it('produces ids that pass the rename validator', () => {
+    const names = ['Log', 'Fetch CSV', '', '2FA', '__error', 'Ünïcôdé step'];
+    const existing: string[] = [];
+    for (const name of names) {
+      const id = generateStepId(name, existing);
+      expect(getStepIdValidationError(id, '', existing)).toBeNull();
+      existing.push(id);
+    }
+    // Every generated id is distinct.
+    expect(new Set(existing).size).toBe(names.length);
+  });
+});
+
+describe('workflowStore step id generation on create', () => {
+  beforeEach(() => {
+    useWorkflowStore.getState().resetState();
+  });
+
+  it('addNode without an explicit id derives a slug instead of a UUID', () => {
+    const store = useWorkflowStore.getState();
+    store.addNode({ stepType: 'Log', name: 'Log' }, { x: 0, y: 0 });
+
+    const [node] = useWorkflowStore.getState().nodes;
+    expect(node.id).toBe('log');
+    expect(node.id).not.toMatch(UUID_RE);
+    // The node's own data carries the same id the graph is keyed by.
+    expect((node.data as { id: string }).id).toBe('log');
+  });
+
+  it('addNode uniquifies when the derived slug is already taken', () => {
+    useWorkflowStore
+      .getState()
+      .addNode({ stepType: 'Log', name: 'Log' }, { x: 0, y: 0 });
+    useWorkflowStore
+      .getState()
+      .addNode({ stepType: 'Log', name: 'Log' }, { x: 240, y: 0 });
+
+    expect(useWorkflowStore.getState().nodes.map((n) => n.id)).toEqual([
+      'log',
+      'log_2',
+    ]);
+  });
+
+  it('addNode still honours an explicit id when one is supplied', () => {
+    useWorkflowStore
+      .getState()
+      .addNode(
+        { id: 'receive_order', stepType: 'Log', name: 'Anything else' },
+        { x: 0, y: 0 }
+      );
+
+    expect(useWorkflowStore.getState().nodes[0].id).toBe('receive_order');
   });
 });

@@ -1,5 +1,4 @@
 import { memo, useCallback, useState } from 'react';
-import { v4 as uuidv4 } from 'uuid';
 import { Node, NodeProps, useReactFlow } from '@xyflow/react';
 import { BaseNodeForm } from '../NodeForm/BaseNodeForm.tsx';
 import * as form from '@/features/workflows/components/WorkflowEditor/NodeForm/NodeFormItem.tsx';
@@ -11,6 +10,10 @@ import {
 } from '@/features/workflows/config/workflow.ts';
 import { BaseNode } from '../BaseNode.tsx';
 import { useExecutionStore } from '@/features/workflows/stores/executionStore';
+import {
+  generateStepId,
+  useWorkflowStore,
+} from '@/features/workflows/stores/workflowStore.ts';
 
 function CreateNodeComponent(props: NodeProps<Node>) {
   const { id } = props;
@@ -24,7 +27,10 @@ function CreateNodeComponent(props: NodeProps<Node>) {
 
   const handleCreate = useCallback(
     (data: form.SchemaType) => {
-      const newId = uuidv4();
+      const newId = generateStepId(
+        data.name,
+        useWorkflowStore.getState().nodes.map((n) => n.id)
+      );
       const type = STEP_TYPES[data.stepType] || NODE_TYPES.BasicNode;
       const style = NODE_TYPE_SIZES[type];
 

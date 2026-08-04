@@ -1,13 +1,15 @@
 import { memo, useCallback, useMemo, useState } from 'react';
 import { Node, NodeProps, Position, useNodeConnections } from '@xyflow/react';
-import { v4 as uuidv4 } from 'uuid';
 import { Button } from '@/shared/components/ui/button.tsx';
 import { BaseNode } from '../BaseNode.tsx';
 import { ButtonHandle } from '../ButtonHandle.tsx';
 import { Plus, AlertTriangle } from 'lucide-react';
 import * as form from '@/features/workflows/components/WorkflowEditor/NodeForm/NodeFormItem.tsx';
 import { BASE_WIDTH } from './utils.tsx';
-import { useWorkflowStore } from '@/features/workflows/stores/workflowStore.ts';
+import {
+  generateStepId,
+  useWorkflowStore,
+} from '@/features/workflows/stores/workflowStore.ts';
 import {
   useValidationStore,
   getFirstValidationMessage,
@@ -210,7 +212,10 @@ function BasicNodeComponent({
       }
 
       // Set pending new node - will be created when user confirms in dialog
-      const newNodeId = uuidv4();
+      const newNodeId = generateStepId(
+        nodeData.name,
+        nodes.map((n) => n.id)
+      );
       setPendingNewNode({
         id: newNodeId,
         data: nodeData as any,
@@ -284,7 +289,10 @@ function BasicNodeComponent({
     }
 
     setPendingNewNode({
-      id: uuidv4(),
+      id: generateStepId(
+        nodeData.name,
+        nodes.map((n) => n.id)
+      ),
       data: nodeData as any,
       position: finalPosition,
       parentId: currentParentId,
@@ -339,7 +347,10 @@ function BasicNodeComponent({
       // Find the incoming edge to determine insertion context
       const incomingEdge = edges.find((e) => e.target === id);
 
-      const newNodeId = uuidv4();
+      const newNodeId = generateStepId(
+        nodeData.name,
+        nodes.map((n) => n.id)
+      );
 
       if (incomingEdge) {
         // Insert between parent and current node

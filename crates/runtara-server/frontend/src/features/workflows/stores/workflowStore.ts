@@ -153,6 +153,52 @@ export function getStepIdValidationError(
   return null;
 }
 
+/**
+ * Derive a readable step id from a step's display name.
+ *
+ * Steps have exactly one identifier — the key in `steps` — and DSL/MCP authors
+ * write a readable slug into it (`fetch_csv`, `parse_csv`, `finish`). The editor
+ * used to mint a UUID there instead, which then surfaced verbatim in reference
+ * paths (`steps['b7514123-…'].outputs`) and in server diagnostics. This produces
+ * the DSL-style id for steps created on the canvas.
+ *
+ * snake_case rather than kebab: it keeps the dot reference form `steps.<id>` a
+ * legal identifier (for minijinja templates), and keeps hyphens out of ids that
+ * are interpolated into `${from}-${to}-${label}` edge ids.
+ *
+ * `existingIds` must cover the whole canvas — including nested container
+ * children — because a step id is also the React Flow node id, which is global.
+ */
+export function generateStepId(
+  name: string | undefined,
+  existingIds: Iterable<string>
+): string {
+  let base = (name || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+
+  // A leading digit is legal in `steps['2fa']` but not in the dot form, so
+  // qualify it rather than emitting an id that only works when bracketed.
+  if (/^[0-9]/.test(base)) {
+    base = `step_${base}`;
+  }
+  if (!base) {
+    base = 'step';
+  }
+
+  const taken = new Set(existingIds);
+  let candidate = base;
+  // Matches generateUniqueStepName's display-name convention: the second
+  // "Log" is "Log 2", so its id is `log_2`.
+  let counter = 2;
+  while (taken.has(candidate) || RESERVED_STEP_IDS.has(candidate)) {
+    candidate = `${base}_${counter}`;
+    counter += 1;
+  }
+  return candidate;
+}
+
 type TimelineMovePlacement = 'before' | 'after';
 
 type TimelineMoveContext = {
@@ -512,7 +558,12 @@ export const useWorkflowStore = create<WorkflowState>()(
 
       // Node Operations
       addNode: (step, position, parentId) => {
-        const nodeId = step.id || uuidv4();
+        const nodeId =
+          step.id ||
+          generateStepId(
+            step.name as string | undefined,
+            get().nodes.map((node) => node.id)
+          );
         set((state) => {
           const nodeType = step.stepType
             ? STEP_TYPES[step.stepType as keyof typeof STEP_TYPES] ||
@@ -1020,7 +1071,12 @@ export const useWorkflowStore = create<WorkflowState>()(
       ) =>
         set((state) => {
           // Create new node ID
-          const newNodeId = newStepData.id || uuidv4();
+          const newNodeId =
+            newStepData.id ||
+            generateStepId(
+              newStepData.name as string | undefined,
+              state.nodes.map((node) => node.id)
+            );
           const nodeType = newStepData.stepType
             ? STEP_TYPES[newStepData.stepType as keyof typeof STEP_TYPES] ||
               NODE_TYPES.BasicNode

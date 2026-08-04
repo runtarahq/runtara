@@ -1,12 +1,14 @@
 import { memo, useCallback, useState, useMemo } from 'react';
 import { Handle, Node, NodeProps, Position } from '@xyflow/react';
-import { v4 as uuidv4 } from 'uuid';
 import { Button } from '@/shared/components/ui/button.tsx';
 import { Plus } from 'lucide-react';
 import { BaseNode } from '../BaseNode.tsx';
 import { BASE_WIDTH } from './utils.tsx';
 import * as form from '@/features/workflows/components/WorkflowEditor/NodeForm/NodeFormItem.tsx';
-import { useWorkflowStore } from '@/features/workflows/stores/workflowStore.ts';
+import {
+  generateStepId,
+  useWorkflowStore,
+} from '@/features/workflows/stores/workflowStore.ts';
 import { useExecutionStore } from '@/features/workflows/stores/executionStore';
 import {
   useValidationStore,
@@ -277,7 +279,10 @@ function SwitchNodeComponent({
       }
 
       // Set pending new node - will be created when user confirms in dialog
-      const newNodeId = uuidv4();
+      const newNodeId = generateStepId(
+        nodeData.name,
+        nodes.map((n) => n.id)
+      );
       setPendingNewNode({
         id: newNodeId,
         data: nodeData as any,
