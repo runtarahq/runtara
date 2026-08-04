@@ -1,12 +1,14 @@
 import { memo, useCallback, useMemo, useState } from 'react';
 import { Handle, Node, NodeProps, Position } from '@xyflow/react';
-import { v4 as uuidv4 } from 'uuid';
 import { Plus, CheckCircle2, XCircle, Pause } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button.tsx';
 import { BaseNode } from '../BaseNode.tsx';
 import { StepTypeIcon } from '@/features/workflows/components/StepTypeIcon';
 import * as form from '@/features/workflows/components/WorkflowEditor/NodeForm/NodeFormItem.tsx';
-import { useWorkflowStore } from '@/features/workflows/stores/workflowStore.ts';
+import {
+  generateStepId,
+  useWorkflowStore,
+} from '@/features/workflows/stores/workflowStore.ts';
 import { useExecutionStore } from '@/features/workflows/stores/executionStore';
 import {
   useValidationStore,
@@ -271,7 +273,10 @@ function AiAgentNodeComponent({
         y: currentPosAbsY,
       });
 
-      const newNodeId = uuidv4();
+      const newNodeId = generateStepId(
+        stepName,
+        storeNodes.map((n) => n.id)
+      );
       setPendingNewNode({
         id: newNodeId,
         data: nodeData as any,
@@ -320,7 +325,10 @@ function AiAgentNodeComponent({
         y: currentPosAbsY + 60,
       });
 
-      const newNodeId = uuidv4();
+      const newNodeId = generateStepId(
+        stepName,
+        storeNodes.map((n) => n.id)
+      );
 
       // Pre-populate memory provider step with required inputs
       // (conversation_id and messages are normally filled at runtime by the AI Agent,

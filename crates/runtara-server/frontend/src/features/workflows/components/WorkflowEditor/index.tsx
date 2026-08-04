@@ -14,8 +14,10 @@ import {
   OnConnectEnd,
 } from '@xyflow/react';
 import { ListTree, Network, Plus } from 'lucide-react';
-import { v4 as uuidv4 } from 'uuid';
-import { useWorkflowStore } from '@/features/workflows/stores/workflowStore.ts';
+import {
+  generateStepId,
+  useWorkflowStore,
+} from '@/features/workflows/stores/workflowStore.ts';
 import { useExecutionStore } from '@/features/workflows/stores/executionStore';
 import { useValidationStore } from '@/features/workflows/stores/validationStore';
 import { toast } from 'sonner';
@@ -1158,7 +1160,10 @@ function WorkflowEditorContent({
         }
 
         setPendingNewNode({
-          id: uuidv4(),
+          id: generateStepId(
+            data.name,
+            nodes.map((node) => node.id)
+          ),
           data: data as any,
           position: finalPosition,
           parentId,
@@ -1272,8 +1277,11 @@ function WorkflowEditorContent({
     (result: StepPickerResult) => {
       if (!createStepContext) return;
 
-      const newNodeId = uuidv4();
       const uniqueName = generateUniqueStepName(result.name, nodes);
+      const newNodeId = generateStepId(
+        uniqueName,
+        nodes.map((node) => node.id)
+      );
       const data = {
         ...form.initialValues,
         stepType: result.stepType,

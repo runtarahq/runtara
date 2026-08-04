@@ -6,14 +6,16 @@ import {
   Position,
   useNodeConnections,
 } from '@xyflow/react';
-import { v4 as uuidv4 } from 'uuid';
 import { Plus, AlertTriangle } from 'lucide-react';
 import { ButtonHandle } from '../ButtonHandle.tsx';
 import { Button } from '@/shared/components/ui/button.tsx';
 import * as form from '@/features/workflows/components/WorkflowEditor/NodeForm/NodeFormItem.tsx';
 import { BASE_GROUP_WIDTH } from './utils.tsx';
 import { BaseResizableNode } from './BaseResizableNode.tsx';
-import { useWorkflowStore } from '@/features/workflows/stores/workflowStore.ts';
+import {
+  generateStepId,
+  useWorkflowStore,
+} from '@/features/workflows/stores/workflowStore.ts';
 import { useExecutionStore } from '@/features/workflows/stores/executionStore';
 import {
   STEP_TYPES,
@@ -125,7 +127,10 @@ function Container({
       }
 
       // Set pending new node - will be created when user confirms in dialog
-      const newNodeId = uuidv4();
+      const newNodeId = generateStepId(
+        nodeData.name,
+        nodes.map((n) => n.id)
+      );
       setPendingNewNode({
         id: newNodeId,
         data: nodeData as any,
@@ -191,7 +196,10 @@ function Container({
     };
 
     setPendingNewNode({
-      id: uuidv4(),
+      id: generateStepId(
+        nodeData.name,
+        nodes.map((n) => n.id)
+      ),
       data: nodeData as any,
       position,
       sourceNodeId: id,
