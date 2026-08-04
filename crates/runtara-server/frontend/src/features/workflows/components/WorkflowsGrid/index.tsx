@@ -149,13 +149,13 @@ export function WorkflowsGrid({
     );
   }, []);
 
-  // Pagination state (API uses 1-based pages)
-  const [page, setPage] = useState(1);
+  // Pagination state (API uses 0-based pages)
+  const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
 
   // Reset to first page when folder or search changes
   useEffect(() => {
-    setPage(1);
+    setPage(0);
   }, [folderPath, searchTerm]);
 
   // Fetch folders for move dialog
@@ -379,8 +379,8 @@ export function WorkflowsGrid({
   const hasContent = hasFolders || hasWorkflows;
 
   // Pagination display values
-  const startRow = totalElements === 0 ? 0 : (page - 1) * pageSize + 1;
-  const endRow = Math.min(page * pageSize, totalElements);
+  const startRow = totalElements === 0 ? 0 : page * pageSize + 1;
+  const endRow = Math.min((page + 1) * pageSize, totalElements);
 
   let body: ReactNode;
   if (isFetching) {
@@ -523,13 +523,13 @@ export function WorkflowsGrid({
               }`}
               right={
                 <TablePagination
-                  pageIndex={page - 1}
+                  pageIndex={page}
                   pageSize={pageSize}
                   pageCount={totalPages}
-                  onPageChange={(p) => setPage(p + 1)}
+                  onPageChange={setPage}
                   onPageSizeChange={(size) => {
                     setPageSize(size);
-                    setPage(1);
+                    setPage(0);
                   }}
                 />
               }

@@ -1447,7 +1447,7 @@ impl ExecutionEngine {
         page: Option<i32>,
         size: Option<i32>,
     ) -> Result<PageWorkflowInstanceHistoryDto, ExecutionError> {
-        let page = page.unwrap_or(0).max(0);
+        let page = crate::api::utils::pagination::normalize_page(page);
         let size = size.unwrap_or(10).clamp(1, 100);
 
         let client = self.require_runtime_client()?;
@@ -1572,7 +1572,7 @@ impl ExecutionEngine {
         size: Option<i32>,
         filters: ExecutionFilters,
     ) -> Result<PageWorkflowInstanceHistoryDto, ExecutionError> {
-        let page = page.unwrap_or(0).max(0);
+        let page = crate::api::utils::pagination::normalize_page(page);
         let size = size.unwrap_or(20).clamp(1, 100);
 
         let client = self.require_runtime_client()?;

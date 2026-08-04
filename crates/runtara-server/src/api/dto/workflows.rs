@@ -1006,7 +1006,7 @@ impl PageWorkflowDto {
     /// # Arguments
     /// * `content` - The workflows for this page
     /// * `total_elements` - Total number of workflows across all pages
-    /// * `page` - Current page number (1-based from API, converted to 0-based internally)
+    /// * `page` - Current page number (0-based, as requested)
     /// * `size` - Page size
     pub fn new(content: Vec<WorkflowDto>, total_elements: i64, page: i32, size: i32) -> Self {
         let total_pages = if total_elements == 0 {
@@ -1014,7 +1014,8 @@ impl PageWorkflowDto {
         } else {
             ((total_elements as f64) / (size as f64)).ceil() as i32
         };
-        let number = (page - 1).max(0); // Convert 1-based to 0-based
+        // Echoes the requested page so `number + 1` is the next page.
+        let number = page.max(0);
         let number_of_elements = content.len() as i32;
 
         Self {
@@ -1596,5 +1597,28 @@ mod tests {
         let err = validate_workflow_inputs(input).unwrap_err();
 
         assert!(err.message.contains("data"));
+    }
+
+    /// `number` has to echo the page that was asked for, otherwise a client
+    /// advancing with `number + 1` re-requests the page it just read. The
+    /// workflow list used to report `page - 1` here while reading `page` as
+    /// 1-based, which is exactly that loop.
+    #[test]
+    fn page_number_round_trips_the_requested_page() {
+        for page in 0..4 {
+            let dto = PageWorkflowDto::new(vec![], 100, page, 20);
+            assert_eq!(dto.number, page, "page {page} should echo back");
+        }
+
+        let first = PageWorkflowDto::new(vec![], 100, 0, 20);
+        assert!(first.first);
+        assert!(!first.last);
+
+        // Negative pages clamp to the first page rather than a negative offset.
+        assert_eq!(PageWorkflowDto::new(vec![], 100, -3, 20).number, 0);
+
+        let last = PageWorkflowDto::new(vec![], 100, 4, 20);
+        assert!(last.last);
+        assert!(!last.first);
     }
 }
