@@ -7,6 +7,7 @@ import { PrivateRoute } from '@/router/PrivateRoute';
 import { EntitlementRoute } from '@/router/EntitlementRoute';
 import { Layout } from '@/shared/layouts/layout';
 import { Login } from '@/shared/pages/login';
+import { NotFound } from '@/shared/pages/NotFound';
 import { ErrorBoundary } from '@/shared/components/error-boundary.tsx';
 import { Spinner } from '@/shared/components/ui/spinner';
 
@@ -514,7 +515,7 @@ export const router = createBrowserRouter(
         },
         {
           path: '*',
-          element: <>404</>,
+          element: <NotFound />,
         },
       ],
     },
