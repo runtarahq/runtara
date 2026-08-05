@@ -39,6 +39,11 @@ required-features = ["compiler"]
 
 [dependencies]
 runtara-dsl = { path = "../runtara-dsl", version = "8.7" }
+# Reference-path tokenization (`reference_path`), so validation splits a path
+# into exactly the segments the runtime will resolve. `default-features = false`
+# drops the SDK/HTTP runtime, leaving serde + serde_json + minijinja — all of
+# which this crate already depends on, so the dependency graph is unchanged.
+runtara-workflow-stdlib = { path = "../runtara-workflow-stdlib", version = "8.7", default-features = false }
 runtara-workflow-wit = { path = "../runtara-workflow-wit", version = "8.7", optional = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -59,7 +64,6 @@ tempfile = "3"
 base64 = { workspace = true }
 wasmparser = "0.247"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-runtara-workflow-stdlib = { path = "../runtara-workflow-stdlib", version = "8.7", default-features = false }
 # Embedded-vs-CLI A/B in tests/direct_wasm_execute.rs: the composed component
 # must behave identically under the in-process WorkflowExecutor.
 runtara-component-host = { path = "../runtara-component-host" }

@@ -20,6 +20,7 @@ use crate::agent_input_validation::{
     AgentInputMissingReason, AgentInputValidationError, MissingAgentInput,
 };
 use crate::conditions::{is_truthy, to_number, values_equal};
+use crate::reference_path::{self, array_index, is_array_index_token};
 use crate::switch_helpers::process_switch_output;
 use crate::template::{CompiledTemplate, render_template};
 
@@ -4699,7 +4700,7 @@ fn apply_group_by(config: &Value, source: &Value) -> Result<Value, String> {
         .get("key")
         .and_then(Value::as_str)
         .ok_or_else(|| "GroupBy config missing key".to_string())?;
-    let pointer = path_to_json_pointer(key);
+    let pointer = reference_path::to_json_pointer(key);
 
     let mut groups = BTreeMap::<String, Vec<Value>>::new();
     let mut counts = BTreeMap::<String, usize>::new();
@@ -6097,19 +6098,17 @@ fn lookup_source_path(source: &Value, path: &str) -> Option<Value> {
     lookup_segments(source, &path_to_segments(path))
 }
 
-/// Pre-split a reference path into already-unescaped JSON-pointer segments.
+/// Pre-split a reference path into lookup segments.
 ///
-/// This is the expensive half of a reference lookup (the `['..']`/`["..]`
-/// bracket normalization, the `[N]` numeric-index scan, and the `~0`/`~1`
-/// escape round-trip). Hoisting it into a compiled reference means a per-element
-/// Filter/While/GroupBy reference parses its path **once** instead of on every
-/// evaluation. [`lookup_segments_detailed`] is the cheap walk over the result.
+/// This is the expensive half of a reference lookup (the bracket scan).
+/// Hoisting it into a compiled reference means a per-element Filter/While/GroupBy
+/// reference parses its path **once** instead of on every evaluation.
+/// [`lookup_segments_detailed`] is the cheap walk over the result.
+///
+/// Tokenization lives in [`crate::reference_path`] so the authoring-time
+/// validator splits paths exactly the same way.
 fn path_to_segments(path: &str) -> Vec<String> {
-    path_to_json_pointer(path)
-        .split('/')
-        .skip(1)
-        .map(unescape_pointer_segment)
-        .collect()
+    reference_path::reference_segments(path)
 }
 
 /// `Option`-returning walk over pre-split segments — a test-only `Some/None`
@@ -6285,79 +6284,6 @@ fn resolve_lookup(lookup: Lookup, default: Option<Value>) -> Result<Value, Strin
         Lookup::Found(value) => Ok(value),
         Lookup::Mismatch(message) => default.ok_or(message),
     }
-}
-
-/// Resolve a path segment to a concrete array index, supporting Python-style
-/// negative suffix indexing: `-1` is the last element, `-2` the second-to-last.
-/// Non-numeric segments and out-of-range negatives return `None`, so an unmatched
-/// index falls through to the resolver's null/default path exactly like an
-/// out-of-range positive index does.
-fn array_index(segment: &str, len: usize) -> Option<usize> {
-    let raw: i64 = segment.parse().ok()?;
-    if raw >= 0 {
-        usize::try_from(raw).ok()
-    } else {
-        // `unsigned_abs` avoids overflow at `i64::MIN`.
-        len.checked_sub(usize::try_from(raw.unsigned_abs()).ok()?)
-    }
-}
-
-/// True when a `[..]` bracket body is an array index — an optional leading `-`
-/// followed by one or more ASCII digits (e.g. `0`, `12`, `-1`).
-fn is_array_index_token(token: &str) -> bool {
-    let digits = token.strip_prefix('-').unwrap_or(token);
-    !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit())
-}
-
-/// Reverse the JSON-pointer escaping applied by [`path_to_json_pointer`].
-fn unescape_pointer_segment(segment: &str) -> String {
-    segment.replace("~1", "/").replace("~0", "~")
-}
-
-fn path_to_json_pointer(path: &str) -> String {
-    let normalized = path
-        .replace("['", ".")
-        .replace("']", "")
-        .replace("[\"", ".")
-        .replace("\"]", "");
-
-    let mut dotted = String::new();
-    let mut chars = normalized.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '[' {
-            let mut index = String::new();
-            while let Some(&next_ch) = chars.peek() {
-                if next_ch == ']' {
-                    chars.next();
-                    break;
-                }
-                index.push(chars.next().expect("peeked character exists"));
-            }
-            if is_array_index_token(&index) {
-                dotted.push('.');
-                dotted.push_str(&index);
-            } else {
-                dotted.push('[');
-                dotted.push_str(&index);
-                dotted.push(']');
-            }
-        } else {
-            dotted.push(ch);
-        }
-    }
-
-    let mut out = String::with_capacity(dotted.len() + 4);
-    for segment in dotted.split('.') {
-        out.push('/');
-        for ch in segment.chars() {
-            match ch {
-                '~' => out.push_str("~0"),
-                '/' => out.push_str("~1"),
-                _ => out.push(ch),
-            }
-        }
-    }
-    out
 }
 
 // ===========================================================================
@@ -7277,6 +7203,49 @@ mod tests {
         // Out-of-range negative misses (None), like an out-of-range positive index.
         assert_eq!(lookup_source_path(&source, "items.-4"), None);
         assert_eq!(lookup_source_path(&source, "items.3"), None);
+    }
+
+    /// A bracket-quoted body is one opaque key, dots included. The runtime used
+    /// to rewrite `["a.b"]` to `.a.b` and split it, so a reference to a literal
+    /// dotted key resolved a nested path that wasn't there and fell through to
+    /// null — while the validator, reading it as a single key, had accepted it.
+    #[test]
+    fn lookup_treats_bracket_quoted_dotted_key_as_one_segment() {
+        reset_value_store();
+        let source = json!({
+            "data": {
+                "a.b": "flat",
+                "a": { "b": "nested" },
+            }
+        });
+
+        assert_eq!(
+            lookup_source_path(&source, r#"data["a.b"]"#),
+            Some(json!("flat"))
+        );
+        assert_eq!(
+            lookup_source_path(&source, "data['a.b']"),
+            Some(json!("flat"))
+        );
+        // The dotted form still descends, so both spellings stay addressable.
+        assert_eq!(
+            lookup_source_path(&source, "data.a.b"),
+            Some(json!("nested"))
+        );
+    }
+
+    /// An unquoted, non-numeric bracket body is a plain key. The runtime used to
+    /// keep the brackets inside the segment text and look for a key literally
+    /// named `data[key]`, while the validator read it as `data` then `key`.
+    #[test]
+    fn lookup_treats_unquoted_bracket_body_as_a_plain_key() {
+        reset_value_store();
+        let source = json!({ "data": { "key": "value" } });
+
+        assert_eq!(
+            lookup_source_path(&source, "data[key]"),
+            Some(json!("value"))
+        );
     }
 
     /// SYN-448: the negative index must reach the leaf through both reference

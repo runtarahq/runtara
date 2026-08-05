@@ -64,6 +64,10 @@ pub mod template;
 // JSON helpers for direct-emitted workflow components
 pub mod direct_json;
 
+// Reference-path tokenization, shared with the authoring-time validator so both
+// agree on what a path's segments are.
+pub mod reference_path;
+
 // Child workflow input validation (runtime)
 pub mod child_input_validation;
 

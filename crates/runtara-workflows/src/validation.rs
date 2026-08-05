@@ -73,6 +73,12 @@ use crate::dependency_analysis::{DependencyGraph, WorkflowReference};
 use runtara_dsl::{
     CompositeInner, ExecutionGraph, InputMapping, MappingValue, SchemaField, SchemaFieldType, Step,
 };
+// The runtime's own path tokenizer, so validation splits a reference into
+// exactly the segments a lookup will walk — in particular treating a
+// bracket-quoted body like `data["a.b"]` as one opaque key, not a nested path.
+use runtara_workflow_stdlib::reference_path::{
+    array_index, is_array_index_token, reference_segments,
+};
 use std::collections::{HashMap, HashSet};
 
 // ============================================================================
@@ -4491,16 +4497,18 @@ fn extract_step_id_from_reference(ref_path: &str) -> Option<String> {
 }
 
 /// Extract variable name from a reference path like "variables.my_var" or "variables.counter.value"
+/// The variable a `variables.*` reference names, or `None` for any other root.
+///
+/// Tokenized rather than split on the first `.`, so a bracketed tail belongs to
+/// the path instead of the name: `variables.rows[-1].sku` names `rows`, not
+/// `rows[-1]`. Splitting naively here reported the whole `rows[-1]` as an
+/// unknown variable and stopped the reference ever reaching the path walk.
 fn extract_variable_name_from_reference(ref_path: &str) -> Option<String> {
-    if let Some(rest) = ref_path.strip_prefix("variables.") {
-        if let Some(dot_pos) = rest.find('.') {
-            return Some(rest[..dot_pos].to_string());
-        } else {
-            // Reference is just "variables.var_name"
-            return Some(rest.to_string());
-        }
+    let mut segments = reference_segments(ref_path).into_iter();
+    if segments.next().as_deref() != Some("variables") {
+        return None;
     }
-    None
+    segments.next()
 }
 
 /// Get the step type name for error messages.
@@ -4631,50 +4639,6 @@ fn reference_root(reference: &str) -> &str {
     &reference[..end]
 }
 
-fn reference_segments(reference: &str) -> Vec<String> {
-    let mut segments = Vec::new();
-    let mut current = String::new();
-    let mut chars = reference.chars().peekable();
-
-    while let Some(ch) = chars.next() {
-        match ch {
-            '.' => {
-                if !current.is_empty() {
-                    segments.push(std::mem::take(&mut current));
-                }
-            }
-            '[' => {
-                if !current.is_empty() {
-                    segments.push(std::mem::take(&mut current));
-                }
-
-                let mut bracket = String::new();
-                for next in chars.by_ref() {
-                    if next == ']' {
-                        break;
-                    }
-                    bracket.push(next);
-                }
-
-                let bracket = bracket
-                    .trim()
-                    .trim_matches(|c| c == '\'' || c == '"')
-                    .to_string();
-                if !bracket.is_empty() {
-                    segments.push(bracket);
-                }
-            }
-            _ => current.push(ch),
-        }
-    }
-
-    if !current.is_empty() {
-        segments.push(current);
-    }
-
-    segments
-}
-
 /// True when `segments` begins with exactly `prefix` (caller has already
 /// checked `segments.len() > prefix.len()`).
 fn segments_start_with(segments: &[String], prefix: &[&str]) -> bool {
@@ -4717,7 +4681,7 @@ fn validate_schema_reference_path(
         let segment = &segments[index];
 
         if current_field.field_type == SchemaFieldType::Array {
-            if segment.parse::<usize>().is_ok() {
+            if is_array_index_token(segment) {
                 if let Some(item_schema) = current_field.items.as_deref() {
                     current_field = item_schema;
                     known_prefix.push_str(&format!("[{}]", segment));
@@ -4836,7 +4800,10 @@ fn validate_variable_reference_path(
                 known_prefix.push_str(segment);
             }
             serde_json::Value::Array(items) => {
-                let Ok(index) = segment.parse::<usize>() else {
+                // Mirrors the runtime's `descend`: a non-index segment on an
+                // array is a shape error, while an index that lands out of
+                // range is a plain miss. Negative indices resolve from the end.
+                if !is_array_index_token(segment) {
                     result
                         .errors
                         .push(ValidationError::ReferenceNonObjectTraversal {
@@ -4847,8 +4814,10 @@ fn validate_variable_reference_path(
                             attempted_field: segment.clone(),
                         });
                     return;
-                };
-                let Some(next_value) = items.get(index) else {
+                }
+                let Some(next_value) =
+                    array_index(segment, items.len()).and_then(|index| items.get(index))
+                else {
                     result
                         .errors
                         .push(ValidationError::UndefinedReferenceField {
@@ -4861,7 +4830,7 @@ fn validate_variable_reference_path(
                     return;
                 };
                 current_value = next_value;
-                known_prefix.push_str(&format!("[{}]", index));
+                known_prefix.push_str(&format!("[{}]", segment));
             }
             other => {
                 result
@@ -9896,16 +9865,31 @@ mod tests {
 
     #[test]
     fn test_extract_variable_name_bracket_notation() {
-        // Note: Bracket notation is not yet supported for variable extraction.
-        // This test documents the current behavior. Supporting bracket notation
-        // could be added in the future if needed.
+        // Bracket notation now resolves through the shared tokenizer, so a
+        // quoted name is the variable and a bracketed tail stays part of the
+        // path. Previously every one of these returned `None`, so the variable
+        // went unchecked entirely.
         assert_eq!(
             extract_variable_name_from_reference("variables['my-var']"),
-            None // Bracket notation not supported
+            Some("my-var".to_string())
         );
         assert_eq!(
             extract_variable_name_from_reference("variables[\"my-var\"]"),
-            None // Bracket notation not supported
+            Some("my-var".to_string())
+        );
+        // A quoted name keeps its dots instead of being split.
+        assert_eq!(
+            extract_variable_name_from_reference("variables[\"a.b\"]"),
+            Some("a.b".to_string())
+        );
+        // An indexed tail belongs to the path, not the name.
+        assert_eq!(
+            extract_variable_name_from_reference("variables.rows[-1].sku"),
+            Some("rows".to_string())
+        );
+        assert_eq!(
+            extract_variable_name_from_reference("variables.rows[0]"),
+            Some("rows".to_string())
         );
     }
 
@@ -9995,6 +9979,191 @@ mod tests {
                     missing_field,
                     ..
                 } if known_prefix == "data.a" && missing_field == "d"
+            )),
+            "{:?}",
+            result.errors
+        );
+    }
+
+    /// A bracket-quoted body is one opaque key, so `data.nested["a.b"]`
+    /// addresses the literal field `a.b` under `nested` rather than descending
+    /// `a` then `b`. Validation and the runtime resolver share one tokenizer
+    /// (`runtara_workflow_stdlib::reference_path`), so what validates here is
+    /// what resolves at run time — previously the runtime split this path and
+    /// silently produced null for a reference the validator had accepted.
+    ///
+    /// Anchored one level down deliberately: a *root*-level bracket reference
+    /// like `data["a.b"]` never reaches schema validation at all, because
+    /// `parse_reference` splits on `.` and sees the root as `data["a`. That
+    /// bypass is a separate gap — testing this here against `data[..]` would
+    /// pass no matter what the schema says.
+    #[test]
+    fn test_data_reference_bracket_quoted_dotted_key_resolves_flat() {
+        // Both halves run against the same schema, so the assertions can only
+        // both hold if the bracket body is genuinely matched as one key.
+        let declared = validate_nested_bracket_reference(r#"data.nested["a.b"]"#);
+        assert!(
+            !declared.errors.iter().any(|error| matches!(
+                error,
+                ValidationError::UndefinedReferenceField { .. }
+                    | ValidationError::InvalidReferencePath { .. }
+            )),
+            "declared key `a.b` must validate: {:?}",
+            declared.errors
+        );
+
+        // The discriminating half: an undeclared key must be rejected, proving
+        // the reference actually reached the schema walk.
+        let undeclared = validate_nested_bracket_reference(r#"data.nested["a.c"]"#);
+        assert!(
+            undeclared.errors.iter().any(|error| matches!(
+                error,
+                ValidationError::UndefinedReferenceField { missing_field, .. }
+                    if missing_field == "a.c"
+            )),
+            "undeclared key `a.c` must be rejected: {:?}",
+            undeclared.errors
+        );
+    }
+
+    /// Validate a single-mapping workflow whose only reference is `reference`,
+    /// against an input schema declaring exactly `nested: { "a.b": string }`.
+    fn validate_nested_bracket_reference(reference: &str) -> ValidationResult {
+        let mut mapping = HashMap::new();
+        mapping.insert("value".to_string(), ref_value(reference));
+
+        let mut steps = HashMap::new();
+        steps.insert(
+            "agent".to_string(),
+            create_agent_step("agent", "transform", Some(mapping)),
+        );
+
+        let mut nested_props = HashMap::new();
+        nested_props.insert("a.b".to_string(), schema_field(SchemaFieldType::String));
+
+        let mut graph = create_basic_graph(steps, "agent");
+        graph
+            .input_schema
+            .insert("nested".to_string(), object_schema_field(nested_props));
+
+        validate_workflow(&graph, &test_catalog())
+    }
+
+    /// Negative array indices resolve Python-style at run time, so authoring
+    /// must accept them too. The schema walk previously gated on
+    /// `parse::<usize>()`, which rejects `-1`, so a declared array raised a
+    /// bogus traversal error for a reference the runtime resolves fine.
+    #[test]
+    fn test_data_reference_negative_array_index_is_accepted() {
+        let mut mapping = HashMap::new();
+        mapping.insert("last".to_string(), ref_value("data.items[-1].sku"));
+
+        let mut steps = HashMap::new();
+        steps.insert(
+            "agent".to_string(),
+            create_agent_step("agent", "transform", Some(mapping)),
+        );
+
+        let mut item_props = HashMap::new();
+        item_props.insert("sku".to_string(), schema_field(SchemaFieldType::String));
+        let mut items = schema_field(SchemaFieldType::Array);
+        items.items = Some(Box::new(object_schema_field(item_props)));
+
+        let mut graph = create_basic_graph(steps, "agent");
+        graph.input_schema.insert("items".to_string(), items);
+
+        let result = validate_workflow(&graph, &test_catalog());
+
+        assert!(
+            !result.errors.iter().any(|error| matches!(
+                error,
+                ValidationError::ReferenceNonObjectTraversal { .. }
+                    | ValidationError::UndefinedReferenceField { .. }
+            )),
+            "negative index must validate against a declared array: {:?}",
+            result.errors
+        );
+    }
+
+    /// The same rule on the concrete-value walk used for `variables.*`, where
+    /// the index is resolved against the literal array rather than a schema.
+    ///
+    /// Spelled with dots rather than `rows[-1]` because `parse_reference` still
+    /// splits the variable name on the first `.`, so the bracket form is
+    /// reported as the unknown variable `rows[-1]` and never reaches this walk.
+    #[test]
+    fn test_variable_reference_negative_array_index_resolves_from_the_end() {
+        use runtara_dsl::{Variable, VariableType};
+
+        let mut mapping = HashMap::new();
+        mapping.insert("last".to_string(), ref_value("variables.rows.-1.sku"));
+        mapping.insert("past".to_string(), ref_value("variables.rows.-4.sku"));
+
+        let mut steps = HashMap::new();
+        steps.insert(
+            "agent".to_string(),
+            create_agent_step("agent", "transform", Some(mapping)),
+        );
+
+        let mut graph = create_basic_graph(steps, "agent");
+        graph.variables.insert(
+            "rows".to_string(),
+            Variable {
+                var_type: VariableType::Array,
+                value: serde_json::json!([{ "sku": "a" }, { "sku": "b" }, { "sku": "c" }]),
+                description: None,
+            },
+        );
+
+        let result = validate_workflow(&graph, &test_catalog());
+
+        // `-1` is the last element, so `.sku` beyond it is a real field.
+        assert!(
+            !result.errors.iter().any(|error| matches!(
+                error,
+                ValidationError::ReferenceNonObjectTraversal { attempted_field, .. }
+                    if attempted_field == "-1"
+            )),
+            "`-1` must resolve to the last element: {:?}",
+            result.errors
+        );
+        // `-4` is past the front of a 3-element array — still out of range.
+        assert!(
+            result.errors.iter().any(|error| matches!(
+                error,
+                ValidationError::UndefinedReferenceField { missing_field, .. }
+                    if missing_field == "-4"
+            )),
+            "`-4` must stay out of range: {:?}",
+            result.errors
+        );
+    }
+
+    /// The counterpart: with only a flat `a.b` key in the schema, the dotted
+    /// spelling is a genuine miss — it asks for a nested `a`, which is absent.
+    #[test]
+    fn test_data_reference_dotted_path_does_not_match_flat_key() {
+        let mut mapping = HashMap::new();
+        mapping.insert("value".to_string(), ref_value("data.a.b"));
+
+        let mut steps = HashMap::new();
+        steps.insert(
+            "agent".to_string(),
+            create_agent_step("agent", "transform", Some(mapping)),
+        );
+
+        let mut graph = create_basic_graph(steps, "agent");
+        graph
+            .input_schema
+            .insert("a.b".to_string(), schema_field(SchemaFieldType::String));
+
+        let result = validate_workflow(&graph, &test_catalog());
+
+        assert!(
+            result.errors.iter().any(|error| matches!(
+                error,
+                ValidationError::UndefinedDataReference { field_name, .. }
+                    if field_name == "a"
             )),
             "{:?}",
             result.errors

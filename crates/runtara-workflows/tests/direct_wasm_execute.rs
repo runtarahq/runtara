@@ -33,6 +33,7 @@ const FILTER_SIMPLE: &str = include_str!("fixtures/filter_simple.json");
 const SWITCH_VALUE_SIMPLE: &str = include_str!("fixtures/switch_value_simple.json");
 const SWITCH_ROUTING_SIMPLE: &str = include_str!("fixtures/switch_routing_simple.json");
 const GROUP_BY_SIMPLE: &str = include_str!("fixtures/group_by_simple.json");
+const BRACKET_QUOTED_DOTTED_KEY: &str = include_str!("fixtures/bracket_quoted_dotted_key.json");
 const DELAY_DYNAMIC: &str = include_str!("fixtures/delay_dynamic.json");
 const LOG_ALL_LEVELS: &str = include_str!("fixtures/log_all_levels.json");
 const ERROR_DIRECT_SIMPLE: &str = include_str!("fixtures/error_direct_simple.json");
@@ -2334,6 +2335,32 @@ fn direct_wasm_execute_finish_passthrough_reports_completion() {
     );
 
     assert_eq!(output, serde_json::json!({ "result": "direct-finish" }));
+}
+
+/// A bracket-quoted body is one opaque key, dots included, all the way through
+/// compile → compose → execute in the guest. The runtime used to rewrite
+/// `["a.b"]` to `.a.b` and split it, so a reference the validator had accepted
+/// as the literal field `a.b` resolved the (absent) nested path instead and
+/// silently produced null.
+#[test]
+fn direct_wasm_execute_resolves_bracket_quoted_dotted_key() {
+    let components_dir = direct_e2e_components_dir();
+
+    let output = run_direct_workflow(
+        &components_dir,
+        "direct-wasm-execute-bracket-quoted-dotted-key",
+        BRACKET_QUOTED_DOTTED_KEY,
+        br#"{"a.b":"flat-value","a":{"b":"nested-value"}}"#,
+    );
+
+    assert_eq!(
+        output,
+        serde_json::json!({
+            "flat": "flat-value",
+            "flatSingleQuoted": "flat-value",
+            "nested": "nested-value"
+        })
+    );
 }
 
 /// A single-Finish workflow that binds `data.count` under an `integer` type
