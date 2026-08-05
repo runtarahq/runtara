@@ -20,7 +20,7 @@ use crate::agent_input_validation::{
     AgentInputMissingReason, AgentInputValidationError, MissingAgentInput,
 };
 use crate::conditions::{is_truthy, to_number, values_equal};
-use crate::reference_path::{self, is_array_index_token};
+use crate::reference_path::{self, array_index, is_array_index_token};
 use crate::switch_helpers::process_switch_output;
 use crate::template::{CompiledTemplate, render_template};
 
@@ -6283,21 +6283,6 @@ fn resolve_lookup(lookup: Lookup, default: Option<Value>) -> Result<Value, Strin
         Lookup::Found(Value::Null) | Lookup::Absent => Ok(default.unwrap_or(Value::Null)),
         Lookup::Found(value) => Ok(value),
         Lookup::Mismatch(message) => default.ok_or(message),
-    }
-}
-
-/// Resolve a path segment to a concrete array index, supporting Python-style
-/// negative suffix indexing: `-1` is the last element, `-2` the second-to-last.
-/// Non-numeric segments and out-of-range negatives return `None`, so an unmatched
-/// index falls through to the resolver's null/default path exactly like an
-/// out-of-range positive index does.
-fn array_index(segment: &str, len: usize) -> Option<usize> {
-    let raw: i64 = segment.parse().ok()?;
-    if raw >= 0 {
-        usize::try_from(raw).ok()
-    } else {
-        // `unsigned_abs` avoids overflow at `i64::MIN`.
-        len.checked_sub(usize::try_from(raw.unsigned_abs()).ok()?)
     }
 }
 

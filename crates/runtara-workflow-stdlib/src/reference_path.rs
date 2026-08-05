@@ -90,9 +90,28 @@ pub fn to_json_pointer(path: &str) -> String {
 
 /// True when a `[..]` body is an array index — an optional leading `-` followed
 /// by one or more ASCII digits (e.g. `0`, `12`, `-1`).
+///
+/// Shared with the validator so a segment that indexes an array at run time is
+/// also treated as an index at authoring time. A plain `parse::<usize>()` is
+/// *not* equivalent: it rejects the negative forms the resolver accepts.
 pub fn is_array_index_token(token: &str) -> bool {
     let digits = token.strip_prefix('-').unwrap_or(token);
     !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit())
+}
+
+/// Resolve an index segment against an array of length `len`, supporting
+/// Python-style negative suffix indexing: `-1` is the last element, `-2` the
+/// second-to-last. Non-numeric segments and out-of-range negatives return
+/// `None`, so an unmatched index falls through to the resolver's null/default
+/// path exactly like an out-of-range positive index does.
+pub fn array_index(segment: &str, len: usize) -> Option<usize> {
+    let raw: i64 = segment.parse().ok()?;
+    if raw >= 0 {
+        usize::try_from(raw).ok()
+    } else {
+        // `unsigned_abs` avoids overflow at `i64::MIN`.
+        len.checked_sub(usize::try_from(raw.unsigned_abs()).ok()?)
+    }
 }
 
 /// Reduce a trimmed `[..]` body to its segment, dropping an empty one.
@@ -152,6 +171,28 @@ mod tests {
         assert!(!is_array_index_token("a"));
         assert!(!is_array_index_token("-"));
         assert!(!is_array_index_token(""));
+    }
+
+    #[test]
+    fn array_index_resolves_negatives_from_the_end() {
+        assert_eq!(array_index("0", 3), Some(0));
+        assert_eq!(array_index("2", 3), Some(2));
+        assert_eq!(array_index("-1", 3), Some(2));
+        assert_eq!(array_index("-3", 3), Some(0));
+        // Out of range in either direction is a miss, not a wrap-around.
+        assert_eq!(array_index("-4", 3), None);
+        assert_eq!(array_index("a", 3), None);
+    }
+
+    #[test]
+    fn negative_indices_are_index_tokens_not_keys() {
+        // The trap this pair exists to avoid: `parse::<usize>()` rejects the
+        // negative forms `array_index` resolves, so a validator using it would
+        // reject a reference the runtime happily resolves.
+        for token in ["-1", "-2", "-10"] {
+            assert!(is_array_index_token(token), "{token}");
+            assert!(token.parse::<usize>().is_err(), "{token}");
+        }
     }
 
     #[test]
