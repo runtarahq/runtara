@@ -1,0 +1,29 @@
+{
+  "name": "Bracket Quoted Dotted Key",
+  "description": "Reads a literal dotted key via the bracket-quoted form alongside the equivalent nested path, so both spellings stay addressable",
+  "steps": {
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "flat": {
+          "valueType": "reference",
+          "value": "data[\"a.b\"]"
+        },
+        "flatSingleQuoted": {
+          "valueType": "reference",
+          "value": "data['a.b']"
+        },
+        "nested": {
+          "valueType": "reference",
+          "value": "data.a.b"
+        }
+      }
+    }
+  },
+  "entryPoint": "finish",
+  "executionPlan": [],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}

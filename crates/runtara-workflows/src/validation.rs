@@ -73,6 +73,10 @@ use crate::dependency_analysis::{DependencyGraph, WorkflowReference};
 use runtara_dsl::{
     CompositeInner, ExecutionGraph, InputMapping, MappingValue, SchemaField, SchemaFieldType, Step,
 };
+// The runtime's own path tokenizer, so validation splits a reference into
+// exactly the segments a lookup will walk — in particular treating a
+// bracket-quoted body like `data["a.b"]` as one opaque key, not a nested path.
+use runtara_workflow_stdlib::reference_path::reference_segments;
 use std::collections::{HashMap, HashSet};
 
 // ============================================================================
@@ -4629,50 +4633,6 @@ const LEGAL_REFERENCE_ROOTS: &[&str] = &[
 fn reference_root(reference: &str) -> &str {
     let end = reference.find(['.', '[']).unwrap_or(reference.len());
     &reference[..end]
-}
-
-fn reference_segments(reference: &str) -> Vec<String> {
-    let mut segments = Vec::new();
-    let mut current = String::new();
-    let mut chars = reference.chars().peekable();
-
-    while let Some(ch) = chars.next() {
-        match ch {
-            '.' => {
-                if !current.is_empty() {
-                    segments.push(std::mem::take(&mut current));
-                }
-            }
-            '[' => {
-                if !current.is_empty() {
-                    segments.push(std::mem::take(&mut current));
-                }
-
-                let mut bracket = String::new();
-                for next in chars.by_ref() {
-                    if next == ']' {
-                        break;
-                    }
-                    bracket.push(next);
-                }
-
-                let bracket = bracket
-                    .trim()
-                    .trim_matches(|c| c == '\'' || c == '"')
-                    .to_string();
-                if !bracket.is_empty() {
-                    segments.push(bracket);
-                }
-            }
-            _ => current.push(ch),
-        }
-    }
-
-    if !current.is_empty() {
-        segments.push(current);
-    }
-
-    segments
 }
 
 /// True when `segments` begins with exactly `prefix` (caller has already
@@ -9995,6 +9955,72 @@ mod tests {
                     missing_field,
                     ..
                 } if known_prefix == "data.a" && missing_field == "d"
+            )),
+            "{:?}",
+            result.errors
+        );
+    }
+
+    /// A bracket-quoted body is one opaque key, so `data["a.b"]` addresses the
+    /// literal field `a.b` rather than descending `a` then `b`. Validation and
+    /// the runtime resolver share one tokenizer
+    /// (`runtara_workflow_stdlib::reference_path`), so what validates here is
+    /// what resolves at run time — previously the runtime split this path and
+    /// silently produced null for a reference the validator had accepted.
+    #[test]
+    fn test_data_reference_bracket_quoted_dotted_key_resolves_flat() {
+        let mut mapping = HashMap::new();
+        mapping.insert("value".to_string(), ref_value(r#"data["a.b"]"#));
+
+        let mut steps = HashMap::new();
+        steps.insert(
+            "agent".to_string(),
+            create_agent_step("agent", "transform", Some(mapping)),
+        );
+
+        let mut graph = create_basic_graph(steps, "agent");
+        graph
+            .input_schema
+            .insert("a.b".to_string(), schema_field(SchemaFieldType::String));
+
+        let result = validate_workflow(&graph, &test_catalog());
+
+        assert!(
+            !result.errors.iter().any(|error| matches!(
+                error,
+                ValidationError::UndefinedReferenceField { .. }
+                    | ValidationError::InvalidReferencePath { .. }
+            )),
+            "{:?}",
+            result.errors
+        );
+    }
+
+    /// The counterpart: with only a flat `a.b` key in the schema, the dotted
+    /// spelling is a genuine miss — it asks for a nested `a`, which is absent.
+    #[test]
+    fn test_data_reference_dotted_path_does_not_match_flat_key() {
+        let mut mapping = HashMap::new();
+        mapping.insert("value".to_string(), ref_value("data.a.b"));
+
+        let mut steps = HashMap::new();
+        steps.insert(
+            "agent".to_string(),
+            create_agent_step("agent", "transform", Some(mapping)),
+        );
+
+        let mut graph = create_basic_graph(steps, "agent");
+        graph
+            .input_schema
+            .insert("a.b".to_string(), schema_field(SchemaFieldType::String));
+
+        let result = validate_workflow(&graph, &test_catalog());
+
+        assert!(
+            result.errors.iter().any(|error| matches!(
+                error,
+                ValidationError::UndefinedDataReference { field_name, .. }
+                    if field_name == "a"
             )),
             "{:?}",
             result.errors
