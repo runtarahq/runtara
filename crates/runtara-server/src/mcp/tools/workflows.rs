@@ -237,7 +237,7 @@ pub struct GetWorkflowAuthoringSchemaParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ListWorkflowsParams {
-    #[schemars(description = "Page number (1-based)")]
+    #[schemars(description = "Page number (0-based)")]
     pub page: Option<i64>,
     #[schemars(description = "Items per page")]
     pub page_size: Option<i64>,

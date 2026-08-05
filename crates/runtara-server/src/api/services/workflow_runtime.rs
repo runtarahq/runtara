@@ -235,7 +235,7 @@ pub async fn list_workflow_actions(
     page: Option<i32>,
     size: Option<i32>,
 ) -> Result<WorkflowRuntimeActionPage, WorkflowRuntimeError> {
-    let page_number = page.unwrap_or(0).max(0);
+    let page_number = crate::api::utils::pagination::normalize_page(page);
     let page_size = size.unwrap_or(25).clamp(1, 100);
     let instances = engine
         .list_executions(tenant_id, workflow_id, Some(page_number), Some(page_size))

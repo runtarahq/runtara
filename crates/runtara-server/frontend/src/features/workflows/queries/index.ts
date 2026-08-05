@@ -109,13 +109,13 @@ async function fetchWorkflowPage(token: string, page: number) {
  * `pageSize` cannot be raised past 100, so a single request silently omitted
  * every workflow beyond the first 100 — they became unselectable, and the
  * trigger list fell back to rendering raw workflow UUIDs. Walk the pages
- * instead: page 1 reports `totalPages`, and the remainder are fetched together.
+ * instead: page 0 reports `totalPages`, and the remainder are fetched together.
  *
  * Returns the same `{ data: { content, … }, message, success }` envelope as a
  * single page, with the pagination fields restated to describe the aggregate.
  */
 export async function getWorkflows(token: string) {
-  const first = await fetchWorkflowPage(token, 1);
+  const first = await fetchWorkflowPage(token, 0);
   const firstPage = (first as { data?: Record<string, any> } | undefined)?.data;
   const totalPages: number = firstPage?.totalPages ?? 1;
 
@@ -133,7 +133,7 @@ export async function getWorkflows(token: string) {
 
   const laterPages = await Promise.all(
     Array.from({ length: pagesToFetch - 1 }, (_, index) =>
-      fetchWorkflowPage(token, index + 2)
+      fetchWorkflowPage(token, index + 1)
     )
   );
 
@@ -206,6 +206,65 @@ export interface WorkflowInstanceWithMetadata extends WorkflowInstanceDto {
     heartbeatAt?: string;
     additionalMetadata?: Record<string, unknown>;
   };
+}
+
+/**
+ * Stand-in for a run that has been queued but whose instance row does not exist
+ * yet.
+ *
+ * Starting a workflow publishes it to the trigger stream and hands back an
+ * instance id right away; the row itself is written later, when the runtime
+ * picks the event up. Until then the caller has an id it cannot read, so this
+ * supplies the status the execute response already reported.
+ */
+export function queuedInstancePlaceholder(
+  workflowId: string,
+  instanceId: string,
+  version?: number
+): WorkflowInstanceWithMetadata {
+  const now = new Date().toISOString();
+  return {
+    id: instanceId,
+    workflowId,
+    status: 'queued',
+    inputs: {} as WorkflowInstanceDto['inputs'],
+    created: now,
+    updated: now,
+    usedVersion: version ?? 0,
+  };
+}
+
+/** A run queued by this page, and when — see {@link holdForQueuedRow}. */
+export interface QueuedRun {
+  instanceId: string;
+  queuedAt: number;
+}
+
+/**
+ * How long to give the runtime to write the row of a just-queued run. Generous
+ * next to the observed lag (a few tens of ms) and still far below the point
+ * where a user would notice the first status arriving late.
+ */
+const QUEUED_ROW_GRACE_MS = 1200;
+
+/**
+ * Hold a read of `instanceId` until its row can be expected to exist.
+ *
+ * A read issued in the gap between `execute` returning and the runtime writing
+ * the row is a genuine 404, which the browser logs on every single run. Waiting
+ * here rather than gating the query keeps the query's own scheduling — when it
+ * runs, when it polls, when it gives up — exactly as it was; only the request
+ * leaves a moment later. Returns immediately for any instance this page did not
+ * just queue.
+ */
+export async function holdForQueuedRow(
+  queued: QueuedRun | null | undefined,
+  instanceId: string
+): Promise<void> {
+  if (!queued || queued.instanceId !== instanceId) return;
+  const remaining = QUEUED_ROW_GRACE_MS - (Date.now() - queued.queuedAt);
+  if (remaining <= 0) return;
+  await new Promise((resolve) => setTimeout(resolve, remaining));
 }
 
 export async function getWorkflowInstance(

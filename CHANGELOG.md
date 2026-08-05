@@ -85,6 +85,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING: `GET /api/runtime/workflows` now takes a 0-based `page`**, matching
+  every other paginated endpoint in the runtime API (`/executions`,
+  `/workflows/{id}/instances`, `/checkpoints`, `/actions`). It was the only
+  1-based one, while still reporting a 0-based `number` in the response — so
+  `number + 1` re-requested the page just read and never reached page 2, and
+  `?page=0` and `?page=1` both returned the first page. `number` now echoes the
+  page that was asked for. **Callers passing `page=1` for the first page must
+  change it to `page=0`, or they will silently skip the first page.** The MCP
+  `list_workflows` tool takes the same 0-based `page`.
 - **Encoding-sensitive agents (text, csv, xml) now share one encoding
   vocabulary** via the new `runtara-agent-encoding` crate. Their `encoding`
   inputs become a curated dropdown of standard names plus `Auto` (detect),

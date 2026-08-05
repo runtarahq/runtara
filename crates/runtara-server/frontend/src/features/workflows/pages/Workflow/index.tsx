@@ -34,6 +34,9 @@ import {
   setCurrentVersion,
   updateWorkflow,
   getWorkflowInstance,
+  queuedInstancePlaceholder,
+  holdForQueuedRow,
+  type QueuedRun,
   getStepEvents,
   toggleTrackEvents,
   resumeInstance,
@@ -668,6 +671,9 @@ export function Workflow() {
     resetExecution,
   } = useExecutionStore();
 
+  // The run this page started, and when — read by the instance query below.
+  const queuedRunRef = useRef<QueuedRun | null>(null);
+
   const scheduleMutation = useCustomMutation({
     mutationFn: (
       token: string,
@@ -699,6 +705,19 @@ export function Workflow() {
       const instanceId = response?.data?.instanceId;
 
       if (instanceId && variables.workflowId) {
+        // Show the queued status the response already carries, and note when the
+        // run was queued so the first read of its row can wait for the runtime
+        // to write one.
+        queryClient.setQueryData(
+          queryKeys.workflows.instance(variables.workflowId, instanceId),
+          queuedInstancePlaceholder(
+            variables.workflowId,
+            instanceId,
+            variables.version
+          )
+        );
+        queuedRunRef.current = { instanceId, queuedAt: Date.now() };
+
         // Start execution visualization (debugMode enables step-event polling)
         startExecution(
           instanceId,
@@ -717,9 +736,19 @@ export function Workflow() {
         workflowId ?? '',
         executingInstanceId ?? ''
       ),
-      queryFn: (token: string) =>
-        getWorkflowInstance(token, workflowId!, executingInstanceId!),
+      queryFn: async (token: string) => {
+        // Reading a run this page has only just queued would 404 — the runtime
+        // has not written its row yet. Only that run waits; anything else,
+        // including an instance attached to on load, reads straight away.
+        await holdForQueuedRow(queuedRunRef.current, executingInstanceId!);
+        return getWorkflowInstance(token, workflowId!, executingInstanceId!);
+      },
       enabled: !!executingInstanceId,
+      // The seeded queued status is for display only. Without this it would
+      // count as fresh under the client's 5-minute default and suppress the
+      // read that follows, leaving the run's real status to the poll below —
+      // which a hidden tab skips entirely.
+      staleTime: 0,
       refetchInterval: (query: any) => {
         const status = query.state.data?.status;
         const isActive =

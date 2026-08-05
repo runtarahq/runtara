@@ -29,12 +29,15 @@ function page(items: number, totalElements: number, totalPages: number) {
   };
 }
 
-/** Serve `total` workflows across 100-row pages, keyed by requested page. */
+/**
+ * Serve `total` workflows across 100-row pages, keyed by requested page.
+ * Pages are 0-based, matching the runtime API.
+ */
 function serve(total: number) {
   const totalPages = Math.max(1, Math.ceil(total / 100));
   listWorkflowsHandler.mockImplementation((params: { page?: number }) => {
-    const requested = params?.page ?? 1;
-    const remaining = total - (requested - 1) * 100;
+    const requested = params?.page ?? 0;
+    const remaining = total - requested * 100;
     return Promise.resolve(
       page(Math.max(0, Math.min(100, remaining)), total, totalPages)
     );
@@ -57,13 +60,13 @@ describe('getWorkflows', () => {
     expect(listWorkflowsHandler).toHaveBeenCalledTimes(2);
   });
 
-  it('asks for each page in turn', async () => {
+  it('asks for each page in turn, starting at page 0', async () => {
     serve(124);
 
     await getWorkflows('token');
 
     const pages = listWorkflowsHandler.mock.calls.map((call) => call[0].page);
-    expect(pages).toEqual([1, 2]);
+    expect(pages).toEqual([0, 1]);
   });
 
   it('makes a single request when everything fits on one page', async () => {

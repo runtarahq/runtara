@@ -96,6 +96,7 @@ pub struct UpdateWorkflowRequest {
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct ListWorkflowsQuery {
+    /// Page number (0-based, default: 0)
     pub page: Option<i32>,
     #[serde(rename = "pageSize")]
     pub page_size: Option<i32>,
@@ -792,7 +793,7 @@ pub async fn publish_workflow_agent_handler(
     get,
     path = "/api/runtime/workflows",
     params(
-        ("page" = Option<i32>, Query, description = "Page number (1-based, default: 1)"),
+        ("page" = Option<i32>, Query, description = "Page number (0-based, default: 0)"),
         ("pageSize" = Option<i32>, Query, description = "Page size (default: 20, max: 100)"),
         ("path" = Option<String>, Query, description = "Filter by folder path (e.g., '/Sales/'). If not provided, returns all workflows."),
         ("recursive" = bool, Query, description = "If true and path is provided, includes workflows in subfolders (default: false)"),
@@ -819,8 +820,8 @@ pub async fn list_workflows_handler(
     let repository = Arc::new(WorkflowRepository::new(pool.clone()));
     let service = WorkflowService::new(repository, connections.clone(), agent_catalog.clone());
 
-    // Delegate to service with pagination
-    let page = query.page.unwrap_or(1);
+    // Delegate to service with pagination (0-based pages; the service normalizes)
+    let page = query.page.unwrap_or(0);
     let page_size = query.page_size.unwrap_or(20);
 
     let query_start = std::time::Instant::now();
@@ -2118,7 +2119,7 @@ pub async fn list_instance_checkpoints_handler(
     };
 
     // Normalize pagination
-    let page = query.page.unwrap_or(0).max(0);
+    let page = crate::api::utils::pagination::normalize_page(query.page);
     let size = query.size.unwrap_or(20).clamp(1, 100) as u32;
 
     // Fetch checkpoints via runtara management SDK

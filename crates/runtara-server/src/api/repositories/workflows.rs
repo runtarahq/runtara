@@ -347,6 +347,7 @@ impl WorkflowRepository {
     /// Note: name/description are extracted from the execution graph (definition)
     ///
     /// # Arguments
+    /// * `page` - 0-based page number; page 0 is the first page.
     /// * `path` - Optional folder path filter. If None, returns all workflows (backward compatible).
     ///   If Some, filters by exact path match (recursive=false) or prefix match (recursive=true).
     /// * `recursive` - If true and path is provided, includes workflows in subfolders.
@@ -360,7 +361,7 @@ impl WorkflowRepository {
         recursive: bool,
         search: Option<&str>,
     ) -> Result<(Vec<WorkflowDto>, i64), sqlx::Error> {
-        let offset = (page - 1) * page_size;
+        let offset = page * page_size;
 
         // Build path filter value
         let (_, _, path_value) = match (path, recursive) {

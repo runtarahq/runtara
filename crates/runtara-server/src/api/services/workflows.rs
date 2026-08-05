@@ -423,6 +423,7 @@ impl WorkflowService {
     /// List workflows with pagination and optional folder filtering
     ///
     /// # Arguments
+    /// * `page` - 0-based page number; page 0 is the first page.
     /// * `path` - Optional folder path to filter by. If None, returns all workflows (backward compatible).
     /// * `recursive` - If true and path is provided, includes workflows in subfolders.
     pub async fn list_workflows(
