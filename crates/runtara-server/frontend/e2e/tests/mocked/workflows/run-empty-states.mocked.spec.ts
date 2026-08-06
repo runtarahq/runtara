@@ -17,18 +17,22 @@ test.describe('Run history empty states (mocked)', () => {
   async function mockRun(page: Page, mockApi: MockApi, status: string) {
     await mockApi.bootstrap(page);
     await mockApi.workflows.get(page, workflow.id, workflow);
-    await mockApi.workflows.instance(page, workflow.id, instanceId, {
-      data: {
+    await mockApi.workflows.instanceDetail(
+      page,
+      workflow.id,
+      instanceId,
+      {
         id: instanceId,
         workflowId: workflow.id,
         status,
         created: '2026-01-01T12:00:00Z',
+        started: '2026-01-01T12:00:00Z',
         finished: status === 'COMPLETED' ? '2026-01-01T12:00:02Z' : undefined,
         inputs: null,
         outputs: null,
       },
-      success: true,
-    });
+      { workflowName: workflow.name }
+    );
     // No steps and no events: the run recorded nothing at all.
     await mockApi.workflows.stepSummaries(page, workflow.id, instanceId, []);
     await mockApi.workflows.stepEvents(page, workflow.id, instanceId, []);
