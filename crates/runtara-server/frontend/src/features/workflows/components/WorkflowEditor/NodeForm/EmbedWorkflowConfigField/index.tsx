@@ -11,7 +11,7 @@ import { Label } from '@/shared/components/ui/label.tsx';
 import { WorkflowDto } from '@/generated/RuntaraRuntimeApi';
 import { NodeFormContext } from '../NodeFormContext.tsx';
 import { Icons } from '@/shared/components/icons.tsx';
-import { cn } from '@/lib/utils.ts';
+import { cn, formatDate } from '@/lib/utils.ts';
 import { useCustomQuery } from '@/shared/hooks/api';
 import { getWorkflowVersions } from '@/features/workflows/queries';
 import { queryKeys } from '@/shared/queries/query-keys';
@@ -193,7 +193,7 @@ export function EmbedWorkflowConfigField({
                         </span>
                         {version.createdAt && (
                           <span className="ml-2 text-muted-foreground">
-                            ({new Date(version.createdAt).toLocaleDateString()})
+                            ({formatDate(version.createdAt, 'dd MMM, yyyy')})
                           </span>
                         )}
                       </SelectItem>

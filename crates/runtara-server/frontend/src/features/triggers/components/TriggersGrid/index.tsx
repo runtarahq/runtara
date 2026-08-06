@@ -13,6 +13,7 @@ import {
   getEmailTriggerAddress,
   getChannelWebhookUrl,
 } from '@/features/triggers/utils/endpoints';
+import { formatDate } from '@/lib/utils';
 import { Badge } from '@/shared/components/ui/badge';
 import { Button } from '@/shared/components/ui/button';
 import { Can } from '@/shared/components/Can';
@@ -104,7 +105,7 @@ function formatLastRun(lastRun?: string | null): string {
   if (isNaN(date.getTime())) {
     return '—';
   }
-  return date.toLocaleString();
+  return formatDate(date);
 }
 
 export function TriggersGrid({

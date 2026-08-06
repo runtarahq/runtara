@@ -3,7 +3,7 @@ import { Check, RefreshCw } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button';
 import { Badge } from '@/shared/components/ui/badge';
 import { SectionLabel } from '@/shared/components/section-label';
-import { cn } from '@/lib/utils';
+import { cn, formatRelativeTime } from '@/lib/utils';
 import { WorkflowVersionInfoDto } from '@/features/workflows/queries';
 
 interface VersionsPanelContentProps {
@@ -35,24 +35,9 @@ function formatBytes(bytes?: number | null): string {
   return `${mb.toFixed(mb < 10 ? 1 : 0)} MB`;
 }
 
-/**
- * Get relative time string (e.g., "2 hours ago", "3 days ago")
- */
+/** Relative time for a version row, blank when the timestamp is missing. */
 function getRelativeTime(dateString?: string): string {
-  if (!dateString) return '';
-
-  const now = new Date();
-  const past = new Date(dateString);
-  const diffMs = now.getTime() - past.getTime();
-  const diffMins = Math.floor(diffMs / 60000);
-  const diffHours = Math.floor(diffMs / 3600000);
-  const diffDays = Math.floor(diffMs / 86400000);
-
-  if (diffMins < 1) return 'just now';
-  if (diffMins < 60) return `${diffMins} min ago`;
-  if (diffHours < 24) return `${diffHours} hr ago`;
-  if (diffDays < 7) return `${diffDays} days ago`;
-  return new Date(dateString).toLocaleString();
+  return dateString ? formatRelativeTime(dateString) : '';
 }
 
 /**

@@ -1,6 +1,7 @@
 import { type ReactNode } from 'react';
 import { Link } from 'react-router';
 import { BarChart3, Edit, PlusIcon } from 'lucide-react';
+import { formatDate } from '@/lib/utils';
 import { Button } from '@/shared/components/ui/button';
 import { WithTooltip } from '@/shared/components/ui/tooltip';
 import { Can } from '@/shared/components/Can';
@@ -99,7 +100,7 @@ export function ReportsListPage() {
                 </div>
               </TableCell>
               <TableCell className="whitespace-nowrap text-muted-foreground">
-                {new Date(report.updatedAt).toLocaleString()}
+                {formatDate(report.updatedAt)}
               </TableCell>
               <TableCell className="text-right">
                 <div className="flex items-center justify-end gap-1">
