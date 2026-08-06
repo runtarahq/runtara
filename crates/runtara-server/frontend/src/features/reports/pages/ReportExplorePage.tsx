@@ -53,6 +53,7 @@ import {
   encodeFilterValue,
   getFilterDefaultValue,
   humanizeFieldName,
+  isExplorableDataset,
   slugify,
 } from '../utils';
 
@@ -1411,10 +1412,6 @@ function visibleMeasures(dataset: ReportDatasetDefinition) {
   return dataset.measures.filter(
     (measure) => !(measure as { hidden?: boolean }).hidden
   );
-}
-
-function isExplorableDataset(dataset: ReportDatasetDefinition) {
-  return (dataset as { explorable?: boolean }).explorable !== false;
 }
 
 function buildPreviewBlock(
