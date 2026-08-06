@@ -3,6 +3,7 @@ import {
   getStatusDisplay,
   getTerminationTypeDisplay,
   isActiveStatus,
+  isFinishedStatus,
   isTerminalStatus,
 } from './status-display';
 
@@ -240,6 +241,55 @@ describe('status-display utilities', () => {
       statuses.forEach((status) => {
         expect(isTerminalStatus(status)).toBe(!isActiveStatus(status));
       });
+    });
+  });
+
+  describe('isFinishedStatus', () => {
+    it('returns true for statuses that end a run', () => {
+      [
+        'completed',
+        'success',
+        'failed',
+        'error',
+        'cancelled',
+        'aborted',
+        'timeout',
+      ].forEach((status) => {
+        expect(isFinishedStatus(status)).toBe(true);
+      });
+    });
+
+    it('returns false while a run can still progress', () => {
+      [
+        'running',
+        'queued',
+        'pending',
+        'compiling',
+        'suspended',
+        'not_started',
+      ].forEach((status) => {
+        expect(isFinishedStatus(status)).toBe(false);
+      });
+    });
+
+    it('returns false when the status is missing or unrecognized', () => {
+      expect(isFinishedStatus(null)).toBe(false);
+      expect(isFinishedStatus(undefined)).toBe(false);
+      expect(isFinishedStatus('')).toBe(false);
+      expect(isFinishedStatus('unknown')).toBe(false);
+      expect(isFinishedStatus('something_new')).toBe(false);
+    });
+
+    it('handles case-insensitive input', () => {
+      expect(isFinishedStatus('COMPLETED')).toBe(true);
+      expect(isFinishedStatus('Cancelled')).toBe(true);
+    });
+
+    it('is stricter than isTerminalStatus for unknown statuses', () => {
+      // isTerminalStatus is `!isActiveStatus`, so an absent status reads as
+      // terminal; isFinishedStatus must not make that claim.
+      expect(isTerminalStatus(null)).toBe(true);
+      expect(isFinishedStatus(null)).toBe(false);
     });
   });
 });

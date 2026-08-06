@@ -88,6 +88,26 @@ export interface MockApi {
       instanceId: string,
       body: unknown
     ) => Promise<void>;
+    instanceDetail: (
+      page: Page,
+      workflowId: string,
+      instanceId: string,
+      instance: unknown,
+      metadata?: unknown
+    ) => Promise<void>;
+    stepSummaries: (
+      page: Page,
+      workflowId: string,
+      instanceId: string,
+      steps: unknown[],
+      opts?: { total?: number }
+    ) => Promise<void>;
+    stepEvents: (
+      page: Page,
+      workflowId: string,
+      instanceId: string,
+      events: unknown[]
+    ) => Promise<void>;
   };
   triggers: {
     list: (page: Page, triggers: InvocationTrigger[]) => Promise<void>;
@@ -242,6 +262,44 @@ const factory: MockApi = {
       page.route(
         runtimeUrl(`workflows/${workflowId}/history/${instanceId}/logs`),
         (route) => fulfill(route, body as JsonBody)
+      ),
+    // `GET /workflows/{id}/instances/{id}` — what getWorkflowInstance() actually
+    // calls, and what the run-history page renders from. Note this is NOT the
+    // `.../history/{id}` path the `instance` helper above uses; the API exposes
+    // no such route, so that helper intercepts nothing.
+    instanceDetail: (page, workflowId, instanceId, instance, metadata) =>
+      page.route(
+        runtimeUrl(`workflows/${workflowId}/instances/${instanceId}`),
+        (route) =>
+          fulfill(route, {
+            data: { instance, ...(metadata ? { metadata } : {}) },
+            message: 'ok',
+            success: true,
+          })
+      ),
+    stepSummaries: (page, workflowId, instanceId, steps, opts) =>
+      page.route(
+        runtimeUrl(`workflows/${workflowId}/instances/${instanceId}/steps`),
+        (route) =>
+          fulfill(route, {
+            data: {
+              steps,
+              count: steps.length,
+              totalCount: opts?.total ?? steps.length,
+            },
+            success: true,
+          })
+      ),
+    stepEvents: (page, workflowId, instanceId, events) =>
+      page.route(
+        runtimeUrl(
+          `workflows/${workflowId}/instances/${instanceId}/step-events`
+        ),
+        (route) =>
+          fulfill(route, {
+            data: { events, count: events.length, totalCount: events.length },
+            success: true,
+          })
       ),
   },
   triggers: {
