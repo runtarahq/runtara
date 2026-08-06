@@ -8,7 +8,7 @@ import {
   MessageSquare,
 } from 'lucide-react';
 import { WorkflowDto } from '@/generated/RuntaraRuntimeApi';
-import { cn, formatDate } from '@/lib/utils.ts';
+import { cn, formatDate, formatRelativeTime } from '@/lib/utils.ts';
 import { Button } from '@/shared/components/ui/button.tsx';
 import { Can } from '@/shared/components/Can';
 import { TableCell, TableRow } from '@/shared/components/ui/table';
@@ -29,23 +29,6 @@ interface WorkflowCardProps {
   /** Whether to show the move to folder button */
   showMoveAction?: boolean;
 }
-
-const getRelativeTime = (date: string | undefined) => {
-  if (!date) return 'unknown time';
-
-  const now = new Date();
-  const past = new Date(date);
-  const diffMs = now.getTime() - past.getTime();
-  const diffMins = Math.floor(diffMs / 60000);
-  const diffHours = Math.floor(diffMs / 3600000);
-  const diffDays = Math.floor(diffMs / 86400000);
-
-  if (diffMins < 1) return 'just now';
-  if (diffMins < 60) return `${diffMins} min ago`;
-  if (diffHours < 24) return `${diffHours} hr ago`;
-  if (diffDays < 7) return `${diffDays} days ago`;
-  return formatDate(date);
-};
 
 export function WorkflowCard({
   workflow,
@@ -100,8 +83,13 @@ export function WorkflowCard({
           {description || <span className="text-muted-foreground/60">—</span>}
         </div>
       </TableCell>
-      <TableCell className="whitespace-nowrap text-muted-foreground">
-        {workflow.updated ? getRelativeTime(workflow.updated) : '—'}
+      <TableCell
+        className="whitespace-nowrap text-muted-foreground"
+        title={
+          workflow.updated ? formatRelativeTime(workflow.updated) : undefined
+        }
+      >
+        {workflow.updated ? formatDate(workflow.updated) : '—'}
       </TableCell>
       <TableCell className="text-right">
         <div className="flex items-center justify-end gap-1 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100">

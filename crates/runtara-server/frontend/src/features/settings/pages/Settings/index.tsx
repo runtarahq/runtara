@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { PlusIcon, Key, Ban } from 'lucide-react';
+import { formatDate } from '@/lib/utils';
 import { Button } from '@/shared/components/ui/button';
 import { WithTooltip } from '@/shared/components/ui/tooltip';
 import {
@@ -26,17 +27,6 @@ import { useApiKeys } from '../../hooks/useApiKeys';
 import { CreateApiKeyDialog } from '../../components/CreateApiKeyDialog';
 import { RevokeApiKeyDialog } from '../../components/RevokeApiKeyDialog';
 import type { ApiKey } from '@/generated/RuntaraRuntimeApi';
-
-function formatDate(dateStr: string | null | undefined) {
-  if (!dateStr) return 'Never';
-  return new Date(dateStr).toLocaleDateString(undefined, {
-    year: 'numeric',
-    month: 'short',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-  });
-}
 
 export function Settings() {
   const { data: apiKeys, isFetching, isError, error } = useApiKeys();

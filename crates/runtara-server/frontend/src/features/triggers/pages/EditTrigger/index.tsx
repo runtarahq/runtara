@@ -3,6 +3,7 @@ import { toast } from 'sonner';
 import { useCustomMutation, useCustomQuery } from '@/shared/hooks/api';
 import { queryKeys } from '@/shared/queries/query-keys';
 import { WorkflowDto } from '@/generated/RuntaraRuntimeApi';
+import { formatDate } from '@/lib/utils';
 import { Loader } from '@/shared/components/loader.tsx';
 import { PageContainer } from '@/shared/components/page-container';
 import { SectionLabel } from '@/shared/components/section-label';
@@ -251,7 +252,7 @@ export function EditTrigger() {
   const metadata = [
     trigger.data?.id ? `ID: ${trigger.data.id}` : null,
     trigger.data?.updatedAt
-      ? `Updated ${new Date(trigger.data.updatedAt).toLocaleString()}`
+      ? `Updated ${formatDate(trigger.data.updatedAt)}`
       : null,
   ].filter(Boolean) as string[];
 

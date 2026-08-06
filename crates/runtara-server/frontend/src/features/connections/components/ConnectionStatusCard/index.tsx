@@ -6,6 +6,7 @@ import type {
   ConnectionStatus,
   ConnectionTypeDto,
 } from '@/generated/RuntaraRuntimeApi';
+import { formatDate, formatRelativeTime } from '@/lib/utils';
 import { StatusPill } from '@/shared/components/console';
 import { Button } from '@/shared/components/ui/button';
 import {
@@ -51,19 +52,11 @@ type ConnectionStatusCardProps = {
   hasReauthChanges: boolean;
 };
 
+/** Relative time for the grant health line, omitted when unavailable. */
 function relativeTime(iso?: string): string | null {
   if (!iso) return null;
-  const then = new Date(iso).getTime();
-  if (Number.isNaN(then)) return null;
-  const seconds = Math.round((Date.now() - then) / 1000);
-  if (seconds < 60) return 'just now';
-  const minutes = Math.round(seconds / 60);
-  if (minutes < 60) return `${minutes} min ago`;
-  const hours = Math.round(minutes / 60);
-  if (hours < 24) return `${hours} h ago`;
-  const days = Math.round(hours / 24);
-  if (days < 30) return `${days} d ago`;
-  return new Date(iso).toLocaleDateString();
+  if (Number.isNaN(new Date(iso).getTime())) return null;
+  return formatRelativeTime(iso);
 }
 
 /** A never-authorized OAuth connection: reconnect-required with no grant yet. */
@@ -111,7 +104,7 @@ function grantHealthLine(
   if (!grantState || !grantState.hasAccessToken) return null;
   const authorized = relativeTime(grantState.authorizedAt ?? undefined);
   const expires = grantState.tokenExpiresAt
-    ? new Date(grantState.tokenExpiresAt).toLocaleString()
+    ? formatDate(grantState.tokenExpiresAt)
     : null;
   const parts: string[] = [];
   if (authorized) parts.push(`Authorized ${authorized}`);
