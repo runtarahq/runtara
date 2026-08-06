@@ -10,6 +10,7 @@ import {
   getDefaultReportViewTarget,
   getReportLayoutBlockIds,
   getReportViewBreadcrumbs,
+  hasExplorableDataset,
   isWorkflowActionDisabled,
   isWorkflowActionVisible,
   legacyToCanonicalCondition,
@@ -18,7 +19,11 @@ import {
   reportVisibilityToCanonicalCondition,
   truncateCellText,
 } from './utils';
-import type { ReportDefinition, ReportViewDefinition } from './types';
+import type {
+  ReportDatasetDefinition,
+  ReportDefinition,
+  ReportViewDefinition,
+} from './types';
 
 describe('report row conditions', () => {
   const row = {
@@ -538,5 +543,45 @@ describe('absolute time ranges', () => {
         dayRangeToAbsoluteTimeRange('2026-07-01', '2026-07-01')
       )
     ).toBe(expected.format(new Date('2026-07-01T00:00:00Z')));
+  });
+});
+
+describe('hasExplorableDataset', () => {
+  const definition: ReportDefinition = {
+    definitionVersion: 1,
+    layout: { id: 'root', columns: 1, items: [] },
+    filters: [],
+    blocks: [],
+  };
+
+  const dataset: ReportDatasetDefinition = {
+    id: 'orders',
+    label: 'Orders',
+    source: { schema: 'orders' },
+    dimensions: [{ field: 'status', label: 'Status', type: 'string' }],
+    measures: [{ id: 'total', label: 'Total', op: 'count', format: 'number' }],
+  };
+
+  it('is false when the definition carries no datasets at all', () => {
+    // `datasets` is optional on the wire, so both shapes reach the UI.
+    expect(hasExplorableDataset(definition)).toBe(false);
+    expect(hasExplorableDataset({ ...definition, datasets: [] })).toBe(false);
+  });
+
+  it('is true when at least one dataset is present', () => {
+    expect(hasExplorableDataset({ ...definition, datasets: [dataset] })).toBe(
+      true
+    );
+  });
+
+  it('ignores datasets explicitly opted out of Explore', () => {
+    const optedOut = { ...dataset, explorable: false };
+    expect(hasExplorableDataset({ ...definition, datasets: [optedOut] })).toBe(
+      false
+    );
+    // One explorable dataset among opted-out ones is still enough.
+    expect(
+      hasExplorableDataset({ ...definition, datasets: [optedOut, dataset] })
+    ).toBe(true);
   });
 });

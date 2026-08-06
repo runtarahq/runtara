@@ -63,6 +63,25 @@ const emptyReport: ReportDto = {
   },
 };
 
+const datasetReport: ReportDto = {
+  ...sampleReport,
+  id: 'rep_dataset',
+  definition: {
+    ...sampleReport.definition,
+    datasets: [
+      {
+        id: 'orders_ds',
+        label: 'Orders',
+        source: { schema: 'orders' },
+        dimensions: [{ field: 'status', label: 'Status', type: 'string' }],
+        measures: [
+          { id: 'total', label: 'Total', op: 'count', format: 'number' },
+        ],
+      },
+    ],
+  },
+};
+
 const stagedReport: ReportDto = {
   ...sampleReport,
   id: 'rep_staged',
@@ -93,18 +112,18 @@ const stagedReport: ReportDto = {
   },
 };
 
+const fixtureReports: ReportDto[] = [
+  sampleReport,
+  emptyReport,
+  datasetReport,
+  stagedReport,
+];
+
 const useReportRenderMock = vi.hoisted(() => vi.fn());
 
 vi.mock('../hooks/useReports', () => ({
   useReport: (reportId: string | undefined) => ({
-    data:
-      reportId === sampleReport.id
-        ? sampleReport
-        : reportId === emptyReport.id
-          ? emptyReport
-          : reportId === stagedReport.id
-            ? stagedReport
-            : null,
+    data: fixtureReports.find((report) => report.id === reportId) ?? null,
     isFetching: false,
   }),
   useReportRender: (...args: unknown[]) =>
@@ -234,6 +253,32 @@ describe('ReportPage existing-report load', () => {
       ).toBeInTheDocument();
     });
     expect(screen.getByText(/Switch to edit mode/i)).toBeInTheDocument();
+  });
+
+  it('withholds Explore from a report with no semantic dataset', async () => {
+    renderAt(`/reports/${sampleReport.id}`);
+
+    await waitFor(() => {
+      expect(screen.getByText('Orders')).toBeInTheDocument();
+    });
+    // Following it would land on a page that can only say Explore is
+    // unavailable here, so the action should not be offered at all.
+    expect(screen.queryByRole('button', { name: 'Explore' })).toBeNull();
+    // The sibling header actions are unaffected.
+    expect(screen.getByRole('button', { name: 'Print' })).toBeInTheDocument();
+  });
+
+  it('offers Explore once the report exposes a dataset', async () => {
+    renderAt(`/reports/${datasetReport.id}`);
+
+    await waitFor(() => {
+      expect(screen.getByText('Orders')).toBeInTheDocument();
+    });
+    expect(screen.getByRole('button', { name: 'Explore' })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Explore' })).toHaveAttribute(
+      'href',
+      `/reports/${datasetReport.id}/explore`
+    );
   });
 
   it('replaces an inaccessible future-stage URL with the server-resolved current view', async () => {

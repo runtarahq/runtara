@@ -1,6 +1,7 @@
 import {
   ReportBlockDefinition,
   ReportCondition,
+  ReportDatasetDefinition,
   ReportDefinition,
   ReportFilterDefinition,
   ReportGridLayoutNode,
@@ -299,6 +300,18 @@ export function getBlockById(
   blockId: string
 ): ReportBlockDefinition | undefined {
   return definition.blocks.find((block) => block.id === blockId);
+}
+
+export function isExplorableDataset(dataset: ReportDatasetDefinition): boolean {
+  return (dataset as { explorable?: boolean }).explorable !== false;
+}
+
+/** Whether Explore has anything to work with. The Explore screen renders only
+ * when the definition carries at least one explorable dataset, so the entry
+ * points that link to it gate on this same predicate — otherwise the action
+ * leads to a page that can only say it has nothing to show. */
+export function hasExplorableDataset(definition: ReportDefinition): boolean {
+  return (definition.datasets ?? []).some(isExplorableDataset);
 }
 
 export function isVisibleByShowWhen(

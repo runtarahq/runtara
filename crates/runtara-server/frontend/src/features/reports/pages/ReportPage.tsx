@@ -56,6 +56,7 @@ import {
   getDefaultReportViewId,
   getDefaultReportViewTarget,
   getReportLayoutBlockIds,
+  hasExplorableDataset,
   slugify,
 } from '../utils';
 import { normalizeReportDefinitionForSave } from '../normalizeDefinition';
@@ -526,8 +527,10 @@ export function ReportPage() {
   );
 
   const exploreSearch = searchParams.toString();
+  // Explore has nothing to offer a report with no semantic dataset — the page
+  // it links to can only say so. Withhold the action instead of leading there.
   const explorePath =
-    isExisting && reportId
+    isExisting && reportId && hasExplorableDataset(definition)
       ? `/reports/${reportId}/explore${exploreSearch ? `?${exploreSearch}` : ''}`
       : null;
 
