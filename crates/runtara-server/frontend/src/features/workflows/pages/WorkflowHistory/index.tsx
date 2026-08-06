@@ -62,6 +62,10 @@ import {
   getStatusDisplay,
   isActiveStatus,
 } from '@/shared/utils/status-display';
+import {
+  getRunEventsEmptyState,
+  getRunOutputEmptyState,
+} from '@/features/workflows/utils/run-empty-state';
 import { ExecutionTimeline } from '@/features/workflows/components/ExecutionTimeline';
 import { ReplayView } from '@/features/workflows/components/Replay';
 import { Tabs, TabsList, TabsTrigger } from '@/shared/components/ui/tabs';
@@ -282,6 +286,10 @@ export function WorkflowHistory() {
   if (!data) {
     return <Loader />;
   }
+
+  // Empty-state wording depends on whether the run can still produce something.
+  const outputEmptyState = getRunOutputEmptyState(data.status);
+  const eventsEmptyState = getRunEventsEmptyState(data.status, 'Events');
 
   return (
     <div className="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
@@ -811,10 +819,10 @@ export function WorkflowHistory() {
                     <Sparkles className="size-6 text-muted-foreground" />
                   </div>
                   <p className="mb-1 text-sm text-muted-foreground">
-                    No output data yet
+                    {outputEmptyState.title}
                   </p>
                   <p className="text-xs text-muted-foreground">
-                    Output will be available once the workflow completes
+                    {outputEmptyState.description}
                   </p>
                 </div>
               )}
@@ -1114,11 +1122,11 @@ export function WorkflowHistory() {
                 <div className="mb-4 inline-flex size-16 items-center justify-center rounded-full bg-purple-500/10">
                   <ChevronRight className="size-8 text-purple-600" />
                 </div>
-                <h3 className="mb-2 text-lg font-semibold">No Events Yet</h3>
+                <h3 className="mb-2 text-lg font-semibold">
+                  {eventsEmptyState.title}
+                </h3>
                 <p className="mx-auto max-w-md text-sm text-muted-foreground">
-                  Events will appear here as your workflow executes. If your
-                  workflow is still running, events may appear soon. Check back
-                  or refresh the page to see the latest events.
+                  {eventsEmptyState.description}
                 </p>
               </div>
             )}

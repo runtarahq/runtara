@@ -45,6 +45,7 @@ import { HumanInputCard } from '@/features/workflows/components/ExecutionPanel/H
 import { useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import { isActiveStatus } from '@/shared/utils/status-display';
+import { getRunEventsEmptyState } from '@/features/workflows/utils/run-empty-state';
 import { Spinner } from '@/shared/components/ui/spinner';
 
 interface ExecutionTimelineProps {
@@ -318,15 +319,18 @@ export function ExecutionTimeline({
   }
 
   if (visibleSteps.length === 0) {
+    const emptyState = getRunEventsEmptyState(
+      instanceData?.status,
+      'Timeline Events'
+    );
     return (
       <div className="px-6 py-16 text-center">
         <div className="mb-4 inline-flex size-16 items-center justify-center rounded-full bg-purple-500/10">
           <Clock className="size-8 text-purple-600" />
         </div>
-        <h3 className="mb-2 text-lg font-semibold">No Timeline Events Yet</h3>
+        <h3 className="mb-2 text-lg font-semibold">{emptyState.title}</h3>
         <p className="mx-auto max-w-md text-sm text-muted-foreground">
-          Timeline events will appear here as your workflow executes. If your
-          workflow is still running, events may appear soon.
+          {emptyState.description}
         </p>
       </div>
     );

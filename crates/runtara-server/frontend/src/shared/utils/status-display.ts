@@ -176,3 +176,24 @@ export function isActiveStatus(status: string | undefined | null): boolean {
 export function isTerminalStatus(status: string | undefined | null): boolean {
   return !isActiveStatus(status);
 }
+
+/**
+ * Check if a run has demonstrably stopped for good.
+ *
+ * Deliberately narrower than `isTerminalStatus` (which is `!isActiveStatus`, so a
+ * missing or unrecognized status reads as terminal): this only answers true for a
+ * status we recognize as an ending. Use it when saying "this run is over" would be
+ * wrong if we simply don't know yet — e.g. empty-state copy.
+ */
+export function isFinishedStatus(status: string | undefined | null): boolean {
+  const normalizedStatus = status?.toLowerCase() || '';
+  return [
+    'completed',
+    'success',
+    'failed',
+    'error',
+    'cancelled',
+    'aborted',
+    'timeout',
+  ].includes(normalizedStatus);
+}

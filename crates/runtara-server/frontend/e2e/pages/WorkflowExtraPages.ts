@@ -12,6 +12,18 @@ export class WorkflowLogsPage extends BasePage {
   }
 }
 
+export class WorkflowHistoryPage extends BasePage {
+  readonly path: string;
+  constructor(
+    page: import('@playwright/test').Page,
+    workflowId: string,
+    instanceId: string
+  ) {
+    super(page);
+    this.path = `/workflows/${workflowId}/history/${instanceId}`;
+  }
+}
+
 export class WorkflowChatPage extends BasePage {
   readonly path: string;
   constructor(
