@@ -29,6 +29,7 @@ import {
 } from '../utils';
 import {
   FieldControl,
+  optionKey,
   useResolvedOptions,
   type FormDefinition,
   type OptionResolver,
@@ -711,12 +712,6 @@ function labelForValue(value: unknown, options: FilterOption[]): string {
   const key = optionKey(value);
   const match = options.find((option) => optionKey(option.value) === key);
   return match?.label ?? String(value);
-}
-
-function optionKey(value: unknown): string {
-  if (value === null || value === undefined) return '__empty__';
-  if (typeof value === 'string') return value;
-  return JSON.stringify(value);
 }
 
 function formatOptionLabel(label: string, count?: number): string {

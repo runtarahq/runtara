@@ -18,7 +18,7 @@ import {
 import { ReportEditorConfig, ReportEditorKind } from '../../../types';
 import { useReportLookupOptions } from '../../../hooks/useReports';
 import { reportEditorToFormField } from '../../../form-adapters';
-import { FieldControl } from '@/shared/forms';
+import { FieldControl, optionKey } from '@/shared/forms';
 
 type FieldEditorProps = {
   value: unknown;
@@ -332,12 +332,6 @@ function isEmptyLookupValue(value: unknown): boolean {
   if (value === null || value === undefined) return true;
   if (typeof value === 'string') return value.trim().length === 0;
   return false;
-}
-
-function optionKey(value: unknown): string {
-  if (value === null || value === undefined) return '__empty__';
-  if (typeof value === 'string') return value;
-  return JSON.stringify(value);
 }
 
 function stringifyForInput(value: unknown, kind: ReportEditorKind): string {

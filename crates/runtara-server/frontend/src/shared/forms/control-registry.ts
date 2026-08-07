@@ -23,3 +23,16 @@ export function optionsFor(field: FormField): FormOption[] {
   if (field.control?.options?.length) return field.control.options;
   return (field.enum ?? []).map((value) => ({ value, label: String(value) }));
 }
+
+/**
+ * Keys an option value for controls that exchange DOM strings. Strings are
+ * emitted as-is so the rendered option value is the value that is stored;
+ * richer types are JSON-encoded to survive the round trip. Empty and nullish
+ * values collapse to a sentinel because a select item cannot carry an empty
+ * value.
+ */
+export function optionKey(value: unknown): string {
+  if (value === null || value === undefined || value === '') return '__empty__';
+  if (typeof value === 'string') return value;
+  return JSON.stringify(value);
+}
