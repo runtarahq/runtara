@@ -19,6 +19,11 @@ import { queryKeys } from '@/shared/queries/query-keys.ts';
 import { queryClient } from '@/main.tsx';
 import { folderCountLabel } from './folder-count-label';
 import {
+  folderWorkflowWindow,
+  rowPageCount,
+  workflowServerSlice,
+} from './row-window';
+import {
   cloneWorkflow,
   getWorkflowsInFolder,
   moveWorkflowToFolder,
@@ -161,6 +166,24 @@ export function WorkflowsGrid({
   // Fetch folders for move dialog
   const { data: foldersData } = useFolders();
 
+  // Folders and workflows are one row set, folders first: this page's folder
+  // slice comes off the client-side folder list, and whatever room is left is
+  // filled with workflows continuing from where the folders end.
+  const folderCount = folders.length;
+  const rowWindow = useMemo(
+    () => folderWorkflowWindow(folderCount, page, pageSize),
+    [folderCount, page, pageSize]
+  );
+  const workflowSlice = useMemo(
+    () =>
+      workflowServerSlice(
+        rowWindow.workflowOffset,
+        rowWindow.workflowLimit,
+        pageSize
+      ),
+    [rowWindow.workflowOffset, rowWindow.workflowLimit, pageSize]
+  );
+
   const {
     data: response,
     isFetching,
@@ -169,27 +192,55 @@ export function WorkflowsGrid({
   } = useCustomQuery({
     queryKey: [
       ...queryKeys.workflows.inFolder(folderPath ?? '/', false),
-      page,
+      workflowSlice.page,
+      workflowSlice.skip,
+      workflowSlice.take,
       pageSize,
       searchTerm,
     ],
-    queryFn: (token: string) =>
-      getWorkflowsInFolder(token, {
-        path: folderPath,
-        recursive: false,
-        page,
-        pageSize,
-        search: searchTerm?.trim() || undefined,
-      }),
+    queryFn: async (token: string) => {
+      const requestPage = (serverPage: number) =>
+        getWorkflowsInFolder(token, {
+          path: folderPath,
+          recursive: false,
+          page: serverPage,
+          pageSize,
+          search: searchTerm?.trim() || undefined,
+        });
+
+      const first = await requestPage(workflowSlice.page);
+      const content = (first.data?.content ?? []).slice(
+        workflowSlice.skip,
+        workflowSlice.skip + workflowSlice.take
+      );
+
+      // A folder block that is not a multiple of pageSize leaves every later
+      // window starting mid-page, so the tail of the page comes from the next one.
+      if (
+        content.length < workflowSlice.take &&
+        workflowSlice.page + 1 < (first.data?.totalPages ?? 0)
+      ) {
+        const second = await requestPage(workflowSlice.page + 1);
+        content.push(
+          ...(second.data?.content ?? []).slice(
+            0,
+            workflowSlice.take - content.length
+          )
+        );
+      }
+
+      return {
+        content: content as WorkflowDto[],
+        totalElements: first.data?.totalElements ?? 0,
+      };
+    },
   });
 
   // Extract workflows array and pagination info from paginated response
-  const workflows = useMemo(
-    () => (response?.data?.content || []) as WorkflowDto[],
-    [response?.data?.content]
-  );
-  const totalElements = response?.data?.totalElements ?? 0;
-  const totalPages = response?.data?.totalPages ?? 1;
+  const workflows = useMemo(() => response?.content ?? [], [response?.content]);
+  const workflowTotal = response?.totalElements ?? 0;
+  const totalElements = folderCount + workflowTotal;
+  const totalPages = rowPageCount(folderCount, workflowTotal, pageSize);
   // Server handles both folder and search filtering via query parameters
   // Client-side: sort only
   const filteredWorkflows = useMemo(() => {
@@ -374,9 +425,19 @@ export function WorkflowsGrid({
     [moveTarget, moveMutation]
   );
 
-  const hasFolders = folders.length > 0;
-  const hasWorkflows = filteredWorkflows.length > 0;
-  const hasContent = hasFolders || hasWorkflows;
+  const visibleFolders = useMemo(
+    () =>
+      folders.slice(
+        rowWindow.folderStart,
+        rowWindow.folderStart + rowWindow.folderTake
+      ),
+    [folders, rowWindow.folderStart, rowWindow.folderTake]
+  );
+
+  const hasFolders = folderCount > 0;
+  // Emptiness is a property of the whole listing, not of the page being viewed:
+  // a page filled entirely with folders is not an empty workflow list.
+  const hasContent = hasFolders || workflowTotal > 0;
 
   // Pagination display values
   const startRow = totalElements === 0 ? 0 : page * pageSize + 1;
@@ -427,7 +488,7 @@ export function WorkflowsGrid({
           </TableRow>
         </TableHeader>
         <TableBody>
-          {folders.map((folder) => {
+          {visibleFolders.map((folder) => {
             const count = folderWorkflowCounts[folder.path];
             return (
               <TableRow
@@ -494,7 +555,7 @@ export function WorkflowsGrid({
               pendingActionType={pendingAction?.type}
             />
           ))}
-          {!hasWorkflows && (
+          {workflowTotal === 0 && (
             <TableRow className="hover:bg-transparent">
               <TableCell
                 colSpan={4}
@@ -518,7 +579,7 @@ export function WorkflowsGrid({
             <TableStatusFooter
               left={`Rows ${startRow}–${endRow} of ${totalElements.toLocaleString()}${
                 hasFolders
-                  ? ` · ${folders.length} folder${folders.length === 1 ? '' : 's'}`
+                  ? ` · ${folderCount} folder${folderCount === 1 ? '' : 's'}`
                   : ''
               }`}
               right={
