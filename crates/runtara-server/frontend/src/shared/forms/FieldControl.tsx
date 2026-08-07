@@ -12,12 +12,8 @@ import {
 import { TagInput } from '@/shared/components/ui/tag-input';
 import { Textarea } from '@/shared/components/ui/textarea';
 
-import { inferControlKind, optionsFor } from './control-registry';
+import { inferControlKind, optionKey, optionsFor } from './control-registry';
 import type { FormField, FormOption } from './types';
-
-function optionKey(value: unknown): string {
-  return JSON.stringify(value);
-}
 
 interface FieldControlProps {
   id: string;
