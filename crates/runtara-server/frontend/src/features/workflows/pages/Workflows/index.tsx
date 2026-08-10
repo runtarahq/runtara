@@ -196,6 +196,7 @@ export function Workflows() {
         showMoveAction={true}
         folders={childFolders}
         folderWorkflowCounts={folderWorkflowCounts}
+        onClearSearch={() => setSearchTerm('')}
         onFolderNavigate={handleFolderNavigate}
         onFolderRename={setRenameFolderTarget}
         onFolderDelete={setDeleteFolderTarget}

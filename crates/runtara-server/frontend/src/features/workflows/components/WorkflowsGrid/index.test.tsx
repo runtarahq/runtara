@@ -1,3 +1,4 @@
+import type { ComponentProps } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -63,28 +64,37 @@ const allFolders = Array.from({ length: FOLDER_COUNT }, (_, i) => {
   return { name, path: `/${name}/` };
 });
 
-/** Stands in for GET /api/runtime/workflows, honouring its page/pageSize contract. */
+/**
+ * Stands in for GET /api/runtime/workflows, honouring its page/pageSize contract
+ * and its `search` parameter (case-insensitive substring on the name).
+ */
 function serveWorkflowPage(_token: string, params: Record<string, any>) {
   const pageSize = params.pageSize ?? 20;
   const page = params.page ?? 0;
   const start = page * pageSize;
-  const content = allWorkflows.slice(start, start + pageSize);
+  const search = (params.search ?? '').toLowerCase();
+  const matching = search
+    ? allWorkflows.filter((workflow) =>
+        (workflow.name || '').toLowerCase().includes(search)
+      )
+    : allWorkflows;
+  const content = matching.slice(start, start + pageSize);
 
   return Promise.resolve({
     data: {
       content,
       first: page === 0,
-      last: start + pageSize >= WORKFLOW_COUNT,
+      last: start + pageSize >= matching.length,
       number: page,
       numberOfElements: content.length,
       size: pageSize,
-      totalElements: WORKFLOW_COUNT,
-      totalPages: Math.ceil(WORKFLOW_COUNT / pageSize),
+      totalElements: matching.length,
+      totalPages: Math.ceil(matching.length / pageSize),
     },
   });
 }
 
-function renderGrid() {
+function renderGrid(props: Partial<ComponentProps<typeof WorkflowsGrid>> = {}) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
@@ -92,7 +102,12 @@ function renderGrid() {
   return render(
     <QueryClientProvider client={queryClient}>
       <MemoryRouter initialEntries={['/workflows']}>
-        <WorkflowsGrid searchTerm="" folderPath="/" folders={allFolders} />
+        <WorkflowsGrid
+          searchTerm=""
+          folderPath="/"
+          folders={allFolders}
+          {...props}
+        />
       </MemoryRouter>
     </QueryClientProvider>
   );
@@ -175,21 +190,7 @@ describe('WorkflowsGrid pagination', () => {
   });
 
   it('fills the first page with workflows when the folder list is short', async () => {
-    render(
-      <QueryClientProvider
-        client={
-          new QueryClient({ defaultOptions: { queries: { retry: false } } })
-        }
-      >
-        <MemoryRouter initialEntries={['/workflows']}>
-          <WorkflowsGrid
-            searchTerm=""
-            folderPath="/"
-            folders={allFolders.slice(0, 3)}
-          />
-        </MemoryRouter>
-      </QueryClientProvider>
-    );
+    renderGrid({ folders: allFolders.slice(0, 3) });
 
     await screen.findByText('Workflow 01');
     expect(folderRowNames()).toEqual(['folder-01', 'folder-02', 'folder-03']);
@@ -201,5 +202,118 @@ describe('WorkflowsGrid pagination', () => {
     await screen.findByText('Workflow 08');
     expect(folderRowNames()).toEqual([]);
     expect(screen.getByText('Workflow 17')).toBeInTheDocument();
+  });
+});
+
+describe('WorkflowsGrid search', () => {
+  beforeEach(() => {
+    mocks.getWorkflowsInFolder.mockReset();
+    mocks.getWorkflowsInFolder.mockImplementation(serveWorkflowPage);
+  });
+
+  it('filters folder rows alongside workflow rows', async () => {
+    // "01" is in exactly one folder name and one workflow name.
+    renderGrid({ searchTerm: '01' });
+
+    await screen.findByText('Workflow 01');
+    expect(folderRowNames()).toEqual(['folder-01']);
+    expect(screen.queryByText('Workflow 02')).not.toBeInTheDocument();
+    expect(screen.getByText('Rows 1–2 of 2 · 1 folder')).toBeInTheDocument();
+  });
+
+  it('pages the matching rows, not the unfiltered folder list', async () => {
+    // "0" matches folders 01–10 and workflows 01–09, 10, 20, 30, 40.
+    renderGrid({ searchTerm: '0' });
+
+    await screen.findByText('folder-01');
+    expect(folderRowNames()).toEqual([
+      'folder-01',
+      'folder-02',
+      'folder-03',
+      'folder-04',
+      'folder-05',
+      'folder-06',
+      'folder-07',
+      'folder-08',
+      'folder-09',
+      'folder-10',
+    ]);
+    expect(
+      screen.getByText('Rows 1–10 of 23 · 10 folders')
+    ).toBeInTheDocument();
+
+    // Page 2 starts at the first workflow: with all 12 folders counted it would
+    // still be showing folder rows here.
+    await goToNextPage();
+    await screen.findByText('Workflow 01');
+    expect(folderRowNames()).toEqual([]);
+    expect(screen.getByText('Workflow 10')).toBeInTheDocument();
+    expect(screen.queryByText('Workflow 20')).not.toBeInTheDocument();
+    expect(
+      screen.getByText('Rows 11–20 of 23 · 10 folders')
+    ).toBeInTheDocument();
+  });
+
+  it('explains a folder-only match instead of claiming the folder is empty', async () => {
+    // "folder-1" matches three folder names and no workflow.
+    renderGrid({ searchTerm: 'folder-1' });
+
+    await screen.findByText('folder-10');
+    expect(folderRowNames()).toEqual(['folder-10', 'folder-11', 'folder-12']);
+    expect(
+      screen.getByText('No workflows match your search.')
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText('No workflows in this folder yet.')
+    ).not.toBeInTheDocument();
+  });
+
+  it('shows a no-results state, not the first-run state, when nothing matches', async () => {
+    const onClearSearch = vi.fn();
+    renderGrid({ searchTerm: 'zzzznomatch', onClearSearch });
+
+    await screen.findByText('No matching workflows');
+    expect(folderRowNames()).toEqual([]);
+    expect(
+      screen.getByText('Nothing here matches “zzzznomatch”.')
+    ).toBeInTheDocument();
+    expect(screen.queryByText('No workflows yet')).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: 'Create workflow' })
+    ).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Clear search' }));
+    expect(onClearSearch).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the first-run state when the listing is empty without a search', async () => {
+    mocks.getWorkflowsInFolder.mockResolvedValue({
+      data: { content: [], totalElements: 0, totalPages: 0 },
+    });
+    renderGrid({ folders: [] });
+
+    await screen.findByText('No workflows yet');
+    expect(screen.queryByText('No matching workflows')).not.toBeInTheDocument();
+  });
+});
+
+describe('WorkflowsGrid empty-workflow row', () => {
+  beforeEach(() => {
+    mocks.getWorkflowsInFolder.mockReset();
+    mocks.getWorkflowsInFolder.mockResolvedValue({
+      data: { content: [], totalElements: 0, totalPages: 0 },
+    });
+  });
+
+  it('says the folders hold everything when the root has no loose workflows', async () => {
+    renderGrid({ folderPath: '/' });
+
+    await screen.findByText('No workflows outside these folders yet.');
+  });
+
+  it('scopes the copy to the folder being browsed', async () => {
+    renderGrid({ folderPath: '/folder-01/' });
+
+    await screen.findByText('No workflows in this folder yet.');
   });
 });
