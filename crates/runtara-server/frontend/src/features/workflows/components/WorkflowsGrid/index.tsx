@@ -7,6 +7,7 @@ import {
   ArrowUpDown,
   Folder,
   Pencil,
+  Search,
   Trash2,
 } from 'lucide-react';
 import { WorkflowDto } from '@/generated/RuntaraRuntimeApi';
@@ -18,6 +19,7 @@ import {
 import { queryKeys } from '@/shared/queries/query-keys.ts';
 import { queryClient } from '@/main.tsx';
 import { folderCountLabel } from './folder-count-label';
+import { matchFolders } from './folder-search';
 import {
   folderWorkflowWindow,
   rowPageCount,
@@ -79,6 +81,8 @@ interface WorkflowsGridProps {
   /** Child folders to render as the first rows of the table */
   folders?: WorkflowFolderItem[];
   folderWorkflowCounts?: Record<string, number>;
+  /** Clears the page's search box from the no-results state. */
+  onClearSearch?: () => void;
   onFolderNavigate?: (path: string) => void;
   onFolderRename?: (path: string) => void;
   onFolderDelete?: (path: string) => void;
@@ -127,6 +131,7 @@ export function WorkflowsGrid({
   showMoveAction = false,
   folders = [],
   folderWorkflowCounts = {},
+  onClearSearch,
   onFolderNavigate,
   onFolderRename,
   onFolderDelete,
@@ -166,10 +171,19 @@ export function WorkflowsGrid({
   // Fetch folders for move dialog
   const { data: foldersData } = useFolders();
 
+  const isSearching = searchTerm.trim().length > 0;
+
+  // Search covers the whole listing, so the folder rows are matched here — the
+  // workflow half is already filtered by the server's `search` parameter.
+  const matchedFolders = useMemo(
+    () => matchFolders(folders, searchTerm),
+    [folders, searchTerm]
+  );
+
   // Folders and workflows are one row set, folders first: this page's folder
   // slice comes off the client-side folder list, and whatever room is left is
   // filled with workflows continuing from where the folders end.
-  const folderCount = folders.length;
+  const folderCount = matchedFolders.length;
   const rowWindow = useMemo(
     () => folderWorkflowWindow(folderCount, page, pageSize),
     [folderCount, page, pageSize]
@@ -427,17 +441,26 @@ export function WorkflowsGrid({
 
   const visibleFolders = useMemo(
     () =>
-      folders.slice(
+      matchedFolders.slice(
         rowWindow.folderStart,
         rowWindow.folderStart + rowWindow.folderTake
       ),
-    [folders, rowWindow.folderStart, rowWindow.folderTake]
+    [matchedFolders, rowWindow.folderStart, rowWindow.folderTake]
   );
 
   const hasFolders = folderCount > 0;
   // Emptiness is a property of the whole listing, not of the page being viewed:
   // a page filled entirely with folders is not an empty workflow list.
   const hasContent = hasFolders || workflowTotal > 0;
+
+  // Only reachable with folder rows above it, so it explains the missing
+  // workflows rather than the listing as a whole — "yet" would be wrong under a
+  // search, and "in this folder" wrong at the root.
+  const noWorkflowRowsLabel = isSearching
+    ? 'No workflows match your search.'
+    : !folderPath || folderPath === '/'
+      ? 'No workflows outside these folders yet.'
+      : 'No workflows in this folder yet.';
 
   // Pagination display values
   const startRow = totalElements === 0 ? 0 : page * pageSize + 1;
@@ -450,6 +473,23 @@ export function WorkflowsGrid({
     );
   } else if (isError) {
     body = <ConsoleErrorState error={error} entityLabel="workflows" />;
+  } else if (!hasContent && isSearching) {
+    // A search that matches nothing is not a tenant with no workflows: offering
+    // "create your first workflow" here reads as if the listing were empty.
+    body = (
+      <ConsoleEmptyState
+        icon={<Search className="mb-4 size-10 text-muted-foreground" />}
+        title="No matching workflows"
+        description={`Nothing here matches “${searchTerm.trim()}”.`}
+        action={
+          onClearSearch ? (
+            <Button variant="secondary" bordered onClick={onClearSearch}>
+              Clear search
+            </Button>
+          ) : undefined
+        }
+      />
+    );
   } else if (!hasContent) {
     body = (
       <ConsoleEmptyState
@@ -561,7 +601,7 @@ export function WorkflowsGrid({
                 colSpan={4}
                 className="py-6 text-center text-sm text-muted-foreground"
               >
-                No workflows in this folder yet.
+                {noWorkflowRowsLabel}
               </TableCell>
             </TableRow>
           )}
