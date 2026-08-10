@@ -24,6 +24,7 @@ export const fieldsConfig = [
     name: 'workflowId',
     options: [],
     initialValue: '',
+    placeholder: 'Select a workflow',
     renderFormField: (config: Record<string, unknown>) => (
       <WorkflowField {...config} />
     ),

@@ -4,7 +4,7 @@ import { WorkflowDto } from '@/generated/RuntaraRuntimeApi';
 import { SelectInput } from '@/shared/components/select-input.tsx';
 
 export function WorkflowField(props: any) {
-  const { label, name, disabled, workflows } = props;
+  const { label, name, disabled, workflows, placeholder } = props;
 
   const { field } = useController({ name });
 
@@ -26,6 +26,7 @@ export function WorkflowField(props: any) {
       name={name}
       options={options}
       disabled={disabled}
+      placeholder={placeholder}
       onChange={handleChange}
     />
   );

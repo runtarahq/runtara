@@ -29,10 +29,12 @@ interface SelectInputProps {
   onChange?: (value: string) => void;
   description?: string;
   className?: string;
+  placeholder?: string;
 }
 
 export function SelectInput(props: SelectInputProps) {
-  const { label, name, options, disabled, onChange, description } = props;
+  const { label, name, options, disabled, onChange, description, placeholder } =
+    props;
 
   return (
     <FormField
@@ -47,8 +49,10 @@ export function SelectInput(props: SelectInputProps) {
                 value={field.value}
                 disabled={disabled}
               >
-                <SelectTrigger>
-                  <SelectValue placeholder="" />
+                {/* The muted class lives here rather than on the shared
+                    SelectTrigger so only this component's selects restyle. */}
+                <SelectTrigger className="data-[placeholder]:text-muted-foreground">
+                  <SelectValue placeholder={placeholder} />
                 </SelectTrigger>
                 <SelectContent>
                   <SelectGroup>
