@@ -15,13 +15,20 @@ test.describe('Create trigger (mocked)', () => {
 
     await view.expectHeading(/create trigger/i);
 
-    // Nothing is selected yet, so the workflow picker has to say so rather
-    // than render an empty box and only explain itself on submit.
-    await expect(
-      page.getByRole('combobox').filter({ hasText: 'Select a workflow' })
-    ).toBeVisible();
+    // Querying by accessible name is the assertion: the picker's label has to
+    // reach the Radix trigger. Nothing is selected yet, so it also has to say
+    // so rather than render an empty box and only explain itself on submit.
+    await expect(page.getByRole('combobox', { name: 'Workflow' })).toHaveText(
+      /Select a workflow/
+    );
 
-    await runA11y(page, { exclude: ['[data-sonner-toaster]'] });
+    // The selects on this form used to render as unnamed comboboxes. They no
+    // longer do, so hold the page to button-name rather than leaving it under
+    // the app-wide waiver.
+    await runA11y(page, {
+      exclude: ['[data-sonner-toaster]'],
+      enabledRules: ['button-name'],
+    });
     await view.expectMatchesSnapshot('triggers-create');
   });
 });

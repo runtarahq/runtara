@@ -26,8 +26,12 @@ const DEFAULT_BLOCKING_IMPACTS =
  * below should be tracked as tech debt in the backlog; do not add new entries
  * without a linked issue.
  *
+ * A page that has been cleaned up can opt back into a rule with `enabledRules`,
+ * which is how a fixed page stops regressing while the rest of the app catches
+ * up — see the trigger specs, which re-enable button-name.
+ *
  * Known debt:
- *   - button-name: icon-only buttons without aria-label (analytics, history, trigger forms)
+ *   - button-name: icon-only buttons without aria-label (analytics, history)
  *   - color-contrast: a handful of muted text colors below AA threshold
  *   - list / listitem: sidebar uses <ul><Component /></ul> which axe flags
  *   - aria-allowed-attr, aria-required-children, aria-required-parent: Radix UI primitives
@@ -50,6 +54,12 @@ export interface A11yFixtures {
       include?: string;
       exclude?: string[];
       disabledRules?: string[];
+      /**
+       * Opt a page back into a rule from DEFAULT_DISABLED_RULES, once that
+       * page no longer trips it. Keeps the fixed page from regressing without
+       * waiting on the rest of the app.
+       */
+      enabledRules?: string[];
       /** Lower the bar temporarily for a specific page. */
       blockingImpacts?: Array<'minor' | 'moderate' | 'serious' | 'critical'>;
     }
@@ -76,10 +86,11 @@ function makeRunner(testInfo: TestInfo) {
         builder = builder.exclude(sel);
       }
     }
+    const reEnabled = new Set(options.enabledRules ?? []);
     const disabled = [
       ...DEFAULT_DISABLED_RULES,
       ...(options.disabledRules ?? []),
-    ];
+    ].filter((rule) => !reEnabled.has(rule));
     if (disabled.length) {
       builder = builder.disableRules(disabled);
     }

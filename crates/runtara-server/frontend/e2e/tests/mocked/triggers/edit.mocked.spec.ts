@@ -24,7 +24,13 @@ test.describe('Edit trigger (mocked)', () => {
     await view.goto();
 
     await view.expectHeading(/edit trigger/i);
-    await runA11y(page, { exclude: ['[data-sonner-toaster]'] });
+    // The selects on this form used to render as unnamed comboboxes. They no
+    // longer do, so hold the page to button-name rather than leaving it under
+    // the app-wide waiver.
+    await runA11y(page, {
+      exclude: ['[data-sonner-toaster]'],
+      enabledRules: ['button-name'],
+    });
     await view.expectMatchesSnapshot('triggers-edit');
   });
 });
