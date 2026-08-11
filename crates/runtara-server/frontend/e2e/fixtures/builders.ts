@@ -77,6 +77,9 @@ export function buildWorkflow(
     created: nowIso(),
     updated: nowIso(),
     path: '/',
+    // Chat-capable by default so specs exercise the chat surface; pass
+    // `supportsChat: false` to get the "does not support chat" fallback.
+    supportsChat: true,
     ...overrides,
   } as WorkflowDto;
 }

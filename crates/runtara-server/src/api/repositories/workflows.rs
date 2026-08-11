@@ -3,7 +3,7 @@ use serde_json::Value;
 use sha2::Digest;
 use sqlx::{PgPool, Row};
 
-use crate::api::dto::workflows::{Note, WorkflowDto, WorkflowVersionInfoDto};
+use crate::api::dto::workflows::{Note, WorkflowDto, WorkflowVersionInfoDto, graph_supports_chat};
 use crate::types::MemoryTier;
 
 type WorkflowVersionRow = (
@@ -564,6 +564,10 @@ impl WorkflowRepository {
                         notes: Vec::new(), // Empty for list view (no execution graph loaded)
                         path: row.8.clone(),
                         slug: row.9.clone(),
+                        // The graph is withheld from list rows, but it is already
+                        // in hand here — so the chat predicate costs nothing extra
+                        // and the list can gate its Chat action on the real answer.
+                        supports_chat: graph_supports_chat(&execution_graph),
                     }
                 })
                 .collect();
@@ -680,6 +684,7 @@ impl WorkflowRepository {
                 notes: Note::extract_from_execution_graph(&r.0),
                 path: r.7.clone(),
                 slug: r.8.clone(),
+                supports_chat: graph_supports_chat(execution_graph),
             }
         }))
     }

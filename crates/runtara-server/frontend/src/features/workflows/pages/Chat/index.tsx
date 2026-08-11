@@ -1,6 +1,7 @@
 import { useEffect, useCallback, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router';
-import { ArrowLeft } from 'lucide-react';
+import { ArrowLeft, MessageSquareOff } from 'lucide-react';
+import { WorkflowDto } from '@/generated/RuntaraRuntimeApi';
 import { Button } from '@/shared/components/ui/button.tsx';
 import { usePageTitle } from '@/shared/hooks/usePageTitle';
 import { useCustomQuery } from '@/shared/hooks/api';
@@ -29,7 +30,21 @@ export function ChatPage() {
     enabled: !!workflowId,
   });
 
-  const workflowName = (workflowResponse as any)?.data?.name ?? 'Chat';
+  const workflow = (workflowResponse as { data?: WorkflowDto } | undefined)
+    ?.data;
+  const workflowName = workflow?.name ?? 'Chat';
+
+  // The server reports whether the graph contains a step that waits for a
+  // reply. Without one nothing ever reads what is typed here, so starting a
+  // session is a dead end and the page says so instead. Direct URLs still land
+  // here — this is the fallback for them, not a redirect.
+  //
+  // Resuming a run (`:instanceId`) is exempt: it already has a transcript, and
+  // Invocation History only links here for a run that is holding a pending
+  // input. Refusing that would block the one reply the user came to give.
+  const isWorkflowLoaded = !!workflow;
+  const supportsChat = workflow?.supportsChat === true;
+  const isDeadEnd = isWorkflowLoaded && !instanceId && !supportsChat;
 
   usePageTitle(`Chat - ${workflowName}`);
 
@@ -55,6 +70,10 @@ export function ChatPage() {
   // Initialize or resume chat on mount
   useEffect(() => {
     if (!workflowId) return;
+    // Nothing starts until the workflow has answered — a new session on a
+    // workflow that never waits allocated an instance for a chat that could
+    // never reply.
+    if (!isWorkflowLoaded || isDeadEnd) return;
     if (initRef.current) return;
     initRef.current = true;
 
@@ -113,7 +132,7 @@ export function ChatPage() {
       cancelStream();
       useChatStore.getState().resetChat();
     };
-  }, [workflowId, instanceId]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [workflowId, instanceId, isWorkflowLoaded, isDeadEnd]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleBack = useCallback(() => {
     navigate(`/workflows/${workflowId}`);
@@ -151,18 +170,37 @@ export function ChatPage() {
         </div>
       )}
 
-      {/* Message list */}
-      <ChatMessageList messages={messages} />
+      {isDeadEnd ? (
+        <div className="flex flex-1 flex-col items-center justify-center px-4 text-center">
+          <MessageSquareOff className="mb-3 size-10 text-muted-foreground/40" />
+          <p className="text-sm font-medium text-foreground">
+            This workflow does not support chat
+          </p>
+          <p className="mt-1 max-w-md text-xs text-muted-foreground">
+            A conversation needs a step that waits for your reply. Add a Wait
+            for signal step — on its own, or as an AI Agent tool — and this
+            workflow will start accepting messages.
+          </p>
+          <Button variant="secondary" className="mt-4" onClick={handleBack}>
+            Open workflow
+          </Button>
+        </div>
+      ) : (
+        <>
+          {/* Message list */}
+          <ChatMessageList messages={messages} />
 
-      {/* Input */}
-      <ChatInput
-        onSend={sendMessage}
-        onSignalResponse={sendMessage}
-        status={status}
-        waitingForInput={waitingForInput}
-        instanceId={storeInstanceId}
-        token={token}
-      />
+          {/* Input */}
+          <ChatInput
+            onSend={sendMessage}
+            onSignalResponse={sendMessage}
+            status={status}
+            waitingForInput={waitingForInput}
+            instanceId={storeInstanceId}
+            token={token}
+          />
+        </>
+      )}
     </div>
   );
 }
