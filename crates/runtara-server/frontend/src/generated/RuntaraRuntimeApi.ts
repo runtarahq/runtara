@@ -5845,6 +5845,13 @@ export interface WorkflowDto {
    */
   slug?: string | null;
   started?: string | null;
+  /**
+   * Whether this version can hold a conversation, i.e. whether it contains a
+   * step that waits for a reply. See `graph_supports_chat`. Consumers use it
+   * to decide whether to offer chat at all, rather than opening a surface
+   * that accepts messages nothing will ever read.
+   */
+  supportsChat?: boolean;
   /** Whether this version is compiled with step-event tracking instrumentation */
   trackEvents?: boolean;
   updated: string;

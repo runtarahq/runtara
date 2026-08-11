@@ -252,6 +252,8 @@ impl WorkflowService {
             notes: Vec::new(), // Empty notes for new workflow
             path,
             slug: Some(slug),
+            // A new workflow's graph has no steps at all, so nothing waits yet.
+            supports_chat: false,
         })
     }
 

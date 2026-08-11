@@ -55,6 +55,10 @@ export function WorkflowCard({
   const rawSchema =
     (workflow as any).inputSchema ?? (workflow as any).input_schema ?? {};
   const hasInputs = parseSchema(rawSchema).length > 0;
+  // The server answers whether this workflow has a step that waits for a reply.
+  // Without one the chat surface accepts messages nothing ever reads, so the
+  // row does not offer the action at all.
+  const supportsChat = workflow.supportsChat === true;
 
   return (
     <TableRow className={cn('group', className)}>
@@ -109,7 +113,7 @@ export function WorkflowCard({
               )}
             </Button>
           </Can>
-          {onChat && (
+          {onChat && supportsChat && (
             <Button
               variant="secondary"
               size="icon-sm"

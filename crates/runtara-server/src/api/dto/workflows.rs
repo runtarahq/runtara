@@ -710,6 +710,48 @@ impl Note {
     }
 }
 
+/// Whether a workflow's graph can hold a conversation.
+///
+/// A message typed into the chat surface only ever reaches a workflow through the
+/// session bridge, which pops it off the session queue and delivers it as a signal
+/// when the running instance asks for external input. Only a `WaitForSignal` step
+/// asks. A graph without one still starts an instance for every message sent, but
+/// nothing ever consumes what was typed — so chat there is a dead end.
+///
+/// The walk is a plain recursion over the stored JSON rather than a
+/// `runtara_dsl::ExecutionGraph` parse: the step structs are `deny_unknown_fields`,
+/// so a strict parse would turn any schema drift into "no chat" and hide a working
+/// feature. Walking the raw value also covers `Split`/`While` subgraphs, a
+/// `WaitForSignal`'s `onWait` branch, and AI Agent tool edges without naming them,
+/// since all of those are inlined in the same definition.
+///
+/// One case it cannot see: an `EmbedWorkflow` step names its child by id, so a
+/// child that waits is invisible here. The chat page stays reachable by direct URL
+/// for exactly that reason.
+pub fn graph_supports_chat(execution_graph: &Value) -> bool {
+    /// Depth ceiling, so a pathological definition cannot blow the stack. Real
+    /// graphs nest a handful of levels (subgraph within subgraph within onWait).
+    const MAX_DEPTH: u32 = 64;
+
+    fn walk(value: &Value, depth: u32) -> bool {
+        if depth > MAX_DEPTH {
+            return false;
+        }
+        match value {
+            Value::Object(map) => {
+                if map.get("stepType").and_then(|v| v.as_str()) == Some("WaitForSignal") {
+                    return true;
+                }
+                map.values().any(|child| walk(child, depth + 1))
+            }
+            Value::Array(items) => items.iter().any(|item| walk(item, depth + 1)),
+            _ => false,
+        }
+    }
+
+    walk(execution_graph, 0)
+}
+
 #[allow(dead_code)]
 #[derive(Serialize, Deserialize, ToSchema, Clone)]
 pub struct WorkflowDto {
@@ -764,6 +806,12 @@ pub struct WorkflowDto {
     /// on rename. `None` only for rows created before the slug backfill ran.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slug: Option<String>,
+    /// Whether this version can hold a conversation, i.e. whether it contains a
+    /// step that waits for a reply. See `graph_supports_chat`. Consumers use it
+    /// to decide whether to offer chat at all, rather than opening a surface
+    /// that accepts messages nothing will ever read.
+    #[serde(default, rename = "supportsChat")]
+    pub supports_chat: bool,
 }
 
 fn default_path() -> String {
@@ -1620,5 +1668,100 @@ mod tests {
         let last = PageWorkflowDto::new(vec![], 100, 4, 20);
         assert!(last.last);
         assert!(!last.first);
+    }
+
+    #[test]
+    fn a_top_level_wait_makes_a_workflow_chattable() {
+        let graph = json!({
+            "entryPoint": "ask",
+            "steps": {
+                "ask": {
+                    "stepType": "WaitForSignal",
+                    "id": "ask",
+                    "responseSchema": {"message": {"type": "string"}}
+                },
+                "finish": {"stepType": "Finish", "id": "finish"}
+            }
+        });
+        assert!(graph_supports_chat(&graph));
+    }
+
+    #[test]
+    fn a_wait_nested_in_a_subgraph_still_counts() {
+        // Split/While bodies and onWait branches are inlined in the same
+        // definition, so the recursion reaches them without naming each shape.
+        let graph = json!({
+            "entryPoint": "loop",
+            "steps": {
+                "loop": {
+                    "stepType": "While",
+                    "id": "loop",
+                    "subgraph": {
+                        "entryPoint": "ask",
+                        "steps": {
+                            "ask": {"stepType": "WaitForSignal", "id": "ask"}
+                        }
+                    }
+                }
+            }
+        });
+        assert!(graph_supports_chat(&graph));
+    }
+
+    #[test]
+    fn a_wait_reached_as_an_ai_agent_tool_counts() {
+        // The agent's tools are labelled edges onto ordinary steps, so the wait
+        // is a peer of the agent rather than nested inside it.
+        let graph = json!({
+            "entryPoint": "agent",
+            "steps": {
+                "agent": {"stepType": "AiAgent", "id": "agent", "model": "claude"},
+                "ask_user": {"stepType": "WaitForSignal", "id": "ask_user"}
+            },
+            "executionPlan": [
+                {"fromStep": "agent", "toStep": "ask_user", "label": "tool:ask_user"}
+            ]
+        });
+        assert!(graph_supports_chat(&graph));
+    }
+
+    #[test]
+    fn a_workflow_that_never_waits_is_not_chattable() {
+        // The Log-only shape from the deep test: it runs, it finishes, and it
+        // never gives the session bridge a signal to hand the message to.
+        let graph = json!({
+            "entryPoint": "log",
+            "steps": {
+                "log": {"stepType": "Log", "id": "log", "message": "hello"},
+                "call": {
+                    "stepType": "Agent",
+                    "id": "call",
+                    "agentId": "http",
+                    "capabilityId": "request"
+                },
+                "finish": {"stepType": "Finish", "id": "finish"}
+            }
+        });
+        assert!(!graph_supports_chat(&graph));
+    }
+
+    #[test]
+    fn empty_and_malformed_graphs_are_not_chattable() {
+        assert!(!graph_supports_chat(&json!({})));
+        assert!(!graph_supports_chat(&json!({"steps": {}})));
+        assert!(!graph_supports_chat(&json!({"nonsense": true})));
+        assert!(!graph_supports_chat(&json!(null)));
+        assert!(!graph_supports_chat(&json!("WaitForSignal")));
+    }
+
+    #[test]
+    fn deep_nesting_terminates_instead_of_overflowing() {
+        // Build a graph nested past the depth ceiling; the answer degrades to
+        // "no chat", but the walk must return rather than blow the stack.
+        let mut graph = json!({"stepType": "WaitForSignal", "id": "deep"});
+        for _ in 0..200 {
+            graph = json!({"subgraph": graph});
+        }
+        assert!(!graph_supports_chat(&graph));
     }
 }
