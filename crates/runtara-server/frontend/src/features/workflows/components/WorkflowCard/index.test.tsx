@@ -1,8 +1,9 @@
 import { render, screen } from '@testing-library/react';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { WorkflowDto } from '@/generated/RuntaraRuntimeApi';
 import { Table, TableBody } from '@/shared/components/ui/table';
+import { useAuthStore } from '@/shared/stores/authStore';
 import { WorkflowCard } from './index';
 
 function buildWorkflow(overrides: Partial<WorkflowDto> = {}): WorkflowDto {
@@ -39,6 +40,12 @@ function renderCard(workflow: WorkflowDto, onChat = vi.fn()) {
   );
 }
 
+beforeEach(() => {
+  // No resolved permission set — `useHasPermission` then allows everything, so
+  // these cases isolate the capability gate from the permission gate.
+  useAuthStore.getState().clearMe();
+});
+
 describe('WorkflowCard chat action', () => {
   it('offers Chat on a workflow that can hold a conversation', () => {
     renderCard(buildWorkflow({ supportsChat: true }));
@@ -61,5 +68,35 @@ describe('WorkflowCard chat action', () => {
     renderCard(buildWorkflow());
 
     expect(screen.queryByTitle('Chat')).not.toBeInTheDocument();
+  });
+});
+
+describe('WorkflowCard chat action permissions', () => {
+  it('withholds Chat from a caller who cannot execute workflows', () => {
+    // Opening chat queues a run, so a role that cannot Start cannot chat
+    // either — the server rejects the session POST on the same permission.
+    useAuthStore.getState().setMe({
+      role: 'viewer',
+      permissions: { 'workflow:read': 'allow' },
+    });
+
+    renderCard(buildWorkflow({ supportsChat: true }));
+
+    expect(screen.queryByTitle('Chat')).not.toBeInTheDocument();
+    expect(screen.queryByTitle('Start')).not.toBeInTheDocument();
+  });
+
+  it('offers Chat to a caller who may execute workflows', () => {
+    useAuthStore.getState().setMe({
+      role: 'member',
+      permissions: { 'workflow:read': 'allow', 'workflow:execute': 'allow' },
+    });
+
+    renderCard(buildWorkflow({ supportsChat: true }));
+
+    expect(screen.getByTitle('Chat')).toBeInTheDocument();
+    expect(screen.getByTitle('Start')).toBeInTheDocument();
+    // Execute alone does not unlock the edit-class actions.
+    expect(screen.queryByTitle('Edit')).not.toBeInTheDocument();
   });
 });
