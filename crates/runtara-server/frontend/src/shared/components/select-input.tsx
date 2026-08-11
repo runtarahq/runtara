@@ -43,32 +43,37 @@ export function SelectInput(props: SelectInputProps) {
         return (
           <FormItem>
             {label && <FormLabel>{label}</FormLabel>}
-            <FormControl>
-              <Select
-                onValueChange={onChange}
-                value={field.value}
-                disabled={disabled}
-              >
+            <Select
+              onValueChange={onChange}
+              value={field.value}
+              disabled={disabled}
+            >
+              {/* FormControl is a Slot: it forwards the form item id and the
+                  aria attributes to its immediate child. That child has to be
+                  the trigger, not the Radix root, or they land on a component
+                  that renders no DOM and the label above associates with
+                  nothing. */}
+              <FormControl>
                 {/* The muted class lives here rather than on the shared
                     SelectTrigger so only this component's selects restyle. */}
                 <SelectTrigger className="data-[placeholder]:text-muted-foreground">
                   <SelectValue placeholder={placeholder} />
                 </SelectTrigger>
-                <SelectContent>
-                  <SelectGroup>
-                    {options.map((option) => (
-                      <SelectItem
-                        key={option.value}
-                        value={option.value}
-                        disabled={option.disabled}
-                      >
-                        {option.label}
-                      </SelectItem>
-                    ))}
-                  </SelectGroup>
-                </SelectContent>
-              </Select>
-            </FormControl>
+              </FormControl>
+              <SelectContent>
+                <SelectGroup>
+                  {options.map((option) => (
+                    <SelectItem
+                      key={option.value}
+                      value={option.value}
+                      disabled={option.disabled}
+                    >
+                      {option.label}
+                    </SelectItem>
+                  ))}
+                </SelectGroup>
+              </SelectContent>
+            </Select>
             {description && <FormDescription>{description}</FormDescription>}
             <FormMessage />
           </FormItem>

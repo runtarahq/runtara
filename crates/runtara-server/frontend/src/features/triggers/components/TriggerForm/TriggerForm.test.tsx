@@ -1,4 +1,4 @@
-import { render, screen, within } from '@testing-library/react';
+import { render, screen } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter } from 'react-router';
 import { beforeAll, describe, expect, it, vi } from 'vitest';
@@ -36,13 +36,8 @@ function renderForm(initValues?: TriggerSchemaType) {
   );
 }
 
-// SelectInput leaves its Radix trigger without an id, so the label is not
-// programmatically associated with it and the combobox has no accessible
-// name. Scope the lookup to the field that holds the "Workflow" label.
-function workflowCombobox() {
-  const field = screen.getByText('Workflow').closest('div');
-  return within(field as HTMLElement).getByRole('combobox');
-}
+const workflowCombobox = () =>
+  screen.getByRole('combobox', { name: 'Workflow' });
 
 describe('TriggerForm workflow field', () => {
   beforeAll(() => {
