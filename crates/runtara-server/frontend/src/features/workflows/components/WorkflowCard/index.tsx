@@ -114,14 +114,19 @@ export function WorkflowCard({
             </Button>
           </Can>
           {onChat && supportsChat && (
-            <Button
-              variant="secondary"
-              size="icon-sm"
-              onClick={() => onChat(workflow)}
-              title="Chat"
-            >
-              <MessageSquare className="size-4" />
-            </Button>
+            // Opening chat queues a run, so it is execute-class like Start —
+            // the server maps POST /workflows/{id}/sessions to the same
+            // permission.
+            <Can permission="workflow:execute">
+              <Button
+                variant="secondary"
+                size="icon-sm"
+                onClick={() => onChat(workflow)}
+                title="Chat"
+              >
+                <MessageSquare className="size-4" />
+              </Button>
+            </Can>
           )}
           <Can permission="workflow:update">
             <Button
