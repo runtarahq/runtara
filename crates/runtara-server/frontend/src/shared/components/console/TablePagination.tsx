@@ -5,8 +5,7 @@ import {
   ChevronRight,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
-
-const PAGE_SIZE_OPTIONS = [10, 20, 50, 100];
+import { PAGE_SIZE_OPTIONS } from './page-size-options';
 
 export interface TablePaginationProps {
   pageIndex: number;

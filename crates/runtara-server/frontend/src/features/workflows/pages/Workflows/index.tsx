@@ -1,4 +1,4 @@
-import { useState, useMemo, useCallback } from 'react';
+import { useState, useMemo, useCallback, useEffect, useRef } from 'react';
 import { Link, useSearchParams } from 'react-router';
 import { PlusIcon } from 'lucide-react';
 import { toast } from 'sonner';
@@ -25,15 +25,53 @@ import {
   getChildFolders,
 } from '../../hooks/useFolders';
 import { createWorkflowHref } from '../../folder-nav';
+import {
+  readListUrlState,
+  writeListUrlState,
+} from '../../components/WorkflowsGrid/list-url-state';
 
 export function Workflows() {
   usePageTitle('Workflows');
   const [searchParams, setSearchParams] = useSearchParams();
-  const [searchTerm, setSearchTerm] = useState('');
-  const debouncedSearchTerm = useDebounce(searchTerm, 300);
 
   // Folder navigation state - derived from URL search params for proper browser history support
   const currentFolderPath = searchParams.get('folder') || '/';
+
+  // The URL owns the query and the listing reads it from there. The box keeps
+  // its own copy so typing stays responsive, and only the settled value is
+  // written — a history entry per keystroke would make Back useless.
+  const urlSearchTerm = readListUrlState(searchParams).search;
+  const [searchInput, setSearchInput] = useState(urlSearchTerm);
+  const debouncedInput = useDebounce(searchInput, 300);
+  // Whitespace is no query at all, and the URL says so by holding nothing.
+  const settledSearchTerm = debouncedInput.trim() ? debouncedInput : '';
+  // The last value the two sides agreed on, so each sync below can tell its own
+  // write from a change that came from elsewhere — a back/forward, or a link
+  // opened with a query already on it — instead of the two overwriting in a loop.
+  const syncedSearchTerm = useRef(urlSearchTerm);
+
+  // Box → URL.
+  useEffect(() => {
+    // The debounce still trailing the box means this fired for some other
+    // reason — `setSearchParams` is a new function after every navigation — and
+    // the settled value is the one from before that navigation. Writing it back
+    // is how a Back taken mid-debounce used to bounce straight forward again.
+    if (debouncedInput !== searchInput) return;
+    if (settledSearchTerm === syncedSearchTerm.current) return;
+    syncedSearchTerm.current = settledSearchTerm;
+    setSearchParams(
+      (prev) => writeListUrlState(prev, { search: settledSearchTerm }),
+      { replace: true }
+    );
+  }, [debouncedInput, searchInput, settledSearchTerm, setSearchParams]);
+
+  // URL → box, for the queries this page didn't type: a back/forward, or a link
+  // opened with one already on it.
+  useEffect(() => {
+    if (urlSearchTerm === syncedSearchTerm.current) return;
+    syncedSearchTerm.current = urlSearchTerm;
+    setSearchInput(urlSearchTerm);
+  }, [urlSearchTerm]);
 
   // Dialog state
   const [renameFolderTarget, setRenameFolderTarget] = useState<string | null>(
@@ -71,19 +109,13 @@ export function Workflows() {
   // Folder navigation - updates URL to enable browser back/forward navigation
   const handleFolderNavigate = useCallback(
     (path: string) => {
-      if (path === '/') {
-        setSearchParams((prev) => {
-          const next = new URLSearchParams(prev);
-          next.delete('folder');
-          return next;
-        });
-      } else {
-        setSearchParams((prev) => {
-          const next = new URLSearchParams(prev);
-          next.set('folder', path);
-          return next;
-        });
-      }
+      setSearchParams((prev) => {
+        const next = new URLSearchParams(prev);
+        if (path === '/') next.delete('folder');
+        else next.set('folder', path);
+        // Another folder is another listing, so the page index goes with it.
+        return writeListUrlState(next, { page: 0 });
+      });
     },
     [setSearchParams]
   );
@@ -128,7 +160,7 @@ export function Workflows() {
             (prev) => {
               const next = new URLSearchParams(prev);
               next.delete('folder');
-              return next;
+              return writeListUrlState(next, { page: 0 });
             },
             { replace: true }
           );
@@ -168,8 +200,8 @@ export function Workflows() {
       left={<Breadcrumb items={breadcrumbItems} />}
       search={
         <ToolbarSearch
-          value={searchTerm}
-          onChange={setSearchTerm}
+          value={searchInput}
+          onChange={setSearchInput}
           placeholder="Search workflows…"
           className="w-56"
         />
@@ -191,12 +223,12 @@ export function Workflows() {
     <>
       <WorkflowsGrid
         toolbar={toolbar}
-        searchTerm={debouncedSearchTerm}
+        searchTerm={urlSearchTerm}
         folderPath={currentFolderPath}
         showMoveAction={true}
         folders={childFolders}
         folderWorkflowCounts={folderWorkflowCounts}
-        onClearSearch={() => setSearchTerm('')}
+        onClearSearch={() => setSearchInput('')}
         onFolderNavigate={handleFolderNavigate}
         onFolderRename={setRenameFolderTarget}
         onFolderDelete={setDeleteFolderTarget}

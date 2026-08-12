@@ -2,7 +2,7 @@ import type { ComponentProps } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { MemoryRouter } from 'react-router';
+import { MemoryRouter, useLocation } from 'react-router';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { WorkflowDto } from '@/generated/RuntaraRuntimeApi';
@@ -94,23 +94,37 @@ function serveWorkflowPage(_token: string, params: Record<string, any>) {
   });
 }
 
-function renderGrid(props: Partial<ComponentProps<typeof WorkflowsGrid>> = {}) {
+/** Reports the live query string so tests can assert on the URL the grid writes. */
+function LocationProbe() {
+  const location = useLocation();
+  return <output data-testid="location-search">{location.search}</output>;
+}
+
+function renderGrid(
+  props: Partial<ComponentProps<typeof WorkflowsGrid>> = {},
+  initialEntry = '/workflows'
+) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
 
   return render(
     <QueryClientProvider client={queryClient}>
-      <MemoryRouter initialEntries={['/workflows']}>
+      <MemoryRouter initialEntries={[initialEntry]}>
         <WorkflowsGrid
           searchTerm=""
           folderPath="/"
           folders={allFolders}
           {...props}
         />
+        <LocationProbe />
       </MemoryRouter>
     </QueryClientProvider>
   );
+}
+
+function locationSearch(): string {
+  return screen.getByTestId('location-search').textContent ?? '';
 }
 
 function folderRowNames(): string[] {
@@ -315,5 +329,66 @@ describe('WorkflowsGrid empty-workflow row', () => {
     renderGrid({ folderPath: '/folder-01/' });
 
     await screen.findByText('No workflows in this folder yet.');
+  });
+});
+
+describe('WorkflowsGrid URL state', () => {
+  beforeEach(() => {
+    mocks.getWorkflowsInFolder.mockReset();
+    mocks.getWorkflowsInFolder.mockImplementation(serveWorkflowPage);
+  });
+
+  it('opens on the page and size the URL asks for', async () => {
+    // Page 2 of 20 rows: the 12 folders and workflows 1–8 are behind us.
+    renderGrid({}, '/workflows?page=2&pageSize=20');
+
+    await screen.findByText('Workflow 09');
+    expect(folderRowNames()).toEqual([]);
+    expect(screen.getByText('Workflow 28')).toBeInTheDocument();
+    expect(screen.queryByText('Workflow 29')).not.toBeInTheDocument();
+    expect(
+      screen.getByText('Rows 21–40 of 55 · 12 folders')
+    ).toBeInTheDocument();
+  });
+
+  it('puts the page it turns to in the URL', async () => {
+    renderGrid();
+
+    await screen.findByText('folder-01');
+    expect(locationSearch()).toBe('');
+
+    await goToNextPage();
+    await screen.findByText('Workflow 01');
+    expect(locationSearch()).toBe('?page=2');
+  });
+
+  it('records a new page size and returns to the first page', async () => {
+    renderGrid({}, '/workflows?page=3');
+
+    await screen.findByText('Workflow 09');
+    await userEvent.selectOptions(screen.getByLabelText('Rows per page'), '20');
+
+    await screen.findByText('folder-01');
+    expect(locationSearch()).toBe('?pageSize=20');
+  });
+
+  it('lands on the last page when the URL asks for one past the end', async () => {
+    // What a shared link turns into once the listing it pointed at shrinks.
+    renderGrid({}, '/workflows?page=99');
+
+    await screen.findByText('Workflow 43');
+    expect(locationSearch()).toBe('?page=6');
+    expect(
+      screen.getByText('Rows 51–55 of 55 · 12 folders')
+    ).toBeInTheDocument();
+  });
+
+  it('drops a size it had to ignore instead of leaving the URL claiming it', async () => {
+    renderGrid({}, '/workflows?pageSize=7&q=keep-me');
+
+    await screen.findByText('folder-01');
+    expect(screen.getByLabelText('Rows per page')).toHaveValue('10');
+    // The listing's own parameters are corrected; the rest is left alone.
+    expect(locationSearch()).toBe('?q=keep-me');
   });
 });

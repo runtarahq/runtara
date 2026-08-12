@@ -1,5 +1,5 @@
 import { ReactNode, useCallback, useEffect, useMemo, useState } from 'react';
-import { Link, useNavigate } from 'react-router';
+import { Link, useNavigate, useSearchParams } from 'react-router';
 import { toast } from 'sonner';
 import {
   ArrowDown,
@@ -25,6 +25,7 @@ import {
   rowPageCount,
   workflowServerSlice,
 } from './row-window';
+import { readListUrlState, writeListUrlState } from './list-url-state';
 import {
   cloneWorkflow,
   getWorkflowsInFolder,
@@ -59,8 +60,6 @@ import { MoveToFolderDialog } from '../FolderDialogs';
 import { ConfirmationDialog } from '@/shared/components/confirmation-dialog';
 import { parseSchema } from '@/features/workflows/utils/schema';
 import { useFolders } from '../../hooks/useFolders';
-
-const DEFAULT_PAGE_SIZE = 10;
 
 interface WorkflowFolderItem {
   name: string;
@@ -159,14 +158,39 @@ export function WorkflowsGrid({
     );
   }, []);
 
-  // Pagination state (API uses 0-based pages)
-  const [page, setPage] = useState(0);
-  const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
+  // Pagination lives in the URL so the view survives a reload and can be shared
+  // (API and control are both 0-based; the URL is 1-based).
+  const [searchParams, setSearchParams] = useSearchParams();
+  const { page, pageSize } = readListUrlState(searchParams);
 
-  // Reset to first page when folder or search changes
+  // Turning a page is a navigation of its own, so it pushes: Back returns to the
+  // page you came from. Resizing keeps the same listing, so it replaces — and
+  // drops the page index, whose rows the new size no longer lines up with.
+  const goToPage = useCallback(
+    (next: number) => {
+      setSearchParams((current) => writeListUrlState(current, { page: next }));
+    },
+    [setSearchParams]
+  );
+  const changePageSize = useCallback(
+    (next: number) => {
+      setSearchParams(
+        (current) => writeListUrlState(current, { pageSize: next }),
+        { replace: true }
+      );
+    },
+    [setSearchParams]
+  );
+
+  // A parameter the listing had to ignore — a hand-edited `pageSize=7`, a
+  // default spelled out — shouldn't sit in the URL describing a view that isn't
+  // the one on screen. Write back what was actually read.
   useEffect(() => {
-    setPage(0);
-  }, [folderPath, searchTerm]);
+    const canonical = writeListUrlState(searchParams, { page, pageSize });
+    if (canonical.toString() !== searchParams.toString()) {
+      setSearchParams(canonical, { replace: true });
+    }
+  }, [searchParams, page, pageSize, setSearchParams]);
 
   // Fetch folders for move dialog
   const { data: foldersData } = useFolders();
@@ -255,6 +279,20 @@ export function WorkflowsGrid({
   const workflowTotal = response?.totalElements ?? 0;
   const totalElements = folderCount + workflowTotal;
   const totalPages = rowPageCount(folderCount, workflowTotal, pageSize);
+
+  // A link can outlive the rows it pointed at — a shared `?page=9` for a listing
+  // that has since shrunk. Land on the last page that exists rather than on an
+  // empty table, and replace so Back doesn't return to the dead page.
+  useEffect(() => {
+    if (isFetching || isError || !response) return;
+    if (page > 0 && page >= totalPages) {
+      setSearchParams(
+        (current) => writeListUrlState(current, { page: totalPages - 1 }),
+        { replace: true }
+      );
+    }
+  }, [isFetching, isError, response, page, totalPages, setSearchParams]);
+
   // Server handles both folder and search filtering via query parameters
   // Client-side: sort only
   const filteredWorkflows = useMemo(() => {
@@ -627,11 +665,8 @@ export function WorkflowsGrid({
                   pageIndex={page}
                   pageSize={pageSize}
                   pageCount={totalPages}
-                  onPageChange={setPage}
-                  onPageSizeChange={(size) => {
-                    setPageSize(size);
-                    setPage(0);
-                  }}
+                  onPageChange={goToPage}
+                  onPageSizeChange={changePageSize}
                 />
               }
             />
