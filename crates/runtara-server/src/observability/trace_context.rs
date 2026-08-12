@@ -87,14 +87,100 @@ mod tests {
     // each other and produce flaky results.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+    /// Run `f` under a thread-local subscriber carrying a real OpenTelemetry
+    /// tracer, so span contexts are valid regardless of what the rest of the
+    /// test binary has installed globally. `with_default` scopes the
+    /// subscriber to this thread, so parallel tests are unaffected.
+    fn with_otel_subscriber<T>(f: impl FnOnce() -> T) -> T {
+        use opentelemetry::trace::TracerProvider as _;
+        use opentelemetry_sdk::trace::SdkTracerProvider;
+        use tracing_subscriber::layer::SubscriberExt;
+
+        // No exporter: spans are still sampled and assigned real ids, they
+        // just go nowhere, which is all these assertions need.
+        let provider = SdkTracerProvider::builder().build();
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_opentelemetry::layer().with_tracer(provider.tracer("trace-context-test")),
+        );
+        tracing::subscriber::with_default(subscriber, f)
+    }
+
     #[test]
     fn test_format_traceparent_no_active_span() {
-        // Without an active span, should return None.
-        // This test does not touch env vars, so no lock is needed.
-        let result = format_traceparent();
-        // May or may not be None depending on whether OTel is initialised in
-        // the test process — just ensure it doesn't panic.
-        let _ = result;
+        // A subscriber with no OpenTelemetry layer yields no span context, so
+        // there is nothing to propagate. Pinning the subscriber makes the
+        // answer deterministic instead of depending on whether some other test
+        // in this binary happened to initialise OTel first.
+        let result = tracing::subscriber::with_default(tracing_subscriber::registry(), || {
+            let span = tracing::info_span!("no_otel_layer");
+            let _entered = span.enter();
+            format_traceparent()
+        });
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_format_traceparent_with_active_span() {
+        let (traceparent, context) = with_otel_subscriber(|| {
+            let span = tracing::info_span!("outbound");
+            let _entered = span.enter();
+            (format_traceparent(), get_current_trace_context())
+        });
+
+        let traceparent = traceparent.expect("an active sampled span must produce a traceparent");
+
+        // W3C traceparent: version "00", 32-hex trace id, 16-hex span id, and
+        // the sampled flag. A child process parses this verbatim, so the field
+        // widths matter as much as the values.
+        let fields: Vec<&str> = traceparent.split('-').collect();
+        assert_eq!(fields.len(), 4, "malformed traceparent {traceparent:?}");
+        assert_eq!(fields[0], "00");
+        assert_eq!(fields[1].len(), 32, "trace id must be 32 hex chars");
+        assert_eq!(fields[2].len(), 16, "span id must be 16 hex chars");
+        assert_eq!(fields[3], "01");
+        assert!(
+            fields[1]
+                .chars()
+                .chain(fields[2].chars())
+                .all(|c| c.is_ascii_hexdigit()),
+            "trace and span ids must be lower-hex, got {traceparent:?}"
+        );
+
+        // Neither id may be the all-zero "invalid" sentinel.
+        assert_ne!(fields[1], "0".repeat(32));
+        assert_ne!(fields[2], "0".repeat(16));
+
+        // The header is exactly the pair `get_current_trace_context` reports.
+        let (trace_id, span_id) = context.expect("context must be present alongside traceparent");
+        assert_eq!(fields[1], trace_id);
+        assert_eq!(fields[2], span_id);
+    }
+
+    #[test]
+    fn test_sibling_spans_share_a_trace_but_not_a_span_id() {
+        // Propagation is only useful if the span id actually tracks the span
+        // being propagated from; a stale or constant span id would still pass
+        // every shape check above.
+        let (outer, inner) = with_otel_subscriber(|| {
+            let outer_span = tracing::info_span!("outer");
+            let _outer = outer_span.enter();
+            let outer_ctx = get_current_trace_context();
+
+            let inner_span = tracing::info_span!("inner");
+            let _inner = inner_span.enter();
+            let inner_ctx = get_current_trace_context();
+
+            (outer_ctx, inner_ctx)
+        });
+
+        let (outer_trace, outer_span) = outer.expect("outer span context");
+        let (inner_trace, inner_span) = inner.expect("inner span context");
+
+        assert_eq!(
+            outer_trace, inner_trace,
+            "a child span joins its parent trace"
+        );
+        assert_ne!(outer_span, inner_span, "each span needs its own span id");
     }
 
     #[test]

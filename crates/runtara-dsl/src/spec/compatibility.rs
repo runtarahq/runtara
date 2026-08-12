@@ -476,8 +476,15 @@ mod tests {
             BreakingChangeType::RemovedStepType
         ));
         assert_eq!(report.breaking_changes[0].component, "GroupBy");
-        // GroupBy has a migration guide
-        assert!(report.breaking_changes[0].migration_guide.is_some());
+        // GroupBy has a migration guide, and it must name the replacement.
+        assert!(
+            report.breaking_changes[0]
+                .migration_guide
+                .as_deref()
+                .is_some_and(|g| g.contains("transform.group-by")),
+            "got {:?}",
+            report.breaking_changes[0].migration_guide
+        );
     }
 
     #[test]
@@ -898,42 +905,40 @@ mod tests {
     }
 
     // ============================================================================
-    // BreakingChangeType Tests
+    // Migration guidance on removals
     // ============================================================================
 
+    /// A removed step type only carries a migration guide when a replacement
+    /// actually exists. `test_dsl_compatibility_step_removed` pins the GroupBy
+    /// case; this pins the other side of that branch, so a guide can't start
+    /// leaking onto every removal.
     #[test]
-    fn test_breaking_change_type_variants() {
-        let variants = vec![
-            BreakingChangeType::RemovedStepType,
-            BreakingChangeType::RemovedAgent,
-            BreakingChangeType::RemovedCapability,
-            BreakingChangeType::RequiredFieldAdded,
-            BreakingChangeType::TypeChanged,
-            BreakingChangeType::EnumValueRemoved,
-        ];
-        // Just verify all variants can be created and debugged
-        for variant in variants {
-            let _ = format!("{:?}", variant);
-        }
-    }
+    fn removed_step_type_without_a_replacement_has_no_migration_guide() {
+        let old_spec = json!({
+            "definitions": {
+                "Step": {
+                    "oneOf": [
+                        { "$ref": "#/definitions/AgentStep" },
+                        { "$ref": "#/definitions/LogStep" }
+                    ]
+                }
+            }
+        });
+        let new_spec = json!({
+            "definitions": {
+                "Step": {
+                    "oneOf": [
+                        { "$ref": "#/definitions/AgentStep" }
+                    ]
+                }
+            }
+        });
 
-    // ============================================================================
-    // CompatibleChangeType Tests
-    // ============================================================================
+        let report = check_dsl_compatibility(&old_spec, &new_spec);
 
-    #[test]
-    fn test_compatible_change_type_variants() {
-        let variants = vec![
-            CompatibleChangeType::AddedStepType,
-            CompatibleChangeType::AddedAgent,
-            CompatibleChangeType::AddedCapability,
-            CompatibleChangeType::OptionalFieldAdded,
-            CompatibleChangeType::EnumValueAdded,
-            CompatibleChangeType::DescriptionUpdated,
-        ];
-        for variant in variants {
-            let _ = format!("{:?}", variant);
-        }
+        assert_eq!(report.breaking_changes.len(), 1);
+        assert_eq!(report.breaking_changes[0].component, "Log");
+        assert!(report.breaking_changes[0].migration_guide.is_none());
     }
 
     // ============================================================================

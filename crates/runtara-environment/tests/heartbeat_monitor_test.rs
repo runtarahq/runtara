@@ -516,21 +516,8 @@ fn test_heartbeat_monitor_config_debug() {
 }
 
 // ============================================================================
-// HeartbeatMonitor Creation Tests
+// HeartbeatMonitor Lifecycle Tests
 // ============================================================================
-
-#[tokio::test]
-async fn test_heartbeat_monitor_creation() {
-    skip_if_no_db!();
-    let pool = get_test_pool().await;
-
-    let persistence = Arc::new(MockPersistence::new());
-    let config = HeartbeatMonitorConfig::default();
-
-    let monitor = HeartbeatMonitor::new(pool, persistence, Arc::new(MockRunner), config);
-    let _shutdown = monitor.shutdown_handle();
-    // Monitor created successfully
-}
 
 #[tokio::test]
 async fn test_heartbeat_monitor_shutdown() {
@@ -551,15 +538,20 @@ async fn test_heartbeat_monitor_shutdown() {
         monitor.run().await;
     });
 
-    // Give it a moment to start
+    // Give it a moment to start, so shutdown races against a running poll loop
+    // rather than arriving before `run` has begun.
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Signal shutdown
     shutdown.notify_one();
 
-    // Wait for it to stop (with timeout)
-    let result = tokio::time::timeout(Duration::from_secs(2), handle).await;
-    assert!(result.is_ok(), "Monitor should shutdown promptly");
+    // Wait for it to stop (with timeout). Both layers matter: the outer one is
+    // "did it stop in time", the inner one is "did it stop cleanly" — a panic
+    // inside `run` also joins promptly and would otherwise pass unnoticed.
+    tokio::time::timeout(Duration::from_secs(2), handle)
+        .await
+        .expect("monitor should shut down within 2s of being notified")
+        .expect("monitor task should exit cleanly, not panic");
 }
 
 // ============================================================================

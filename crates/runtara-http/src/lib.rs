@@ -468,48 +468,133 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_create_client() {
-        let _client = HttpClient::new();
-    }
-
-    #[test]
-    fn test_create_client_with_timeout() {
-        let _client = HttpClient::with_timeout(Duration::from_secs(5));
+    fn test_request_starts_empty_from_either_constructor() {
+        // The client-level timeout lives inside the backend agent and isn't
+        // observable from here; what both constructors must guarantee is that
+        // `request` seeds a builder with the verb and URL and nothing else.
+        for client in [
+            HttpClient::new(),
+            HttpClient::with_timeout(Duration::from_secs(5)),
+        ] {
+            let req = client.request("GET", "http://example.com/path");
+            assert_eq!(req.method, "GET");
+            assert_eq!(req.url, "http://example.com/path");
+            assert!(req.headers.is_empty());
+            assert!(req.query_params.is_empty());
+            assert!(req.body.is_none());
+            assert!(req.timeout.is_none());
+        }
     }
 
     #[test]
     fn test_request_builder_headers() {
         let client = HttpClient::new();
-        let _req = client
+        let req = client
             .request("GET", "http://example.com")
             .header("Authorization", "Bearer token")
             .header("Accept", "application/json");
+
+        // Order is preserved: some servers are sensitive to header ordering,
+        // and repeated keys must accumulate rather than overwrite.
+        assert_eq!(
+            req.headers,
+            vec![
+                ("Authorization".to_string(), "Bearer token".to_string()),
+                ("Accept".to_string(), "application/json".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_request_builder_repeated_header_key_accumulates() {
+        let client = HttpClient::new();
+        let req = client
+            .request("GET", "http://example.com")
+            .header("Set-Cookie", "a=1")
+            .header("Set-Cookie", "b=2");
+
+        assert_eq!(
+            req.headers,
+            vec![
+                ("Set-Cookie".to_string(), "a=1".to_string()),
+                ("Set-Cookie".to_string(), "b=2".to_string()),
+            ]
+        );
     }
 
     #[test]
     fn test_request_builder_query_params() {
         let client = HttpClient::new();
-        let _req = client
+        let req = client
             .request("GET", "http://example.com")
             .query("page", "1")
             .query("limit", "10");
+
+        assert_eq!(
+            req.query_params,
+            vec![
+                ("page".to_string(), "1".to_string()),
+                ("limit".to_string(), "10".to_string()),
+            ]
+        );
+        // Query params must not leak into the URL until the request executes.
+        assert_eq!(req.url, "http://example.com");
     }
 
     #[test]
     fn test_request_builder_json_body() {
         let client = HttpClient::new();
         let body = serde_json::json!({"key": "value"});
-        let _req = client
+        let req = client
             .request("POST", "http://example.com")
             .body_json(&body);
+
+        match req.body {
+            Some(Body::Json(ref value)) => assert_eq!(*value, body),
+            Some(Body::Bytes(_)) => panic!("body_json stored a byte body"),
+            None => panic!("body_json stored no body"),
+        }
     }
 
     #[test]
     fn test_request_builder_bytes_body() {
         let client = HttpClient::new();
-        let _req = client
+        let req = client
             .request("PUT", "http://example.com")
             .body_bytes(b"raw data");
+
+        match req.body {
+            Some(Body::Bytes(ref bytes)) => assert_eq!(bytes.as_slice(), b"raw data"),
+            Some(Body::Json(_)) => panic!("body_bytes stored a JSON body"),
+            None => panic!("body_bytes stored no body"),
+        }
+    }
+
+    #[test]
+    fn test_request_builder_last_body_wins() {
+        let client = HttpClient::new();
+        let req = client
+            .request("POST", "http://example.com")
+            .body_json(&serde_json::json!({"key": "value"}))
+            .body_bytes(b"raw data");
+
+        // A single request carries a single body; the later call replaces the
+        // earlier one rather than sending both or silently keeping the first.
+        match req.body {
+            Some(Body::Bytes(ref bytes)) => assert_eq!(bytes.as_slice(), b"raw data"),
+            Some(Body::Json(_)) => panic!("the earlier JSON body survived body_bytes"),
+            None => panic!("no body was stored"),
+        }
+    }
+
+    #[test]
+    fn test_request_builder_timeout_is_recorded() {
+        let client = HttpClient::new();
+        let req = client
+            .request("GET", "http://example.com")
+            .timeout(Duration::from_secs(7));
+
+        assert_eq!(req.timeout, Some(Duration::from_secs(7)));
     }
 
     #[test]
