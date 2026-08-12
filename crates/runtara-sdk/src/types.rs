@@ -612,12 +612,43 @@ mod tests {
     }
 
     #[test]
-    fn test_retry_config_delay_overflow_protection() {
-        // Test that we don't overflow with very large values
+    fn test_retry_config_delay_saturates_on_multiply_overflow() {
+        // `delay_ms * 2^63` overflows u64. Saturating to the maximum delay is
+        // what keeps a failing call backing off; wrapping would hand back a
+        // tiny duration and turn the backoff into a retry storm.
         let config = RetryConfig::new(100, u64::MAX, RetryStrategy::ExponentialBackoff);
-        // This should use saturating_mul and not panic
-        let _delay = config.delay_for_attempt(64); // 2^63 would overflow
-        // Just verify it doesn't panic
+        assert_eq!(
+            config.delay_for_attempt(64),
+            std::time::Duration::from_millis(u64::MAX)
+        );
+    }
+
+    #[test]
+    fn test_retry_config_delay_saturates_on_exponent_overflow() {
+        // Attempt 65 asks for 2^64, which does not fit in u64. The multiplier
+        // itself must saturate before it ever reaches the multiply.
+        let config = RetryConfig::new(100, 1, RetryStrategy::ExponentialBackoff);
+        assert_eq!(
+            config.delay_for_attempt(65),
+            std::time::Duration::from_millis(u64::MAX)
+        );
+    }
+
+    #[test]
+    fn test_retry_config_delay_never_decreases_with_attempt() {
+        // The property that actually matters: no attempt may back off less than
+        // the attempt before it, including across both saturation points.
+        let config = RetryConfig::new(100, 1000, RetryStrategy::ExponentialBackoff);
+        let mut previous = config.delay_for_attempt(0);
+        for attempt in 1..=70 {
+            let current = config.delay_for_attempt(attempt);
+            assert!(
+                current >= previous,
+                "attempt {attempt} backs off {current:?}, less than the previous {previous:?}"
+            );
+            previous = current;
+        }
+        assert_eq!(previous, std::time::Duration::from_millis(u64::MAX));
     }
 
     #[test]

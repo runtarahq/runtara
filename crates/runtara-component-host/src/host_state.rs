@@ -276,7 +276,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn host_state_builds_with_full_context() {
+    fn host_state_shares_one_call_context_with_its_hooks() {
         let ctx = Arc::new(CallContext::for_test(
             "tenant-1",
             "http://proxy.local:7001",
@@ -284,7 +284,34 @@ mod tests {
             "http://obj.local:7003",
             "http://core.local:7004",
         ));
-        let _state = HostState::new(ctx);
+        let state = HostState::new(Arc::clone(&ctx));
+
+        // The hooks must see the same context the state was built from — a
+        // divergence here would let host calls run against another tenant.
+        assert!(Arc::ptr_eq(&state.ctx, &ctx));
+        assert!(Arc::ptr_eq(&state.hooks.ctx, &ctx));
+    }
+
+    #[test]
+    fn host_state_starts_unterminated_with_default_table_cap() {
+        let ctx = Arc::new(CallContext::for_test(
+            "tenant-1",
+            "http://proxy.local:7001",
+            "http://agent.local:7002",
+            "http://obj.local:7003",
+            "http://core.local:7004",
+        ));
+        let state = HostState::new(ctx);
+
+        // A fresh state has not been interrupted; the epoch callback is the
+        // only thing allowed to set this.
+        assert!(state.termination.is_none());
+        assert_eq!(
+            state.limiter.max_table_elements,
+            DEFAULT_GUEST_TABLE_MAX_ELEMENTS
+        );
+        assert_eq!(state.limiter.memory_peak_bytes, 0);
+        assert!(!state.limiter.denied_memory_grow);
     }
 
     #[test]

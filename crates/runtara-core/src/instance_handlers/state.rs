@@ -61,10 +61,35 @@ mod tests {
     use crate::instance_handlers::mock_persistence::MockPersistence;
 
     #[test]
-    fn test_instance_handler_state_new() {
-        let persistence = Arc::new(MockPersistence::new());
-        let state = InstanceHandlerState::new(persistence);
-        // Just verify it compiles and persistence is accessible
-        let _ = &state.persistence;
+    fn new_disables_the_concurrency_cap_and_starts_undrained() {
+        let state = InstanceHandlerState::new(Arc::new(MockPersistence::new()));
+
+        // 0 is the documented "no cap" value — a nonzero default here would
+        // silently start refusing registrations.
+        assert_eq!(state.max_concurrent_instances, 0);
+        assert!(!state.is_draining());
+    }
+
+    #[test]
+    fn with_limits_carries_the_concurrency_cap() {
+        let state = InstanceHandlerState::with_limits(Arc::new(MockPersistence::new()), 12);
+
+        assert_eq!(state.max_concurrent_instances, 12);
+        assert!(!state.is_draining());
+    }
+
+    #[test]
+    fn draining_handle_aliases_the_flag_the_state_reads() {
+        let state = InstanceHandlerState::new(Arc::new(MockPersistence::new()));
+        let handle = state.draining_handle();
+
+        // The handle exists so an external coordinator can request drain; if it
+        // were a copy rather than an alias, drain would be silently ignored.
+        assert!(!state.is_draining());
+        handle.store(true, Ordering::SeqCst);
+        assert!(state.is_draining());
+
+        handle.store(false, Ordering::SeqCst);
+        assert!(!state.is_draining());
     }
 }
