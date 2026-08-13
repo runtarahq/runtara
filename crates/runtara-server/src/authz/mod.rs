@@ -10,10 +10,16 @@
 //! The map is expressed per role: each [`Role`] owns a constant list of the permissions it
 //! grants and the scope of each (see [`Role::grants`]). A permission absent from a role's
 //! list is denied.
+//!
+//! A credential may narrow what it exercises of its role — see [`ApiKeyScope`] in [`scope`].
+
+pub mod scope;
 
 use std::fmt;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
+
+pub use scope::ApiKeyScope;
 
 /// Built-in tenant roles, most- to least-privileged.
 ///
@@ -191,6 +197,21 @@ impl Permission {
     /// Parse a colon-style wire identifier back into a `Permission`.
     pub fn from_wire(s: &str) -> Option<Permission> {
         Permission::ALL.into_iter().find(|p| p.as_str() == s)
+    }
+
+    /// Whether this permission is a read — the `<resource>:read` half of the vocabulary.
+    ///
+    /// Derived from the wire form rather than a hand-kept list, so a permission added to the
+    /// enum joins or stays out of the read set by its own name instead of by remembering to
+    /// edit a second place. This is what [`ApiKeyScope::ReadOnly`] narrows to; the exact
+    /// membership is pinned by `is_read_matches_the_read_permissions`.
+    ///
+    /// Note this is a property of the *permission*, not of the HTTP method: routes that read
+    /// via `POST` (SQL queries, report renders, graph validation) map to a read permission and
+    /// are reads here, while `GET /connections/{id}/oauth/authorize` maps to
+    /// `connection:update` and is not.
+    pub fn is_read(self) -> bool {
+        self.as_str().ends_with(":read")
     }
 }
 
@@ -422,6 +443,34 @@ mod tests {
     #[test]
     fn role_rejects_unknown_value() {
         assert!(serde_json::from_value::<Role>(serde_json::json!("superuser")).is_err());
+    }
+
+    #[test]
+    fn is_read_matches_the_read_permissions() {
+        // `is_read` derives from the wire form, so this pins the resulting membership: it is
+        // what `ApiKeyScope::ReadOnly` lets through, and a permission joining or leaving the
+        // set is a change to what every read-only key can do.
+        let read: Vec<&str> = Permission::ALL
+            .into_iter()
+            .filter(|p| p.is_read())
+            .map(|p| p.as_str())
+            .collect();
+        assert_eq!(
+            read,
+            [
+                "workflow:read",
+                "invocation_history:read",
+                "database:read",
+                "report:read",
+                "trigger:read",
+                "connection:read",
+                "analytics:read",
+            ]
+        );
+        // The two non-`*:read` permissions that could plausibly be mistaken for reads: a
+        // capability grant, and a GET-shaped route that starts a credential change.
+        assert!(!Permission::UserManagementAccess.is_read());
+        assert!(!Permission::ConnectionUpdate.is_read());
     }
 
     #[test]

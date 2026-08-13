@@ -12,6 +12,7 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::auth::AuthContext;
+use crate::authz::ApiKeyScope;
 use crate::middleware::tenant_auth::{CallerId, OrgId, Source};
 use crate::product_events::{EventType, ProductEvent, ProductEventSink};
 
@@ -35,6 +36,10 @@ pub struct ApiKey {
     /// Token identity — the `token:revoked:{jti}` revocation-denylist key. `None` for
     /// legacy rows.
     pub jti: Option<String>,
+    /// Optional narrowing of the inherited role (`read_only`). `None` — the value every key
+    /// created before scopes existed carries — means no narrowing. Never widens: the role gate
+    /// still runs on top. See [`ApiKeyScope`].
+    pub scope: Option<String>,
     #[schema(value_type = String)]
     pub created_at: DateTime<Utc>,
     #[schema(value_type = Option<String>)]
@@ -51,6 +56,11 @@ pub struct CreateApiKeyRequest {
     /// Optional expiration time
     #[schema(value_type = Option<String>)]
     pub expires_at: Option<DateTime<Utc>>,
+    /// How much of the issuing user's role this key may exercise. Omitted (or `full`) means no
+    /// narrowing — today's behavior. An unrecognized value is rejected rather than ignored, so
+    /// a client asking for a scope this build doesn't know never silently gets a full key.
+    #[serde(default)]
+    pub scope: Option<ApiKeyScope>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -185,12 +195,15 @@ pub async fn create_api_key(
         plaintext_key[..12].to_string()
     };
     let key_hash = sha256_hex(&plaintext_key);
+    // `Full` persists as NULL, so an unscoped key created today is indistinguishable from one
+    // created before scopes existed — there is exactly one representation of "no narrowing".
+    let scope = request.scope.unwrap_or_default().to_column();
 
     match sqlx::query_as::<_, ApiKey>(
         r#"
-        INSERT INTO public.api_keys (org_id, name, key_prefix, key_hash, created_by, issuing_user_id, jti, expires_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-        RETURNING id, org_id, name, key_prefix, key_hash, created_by, issuing_user_id, jti, created_at, expires_at, last_used_at, is_revoked
+        INSERT INTO public.api_keys (org_id, name, key_prefix, key_hash, created_by, issuing_user_id, jti, expires_at, scope)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        RETURNING id, org_id, name, key_prefix, key_hash, created_by, issuing_user_id, jti, scope, created_at, expires_at, last_used_at, is_revoked
         "#,
     )
     .bind(&tenant_id)
@@ -201,6 +214,7 @@ pub async fn create_api_key(
     .bind(&issuing_user_id)
     .bind(&jti)
     .bind(request.expires_at)
+    .bind(scope)
     .fetch_one(&pool)
     .await
     {
@@ -253,7 +267,7 @@ pub async fn list_api_keys(
     // of role. Ownership — not a role permission — is the gate, so this scoping is unconditional.
     match sqlx::query_as::<_, ApiKey>(
         r#"
-        SELECT id, org_id, name, key_prefix, key_hash, created_by, issuing_user_id, jti, created_at, expires_at, last_used_at, is_revoked
+        SELECT id, org_id, name, key_prefix, key_hash, created_by, issuing_user_id, jti, scope, created_at, expires_at, last_used_at, is_revoked
         FROM public.api_keys
         WHERE org_id = $1 AND issuing_user_id = $2
         ORDER BY created_at DESC
@@ -362,7 +376,7 @@ pub async fn validate_api_key_by_hash(pool: &PgPool, key_hash: &str) -> Result<A
         WHERE key_hash = $1
           AND is_revoked = FALSE
           AND (expires_at IS NULL OR expires_at > NOW())
-        RETURNING id, org_id, name, key_prefix, key_hash, created_by, issuing_user_id, jti, created_at, expires_at, last_used_at, is_revoked
+        RETURNING id, org_id, name, key_prefix, key_hash, created_by, issuing_user_id, jti, scope, created_at, expires_at, last_used_at, is_revoked
         "#,
     )
     .bind(key_hash)

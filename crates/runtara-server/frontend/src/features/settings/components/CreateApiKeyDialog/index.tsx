@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { useForm } from 'react-hook-form';
+import { Controller, useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
 import { toast } from 'sonner';
@@ -13,6 +13,7 @@ import {
   DialogTitle,
 } from '@/shared/components/ui/dialog';
 import { Button } from '@/shared/components/ui/button';
+import { Checkbox } from '@/shared/components/ui/checkbox';
 import { Input } from '@/shared/components/ui/input';
 import { Label } from '@/shared/components/ui/label';
 import { FieldError } from '@/shared/components/ui/form';
@@ -21,6 +22,8 @@ import { Alert, AlertDescription } from '@/shared/components/ui/alert';
 
 const schema = z.object({
   name: z.string().min(1, 'Name is required').max(100, 'Name is too long'),
+  /** Maps to the `read_only` scope on submit; unchecked sends no scope at all. */
+  readOnly: z.boolean(),
 });
 
 type FormValues = z.infer<typeof schema>;
@@ -37,16 +40,21 @@ export function CreateApiKeyDialog({ open, onClose }: CreateApiKeyDialogProps) {
 
   const form = useForm<FormValues>({
     resolver: zodResolver(schema),
-    defaultValues: { name: '' },
+    defaultValues: { name: '', readOnly: false },
   });
 
-  const handleSubmit = (values: FormValues) => {
-    createKey(values, {
-      onSuccess: (data) => {
-        setCreatedKey(data.key);
-        toast.success('API key created');
-      },
-    });
+  const handleSubmit = ({ name, readOnly }: FormValues) => {
+    // An unscoped key sends no `scope` at all, so it is stored exactly like every key
+    // created before scopes existed.
+    createKey(
+      { name, ...(readOnly ? { scope: 'read_only' as const } : {}) },
+      {
+        onSuccess: (data) => {
+          setCreatedKey(data.key);
+          toast.success('API key created');
+        },
+      }
+    );
   };
 
   const handleCopy = async () => {
@@ -114,19 +122,45 @@ export function CreateApiKeyDialog({ open, onClose }: CreateApiKeyDialogProps) {
                 Create an API key for MCP or external integrations.
               </DialogDescription>
             </DialogHeader>
-            <div className="py-4">
-              <Label htmlFor="name">Name</Label>
-              <Input
-                id="name"
-                placeholder="e.g. MCP Server, CI/CD Pipeline"
-                {...form.register('name')}
-                className="mt-1.5"
-              />
-              {form.formState.errors.name && (
-                <FieldError className="mt-1">
-                  {form.formState.errors.name.message}
-                </FieldError>
-              )}
+            <div className="space-y-4 py-4">
+              <div>
+                <Label htmlFor="name">Name</Label>
+                <Input
+                  id="name"
+                  placeholder="e.g. MCP Server, CI/CD Pipeline"
+                  {...form.register('name')}
+                  className="mt-1.5"
+                />
+                {form.formState.errors.name && (
+                  <FieldError className="mt-1">
+                    {form.formState.errors.name.message}
+                  </FieldError>
+                )}
+              </div>
+              <div className="flex items-start gap-2.5">
+                <Controller
+                  control={form.control}
+                  name="readOnly"
+                  render={({ field }) => (
+                    <Checkbox
+                      id="read-only"
+                      checked={field.value}
+                      onCheckedChange={(state) => field.onChange(state === true)}
+                      className="mt-0.5"
+                    />
+                  )}
+                />
+                <div className="space-y-1">
+                  <Label htmlFor="read-only" className="font-normal">
+                    Read-only
+                  </Label>
+                  <p className="text-xs text-muted-foreground">
+                    The key acts as you, limited to read operations — it can't
+                    create, edit, delete, run workflows, or manage API keys.
+                    Scope can't be changed later.
+                  </p>
+                </div>
+              </div>
             </div>
             <DialogFooter>
               <Button

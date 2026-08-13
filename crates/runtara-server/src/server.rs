@@ -175,6 +175,7 @@ use runtime_client::RuntimeClient;
             api::handlers::api_keys::ApiKey,
             api::handlers::api_keys::CreateApiKeyRequest,
             api::handlers::api_keys::CreateApiKeyResponse,
+            crate::authz::ApiKeyScope,
             // Entitlement DTOs
             api::dto::entitlements::EntitlementsDto,
             crate::entitlements::FeatureKey,
@@ -675,6 +676,10 @@ async fn permissions_handler() -> Json<serde_json::Value> {
 /// access level (`allow`/`own`) so the SPA can show/hide controls. In `local`/`trust_proxy`
 /// modes the caller acts as Owner, minus `user_management:access`: that UI-only capability
 /// links to the managed control plane, which self-hosted deployments don't have.
+///
+/// A scoped API key reports the *intersection* of its role's grants and its scope, so what
+/// `/me` advertises is what the credential can actually do rather than what its issuing user
+/// could. `scope` is echoed alongside so a client can tell a narrowed key from a demoted user.
 /// See `docs/security/user-management-contracts.md`.
 async fn me_handler(
     axum::Extension(auth): axum::Extension<crate::auth::AuthContext>,
@@ -688,6 +693,15 @@ async fn me_handler(
             let mut m = serde_json::Map::new();
             for (perm, access) in role.grants() {
                 if self_hosted && *perm == crate::authz::Permission::UserManagementAccess {
+                    continue;
+                }
+                // The gate would refuse these anyway; hiding them keeps the SPA's controls and
+                // the enforcement in agreement for a scoped key. The method argument is inert
+                // here — it only decides ungated routes, and every permission is `Some`.
+                if !auth
+                    .api_key_scope
+                    .permits(Some(*perm), &axum::http::Method::POST)
+                {
                     continue;
                 }
                 if !matches!(access, crate::authz::Access::Deny) {
@@ -709,6 +723,7 @@ async fn me_handler(
         "email": auth.email,
         "name": auth.name,
         "role": auth.role.map(|r| r.as_str()),
+        "scope": auth.api_key_scope.as_str(),
         "permissions": permissions,
     }))
 }
@@ -2346,12 +2361,24 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     // in-process instead of hitting the router fallback and returning a bare 404
     // in every deployment. `event_routes` is moved into `public_app` below, so
     // clone it here.
+    // `event_routes` is the one group that carries no authorization layer on the public app —
+    // webhook ingest is authenticated by the unguessable id in the URL, not by a caller. In
+    // process, though, `execute_workflow_sync` reaches it as a real identity, so the internal
+    // copy gets the same gate every other MCP-reachable route has. Without it that single tool
+    // would run a workflow for a caller whose role or credential scope forbids executing one.
+    let internal_event_routes =
+        event_routes
+            .clone()
+            .route_layer(from_fn(crate::middleware::authorization::authorize(
+                membership_policy,
+            )));
+
     let internal_router = Router::new()
         .merge(tenant_routes.clone())
         .merge(object_model_routes.clone())
         .nest("/api/runtime", connections_tenant_routes.clone())
         .merge(public_routes.clone())
-        .merge(event_routes.clone());
+        .merge(internal_event_routes);
 
     // Build MCP (Model Context Protocol) router with JWT authentication.
     // Uses .layer() (not .route_layer()) because the MCP transport is a

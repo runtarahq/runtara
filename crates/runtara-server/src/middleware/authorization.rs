@@ -32,7 +32,7 @@ use futures::{FutureExt, future::BoxFuture};
 use serde_json::{Value, json};
 
 use crate::auth::{AuthContext, MembershipPolicy};
-use crate::authz::{Access, Permission, Role, access_for};
+use crate::authz::{Access, ApiKeyScope, Permission, Role, access_for};
 
 /// A route-level authorization denial: the caller's role does not grant `permission`.
 ///
@@ -78,6 +78,94 @@ impl AuthzDenial {
 impl IntoResponse for AuthzDenial {
     fn into_response(self) -> Response {
         (StatusCode::FORBIDDEN, Json(self.json_body())).into_response()
+    }
+}
+
+/// A credential-scope denial: the caller's API key is narrowed to a scope that does not cover
+/// this request.
+///
+/// Separate from [`AuthzDenial`] on purpose. That one answers "your *role* can't do this" and is
+/// tied to the membership rollout; this one answers "your *key* can't do this", holds whether or
+/// not a role resolved, and names a different remedy — mint a key with a wider scope, rather
+/// than ask for a role change. Keeping the codes distinct is what lets denial logs and metrics
+/// tell a scope rejection from a role rejection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScopeDenial {
+    scope: ApiKeyScope,
+    /// The permission the route maps to, or `None` for an ungated route (metadata, API-key
+    /// management) that the scope blocked on method alone.
+    permission: Option<Permission>,
+}
+
+impl ScopeDenial {
+    /// Stable error code surfaced to clients and logs, distinct from [`AuthzDenial::CODE`].
+    pub const CODE: &'static str = "API_KEY_SCOPE_DENIED";
+
+    pub fn forbidden(scope: ApiKeyScope, permission: Option<Permission>) -> Self {
+        Self { scope, permission }
+    }
+
+    pub fn scope(&self) -> ApiKeyScope {
+        self.scope
+    }
+
+    pub fn permission(&self) -> Option<Permission> {
+        self.permission
+    }
+
+    pub fn code(&self) -> &'static str {
+        Self::CODE
+    }
+
+    /// The 403 JSON body. Mirrors [`AuthzDenial::json_body`]'s shape — stable `code` plus
+    /// context fields — so MCP's error translation surfaces it structurally to MCP clients the
+    /// same way, and `permission` is present whenever the route has one.
+    pub fn json_body(&self) -> Value {
+        json!({
+            "code": Self::CODE,
+            "scope": self.scope.as_str(),
+            "permission": self.permission.map(|p| p.as_str()),
+            "message": match self.permission {
+                Some(permission) => format!(
+                    "This API key is limited to {} access and cannot perform {}",
+                    self.scope.as_str(),
+                    permission.as_str()
+                ),
+                None => format!(
+                    "This API key is limited to {} access and cannot perform this operation",
+                    self.scope.as_str()
+                ),
+            },
+        })
+    }
+}
+
+impl IntoResponse for ScopeDenial {
+    fn into_response(self) -> Response {
+        (StatusCode::FORBIDDEN, Json(self.json_body())).into_response()
+    }
+}
+
+/// The credential-scope gate: may a key scoped to `scope` make this request?
+///
+/// Deliberately independent of [`MembershipPolicy`] and of whether a role resolved, unlike
+/// [`decision_for`]. A scope is a property of the credential rather than of the SaaS membership
+/// rollout, so it holds in every auth mode — including the non-OIDC self-hosted modes where an
+/// API key acts as `Role::Owner` outright and this gate is the only thing narrowing it. There is
+/// no shadow-logging stage for the same reason: only keys created with a scope can be caught by
+/// it, so there is no existing traffic to preview against.
+///
+/// This gate only ever narrows. It runs *before* the role gate and never substitutes for it: a
+/// request that clears the scope still has to clear [`decision_for`].
+pub fn scope_decision_for(
+    scope: ApiKeyScope,
+    permission: Option<Permission>,
+    method: &Method,
+) -> Result<(), ScopeDenial> {
+    if scope.permits(permission, method) {
+        Ok(())
+    } else {
+        Err(ScopeDenial::forbidden(scope, permission))
     }
 }
 
@@ -416,6 +504,15 @@ pub fn permission_for(method: &Method, path: &str) -> Option<Permission> {
         | ("GET", "/connections/{id}/rate-limit-history") => ConnectionRead,
         ("GET", "/api/runtime/connections/{id}/rate-limit-timeline")
         | ("GET", "/connections/{id}/rate-limit-timeline") => ConnectionRead,
+        // ── Event ingest ─────────────────────────────────────────────────
+        // Both routes run a workflow, so they map to `workflow:execute`. On the public app they
+        // are mounted with no auth layer at all — webhook ingest is authenticated by the
+        // unguessable trigger/workflow id in the URL, not by a caller identity — so this mapping
+        // has no effect there. It exists for the *internal* copy of these routes, the one MCP
+        // tools call in-process (`execute_workflow_sync` targets `events/http-sync`), where the
+        // caller is a real identity with a role and a credential scope that must apply.
+        (_, "/api/runtime/events/http-sync/{workflow_id}") => WorkflowExecute,
+        (_, "/api/runtime/events/http/{trigger_id}/{action}") => WorkflowExecute,
         // API-key routes (legacy rt_* keys) are intentionally NOT role-gated here. An API key is
         // a personal credential scoped to its issuing user: any role may manage its own keys, and
         // the handlers enforce that ownership directly (list/revoke filter on `issuing_user_id`).
@@ -432,19 +529,25 @@ pub fn permission_for(method: &Method, path: &str) -> Option<Permission> {
 /// time (process-global, `Copy`).
 ///
 /// Reads the matched route template ([`MatchedPath`], populated by routing) and the caller's
-/// role ([`AuthContext`], populated by `authenticate`), both of which are present by the time a
-/// `route_layer` runs. A request whose route has no permission, or whose role [`decision_for`]
-/// permits, passes through untouched. A denied role short-circuits with `403 PERMISSION_DENIED`
-/// under `Required`; under `Logging` the same denial is logged and counted with
-/// `enforced = false` while the request passes through, so the shadow stage previews exactly
-/// what promotion to `required` will reject.
+/// role and credential scope ([`AuthContext`], populated by `authenticate`), all present by the
+/// time a `route_layer` runs. Two gates run in order:
+///
+/// 1. **Credential scope** ([`scope_decision_for`]) — enforced for every request, regardless of
+///    `policy` and of whether a role resolved, and enforced on *ungated* routes too (on method
+///    alone). That last part is what stops a read-only key from `POST`ing to the deliberately
+///    ungated API-key routes and minting itself an unscoped key.
+/// 2. **Role** ([`decision_for`]) — unchanged: a request whose route has no permission, or whose
+///    role permits it, passes through. A denied role short-circuits with `403 PERMISSION_DENIED`
+///    under `Required`; under `Logging` the same denial is logged and counted with
+///    `enforced = false` while the request passes through, so the shadow stage previews exactly
+///    what promotion to `required` will reject.
 pub fn authorize(
     policy: MembershipPolicy,
 ) -> impl Clone + Send + Sync + 'static + Fn(Request, Next) -> BoxFuture<'static, Response> {
     move |req: Request, next: Next| {
         // Snapshot the caller identity so denial logs are self-contained rather than relying on
-        // parent-span field flattening. `role` also drives the gate decision.
-        let (tenant_id, user_id, auth_method, role) = req
+        // parent-span field flattening. `role` and `scope` also drive the gate decisions.
+        let (tenant_id, user_id, auth_method, role, scope) = req
             .extensions()
             .get::<AuthContext>()
             .map(|c| {
@@ -453,18 +556,45 @@ pub fn authorize(
                     Some(c.user_id.clone()),
                     Some(c.auth_method.as_str()),
                     c.role,
+                    c.api_key_scope,
                 )
             })
-            .unwrap_or((None, None, None, None));
+            .unwrap_or((None, None, None, None, ApiKeyScope::Full));
         let matched = req
             .extensions()
             .get::<MatchedPath>()
             .map(|m| m.as_str().to_owned());
         let method = req.method().clone();
         async move {
-            if let Some(path) = matched.as_deref()
-                && let Some(permission) = permission_for(&method, path)
-            {
+            let permission = matched
+                .as_deref()
+                .and_then(|path| permission_for(&method, path));
+
+            // Gate 1 — credential scope. Runs even when the route maps to no permission, and
+            // even when no role resolved: the key's own ceiling does not depend on either.
+            if let Err(denial) = scope_decision_for(scope, permission, &method) {
+                tracing::warn!(
+                    tenant_id = tenant_id.as_deref(),
+                    user_id = user_id.as_deref(),
+                    auth_method,
+                    role = role.map(|r| r.as_str()),
+                    scope = scope.as_str(),
+                    permission = permission.map(|p| p.as_str()),
+                    code = ScopeDenial::CODE,
+                    method = method.as_str(),
+                    matched_path = matched.as_deref(),
+                    enforced = true,
+                    "api key scope denied"
+                );
+                crate::observability::record_scope_denial(
+                    permission.map(|p| p.as_str()).unwrap_or("<ungated>"),
+                    scope.as_str(),
+                );
+                return denial.into_response();
+            }
+
+            // Gate 2 — role.
+            if let (Some(path), Some(permission)) = (matched.as_deref(), permission) {
                 let decision = decision_for(policy, role, permission);
                 if let GateDecision::ShadowDeny(denial) | GateDecision::Deny(denial) = decision {
                     let enforced = matches!(decision, GateDecision::Deny(_));
@@ -1173,6 +1303,41 @@ mod tests {
     }
 
     #[test]
+    fn permission_for_gates_event_ingest_as_execution() {
+        // These routes run a workflow. On the public app they are mounted without an auth layer
+        // (webhook ingest), so this mapping only bites on the internal copy MCP calls — which is
+        // exactly where `execute_workflow_sync` would otherwise slip a scoped or read-only
+        // caller past the gate. Every method the routes accept must map, not just POST.
+        for method in [
+            Method::POST,
+            Method::GET,
+            Method::PUT,
+            Method::DELETE,
+            Method::PATCH,
+        ] {
+            assert_eq!(
+                permission_for(&method, "/api/runtime/events/http-sync/{workflow_id}"),
+                Some(Permission::WorkflowExecute),
+                "{method} http-sync"
+            );
+            assert_eq!(
+                permission_for(&method, "/api/runtime/events/http/{trigger_id}/{action}"),
+                Some(Permission::WorkflowExecute),
+                "{method} http trigger"
+            );
+        }
+        // And a read-only key is refused it, on the same footing as `workflows/{id}/execute`.
+        assert!(
+            scope_decision_for(
+                ApiKeyScope::ReadOnly,
+                Some(Permission::WorkflowExecute),
+                &Method::POST
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn permission_for_gates_agent_execution() {
         // Host-mediated agent capability I/O is gated like running a workflow.
         let cases: &[(Method, &str, Permission)] = &[
@@ -1267,6 +1432,278 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    // ── credential scope: the pure decision ─────────────────────────────────
+
+    #[test]
+    fn scope_full_permits_every_route() {
+        // The overwhelmingly common case — every JWT caller and every unscoped key.
+        for permission in Permission::ALL {
+            assert!(
+                scope_decision_for(ApiKeyScope::Full, Some(permission), &Method::DELETE).is_ok()
+            );
+        }
+        assert!(scope_decision_for(ApiKeyScope::Full, None, &Method::POST).is_ok());
+    }
+
+    #[test]
+    fn scope_read_only_permits_reads_and_denies_writes() {
+        assert!(
+            scope_decision_for(
+                ApiKeyScope::ReadOnly,
+                Some(Permission::WorkflowRead),
+                &Method::GET
+            )
+            .is_ok()
+        );
+        // A POST-shaped read (the SQL query tools, report render) still passes: the decision is
+        // keyed on the permission, not the verb.
+        assert!(
+            scope_decision_for(
+                ApiKeyScope::ReadOnly,
+                Some(Permission::DatabaseRead),
+                &Method::POST
+            )
+            .is_ok()
+        );
+        let denial = scope_decision_for(
+            ApiKeyScope::ReadOnly,
+            Some(Permission::WorkflowDelete),
+            &Method::POST,
+        )
+        .expect_err("a write permission is out of a read-only scope");
+        assert_eq!(denial.scope(), ApiKeyScope::ReadOnly);
+        assert_eq!(denial.permission(), Some(Permission::WorkflowDelete));
+    }
+
+    #[test]
+    fn scope_read_only_denies_writes_on_ungated_routes() {
+        // The escalation path: `POST /api/runtime/api-keys` maps to no permission (it is gated
+        // by ownership in the handler), so only the ungated-route arm stops a read-only key
+        // minting itself an unscoped one.
+        assert_eq!(
+            permission_for(&Method::POST, "/api/runtime/api-keys"),
+            None,
+            "precondition: API-key creation is ungated by the permission map"
+        );
+        let denial = scope_decision_for(ApiKeyScope::ReadOnly, None, &Method::POST)
+            .expect_err("an ungated write is out of a read-only scope");
+        assert_eq!(denial.permission(), None);
+        assert!(scope_decision_for(ApiKeyScope::ReadOnly, None, &Method::GET).is_ok());
+    }
+
+    #[test]
+    fn scope_denial_body_carries_a_distinct_code() {
+        // A distinct code from the role gate: the remedy is a wider key, not a role change.
+        // MCP's error translation keys on `code`, so it must be present and stable.
+        let body = ScopeDenial::forbidden(ApiKeyScope::ReadOnly, Some(Permission::WorkflowCreate))
+            .json_body();
+        assert_eq!(body["code"], ScopeDenial::CODE);
+        assert_ne!(ScopeDenial::CODE, AuthzDenial::CODE);
+        assert_eq!(body["scope"], "read_only");
+        assert_eq!(body["permission"], "workflow:create");
+
+        let ungated = ScopeDenial::forbidden(ApiKeyScope::ReadOnly, None).json_body();
+        assert_eq!(ungated["permission"], Value::Null);
+    }
+
+    // ── credential scope: through the real layer ────────────────────────────
+
+    /// Inject an `AuthContext` carrying both a role and a credential scope.
+    fn inject_scoped(
+        role: Option<Role>,
+        scope: ApiKeyScope,
+    ) -> impl Clone + Send + Sync + 'static + Fn(Request, Next) -> BoxFuture<'static, Response>
+    {
+        move |mut req: Request, next: Next| {
+            let mut ctx = AuthContext::new("tenant".into(), "auth0|u".into(), AuthMethod::ApiKey);
+            ctx.role = role;
+            ctx.api_key_scope = scope;
+            async move {
+                req.extensions_mut().insert(ctx);
+                next.run(req).await
+            }
+            .boxed()
+        }
+    }
+
+    /// The two gated workflow routes plus the ungated API-key creation route, so one app covers
+    /// both arms of the scope decision.
+    fn scoped_app(role: Option<Role>, scope: ApiKeyScope, policy: MembershipPolicy) -> Router {
+        Router::new()
+            .route("/api/runtime/workflows", get(|| async { "ok" }))
+            .route(
+                "/api/runtime/workflows/{id}/delete",
+                post(|| async { "ok" }),
+            )
+            .route("/api/runtime/api-keys", post(|| async { "ok" }))
+            .route_layer(from_fn(authorize(policy)))
+            .route_layer(from_fn(inject_scoped(role, scope)))
+    }
+
+    async fn status_and_body(resp: Response) -> (StatusCode, Value) {
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let body = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, body)
+    }
+
+    #[tokio::test]
+    async fn read_only_key_reads_but_cannot_write_even_as_owner() {
+        // The headline case: an Owner's key, narrowed at creation. The role would allow the
+        // delete; the scope does not.
+        let app = scoped_app(
+            Some(Role::Owner),
+            ApiKeyScope::ReadOnly,
+            MembershipPolicy::Required,
+        );
+        let (status, _) = status_and_body(
+            app.clone()
+                .oneshot(
+                    HttpRequest::get("/api/runtime/workflows")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, body) = status_and_body(
+            app.oneshot(
+                HttpRequest::post("/api/runtime/workflows/wf-1/delete")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["code"], ScopeDenial::CODE);
+        assert_eq!(body["scope"], "read_only");
+    }
+
+    #[tokio::test]
+    async fn read_only_key_cannot_mint_another_key() {
+        // API-key creation is ungated by the permission map, so this passes the role gate for
+        // every role — the scope gate is the only thing standing between a read-only key and an
+        // unscoped one.
+        let app = scoped_app(
+            Some(Role::Owner),
+            ApiKeyScope::ReadOnly,
+            MembershipPolicy::Required,
+        );
+        let (status, body) = status_and_body(
+            app.oneshot(
+                HttpRequest::post("/api/runtime/api-keys")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["code"], ScopeDenial::CODE);
+    }
+
+    #[tokio::test]
+    async fn scope_is_enforced_under_every_membership_policy() {
+        // Unlike the role gate, the scope does not wait for the membership rollout: it is a
+        // property of the credential. `role = None` stands in for the modes where no membership
+        // lookup happens at all.
+        for policy in [
+            MembershipPolicy::Disabled,
+            MembershipPolicy::Logging,
+            MembershipPolicy::Required,
+        ] {
+            let app = scoped_app(None, ApiKeyScope::ReadOnly, policy);
+            let (status, body) = status_and_body(
+                app.oneshot(
+                    HttpRequest::post("/api/runtime/workflows/wf-1/delete")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "policy {policy:?}");
+            assert_eq!(body["code"], ScopeDenial::CODE, "policy {policy:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn scope_never_widens_a_denied_role() {
+        // A Viewer with a `Full` key is still a Viewer: the role gate runs after the scope gate
+        // and rejects with its own code.
+        let app = scoped_app(
+            Some(Role::Viewer),
+            ApiKeyScope::Full,
+            MembershipPolicy::Required,
+        );
+        let (status, body) = status_and_body(
+            app.oneshot(
+                HttpRequest::post("/api/runtime/workflows/wf-1/delete")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["code"], AuthzDenial::CODE);
+    }
+
+    #[tokio::test]
+    async fn unscoped_key_behaves_exactly_as_before() {
+        // Regression guard for existing keys: a NULL scope reads as `Full` and changes nothing.
+        let app = scoped_app(
+            Some(Role::Owner),
+            ApiKeyScope::Full,
+            MembershipPolicy::Required,
+        );
+        for request in [
+            HttpRequest::get("/api/runtime/workflows"),
+            HttpRequest::post("/api/runtime/workflows/wf-1/delete"),
+            HttpRequest::post("/api/runtime/api-keys"),
+        ] {
+            let (status, _) = status_and_body(
+                app.clone()
+                    .oneshot(request.body(Body::empty()).unwrap())
+                    .await
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+        }
+    }
+
+    #[tokio::test]
+    async fn unrecognized_scope_denies_everything() {
+        // Rollback safety, end to end: a scope name this build cannot parse blocks reads too.
+        let app = scoped_app(
+            Some(Role::Owner),
+            ApiKeyScope::Unrecognized,
+            MembershipPolicy::Required,
+        );
+        let (status, body) = status_and_body(
+            app.oneshot(
+                HttpRequest::get("/api/runtime/workflows")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["code"], ScopeDenial::CODE);
+        assert_eq!(body["scope"], "unknown");
     }
 
     /// Build an app exposing the real folder-rename route under the `authorize` layer.

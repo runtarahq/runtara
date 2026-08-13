@@ -28,6 +28,19 @@ import { CreateApiKeyDialog } from '../../components/CreateApiKeyDialog';
 import { RevokeApiKeyDialog } from '../../components/RevokeApiKeyDialog';
 import type { ApiKey } from '@/generated/RuntaraRuntimeApi';
 
+/**
+ * A key's scope, as stored: `null` means no narrowing — the key exercises its owner's role in
+ * full, which is what every key created before scopes existed carries.
+ */
+function ApiKeyScopeLabel({ scope }: { scope: ApiKey['scope'] }) {
+  if (!scope) return <>Full access</>;
+  if (scope === 'read_only')
+    return <StatusPill tone="neutral" dot={false} label="Read-only" />;
+  // A scope this build doesn't know about: the server denies everything for it, so show the
+  // raw value rather than implying it grants anything.
+  return <StatusPill tone="neutral" dot={false} label={scope} />;
+}
+
 export function Settings() {
   const { data: apiKeys, isFetching, isError, error } = useApiKeys();
   const [createOpen, setCreateOpen] = useState(false);
@@ -89,6 +102,7 @@ export function Settings() {
             <TableHead>Name</TableHead>
             <TableHead>Status</TableHead>
             <TableHead>Key</TableHead>
+            <TableHead>Scope</TableHead>
             <TableHead>Created</TableHead>
             <TableHead>Last used</TableHead>
             <TableHead>Expires</TableHead>
@@ -106,6 +120,9 @@ export function Settings() {
               </TableCell>
               <TableCell className="font-mono text-xs text-muted-foreground">
                 {key.key_prefix}...
+              </TableCell>
+              <TableCell className="text-muted-foreground">
+                <ApiKeyScopeLabel scope={key.scope} />
               </TableCell>
               <TableCell className="text-muted-foreground">
                 {formatDate(key.created_at)}
@@ -144,6 +161,9 @@ export function Settings() {
               </TableCell>
               <TableCell className="font-mono text-xs text-muted-foreground">
                 {key.key_prefix}...
+              </TableCell>
+              <TableCell className="text-muted-foreground">
+                <ApiKeyScopeLabel scope={key.scope} />
               </TableCell>
               <TableCell className="text-muted-foreground">
                 {formatDate(key.created_at)}

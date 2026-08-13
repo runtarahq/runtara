@@ -9,7 +9,7 @@ use tracing::Instrument;
 
 use crate::api::handlers::api_keys::ApiKey;
 use crate::auth::{AuthContext, AuthMethod, AuthProviderKind, AuthState, MembershipPolicy};
-use crate::authz::Role;
+use crate::authz::{ApiKeyScope, Role};
 use crate::valkey::auth::{AuthzValkeyError, get_member_role, token_is_revoked};
 
 /// Authentication middleware. Defers to the configured `AuthProvider` for everything
@@ -119,6 +119,11 @@ async fn validate_api_key(token: &str, auth_state: &AuthState) -> Result<ApiKey,
 
 /// Build the `AuthContext` for an API-key request. The key acts as its issuing user — role
 /// and resource ownership inherit from them — so `user_id` is the issuing user's `sub`.
+///
+/// The key's `scope` rides along as the ceiling on that inherited role. Unlike the role, it
+/// comes off the key row rather than the tenant Valkey, so it applies in every auth mode and
+/// on every request — including the in-process calls MCP tools make under a clone of this
+/// context.
 fn api_key_context(key: &ApiKey) -> AuthContext {
     let mut ctx = AuthContext::new(
         key.org_id.clone(),
@@ -126,6 +131,7 @@ fn api_key_context(key: &ApiKey) -> AuthContext {
         AuthMethod::ApiKey,
     );
     ctx.jti = key.jti.clone();
+    ctx.api_key_scope = ApiKeyScope::from_column(key.scope.as_deref());
     ctx
 }
 
@@ -478,10 +484,18 @@ mod tests {
             created_by: Some(issuing_user_id.to_string()),
             issuing_user_id: issuing_user_id.to_string(),
             jti: jti.map(|s| s.to_string()),
+            scope: None,
             created_at: chrono::Utc::now(),
             expires_at: None,
             last_used_at: None,
             is_revoked: false,
+        }
+    }
+
+    fn api_key_row_scoped(issuing_user_id: &str, scope: Option<&str>) -> ApiKey {
+        ApiKey {
+            scope: scope.map(|s| s.to_string()),
+            ..api_key_row(issuing_user_id, Some("jti-scoped"))
         }
     }
 
@@ -587,6 +601,40 @@ mod tests {
         assert_eq!(ctx.user_id, "auth0|owner");
         assert_eq!(ctx.jti.as_deref(), Some("jti-9"));
         assert_eq!(ctx.auth_method, AuthMethod::ApiKey);
+        // A key with no stored scope exercises its issuing user's role in full — the behavior
+        // every key had before scopes existed.
+        assert_eq!(ctx.api_key_scope, ApiKeyScope::Full);
+    }
+
+    #[tokio::test]
+    async fn api_key_context_carries_the_stored_scope() {
+        let ctx = api_key_context(&api_key_row_scoped("auth0|owner", Some("read_only")));
+        assert_eq!(ctx.api_key_scope, ApiKeyScope::ReadOnly);
+        // The scope is independent of the role: it rides on the context even before the
+        // membership lookup runs, and the role gate still applies on top of it.
+        assert_eq!(ctx.role, None);
+    }
+
+    #[tokio::test]
+    async fn api_key_context_fails_closed_on_an_unknown_scope() {
+        // A row written by a newer server, read after a rollback: deny rather than widen.
+        let ctx = api_key_context(&api_key_row_scoped("auth0|owner", Some("execute")));
+        assert_eq!(ctx.api_key_scope, ApiKeyScope::Unrecognized);
+    }
+
+    #[tokio::test]
+    async fn self_hosted_owner_role_does_not_clear_the_scope() {
+        // `local`/`trust_proxy` hand every key `Role::Owner`, so the scope is the only thing
+        // narrowing it there — the membership shortcut must leave it intact.
+        let key = api_key_row_scoped("operator", Some("read_only"));
+        let mut ctx = api_key_context(&key);
+        let local = Arc::new(LocalProvider::new("tenant".to_string())) as Arc<dyn AuthProvider>;
+        let st = state_with_provider(local, MembershipPolicy::Required, None);
+        enforce_api_key_membership(&st, &key, &mut ctx)
+            .await
+            .expect("self-hosted keys authenticate");
+        assert_eq!(ctx.role, Some(Role::Owner));
+        assert_eq!(ctx.api_key_scope, ApiKeyScope::ReadOnly);
     }
 
     #[tokio::test]
