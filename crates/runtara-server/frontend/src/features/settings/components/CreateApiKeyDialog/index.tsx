@@ -145,7 +145,9 @@ export function CreateApiKeyDialog({ open, onClose }: CreateApiKeyDialogProps) {
                     <Checkbox
                       id="read-only"
                       checked={field.value}
-                      onCheckedChange={(state) => field.onChange(state === true)}
+                      onCheckedChange={(state) =>
+                        field.onChange(state === true)
+                      }
                       className="mt-0.5"
                     />
                   )}
