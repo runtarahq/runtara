@@ -24,6 +24,47 @@ fn test_get_http_extractor_ids() {
     );
 }
 
+/// The `http` agent's integration list IS this registry, so an unregistered
+/// integration simply cannot be bound to an HTTP step. QuickBooks Online was
+/// missing, which left Intuit endpoints the typed `quickbooks` agent does not
+/// cover — notably the dimension/custom-field labels behind the GraphQL API —
+/// unreachable from any workflow.
+#[test]
+fn quickbooks_online_is_reachable_from_the_http_agent() {
+    assert!(
+        get_http_extractor_ids().contains(&"quickbooks_online"),
+        "quickbooks_online must stay registered or HTTP steps lose Intuit access, got: {:?}",
+        get_http_extractor_ids()
+    );
+    assert!(
+        resolve_integration_ids("http", &[])
+            .iter()
+            .any(|id| id == "quickbooks_online"),
+        "the http agent's resolved integration ids must include quickbooks_online"
+    );
+}
+
+#[test]
+fn quickbooks_extractor_requires_client_id() {
+    let extractor = connection_types::QuickBooksOnlineExtractor;
+    assert_eq!(extractor.integration_id(), "quickbooks_online");
+
+    // realm_id / tokens arrive via the OAuth callback, so a freshly-created
+    // connection carries only the app credentials — that must still extract.
+    let config = extractor
+        .extract(&json!({ "client_id": "abc", "client_secret": "shh" }))
+        .expect("client_id alone should be enough");
+    assert_eq!(
+        config.headers.get("Accept").map(String::as_str),
+        Some("application/json")
+    );
+    // The proxy owns the base URL (descriptor-resolved, realm-scoped); the
+    // extractor must not pin a second, drifting copy of it.
+    assert!(config.url_prefix.is_empty(), "got {:?}", config.url_prefix);
+
+    assert!(extractor.extract(&json!({})).is_err());
+}
+
 // ============================================================================
 // Host-resolved integration ids
 // ============================================================================

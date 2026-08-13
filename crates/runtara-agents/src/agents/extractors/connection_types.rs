@@ -781,9 +781,43 @@ fn default_hubspot_scopes() -> String {
 /// The descriptor drives every provider quirk: HTTP Basic on the token endpoint,
 /// rotating refresh tokens, sandbox/prod host selection by `environment`, the
 /// `/v3/company/{realm_id}` path template, and capturing `realmId` off the callback.
+///
+/// Intuit splits one credential across two hosts: the Accounting API v3 (the base
+/// URL above) and the app-foundations GraphQL API, which is where Intuit Enterprise
+/// Suite **dimension** definitions live — the only way to turn the opaque
+/// `Line[].CustomExtensions[]` ids stamped on invoice lines into labels
+/// (`Dimension` / `DimensionValue` are not v3 query entities; querying them returns
+/// HTTP 400 `QueryValidationError`). The `graphql` named endpoint declares that
+/// second host so an HTTP step bound to this connection can reach it under the same
+/// managed OAuth token, without the proxy's base-URL pin having to be loosened.
+///
+/// Two entitlement gates sit in front of that endpoint, and both surface as an
+/// authorization failure rather than anything this descriptor can detect:
+/// the Dimensions API is limited to Silver-tier-and-above Intuit partners, and it
+/// needs a restricted scope the connection does not request by default (see
+/// `scopes`). A connection can be perfectly valid and still 403 there.
+///
+/// Note that Intuit runs a *second*, separate GraphQL host — `api.intuit.com/graphql`
+/// for the general QuickBooks GraphQL API. It is not declared here because nothing
+/// needs it yet; add another `named_endpoint` if that changes.
 #[derive(Debug, Deserialize, ConnectionParams)]
 #[connection(
     integration_id = "quickbooks_online",
+    // Endpoint, headers and scopes below are per Intuit's "Get started with
+    // dimensions" (developer.intuit.com/app/developer/ies/docs/workflows/
+    // manage-dimensions/get-started-with-dimensions).
+    //
+    // No `headers`: that page lists exactly two required headers, `Content-Type:
+    // application/json` and `Authorization: Bearer …`. The proxy injects the
+    // Authorization, and the http agent sets Content-Type on a JSON body, so
+    // nothing is left to declare. In particular Intuit does NOT want the realm in
+    // a header — it is carried by the token — and declaring one anyway would be
+    // actively harmful, since a header template is strict and would fail-close
+    // every request from a connection whose realm_id is unset.
+    //
+    // No `sandbox_url`: Intuit documents a single GraphQL endpoint with no
+    // sandbox variant, so a sandbox connection correctly uses this same host.
+    named_endpoint(name = "graphql", url = "https://qb.api.intuit.com/graphql"),
     display_name = "QuickBooks Online",
     description = "Connect to Intuit QuickBooks Online (Accounting API v3) using OAuth2 authorization",
     category = "erp",
@@ -839,11 +873,26 @@ pub struct QuickBooksOnlineParams {
     )]
     pub realm_id: Option<String>,
 
-    /// OAuth2 scopes (space-separated)
+    /// OAuth2 scopes (space-separated).
+    ///
+    /// The default covers the Accounting API only. The `graphql` named endpoint
+    /// (Intuit Enterprise Suite dimensions) needs `app-foundations
+    /// .custom-dimensions.read` on top — see the description below. That scope is
+    /// deliberately NOT in the default: Intuit classes it as a *restricted* scope
+    /// that an app must first enable on its Permissions page, and requesting one
+    /// the app has not been granted fails the authorization request outright. So
+    /// defaulting it on would break consent for every connection whose app has no
+    /// dimensions entitlement, to help the few that do.
     #[serde(default = "default_quickbooks_scopes")]
     #[field(
         display_name = "Scopes",
-        description = "Space-separated OAuth2 scopes",
+        description = "Space-separated OAuth2 scopes. The default covers the Accounting API. \
+                       To read Intuit Enterprise Suite dimensions (the 'graphql' endpoint), also \
+                       add 'app-foundations.custom-dimensions.read' — and \
+                       'app-foundations.custom-dimensions.write' to create or disable dimension \
+                       values. Those are restricted scopes: enable them first on your app's \
+                       Permissions page in the Intuit Developer Portal (Silver tier or higher), \
+                       or consent will fail.",
         default = "com.intuit.quickbooks.accounting",
         requires_reauthorization
     )]
@@ -856,6 +905,47 @@ fn default_quickbooks_environment() -> String {
 
 fn default_quickbooks_scopes() -> String {
     "com.intuit.quickbooks.accounting".to_string()
+}
+
+/// HTTP extractor for QuickBooks Online connections.
+///
+/// Registering this is what lets the generic `http` agent bind a
+/// `quickbooks_online` connection — the agent's `integration_ids` list IS the
+/// extractor registry (`resolve_integration_ids`), so without an entry here the
+/// connection never appears in the step's connection picker. The typed
+/// `quickbooks` agent covers Accounting API v3; the http agent covers everything
+/// Intuit exposes that v3 does not, notably the `graphql` named endpoint above.
+///
+/// No credentials are set here, and `url_prefix` is inert: at runtime the proxy
+/// resolves both the bearer token and the base URL from the connection descriptor
+/// (`describe_oauth_authcode_auth`), which is also what keeps the rotating OAuth
+/// token working. The values below exist for the extractor contract and the
+/// registry's validation role.
+pub struct QuickBooksOnlineExtractor;
+
+impl HttpConnectionExtractor for QuickBooksOnlineExtractor {
+    fn integration_id(&self) -> &'static str {
+        "quickbooks_online"
+    }
+
+    fn extract(&self, params: &Value) -> Result<HttpConnectionConfig, String> {
+        // access_token/refresh_token/realm_id arrive later via the OAuth callback,
+        // so client_id is the only field guaranteed present on a stored connection.
+        if params.get("client_id").and_then(|v| v.as_str()).is_none() {
+            return Err("Invalid quickbooks_online connection: missing client_id".to_string());
+        }
+
+        let mut headers = HashMap::new();
+        headers.insert("Accept".to_string(), "application/json".to_string());
+        headers.insert("Content-Type".to_string(), "application/json".to_string());
+
+        Ok(HttpConnectionConfig {
+            headers,
+            query_parameters: HashMap::new(),
+            url_prefix: String::new(),
+            rate_limit_config: None,
+        })
+    }
 }
 
 /// HTTP extractor for HubSpot connections.

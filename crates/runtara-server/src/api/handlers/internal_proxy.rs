@@ -210,6 +210,15 @@ pub struct ProxyRequest {
     /// rejected. See [`crate::api::services::endpoint_ref`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub endpoint_ref: Option<String>,
+    /// Name of a descriptor-declared alternate endpoint to send this request to
+    /// (e.g. `"graphql"` on a `quickbooks_online` connection). Unlike
+    /// `endpoint_ref`, the URL is not supplied by the caller — only the *selector*
+    /// is. The set of reachable endpoints is fixed in the connection type's
+    /// `named_endpoints`, so an agent can widen the destination only to a host the
+    /// descriptor author vetted. Lets one credential serve a provider that splits
+    /// its API across hosts. See [`apply_named_endpoint_override`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
     /// Request timeout in milliseconds (default: 30 000)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
@@ -265,6 +274,70 @@ fn apply_aws_service_override(aws_service: Option<&str>, resolved: &mut Resolved
             );
         }
     }
+}
+
+/// Point a request at a descriptor-declared alternate endpoint of its connection.
+///
+/// Providers routinely split one credential across more than one host — the same
+/// Intuit OAuth token authenticates both the Accounting API and the GraphQL API
+/// where dimension/custom-field labels live. The base-URL pin (correctly) makes
+/// the second host unreachable, so the connection type declares it up front in
+/// `named_endpoints` and the caller selects it **by name**. The caller never
+/// supplies a URL: the reachable set is `&'static` in the descriptor and cannot be
+/// influenced by connection parameters, so this widens egress only to hosts a
+/// descriptor author vetted.
+///
+/// Runs before the pin, so `pin_url_to_base` then enforces host, scheme and path
+/// containment against the *selected* endpoint — nothing is relaxed.
+///
+/// Any failure is a hard reject (403). In particular an undeclared name must NOT
+/// fall through to the connection's default base URL: a typo'd selector would
+/// otherwise quietly send the credential to the wrong API and look like a
+/// provider-side 404.
+fn apply_named_endpoint_override(
+    endpoint: Option<&str>,
+    connection_id: &str,
+    integration_id: &str,
+    params: &Value,
+    final_headers: &mut HashMap<String, String>,
+    resolved: &mut ResolvedConnectionAuth,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    let Some(name) = endpoint.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(());
+    };
+
+    let selected = runtara_connections::auth::provider_auth::resolve_named_endpoint_for(
+        integration_id,
+        name,
+        params,
+    )
+    .map_err(|e| {
+        tracing::warn!(
+            target: "proxy",
+            connection_id,
+            integration_id,
+            endpoint = name,
+            reason = %e,
+            "proxy.named_endpoint.rejected"
+        );
+        (
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "error": format!("Named endpoint rejected: {e}"),
+                "code": "NAMED_ENDPOINT_REJECTED",
+            })),
+        )
+    })?;
+
+    // Declared headers never overwrite an existing one — most importantly the
+    // `Authorization` the credential resolution just injected. The macro also
+    // refuses to compile a descriptor that declares `Authorization`, so this is
+    // belt-and-braces rather than the only guard.
+    for (header_name, header_value) in selected.headers {
+        final_headers.entry(header_name).or_insert(header_value);
+    }
+    resolved.base_url = Some(selected.base_url);
+    Ok(())
 }
 
 /// Map a credential-resolution failure onto the proxy's HTTP error contract.
@@ -464,6 +537,18 @@ pub async fn execute_proxy_request(
         // Agent-declared AWS service (generic AWS credentials) — see
         // `apply_aws_service_override`.
         apply_aws_service_override(request.aws_service.as_deref(), &mut resolved);
+
+        // Agent-selected alternate endpoint of this connection type — see
+        // `apply_named_endpoint_override`. Runs before the pin so the selected
+        // endpoint becomes the pin base and is still fully enforced.
+        apply_named_endpoint_override(
+            request.endpoint.as_deref(),
+            connection_id,
+            integration_id,
+            &params,
+            &mut final_headers,
+            &mut resolved,
+        )?;
 
         // Agent-declared endpoint ref (generic per-request base URL binding) —
         // see `apply_endpoint_ref_override`. Runs before the pin so the ref's
@@ -1057,6 +1142,187 @@ mod tests {
             resolved.base_url.as_deref(),
             Some("https://api.example.com")
         );
+    }
+
+    // ── Named-endpoint override ──────────────────────────────────────────
+    //
+    // Exercised against the REAL `quickbooks_online` descriptor, so these also
+    // guard the declaration itself: if the `graphql` named endpoint is dropped or
+    // renamed, these fail rather than silently un-shipping the fix.
+
+    const QBO_BASE: &str = "https://quickbooks.api.intuit.com/v3/company/9130000";
+
+    fn qbo_resolved() -> ResolvedConnectionAuth {
+        ResolvedConnectionAuth {
+            base_url: Some(QBO_BASE.into()),
+            aws_signing: None,
+            azure_signing: None,
+            rotated_credentials: None,
+        }
+    }
+
+    fn qbo_params() -> Value {
+        json!({ "environment": "production", "realm_id": "9130000", "client_id": "abc" })
+    }
+
+    fn apply_named(
+        endpoint: Option<&str>,
+        params: &Value,
+        headers: &mut HashMap<String, String>,
+        resolved: &mut ResolvedConnectionAuth,
+    ) -> Result<(), (StatusCode, Json<Value>)> {
+        apply_named_endpoint_override(
+            endpoint,
+            "conn-1",
+            "quickbooks_online",
+            params,
+            headers,
+            resolved,
+        )
+    }
+
+    #[test]
+    fn named_endpoint_noop_without_a_selector() {
+        for selector in [None, Some(""), Some("   ")] {
+            let mut headers = HashMap::new();
+            let mut resolved = qbo_resolved();
+            apply_named(selector, &qbo_params(), &mut headers, &mut resolved).unwrap();
+            assert_eq!(resolved.base_url.as_deref(), Some(QBO_BASE));
+            assert!(headers.is_empty(), "selector={selector:?}");
+        }
+    }
+
+    #[test]
+    fn named_endpoint_swaps_base_url_to_the_declared_host() {
+        let mut headers = HashMap::new();
+        let mut resolved = qbo_resolved();
+        apply_named(Some("graphql"), &qbo_params(), &mut headers, &mut resolved).unwrap();
+
+        assert_eq!(
+            resolved.base_url.as_deref(),
+            Some("https://qb.api.intuit.com/graphql")
+        );
+    }
+
+    /// The QBO `graphql` endpoint declares no headers today (see the descriptor:
+    /// Intuit's docs don't confirm a realm header, and a declared template is
+    /// strict). A connection that never completed OAuth — hence no `realm_id` —
+    /// must therefore still reach it, rather than fail closed on a guessed
+    /// requirement.
+    #[test]
+    fn named_endpoint_resolves_without_a_realm() {
+        let mut headers = HashMap::new();
+        let mut resolved = qbo_resolved();
+        apply_named(
+            Some("graphql"),
+            &json!({ "environment": "production", "client_id": "abc" }),
+            &mut headers,
+            &mut resolved,
+        )
+        .unwrap();
+
+        assert_eq!(
+            resolved.base_url.as_deref(),
+            Some("https://qb.api.intuit.com/graphql")
+        );
+        assert!(headers.is_empty(), "got {headers:?}");
+    }
+
+    #[test]
+    fn named_endpoint_never_overwrites_the_injected_credential() {
+        let mut headers =
+            HashMap::from([("Authorization".to_string(), "Bearer injected".to_string())]);
+        let mut resolved = qbo_resolved();
+        apply_named(Some("graphql"), &qbo_params(), &mut headers, &mut resolved).unwrap();
+
+        assert_eq!(
+            headers.get("Authorization").map(String::as_str),
+            Some("Bearer injected")
+        );
+    }
+
+    #[test]
+    fn named_endpoint_unknown_name_rejects_and_leaves_base_url_intact() {
+        let mut headers = HashMap::new();
+        let mut resolved = qbo_resolved();
+        let err = apply_named(
+            Some("graphqll"), // typo
+            &qbo_params(),
+            &mut headers,
+            &mut resolved,
+        )
+        .unwrap_err();
+
+        assert_eq!(err.0, StatusCode::FORBIDDEN);
+        // The critical property: NO fall-through to the default base. A typo must
+        // not quietly send the Intuit token to the Accounting API and read as a 404.
+        assert_eq!(resolved.base_url.as_deref(), Some(QBO_BASE));
+        assert!(headers.is_empty());
+    }
+
+    #[test]
+    fn named_endpoint_rejects_when_the_integration_declares_none() {
+        let mut headers = HashMap::new();
+        let mut resolved = qbo_resolved();
+        let err = apply_named_endpoint_override(
+            Some("graphql"),
+            "conn-1",
+            "stripe_api_key",
+            &json!({}),
+            &mut headers,
+            &mut resolved,
+        )
+        .unwrap_err();
+
+        assert_eq!(err.0, StatusCode::FORBIDDEN);
+        assert_eq!(resolved.base_url.as_deref(), Some(QBO_BASE));
+    }
+
+    /// The end-to-end decision the fix turns on: the pin is what blocks the
+    /// GraphQL host today, and the selector is what unblocks it — without
+    /// relaxing the pin for anything else.
+    #[test]
+    fn named_endpoint_round_trips_through_the_pin() {
+        let agent_url = "https://qb.api.intuit.com/graphql";
+
+        // Without the selector: re-rooted onto the Accounting API host, then
+        // rejected because /graphql escapes /v3/company/{realm}. This is exactly
+        // the failure the bug report hit.
+        assert!(matches!(
+            proxy_url::pin_url_to_base(
+                agent_url,
+                Some(QBO_BASE),
+                true,
+                &proxy_url::PinOptions::strict(),
+            ),
+            Err(ProxyReject::PathEscape { .. })
+        ));
+
+        // With the selector: the base becomes the declared endpoint and the same
+        // request pins cleanly (path equality), credentials still host-pinned.
+        let mut headers = HashMap::new();
+        let mut resolved = qbo_resolved();
+        apply_named(Some("graphql"), &qbo_params(), &mut headers, &mut resolved).unwrap();
+
+        let pinned = proxy_url::pin_url_to_base(
+            agent_url,
+            resolved.base_url.as_deref(),
+            true,
+            &proxy_url::PinOptions::strict(),
+        )
+        .expect("selected endpoint should pin");
+        assert_eq!(pinned, "https://qb.api.intuit.com/graphql");
+
+        // And the selector does NOT become a general escape hatch: a third host
+        // is still re-rooted onto the selected endpoint, never reached.
+        let elsewhere = proxy_url::pin_url_to_base(
+            "https://attacker.example/graphql",
+            resolved.base_url.as_deref(),
+            true,
+            &proxy_url::PinOptions::strict(),
+        )
+        .unwrap();
+        assert!(!elsewhere.contains("attacker.example"), "got {elsewhere}");
     }
 
     // ── Endpoint-ref override ────────────────────────────────────────────

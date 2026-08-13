@@ -207,6 +207,14 @@ impl RequestBuilder {
             .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case("x-runtara-aws-service"))
             .map(|(_, v)| v.clone());
+        // Name of a descriptor-declared alternate endpoint of the connection
+        // (e.g. "graphql"). Only the selector travels — the URL set is fixed in
+        // the connection type, so this cannot point egress at an arbitrary host.
+        let endpoint = self
+            .headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("x-runtara-connection-endpoint"))
+            .map(|(_, v)| v.clone());
         // Opaque, tenant+connection-bound endpoint reference (a signed token).
         // Lets a connection reach a validated per-request base URL (e.g. a
         // Teams conversation's serviceUrl) the connection itself did not pin.
@@ -244,6 +252,7 @@ impl RequestBuilder {
             "connection_id": connection_id,
             "ai_provider": ai_provider,
             "aws_service": aws_service,
+            "endpoint": endpoint,
             "endpoint_ref": endpoint_ref,
             "timeout_ms": self.timeout.map(|t| t.as_millis() as u64),
         });

@@ -1415,6 +1415,7 @@ mod tests {
             fields: FIELDS,
             sections: &[],
             oauth_config: None,
+            named_endpoints: &[],
         };
         let patch = ConnectionParameterPatch {
             set: HashMap::new(),

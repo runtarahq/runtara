@@ -271,6 +271,17 @@ pub struct HttpRequestInput {
     pub url: String,
 
     #[field(
+        display_name = "Connection Endpoint",
+        description = "Name of an alternate endpoint declared by the connection type, for \
+                       providers that split one credential across several API hosts \
+                       (e.g. \"graphql\" on a QuickBooks Online connection). Leave empty to \
+                       use the connection's default base URL. Ignored without a connection.",
+        example = "graphql"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_endpoint: Option<String>,
+
+    #[field(
         display_name = "Headers",
         description = "Custom HTTP headers",
         example = r#"{"Authorization": "Bearer token123"}"#,
@@ -351,6 +362,7 @@ impl Default for HttpRequestInput {
             _connection: None,
             method: HttpMethod::default(),
             url: String::new(),
+            connection_endpoint: None,
             headers: HashMap::new(),
             query_parameters: HashMap::new(),
             body: HttpBody(Value::Null),
@@ -432,6 +444,21 @@ pub fn http_request(input: HttpRequestInput) -> Result<HttpResponse, AgentError>
         headers
             .entry("X-Runtara-Connection-Id".to_string())
             .or_insert_with(|| raw.connection_id.clone());
+
+        // Name an alternate endpoint the connection type declares. Only the
+        // selector is sent — the proxy owns the URL set, so this cannot point a
+        // credentialed request at a host the descriptor did not declare. Only
+        // meaningful alongside a connection, hence the nesting.
+        if let Some(endpoint) = input
+            .connection_endpoint
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            headers
+                .entry("X-Runtara-Connection-Endpoint".to_string())
+                .or_insert_with(|| endpoint.to_string());
+        }
     }
 
     // Append query parameters.

@@ -978,6 +978,41 @@ pub struct OAuthConfig {
     pub params_driven: bool,
 }
 
+/// An additional API endpoint a connection type may egress to, beyond the base
+/// URL its auth descriptor resolves.
+///
+/// Some providers split one credential across more than one host: the same
+/// Intuit OAuth token authenticates both the Accounting API
+/// (`quickbooks.api.intuit.com/v3/company/{realm_id}`) and the app-foundations
+/// GraphQL API. The proxy pins every connection-scoped request to a single base
+/// URL (`pin_url_to_base`), so without an explicit declaration the second host is
+/// unreachable — which is the point: an agent must never be able to name its own
+/// destination for a credentialed request.
+///
+/// These entries are the declaration. They are **`&'static`, authored in the
+/// connection descriptor, and never read from connection parameters** — the same
+/// guarantee `OAuthConfig::params_driven` exists to protect. A parameters PATCH
+/// can therefore never redirect credentialed egress at a host the descriptor
+/// author did not vet. Selecting one is opt-in per request and fail-closed: an
+/// undeclared name is rejected, never silently downgraded to the default base.
+#[derive(Debug, Clone)]
+pub struct NamedEndpoint {
+    /// Selector the caller passes to choose this endpoint (e.g. `"graphql"`).
+    pub name: &'static str,
+    /// Production URL. May carry `{param}` placeholders substituted from the
+    /// connection's parameters (same templating as `base_url_path_template`).
+    pub url: &'static str,
+    /// Sandbox URL, selected when the connection's `environment` parameter is
+    /// `"sandbox"`. Empty string = no sandbox variant, `url` is used for both.
+    pub sandbox_url: &'static str,
+    /// Extra request headers this endpoint needs, as `(name, value)` pairs.
+    /// Values support the same `{param}` templating as `url`, so a provider that
+    /// wants a tenant/realm id in a header gets it without the calling agent ever
+    /// seeing the parameter. `Authorization` may not be declared here — the proxy
+    /// injects the credential and a descriptor must not be able to shadow it.
+    pub headers: &'static [(&'static str, &'static str)],
+}
+
 /// Metadata for a connection type.
 #[derive(Debug, Clone)]
 pub struct ConnectionTypeMeta {
@@ -999,6 +1034,9 @@ pub struct ConnectionTypeMeta {
     pub sections: &'static [ConnectionSectionMeta],
     /// OAuth2 configuration (only for auth_type = Oauth2AuthorizationCode)
     pub oauth_config: Option<&'static OAuthConfig>,
+    /// Additional descriptor-declared endpoints this connection may egress to,
+    /// selectable per request. Empty for the common single-host provider.
+    pub named_endpoints: &'static [NamedEndpoint],
 }
 
 /// Get all registered connection type metadata

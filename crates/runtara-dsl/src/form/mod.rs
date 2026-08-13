@@ -1454,6 +1454,7 @@ mod tests {
             fields: FIELDS,
             sections: &[],
             oauth_config: None,
+            named_endpoints: &[],
         };
 
         let definition = connection_form_definition(&meta);

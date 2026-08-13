@@ -76,6 +76,10 @@ run_test "Teams outbound send-message (mock Bot Connector)" "${SCRIPT_DIR}/test_
 run_test "Teams inbound webhook JWT + dedup (mock authority)" "${SCRIPT_DIR}/test_teams_inbound_webhook.sh"
 run_test "Channel session re-flush provenance guard" "${SCRIPT_DIR}/test_channel_reflush_provenance.sh"
 
+# Connection named endpoints. Also self-contained (own server + Valkey); needs
+# docker + python3 + jq. Nothing egresses — every case fail-closes at the proxy.
+run_test "Connection named endpoints (QuickBooks Online)" "${SCRIPT_DIR}/test_connection_named_endpoint.sh"
+
 # Summary
 echo "=========================================="
 echo "Test Results"

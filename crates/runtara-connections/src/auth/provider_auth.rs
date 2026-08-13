@@ -640,6 +640,154 @@ fn resolve_oauth_base_url(cfg: &OAuthConfig, params: &Value) -> Option<String> {
     Some(url)
 }
 
+// ============================================================================
+// Named endpoints — descriptor-declared additional egress targets
+// ============================================================================
+
+/// A resolved [`NamedEndpoint`]: the base URL to pin to, plus any extra headers
+/// the endpoint declared.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamedEndpointResolution {
+    pub base_url: String,
+    pub headers: Vec<(String, String)>,
+}
+
+/// Why a named-endpoint selection was refused. Every variant is fail-closed: the
+/// caller must abandon the request, never fall back to the connection's default
+/// base URL (a typo'd selector would otherwise silently send the credential to
+/// the wrong API).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NamedEndpointError {
+    /// The connection type declares no endpoint by that name.
+    NotDeclared { name: String, declared: Vec<String> },
+    /// A `{param}` placeholder had no matching string connection parameter.
+    UnresolvedTemplate { name: String, param: String },
+}
+
+impl std::fmt::Display for NamedEndpointError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotDeclared { name, declared } => {
+                if declared.is_empty() {
+                    write!(
+                        f,
+                        "connection type declares no named endpoints, but \"{name}\" was requested"
+                    )
+                } else {
+                    write!(
+                        f,
+                        "unknown named endpoint \"{name}\" (declared: {})",
+                        declared.join(", ")
+                    )
+                }
+            }
+            Self::UnresolvedTemplate { name, param } => write!(
+                f,
+                "named endpoint \"{name}\" needs connection parameter `{param}`, which is unset"
+            ),
+        }
+    }
+}
+
+/// Resolve the named endpoint `name` declared by `meta` against a connection's
+/// `params`.
+///
+/// Sandbox selection follows the same rule as [`resolve_oauth_base_url`]: the
+/// `sandbox_url` wins when the connection's `environment` parameter is
+/// `"sandbox"` and the descriptor declares one. `{param}` placeholders in the URL
+/// and in header values are substituted from `params` — strictly, unlike
+/// [`substitute_path_template`], because an endpoint URL that silently loses its
+/// tenant segment would point at a different scope of the provider's API rather
+/// than at an obviously-broken path.
+///
+/// Pure by design (takes the descriptor, not an integration id) so it is testable
+/// without the connection-type registry; [`resolve_named_endpoint_for`] is the
+/// registry-backed wrapper the proxy calls.
+pub fn resolve_named_endpoint(
+    meta: &runtara_dsl::agent_meta::ConnectionTypeMeta,
+    name: &str,
+    params: &Value,
+) -> Result<NamedEndpointResolution, NamedEndpointError> {
+    let endpoint = meta
+        .named_endpoints
+        .iter()
+        .find(|e| e.name.eq_ignore_ascii_case(name))
+        .ok_or_else(|| NamedEndpointError::NotDeclared {
+            name: name.to_string(),
+            declared: meta
+                .named_endpoints
+                .iter()
+                .map(|e| e.name.to_string())
+                .collect(),
+        })?;
+
+    let is_sandbox = params["environment"].as_str() == Some("sandbox");
+    let url = if is_sandbox && !endpoint.sandbox_url.is_empty() {
+        endpoint.sandbox_url
+    } else {
+        endpoint.url
+    };
+
+    let strict = |template: &str| {
+        substitute_template_strict(template, params).map_err(|param| {
+            NamedEndpointError::UnresolvedTemplate {
+                name: endpoint.name.to_string(),
+                param,
+            }
+        })
+    };
+
+    let base_url = strict(url)?.trim_end_matches('/').to_string();
+    let mut headers = Vec::with_capacity(endpoint.headers.len());
+    for (header_name, header_value) in endpoint.headers {
+        headers.push(((*header_name).to_string(), strict(header_value)?));
+    }
+
+    Ok(NamedEndpointResolution { base_url, headers })
+}
+
+/// Registry-backed [`resolve_named_endpoint`]. An integration with no descriptor
+/// at all is treated as declaring nothing, so an endpoint selection against it is
+/// refused rather than ignored.
+pub fn resolve_named_endpoint_for(
+    integration_id: &str,
+    name: &str,
+    params: &Value,
+) -> Result<NamedEndpointResolution, NamedEndpointError> {
+    match find_connection_type(integration_id) {
+        Some(meta) => resolve_named_endpoint(meta, name, params),
+        None => Err(NamedEndpointError::NotDeclared {
+            name: name.to_string(),
+            declared: Vec::new(),
+        }),
+    }
+}
+
+/// Like [`substitute_path_template`] but fails on a `{name}` with no matching
+/// string param, returning the offending placeholder name.
+fn substitute_template_strict(template: &str, params: &Value) -> Result<String, String> {
+    let mut out = String::with_capacity(template.len());
+    let mut chars = template.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '{' {
+            let mut name = String::new();
+            for c2 in chars.by_ref() {
+                if c2 == '}' {
+                    break;
+                }
+                name.push(c2);
+            }
+            match params[name.as_str()].as_str().filter(|s| !s.is_empty()) {
+                Some(val) => out.push_str(val),
+                None => return Err(name),
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    Ok(out)
+}
+
 /// Replace `{name}` placeholders in a path template with the matching string param.
 /// A missing param substitutes empty (yielding an obviously-broken path the API
 /// rejects clearly, rather than silently hitting the wrong resource).
@@ -945,6 +1093,157 @@ mod tests {
             resolve_oauth_base_url(&cfg, &json!({"realm_id":"456"})).as_deref(),
             Some("https://quickbooks.api.intuit.com/v3/company/456")
         );
+    }
+
+    // ── Named endpoints ──────────────────────────────────────────────────────
+
+    use runtara_dsl::agent_meta::{ConnectionTypeMeta, NamedEndpoint};
+
+    static TEST_ENDPOINTS: &[NamedEndpoint] = &[
+        NamedEndpoint {
+            name: "graphql",
+            url: "https://qb.api.intuit.com/graphql",
+            sandbox_url: "https://sandbox-qb.api.intuit.com/graphql",
+            headers: &[("Intuit-Realm-Id", "{realm_id}")],
+        },
+        NamedEndpoint {
+            name: "no-sandbox",
+            url: "https://api.example.com/v1/{realm_id}",
+            sandbox_url: "",
+            headers: &[],
+        },
+    ];
+
+    fn meta_with(named_endpoints: &'static [NamedEndpoint]) -> ConnectionTypeMeta {
+        ConnectionTypeMeta {
+            integration_id: "fixture",
+            display_name: "Fixture",
+            description: None,
+            category: None,
+            service_id: None,
+            auth_type: None,
+            fields: &[],
+            sections: &[],
+            oauth_config: None,
+            named_endpoints,
+        }
+    }
+
+    #[test]
+    fn named_endpoint_resolves_url_and_templated_header() {
+        let resolved = resolve_named_endpoint(
+            &meta_with(TEST_ENDPOINTS),
+            "graphql",
+            &json!({"environment":"production","realm_id":"123"}),
+        )
+        .unwrap();
+        assert_eq!(resolved.base_url, "https://qb.api.intuit.com/graphql");
+        assert_eq!(
+            resolved.headers,
+            vec![("Intuit-Realm-Id".to_string(), "123".to_string())]
+        );
+    }
+
+    #[test]
+    fn named_endpoint_selects_sandbox_by_environment() {
+        let resolved = resolve_named_endpoint(
+            &meta_with(TEST_ENDPOINTS),
+            "graphql",
+            &json!({"environment":"sandbox","realm_id":"123"}),
+        )
+        .unwrap();
+        assert_eq!(
+            resolved.base_url,
+            "https://sandbox-qb.api.intuit.com/graphql"
+        );
+    }
+
+    #[test]
+    fn named_endpoint_without_sandbox_variant_keeps_prod_url() {
+        // A sandbox connection must not silently lose its endpoint when the
+        // descriptor declares no sandbox variant.
+        let resolved = resolve_named_endpoint(
+            &meta_with(TEST_ENDPOINTS),
+            "no-sandbox",
+            &json!({"environment":"sandbox","realm_id":"9"}),
+        )
+        .unwrap();
+        assert_eq!(resolved.base_url, "https://api.example.com/v1/9");
+    }
+
+    #[test]
+    fn named_endpoint_lookup_is_case_insensitive() {
+        assert!(
+            resolve_named_endpoint(
+                &meta_with(TEST_ENDPOINTS),
+                "GraphQL",
+                &json!({"realm_id":"1"})
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn named_endpoint_unknown_name_is_refused() {
+        let err = resolve_named_endpoint(
+            &meta_with(TEST_ENDPOINTS),
+            "does-not-exist",
+            &json!({"realm_id":"1"}),
+        )
+        .unwrap_err();
+        match err {
+            NamedEndpointError::NotDeclared { ref declared, .. } => {
+                assert_eq!(declared, &["graphql".to_string(), "no-sandbox".to_string()]);
+            }
+            other => panic!("expected NotDeclared, got {other:?}"),
+        }
+        // The message names what IS declared, so a typo is self-diagnosing.
+        assert!(err.to_string().contains("graphql"), "got {err}");
+    }
+
+    #[test]
+    fn named_endpoint_refused_when_none_declared() {
+        let err = resolve_named_endpoint(&meta_with(&[]), "graphql", &json!({})).unwrap_err();
+        assert!(matches!(err, NamedEndpointError::NotDeclared { .. }));
+    }
+
+    #[test]
+    fn named_endpoint_missing_template_param_fails_closed() {
+        // A missing realm must NOT substitute empty — that would silently point
+        // at a different scope of the provider's API.
+        for params in [json!({}), json!({ "realm_id": "" })] {
+            let err = resolve_named_endpoint(&meta_with(TEST_ENDPOINTS), "no-sandbox", &params)
+                .unwrap_err();
+            assert_eq!(
+                err,
+                NamedEndpointError::UnresolvedTemplate {
+                    name: "no-sandbox".into(),
+                    param: "realm_id".into(),
+                },
+                "params={params}"
+            );
+        }
+    }
+
+    #[test]
+    fn named_endpoint_missing_param_in_header_also_fails_closed() {
+        let err =
+            resolve_named_endpoint(&meta_with(TEST_ENDPOINTS), "graphql", &json!({})).unwrap_err();
+        assert_eq!(
+            err,
+            NamedEndpointError::UnresolvedTemplate {
+                name: "graphql".into(),
+                param: "realm_id".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn named_endpoint_for_unknown_integration_is_refused() {
+        assert!(matches!(
+            resolve_named_endpoint_for("no_such_integration", "graphql", &json!({})),
+            Err(NamedEndpointError::NotDeclared { .. })
+        ));
     }
 
     fn oauth_cfg_basic_revoke() -> OAuthConfig {

@@ -93,6 +93,18 @@ pub fn get_default_rate_limit_config(integration_id: &str) -> Option<RateLimitCo
             max_retries: 3,
             max_wait_ms: 60000,
         }),
+        // QuickBooks Online: Intuit throttles the Accounting API at ~500 requests
+        // per minute per realm (=8/s) with a concurrent-request cap of 10. 8 req/s
+        // with burst 15 sits at the documented rate without tripping the burst.
+        // Both the typed `quickbooks` agent and http steps bound to the connection
+        // share this budget, since the limiter is keyed on the connection.
+        "quickbooks_online" => Some(RateLimitConfigDto {
+            requests_per_second: 8,
+            burst_size: 15,
+            retry_on_limit: true,
+            max_retries: 3,
+            max_wait_ms: 60000,
+        }),
         // Mailgun: per-plan sending/API limits vary; 5 req/s with burst 10 is a
         // conservative floor that suits transactional sending without 429s.
         "mailgun" => Some(RateLimitConfigDto {

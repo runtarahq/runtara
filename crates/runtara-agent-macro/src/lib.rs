@@ -762,6 +762,29 @@ struct ConnectionFieldArgs {
     required: Option<syn::Path>,
 }
 
+/// One `named_endpoint(...)` entry on a `#[connection(...)]` attribute.
+///
+/// Declares an additional host this connection may egress to beyond the base URL
+/// its auth descriptor resolves (see `runtara_dsl::agent_meta::NamedEndpoint`).
+/// A repeatable nested attribute rather than another delimited string, because
+/// the values are URLs and every separator this crate already uses for list
+/// attributes (`:` in `oauth_extra_callback_params`, `,` in `parse_str_list`)
+/// occurs inside them.
+#[derive(Debug, FromMeta)]
+struct NamedEndpointArgs {
+    /// Selector the caller passes to choose this endpoint (e.g. "graphql").
+    name: String,
+    /// Production URL; may carry `{param}` placeholders.
+    url: String,
+    /// Sandbox URL, used when the connection's `environment` == "sandbox".
+    #[darling(default)]
+    sandbox_url: Option<String>,
+    /// Extra headers as `Name=Value` pairs, comma-separated. Values may carry
+    /// `{param}` placeholders (e.g. "Intuit-Realm-Id={realm_id}").
+    #[darling(default)]
+    headers: Option<String>,
+}
+
 /// Container attributes for ConnectionParams derive
 #[derive(Debug, FromDeriveInput)]
 #[darling(attributes(connection))]
@@ -827,6 +850,10 @@ struct ConnectionContainerArgs {
     /// the generic bring-your-own types; default false)
     #[darling(default)]
     oauth_params_driven: Option<bool>,
+    /// Additional descriptor-declared endpoints this connection may egress to,
+    /// selectable per request. Repeat the attribute once per endpoint.
+    #[darling(multiple)]
+    named_endpoint: Vec<NamedEndpointArgs>,
 }
 
 /// Derive macro for connection parameter structs
@@ -1219,6 +1246,11 @@ pub fn derive_connection_params(input: TokenStream) -> TokenStream {
         _ => quote! { None },
     };
 
+    let named_endpoints_token = match build_named_endpoints(&args.named_endpoint) {
+        Ok(tokens) => tokens,
+        Err(e) => return TokenStream::from(e.to_compile_error()),
+    };
+
     let meta_ident = format_ident!("__CONNECTION_META_{}", struct_name);
 
     let expanded = quote! {
@@ -1234,11 +1266,91 @@ pub fn derive_connection_params(input: TokenStream) -> TokenStream {
             fields: &[#(#field_metas),*],
             sections: &[#(#section_metas),*],
             oauth_config: #oauth_config_token,
+            named_endpoints: #named_endpoints_token,
         };
 
     };
 
     TokenStream::from(expanded)
+}
+
+/// Build the `&[NamedEndpoint]` literal from the `named_endpoint(...)` attributes.
+///
+/// Validation is deliberately a compile error rather than a runtime check: these
+/// entries widen where a stored credential may be sent, so a malformed one must
+/// never reach a running server. Rejects a duplicate `name` (the selector would be
+/// ambiguous), an empty `url`, a header without `Name=Value` shape, and — the one
+/// that matters most — a declared `Authorization` header, which would let a
+/// descriptor shadow the credential the proxy injects.
+fn build_named_endpoints(
+    endpoints: &[NamedEndpointArgs],
+) -> Result<proc_macro2::TokenStream, syn::Error> {
+    let err = |msg: String| syn::Error::new(proc_macro2::Span::call_site(), msg);
+    let mut seen: Vec<&str> = Vec::new();
+    let mut items: Vec<proc_macro2::TokenStream> = Vec::new();
+
+    for endpoint in endpoints {
+        let name = endpoint.name.trim();
+        if name.is_empty() {
+            return Err(err("named_endpoint: `name` must not be empty".to_string()));
+        }
+        if seen.iter().any(|s| s.eq_ignore_ascii_case(name)) {
+            return Err(err(format!(
+                "named_endpoint: duplicate name \"{name}\" — the selector would be ambiguous"
+            )));
+        }
+        seen.push(name);
+
+        let url = endpoint.url.trim();
+        if url.is_empty() {
+            return Err(err(format!(
+                "named_endpoint \"{name}\": `url` must not be empty"
+            )));
+        }
+        let sandbox_url = endpoint.sandbox_url.as_deref().unwrap_or("").trim();
+
+        let mut headers: Vec<proc_macro2::TokenStream> = Vec::new();
+        for pair in endpoint
+            .headers
+            .as_deref()
+            .unwrap_or("")
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            let Some((header_name, header_value)) = pair.split_once('=') else {
+                return Err(err(format!(
+                    "named_endpoint \"{name}\": header \"{pair}\" is not in `Name=Value` form"
+                )));
+            };
+            let header_name = header_name.trim();
+            let header_value = header_value.trim();
+            if header_name.is_empty() || header_value.is_empty() {
+                return Err(err(format!(
+                    "named_endpoint \"{name}\": header \"{pair}\" has an empty name or value"
+                )));
+            }
+            if header_name.eq_ignore_ascii_case("authorization") {
+                return Err(err(format!(
+                    "named_endpoint \"{name}\": an `Authorization` header may not be declared — \
+                     the proxy injects the connection's credential and a descriptor must not be \
+                     able to shadow it"
+                )));
+            }
+            headers.push(quote! { (#header_name, #header_value) });
+        }
+
+        items.push(quote! {
+            runtara_dsl::agent_meta::NamedEndpoint {
+                name: #name,
+                url: #url,
+                sandbox_url: #sandbox_url,
+                headers: &[#(#headers),*],
+            }
+        });
+    }
+
+    Ok(quote! { &[#(#items),*] })
 }
 
 /// Parse the `oauth_extra_callback_params` attribute — comma-separated
