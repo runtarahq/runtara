@@ -387,7 +387,7 @@ async fn test_list_instances() {
     // List running for tenant-a
     let options = db::ListInstancesOptions {
         tenant_id: Some("list-test-tenant-a".to_string()),
-        status: Some("running".to_string()),
+        statuses: Some(vec!["running".to_string()]),
         limit: 100,
         ..Default::default()
     };

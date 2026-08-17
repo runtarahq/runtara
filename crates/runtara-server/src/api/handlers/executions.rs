@@ -77,12 +77,15 @@ fn parse_filters(query: &ListAllExecutionsQuery) -> Result<ExecutionFilters, Str
             .collect::<Vec<_>>()
     });
 
-    // Validate statuses (must be lowercase to match DB and API response format)
+    // Validate statuses (must be lowercase to match DB and API response format).
+    // `suspended` belongs here too: it is a status listings report, so it has to
+    // be one callers can filter on.
     if let Some(ref status_list) = statuses {
         let valid_statuses = [
             "queued",
             "compiling",
             "running",
+            "suspended",
             "completed",
             "failed",
             "timeout",
@@ -91,8 +94,9 @@ fn parse_filters(query: &ListAllExecutionsQuery) -> Result<ExecutionFilters, Str
         for status in status_list {
             if !valid_statuses.contains(&status.as_str()) {
                 return Err(format!(
-                    "Invalid status '{}'. Valid values: queued, compiling, running, completed, failed, timeout, cancelled",
-                    status
+                    "Invalid status '{}'. Valid values: {}",
+                    status,
+                    valid_statuses.join(", ")
                 ));
             }
         }
@@ -136,4 +140,75 @@ fn parse_filters(query: &ListAllExecutionsQuery) -> Result<ExecutionFilters, Str
         sort_by: sort_column.to_string(),
         sort_order: sort_order_sql.to_string(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn query_with_status(status: Option<&str>) -> ListAllExecutionsQuery {
+        ListAllExecutionsQuery {
+            page: None,
+            size: None,
+            workflow_id: None,
+            status: status.map(|s| s.to_string()),
+            created_from: None,
+            created_to: None,
+            completed_from: None,
+            completed_to: None,
+            sort_by: None,
+            sort_order: None,
+        }
+    }
+
+    #[test]
+    fn parse_filters_without_status_leaves_it_unset() {
+        let filters = parse_filters(&query_with_status(None)).expect("valid query");
+
+        assert!(filters.statuses.is_none());
+    }
+
+    #[test]
+    fn parse_filters_keeps_every_status() {
+        let filters = parse_filters(&query_with_status(Some("failed,cancelled"))).expect("valid");
+
+        assert_eq!(
+            filters.statuses,
+            Some(vec!["failed".to_string(), "cancelled".to_string()])
+        );
+    }
+
+    #[test]
+    fn parse_filters_trims_and_drops_blank_entries() {
+        let filters = parse_filters(&query_with_status(Some(" failed , ,cancelled "))).expect("ok");
+
+        assert_eq!(
+            filters.statuses,
+            Some(vec!["failed".to_string(), "cancelled".to_string()])
+        );
+    }
+
+    #[test]
+    fn parse_filters_rejects_an_invalid_status_anywhere_in_the_list() {
+        let error = parse_filters(&query_with_status(Some("failed,bogus")))
+            .expect_err("bogus is not a status");
+
+        assert!(error.contains("bogus"), "error should name the bad value");
+    }
+
+    #[test]
+    fn parse_filters_accepts_suspended() {
+        // Listings report `suspended`, so it has to be filterable too.
+        let filters = parse_filters(&query_with_status(Some("suspended"))).expect("valid");
+
+        assert_eq!(filters.statuses, Some(vec!["suspended".to_string()]));
+    }
+
+    #[test]
+    fn parse_filters_accepts_every_status_the_api_documents() {
+        let all = "queued,compiling,running,suspended,completed,failed,timeout,cancelled";
+        let filters = parse_filters(&query_with_status(Some(all))).expect("valid");
+
+        assert_eq!(filters.statuses.expect("statuses").len(), 8);
+    }
 }

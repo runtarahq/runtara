@@ -353,6 +353,70 @@ fn instance_status_from_string(s: &str) -> InstanceStatus {
     }
 }
 
+/// Build the query parameters for `GET /api/v1/instances`.
+///
+/// The status filter goes out twice on purpose. `statuses` is the real filter —
+/// an instance matches any one of them — while `status` repeats the first entry
+/// for environments that predate the multi-status filter: those ignore the
+/// unknown `statuses` parameter, and without `status` they would return every
+/// instance rather than a narrower set.
+fn list_instances_query(options: &ListInstancesOptions) -> Vec<(String, String)> {
+    let mut query: Vec<(String, String)> = Vec::new();
+
+    if let Some(ref tenant_id) = options.tenant_id {
+        query.push(("tenant_id".to_string(), tenant_id.clone()));
+    }
+    if let Some(first) = options.statuses.first() {
+        query.push(("status".to_string(), first.as_str().to_string()));
+        query.push((
+            "statuses".to_string(),
+            options
+                .statuses
+                .iter()
+                .map(|status| status.as_str())
+                .collect::<Vec<_>>()
+                .join(","),
+        ));
+    }
+    if let Some(ref image_id) = options.image_id {
+        query.push(("image_id".to_string(), image_id.clone()));
+    }
+    if let Some(ref prefix) = options.image_name_prefix {
+        query.push(("image_name_prefix".to_string(), prefix.clone()));
+    }
+    if let Some(created_after) = options.created_after {
+        query.push((
+            "created_after_ms".to_string(),
+            created_after.timestamp_millis().to_string(),
+        ));
+    }
+    if let Some(created_before) = options.created_before {
+        query.push((
+            "created_before_ms".to_string(),
+            created_before.timestamp_millis().to_string(),
+        ));
+    }
+    if let Some(finished_after) = options.finished_after {
+        query.push((
+            "finished_after_ms".to_string(),
+            finished_after.timestamp_millis().to_string(),
+        ));
+    }
+    if let Some(finished_before) = options.finished_before {
+        query.push((
+            "finished_before_ms".to_string(),
+            finished_before.timestamp_millis().to_string(),
+        ));
+    }
+    if let Some(order_by) = options.order_by {
+        query.push(("order_by".to_string(), order_by.as_str().to_string()));
+    }
+    query.push(("limit".to_string(), options.limit.to_string()));
+    query.push(("offset".to_string(), options.offset.to_string()));
+
+    query
+}
+
 fn step_status_from_string(s: &str) -> StepStatus {
     match s {
         "completed" => StepStatus::Completed,
@@ -568,58 +632,7 @@ impl ManagementSdk {
     ) -> Result<ListInstancesResult> {
         debug!("Listing instances");
 
-        let mut query: Vec<(String, String)> = Vec::new();
-
-        if let Some(ref tenant_id) = options.tenant_id {
-            query.push(("tenant_id".to_string(), tenant_id.clone()));
-        }
-        if let Some(status) = options.status {
-            let status_str = match status {
-                InstanceStatus::Pending => "pending",
-                InstanceStatus::Running => "running",
-                InstanceStatus::Suspended => "suspended",
-                InstanceStatus::Completed => "completed",
-                InstanceStatus::Failed => "failed",
-                InstanceStatus::Cancelled => "cancelled",
-                InstanceStatus::Unknown => "unknown",
-            };
-            query.push(("status".to_string(), status_str.to_string()));
-        }
-        if let Some(ref image_id) = options.image_id {
-            query.push(("image_id".to_string(), image_id.clone()));
-        }
-        if let Some(ref prefix) = options.image_name_prefix {
-            query.push(("image_name_prefix".to_string(), prefix.clone()));
-        }
-        if let Some(created_after) = options.created_after {
-            query.push((
-                "created_after_ms".to_string(),
-                created_after.timestamp_millis().to_string(),
-            ));
-        }
-        if let Some(created_before) = options.created_before {
-            query.push((
-                "created_before_ms".to_string(),
-                created_before.timestamp_millis().to_string(),
-            ));
-        }
-        if let Some(finished_after) = options.finished_after {
-            query.push((
-                "finished_after_ms".to_string(),
-                finished_after.timestamp_millis().to_string(),
-            ));
-        }
-        if let Some(finished_before) = options.finished_before {
-            query.push((
-                "finished_before_ms".to_string(),
-                finished_before.timestamp_millis().to_string(),
-            ));
-        }
-        if let Some(order_by) = options.order_by {
-            query.push(("order_by".to_string(), order_by.as_str().to_string()));
-        }
-        query.push(("limit".to_string(), options.limit.to_string()));
-        query.push(("offset".to_string(), options.offset.to_string()));
+        let query = list_instances_query(&options);
 
         let resp = self
             .client
@@ -1710,5 +1723,48 @@ impl ManagementSdk {
 
         self.wait_for_completion(&result.instance_id, poll_interval)
             .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn value_of<'a>(query: &'a [(String, String)], key: &str) -> Option<&'a str> {
+        query
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.as_str())
+    }
+
+    #[test]
+    fn list_instances_query_omits_status_when_unset() {
+        let query = list_instances_query(&ListInstancesOptions::new().with_tenant_id("acme"));
+
+        assert_eq!(value_of(&query, "tenant_id"), Some("acme"));
+        assert_eq!(value_of(&query, "status"), None);
+        assert_eq!(value_of(&query, "statuses"), None);
+    }
+
+    #[test]
+    fn list_instances_query_sends_every_status() {
+        let query = list_instances_query(
+            &ListInstancesOptions::new()
+                .with_statuses([InstanceStatus::Failed, InstanceStatus::Cancelled]),
+        );
+
+        assert_eq!(value_of(&query, "statuses"), Some("failed,cancelled"));
+        // Kept for environments that do not understand `statuses`: narrowing to
+        // the first status beats dropping the filter entirely.
+        assert_eq!(value_of(&query, "status"), Some("failed"));
+    }
+
+    #[test]
+    fn list_instances_query_single_status_matches_both_forms() {
+        let query =
+            list_instances_query(&ListInstancesOptions::new().with_status(InstanceStatus::Running));
+
+        assert_eq!(value_of(&query, "status"), Some("running"));
+        assert_eq!(value_of(&query, "statuses"), Some("running"));
     }
 }

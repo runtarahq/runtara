@@ -26,6 +26,20 @@ pub enum InstanceStatus {
 }
 
 impl InstanceStatus {
+    /// The wire spelling used by the environment's query parameters, matching
+    /// the `instance_status` values stored in the database.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            InstanceStatus::Unknown => "unknown",
+            InstanceStatus::Pending => "pending",
+            InstanceStatus::Running => "running",
+            InstanceStatus::Suspended => "suspended",
+            InstanceStatus::Completed => "completed",
+            InstanceStatus::Failed => "failed",
+            InstanceStatus::Cancelled => "cancelled",
+        }
+    }
+
     /// Check if this is a terminal status.
     pub fn is_terminal(&self) -> bool {
         matches!(
@@ -394,8 +408,10 @@ impl ListInstancesOrder {
 pub struct ListInstancesOptions {
     /// Filter by tenant ID.
     pub tenant_id: Option<String>,
-    /// Filter by status.
-    pub status: Option<InstanceStatus>,
+    /// Filter by status — an instance matches if it holds any one of these.
+    /// Empty means the status is left unfiltered.
+    #[serde(default)]
+    pub statuses: Vec<InstanceStatus>,
     /// Filter by image ID (exact UUID match).
     pub image_id: Option<String>,
     /// Filter by image name prefix (e.g., "workflow_id:" matches "workflow_id:1", "workflow_id:2").
@@ -431,9 +447,23 @@ impl ListInstancesOptions {
         self
     }
 
-    /// Filter by status.
+    /// Filter by a single status.
     pub fn with_status(mut self, status: InstanceStatus) -> Self {
-        self.status = Some(status);
+        self.statuses = vec![status];
+        self
+    }
+
+    /// Filter by several statuses at once — an instance matches if it holds any
+    /// one of them. Repeats are collapsed, so callers can pass the result of a
+    /// lossy status mapping directly.
+    pub fn with_statuses(mut self, statuses: impl IntoIterator<Item = InstanceStatus>) -> Self {
+        let mut resolved: Vec<InstanceStatus> = Vec::new();
+        for status in statuses {
+            if !resolved.contains(&status) {
+                resolved.push(status);
+            }
+        }
+        self.statuses = resolved;
         self
     }
 
@@ -1676,9 +1706,45 @@ mod tests {
             .with_offset(10);
 
         assert_eq!(opts.tenant_id, Some("tenant-1".to_string()));
-        assert_eq!(opts.status, Some(InstanceStatus::Running));
+        assert_eq!(opts.statuses, vec![InstanceStatus::Running]);
         assert_eq!(opts.limit, 50);
         assert_eq!(opts.offset, 10);
+    }
+
+    #[test]
+    fn test_list_instances_options_with_statuses() {
+        let opts = ListInstancesOptions::new()
+            .with_statuses([InstanceStatus::Failed, InstanceStatus::Cancelled]);
+
+        assert_eq!(
+            opts.statuses,
+            vec![InstanceStatus::Failed, InstanceStatus::Cancelled]
+        );
+    }
+
+    #[test]
+    fn test_list_instances_options_with_statuses_collapses_repeats() {
+        // `failed` and `timeout` both map to Failed upstream, so the same status
+        // can arrive twice.
+        let opts = ListInstancesOptions::new().with_statuses([
+            InstanceStatus::Failed,
+            InstanceStatus::Failed,
+            InstanceStatus::Cancelled,
+        ]);
+
+        assert_eq!(
+            opts.statuses,
+            vec![InstanceStatus::Failed, InstanceStatus::Cancelled]
+        );
+    }
+
+    #[test]
+    fn test_list_instances_options_with_status_replaces_statuses() {
+        let opts = ListInstancesOptions::new()
+            .with_statuses([InstanceStatus::Failed, InstanceStatus::Cancelled])
+            .with_status(InstanceStatus::Running);
+
+        assert_eq!(opts.statuses, vec![InstanceStatus::Running]);
     }
 
     #[test]
@@ -1686,7 +1752,7 @@ mod tests {
         let opts = ListInstancesOptions::new();
 
         assert!(opts.tenant_id.is_none());
-        assert!(opts.status.is_none());
+        assert!(opts.statuses.is_empty());
         assert!(opts.image_id.is_none());
         assert!(opts.created_after.is_none());
         assert!(opts.created_before.is_none());

@@ -63,6 +63,25 @@ pub fn execution_status_to_runtara(status: &str) -> Option<RuntaraInstanceStatus
     }
 }
 
+/// Convert a set of local execution statuses to the Runtara statuses a listing
+/// should match.
+///
+/// The mapping is many-to-one — `queued` and `compiling` both mean `Pending`,
+/// `failed` and `timeout` both mean `Failed` — so repeats are collapsed and the
+/// result can be shorter than the input. Unrecognized entries are dropped;
+/// callers validate the vocabulary before getting here.
+pub fn execution_statuses_to_runtara(statuses: &[String]) -> Vec<RuntaraInstanceStatus> {
+    let mut mapped: Vec<RuntaraInstanceStatus> = Vec::new();
+    for status in statuses {
+        if let Some(runtara_status) = execution_status_to_runtara(status)
+            && !mapped.contains(&runtara_status)
+        {
+            mapped.push(runtara_status);
+        }
+    }
+    mapped
+}
+
 /// Execution duration in seconds derived from the instance timestamps.
 ///
 /// Returns `None` unless both timestamps are present and `finished_at` is at
@@ -525,6 +544,61 @@ mod tests {
     #[test]
     fn test_execution_status_to_runtara_unknown() {
         assert_eq!(execution_status_to_runtara("invalid_status"), None);
+    }
+
+    // =========================================================================
+    // execution_statuses_to_runtara tests
+    // =========================================================================
+
+    fn statuses(values: &[&str]) -> Vec<String> {
+        values.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn test_execution_statuses_to_runtara_keeps_every_status() {
+        assert_eq!(
+            execution_statuses_to_runtara(&statuses(&["failed", "cancelled"])),
+            vec![
+                RuntaraInstanceStatus::Failed,
+                RuntaraInstanceStatus::Cancelled
+            ]
+        );
+    }
+
+    #[test]
+    fn test_execution_statuses_to_runtara_collapses_shared_mappings() {
+        // failed/timeout and queued/compiling each collapse onto one runtime
+        // status; the filter must not ask for it twice.
+        assert_eq!(
+            execution_statuses_to_runtara(&statuses(&["failed", "timeout"])),
+            vec![RuntaraInstanceStatus::Failed]
+        );
+        assert_eq!(
+            execution_statuses_to_runtara(&statuses(&["queued", "compiling"])),
+            vec![RuntaraInstanceStatus::Pending]
+        );
+    }
+
+    #[test]
+    fn test_execution_statuses_to_runtara_preserves_order() {
+        assert_eq!(
+            execution_statuses_to_runtara(&statuses(&["cancelled", "running", "completed"])),
+            vec![
+                RuntaraInstanceStatus::Cancelled,
+                RuntaraInstanceStatus::Running,
+                RuntaraInstanceStatus::Completed
+            ]
+        );
+    }
+
+    #[test]
+    fn test_execution_statuses_to_runtara_drops_unknown_entries() {
+        assert_eq!(
+            execution_statuses_to_runtara(&statuses(&["nonsense", "running"])),
+            vec![RuntaraInstanceStatus::Running]
+        );
+        assert!(execution_statuses_to_runtara(&statuses(&["nonsense"])).is_empty());
+        assert!(execution_statuses_to_runtara(&[]).is_empty());
     }
 
     // =========================================================================

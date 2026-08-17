@@ -190,8 +190,14 @@ struct InstanceStatusJsonResponse {
 struct ListInstancesQuery {
     #[serde(default)]
     tenant_id: Option<String>,
+    /// Single status filter. Superseded by `statuses`; kept so clients that
+    /// predate the multi-status filter keep working.
     #[serde(default)]
     status: Option<String>,
+    /// Comma-separated status filter — a row matches if it holds any one of
+    /// them. Takes precedence over `status` when both are present.
+    #[serde(default)]
+    statuses: Option<String>,
     #[serde(default)]
     image_id: Option<String>,
     #[serde(default)]
@@ -210,6 +216,25 @@ struct ListInstancesQuery {
     limit: Option<u32>,
     #[serde(default)]
     offset: Option<u32>,
+}
+
+/// Resolve the status filter from the two query forms.
+///
+/// `statuses` (comma-separated) wins when present; `status` is the older
+/// single-value form. Blank entries are dropped and repeats collapsed, so a
+/// list that normalizes to nothing leaves the status unfiltered rather than
+/// matching no rows.
+fn resolve_status_filter(statuses: Option<&str>, status: Option<&str>) -> Option<Vec<String>> {
+    let raw = statuses.or(status)?;
+
+    let mut resolved: Vec<String> = Vec::new();
+    for entry in raw.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        if !resolved.iter().any(|kept| kept == entry) {
+            resolved.push(entry.to_string());
+        }
+    }
+
+    (!resolved.is_empty()).then_some(resolved)
 }
 
 /// Instance summary for list responses.
@@ -1201,8 +1226,7 @@ async fn handle_list_instances(
     let limit = query.limit.unwrap_or(100) as i64;
     let offset = query.offset.unwrap_or(0) as i64;
 
-    // Convert status string to match DB format
-    let status = query.status;
+    let statuses = resolve_status_filter(query.statuses.as_deref(), query.status.as_deref());
 
     // Convert milliseconds to DateTime
     let created_after = query
@@ -1220,7 +1244,7 @@ async fn handle_list_instances(
 
     let options = db::ListInstancesOptions {
         tenant_id: query.tenant_id,
-        status,
+        statuses,
         image_id: query.image_id,
         image_name_prefix: query.image_name_prefix,
         created_after,
@@ -2185,6 +2209,51 @@ mod tests {
 
     use runtara_core::persistence::{CompleteInstanceParams, Persistence, SqlitePersistence};
     use std::sync::Arc;
+
+    fn owned(values: &[&str]) -> Option<Vec<String>> {
+        Some(values.iter().map(|s| s.to_string()).collect())
+    }
+
+    #[test]
+    fn resolve_status_filter_splits_the_multi_status_form() {
+        assert_eq!(
+            resolve_status_filter(Some("failed,cancelled"), None),
+            owned(&["failed", "cancelled"])
+        );
+    }
+
+    #[test]
+    fn resolve_status_filter_prefers_statuses_over_status() {
+        // A client that sends both means the list; `status` is only there for
+        // servers that do not understand `statuses`.
+        assert_eq!(
+            resolve_status_filter(Some("failed,cancelled"), Some("failed")),
+            owned(&["failed", "cancelled"])
+        );
+    }
+
+    #[test]
+    fn resolve_status_filter_falls_back_to_the_single_form() {
+        assert_eq!(
+            resolve_status_filter(None, Some("running")),
+            owned(&["running"])
+        );
+    }
+
+    #[test]
+    fn resolve_status_filter_normalizes_whitespace_and_repeats() {
+        assert_eq!(
+            resolve_status_filter(Some(" failed , cancelled ,failed"), None),
+            owned(&["failed", "cancelled"])
+        );
+    }
+
+    #[test]
+    fn resolve_status_filter_treats_an_empty_list_as_no_filter() {
+        assert_eq!(resolve_status_filter(Some(" , "), None), None);
+        assert_eq!(resolve_status_filter(Some(""), None), None);
+        assert_eq!(resolve_status_filter(None, None), None);
+    }
 
     /// A suspended instance with the given `termination_reason` marker.
     async fn suspended_instance(

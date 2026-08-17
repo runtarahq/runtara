@@ -168,8 +168,9 @@ pub async fn get_instance_full(
 pub struct ListInstancesOptions {
     /// Filter by tenant ID.
     pub tenant_id: Option<String>,
-    /// Filter by status.
-    pub status: Option<String>,
+    /// Filter by status — a row matches if it holds any one of these. `None`
+    /// (or an empty list) leaves the status unfiltered.
+    pub statuses: Option<Vec<String>>,
     /// Filter by image ID (exact match).
     pub image_id: Option<String>,
     /// Filter by image name prefix (e.g., "workflow_id:" matches "workflow_id:1", "workflow_id:2").
@@ -188,6 +189,16 @@ pub struct ListInstancesOptions {
     pub limit: i64,
     /// Pagination offset.
     pub offset: i64,
+}
+
+/// Status filter as a bindable array. An empty list means "no status filter"
+/// rather than "match nothing", so callers can pass a filtered/deduped vector
+/// straight through without special-casing the empty case.
+fn status_filter(options: &ListInstancesOptions) -> Option<&[String]> {
+    options
+        .statuses
+        .as_deref()
+        .filter(|statuses| !statuses.is_empty())
 }
 
 /// List instances with optional filters.
@@ -218,7 +229,7 @@ pub async fn list_instances(
         LEFT JOIN instance_images ii ON i.instance_id = ii.instance_id
         LEFT JOIN images img ON ii.image_id = img.image_id
         WHERE ($1::TEXT IS NULL OR i.tenant_id = $1)
-          AND ($2::TEXT IS NULL OR i.status::TEXT = $2)
+          AND ($2::TEXT[] IS NULL OR i.status::TEXT = ANY($2::TEXT[]))
           AND ($3::TEXT IS NULL OR ii.image_id = $3)
           AND ($4::TEXT IS NULL OR img.name LIKE $4)
           AND ($5::TIMESTAMPTZ IS NULL OR i.created_at >= $5)
@@ -233,7 +244,7 @@ pub async fn list_instances(
 
     sqlx::query_as::<_, InstanceWithImage>(&query)
         .bind(options.tenant_id.as_deref())
-        .bind(options.status.as_deref())
+        .bind(status_filter(options))
         .bind(options.image_id.as_deref())
         .bind(image_name_pattern.as_deref())
         .bind(options.created_after)
@@ -264,7 +275,7 @@ pub async fn count_instances(
         LEFT JOIN instance_images ii ON i.instance_id = ii.instance_id
         LEFT JOIN images img ON ii.image_id = img.image_id
         WHERE ($1::TEXT IS NULL OR i.tenant_id = $1)
-          AND ($2::TEXT IS NULL OR i.status::TEXT = $2)
+          AND ($2::TEXT[] IS NULL OR i.status::TEXT = ANY($2::TEXT[]))
           AND ($3::TEXT IS NULL OR ii.image_id = $3)
           AND ($4::TEXT IS NULL OR img.name LIKE $4)
           AND ($5::TIMESTAMPTZ IS NULL OR i.created_at >= $5)
@@ -274,7 +285,7 @@ pub async fn count_instances(
         "#,
     )
     .bind(options.tenant_id.as_deref())
-    .bind(options.status.as_deref())
+    .bind(status_filter(options))
     .bind(options.image_id.as_deref())
     .bind(image_name_pattern.as_deref())
     .bind(options.created_after)
@@ -552,7 +563,7 @@ mod tests {
         let options = ListInstancesOptions::default();
 
         assert!(options.tenant_id.is_none());
-        assert!(options.status.is_none());
+        assert!(options.statuses.is_none());
         assert!(options.image_id.is_none());
         assert!(options.image_name_prefix.is_none());
         assert!(options.created_after.is_none());
@@ -577,11 +588,38 @@ mod tests {
     #[test]
     fn test_list_instances_options_with_status() {
         let options = ListInstancesOptions {
-            status: Some("running".to_string()),
+            statuses: Some(vec!["running".to_string()]),
             ..Default::default()
         };
 
-        assert_eq!(options.status, Some("running".to_string()));
+        assert_eq!(options.statuses, Some(vec!["running".to_string()]));
+        assert_eq!(status_filter(&options), Some(&["running".to_string()][..]));
+    }
+
+    #[test]
+    fn test_list_instances_options_with_multiple_statuses() {
+        let options = ListInstancesOptions {
+            statuses: Some(vec!["failed".to_string(), "cancelled".to_string()]),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            status_filter(&options),
+            Some(&["failed".to_string(), "cancelled".to_string()][..])
+        );
+    }
+
+    #[test]
+    fn test_status_filter_treats_empty_list_as_unfiltered() {
+        // An empty array bound into `= ANY(...)` would match no rows at all,
+        // which is not what "no status filter" means.
+        let options = ListInstancesOptions {
+            statuses: Some(Vec::new()),
+            ..Default::default()
+        };
+
+        assert_eq!(status_filter(&options), None);
+        assert_eq!(status_filter(&ListInstancesOptions::default()), None);
     }
 
     #[test]
@@ -643,7 +681,7 @@ mod tests {
 
         let options = ListInstancesOptions {
             tenant_id: Some("tenant-1".to_string()),
-            status: Some("completed".to_string()),
+            statuses: Some(vec!["completed".to_string()]),
             image_id: Some("img-456".to_string()),
             image_name_prefix: Some("workflow:".to_string()),
             created_after: Some(now - chrono::Duration::days(7)),
@@ -656,7 +694,7 @@ mod tests {
         };
 
         assert_eq!(options.tenant_id, Some("tenant-1".to_string()));
-        assert_eq!(options.status, Some("completed".to_string()));
+        assert_eq!(options.statuses, Some(vec!["completed".to_string()]));
         assert_eq!(options.image_id, Some("img-456".to_string()));
         assert_eq!(options.image_name_prefix, Some("workflow:".to_string()));
         assert!(options.created_after.is_some());
@@ -685,7 +723,7 @@ mod tests {
     fn test_list_instances_options_clone() {
         let options = ListInstancesOptions {
             tenant_id: Some("tenant-1".to_string()),
-            status: Some("running".to_string()),
+            statuses: Some(vec!["running".to_string()]),
             limit: 10,
             ..Default::default()
         };
@@ -693,7 +731,7 @@ mod tests {
         let cloned = options.clone();
 
         assert_eq!(options.tenant_id, cloned.tenant_id);
-        assert_eq!(options.status, cloned.status);
+        assert_eq!(options.statuses, cloned.statuses);
         assert_eq!(options.limit, cloned.limit);
     }
 
