@@ -416,6 +416,27 @@ pub fn record_permission_denial(permission: &'static str, gate: &'static str, en
     }
 }
 
+/// Count a credential-scope denial on the same counter, tagged `gate="api_key_scope"` plus the
+/// `scope` that refused it. `permission` is `"<ungated>"` for a route the permission map does not
+/// cover (metadata, API-key management), which the scope blocks on method alone.
+///
+/// Separate from [`record_permission_denial`] only so the extra `scope` attribute does not have
+/// to be threaded through the role-gate call sites, where it is always absent. Scope denials are
+/// always enforced — there is no shadow stage — so `enforced` is fixed at `true`.
+pub fn record_scope_denial(permission: &'static str, scope: &'static str) {
+    if let Some(m) = metrics() {
+        m.auth_permission_denials_total.add(
+            1,
+            &[
+                KeyValue::new("permission", permission),
+                KeyValue::new("gate", "api_key_scope"),
+                KeyValue::new("scope", scope),
+                KeyValue::new("enforced", true),
+            ],
+        );
+    }
+}
+
 /// Initialize OpenTelemetry with OTLP exporter
 ///
 /// Uses environment variables:

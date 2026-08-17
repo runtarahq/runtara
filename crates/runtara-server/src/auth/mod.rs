@@ -9,7 +9,7 @@ use redis::aio::ConnectionManager;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 
-use crate::authz::Role;
+use crate::authz::{ApiKeyScope, Role};
 
 pub use provider::{AuthError, AuthProvider, AuthProviderKind, AuthProviders};
 
@@ -43,6 +43,13 @@ pub struct AuthContext {
     /// lookup populates it. JWTs never carry the role; it is read from the
     /// per-tenant Valkey `member:{sub}` entry.
     pub role: Option<Role>,
+    /// How much of `role` this credential may actually exercise. [`ApiKeyScope::Full`] for JWTs
+    /// and for every unscoped API key — the scope narrows an API key's inherited role and can
+    /// never widen it. Enforced in [`crate::middleware::authorization`] ahead of the role gate,
+    /// and inherited by MCP tool calls, which run their in-process API calls under a clone of
+    /// this context.
+    #[serde(default)]
+    pub api_key_scope: ApiKeyScope,
     /// Token identity (`jti` claim / API-key token id). Key for the revocation denylist.
     pub jti: Option<String>,
     /// Identity claims passed through from the JWT, for logging and the `/me` response.
@@ -62,6 +69,7 @@ impl AuthContext {
             user_id,
             auth_method,
             role: None,
+            api_key_scope: ApiKeyScope::Full,
             jti: None,
             email: None,
             name: None,

@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { PlusIcon, Key, Ban } from 'lucide-react';
+import { addDays, formatDistanceToNowStrict } from 'date-fns';
 import { formatDate } from '@/lib/utils';
 import { Button } from '@/shared/components/ui/button';
 import { WithTooltip } from '@/shared/components/ui/tooltip';
@@ -27,6 +28,64 @@ import { useApiKeys } from '../../hooks/useApiKeys';
 import { CreateApiKeyDialog } from '../../components/CreateApiKeyDialog';
 import { RevokeApiKeyDialog } from '../../components/RevokeApiKeyDialog';
 import type { ApiKey } from '@/generated/RuntaraRuntimeApi';
+
+/** A key is called out as expiring this many days ahead of `expires_at`. */
+const EXPIRY_WARNING_DAYS = 7;
+
+/**
+ * Where a key sits relative to its own expiry. The server stops validating a key the moment
+ * `expires_at` passes (`validate_api_key_by_hash` filters on it), but nothing revokes the row —
+ * so an expired key is still `is_revoked: false` and would otherwise render as "Active" while
+ * refusing every request. `expired` exists to keep this table honest about that.
+ */
+function expiryState(
+  expiresAt: ApiKey['expires_at']
+): 'none' | 'expired' | 'soon' | 'ok' {
+  if (!expiresAt) return 'none';
+  const expiry = new Date(expiresAt);
+  if (Number.isNaN(expiry.getTime())) return 'none';
+  if (expiry <= new Date()) return 'expired';
+  return expiry <= addDays(new Date(), EXPIRY_WARNING_DAYS) ? 'soon' : 'ok';
+}
+
+/** The status pill for a key that has not been revoked. */
+function ApiKeyStatusPill({ apiKey }: { apiKey: ApiKey }) {
+  switch (expiryState(apiKey.expires_at)) {
+    case 'expired':
+      return <StatusPill tone="neutral" label="Expired" />;
+    case 'soon':
+      return <StatusPill tone="warning" label="Expiring" />;
+    default:
+      return <StatusPill tone="success" label="Active" />;
+  }
+}
+
+/** The Expires cell: the date, plus how long is left while that is still worth saying. */
+function ApiKeyExpiry({ apiKey }: { apiKey: ApiKey }) {
+  const state = expiryState(apiKey.expires_at);
+  if (state === 'none' || !apiKey.expires_at) return <>No expiration</>;
+  return (
+    <span className={state === 'soon' ? 'text-warning' : undefined}>
+      {formatDate(apiKey.expires_at)}
+      {state === 'soon' && (
+        <> · in {formatDistanceToNowStrict(new Date(apiKey.expires_at))}</>
+      )}
+    </span>
+  );
+}
+
+/**
+ * A key's scope, as stored: `null` means no narrowing — the key exercises its owner's role in
+ * full, which is what every key created before scopes existed carries.
+ */
+function ApiKeyScopeLabel({ scope }: { scope: ApiKey['scope'] }) {
+  if (!scope) return <>Full access</>;
+  if (scope === 'read_only')
+    return <StatusPill tone="neutral" dot={false} label="Read-only" />;
+  // A scope this build doesn't know about: the server denies everything for it, so show the
+  // raw value rather than implying it grants anything.
+  return <StatusPill tone="neutral" dot={false} label={scope} />;
+}
 
 export function Settings() {
   const { data: apiKeys, isFetching, isError, error } = useApiKeys();
@@ -89,6 +148,7 @@ export function Settings() {
             <TableHead>Name</TableHead>
             <TableHead>Status</TableHead>
             <TableHead>Key</TableHead>
+            <TableHead>Scope</TableHead>
             <TableHead>Created</TableHead>
             <TableHead>Last used</TableHead>
             <TableHead>Expires</TableHead>
@@ -102,10 +162,13 @@ export function Settings() {
                 {key.name}
               </TableCell>
               <TableCell className="text-muted-foreground">
-                <StatusPill tone="success" label="Active" />
+                <ApiKeyStatusPill apiKey={key} />
               </TableCell>
               <TableCell className="font-mono text-xs text-muted-foreground">
                 {key.key_prefix}...
+              </TableCell>
+              <TableCell className="text-muted-foreground">
+                <ApiKeyScopeLabel scope={key.scope} />
               </TableCell>
               <TableCell className="text-muted-foreground">
                 {formatDate(key.created_at)}
@@ -114,7 +177,7 @@ export function Settings() {
                 {key.last_used_at ? formatDate(key.last_used_at) : 'Never'}
               </TableCell>
               <TableCell className="text-muted-foreground">
-                {key.expires_at ? formatDate(key.expires_at) : 'No expiration'}
+                <ApiKeyExpiry apiKey={key} />
               </TableCell>
               <TableCell className="text-right">
                 <div className="flex items-center justify-end gap-1">
@@ -146,13 +209,16 @@ export function Settings() {
                 {key.key_prefix}...
               </TableCell>
               <TableCell className="text-muted-foreground">
+                <ApiKeyScopeLabel scope={key.scope} />
+              </TableCell>
+              <TableCell className="text-muted-foreground">
                 {formatDate(key.created_at)}
               </TableCell>
               <TableCell className="text-muted-foreground">
                 {key.last_used_at ? formatDate(key.last_used_at) : 'Never'}
               </TableCell>
               <TableCell className="text-muted-foreground">
-                {key.expires_at ? formatDate(key.expires_at) : 'No expiration'}
+                <ApiKeyExpiry apiKey={key} />
               </TableCell>
               <TableCell className="text-right" />
             </TableRow>

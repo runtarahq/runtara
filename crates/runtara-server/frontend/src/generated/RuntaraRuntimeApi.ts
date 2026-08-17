@@ -368,6 +368,9 @@ export type BulkValidationMode = "stop" | "skip";
 /** Behavior on unique-key conflict for bulk-create. */
 export type BulkConflictMode = "error" | "skip" | "upsert";
 
+/** How much of the issuing user's role the key may exercise. Omitted or `full` means no narrowing. */
+export type ApiKeyScope = "full" | "read_only";
+
 /** Aggregate function. JSON encoding is SCREAMING_SNAKE_CASE. */
 export type AggregateFn =
   | "COUNT"
@@ -758,6 +761,12 @@ export interface ApiKey {
   last_used_at?: string | null;
   name: string;
   org_id: string;
+  /**
+   * Optional narrowing of the inherited role (`read_only`). `None` — the value every key
+   * created before scopes existed carries — means no narrowing. Never widens: the role gate
+   * still runs on top. See [`ApiKeyScope`].
+   */
+  scope?: string | null;
 }
 
 /** Generic API response wrapper */
@@ -1022,6 +1031,13 @@ export interface ApiResponseWorkflowDto {
      */
     slug?: string | null;
     started?: string | null;
+    /**
+     * Whether this version can hold a conversation, i.e. whether it contains a
+     * step that waits for a reply. See `graph_supports_chat`. Consumers use it
+     * to decide whether to offer chat at all, rather than opening a surface
+     * that accepts messages nothing will ever read.
+     */
+    supportsChat?: boolean;
     /** Whether this version is compiled with step-event tracking instrumentation */
     trackEvents?: boolean;
     updated: string;
@@ -1680,6 +1696,12 @@ export interface CreateApiKeyRequest {
   expires_at?: string | null;
   /** Human-readable name for the key */
   name: string;
+  /**
+   * How much of the issuing user's role this key may exercise. Omitted (or `full`) means no
+   * narrowing — today's behavior. An unrecognized value is rejected rather than ignored, so
+   * a client asking for a scope this build doesn't know never silently gets a full key.
+   */
+  scope?: null | ApiKeyScope;
 }
 
 export type CreateApiKeyResponse = ApiKey & {
@@ -8049,7 +8071,7 @@ export class Api<
     listWorkflowsHandler: (
       query: {
         /**
-         * Page number (1-based, default: 1)
+         * Page number (0-based, default: 0)
          * @format int32
          */
         page?: number;
