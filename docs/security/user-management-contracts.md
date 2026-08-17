@@ -53,9 +53,10 @@ Key consequences:
   per-tenant Valkey only. Auth0 is called *only* by smo-management, off the hot
   path, when an admin mutates membership or roles.
 - **API keys and MCP sessions inherit the issuing user's current role from
-  Valkey.** No per-key role or permission scope. Demote the user → their keys are
-  demoted on the next request. Remove the user → their keys stop working on the
-  next request.
+  Valkey.** Demote the user → their keys are demoted on the next request. Remove
+  the user → their keys stop working on the next request. A key may additionally
+  carry a **scope** that narrows what it exercises of that inherited role — never
+  widens it. See §4.1.
 
 ---
 
@@ -259,7 +260,7 @@ Notes:
   list, and revoke its **own** keys, and only its own. There is no role distinction, so
   there is no permission to enforce — the handlers enforce ownership directly (list and
   revoke filter on `issuing_user_id`). A key acts as its issuing user and inherits that
-  user's current role on every request.
+  user's current role on every request, optionally narrowed by a per-key scope (§4.1).
 - **`user_management:access`** is a **UI-only** capability (Owner/Admin): it gates the
   "User Management" link in the runtara SPA that points at the smo-management control plane.
   No runtara route enforces it — it appears in `GET /api/runtime/me` purely so the SPA knows
@@ -296,6 +297,50 @@ caches it; the management SPA gets a typed copy via a small TS generator off the
 JSON shape. **No shared Rust crate** — the JSON endpoint decouples deploy cycles.
 runtara remains the single enforcement point; the admin UI may disable controls
 by role for UX but is never the source of truth.
+
+### 4.1 Per-key scope
+
+An `rt_*` API key acts as its issuing user, which means it inherits that user's
+role **whole**. A key carries an optional `scope` (the `api_keys.scope` column)
+that narrows what it may exercise of that role.
+
+| Scope | Column value | Meaning |
+|---|---|---|
+| Full | `NULL` | No narrowing. The key exercises its issuing user's role in full. |
+| Read-only | `read_only` | Requests whose route maps to a `*:read` permission, and — on routes the permission map does not cover — safe methods only. |
+
+Four properties are load-bearing:
+
+- **It only narrows.** The scope gate runs *before* the role gate and never
+  replaces it: a request that clears the scope must still clear the role. A
+  scope can never grant what the role denies.
+- **It does not depend on the membership rollout.** Unlike the role gate, which
+  is dormant unless the membership policy is `required` (§7), the scope is a
+  property of the credential and is enforced in every mode. This is what makes
+  it meaningful in the non-OIDC self-hosted modes, where an API key acts as
+  `owner` outright and the scope is the *only* thing narrowing it.
+- **`NULL` means no narrowing**, so every key issued before scopes existed keeps
+  its behavior, and an unscoped key created today is stored identically.
+- **An unrecognized value denies everything.** A scope name a build cannot parse
+  fails closed rather than degrading to full access, so rolling back to a build
+  that predates a scope cannot widen a key that was created narrow.
+
+Denials carry the stable code `API_KEY_SCOPE_DENIED` (distinct from the role
+gate's `PERMISSION_DENIED`, since the remedy is a wider key rather than a role
+change) plus the scope and, where the route has one, the permission. They apply
+to MCP identically: every MCP tool re-enters the same REST router in-process
+under the caller's context, so the one gate covers both surfaces.
+
+`GET /api/runtime/me` reports the **intersection** of the role's grants and the
+scope, so what it advertises is what the credential can actually do.
+
+Keys also carry an optional `expires_at`. It is enforced in the validation query
+itself — a key past its expiry stops resolving, independent of role, scope and
+auth mode — and nothing revokes the row, so an expired key remains
+`is_revoked = false` while refusing every request.
+
+Implementation: `crates/runtara-server/src/authz/scope.rs` (the vocabulary and
+the decision), `middleware/authorization.rs` (the gate).
 
 ---
 
