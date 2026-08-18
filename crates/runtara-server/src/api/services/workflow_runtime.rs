@@ -1,7 +1,4 @@
-use std::collections::HashSet;
-
 use chrono::{DateTime, Utc};
-use runtara_management_sdk::{EventSortOrder, ListEventsOptions};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use thiserror::Error;
@@ -9,6 +6,7 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::api::services::input_validation::{is_empty_schema, validate_inputs};
+use crate::api::services::pending_inputs::{fetch_input_and_end_events, open_input_events};
 use crate::runtime_client::RuntimeClient;
 use crate::workers::execution_engine::{ExecutionEngine, ExecutionError};
 
@@ -85,61 +83,12 @@ pub async fn list_instance_actions(
 ) -> Result<Vec<WorkflowRuntimeAction>, WorkflowRuntimeError> {
     validate_instance_id(instance_id)?;
 
-    let input_options = ListEventsOptions::new()
-        .with_limit(100)
-        .with_event_type("custom")
-        .with_subtype("external_input_requested")
-        .with_sort_order(EventSortOrder::Asc);
-
-    let input_events = client
-        .list_events(instance_id, Some(input_options))
+    let (input_events, end_events) = fetch_input_and_end_events(client, instance_id)
         .await
-        .map_err(|error| map_runtime_error(error.to_string(), instance_id))?
-        .events;
+        .map_err(|error| map_runtime_error(error, instance_id))?;
 
-    let end_options = ListEventsOptions::new()
-        .with_limit(1000)
-        .with_event_type("custom")
-        .with_subtype("step_debug_end");
-
-    let end_events = client
-        .list_events(instance_id, Some(end_options))
-        .await
-        .map(|result| result.events)
-        .unwrap_or_default();
-
-    let completed_step_ids: HashSet<String> = end_events
-        .iter()
-        .filter_map(|event| {
-            event
-                .payload
-                .as_ref()
-                .and_then(|payload| payload.get("step_id"))
-                .and_then(Value::as_str)
-                .map(ToString::to_string)
-        })
-        .collect();
-
-    // A resolved WaitForSignal's step_debug_end carries its signal id inside
-    // the outputs envelope. Standalone waits are matched by SIGNAL id below —
-    // signal ids are per-invocation-site (one child step can wait at several
-    // sites in one instance, embedded or composed), so a completed wait at
-    // one site must not hide another site's open wait on the same step id.
-    let completed_signal_ids: HashSet<String> = end_events
-        .iter()
-        .filter_map(|event| {
-            event
-                .payload
-                .as_ref()
-                .and_then(|payload| payload.get("outputs"))
-                .and_then(|outputs| outputs.get("signal_id"))
-                .and_then(Value::as_str)
-                .map(ToString::to_string)
-        })
-        .collect();
-
-    let actions = input_events
-        .iter()
+    let actions = open_input_events(&input_events, &end_events)
+        .into_iter()
         .filter_map(|event| {
             let payload = event.payload.as_ref()?;
             let signal_id = payload.get("signal_id")?.as_str()?.to_string();
@@ -151,24 +100,6 @@ pub async fn list_instance_actions(
                 .get("call_number")
                 .and_then(Value::as_u64)
                 .map(|value| value as u32);
-
-            // AI Agent tool calls complete under the synthetic
-            // "{ai_step_id}.tool.{tool_name}.{call_number}" step id;
-            // standalone waits are matched by their per-site signal id
-            // (a bare step id is NOT unique across invocation sites).
-            match (ai_agent_step_id, tool_name, call_number) {
-                (Some(step), Some(tool), Some(number)) => {
-                    let check_step_id = format!("{}.tool.{}.{}", step, tool, number);
-                    if completed_step_ids.contains(&check_step_id) {
-                        return None;
-                    }
-                }
-                _ => {
-                    if completed_signal_ids.contains(&signal_id) {
-                        return None;
-                    }
-                }
-            }
 
             let input_schema = payload.get("response_schema").cloned();
             let action_key = payload

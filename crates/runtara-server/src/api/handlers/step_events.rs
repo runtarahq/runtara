@@ -11,6 +11,7 @@ use std::sync::Arc;
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
+use crate::api::services::pending_inputs::{fetch_input_and_end_events, open_input_events};
 use crate::api::services::workflow_runtime::{
     SubmitWorkflowActionRequest, WorkflowRuntimeError, list_instance_actions,
     list_workflow_actions, submit_workflow_action as submit_runtime_workflow_action,
@@ -491,18 +492,10 @@ pub async fn get_pending_input(
         }
     };
 
-    // Query all custom events with subtype "external_input_requested"
-    let input_options = ListEventsOptions::new()
-        .with_limit(100)
-        .with_event_type("custom")
-        .with_subtype("external_input_requested")
-        .with_sort_order(EventSortOrder::Asc);
-
-    let input_events = match client.list_events(&instance_id, Some(input_options)).await {
-        Ok(result) => result.events,
-        Err(e) => {
-            let msg = e.to_string();
-            if msg.contains("not found") {
+    let (input_events, end_events) = match fetch_input_and_end_events(&client, &instance_id).await {
+        Ok(events) => events,
+        Err(message) => {
+            if message.contains("not found") {
                 return (
                     StatusCode::NOT_FOUND,
                     Json(json!({
@@ -516,61 +509,16 @@ pub async fn get_pending_input(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({
                     "success": false,
-                    "message": format!("Failed to query events: {}", msg),
+                    "message": format!("Failed to query events: {}", message),
                     "data": Value::Null
                 })),
             );
         }
     };
 
-    // Query all step_debug_end events to find completed steps
-    // (both AiAgentToolCall and WaitForSignal)
-    let end_options = ListEventsOptions::new()
-        .with_limit(1000)
-        .with_event_type("custom")
-        .with_subtype("step_debug_end");
-
-    let end_events = match client.list_events(&instance_id, Some(end_options)).await {
-        Ok(result) => result.events,
-        Err(_) => vec![], // If we can't query, assume none completed
-    };
-
-    // Collect completed step IDs from step_debug_end events
     // The payload fields are at the top level (not nested under "data")
-    let completed_tool_ids: std::collections::HashSet<String> = end_events
-        .iter()
-        .filter_map(|event| {
-            event
-                .payload
-                .as_ref()
-                .and_then(|p| p.get("step_id"))
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-        })
-        .collect();
-
-    // A resolved WaitForSignal's step_debug_end carries its signal id inside
-    // the outputs envelope. Standalone waits are matched by SIGNAL id below —
-    // signal ids are per-invocation-site (one child step can wait at several
-    // sites in one instance, embedded or composed), so a completed wait at
-    // one site must not hide another site's open wait on the same step id.
-    let completed_signal_ids: std::collections::HashSet<String> = end_events
-        .iter()
-        .filter_map(|event| {
-            event
-                .payload
-                .as_ref()
-                .and_then(|p| p.get("outputs"))
-                .and_then(|outputs| outputs.get("signal_id"))
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-        })
-        .collect();
-
-    // Filter to only pending requests (where the tool call hasn't completed)
-    // The payload fields are at the top level (not nested under "data")
-    let pending: Vec<PendingInputResponse> = input_events
-        .iter()
+    let pending: Vec<PendingInputResponse> = open_input_events(&input_events, &end_events)
+        .into_iter()
         .filter_map(|event| {
             let data = event.payload.as_ref()?;
 
@@ -581,25 +529,6 @@ pub async fn get_pending_input(
                 .get("call_number")
                 .and_then(|v| v.as_u64())
                 .map(|v| v as u32);
-
-            // Skip requests that already resolved. AI Agent tool calls
-            // complete under the synthetic step id
-            // "{ai_step_id}.tool.{tool_name}.{call_number}"; standalone
-            // WaitForSignal steps are matched by their per-site signal id
-            // (a bare step id is NOT unique across invocation sites).
-            match (ai_step_id, tool_name, call_number) {
-                (Some(step), Some(tool), Some(num)) => {
-                    let check_step_id = format!("{}.tool.{}.{}", step, tool, num);
-                    if completed_tool_ids.contains(&check_step_id) {
-                        return None;
-                    }
-                }
-                _ => {
-                    if completed_signal_ids.contains(&signal_id) {
-                        return None;
-                    }
-                }
-            }
 
             Some(PendingInputResponse {
                 signal_id,

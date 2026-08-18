@@ -9,12 +9,11 @@
 //! service.
 
 use chrono::{DateTime, Utc};
-use runtara_management_sdk::{
-    EventSortOrder, InstanceInfo, InstanceStatus as RuntaraInstanceStatus, ListEventsOptions,
-};
+use runtara_management_sdk::{InstanceInfo, InstanceStatus as RuntaraInstanceStatus};
 use serde_json::Value;
 
 use crate::api::dto::workflows::{InstanceInputs, WorkflowInstanceDto};
+use crate::api::services::pending_inputs::has_open_inputs;
 use crate::runtime_client::RuntimeClient;
 use crate::types::ExecutionStatus;
 
@@ -98,52 +97,29 @@ fn duration_seconds(
     (ms >= 0).then(|| ms as f64 / 1000.0)
 }
 
-/// Enrich running instances with `has_pending_input` by checking for unresolved
-/// `external_input_requested` events. Only queries events for running instances.
+/// Enrich running instances with `has_pending_input` by checking for
+/// unresolved `external_input_requested` events.
+///
+/// Only queries events for running instances. The request/resolution pairing is
+/// shared with the per-instance pending-input and action endpoints (see
+/// `api::services::pending_inputs`) so the list and the detail views cannot
+/// disagree about the same run.
 pub async fn enrich_pending_input(instances: &mut [WorkflowInstanceDto], client: &RuntimeClient) {
     for instance in instances.iter_mut() {
         if instance.status != ExecutionStatus::Running {
             continue;
         }
 
-        // Check for external_input_requested events
-        let options = ListEventsOptions::new()
-            .with_limit(1)
-            .with_event_type("custom")
-            .with_subtype("external_input_requested")
-            .with_sort_order(EventSortOrder::Desc);
-
-        match client.list_events(&instance.id, Some(options)).await {
-            Ok(result) if !result.events.is_empty() => {
-                // Found at least one external_input_requested event.
-                // Check if the most recent one has been resolved by looking for
-                // a corresponding step_debug_end event (covers both
-                // AiAgentToolCall and standalone WaitForSignal).
-                let end_options = ListEventsOptions::new()
-                    .with_limit(1)
-                    .with_event_type("custom")
-                    .with_subtype("step_debug_end")
-                    .with_sort_order(EventSortOrder::Desc);
-
-                let has_completion = match client.list_events(&instance.id, Some(end_options)).await
-                {
-                    Ok(end_result) => {
-                        // If the latest end event is newer than the latest request,
-                        // the most recent request has been resolved
-                        if let (Some(req), Some(end)) =
-                            (result.events.first(), end_result.events.first())
-                        {
-                            end.created_at >= req.created_at
-                        } else {
-                            false
-                        }
-                    }
-                    Err(_) => false,
-                };
-
-                instance.has_pending_input = !has_completion;
-            }
-            _ => {}
+        match has_open_inputs(client, &instance.id).await {
+            Ok(has_open) => instance.has_pending_input = has_open,
+            // The flag stays false, so the indicator is hidden rather than
+            // wrongly shown for every running row during a runtime hiccup —
+            // but the hiccup itself must not pass silently.
+            Err(error) => tracing::warn!(
+                instance_id = %instance.id,
+                error = %error,
+                "Failed to resolve pending input state; reporting none"
+            ),
         }
     }
 }
