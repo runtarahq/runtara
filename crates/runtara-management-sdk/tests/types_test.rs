@@ -104,9 +104,20 @@ fn test_list_instances_options_builder() {
         .with_offset(10);
 
     assert_eq!(opts.tenant_id, Some("tenant-abc".to_string()));
-    assert_eq!(opts.status, Some(InstanceStatus::Running));
+    assert_eq!(opts.statuses, vec![InstanceStatus::Running]);
     assert_eq!(opts.limit, 50);
     assert_eq!(opts.offset, 10);
+}
+
+#[test]
+fn test_list_instances_options_multi_status_builder() {
+    let opts = ListInstancesOptions::new()
+        .with_statuses([InstanceStatus::Failed, InstanceStatus::Cancelled]);
+
+    assert_eq!(
+        opts.statuses,
+        vec![InstanceStatus::Failed, InstanceStatus::Cancelled]
+    );
 }
 
 #[test]
@@ -114,7 +125,7 @@ fn test_list_instances_options_defaults() {
     let opts = ListInstancesOptions::new();
 
     assert!(opts.tenant_id.is_none());
-    assert!(opts.status.is_none());
+    assert!(opts.statuses.is_empty());
     assert_eq!(opts.limit, 100);
     assert_eq!(opts.offset, 0);
 }

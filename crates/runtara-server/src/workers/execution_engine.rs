@@ -37,7 +37,7 @@ use crate::product_events::{ActorType, EventSource, EventType, ProductEvent, Pro
 use crate::runtime_client::{RuntimeClient, RuntimeError};
 use crate::workers::CancellationHandle;
 use crate::workers::runtara_dto::{
-    ExecutionWithMetadata, enrich_pending_input, execution_status_to_runtara, parse_image_id,
+    ExecutionWithMetadata, enrich_pending_input, execution_statuses_to_runtara, parse_image_id,
     runtara_info_to_dto, runtara_info_to_execution_with_metadata,
     runtara_instance_to_dto_with_info,
 };
@@ -1587,11 +1587,11 @@ impl ExecutionEngine {
             options = options.with_image_name_prefix(&image_name_prefix);
         }
 
-        if let Some(ref statuses) = filters.statuses
-            && let Some(first_status) = statuses.first()
-            && let Some(runtara_status) = execution_status_to_runtara(first_status)
-        {
-            options = options.with_status(runtara_status);
+        if let Some(ref statuses) = filters.statuses {
+            let runtara_statuses = execution_statuses_to_runtara(statuses);
+            if !runtara_statuses.is_empty() {
+                options = options.with_statuses(runtara_statuses);
+            }
         }
 
         if let Some(created_from) = filters.created_from {

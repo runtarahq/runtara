@@ -392,7 +392,7 @@ async fn test_list_instances() {
     // List by status
     let options = db::ListInstancesOptions {
         tenant_id: Some(tenant_id.to_string()),
-        status: Some("completed".to_string()),
+        statuses: Some(vec!["completed".to_string()]),
         limit: 100,
         ..Default::default()
     };
@@ -402,6 +402,83 @@ async fn test_list_instances() {
 
     assert_eq!(completed.len(), 1);
     assert_eq!(completed[0].instance_id, ids[0]);
+
+    // Cleanup
+    for id in &ids {
+        sqlx::query("DELETE FROM instances WHERE instance_id = $1")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .ok();
+    }
+    sqlx::query("DELETE FROM images WHERE image_id = $1")
+        .bind(&image_id)
+        .execute(&pool)
+        .await
+        .ok();
+}
+
+#[tokio::test]
+async fn test_list_instances_by_multiple_statuses() {
+    skip_if_no_db!();
+    let pool = get_pool().await.expect("Failed to connect to database");
+
+    // Unique per run: the assertions count rows for this tenant, so a previous
+    // run that died before its cleanup must not be able to skew them.
+    let tenant_id = format!("test-tenant-list-multi-status-{}", Uuid::new_v4());
+    let tenant_id = tenant_id.as_str();
+    let image_id = Uuid::new_v4().to_string();
+
+    create_test_image(&pool, &image_id, tenant_id)
+        .await
+        .expect("Failed to create test image");
+
+    // One instance per status, so a filter that only honours its first entry
+    // comes back short.
+    let ids: Vec<_> = (0..3).map(|_| Uuid::new_v4().to_string()).collect();
+    for id in &ids {
+        create_test_instance(&pool, id, tenant_id, &image_id).await;
+    }
+    update_test_instance_status(&pool, &ids[0], "failed", None).await;
+    update_test_instance_status(&pool, &ids[1], "cancelled", None).await;
+    update_test_instance_status(&pool, &ids[2], "completed", None).await;
+
+    let options = db::ListInstancesOptions {
+        tenant_id: Some(tenant_id.to_string()),
+        statuses: Some(vec!["failed".to_string(), "cancelled".to_string()]),
+        limit: 100,
+        ..Default::default()
+    };
+
+    let matched = db::list_instances(&pool, &options)
+        .await
+        .expect("Failed to list instances");
+    let mut matched_ids: Vec<_> = matched.iter().map(|i| i.instance_id.clone()).collect();
+    matched_ids.sort();
+    let mut expected_ids = vec![ids[0].clone(), ids[1].clone()];
+    expected_ids.sort();
+
+    assert_eq!(matched_ids, expected_ids, "both statuses must be applied");
+
+    // The count drives totalElements, so it has to agree with the page.
+    let count = db::count_instances(&pool, &options)
+        .await
+        .expect("Failed to count instances");
+    assert_eq!(count, 2);
+
+    // An empty list means "no status filter", not "match nothing".
+    let unfiltered = db::ListInstancesOptions {
+        tenant_id: Some(tenant_id.to_string()),
+        statuses: Some(Vec::new()),
+        limit: 100,
+        ..Default::default()
+    };
+    assert_eq!(
+        db::count_instances(&pool, &unfiltered)
+            .await
+            .expect("Failed to count instances"),
+        3
+    );
 
     // Cleanup
     for id in &ids {

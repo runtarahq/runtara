@@ -6992,7 +6992,11 @@ export class Api<
         size?: number;
         /** Filter by workflow ID */
         workflowId?: string;
-        /** Filter by status (comma-separated, lowercase: queued,completed,failed,running,compiling,timeout,cancelled) */
+        /**
+         * Filter by status. Comma-separated, lowercase; an execution matches if it
+         * holds any one of them (queued, compiling, running, suspended, completed,
+         * failed, timeout, cancelled).
+         */
         status?: string;
         /**
          * Filter by created date - from (inclusive, ISO 8601)

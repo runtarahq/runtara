@@ -29,7 +29,7 @@ pub struct ListExecutionsParams {
     #[schemars(description = "Filter by workflow ID")]
     pub workflow_id: Option<String>,
     #[schemars(
-        description = "Comma-separated statuses: queued,compiling,running,completed,failed,timeout,cancelled"
+        description = "Comma-separated statuses — matches executions holding any one of them: queued,compiling,running,suspended,completed,failed,timeout,cancelled"
     )]
     pub status: Option<String>,
     #[schemars(description = "Page number (0-based)")]

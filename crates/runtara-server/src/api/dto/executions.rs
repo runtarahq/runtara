@@ -19,7 +19,9 @@ pub struct ListAllExecutionsQuery {
     #[serde(rename = "workflowId")]
     pub workflow_id: Option<String>,
 
-    /// Filter by status (comma-separated, lowercase: queued,completed,failed,running,compiling,timeout,cancelled)
+    /// Filter by status. Comma-separated, lowercase; an execution matches if it
+    /// holds any one of them (queued, compiling, running, suspended, completed,
+    /// failed, timeout, cancelled).
     pub status: Option<String>,
 
     /// Filter by created date - from (inclusive, ISO 8601)
