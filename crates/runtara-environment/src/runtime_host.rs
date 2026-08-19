@@ -20,11 +20,12 @@
 //!   `acknowledge_shutdown` free functions performed, plus the same
 //!   `suspended` instance event where the guest called `sdk.suspended()`.
 //! - `durable_sleep_checkpoint` delegates to core `handle_sleep`: persist the
-//!   checkpoint, then sleep the FULL duration in-process. The embedded SDK
-//!   backend's resume-remaining math is deliberately NOT ported — the guest's
-//!   HTTP backend never had it, and differential parity with the composed
-//!   artifact is the acceptance gate (absolute-deadline wake supersedes this
-//!   in a later phase).
+//!   checkpoint, then sleep in-process — for the full duration unless a cancel
+//!   or shutdown arrives, which cuts the sleep short so the guest's next
+//!   `check-signals` can act on it. The embedded SDK backend's resume-remaining
+//!   math is deliberately NOT ported — the guest's HTTP backend never had it,
+//!   and differential parity with the composed artifact is the acceptance gate
+//!   (absolute-deadline wake supersedes this in a later phase).
 //! - A local cancelled flag mirrors `runtara_sdk::INSTANCE_CANCELLED` so
 //!   `is_cancelled` short-circuits after a consumed cancel/shutdown, exactly
 //!   like `runtara_sdk::is_cancelled()`.
@@ -126,6 +127,15 @@ impl PersistenceRuntimeHost {
         .await
         .map_err(Self::err)?;
         Ok(response.signal)
+    }
+
+    /// Let the next lifecycle-signal poll through regardless of how recently
+    /// one ran. Used when a signal is already known to be pending, so the
+    /// limiter would otherwise hide it from the guest's very next poll.
+    fn reset_signal_poll_limiter(&self) {
+        if let Ok(mut last) = self.last_signal_poll.lock() {
+            *last = None;
+        }
     }
 
     /// Server-side signal acknowledgement — the status-transition half of the
@@ -420,7 +430,7 @@ impl RuntimeHost for PersistenceRuntimeHost {
         state: Vec<u8>,
         ms: u64,
     ) -> Result<(), String> {
-        handle_sleep(
+        let response = handle_sleep(
             &self.state,
             SleepRequest {
                 instance_id: self.instance_id.clone(),
@@ -430,8 +440,17 @@ impl RuntimeHost for PersistenceRuntimeHost {
             },
         )
         .await
-        .map(|_| ())
-        .map_err(Self::err)
+        .map_err(Self::err)?;
+
+        // The sleep cut itself short because a signal is pending, and the guest
+        // polls `check-signals` immediately after. Clear the rate limiter so
+        // that poll reaches persistence instead of being answered `None` by a
+        // limiter the sleep's own read just armed — otherwise a cancel seen here
+        // still slips by a whole Delay step.
+        if response.pending_signal.is_some() {
+            self.reset_signal_poll_limiter();
+        }
+        Ok(())
     }
 }
 
@@ -695,6 +714,41 @@ mod tests {
             .await
             .unwrap();
         // Write-only audit: success (no readers to assert against).
+    }
+
+    /// SYN-606: a cancel that arrives while the guest is parked in a durable
+    /// Delay must be visible to the very next `check-signals`. The sleep's own
+    /// signal read would otherwise arm the rate limiter, so the guest's
+    /// follow-up poll — emitted right after the sleep by the Delay lowering —
+    /// would be answered `None` and the cancel would slip a whole Delay step.
+    #[tokio::test]
+    async fn sleep_interrupted_by_cancel_is_visible_to_the_next_check_signals() {
+        let (p, _host, _dir) = setup().await;
+        let host =
+            PersistenceRuntimeHost::from_persistence(Arc::clone(&p), INSTANCE.to_string(), false)
+                .with_signal_poll_interval(Duration::from_secs(60));
+        p.insert_signal(INSTANCE, "cancel", b"").await.unwrap();
+
+        // A long sleep that the pending cancel must cut short.
+        let started = std::time::Instant::now();
+        host.durable_sleep_checkpoint("cp-sleep".into(), b"wake-state".to_vec(), 30_000)
+            .await
+            .unwrap();
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "the pending cancel must interrupt the sleep"
+        );
+
+        // Despite a 60s limiter, the guest's immediately-following poll sees it.
+        assert!(
+            host.check_signals().await.unwrap(),
+            "the cancel must be observable right after the interrupted sleep"
+        );
+        let inst = p.get_instance(INSTANCE).await.unwrap().unwrap();
+        assert_eq!(
+            inst.status, "cancelled",
+            "observing the cancel must drive the instance to cancelled"
+        );
     }
 
     #[tokio::test]

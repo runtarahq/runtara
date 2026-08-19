@@ -186,8 +186,13 @@ pub struct SleepRequest {
     pub state: Vec<u8>,
 }
 
-/// Sleep response (empty - sleep completes in-process).
-pub struct SleepResponse {}
+/// Sleep response.
+pub struct SleepResponse {
+    /// Pending instance-wide signal observed during the sleep, if the sleep was
+    /// cut short by one. Reported, not acknowledged — the guest acks it on its
+    /// own poll, which is what drives the status to `cancelled`.
+    pub pending_signal: Option<Signal>,
+}
 
 /// Instance event.
 pub struct InstanceEvent {

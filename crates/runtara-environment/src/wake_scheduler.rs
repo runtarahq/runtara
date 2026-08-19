@@ -6,6 +6,9 @@
 //! when their wake time arrives. Queries `sleep_until` column via
 //! Core's Persistence trait.
 
+use runtara_core::instance_handlers::{
+    InstanceHandlerState, SignalAck, SignalType, handle_signal_ack,
+};
 use runtara_core::persistence::Persistence;
 use sqlx::PgPool;
 use std::sync::Arc;
@@ -153,6 +156,46 @@ impl WakeScheduler {
         Ok(())
     }
 
+    /// Whether a `cancel` signal is waiting for this instance.
+    ///
+    /// A read failure is reported as "no cancel": relaunching an instance that
+    /// turns out to be cancelled is recoverable (the guest observes the signal
+    /// at its next poll), whereas refusing to wake on a transient database
+    /// error would strand a healthy sleeper.
+    async fn cancel_pending(&self, instance_id: &str) -> bool {
+        match self.persistence.get_pending_signal(instance_id).await {
+            Ok(Some(signal)) => signal.signal_type == "cancel",
+            Ok(None) => false,
+            Err(e) => {
+                warn!(
+                    instance_id = %instance_id,
+                    error = %e,
+                    "Failed to read pending signals before wake; relaunching anyway"
+                );
+                false
+            }
+        }
+    }
+
+    /// Acknowledge the pending cancel and drive the instance to `cancelled`.
+    ///
+    /// Reuses core's ack path rather than writing the status directly, so a
+    /// cancel resolved here is indistinguishable from one a running guest
+    /// acknowledged: same signal acknowledgement, same terminal status.
+    async fn cancel_without_launch(&self, instance_id: &str) -> crate::error::Result<()> {
+        let state = InstanceHandlerState::new(self.persistence.clone());
+        handle_signal_ack(
+            &state,
+            SignalAck {
+                instance_id: instance_id.to_string(),
+                signal_type: SignalType::SignalCancel as i32,
+                acknowledged: true,
+            },
+        )
+        .await
+        .map_err(|e| crate::error::Error::Other(format!("Failed to cancel woken instance: {e}")))
+    }
+
     /// Wake an instance.
     async fn wake_instance(
         &self,
@@ -248,6 +291,20 @@ impl WakeScheduler {
                 );
                 return Err(e.into());
             }
+        }
+
+        // A cancel that arrived while the instance slept has nobody to observe
+        // it: the guest is not running, and a relaunch replays into a checkpoint
+        // HIT that skips the poll sites entirely. Drive it to terminal here
+        // instead of starting a process only to cancel it — the claim above
+        // already took this row out of the wake candidate set.
+        if self.cancel_pending(&instance.instance_id).await {
+            info!(
+                instance_id = %instance.instance_id,
+                "Cancel signal pending at wake time; cancelling instead of relaunching"
+            );
+            self.cancel_without_launch(&instance.instance_id).await?;
+            return Ok(());
         }
 
         // Launch the instance

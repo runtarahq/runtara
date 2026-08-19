@@ -11481,3 +11481,248 @@ fn direct_wasm_execute_parallel_split_durable_backoff_replay_no_double_fire() {
     let _ = stub_stop_tx.send(());
     let _ = stub.join();
 }
+
+/// Chained durable Delays — the shape of the workflow in the SYN-606 report
+/// ("SYN-602 cancellable": ten 3s Delays, stopped ~3s in, which ran all the way
+/// to `completed`). Five is enough to tell "stopped at the first Delay" from
+/// "ignored the cancel and ran the lot".
+const CHAINED_DELAYS: &str = r#"{
+  "name": "Chained Delays",
+  "steps": {
+    "delay_1": { "stepType": "Delay", "id": "delay_1",
+      "durationMs": { "valueType": "immediate", "value": 3000 } },
+    "delay_2": { "stepType": "Delay", "id": "delay_2",
+      "durationMs": { "valueType": "immediate", "value": 3000 } },
+    "delay_3": { "stepType": "Delay", "id": "delay_3",
+      "durationMs": { "valueType": "immediate", "value": 3000 } },
+    "delay_4": { "stepType": "Delay", "id": "delay_4",
+      "durationMs": { "valueType": "immediate", "value": 3000 } },
+    "delay_5": { "stepType": "Delay", "id": "delay_5",
+      "durationMs": { "valueType": "immediate", "value": 3000 } },
+    "finish": { "stepType": "Finish", "id": "finish",
+      "inputMapping": { "ranToCompletion": { "valueType": "immediate", "value": true } } }
+  },
+  "entryPoint": "delay_1",
+  "executionPlan": [
+    { "fromStep": "delay_1", "toStep": "delay_2" },
+    { "fromStep": "delay_2", "toStep": "delay_3" },
+    { "fromStep": "delay_3", "toStep": "delay_4" },
+    { "fromStep": "delay_4", "toStep": "delay_5" },
+    { "fromStep": "delay_5", "toStep": "finish" }
+  ],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}"#;
+
+/// A runtime host that reports a pending lifecycle signal from the moment the
+/// first durable sleep returns — the in-process stand-in for a `stop_execution`
+/// landing while the instance is parked in a Delay.
+///
+/// `check_signals` answering `true` is what the guest acts on; the host has
+/// already consumed and acknowledged the signal by then, exactly as
+/// `PersistenceRuntimeHost` does.
+struct CancelDuringDelayHost {
+    input: Vec<u8>,
+    completed: Mutex<Option<Vec<u8>>>,
+    failed: Mutex<Option<Vec<u8>>>,
+    /// Sleep checkpoint ids, in order — one per Delay actually reached.
+    sleeps: Mutex<Vec<String>>,
+    /// Set once the first sleep returns; every later `check-signals` reports it.
+    cancel_pending: std::sync::atomic::AtomicBool,
+    /// How many times the guest asked. Zero is the bug: a chain of Delays used
+    /// to contain no poll site at all.
+    signal_polls: std::sync::atomic::AtomicU32,
+}
+
+impl CancelDuringDelayHost {
+    fn new(input: &[u8]) -> Self {
+        Self {
+            input: input.to_vec(),
+            completed: Mutex::new(None),
+            failed: Mutex::new(None),
+            sleeps: Mutex::new(Vec::new()),
+            cancel_pending: std::sync::atomic::AtomicBool::new(false),
+            signal_polls: std::sync::atomic::AtomicU32::new(0),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl runtara_component_host::runtime_host::RuntimeHost for CancelDuringDelayHost {
+    async fn load_input(&self) -> Result<Option<Vec<u8>>, String> {
+        Ok(Some(self.input.clone()))
+    }
+    fn instance_id(&self) -> Result<String, String> {
+        Ok("syn606-cancel-during-delay".to_string())
+    }
+    async fn complete(&self, output: Vec<u8>) -> Result<(), String> {
+        *self.completed.lock().unwrap() = Some(output);
+        Ok(())
+    }
+    async fn fail(&self, error: Vec<u8>) -> Result<(), String> {
+        *self.failed.lock().unwrap() = Some(error);
+        Ok(())
+    }
+    async fn custom_event(&self, _kind: String, _payload: Vec<u8>) -> Result<(), String> {
+        Ok(())
+    }
+    fn debug_mode_enabled(&self) -> Result<bool, String> {
+        Ok(false)
+    }
+    async fn breakpoint_pause(&self) -> Result<(), String> {
+        Ok(())
+    }
+    async fn heartbeat(&self) -> Result<(), String> {
+        Ok(())
+    }
+    async fn is_cancelled(&self) -> Result<bool, String> {
+        Ok(self
+            .cancel_pending
+            .load(std::sync::atomic::Ordering::SeqCst))
+    }
+    async fn check_signals(&self) -> Result<bool, String> {
+        self.signal_polls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(self
+            .cancel_pending
+            .load(std::sync::atomic::Ordering::SeqCst))
+    }
+    async fn poll_custom_signal(&self, _checkpoint_id: String) -> Result<Option<Vec<u8>>, String> {
+        Ok(None)
+    }
+    async fn get_checkpoint(&self, _checkpoint_id: String) -> Result<Option<Vec<u8>>, String> {
+        Ok(None)
+    }
+    async fn checkpoint(
+        &self,
+        _checkpoint_id: String,
+        _state: Vec<u8>,
+    ) -> Result<runtara_component_host::runtime_host::RuntimeCheckpointResult, String> {
+        Ok(
+            runtara_component_host::runtime_host::RuntimeCheckpointResult {
+                found: false,
+                state: Vec::new(),
+                pending_signal: None,
+                custom_signal: None,
+            },
+        )
+    }
+    async fn handle_checkpoint_signal(&self, _signal_type: String) -> Result<bool, String> {
+        Ok(true)
+    }
+    async fn record_retry_attempt(
+        &self,
+        _checkpoint_id: String,
+        _attempt_number: u32,
+        _error_message: Option<String>,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+    async fn durable_sleep_checkpoint(
+        &self,
+        checkpoint_id: String,
+        _state: Vec<u8>,
+        _ms: u64,
+    ) -> Result<(), String> {
+        self.sleeps.lock().unwrap().push(checkpoint_id);
+        // Production's `handle_sleep` returns early once a cancel is pending;
+        // the mock does not sleep at all, so "the signal arrived during the
+        // first delay" is modelled by flipping the flag as it returns.
+        self.cancel_pending
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+/// SYN-606: `stop_execution` was a no-op against an instance parked in a durable
+/// Delay. The Delay lowering called `durable-sleep-checkpoint` and checked only
+/// for a retptr error — no `check-signals`, and no `emit_checkpoint_save` to fold
+/// signal handling into. A linear chain of Delays therefore contained ZERO poll
+/// sites, so a cancel written during the first delay was never observed and the
+/// run completed normally.
+///
+/// With the poll emitted after the sleep, the cancel is acted on at the very next
+/// step boundary: the run suspends after the first Delay instead of executing all
+/// five and reporting completion.
+#[test]
+fn direct_wasm_execute_delay_observes_cancel_and_suspends() {
+    let components_dir = direct_e2e_components_dir();
+    let graph: ExecutionGraph = serde_json::from_str(CHAINED_DELAYS).expect("fixture parses");
+    let temp = tempfile::tempdir().expect("tempdir");
+
+    let mut result = runtara_workflows::direct_wasm::compile_direct_workflow_with_abi(
+        DirectCompilationInput {
+            workflow_id: "syn606-cancel-during-delay".to_string(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: graph,
+            child_workflows: vec![],
+            output_dir: temp.path().to_path_buf(),
+            track_events: false,
+            agent_catalog: None,
+            agent_slug: None,
+        },
+        WorkflowAbi::CliRunHttp,
+        false,
+        false,
+    )
+    .expect("direct emit succeeds");
+    result.component_artifacts =
+        emit_direct_component_artifacts_with_binding(&[], RuntimeBinding::HostImport);
+    compose_direct_workflow(&mut result, &components_dir).expect("host-import compose");
+
+    let host = Arc::new(CancelDuringDelayHost::new(b"{}"));
+    let executor = embedded_executor();
+
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let run = runtime.block_on(async {
+        let pre = executor
+            .load(&result.wasm_path)
+            .await
+            .expect("load host-import artifact");
+        executor
+            .execute(
+                &pre,
+                runtara_component_host::WorkflowRunSpec {
+                    env: HashMap::new(),
+                    stderr: None,
+                    timeout: Duration::from_secs(60),
+                    cancel: None,
+                    limits: runtara_component_host::WorkflowLimits::default(),
+                    runtime: Some(host.clone()),
+                },
+            )
+            .await
+    });
+
+    assert!(
+        matches!(run.exit, runtara_component_host::WorkflowExit::Completed),
+        "a suspended run exits cleanly; got {:?} (failed: {:?})",
+        run.exit,
+        host.failed
+            .lock()
+            .unwrap()
+            .as_deref()
+            .map(String::from_utf8_lossy),
+    );
+
+    let sleeps = host.sleeps.lock().unwrap().clone();
+    assert_eq!(
+        sleeps,
+        vec!["delay_1".to_string()],
+        "the run must stop at the Delay the cancel arrived during, not run the whole chain"
+    );
+    assert!(
+        host.signal_polls.load(std::sync::atomic::Ordering::SeqCst) > 0,
+        "a Delay must poll for lifecycle signals; zero polls is the SYN-606 bug"
+    );
+    assert!(
+        host.completed.lock().unwrap().is_none(),
+        "a cancelled run must NOT report completion (it reported one before the fix)"
+    );
+    assert!(
+        host.failed.lock().unwrap().is_none(),
+        "a cancel is a suspend, not a failure"
+    );
+}

@@ -6,10 +6,13 @@ mod common;
 
 use chrono::Utc;
 use runtara_core::persistence::{CompleteInstanceParams, Persistence, PostgresPersistence};
+use runtara_environment::container_registry::ContainerRegistry;
 use runtara_environment::db::{self, Instance};
-use runtara_environment::wake_scheduler::WakeSchedulerConfig;
+use runtara_environment::runner::{MockRunner, Runner};
+use runtara_environment::wake_scheduler::{WakeScheduler, WakeSchedulerConfig};
 use sqlx::PgPool;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -512,4 +515,111 @@ fn test_wake_scheduler_config_custom_data_dir() {
     };
 
     assert_eq!(config.data_dir, PathBuf::from("/custom/data/dir"));
+}
+
+// ============================================================================
+// Cancel-at-wake (SYN-606)
+// ============================================================================
+
+/// Park an instance as a durable sleep leaves it: suspended, with a wake time
+/// already past. Returns its id.
+async fn park_due_instance(pool: &PgPool, tenant_id: &str, image_id: &str) -> String {
+    let instance_id = Uuid::new_v4().to_string();
+    create_test_instance(pool, &instance_id, tenant_id, image_id).await;
+    update_test_instance_status(pool, &instance_id, "suspended", Some("delay-1")).await;
+    PostgresPersistence::new(pool.clone())
+        .set_instance_sleep(&instance_id, Utc::now() - chrono::Duration::seconds(1))
+        .await
+        .expect("Failed to stamp sleep_until");
+    instance_id
+}
+
+/// A cancel that arrives while an instance sleeps has nobody to observe it: the
+/// guest is not running, and a relaunch replays into a checkpoint HIT that skips
+/// the guest's poll sites. The scheduler must resolve it directly — no launch,
+/// terminal status `cancelled` — rather than starting a process that will ignore
+/// the signal and run to completion.
+///
+/// Both cases run under ONE scheduler on purpose. Every suspended-and-due row is
+/// a candidate for any scheduler polling this database, so two schedulers racing
+/// in separate tests would each pick up the other's instance.
+#[tokio::test]
+async fn test_wake_cancels_pending_cancel_and_still_launches_the_rest() {
+    skip_if_no_db!();
+    let pool = get_test_pool().await;
+
+    let tenant_id = "test-tenant-syn606";
+    let image_id = create_test_image(&pool, tenant_id).await;
+    let cancelled_id = park_due_instance(&pool, tenant_id, &image_id).await;
+    let healthy_id = park_due_instance(&pool, tenant_id, &image_id).await;
+
+    let persistence = Arc::new(PostgresPersistence::new(pool.clone()));
+    persistence
+        .insert_signal(&cancelled_id, "cancel", b"")
+        .await
+        .expect("Failed to insert cancel signal");
+
+    // `never_completing` keeps the launched instance's registry row in place;
+    // a self-completing mock would unregister it out from under the assertion.
+    let runner: Arc<dyn Runner> = Arc::new(MockRunner::never_completing());
+    let scheduler = WakeScheduler::new(
+        pool.clone(),
+        persistence.clone(),
+        Arc::clone(&runner),
+        WakeSchedulerConfig {
+            poll_interval: Duration::from_millis(100),
+            batch_size: 10,
+            core_addr: "127.0.0.1:8001".to_string(),
+            data_dir: PathBuf::from(".data"),
+        },
+    );
+    let shutdown = scheduler.shutdown_handle();
+    let handle = tokio::spawn(scheduler.run());
+
+    // Launch is instance-scoped: waking registers a container row for that id.
+    let registry = ContainerRegistry::new(pool.clone());
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    let mut status = String::new();
+    let mut healthy_launched = false;
+    while std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        status = persistence
+            .get_instance(&cancelled_id)
+            .await
+            .expect("Failed to read instance")
+            .expect("Instance should exist")
+            .status;
+        healthy_launched = registry
+            .get(&healthy_id)
+            .await
+            .expect("Failed to read container registry")
+            .is_some();
+        if status == "cancelled" && healthy_launched {
+            break;
+        }
+    }
+
+    shutdown.notify_one();
+    let _ = handle.await;
+
+    assert_eq!(
+        status, "cancelled",
+        "a cancel pending at wake time must land the instance on `cancelled`"
+    );
+    assert!(
+        registry
+            .get(&cancelled_id)
+            .await
+            .expect("Failed to read container registry")
+            .is_none(),
+        "the cancelled instance must not be relaunched just to be cancelled"
+    );
+    assert!(
+        healthy_launched,
+        "a due instance with no pending cancel must still be relaunched"
+    );
+
+    cleanup(&pool, &cancelled_id).await;
+    cleanup(&pool, &healthy_id).await;
+    cleanup_image(&pool, &image_id).await;
 }

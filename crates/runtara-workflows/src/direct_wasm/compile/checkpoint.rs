@@ -56,6 +56,27 @@ pub(super) fn emit_checkpoint_save(
     emit_checkpoint_signal_handling(body, indices);
 }
 
+/// Poll for a pending lifecycle signal and suspend the run if one is acted on.
+///
+/// The standalone counterpart to the signal handling folded into
+/// `emit_checkpoint_save`: a step that blocks without writing a checkpoint has
+/// no save to fold into, so it needs an explicit poll site. Without one a
+/// cancel that arrives while the step is blocked is never observed, and a run
+/// made only of such steps contains no poll site at all.
+pub(super) fn emit_check_signals_and_suspend(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+) {
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.runtime_check_signals));
+    return_if_retptr_error(body, indices);
+    push_retptr_u8_load(body, DIRECT_RET_BOOL_OK_OFFSET);
+    body.instruction(&Instruction::If(BlockType::Empty));
+    // Suspend-and-exit: ABI-aware (clean-run tag vs suspended outcome).
+    super::abi::emit_entry_suspend_return(body, indices);
+    body.instruction(&Instruction::End);
+}
+
 fn emit_checkpoint_signal_handling(body: &mut WasmFunction, indices: &DirectCoreFunctionIndices) {
     load_retptr_tag(body);
     body.instruction(&Instruction::I32Eqz);

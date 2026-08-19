@@ -20,15 +20,17 @@ use super::abi::{
     push_retptr_u8_load, push_segment_args, return_if_retptr_error, store_local_i64_at,
 };
 use super::agent_error::emit_agent_error_route_or_fail;
-use super::checkpoint::{emit_checkpoint_lookup, emit_checkpoint_save};
+use super::checkpoint::{
+    emit_check_signals_and_suspend, emit_checkpoint_lookup, emit_checkpoint_save,
+};
 use super::debug::{emit_step_breakpoint, emit_step_debug_event, emit_wait_debug_start_event};
 use super::dispatcher::emit_run_plan_mapping;
 use super::mapping::emit_build_source;
 use super::split::emit_split_append_error_payload_and_continue;
 use super::{
     DIRECT_RESULT_OPTION_TAG_OFFSET, DIRECT_RESULT_OPTION_U64_TAG_OFFSET,
-    DIRECT_RESULT_OPTION_U64_VALUE_OFFSET, DIRECT_RET_BOOL_OK_OFFSET, DIRECT_RET_U64_OK_OFFSET,
-    DIRECT_STEP_ERROR_LEN_LOCAL, DIRECT_STEP_ERROR_PTR_LOCAL, DIRECT_WAIT_DEADLINE_MS_LOCAL,
+    DIRECT_RESULT_OPTION_U64_VALUE_OFFSET, DIRECT_RET_U64_OK_OFFSET, DIRECT_STEP_ERROR_LEN_LOCAL,
+    DIRECT_STEP_ERROR_PTR_LOCAL, DIRECT_WAIT_DEADLINE_MS_LOCAL,
     DIRECT_WAIT_DEADLINE_SCRATCH_OFFSET, DIRECT_WAIT_ON_WAIT_VARIABLES_LEN_LOCAL,
     DIRECT_WAIT_ON_WAIT_VARIABLES_PTR_LOCAL, DIRECT_WAIT_PARENT_STEPS_LEN_LOCAL,
     DIRECT_WAIT_PARENT_STEPS_PTR_LOCAL, DIRECT_WAIT_POLL_INTERVAL_MS_LOCAL,
@@ -123,14 +125,7 @@ pub(super) fn emit_ai_wait_tool_arm(
     body.instruction(&Instruction::Block(BlockType::Empty));
     body.instruction(&Instruction::Loop(BlockType::Empty));
 
-    push_retptr_arg(body);
-    body.instruction(&Instruction::Call(indices.runtime_check_signals));
-    return_if_retptr_error(body, indices);
-    push_retptr_u8_load(body, DIRECT_RET_BOOL_OK_OFFSET);
-    body.instruction(&Instruction::If(BlockType::Empty));
-    // Suspend-and-exit: ABI-aware (clean-run tag vs suspended outcome).
-    super::abi::emit_entry_suspend_return(body, indices);
-    body.instruction(&Instruction::End);
+    emit_check_signals_and_suspend(body, indices);
 
     body.instruction(&Instruction::LocalGet(DIRECT_WAIT_SIGNAL_ID_PTR_LOCAL));
     body.instruction(&Instruction::LocalGet(DIRECT_WAIT_SIGNAL_ID_LEN_LOCAL));
@@ -424,14 +419,7 @@ pub(super) fn emit_wait_for_signal_plan(
     body.instruction(&Instruction::Block(BlockType::Empty));
     body.instruction(&Instruction::Loop(BlockType::Empty));
 
-    push_retptr_arg(body);
-    body.instruction(&Instruction::Call(indices.runtime_check_signals));
-    return_if_retptr_error(body, indices);
-    push_retptr_u8_load(body, DIRECT_RET_BOOL_OK_OFFSET);
-    body.instruction(&Instruction::If(BlockType::Empty));
-    // Suspend-and-exit: ABI-aware (clean-run tag vs suspended outcome).
-    super::abi::emit_entry_suspend_return(body, indices);
-    body.instruction(&Instruction::End);
+    emit_check_signals_and_suspend(body, indices);
 
     body.instruction(&Instruction::LocalGet(route_ptr_local));
     body.instruction(&Instruction::LocalGet(route_len_local));

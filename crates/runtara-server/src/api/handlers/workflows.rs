@@ -2226,7 +2226,7 @@ pub async fn replay_instance_handler(
         ("instance_id" = String, Path, description = "Instance identifier (UUID)")
     ),
     responses(
-        (status = 200, description = "Instance stopped successfully", body = Value),
+        (status = 200, description = "Cancellation requested for the instance", body = Value),
         (status = 400, description = "Invalid instance ID", body = ErrorResponse),
         (status = 404, description = "Instance not found", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
@@ -2253,7 +2253,9 @@ pub async fn stop_instance_handler(
         Ok(StopOutcome::Stopped { previous_status }) => {
             let response = ApiResponse::success_with_message(
                 format!(
-                    "Instance {} stopped successfully (was: {})",
+                    "Cancellation requested for instance {} (was: {}). \
+                     The instance stops at its next signal checkpoint and \
+                     lands on status `cancelled`.",
                     instance_id, previous_status
                 ),
                 serde_json::Value::Null,
