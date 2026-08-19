@@ -164,7 +164,10 @@ impl WakeScheduler {
     /// error would strand a healthy sleeper.
     async fn cancel_pending(&self, instance_id: &str) -> bool {
         match self.persistence.get_pending_signal(instance_id).await {
-            Ok(Some(signal)) => signal.signal_type == "cancel",
+            // `acknowledged_at` is checked explicitly because SQLite's query
+            // returns acknowledged rows as well as unacknowledged ones, unlike
+            // Postgres — presence alone would re-cancel an already-handled run.
+            Ok(Some(signal)) => signal.signal_type == "cancel" && signal.acknowledged_at.is_none(),
             Ok(None) => false,
             Err(e) => {
                 warn!(

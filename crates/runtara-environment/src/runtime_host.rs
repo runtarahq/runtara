@@ -62,6 +62,14 @@ pub struct PersistenceRuntimeHost {
     /// Signal-poll rate limiter state (mirrors the SDK's `last_signal_poll`).
     last_signal_poll: std::sync::Mutex<Option<Instant>>,
     signal_poll_interval: Duration,
+    /// Set when a durable sleep was cut short by a pending cancel/shutdown and
+    /// cleared as soon as the guest asks about signals. If any OTHER host call
+    /// arrives while it is set, the guest woke from an interrupted sleep and
+    /// carried on without looking — see [`Self::escalate_if_cancel_ignored`].
+    sleep_interrupted: AtomicBool,
+    /// The run's cancel flag, shared with the executor's epoch callback and
+    /// watchdog. Setting it stops the guest; `None` outside a real run.
+    cancel_token: Option<Arc<AtomicBool>>,
 }
 
 impl PersistenceRuntimeHost {
@@ -74,7 +82,15 @@ impl PersistenceRuntimeHost {
             cancelled: AtomicBool::new(false),
             last_signal_poll: std::sync::Mutex::new(None),
             signal_poll_interval: DEFAULT_SIGNAL_POLL_INTERVAL,
+            sleep_interrupted: AtomicBool::new(false),
+            cancel_token: None,
         }
+    }
+
+    /// Share the run's cancel flag so an ignored cancel can stop the guest.
+    pub fn with_cancel_token(mut self, cancel: Arc<AtomicBool>) -> Self {
+        self.cancel_token = Some(cancel);
+        self
     }
 
     /// Host over a bare persistence handle (constructs its own handler state).
@@ -136,6 +152,53 @@ impl PersistenceRuntimeHost {
         if let Ok(mut last) = self.last_signal_poll.lock() {
             *last = None;
         }
+    }
+
+    /// Terminate a run whose guest woke from an interrupted sleep and carried
+    /// on without asking why.
+    ///
+    /// The Delay lowering emits a `check-signals` poll after its sleep, but
+    /// that instruction is compiled into the workflow artifact — every artifact
+    /// built before it existed has no poll site and cannot grow one without a
+    /// recompile. Such a guest wakes early from the shortened sleep, ignores
+    /// the cancel, and runs on; left alone it reports success for a run that
+    /// was cancelled, having skipped the waits it promised (each later sleep
+    /// also returns early, so a chain of delays collapses).
+    ///
+    /// Called at the head of every host call EXCEPT the two signal polls. Those
+    /// two are precisely what a fixed artifact does next, so reaching anything
+    /// else is positive evidence the guest has no poll site. Deliberately not
+    /// keyed on "the next call is another sleep": a single-Delay workflow wired
+    /// straight into Finish never sleeps twice, and that is the shape this is
+    /// most needed for.
+    ///
+    /// Termination goes through the run's cancel flag rather than an error
+    /// return. An `Err` from a host call travels the guest's error channel,
+    /// where a user's `onError` route could catch it — a cancel a workflow can
+    /// swallow is not a cancel. The cancel flag is read by the executor's epoch
+    /// callback and watchdog, outside anything the guest can intercept.
+    async fn escalate_if_cancel_ignored(&self) {
+        if !self.sleep_interrupted.swap(false, Ordering::SeqCst) {
+            return;
+        }
+        tracing::warn!(
+            instance_id = %self.instance_id,
+            "Guest resumed from an interrupted sleep without polling signals; \
+             cancelling host-side (workflow artifact predates the Delay poll site)"
+        );
+        self.cancelled.store(true, Ordering::SeqCst);
+        // The ack is what writes terminal status `cancelled`, exactly as it
+        // would had the guest observed the signal itself.
+        self.ack_signal(SignalType::SignalCancel).await;
+        if let Some(cancel) = &self.cancel_token {
+            cancel.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// The guest asked about signals, so it has a poll site and needs no
+    /// host-side escalation.
+    fn note_guest_polled_signals(&self) {
+        self.sleep_interrupted.store(false, Ordering::SeqCst);
     }
 
     /// Server-side signal acknowledgement — the status-transition half of the
@@ -236,6 +299,7 @@ impl PersistenceRuntimeHost {
 #[async_trait::async_trait]
 impl RuntimeHost for PersistenceRuntimeHost {
     async fn load_input(&self) -> Result<Option<Vec<u8>>, String> {
+        self.escalate_if_cancel_ignored().await;
         let instance = self
             .state
             .persistence
@@ -251,16 +315,19 @@ impl RuntimeHost for PersistenceRuntimeHost {
     }
 
     async fn complete(&self, output: Vec<u8>) -> Result<(), String> {
+        self.escalate_if_cancel_ignored().await;
         self.event(InstanceEventType::EventCompleted, None, output, None)
             .await
     }
 
     async fn fail(&self, error: Vec<u8>) -> Result<(), String> {
+        self.escalate_if_cancel_ignored().await;
         self.event(InstanceEventType::EventFailed, None, error, None)
             .await
     }
 
     async fn custom_event(&self, kind: String, payload: Vec<u8>) -> Result<(), String> {
+        self.escalate_if_cancel_ignored().await;
         // SDK wire shape: event_type "custom", subtype = kind.
         self.event(InstanceEventType::EventCustom, None, payload, Some(kind))
             .await
@@ -271,17 +338,20 @@ impl RuntimeHost for PersistenceRuntimeHost {
     }
 
     async fn breakpoint_pause(&self) -> Result<(), String> {
+        self.escalate_if_cancel_ignored().await;
         // Guest: acknowledge_pause() then sdk.suspended().
         self.ack_signal(SignalType::SignalPause).await;
         self.suspended_event().await
     }
 
     async fn heartbeat(&self) -> Result<(), String> {
+        self.escalate_if_cancel_ignored().await;
         self.event(InstanceEventType::EventHeartbeat, None, Vec::new(), None)
             .await
     }
 
     async fn is_cancelled(&self) -> Result<bool, String> {
+        self.note_guest_polled_signals();
         // Mirrors guest is_cancelled: local flag short-circuit, then a
         // rate-limited poll; only a Cancel both sets the flag and acks.
         if self.cancelled.load(Ordering::SeqCst) {
@@ -301,6 +371,7 @@ impl RuntimeHost for PersistenceRuntimeHost {
     }
 
     async fn check_signals(&self) -> Result<bool, String> {
+        self.note_guest_polled_signals();
         let Some(signal) = self.poll_lifecycle_signal().await? else {
             return Ok(false);
         };
@@ -326,6 +397,7 @@ impl RuntimeHost for PersistenceRuntimeHost {
     }
 
     async fn poll_custom_signal(&self, checkpoint_id: String) -> Result<Option<Vec<u8>>, String> {
+        self.escalate_if_cancel_ignored().await;
         let response = handle_poll_signals(
             &self.state,
             PollSignalsRequest {
@@ -339,6 +411,7 @@ impl RuntimeHost for PersistenceRuntimeHost {
     }
 
     async fn get_checkpoint(&self, checkpoint_id: String) -> Result<Option<Vec<u8>>, String> {
+        self.escalate_if_cancel_ignored().await;
         let response = handle_get_checkpoint(
             &self.state,
             GetCheckpointRequest {
@@ -356,6 +429,7 @@ impl RuntimeHost for PersistenceRuntimeHost {
         checkpoint_id: String,
         state: Vec<u8>,
     ) -> Result<RuntimeCheckpointResult, String> {
+        self.escalate_if_cancel_ignored().await;
         let response = handle_checkpoint(
             &self.state,
             CheckpointRequest {
@@ -380,6 +454,7 @@ impl RuntimeHost for PersistenceRuntimeHost {
     }
 
     async fn handle_checkpoint_signal(&self, signal_type: String) -> Result<bool, String> {
+        self.escalate_if_cancel_ignored().await;
         // Mirrors the guest runtime's checkpoint_signal_action dispatch.
         match signal_type.as_str() {
             "cancel" => {
@@ -408,6 +483,7 @@ impl RuntimeHost for PersistenceRuntimeHost {
         attempt_number: u32,
         error_message: Option<String>,
     ) -> Result<(), String> {
+        self.escalate_if_cancel_ignored().await;
         handle_retry_attempt(
             &self.state,
             RetryAttemptEvent {
@@ -430,6 +506,13 @@ impl RuntimeHost for PersistenceRuntimeHost {
         state: Vec<u8>,
         ms: u64,
     ) -> Result<(), String> {
+        self.escalate_if_cancel_ignored().await;
+        // Already terminal — either the escalation above just cancelled the run,
+        // or the guest consumed a cancel earlier. Sleeping out a cancelled run
+        // wastes the wall clock the executor is about to cut short anyway.
+        if self.cancelled.load(Ordering::SeqCst) {
+            return Ok(());
+        }
         let response = handle_sleep(
             &self.state,
             SleepRequest {
@@ -442,13 +525,18 @@ impl RuntimeHost for PersistenceRuntimeHost {
         .await
         .map_err(Self::err)?;
 
-        // The sleep cut itself short because a signal is pending, and the guest
-        // polls `check-signals` immediately after. Clear the rate limiter so
-        // that poll reaches persistence instead of being answered `None` by a
-        // limiter the sleep's own read just armed — otherwise a cancel seen here
-        // still slips by a whole Delay step.
+        // The sleep cut itself short because a signal is pending, and a fixed
+        // artifact polls `check-signals` immediately after. Clear the rate
+        // limiter so that poll reaches persistence instead of being answered
+        // `None` by a limiter the sleep's own read just armed — otherwise a
+        // cancel seen here still slips by a whole Delay step.
+        //
+        // Arm the escalation flag in the same breath: if the next host call is
+        // anything other than that poll, the artifact has no poll site and the
+        // host cancels the run itself.
         if response.pending_signal.is_some() {
             self.reset_signal_poll_limiter();
+            self.sleep_interrupted.store(true, Ordering::SeqCst);
         }
         Ok(())
     }
@@ -748,6 +836,144 @@ mod tests {
         assert_eq!(
             inst.status, "cancelled",
             "observing the cancel must drive the instance to cancelled"
+        );
+    }
+
+    /// A workflow artifact compiled before the Delay poll site cannot observe a
+    /// cancel. It wakes from the shortened sleep and goes straight on to its
+    /// next step — here, another sleep. That call is the evidence, and the host
+    /// cancels the run rather than letting it report success.
+    #[tokio::test]
+    async fn stale_artifact_that_ignores_an_interrupted_sleep_is_cancelled_host_side() {
+        let (p, _host, _dir) = setup().await;
+        let cancel: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+        let host =
+            PersistenceRuntimeHost::from_persistence(Arc::clone(&p), INSTANCE.to_string(), false)
+                .with_cancel_token(Arc::clone(&cancel));
+        p.insert_signal(INSTANCE, "cancel", b"").await.unwrap();
+
+        // First Delay: the sleep is cut short by the pending cancel.
+        host.durable_sleep_checkpoint("delay-1".into(), b"s".to_vec(), 30_000)
+            .await
+            .unwrap();
+        assert_eq!(
+            p.get_instance(INSTANCE).await.unwrap().unwrap().status,
+            "running",
+            "the interrupted sleep alone must not decide the run's fate"
+        );
+
+        // Second Delay — a poll site would have run first. Reaching here proves
+        // the artifact has none.
+        host.durable_sleep_checkpoint("delay-2".into(), b"s".to_vec(), 30_000)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            p.get_instance(INSTANCE).await.unwrap().unwrap().status,
+            "cancelled"
+        );
+        assert!(
+            cancel.load(Ordering::SeqCst),
+            "the run's cancel flag must be set so the executor stops the guest"
+        );
+    }
+
+    /// The discriminating shape: a single Delay wired straight into Finish never
+    /// sleeps twice, so a detector keyed on "the next call is another sleep"
+    /// would never fire. The next call is `complete` — and it must not be
+    /// allowed to report success for a cancelled run.
+    #[tokio::test]
+    async fn single_delay_into_finish_is_cancelled_not_completed() {
+        let (p, _host, _dir) = setup().await;
+        let cancel: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+        let host =
+            PersistenceRuntimeHost::from_persistence(Arc::clone(&p), INSTANCE.to_string(), false)
+                .with_cancel_token(Arc::clone(&cancel));
+        p.insert_signal(INSTANCE, "cancel", b"").await.unwrap();
+
+        host.durable_sleep_checkpoint("delay".into(), b"s".to_vec(), 1_800_000)
+            .await
+            .unwrap();
+        // Stale guest proceeds to Finish and reports completion.
+        host.complete(br#"{"done":true}"#.to_vec()).await.unwrap();
+
+        let inst = p.get_instance(INSTANCE).await.unwrap().unwrap();
+        assert_eq!(
+            inst.status, "cancelled",
+            "a stopped run must not report success; got {}",
+            inst.status
+        );
+        assert!(cancel.load(Ordering::SeqCst));
+    }
+
+    /// Coexistence: a freshly compiled artifact DOES poll after its sleep. The
+    /// guest path must handle the cancel, and the host escalation must stay out
+    /// of the way — one ack, one terminal transition, no double handling.
+    #[tokio::test]
+    async fn fresh_artifact_polls_and_the_host_does_not_also_escalate() {
+        let (p, _host, _dir) = setup().await;
+        let cancel: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+        let host =
+            PersistenceRuntimeHost::from_persistence(Arc::clone(&p), INSTANCE.to_string(), false)
+                .with_cancel_token(Arc::clone(&cancel));
+        p.insert_signal(INSTANCE, "cancel", b"").await.unwrap();
+
+        host.durable_sleep_checkpoint("delay".into(), b"s".to_vec(), 30_000)
+            .await
+            .unwrap();
+        // The emitted poll site: the guest asks, acts, and suspends itself.
+        assert!(host.check_signals().await.unwrap());
+        assert_eq!(
+            p.get_instance(INSTANCE).await.unwrap().unwrap().status,
+            "cancelled"
+        );
+        assert!(
+            !cancel.load(Ordering::SeqCst),
+            "the guest handled it; the host must not also trip the run's cancel flag"
+        );
+
+        // The signal is acknowledged, so nothing is left for the escalation to
+        // act on as the guest winds down through further host calls. (Checked
+        // via `acknowledged_at`, not row absence: SQLite returns acknowledged
+        // rows from `get_pending_signal` where Postgres filters them.)
+        let signal = p
+            .get_pending_signal(INSTANCE)
+            .await
+            .unwrap()
+            .expect("sqlite keeps the row after acknowledgement");
+        assert!(
+            signal.acknowledged_at.is_some(),
+            "the guest's poll must have acknowledged the cancel"
+        );
+        host.heartbeat().await.unwrap();
+        assert_eq!(
+            p.get_instance(INSTANCE).await.unwrap().unwrap().status,
+            "cancelled"
+        );
+    }
+
+    /// The escalation must not fire on a run nobody cancelled — an ordinary
+    /// sleep followed by ordinary work is untouched.
+    #[tokio::test]
+    async fn uncancelled_run_is_never_escalated() {
+        let (p, _host, _dir) = setup().await;
+        let cancel: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+        let host =
+            PersistenceRuntimeHost::from_persistence(Arc::clone(&p), INSTANCE.to_string(), false)
+                .with_cancel_token(Arc::clone(&cancel));
+
+        host.durable_sleep_checkpoint("delay-1".into(), b"s".to_vec(), 10)
+            .await
+            .unwrap();
+        host.durable_sleep_checkpoint("delay-2".into(), b"s".to_vec(), 10)
+            .await
+            .unwrap();
+        host.complete(br#"{"ok":true}"#.to_vec()).await.unwrap();
+
+        assert!(!cancel.load(Ordering::SeqCst));
+        assert_eq!(
+            p.get_instance(INSTANCE).await.unwrap().unwrap().status,
+            "completed"
         );
     }
 
