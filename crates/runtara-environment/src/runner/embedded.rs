@@ -30,6 +30,9 @@ use runtara_component_host::{
     EngineConfig, WorkflowExecutor, WorkflowExit, WorkflowLimits, WorkflowRunSpec, build_engine,
     spawn_epoch_ticker,
 };
+use runtara_core::instance_handlers::{
+    InstanceHandlerState, SignalAck, SignalType, handle_signal_ack,
+};
 use runtara_core::persistence::Persistence;
 
 use super::common::{self, WorkflowRunnerConfig};
@@ -106,11 +109,25 @@ impl EmbeddedWasmRunner {
         // that indifference is the dual-ABI story: old workflows run
         // unchanged, without a rebuild, through the same spec.
         let debug_mode = env.get("DEBUG_MODE").is_some_and(|value| value == "true");
-        let runtime = Arc::new(crate::runtime_host::PersistenceRuntimeHost::new(
+        let mut host = crate::runtime_host::PersistenceRuntimeHost::new(
             Arc::clone(&self.handler_state),
             options.instance_id.clone(),
             debug_mode,
-        ));
+        );
+        // Share the run's cancel flag: it is how the host stops a guest that
+        // woke from an interrupted sleep and ignored the cancel, without
+        // routing the cancel through the guest's catchable error channel.
+        if let Some(token) = cancel.clone() {
+            host = host.with_cancel_token(token);
+            // Bringing the epoch deadline forward is what makes that flag act
+            // promptly: otherwise it is only read on the next 100ms tick, and a
+            // guest with no poll site keeps completing steps until then.
+            // Engine-global, like the ticker's own increment — other runs'
+            // callbacks fire once early, see no cancel, and yield.
+            let engine = Arc::clone(self.executor.engine());
+            host = host.with_guest_interrupt(Arc::new(move || engine.increment_epoch()));
+        }
+        let runtime = Arc::new(host);
         WorkflowRunSpec {
             env,
             stderr,
@@ -250,6 +267,59 @@ fn has_on_signal_wake(wakes: &[runtara_component_host::lifecycle::WorkflowWake])
 /// pause/breakpoint suspend has no marker and must never be signal-woken) or
 /// `sleeping` for pure timed parks. Relaunch clears the marker with the
 /// running transition.
+/// Terminal backstop for a cancel the guest never acknowledged.
+///
+/// Status `cancelled` is otherwise written only when the guest observes the
+/// signal and acks it. A workflow artifact compiled before the Delay poll site
+/// existed has no way to observe one, so without this a cancelled run reports
+/// whatever it reached on its own — usually `completed`, a silent success for a
+/// run the user stopped.
+///
+/// Runs after the guest is gone, so nothing inside the workflow can intercept
+/// it, and it makes no assumptions about call ordering — which is what makes it
+/// the floor under the host-side escalation in `PersistenceRuntimeHost`. That
+/// escalation is the fast path; this one is the guarantee.
+///
+/// A cancel landing in the instant a run legitimately finishes is recorded
+/// `cancelled` (the ack overwrites the terminal status). Deliberate: a cancel
+/// was requested and demonstrably not honoured, and reporting clean success for
+/// it is the failure mode this exists to prevent.
+async fn enforce_unacked_cancel(persistence: &Arc<dyn Persistence>, instance_id: &str) {
+    // `acknowledged_at` must be checked explicitly: SQLite's `get_pending_signal`
+    // returns acknowledged rows too (Postgres filters them), so the row's mere
+    // presence would otherwise re-cancel a run whose guest handled the signal
+    // properly.
+    match persistence.get_pending_signal(instance_id).await {
+        Ok(Some(signal)) if signal.signal_type == "cancel" && signal.acknowledged_at.is_none() => {
+            warn!(
+                instance_id = %instance_id,
+                "Run ended with an unacknowledged cancel; recording cancelled"
+            );
+            let state = InstanceHandlerState::new(Arc::clone(persistence));
+            if let Err(e) = handle_signal_ack(
+                &state,
+                SignalAck {
+                    instance_id: instance_id.to_string(),
+                    signal_type: SignalType::SignalCancel as i32,
+                    acknowledged: true,
+                },
+            )
+            .await
+            {
+                error!(instance_id = %instance_id, error = %e, "Failed to record cancelled");
+            }
+        }
+        Ok(_) => {}
+        Err(e) => {
+            warn!(
+                instance_id = %instance_id,
+                error = %e,
+                "Could not check for an unacknowledged cancel after the run"
+            );
+        }
+    }
+}
+
 async fn park_invoke_suspend(
     persistence: &dyn Persistence,
     instance_id: &str,
@@ -576,6 +646,11 @@ impl Runner for EmbeddedWasmRunner {
                                 warn!(instance_id = %instance_id, "Embedded workflow run cancelled");
                             }
                         }
+                        // A park is not an ending — the wake scheduler owns it
+                        // from here (and resolves a pending cancel itself).
+                        if !matches!(&run.exit, InvokeExit::Suspended(_)) {
+                            enforce_unacked_cancel(&persistence, &instance_id).await;
+                        }
                     } else {
                         match runtara_component_host::WorkflowExecutor::load(&executor, &wasm_path)
                             .await
@@ -605,6 +680,7 @@ impl Runner for EmbeddedWasmRunner {
                                         warn!(instance_id = %instance_id, "Embedded workflow run cancelled");
                                     }
                                 }
+                                enforce_unacked_cancel(&persistence, &instance_id).await;
                             }
                             Err(e) => {
                                 error!(
@@ -907,6 +983,117 @@ mod tests {
             inst.sleep_until.map(|dt| dt.timestamp_millis() as u64),
             Some(deadline_ms),
             "an on-signal timeout is the fallback wake if the signal never arrives"
+        );
+    }
+
+    /// Build a running instance on real SQLite persistence.
+    async fn backstop_fixture() -> (Arc<dyn Persistence>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let persistence: Arc<dyn Persistence> = Arc::new(
+            SqlitePersistence::from_path(dir.path().join("backstop.db"))
+                .await
+                .expect("sqlite persistence"),
+        );
+        persistence
+            .register_instance("inst-1", "tenant-1")
+            .await
+            .unwrap();
+        persistence
+            .update_instance_status("inst-1", "running", None)
+            .await
+            .unwrap();
+        (persistence, dir)
+    }
+
+    /// The floor under the host-side escalation: a guest that reported success
+    /// while a cancel sat unacknowledged must still land on `cancelled`. This is
+    /// what a workflow artifact with no poll site does, and it is the silent
+    /// success the backstop exists to prevent.
+    #[tokio::test]
+    async fn unacked_cancel_overrides_a_reported_completion() {
+        let (persistence, _dir) = backstop_fixture().await;
+        persistence
+            .insert_signal("inst-1", "cancel", b"")
+            .await
+            .unwrap();
+        persistence
+            .complete_instance(runtara_core::persistence::CompleteInstanceParams::new(
+                "inst-1",
+                "completed",
+            ))
+            .await
+            .unwrap();
+
+        enforce_unacked_cancel(&persistence, "inst-1").await;
+
+        assert_eq!(
+            persistence
+                .get_instance("inst-1")
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            "cancelled",
+            "cancel wins the exit race: a stop was requested and not honoured"
+        );
+    }
+
+    /// The regression the SQLite dialect invites. `get_pending_signal` returns
+    /// ALREADY-ACKNOWLEDGED rows there (Postgres filters them), so a backstop
+    /// keyed on the row's presence would re-cancel a run whose guest handled the
+    /// signal correctly and then finished.
+    #[tokio::test]
+    async fn an_acknowledged_cancel_does_not_re_cancel_a_finished_run() {
+        let (persistence, _dir) = backstop_fixture().await;
+        persistence
+            .insert_signal("inst-1", "cancel", b"")
+            .await
+            .unwrap();
+        persistence.acknowledge_signal("inst-1").await.unwrap();
+        persistence
+            .complete_instance(runtara_core::persistence::CompleteInstanceParams::new(
+                "inst-1",
+                "completed",
+            ))
+            .await
+            .unwrap();
+
+        enforce_unacked_cancel(&persistence, "inst-1").await;
+
+        assert_eq!(
+            persistence
+                .get_instance("inst-1")
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            "completed",
+            "an already-acknowledged cancel must not touch a finished run"
+        );
+    }
+
+    /// A run nobody stopped is left entirely alone.
+    #[tokio::test]
+    async fn a_run_with_no_cancel_is_untouched() {
+        let (persistence, _dir) = backstop_fixture().await;
+        persistence
+            .complete_instance(runtara_core::persistence::CompleteInstanceParams::new(
+                "inst-1",
+                "completed",
+            ))
+            .await
+            .unwrap();
+
+        enforce_unacked_cancel(&persistence, "inst-1").await;
+
+        assert_eq!(
+            persistence
+                .get_instance("inst-1")
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            "completed"
         );
     }
 }

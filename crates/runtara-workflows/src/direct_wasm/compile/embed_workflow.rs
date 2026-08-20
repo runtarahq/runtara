@@ -16,11 +16,13 @@
 use wasm_encoder::{BlockType, Function as WasmFunction, Instruction};
 
 use super::abi::{
-    emit_retptr_error_or_return, load_retptr_list, push_retptr_arg, push_retptr_u8_load,
-    push_segment_args, return_if_retptr_error,
+    emit_retptr_error_or_return, load_retptr_list, push_retptr_arg, push_segment_args,
+    return_if_retptr_error,
 };
 use super::agent_error::emit_agent_error_route_or_fail;
-use super::checkpoint::{emit_checkpoint_lookup, emit_checkpoint_save};
+use super::checkpoint::{
+    emit_check_signals_and_suspend, emit_checkpoint_lookup, emit_checkpoint_save,
+};
 use super::debug::{emit_step_breakpoint, emit_step_debug_event};
 use super::dispatcher::emit_run_plan_mapping;
 use super::embed_retry::{
@@ -35,9 +37,9 @@ use super::{
     DIRECT_EMBED_PARENT_SOURCE_PTR_LOCAL, DIRECT_EMBED_RATE_LIMIT_WAIT_TOTAL_LOCAL,
     DIRECT_EMBED_RETRY_ATTEMPT_LOCAL, DIRECT_EMBED_SAVED_DATA_LEN_LOCAL,
     DIRECT_EMBED_SAVED_DATA_PTR_LOCAL, DIRECT_EMBED_STEP_RESULT_LEN_LOCAL,
-    DIRECT_EMBED_STEP_RESULT_PTR_LOCAL, DIRECT_RET_BOOL_OK_OFFSET, DirectCoreFunctionIndices,
-    DirectCoreStaticData, DirectDataSegment, DirectErrorRoutePlan, DirectFailureTarget,
-    DirectHandledTarget, DirectRunPlan, DirectVariables,
+    DIRECT_EMBED_STEP_RESULT_PTR_LOCAL, DirectCoreFunctionIndices, DirectCoreStaticData,
+    DirectDataSegment, DirectErrorRoutePlan, DirectFailureTarget, DirectHandledTarget,
+    DirectRunPlan, DirectVariables,
 };
 
 pub(super) fn emit_embed_workflow_child_error_and_continue(
@@ -801,14 +803,7 @@ pub(super) fn emit_embed_workflow_plan(
         output_len_local,
     );
 
-    push_retptr_arg(body);
-    body.instruction(&Instruction::Call(indices.runtime_check_signals));
-    return_if_retptr_error(body, indices);
-    push_retptr_u8_load(body, DIRECT_RET_BOOL_OK_OFFSET);
-    body.instruction(&Instruction::If(BlockType::Empty));
-    // Suspend-and-exit: ABI-aware (clean-run tag vs suspended outcome).
-    super::abi::emit_entry_suspend_return(body, indices);
-    body.instruction(&Instruction::End);
+    emit_check_signals_and_suspend(body, indices);
 
     emit_run_plan_mapping(
         body,

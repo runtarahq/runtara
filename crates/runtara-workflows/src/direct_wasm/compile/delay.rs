@@ -15,7 +15,9 @@ use super::abi::{
     emit_entry_suspend_at, emit_retptr_error_or_step_fail, load_retptr_list, push_retptr_arg,
     push_retptr_i64_load, push_segment_args, return_if_retptr_error, store_local_i64_at,
 };
-use super::checkpoint::{emit_checkpoint_lookup, emit_checkpoint_save};
+use super::checkpoint::{
+    emit_check_signals_and_suspend, emit_checkpoint_lookup, emit_checkpoint_save,
+};
 use super::debug::{emit_step_breakpoint, emit_step_debug_event};
 use super::dispatcher::emit_run_plan_mapping;
 use super::mapping::emit_build_source;
@@ -147,6 +149,12 @@ pub(super) fn emit_delay_plan(
             push_retptr_arg(body);
             body.instruction(&Instruction::Call(indices.runtime_durable_sleep_checkpoint));
             return_if_retptr_error(body, indices);
+            // The sleep blocks in the host and writes no checkpoint of its own,
+            // so it has no `emit_checkpoint_save` to fold signal handling into.
+            // Poll explicitly: without this a cancel that arrived mid-sleep is
+            // never observed, and a chain of delays has no poll site at all —
+            // the run ignores the cancel and finishes normally.
+            emit_check_signals_and_suspend(body, indices);
         } else {
             // Store-freeing suspend: the deadline is a durable checkpoint, and
             // the run EXITS with `suspended(at(deadline))` so the host tears
@@ -202,6 +210,9 @@ pub(super) fn emit_delay_plan(
         push_retptr_arg(body);
         body.instruction(&Instruction::Call(indices.runtime_blocking_sleep));
         return_if_retptr_error(body, indices);
+        // Same reasoning as the durable arm: a blocking sleep is a step that
+        // spends real time without ever looking for a signal.
+        emit_check_signals_and_suspend(body, indices);
     }
 
     body.instruction(&Instruction::I32Const(delay_id as i32));

@@ -6,15 +6,18 @@
 use std::time::Duration;
 
 use anyhow::Result;
+use chrono::Utc;
+use tokio::time::Instant;
 use tracing::{debug, instrument};
 
+use super::mappers::map_event_type;
 use super::state::InstanceHandlerState;
 use super::types::{
     CheckpointRequest, CheckpointResponse, CustomSignal, GetCheckpointRequest,
-    GetCheckpointResponse, Signal, SignalType, SleepRequest, SleepResponse,
+    GetCheckpointResponse, InstanceEventType, Signal, SignalType, SleepRequest, SleepResponse,
 };
 use crate::error::CoreError;
-use crate::persistence::Persistence;
+use crate::persistence::{EventRecord, Persistence};
 
 /// Checkpoint handler - combines save and load semantics.
 ///
@@ -208,11 +211,29 @@ pub async fn handle_get_checkpoint(
     })
 }
 
+/// How long a single sleep tick lasts before the sleep looks up again.
+///
+/// Mirrors the runtime host's signal-poll interval: one persistence read per
+/// second is what a Wait poll loop already costs, and a delay shorter than one
+/// tick still performs exactly one uninterrupted sleep.
+const SLEEP_POLL_INTERVAL: Duration = Duration::from_millis(1000);
+
 /// Handle durable sleep request.
 ///
 /// Saves the checkpoint state before sleeping, then sleeps in-process.
 /// This ensures the state is durable and can be restored if the process
 /// is killed during the sleep.
+///
+/// The sleep is a poll loop rather than one long await, for two reasons a
+/// single `tokio::time::sleep` cannot serve:
+///
+/// - A cancel that arrives mid-sleep must be seen. The signal is reported back
+///   in `pending_signal` and deliberately *not* acknowledged here, so the guest
+///   observes it on its own `check-signals` and drives the ack path that writes
+///   status `cancelled`.
+/// - A sleeping instance must not look like a hung one. Each tick records a
+///   heartbeat event, which is the proof of life the staleness reaper judges on;
+///   without it any sleep longer than the heartbeat window is reaped as failed.
 #[instrument(skip(state, request), fields(instance_id = %request.instance_id, checkpoint_id = %request.checkpoint_id))]
 pub async fn handle_sleep(
     state: &InstanceHandlerState,
@@ -241,8 +262,70 @@ pub async fn handle_sleep(
     }
 
     // 2. Sleep in-process; environment may hibernate managed instances separately.
-    tokio::time::sleep(Duration::from_millis(request.duration_ms)).await;
-    Ok(SleepResponse {})
+    let deadline = Instant::now() + Duration::from_millis(request.duration_ms);
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Ok(SleepResponse {
+                pending_signal: None,
+            });
+        }
+
+        tokio::time::sleep(remaining.min(SLEEP_POLL_INTERVAL)).await;
+
+        // A delay that fits inside one tick is done here, and has cost nothing
+        // beyond the sleep itself — no heartbeat, no signal read.
+        if Instant::now() >= deadline {
+            return Ok(SleepResponse {
+                pending_signal: None,
+            });
+        }
+
+        // Proof of life for the staleness reaper, which judges liveness from
+        // `instance_events` and counts any event.
+        record_sleep_heartbeat(state, &request.instance_id).await;
+
+        if let Some(signal) = get_pending_signal(state.persistence.as_ref(), &request.instance_id)
+            .await
+            .filter(interrupts_sleep)
+        {
+            debug!(
+                signal_type = signal.signal_type,
+                "Pending signal observed during sleep - waking early"
+            );
+            return Ok(SleepResponse {
+                pending_signal: Some(signal),
+            });
+        }
+    }
+}
+
+/// Signals that end a sleep early. Cancel and shutdown both terminate the run,
+/// so burning the rest of the clock serves nobody; pause and resume are handled
+/// at the guest's own poll sites and leave the sleep alone.
+fn interrupts_sleep(signal: &Signal) -> bool {
+    signal.signal_type == i32::from(SignalType::SignalCancel)
+        || signal.signal_type == i32::from(SignalType::SignalShutdown)
+}
+
+/// Record a heartbeat for a sleeping instance.
+///
+/// Best-effort: a heartbeat that fails to persist must not fail the sleep, since
+/// the sleep itself is still perfectly valid. The worst case is the instance
+/// looking stale, which is exactly the pre-existing behaviour.
+async fn record_sleep_heartbeat(state: &InstanceHandlerState, instance_id: &str) {
+    let event = EventRecord {
+        id: None,
+        instance_id: instance_id.to_string(),
+        event_type: map_event_type(InstanceEventType::EventHeartbeat).to_string(),
+        checkpoint_id: None,
+        payload: None,
+        created_at: Utc::now(),
+        subtype: None,
+    };
+    if let Err(error) = state.persistence.insert_event(&event).await {
+        debug!(%error, "Failed to record sleep heartbeat");
+    }
 }
 
 #[cfg(test)]
@@ -375,5 +458,175 @@ mod tests {
         let cs = result.custom_signal.unwrap();
         assert_eq!(cs.checkpoint_id, "cp-1");
         assert_eq!(cs.payload, b"custom payload");
+    }
+
+    /// A sleep request for `duration_ms` against the shared test instance.
+    fn sleep_request(duration_ms: u64) -> SleepRequest {
+        SleepRequest {
+            instance_id: "inst-1".to_string(),
+            duration_ms,
+            checkpoint_id: String::new(),
+            state: Vec::new(),
+        }
+    }
+
+    fn heartbeat_count(persistence: &MockPersistence) -> usize {
+        persistence
+            .get_events()
+            .iter()
+            .filter(|event| event.event_type == "heartbeat")
+            .count()
+    }
+
+    /// The SYN-606 regression. A cancel written while the instance is parked in
+    /// a durable Delay used to be ignored for the sleep's whole duration: the
+    /// handler burned the full clock, reported nothing, and the run carried on
+    /// to its natural end. It must now wake early and report the signal.
+    #[tokio::test(start_paused = true)]
+    async fn test_sleep_wakes_early_on_pending_cancel() {
+        let persistence = Arc::new(
+            MockPersistence::new()
+                .with_instance(make_instance("inst-1", "tenant-1", "running"))
+                .with_signal(make_signal("inst-1", "cancel")),
+        );
+        let state = InstanceHandlerState::new(persistence);
+
+        let started = Instant::now();
+        let response = handle_sleep(&state, sleep_request(30_000)).await.unwrap();
+        let elapsed = started.elapsed();
+
+        let signal = response
+            .pending_signal
+            .expect("a pending cancel must be reported back");
+        assert_eq!(signal.signal_type, SignalType::SignalCancel as i32);
+        assert!(
+            elapsed < Duration::from_millis(30_000),
+            "the sleep must be cut short, not run its full duration (took {elapsed:?})"
+        );
+    }
+
+    /// Shutdown is the drain-time sibling of cancel — it also ends the run, so
+    /// sleeping out the clock serves nobody.
+    #[tokio::test(start_paused = true)]
+    async fn test_sleep_wakes_early_on_pending_shutdown() {
+        let persistence = Arc::new(
+            MockPersistence::new()
+                .with_instance(make_instance("inst-1", "tenant-1", "running"))
+                .with_signal(make_signal("inst-1", "shutdown")),
+        );
+        let state = InstanceHandlerState::new(persistence);
+
+        let response = handle_sleep(&state, sleep_request(30_000)).await.unwrap();
+        let signal = response
+            .pending_signal
+            .expect("a pending shutdown must be reported back");
+        assert_eq!(signal.signal_type, SignalType::SignalShutdown as i32);
+    }
+
+    /// A pause is handled at the guest's own poll sites and must not truncate
+    /// the delay — otherwise the step would silently finish early.
+    #[tokio::test(start_paused = true)]
+    async fn test_sleep_ignores_pending_pause() {
+        let persistence = Arc::new(
+            MockPersistence::new()
+                .with_instance(make_instance("inst-1", "tenant-1", "running"))
+                .with_signal(make_signal("inst-1", "pause")),
+        );
+        let state = InstanceHandlerState::new(persistence);
+
+        let started = Instant::now();
+        let response = handle_sleep(&state, sleep_request(5_000)).await.unwrap();
+
+        assert!(response.pending_signal.is_none());
+        assert_eq!(
+            started.elapsed(),
+            Duration::from_millis(5_000),
+            "a pause must leave the sleep's duration alone"
+        );
+    }
+
+    /// The no-signal path is the common one and must be untouched: the full
+    /// requested duration, no early exit.
+    #[tokio::test(start_paused = true)]
+    async fn test_sleep_without_signal_runs_full_duration() {
+        let persistence = Arc::new(
+            MockPersistence::new().with_instance(make_instance("inst-1", "tenant-1", "running")),
+        );
+        let state = InstanceHandlerState::new(persistence);
+
+        let started = Instant::now();
+        let response = handle_sleep(&state, sleep_request(5_000)).await.unwrap();
+
+        assert!(response.pending_signal.is_none());
+        assert_eq!(started.elapsed(), Duration::from_millis(5_000));
+    }
+
+    /// A sleeping instance must not look like a hung one. The staleness reaper
+    /// judges liveness from `instance_events`, and a durable Delay used to emit
+    /// none at all — which is why any Delay past the heartbeat window was
+    /// reaped as `failed`.
+    #[tokio::test(start_paused = true)]
+    async fn test_long_sleep_emits_heartbeats() {
+        let persistence = Arc::new(
+            MockPersistence::new().with_instance(make_instance("inst-1", "tenant-1", "running")),
+        );
+        let state = InstanceHandlerState::new(persistence.clone());
+
+        handle_sleep(&state, sleep_request(5_000)).await.unwrap();
+
+        // One per elapsed poll tick; the final tick lands on the deadline and
+        // returns instead of beating.
+        assert_eq!(heartbeat_count(&persistence), 4);
+    }
+
+    /// A delay shorter than one poll tick is the overwhelmingly common case
+    /// (fixtures use single-digit milliseconds). It must cost exactly one sleep
+    /// and no persistence traffic at all.
+    #[tokio::test(start_paused = true)]
+    async fn test_short_sleep_does_not_poll_or_heartbeat() {
+        let persistence = Arc::new(
+            MockPersistence::new()
+                .with_instance(make_instance("inst-1", "tenant-1", "running"))
+                .with_signal(make_signal("inst-1", "cancel")),
+        );
+        let state = InstanceHandlerState::new(persistence.clone());
+
+        let started = Instant::now();
+        let response = handle_sleep(&state, sleep_request(25)).await.unwrap();
+
+        assert_eq!(started.elapsed(), Duration::from_millis(25));
+        assert!(
+            response.pending_signal.is_none(),
+            "a sub-tick sleep finishes before it would ever look"
+        );
+        assert_eq!(heartbeat_count(&persistence), 0);
+    }
+
+    /// The sleep checkpoint is still saved before any of the polling happens —
+    /// durability must not regress just because the sleep can now end early.
+    #[tokio::test(start_paused = true)]
+    async fn test_sleep_saves_checkpoint_before_waking_early() {
+        let persistence = Arc::new(
+            MockPersistence::new()
+                .with_instance(make_instance("inst-1", "tenant-1", "running"))
+                .with_signal(make_signal("inst-1", "cancel")),
+        );
+        let state = InstanceHandlerState::new(persistence.clone());
+
+        let request = SleepRequest {
+            instance_id: "inst-1".to_string(),
+            duration_ms: 30_000,
+            checkpoint_id: "delay-1".to_string(),
+            state: b"sleep state".to_vec(),
+        };
+        let response = handle_sleep(&state, request).await.unwrap();
+
+        assert!(response.pending_signal.is_some());
+        let saved = persistence
+            .load_checkpoint("inst-1", "delay-1")
+            .await
+            .unwrap()
+            .expect("the sleep checkpoint must be persisted");
+        assert_eq!(saved.state, b"sleep state");
     }
 }
