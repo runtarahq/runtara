@@ -70,6 +70,10 @@ pub struct PersistenceRuntimeHost {
     /// The run's cancel flag, shared with the executor's epoch callback and
     /// watchdog. Setting it stops the guest; `None` outside a real run.
     cancel_token: Option<Arc<AtomicBool>>,
+    /// Brings the executor's epoch deadline forward so its callback fires at
+    /// the guest's next branch point rather than up to a tick later. `None`
+    /// outside a real run.
+    interrupt_guest: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl PersistenceRuntimeHost {
@@ -84,12 +88,23 @@ impl PersistenceRuntimeHost {
             signal_poll_interval: DEFAULT_SIGNAL_POLL_INTERVAL,
             sleep_interrupted: AtomicBool::new(false),
             cancel_token: None,
+            interrupt_guest: None,
         }
     }
 
     /// Share the run's cancel flag so an ignored cancel can stop the guest.
     pub fn with_cancel_token(mut self, cancel: Arc<AtomicBool>) -> Self {
         self.cancel_token = Some(cancel);
+        self
+    }
+
+    /// Supply the hook that brings the executor's epoch deadline forward.
+    ///
+    /// Taken as a callback rather than a `wasmtime::Engine` so this crate stays
+    /// free of a direct wasmtime dependency; the runner passes
+    /// `engine.increment_epoch()`.
+    pub fn with_guest_interrupt(mut self, interrupt: Arc<dyn Fn() + Send + Sync>) -> Self {
+        self.interrupt_guest = Some(interrupt);
         self
     }
 
@@ -188,10 +203,26 @@ impl PersistenceRuntimeHost {
         );
         self.cancelled.store(true, Ordering::SeqCst);
         // The ack is what writes terminal status `cancelled`, exactly as it
-        // would had the guest observed the signal itself.
+        // would had the guest observed the signal itself. It runs BEFORE the
+        // guest is stopped, so the terminal status is durable even if the trap
+        // lands immediately.
         self.ack_signal(SignalType::SignalCancel).await;
         if let Some(cancel) = &self.cancel_token {
             cancel.store(true, Ordering::SeqCst);
+        }
+        // Order matters: the epoch callback reads the cancel flag, so the flag
+        // must be set before the deadline is brought forward.
+        //
+        // Without this the flag is only observed on the next 100ms epoch tick,
+        // and a stale guest runs freely until then — measured at 43-68ms and
+        // three to four completed Agent host calls, i.e. real side effects
+        // after cancellation. Firing the callback at the guest's next branch
+        // point cuts that to the next instruction boundary.
+        //
+        // It does not close the window entirely: a host call already in flight
+        // still runs to completion, or is dropped mid-call by the watchdog.
+        if let Some(interrupt) = &self.interrupt_guest {
+            interrupt();
         }
     }
 
@@ -875,6 +906,84 @@ mod tests {
         assert!(
             cancel.load(Ordering::SeqCst),
             "the run's cancel flag must be set so the executor stops the guest"
+        );
+    }
+
+    /// Measured on the dev tenant before this hook existed: after the host
+    /// cancelled a stale run, the guest kept going for 43-68ms and COMPLETED
+    /// three to four Agent host calls — real side effects after cancellation.
+    /// The cause was the epoch callback only reading the cancel flag on its
+    /// next 100ms tick. Escalation must bring that deadline forward, and must
+    /// do so only after the flag is set, or the callback fires, sees nothing,
+    /// and yields.
+    #[tokio::test]
+    async fn escalation_interrupts_the_guest_and_only_after_the_flag_is_set() {
+        let (p, _host, _dir) = setup().await;
+        let cancel: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+        // Records what the cancel flag looked like at the moment of interrupt.
+        let flag_at_interrupt: Arc<std::sync::Mutex<Vec<bool>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let host = {
+            let cancel = Arc::clone(&cancel);
+            let seen = Arc::clone(&flag_at_interrupt);
+            PersistenceRuntimeHost::from_persistence(Arc::clone(&p), INSTANCE.to_string(), false)
+                .with_cancel_token(Arc::clone(&cancel))
+                .with_guest_interrupt(Arc::new(move || {
+                    seen.lock().unwrap().push(cancel.load(Ordering::SeqCst));
+                }))
+        };
+        p.insert_signal(INSTANCE, "cancel", b"").await.unwrap();
+
+        host.durable_sleep_checkpoint("delay".into(), b"s".to_vec(), 30_000)
+            .await
+            .unwrap();
+        assert!(
+            flag_at_interrupt.lock().unwrap().is_empty(),
+            "the interrupted sleep alone must not stop the guest"
+        );
+
+        // Stale artifact: next call is not a signal poll.
+        host.heartbeat().await.unwrap();
+
+        let seen = flag_at_interrupt.lock().unwrap().clone();
+        assert_eq!(
+            seen.len(),
+            1,
+            "escalation must interrupt the guest exactly once"
+        );
+        assert!(
+            seen[0],
+            "the cancel flag must already be set when the deadline is brought \
+             forward, or the epoch callback sees no cancel and yields"
+        );
+        assert_eq!(
+            p.get_instance(INSTANCE).await.unwrap().unwrap().status,
+            "cancelled",
+            "the terminal status must be durable before the guest is stopped"
+        );
+    }
+
+    /// A cooperative guest is never interrupted — it suspends itself.
+    #[tokio::test]
+    async fn a_guest_that_polls_is_not_interrupted() {
+        let (p, _host, _dir) = setup().await;
+        let interrupts: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+        let host = {
+            let fired = Arc::clone(&interrupts);
+            PersistenceRuntimeHost::from_persistence(Arc::clone(&p), INSTANCE.to_string(), false)
+                .with_cancel_token(Arc::new(AtomicBool::new(false)))
+                .with_guest_interrupt(Arc::new(move || fired.store(true, Ordering::SeqCst)))
+        };
+        p.insert_signal(INSTANCE, "cancel", b"").await.unwrap();
+
+        host.durable_sleep_checkpoint("delay".into(), b"s".to_vec(), 30_000)
+            .await
+            .unwrap();
+        assert!(host.check_signals().await.unwrap());
+
+        assert!(
+            !interrupts.load(Ordering::SeqCst),
+            "a guest with a poll site suspends cooperatively; trapping it is unnecessary"
         );
     }
 

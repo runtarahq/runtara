@@ -119,6 +119,13 @@ impl EmbeddedWasmRunner {
         // routing the cancel through the guest's catchable error channel.
         if let Some(token) = cancel.clone() {
             host = host.with_cancel_token(token);
+            // Bringing the epoch deadline forward is what makes that flag act
+            // promptly: otherwise it is only read on the next 100ms tick, and a
+            // guest with no poll site keeps completing steps until then.
+            // Engine-global, like the ticker's own increment — other runs'
+            // callbacks fire once early, see no cancel, and yield.
+            let engine = Arc::clone(self.executor.engine());
+            host = host.with_guest_interrupt(Arc::new(move || engine.increment_epoch()));
         }
         let runtime = Arc::new(host);
         WorkflowRunSpec {
