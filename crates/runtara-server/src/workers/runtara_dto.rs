@@ -9,6 +9,7 @@
 //! service.
 
 use chrono::{DateTime, Utc};
+use futures::StreamExt;
 use runtara_management_sdk::{InstanceInfo, InstanceStatus as RuntaraInstanceStatus};
 use serde_json::Value;
 
@@ -104,24 +105,47 @@ fn duration_seconds(
 /// shared with the per-instance pending-input and action endpoints (see
 /// `api::services::pending_inputs`) so the list and the detail views cannot
 /// disagree about the same run.
+///
+/// Each lookup is a round trip to the environment service, so they run
+/// concurrently rather than one row at a time — a page holds up to 100
+/// instances and the executions views poll it on a 10s interval, which would
+/// otherwise make list latency scale with how busy the tenant is.
 pub async fn enrich_pending_input(instances: &mut [WorkflowInstanceDto], client: &RuntimeClient) {
+    // Bounded rather than unbounded: the executions views poll this endpoint
+    // per open tab and per tenant, so a full page fanning out at once would
+    // turn one slow list into a burst against the environment service.
+    const MAX_CONCURRENT_LOOKUPS: usize = 8;
+
+    // `iter_mut` hands each future a disjoint borrow of its own row, so results
+    // are written back in place and completion order does not matter. The
+    // futures are built in an explicit loop (concrete lifetimes, no closure
+    // HRTB) as elsewhere in this codebase, since a `map` closure yielding a
+    // future that borrows its argument mutably does not infer.
+    let mut lookups = Vec::new();
     for instance in instances.iter_mut() {
         if instance.status != ExecutionStatus::Running {
             continue;
         }
 
-        match has_open_inputs(client, &instance.id).await {
-            Ok(has_open) => instance.has_pending_input = has_open,
-            // The flag stays false, so the indicator is hidden rather than
-            // wrongly shown for every running row during a runtime hiccup —
-            // but the hiccup itself must not pass silently.
-            Err(error) => tracing::warn!(
-                instance_id = %instance.id,
-                error = %error,
-                "Failed to resolve pending input state; reporting none"
-            ),
-        }
+        lookups.push(async move {
+            match has_open_inputs(client, &instance.id).await {
+                Ok(has_open) => instance.has_pending_input = has_open,
+                // The flag stays false, so the indicator is hidden rather than
+                // wrongly shown for every running row during a runtime hiccup —
+                // but the hiccup itself must not pass silently.
+                Err(error) => tracing::warn!(
+                    instance_id = %instance.id,
+                    error = %error,
+                    "Failed to resolve pending input state; reporting none"
+                ),
+            }
+        });
     }
+
+    futures::stream::iter(lookups)
+        .buffer_unordered(MAX_CONCURRENT_LOOKUPS)
+        .for_each(|()| std::future::ready(()))
+        .await;
 }
 
 /// Convert Runtara `InstanceSummary` to `WorkflowInstanceDto` with workflow

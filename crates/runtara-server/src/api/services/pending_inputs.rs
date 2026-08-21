@@ -25,6 +25,9 @@ use crate::runtime_client::RuntimeClient;
 /// A failed request lookup is an error — the caller decides what an unknown
 /// state means. A failed *end* lookup degrades to "nothing has completed",
 /// which keeps open requests visible rather than hiding them.
+///
+/// Both lookups are needed on every call, so they are issued together instead
+/// of back to back; one instance costs one round trip rather than two.
 pub async fn fetch_input_and_end_events(
     client: &RuntimeClient,
     instance_id: &str,
@@ -35,22 +38,19 @@ pub async fn fetch_input_and_end_events(
         .with_subtype("external_input_requested")
         .with_sort_order(EventSortOrder::Asc);
 
-    let input_events = client
-        .list_events(instance_id, Some(input_options))
-        .await
-        .map_err(|error| error.to_string())?
-        .events;
-
     let end_options = ListEventsOptions::new()
         .with_limit(1000)
         .with_event_type("custom")
         .with_subtype("step_debug_end");
 
-    let end_events = client
-        .list_events(instance_id, Some(end_options))
-        .await
-        .map(|result| result.events)
-        .unwrap_or_default();
+    let (input_result, end_result) = tokio::join!(
+        client.list_events(instance_id, Some(input_options)),
+        client.list_events(instance_id, Some(end_options)),
+    );
+
+    let input_events = input_result.map_err(|error| error.to_string())?.events;
+
+    let end_events = end_result.map(|result| result.events).unwrap_or_default();
 
     Ok((input_events, end_events))
 }
