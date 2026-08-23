@@ -1442,6 +1442,110 @@ mod tests {
         );
     }
 
+    /// Recursively collect the paths of every bare-boolean subschema in a tool
+    /// `input_schema`.
+    ///
+    /// A bare `true` is always a violation: it is the "accept any instance" idiom
+    /// that strict model-provider schema converters reject with
+    /// "Unrecognized schema: true" (they only convert object subschemas), and it is
+    /// always safely replaceable by the empty object schema `{}`. A bare `false` is
+    /// a violation too, EXCEPT `additionalProperties: false`, which is the required
+    /// closed-object idiom (from `#[serde(deny_unknown_fields)]`) that providers accept.
+    ///
+    /// Only JSON-Schema subschema positions are walked (a subschema only ever appears
+    /// under these keywords), so scalar `default`/`enum`/`examples` values are never
+    /// misread as schemas.
+    fn bare_boolean_subschemas(schema: &serde_json::Value, path: &str, out: &mut Vec<String>) {
+        match schema {
+            serde_json::Value::Bool(b) => {
+                let is_required_closed_object = !b && path.ends_with(".additionalProperties");
+                if !is_required_closed_object {
+                    out.push(format!("{path} = {b}"));
+                }
+            }
+            serde_json::Value::Object(obj) => {
+                for (key, val) in obj {
+                    match key.as_str() {
+                        // Single-schema positions.
+                        "additionalProperties"
+                        | "items"
+                        | "not"
+                        | "then"
+                        | "else"
+                        | "if"
+                        | "propertyNames"
+                        | "unevaluatedProperties"
+                        | "unevaluatedItems"
+                        | "contentSchema" => {
+                            bare_boolean_subschemas(val, &format!("{path}.{key}"), out);
+                        }
+                        // Map-of-schema positions (name -> schema).
+                        "properties" | "patternProperties" | "$defs" | "definitions" => {
+                            if let Some(map) = val.as_object() {
+                                for (name, sub) in map {
+                                    bare_boolean_subschemas(
+                                        sub,
+                                        &format!("{path}.{key}.{name}"),
+                                        out,
+                                    );
+                                }
+                            }
+                        }
+                        // Array-of-schema positions.
+                        "oneOf" | "anyOf" | "allOf" | "prefixItems" => {
+                            if let Some(arr) = val.as_array() {
+                                for (i, sub) in arr.iter().enumerate() {
+                                    bare_boolean_subschemas(
+                                        sub,
+                                        &format!("{path}.{key}[{i}]"),
+                                        out,
+                                    );
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// KEYSTONE GUARD: no registered MCP tool may emit a bare-boolean subschema
+    /// (`true` anywhere; `false` except the required `additionalProperties: false`).
+    ///
+    /// Strict model-provider schema converters reject a bare-boolean subschema with
+    /// "JSON schema conversion failed: Unrecognized schema: true" and — because they
+    /// validate the entire tool array up front — a single offending tool makes EVERY
+    /// tool unavailable to that client. Fix by emitting an object schema instead:
+    /// `additionalProperties: true` -> `additionalProperties: {}`, or annotate
+    /// `Vec<serde_json::Value>` params with a `…_json_array_schema` helper (an
+    /// unannotated `serde_json::Value`/`Vec<Value>` field otherwise serializes to
+    /// schemars' `Schema::any()` = the bare boolean `true`).
+    #[test]
+    fn no_tool_schema_emits_a_bare_boolean_subschema() {
+        let router = SmoMcpServer::tool_router();
+        let mut violations: Vec<String> = Vec::new();
+
+        for tool in router.list_all() {
+            let root = serde_json::Value::Object((*tool.input_schema).clone());
+            bare_boolean_subschemas(&root, &tool.name, &mut violations);
+        }
+
+        violations.sort();
+        violations.dedup();
+
+        assert!(
+            violations.is_empty(),
+            "{} MCP tool schema(s) emit a bare-boolean subschema — strict model providers \
+             reject the whole tool array with \"Unrecognized schema: true\". Emit an object \
+             schema instead (e.g. `additionalProperties: {{}}`, or annotate \
+             `Vec<serde_json::Value>` params with a `…_json_array_schema` helper):\n{}",
+            violations.len(),
+            violations.join("\n"),
+        );
+    }
+
     /// Self-test for the keystone guard's machinery: a future refactor must not be
     /// able to make `every_tool_param_advertises_a_concrete_type` pass vacuously
     /// (e.g. by breaking `schema_advertises_type` or if `list_all()` returned no
@@ -1467,5 +1571,45 @@ mod tests {
         ));
         // The guard's walk can never pass vacuously: there must be tools to check.
         assert!(!SmoMcpServer::tool_router().list_all().is_empty());
+    }
+
+    /// Self-test for the bare-boolean walker: it must flag a bare `true`/`false`
+    /// subschema, exempt the required `additionalProperties: false`, and pass clean
+    /// object subschemas (including the empty `{}`) — so the guard above can never
+    /// pass vacuously.
+    #[test]
+    fn bare_boolean_subschema_predicate_is_not_vacuous() {
+        let mut found: Vec<String> = Vec::new();
+        bare_boolean_subschemas(&serde_json::json!({"items": true}), "t", &mut found);
+        assert_eq!(found, vec!["t.items = true"]);
+
+        let mut found: Vec<String> = Vec::new();
+        bare_boolean_subschemas(
+            &serde_json::json!({"properties": {"x": {"type": "object", "additionalProperties": true}}}),
+            "t",
+            &mut found,
+        );
+        assert_eq!(found, vec!["t.properties.x.additionalProperties = true"]);
+
+        // `additionalProperties: false` is the required closed-object idiom — allowed.
+        let mut found: Vec<String> = Vec::new();
+        bare_boolean_subschemas(
+            &serde_json::json!({
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {"x": {"type": "string", "default": false}}
+            }),
+            "t",
+            &mut found,
+        );
+        assert!(
+            found.is_empty(),
+            "closed-object `additionalProperties:false` and a `default:false` value are not bare-bool subschemas: {found:?}"
+        );
+
+        // A nested bare `false` outside `additionalProperties` is still flagged.
+        let mut found: Vec<String> = Vec::new();
+        bare_boolean_subschemas(&serde_json::json!({"not": false}), "t", &mut found);
+        assert_eq!(found, vec!["t.not = false"]);
     }
 }

@@ -86,10 +86,15 @@ fn translate_api_error_response(
 
 /// JSON Schema for arbitrary object-shaped MCP arguments that are stored as
 /// `serde_json::Value` at runtime so stringified client payloads can be recovered.
+///
+/// `additionalProperties` is the empty object schema `{}` (not the bare boolean
+/// `true`): both mean "accept any additional property", but strict model-provider
+/// schema converters reject a bare-boolean subschema ("Unrecognized schema: true")
+/// while accepting the object form.
 pub fn json_object_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
     schemars::json_schema!({
         "type": "object",
-        "additionalProperties": true
+        "additionalProperties": {}
     })
 }
 
@@ -108,7 +113,7 @@ pub fn json_array_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema 
 pub fn optional_json_object_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
     schemars::json_schema!({
         "type": ["object", "null"],
-        "additionalProperties": true
+        "additionalProperties": {}
     })
 }
 
@@ -118,6 +123,20 @@ pub fn optional_json_array_schema(_: &mut schemars::SchemaGenerator) -> schemars
     schemars::json_schema!({
         "type": ["array", "null"],
         "items": {}
+    })
+}
+
+/// Nullable 2-D array schema for `Option<Vec<Vec<serde_json::Value>>>` params
+/// (e.g. columnar bulk `rows`, where each row is itself an array of values).
+/// Emits `type: [array, null]` with `items` an array-of-anything, so no
+/// bare-boolean subschema reaches strict model-provider schema converters.
+pub fn optional_json_2d_array_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "type": ["array", "null"],
+        "items": {
+            "type": "array",
+            "items": {}
+        }
     })
 }
 
@@ -131,12 +150,12 @@ pub fn workflow_inputs_schema(_: &mut schemars::SchemaGenerator) -> schemars::Sc
             },
             "variables": {
                 "type": "object",
-                "additionalProperties": true,
+                "additionalProperties": {},
                 "description": "Workflow variables keyed by variable name."
             }
         },
         "required": ["data"],
-        "additionalProperties": true
+        "additionalProperties": {}
     })
 }
 
@@ -144,7 +163,7 @@ pub fn workflow_inputs_schema(_: &mut schemars::SchemaGenerator) -> schemars::Sc
 pub fn any_json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
     schemars::json_schema!({
         "oneOf": [
-            {"type": "object", "additionalProperties": true},
+            {"type": "object", "additionalProperties": {}},
             {"type": "array"},
             {"type": "string"},
             {"type": "number"},

@@ -182,7 +182,7 @@ fn sql_params_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
                     "description": "Vector dimension; required for type=vector."
                 }
             },
-            "additionalProperties": true
+            "additionalProperties": {}
         }
     })
 }
@@ -229,7 +229,7 @@ fn sql_result_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
                     "description": "Vector dimension; required for type=vector."
                 }
             },
-            "additionalProperties": true
+            "additionalProperties": {}
         }
     })
 }
@@ -388,8 +388,10 @@ pub struct CreateObjectSchemaParams {
     #[schemars(description = "Database table name (auto-derived from name if omitted)")]
     pub table_name: Option<String>,
     #[schemars(description = "Column definitions as JSON array")]
+    #[schemars(schema_with = "crate::mcp::tools::internal_api::json_array_schema")]
     pub columns: Vec<Value>,
     #[schemars(description = "Index definitions as JSON array (optional)")]
+    #[schemars(schema_with = "crate::mcp::tools::internal_api::optional_json_array_schema")]
     pub indexes: Option<Vec<Value>>,
     #[schemars(
         description = "Optional connection ID to target a specific Object Model \
@@ -415,11 +417,13 @@ pub struct UpdateObjectSchemaParams {
                        schema with get_object_schema, append your new columns, and pass \
                        the merged array. Omit to leave columns unchanged."
     )]
+    #[schemars(schema_with = "crate::mcp::tools::internal_api::optional_json_array_schema")]
     pub columns: Option<Vec<Value>>,
     #[schemars(
         description = "FULL replacement index list (same diff semantics as columns). \
                        Omit to leave indexes unchanged."
     )]
+    #[schemars(schema_with = "crate::mcp::tools::internal_api::optional_json_array_schema")]
     pub indexes: Option<Vec<Value>>,
     #[schemars(
         description = "Explicit column renames as [{\"from\": \"old\", \"to\": \"new\"}]. A \
@@ -427,6 +431,7 @@ pub struct UpdateObjectSchemaParams {
                        it a name change is a drop + add that DESTROYS the old data. The `to` \
                        name must appear in the replacement `columns` list."
     )]
+    #[schemars(schema_with = "crate::mcp::tools::internal_api::optional_json_array_schema")]
     pub column_renames: Option<Vec<Value>>,
     #[schemars(
         description = "Acknowledge that this update may DROP columns and lose their data. \
@@ -689,6 +694,7 @@ pub struct BulkCreateInstancesParams {
         description = "Object form — array of instance objects, one per record. Mutually \
                        exclusive with `columns`/`rows`."
     )]
+    #[schemars(schema_with = "crate::mcp::tools::internal_api::optional_json_array_schema")]
     pub instances: Option<Vec<serde_json::Value>>,
     #[schemars(
         description = "Columnar form — column names (length N). Pair with `rows`. Use for \
@@ -698,11 +704,13 @@ pub struct BulkCreateInstancesParams {
     #[schemars(
         description = "Columnar form — each row is an array of values aligned to `columns`."
     )]
+    #[schemars(schema_with = "crate::mcp::tools::internal_api::optional_json_2d_array_schema")]
     pub rows: Option<Vec<Vec<serde_json::Value>>>,
     #[schemars(
         description = "Columnar form — fields merged into every row. Row cell values take \
                        precedence over constants."
     )]
+    #[schemars(schema_with = "crate::mcp::tools::internal_api::optional_json_object_schema")]
     pub constants: Option<serde_json::Map<String, serde_json::Value>>,
     #[schemars(
         description = "Columnar form — when true, empty strings in non-string columns are \
@@ -762,6 +770,7 @@ pub struct BulkUpdateInstancesParams {
     #[schemars(
         description = "byIds: array of {id, properties} entries. Required when mode=byIds."
     )]
+    #[schemars(schema_with = "crate::mcp::tools::internal_api::optional_json_array_schema")]
     pub updates: Option<Vec<serde_json::Value>>,
     #[schemars(
         description = "Optional connection ID to target a specific Object Model \

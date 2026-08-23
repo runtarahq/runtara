@@ -1067,7 +1067,11 @@ fn step_manifest(
                             "parameters": {
                                 "type": "object",
                                 "properties": {},
-                                "additionalProperties": true
+                                // `{}` (not `true`): a bare boolean subschema is
+                                // rejected by strict LLM tool-schema validators
+                                // ("Unrecognized schema: true"); `{}` is the
+                                // provider-safe equivalent.
+                                "additionalProperties": {}
                             }
                         })
                     })
@@ -2073,6 +2077,90 @@ mod tests {
         assert_eq!(agent.capability_id, "chat-completion");
         assert_eq!(agent.max_retries, Some(3));
         assert_eq!(agent.retry_delay, Some(10));
+    }
+
+    /// Regression: the LLM-facing tool defs for an AiAgent (both workflow-step
+    /// tools and the MCP search/invoke meta-tools) must not contain a bare
+    /// boolean subschema (`true`/`false`). Strict tool-schema validators reject
+    /// `additionalProperties: true` with "Unrecognized schema: true". A boolean
+    /// can only ever be a JSON-Schema subschema in this shape, so any boolean
+    /// anywhere in a tool def is a violation.
+    #[test]
+    fn ai_agent_tool_defs_emit_no_bare_boolean_subschema() {
+        let graph: runtara_dsl::ExecutionGraph = serde_json::from_str(
+            r##"{
+              "entryPoint": "ai",
+              "executionPlan": [
+                {"fromStep":"ai","toStep":"finish","label":"next"},
+                {"fromStep":"ai","toStep":"helper","label":"my_tool"},
+                {"fromStep":"ai","toStep":"mcp_agent","label":"mcp.local"}
+              ],
+              "steps": {
+                "ai": {"id":"ai","stepType":"AiAgent","connectionId":"conn-1","config":{
+                  "systemPrompt":{"valueType":"immediate","value":"sys"},
+                  "userPrompt":{"valueType":"immediate","value":"go"},
+                  "provider":{"valueType":"immediate","value":"openai"}
+                }},
+                "helper": {"id":"helper","stepType":"Agent","agentId":"utils","capabilityId":"random-double"},
+                "mcp_agent": {"id":"mcp_agent","stepType":"Agent","agentId":"http","capabilityId":"http-request","connectionId":"mcp-conn"},
+                "finish": {"id":"finish","stepType":"Finish"}
+              }
+            }"##,
+        )
+        .expect("graph parses");
+
+        let manifest = build_direct_workflow_manifest(&graph).expect("manifest builds");
+        let agent = manifest
+            .graph
+            .agents
+            .iter()
+            .find(|a| a.step_id == "ai")
+            .expect("ai agent entry");
+        // Both a workflow-step tool and an MCP edge are present, so the
+        // capability is chat-turn and the tool list mixes both kinds.
+        assert_eq!(agent.capability_id, "chat-turn");
+        let mapping = manifest
+            .graph
+            .mappings
+            .iter()
+            .find(|m| m.id == agent.input_mapping_id)
+            .expect("ai agent mapping");
+        let tools = mapping
+            .value
+            .get("tools")
+            .and_then(|t| t.get("value"))
+            .and_then(serde_json::Value::as_array)
+            .expect("tools mapping is an array");
+        assert!(
+            tools.len() >= 3,
+            "expected 1 workflow-step tool + 2 MCP meta-tools, got {tools:?}"
+        );
+
+        fn bare_boolean(value: &serde_json::Value, path: &str, out: &mut Vec<String>) {
+            match value {
+                serde_json::Value::Bool(_) => out.push(path.to_string()),
+                serde_json::Value::Object(map) => {
+                    for (k, v) in map {
+                        bare_boolean(v, &format!("{path}.{k}"), out);
+                    }
+                }
+                serde_json::Value::Array(arr) => {
+                    for (i, v) in arr.iter().enumerate() {
+                        bare_boolean(v, &format!("{path}[{i}]"), out);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let mut violations = Vec::new();
+        for tool in tools {
+            bare_boolean(tool, "tool", &mut violations);
+        }
+        assert!(
+            violations.is_empty(),
+            "bare boolean schema subschemas in AI-agent tool defs: {violations:?}",
+        );
     }
 
     #[test]
