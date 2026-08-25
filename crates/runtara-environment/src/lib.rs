@@ -3,7 +3,7 @@
 //! Runtara Environment - Instance Lifecycle Management
 //!
 //! This crate provides the control plane for managing workflow instances.
-//! It handles image registration, instance lifecycle, container execution,
+//! It handles image registration, instance lifecycle, workflow execution,
 //! and wake scheduling for durable sleeps.
 //!
 //! # Architecture
@@ -19,8 +19,8 @@
 //! │                   runtara-environment (This Crate)                       │
 //! │                         Port 8002                                        │
 //! │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐     │
-//! │  │   Image     │  │  Instance   │  │    Wake     │  │  Container  │     │
-//! │  │  Registry   │  │  Lifecycle  │  │  Scheduler  │  │   Runner    │     │
+//! │  │   Image     │  │  Instance   │  │    Wake     │  │  Workflow   │     │
+//! │  │  Registry   │  │  Lifecycle  │  │  Scheduler  │  │    Runner   │     │
 //! │  └─────────────┘  └─────────────┘  └─────────────┘  └─────────────┘     │
 //! └─────────────────────────────────────────────────────────────────────────┘
 //!           │                 │                              │
@@ -28,7 +28,7 @@
 //!           │                 ▼                              ▼
 //!           │       ┌───────────────────┐        ┌─────────────────────────┐
 //!           │       │   runtara-core    │◄───────│   Workflow Instances    │
-//!           │       │   Port 8001/8003  │        │   (OCI containers)      │
+//!           │       │   Port 8001/8003  │        │  (in-process wasmtime)  │
 //!           │       └───────────────────┘        └─────────────────────────┘
 //!           │                 │
 //!           ▼                 ▼
@@ -71,15 +71,11 @@
 //!
 //! Signals are proxied to runtara-core which stores them for the instance.
 //!
-//! # Runner Types
+//! # Runner
 //!
-//! Environment supports multiple runner backends for executing workflow binaries:
-//!
-//! | Runner | Description |
-//! |--------|-------------|
-//! | OCI (default) | Execute in OCI containers via runc |
-//! | Native | Execute as direct processes (development) |
-//! | Wasm | Execute as WebAssembly modules (planned) |
+//! Workflows execute on `EmbeddedWasmRunner`, an in-process wasmtime engine.
+//! It is the only backend; `MockRunner` exists for tests. The `runner::Runner`
+//! trait keeps that seam.
 //!
 //! # Instance Status State Machine
 //!
@@ -178,7 +174,7 @@ pub mod container_registry;
 /// Instance output types (legacy, used by SDK).
 pub mod instance_output;
 
-/// Container/process execution backends (OCI, Native, Wasm).
+/// In-process WASM execution backend.
 pub mod runner;
 
 /// HTTP server for the Environment protocol.

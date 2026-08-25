@@ -49,7 +49,6 @@ impl std::fmt::Debug for CompilationWorkerConfig {
 
 impl CompilationWorkerConfig {
     pub fn from_env(redis_url: String) -> Self {
-        // With pasta --config-net, localhost URLs work in containers directly.
         let connection_service_url = std::env::var("CONNECTION_SERVICE_URL").ok();
 
         Self {

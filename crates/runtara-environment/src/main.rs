@@ -6,10 +6,8 @@
 //! - Image registry (create, list, delete images)
 //! - Instance lifecycle (start, stop, resume, status)
 //! - Wake queue (schedule and execute durable sleep wakes)
-//! - Container execution. Always uses the embedded wasmtime runner.
-//!   The OCI and native runners were removed in Phase 3 step 11 — the
-//!   components-mode compile pipeline is the only producer now and it
-//!   only emits `workflow.wasm`.
+//! - Workflow execution on the embedded wasmtime runner. The compile
+//!   pipeline only emits `workflow.wasm`, so that is the only shape it runs.
 
 use std::sync::Arc;
 use tracing::{info, warn};

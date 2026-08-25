@@ -57,8 +57,8 @@ impl DrainController {
 
 /// Convert a path to absolute if it's relative.
 ///
-/// This is critical for paths stored in DB (like bundle_path) - they must be
-/// absolute so the OCI runner can find them regardless of the current working
+/// This is critical for paths stored in DB (like `binary_path`) - they must be
+/// absolute so the runner can find them regardless of the current working
 /// directory at launch time.
 fn ensure_absolute_path(path: PathBuf) -> PathBuf {
     if path.is_absolute() {
@@ -1211,8 +1211,8 @@ pub async fn detect_stale_monitor(
 /// ## Structure
 ///
 /// The body is a `tokio::select!` over two futures:
-/// - `runner.wait_for_exit(...)` — runner-specific exit detection (Child::wait
-///   for WASM, /proc/<pid> for OCI, or polling for the default impl).
+/// - `runner.wait_for_exit(...)` — runner-specific exit detection (the embedded
+///   runner awaits its run task; the default impl polls).
 /// - `tokio::time::sleep_until(...)` — the timeout deadline.
 ///
 /// Each runner's `wait_for_exit` impl is cancel-safe, so dropping it when the
@@ -1552,7 +1552,6 @@ pub struct ListAgentsResponse {
 /// Handle list agents request.
 ///
 /// This returns metadata about all available agents and their capabilities.
-/// It runs in-process (no OCI container needed) since it only returns metadata.
 pub async fn handle_list_agents(_state: &EnvironmentHandlerState) -> Result<ListAgentsResponse> {
     // The environment is no longer the agent-metadata authority. The agent
     // catalog now lives on runtara-server, sourced from the in-process
@@ -1586,7 +1585,6 @@ pub struct GetCapabilityResponse {
 /// Handle get capability request.
 ///
 /// This returns detailed information about a specific capability including its input schema.
-/// It runs in-process (no OCI container needed) since it only returns metadata.
 #[instrument(skip(_state, request), fields(
     agent_id = %request.agent_id,
     capability_id = %request.capability_id,

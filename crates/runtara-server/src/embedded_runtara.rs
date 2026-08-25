@@ -27,12 +27,11 @@ use tracing::{error, info};
 pub struct EmbeddedRuntaraConfig {
     /// PostgreSQL connection pool for Runtara's dedicated database.
     pub pool: PgPool,
-    /// Data directory for images, bundles, and instance I/O.
+    /// Data directory for images and instance I/O.
     pub data_dir: PathBuf,
     /// Bind address for runtara-core QUIC server (instance protocol).
     pub core_bind_addr: SocketAddr,
-    /// Address for containers to connect to runtara-core.
-    /// With pasta --config-net, containers can reach localhost directly.
+    /// Address workflow guests use to reach runtara-core.
     pub core_client_addr: SocketAddr,
     /// Bind address for runtara-environment QUIC server.
     pub environment_bind_addr: SocketAddr,
@@ -95,9 +94,8 @@ impl EmbeddedRuntara {
         );
 
         // Start Environment (management protocol)
-        // Note: core_client_addr is what workflow processes use to connect to runtara-core.
-        // On Linux (OCI + pasta): localhost in container routes to host.
-        // On other platforms (native): process runs on host directly.
+        // Note: core_client_addr is what workflow guests use to reach runtara-core.
+        // Guests run in-process, so this is always the host's own loopback.
         // Start Environment (management protocol via HTTP)
         let env_http_addr = config
             .env_http_bind_addr
@@ -258,7 +256,7 @@ pub async fn maybe_start_embedded()
     };
 
     // Get data_dir from environment and convert to absolute path
-    // This is critical: bundle_path stored in DB must be absolute for OCI runner
+    // This is critical: paths stored in the DB must be absolute for the runner
     let data_dir_raw = std::env::var("DATA_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(".data"));
@@ -275,9 +273,8 @@ pub async fn maybe_start_embedded()
         std::env::var("DATA_DIR").unwrap_or_else(|_| ".data".to_string())
     );
 
-    // With pasta --config-net networking, containers can reach host's localhost directly.
-    // Pasta automatically routes localhost in container to the host's localhost.
-    // No IP transformation needed - just use 127.0.0.1.
+    // Workflow guests run in-process, so no IP transformation is needed —
+    // 127.0.0.1 reaches runtara-core directly.
     // Core HTTP port is used for both binding and client connections (QUIC is gone)
     let core_http_addr = core_http_port.unwrap_or(core_port);
     let config = EmbeddedRuntaraConfig {

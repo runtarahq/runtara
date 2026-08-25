@@ -93,7 +93,7 @@ pub struct LaunchOptions {
 /// Handle for a launched instance (detached execution).
 #[derive(Debug, Clone)]
 pub struct RunnerHandle {
-    /// Unique identifier for this launch (container_id for OCI, PID for native)
+    /// Unique identifier for this launch.
     pub handle_id: String,
     /// Instance ID
     pub instance_id: String,
@@ -156,14 +156,15 @@ pub type CancelToken = Arc<AtomicBool>;
 
 /// Trait for instance runners.
 ///
-/// Runners are responsible for launching and managing instance binaries.
-/// Different implementations can use OCI containers, native processes, WASM, etc.
+/// Runners are responsible for launching and managing workflow guests.
+/// `EmbeddedWasmRunner` is the only production implementation; `MockRunner`
+/// backs the tests.
 ///
 /// Runners read instance output from persistence (runtara-core) after process exit.
 /// Database writes (registration, status updates) are handled by the caller.
 #[async_trait]
 pub trait Runner: Send + Sync {
-    /// Runner type identifier (e.g., "oci", "native", "wasm")
+    /// Runner type identifier (e.g., "wasm-embedded", "mock")
     fn runner_type(&self) -> &'static str;
 
     /// Run an instance synchronously, waiting for completion.

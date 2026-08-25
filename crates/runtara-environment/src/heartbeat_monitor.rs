@@ -298,7 +298,7 @@ impl HeartbeatMonitor {
             "Failing stale instance"
         );
 
-        // Step 1: Try runner.stop() (uses crun kill + crun delete)
+        // Step 1: Try runner.stop() (signals the guest's cancel token)
         let handle = RunnerHandle {
             handle_id: container.container_id.clone(),
             instance_id: container.instance_id.clone(),

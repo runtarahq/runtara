@@ -3,7 +3,7 @@
 //! Provides a low-latency synchronous execution endpoint that:
 //! - Bypasses database queuing and worker polling
 //! - Returns results immediately in HTTP response
-//! - Uses native binary execution via crun launcher
+//! - Runs the workflow in-process on the embedded wasmtime engine
 //! - Still supports side effects (HTTP, random, timestamps)
 
 use axum::{

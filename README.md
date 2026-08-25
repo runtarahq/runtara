@@ -89,7 +89,7 @@ At a high level, the Rust workspace is organized into three layers:
 │  ┌────────────────────────────────────────────────────────────┐  │
 │  │  runtara-environment                                       │  │
 │  │  Management plane: image registry, instance lifecycle,     │  │
-│  │  runners (Wasm/OCI/Native/Mock), wake scheduling           │  │
+│  │  embedded WASM runner, wake scheduling                     │  │
 │  │  ┌──────────────────────────────────────────────────────┐  │  │
 │  │  │  runtara-core + runtara-sdk                          │  │  │
 │  │  │  Durable execution: checkpoints, signals, events,    │  │  │
@@ -130,7 +130,6 @@ rustup target add wasm32-wasip2
 - PostgreSQL for platform, environment, and core state.
 - A separate PostgreSQL database for the object model when running `runtara-server`.
 - Valkey or Redis for `runtara-server` checkpoint storage during workflow execution and MCP session recovery.
-- `crun` and Linux container support only if you enable the OCI runner.
 
 ### Start The Local Runtime
 

@@ -63,8 +63,6 @@ Feature requests are welcome! Please:
 - PostgreSQL 14+
 - Valkey (or Redis) if you plan to run `runtara-server`
 
-For the OCI runner path, you'll also need Linux with `crun` installed.
-
 ### Building
 
 ```bash

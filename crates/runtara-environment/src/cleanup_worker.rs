@@ -2,9 +2,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Background worker for cleaning up old run directories.
 //!
-//! Run directories (`{DATA_DIR}/{tenant_id}/runs/{instance_id}/`) contain:
-//! - `stderr.log` - Captured stderr from the container
-//! - `config.json` - Per-instance OCI configuration
+//! Run directories (`{DATA_DIR}/{tenant_id}/runs/{instance_id}/`) hold the
+//! `stderr.log` captured from the workflow guest.
 //!
 //! These directories are not cleaned up immediately after execution to allow
 //! for debugging. This worker periodically scans for old directories and removes them.

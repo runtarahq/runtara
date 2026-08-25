@@ -2180,9 +2180,9 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     // Crate-owned so the HTTP surface stays colocated with the domain logic.
     let connections_admin_routes = runtara_connections::admin_router(connections_config.clone());
 
-    // Internal Object Model API routes (called by integration agents in workflow binaries)
+    // Internal Object Model API routes (called by integration agents in workflow guests)
     // NO authentication — tenant_id is passed via X-Org-Id header without JWT validation.
-    // These are only accessible from localhost (workflow containers use pasta networking).
+    // These are only accessible from localhost.
     let internal_object_model_state = Arc::new(api::handlers::object_model::ObjectModelState {
         manager: object_store_manager.clone(),
         pool: pool.clone(),
