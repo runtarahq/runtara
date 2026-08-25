@@ -5,7 +5,7 @@
 mod common;
 
 use chrono::Utc;
-use runtara_environment::container_registry::{ContainerInfo, ContainerRegistry, ContainerStatus};
+use runtara_environment::container_registry::{ContainerInfo, ContainerRegistry};
 use sqlx::PgPool;
 use std::time::Duration;
 use uuid::Uuid;
@@ -69,138 +69,6 @@ async fn cleanup_instance(pool: &PgPool, instance_id: &str) {
         .execute(pool)
         .await
         .ok();
-}
-
-// ============================================================================
-// ContainerStatus Tests (Unit tests - no DB required)
-// ============================================================================
-
-#[test]
-fn test_container_status_is_terminal() {
-    let running = ContainerStatus::Running {
-        updated_at: Utc::now(),
-    };
-    assert!(!running.is_terminal());
-
-    let completed = ContainerStatus::Completed {
-        updated_at: Utc::now(),
-        output: None,
-    };
-    assert!(completed.is_terminal());
-
-    let failed = ContainerStatus::Failed {
-        updated_at: Utc::now(),
-        error: "test error".to_string(),
-    };
-    assert!(failed.is_terminal());
-
-    let cancelled = ContainerStatus::Cancelled {
-        updated_at: Utc::now(),
-    };
-    assert!(cancelled.is_terminal());
-}
-
-#[test]
-fn test_container_status_status_str() {
-    let running = ContainerStatus::Running {
-        updated_at: Utc::now(),
-    };
-    assert_eq!(running.status_str(), "running");
-
-    let completed = ContainerStatus::Completed {
-        updated_at: Utc::now(),
-        output: None,
-    };
-    assert_eq!(completed.status_str(), "completed");
-
-    let failed = ContainerStatus::Failed {
-        updated_at: Utc::now(),
-        error: "error".to_string(),
-    };
-    assert_eq!(failed.status_str(), "failed");
-
-    let cancelled = ContainerStatus::Cancelled {
-        updated_at: Utc::now(),
-    };
-    assert_eq!(cancelled.status_str(), "cancelled");
-}
-
-#[test]
-fn test_container_status_updated_at() {
-    let now = Utc::now();
-
-    let running = ContainerStatus::Running { updated_at: now };
-    assert_eq!(running.updated_at(), now);
-
-    let completed = ContainerStatus::Completed {
-        updated_at: now,
-        output: Some(serde_json::json!({"result": "ok"})),
-    };
-    assert_eq!(completed.updated_at(), now);
-
-    let failed = ContainerStatus::Failed {
-        updated_at: now,
-        error: "error".to_string(),
-    };
-    assert_eq!(failed.updated_at(), now);
-
-    let cancelled = ContainerStatus::Cancelled { updated_at: now };
-    assert_eq!(cancelled.updated_at(), now);
-}
-
-#[test]
-fn test_container_status_serialization() {
-    let running = ContainerStatus::Running {
-        updated_at: Utc::now(),
-    };
-    let json = serde_json::to_string(&running).unwrap();
-    assert!(json.contains("\"status\":\"running\""));
-
-    let completed = ContainerStatus::Completed {
-        updated_at: Utc::now(),
-        output: Some(serde_json::json!({"value": 42})),
-    };
-    let json = serde_json::to_string(&completed).unwrap();
-    assert!(json.contains("\"status\":\"completed\""));
-    assert!(json.contains("\"value\":42"));
-
-    let failed = ContainerStatus::Failed {
-        updated_at: Utc::now(),
-        error: "test error".to_string(),
-    };
-    let json = serde_json::to_string(&failed).unwrap();
-    assert!(json.contains("\"status\":\"failed\""));
-    assert!(json.contains("\"error\":\"test error\""));
-}
-
-#[test]
-fn test_container_status_deserialization() {
-    let json = r#"{"status":"running","updated_at":"2024-01-01T00:00:00Z"}"#;
-    let status: ContainerStatus = serde_json::from_str(json).unwrap();
-    assert!(matches!(status, ContainerStatus::Running { .. }));
-
-    let json = r#"{"status":"completed","updated_at":"2024-01-01T00:00:00Z","output":{"result":"success"}}"#;
-    let status: ContainerStatus = serde_json::from_str(json).unwrap();
-    assert!(matches!(
-        status,
-        ContainerStatus::Completed {
-            output: Some(_),
-            ..
-        }
-    ));
-
-    let json =
-        r#"{"status":"failed","updated_at":"2024-01-01T00:00:00Z","error":"connection timeout"}"#;
-    let status: ContainerStatus = serde_json::from_str(json).unwrap();
-    if let ContainerStatus::Failed { error, .. } = status {
-        assert_eq!(error, "connection timeout");
-    } else {
-        panic!("Expected Failed status");
-    }
-
-    let json = r#"{"status":"cancelled","updated_at":"2024-01-01T00:00:00Z"}"#;
-    let status: ContainerStatus = serde_json::from_str(json).unwrap();
-    assert!(matches!(status, ContainerStatus::Cancelled { .. }));
 }
 
 // ============================================================================
@@ -328,46 +196,6 @@ async fn test_unregister() {
 }
 
 #[tokio::test]
-async fn test_list_registered_by_tenant() {
-    skip_if_no_db!();
-    let pool = get_test_pool().await;
-
-    let registry = ContainerRegistry::new(pool.clone());
-
-    let instance1 = Uuid::new_v4().to_string();
-    let instance2 = Uuid::new_v4().to_string();
-    let instance3 = Uuid::new_v4().to_string();
-
-    // Register containers for different tenants
-    registry
-        .register(&create_test_container_info(&instance1, "tenant-a"))
-        .await
-        .unwrap();
-    registry
-        .register(&create_test_container_info(&instance2, "tenant-a"))
-        .await
-        .unwrap();
-    registry
-        .register(&create_test_container_info(&instance3, "tenant-b"))
-        .await
-        .unwrap();
-
-    // List by tenant
-    let tenant_a_containers = registry.list_registered("tenant-a").await.unwrap();
-    assert_eq!(tenant_a_containers.len(), 2);
-
-    let tenant_b_containers = registry.list_registered("tenant-b").await.unwrap();
-    assert_eq!(tenant_b_containers.len(), 1);
-
-    let tenant_c_containers = registry.list_registered("tenant-c").await.unwrap();
-    assert!(tenant_c_containers.is_empty());
-
-    cleanup_instance(&pool, &instance1).await;
-    cleanup_instance(&pool, &instance2).await;
-    cleanup_instance(&pool, &instance3).await;
-}
-
-#[tokio::test]
 async fn test_list_all_registered() {
     skip_if_no_db!();
     let pool = get_test_pool().await;
@@ -434,16 +262,18 @@ async fn test_request_cancellation() {
         .await
         .unwrap();
 
-    // Check cancellation
-    let cancel = registry
-        .check_cancellation(&instance_id)
-        .await
-        .unwrap()
-        .expect("Should have cancellation request");
+    // Assert on the row directly: nothing in the codebase reads this table any
+    // more, so there is no getter to go through.
+    let (grace, reason) = sqlx::query_as::<_, (i32, String)>(
+        "SELECT grace_period_seconds, reason FROM container_cancellations WHERE instance_id = $1",
+    )
+    .bind(&instance_id)
+    .fetch_one(&pool)
+    .await
+    .expect("Should have cancellation request");
 
-    assert_eq!(cancel.instance_id, instance_id);
-    assert_eq!(cancel.grace_period_seconds, 30);
-    assert_eq!(cancel.reason, "test cancellation");
+    assert_eq!(grace, 30);
+    assert_eq!(reason, "test cancellation");
 
     cleanup_instance(&pool, &instance_id).await;
 }
@@ -468,332 +298,16 @@ async fn test_cancellation_upsert() {
         .await
         .unwrap();
 
-    // Check - should have updated values
-    let cancel = registry
-        .check_cancellation(&instance_id)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(cancel.grace_period_seconds, 60);
-    assert_eq!(cancel.reason, "second reason");
-
-    cleanup_instance(&pool, &instance_id).await;
-}
-
-#[tokio::test]
-async fn test_check_cancellation_none() {
-    skip_if_no_db!();
-    let pool = get_test_pool().await;
-
-    let registry = ContainerRegistry::new(pool.clone());
-    let result = registry
-        .check_cancellation("nonexistent")
-        .await
-        .expect("Query should succeed");
-    assert!(result.is_none());
-}
-
-#[tokio::test]
-async fn test_clear_cancellation() {
-    skip_if_no_db!();
-    let pool = get_test_pool().await;
-
-    let registry = ContainerRegistry::new(pool.clone());
-    let instance_id = Uuid::new_v4().to_string();
-
-    registry
-        .request_cancellation(&instance_id, Duration::from_secs(10), "reason")
-        .await
-        .unwrap();
-
-    assert!(
-        registry
-            .check_cancellation(&instance_id)
-            .await
-            .unwrap()
-            .is_some()
-    );
-
-    registry.clear_cancellation(&instance_id).await.unwrap();
-
-    assert!(
-        registry
-            .check_cancellation(&instance_id)
-            .await
-            .unwrap()
-            .is_none()
-    );
-
-    cleanup_instance(&pool, &instance_id).await;
-}
-
-// ============================================================================
-// Status Reporting Tests
-// ============================================================================
-
-#[tokio::test]
-async fn test_report_and_get_status_running() {
-    skip_if_no_db!();
-    let pool = get_test_pool().await;
-
-    let registry = ContainerRegistry::new(pool.clone());
-    let instance_id = Uuid::new_v4().to_string();
-
-    let status = ContainerStatus::Running {
-        updated_at: Utc::now(),
-    };
-
-    registry.report_status(&instance_id, &status).await.unwrap();
-
-    let retrieved = registry
-        .get_status(&instance_id)
-        .await
-        .unwrap()
-        .expect("Should have status");
-
-    assert!(matches!(retrieved, ContainerStatus::Running { .. }));
-    assert_eq!(retrieved.status_str(), "running");
-
-    cleanup_instance(&pool, &instance_id).await;
-}
-
-#[tokio::test]
-async fn test_report_and_get_status_completed() {
-    skip_if_no_db!();
-    let pool = get_test_pool().await;
-
-    let registry = ContainerRegistry::new(pool.clone());
-    let instance_id = Uuid::new_v4().to_string();
-
-    let status = ContainerStatus::Completed {
-        updated_at: Utc::now(),
-        output: Some(serde_json::json!({"result": "success", "count": 42})),
-    };
-
-    registry.report_status(&instance_id, &status).await.unwrap();
-
-    let retrieved = registry.get_status(&instance_id).await.unwrap().unwrap();
-
-    if let ContainerStatus::Completed { output, .. } = retrieved {
-        assert!(output.is_some());
-        let output = output.unwrap();
-        assert_eq!(output["result"], "success");
-        assert_eq!(output["count"], 42);
-    } else {
-        panic!("Expected Completed status");
-    }
-
-    cleanup_instance(&pool, &instance_id).await;
-}
-
-#[tokio::test]
-async fn test_report_and_get_status_failed() {
-    skip_if_no_db!();
-    let pool = get_test_pool().await;
-
-    let registry = ContainerRegistry::new(pool.clone());
-    let instance_id = Uuid::new_v4().to_string();
-
-    let status = ContainerStatus::Failed {
-        updated_at: Utc::now(),
-        error: "Connection refused".to_string(),
-    };
-
-    registry.report_status(&instance_id, &status).await.unwrap();
-
-    let retrieved = registry.get_status(&instance_id).await.unwrap().unwrap();
-
-    if let ContainerStatus::Failed { error, .. } = retrieved {
-        assert_eq!(error, "Connection refused");
-    } else {
-        panic!("Expected Failed status");
-    }
-
-    cleanup_instance(&pool, &instance_id).await;
-}
-
-#[tokio::test]
-async fn test_report_and_get_status_cancelled() {
-    skip_if_no_db!();
-    let pool = get_test_pool().await;
-
-    let registry = ContainerRegistry::new(pool.clone());
-    let instance_id = Uuid::new_v4().to_string();
-
-    let status = ContainerStatus::Cancelled {
-        updated_at: Utc::now(),
-    };
-
-    registry.report_status(&instance_id, &status).await.unwrap();
-
-    let retrieved = registry.get_status(&instance_id).await.unwrap().unwrap();
-    assert!(matches!(retrieved, ContainerStatus::Cancelled { .. }));
-
-    cleanup_instance(&pool, &instance_id).await;
-}
-
-#[tokio::test]
-async fn test_status_upsert() {
-    skip_if_no_db!();
-    let pool = get_test_pool().await;
-
-    let registry = ContainerRegistry::new(pool.clone());
-    let instance_id = Uuid::new_v4().to_string();
-
-    // Report running
-    let running = ContainerStatus::Running {
-        updated_at: Utc::now(),
-    };
-    registry
-        .report_status(&instance_id, &running)
-        .await
-        .unwrap();
-
-    // Update to completed
-    let completed = ContainerStatus::Completed {
-        updated_at: Utc::now(),
-        output: None,
-    };
-    registry
-        .report_status(&instance_id, &completed)
-        .await
-        .unwrap();
-
-    // Should be completed now
-    let retrieved = registry.get_status(&instance_id).await.unwrap().unwrap();
-    assert!(matches!(retrieved, ContainerStatus::Completed { .. }));
-
-    cleanup_instance(&pool, &instance_id).await;
-}
-
-#[tokio::test]
-async fn test_get_status_none() {
-    skip_if_no_db!();
-    let pool = get_test_pool().await;
-
-    let registry = ContainerRegistry::new(pool.clone());
-    let result = registry
-        .get_status("nonexistent")
-        .await
-        .expect("Query should succeed");
-    assert!(result.is_none());
-}
-
-#[tokio::test]
-async fn test_clear_status() {
-    skip_if_no_db!();
-    let pool = get_test_pool().await;
-
-    let registry = ContainerRegistry::new(pool.clone());
-    let instance_id = Uuid::new_v4().to_string();
-
-    let status = ContainerStatus::Running {
-        updated_at: Utc::now(),
-    };
-    registry.report_status(&instance_id, &status).await.unwrap();
-
-    assert!(registry.get_status(&instance_id).await.unwrap().is_some());
-
-    registry.clear_status(&instance_id).await.unwrap();
-
-    assert!(registry.get_status(&instance_id).await.unwrap().is_none());
-
-    cleanup_instance(&pool, &instance_id).await;
-}
-
-// ============================================================================
-// Heartbeat Tests
-// ============================================================================
-
-#[tokio::test]
-async fn test_send_heartbeat() {
-    skip_if_no_db!();
-    let pool = get_test_pool().await;
-
-    let registry = ContainerRegistry::new(pool.clone());
-    let instance_id = Uuid::new_v4().to_string();
-
-    // Initially no heartbeat
-    assert!(!registry.has_heartbeat(&instance_id).await.unwrap());
-    assert!(
-        registry
-            .get_heartbeat(&instance_id)
-            .await
-            .unwrap()
-            .is_none()
-    );
-
-    // Send heartbeat
-    registry.send_heartbeat(&instance_id).await.unwrap();
-
-    // Should have heartbeat now
-    assert!(registry.has_heartbeat(&instance_id).await.unwrap());
-    assert!(
-        registry
-            .get_heartbeat(&instance_id)
-            .await
-            .unwrap()
-            .is_some()
-    );
-
-    cleanup_instance(&pool, &instance_id).await;
-}
-
-#[tokio::test]
-async fn test_heartbeat_upsert() {
-    skip_if_no_db!();
-    let pool = get_test_pool().await;
-
-    let registry = ContainerRegistry::new(pool.clone());
-    let instance_id = Uuid::new_v4().to_string();
-
-    // First heartbeat
-    registry.send_heartbeat(&instance_id).await.unwrap();
-    let first_ts = registry.get_heartbeat(&instance_id).await.unwrap().unwrap();
-
-    // Wait a bit
-    tokio::time::sleep(Duration::from_millis(10)).await;
-
-    // Second heartbeat
-    registry.send_heartbeat(&instance_id).await.unwrap();
-    let second_ts = registry.get_heartbeat(&instance_id).await.unwrap().unwrap();
-
-    // Timestamp should be updated
-    assert!(second_ts >= first_ts);
-
-    cleanup_instance(&pool, &instance_id).await;
-}
-
-#[tokio::test]
-async fn test_has_heartbeat_recent() {
-    skip_if_no_db!();
-    let pool = get_test_pool().await;
-
-    let registry = ContainerRegistry::new(pool.clone());
-    let instance_id = Uuid::new_v4().to_string();
-
-    // Send recent heartbeat
-    registry.send_heartbeat(&instance_id).await.unwrap();
-
-    // Should be detected as having heartbeat (within 60s window)
-    assert!(registry.has_heartbeat(&instance_id).await.unwrap());
-
-    cleanup_instance(&pool, &instance_id).await;
-}
-
-#[tokio::test]
-async fn test_clear_heartbeat() {
-    skip_if_no_db!();
-    let pool = get_test_pool().await;
-
-    let registry = ContainerRegistry::new(pool.clone());
-    let instance_id = Uuid::new_v4().to_string();
-
-    registry.send_heartbeat(&instance_id).await.unwrap();
-    assert!(registry.has_heartbeat(&instance_id).await.unwrap());
-
-    registry.clear_heartbeat(&instance_id).await.unwrap();
-    assert!(!registry.has_heartbeat(&instance_id).await.unwrap());
+    // Should have updated values
+    let (grace, reason) = sqlx::query_as::<_, (i32, String)>(
+        "SELECT grace_period_seconds, reason FROM container_cancellations WHERE instance_id = $1",
+    )
+    .bind(&instance_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(grace, 60);
+    assert_eq!(reason, "second reason");
 
     cleanup_instance(&pool, &instance_id).await;
 }
@@ -810,121 +324,68 @@ async fn test_cleanup_single_container() {
     let registry = ContainerRegistry::new(pool.clone());
     let instance_id = Uuid::new_v4().to_string();
 
-    // Set up all data types for a container
+    // cleanup() clears four tables in one transaction. Only container_registry
+    // and container_cancellations still have writers in the codebase, so seed
+    // the other two directly — the point of the test is that cleanup() empties
+    // all four, whoever wrote them.
     let info = create_test_container_info(&instance_id, "tenant-1");
     registry.register(&info).await.unwrap();
-    registry.send_heartbeat(&instance_id).await.unwrap();
     registry
         .request_cancellation(&instance_id, Duration::from_secs(30), "test")
         .await
         .unwrap();
-    registry
-        .report_status(
-            &instance_id,
-            &ContainerStatus::Running {
-                updated_at: Utc::now(),
-            },
-        )
-        .await
-        .unwrap();
+    sqlx::query(
+        "INSERT INTO container_heartbeats (instance_id, last_heartbeat) VALUES ($1, NOW())",
+    )
+    .bind(&instance_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO container_status (instance_id, status, updated_at) VALUES ($1, $2, NOW())",
+    )
+    .bind(&instance_id)
+    .bind(serde_json::json!({"status": "running"}))
+    .execute(&pool)
+    .await
+    .unwrap();
 
-    // Verify all exist
-    assert!(registry.get(&instance_id).await.unwrap().is_some());
-    // Use get_heartbeat instead of has_heartbeat to avoid timing issues
-    // has_heartbeat checks if heartbeat is within 60s, which can fail due to clock drift
-    assert!(
-        registry
-            .get_heartbeat(&instance_id)
-            .await
-            .unwrap()
-            .is_some()
-    );
-    assert!(
-        registry
-            .check_cancellation(&instance_id)
-            .await
-            .unwrap()
-            .is_some()
-    );
-    assert!(registry.get_status(&instance_id).await.unwrap().is_some());
+    for table in TRACKING_TABLES {
+        assert_eq!(
+            row_count(&pool, table, &instance_id).await,
+            1,
+            "{table} should be seeded before cleanup"
+        );
+    }
 
-    // Cleanup
     registry.cleanup(&instance_id).await.unwrap();
 
-    // Verify all gone
-    assert!(registry.get(&instance_id).await.unwrap().is_none());
-    // Use get_heartbeat to check for absence (consistent with check above)
-    assert!(
-        registry
-            .get_heartbeat(&instance_id)
-            .await
-            .unwrap()
-            .is_none()
-    );
-    assert!(
-        registry
-            .check_cancellation(&instance_id)
-            .await
-            .unwrap()
-            .is_none()
-    );
-    assert!(registry.get_status(&instance_id).await.unwrap().is_none());
+    for table in TRACKING_TABLES {
+        assert_eq!(
+            row_count(&pool, table, &instance_id).await,
+            0,
+            "{table} should be empty after cleanup"
+        );
+    }
 }
 
-#[tokio::test]
-async fn test_cleanup_stale() {
-    skip_if_no_db!();
-    let pool = get_test_pool().await;
+/// Every table `ContainerRegistry::cleanup` is responsible for emptying.
+const TRACKING_TABLES: [&str; 4] = [
+    "container_registry",
+    "container_status",
+    "container_cancellations",
+    "container_heartbeats",
+];
 
-    let registry = ContainerRegistry::new(pool.clone());
-
-    let fresh_instance = Uuid::new_v4().to_string();
-    let stale_instance = Uuid::new_v4().to_string();
-
-    // Register both
-    registry
-        .register(&create_test_container_info(
-            &fresh_instance,
-            "tenant-cleanup-test",
-        ))
-        .await
-        .unwrap();
-    registry
-        .register(&create_test_container_info(
-            &stale_instance,
-            "tenant-cleanup-test",
-        ))
-        .await
-        .unwrap();
-
-    // Only fresh one gets heartbeat
-    registry.send_heartbeat(&fresh_instance).await.unwrap();
-
-    // The stale one has no heartbeat at all, so cleanup_stale should remove it
-    // cleanup_stale removes ALL containers without heartbeats, so we can only check
-    // that our stale instance is removed, not the exact count
-    let cleaned_before = registry.cleanup_stale().await.unwrap();
-
-    // Fresh should still exist
-    assert!(
-        registry.get(&fresh_instance).await.unwrap().is_some(),
-        "Fresh container with heartbeat should survive cleanup"
-    );
-
-    // Stale should be gone
-    assert!(
-        registry.get(&stale_instance).await.unwrap().is_none(),
-        "Stale container without heartbeat should be cleaned up"
-    );
-
-    // At least 1 was cleaned (our stale one), possibly more from other tests
-    assert!(
-        cleaned_before >= 1,
-        "At least 1 stale container should be cleaned"
-    );
-
-    cleanup_instance(&pool, &fresh_instance).await;
-    cleanup_instance(&pool, &stale_instance).await;
+async fn row_count(pool: &PgPool, table: &str, instance_id: &str) -> i64 {
+    // Table names come from the const above, never from test input.
+    sqlx::query_scalar::<_, i64>(&format!(
+        "SELECT COUNT(*) FROM {table} WHERE instance_id = $1"
+    ))
+    .bind(instance_id)
+    .fetch_one(pool)
+    .await
+    .unwrap()
 }
 
 // ============================================================================
@@ -941,9 +402,6 @@ async fn test_operations_on_nonexistent_container() {
 
     // All these should succeed (no error) but have no effect
     registry.unregister(instance_id).await.unwrap();
-    registry.clear_cancellation(instance_id).await.unwrap();
-    registry.clear_status(instance_id).await.unwrap();
-    registry.clear_heartbeat(instance_id).await.unwrap();
     registry.cleanup(instance_id).await.unwrap();
 }
 
