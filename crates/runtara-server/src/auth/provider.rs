@@ -156,8 +156,9 @@ impl AuthProviders {
             );
         }
 
+        // `new` arms the background refresher itself — it has to exist before the first
+        // fetch, so that a failed one can still be recovered.
         let jwks_cache = crate::auth::jwks::JwksCache::new(jwks_uri.clone()).await;
-        crate::auth::jwks::JwksCache::spawn_refresh_task(jwks_cache.clone(), 3600);
 
         let api = Arc::new(OidcProvider::new(
             crate::auth::JwtConfig {
@@ -253,5 +254,31 @@ mod tests {
             msg.contains("OAUTH2_MCP_AUDIENCE"),
             "panic message must name the missing var, got: {msg}"
         );
+    }
+
+    /// Startup must survive an unreachable JWKS endpoint.
+    ///
+    /// This is the wiring the unit tests in `auth::jwks` cannot reach: they prove the cache
+    /// retries, but `oidc_from_env` is what the server actually calls at boot, and it used to
+    /// take the whole process down with it. `start_paused` lets the real 30s startup budget
+    /// elapse against tokio's clock instead of the wall.
+    #[tokio::test(start_paused = true)]
+    async fn oidc_from_env_survives_an_unreachable_jwks_endpoint() {
+        let _lock = ENV_MUTEX.lock().await;
+        let mut guard = EnvGuard::new();
+        // Port 1 refuses immediately — an endpoint that is reachably broken, as in a boot race.
+        guard.set("OAUTH2_JWKS_URI", "http://127.0.0.1:1/jwks.json");
+        guard.set("OAUTH2_ISSUER", "http://127.0.0.1:1/");
+        guard.remove("RUNTARA_MCP_REQUIRE_AUDIENCE");
+        guard.remove("OAUTH2_MCP_AUDIENCE");
+
+        let providers = match tokio::spawn(AuthProviders::oidc_from_env("org_test".to_string()))
+            .await
+        {
+            Ok(providers) => providers,
+            Err(e) => panic!("startup must not die when JWKS is unreachable, but it did: {e:?}"),
+        };
+
+        assert_eq!(providers.kind, AuthProviderKind::Oidc);
     }
 }
