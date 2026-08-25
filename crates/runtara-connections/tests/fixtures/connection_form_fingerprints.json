@@ -80,8 +80,8 @@
   {
     "integrationId": "quickbooks_online",
     "fieldCount": 5,
-    "serializedBytes": 1709,
-    "fnv1a64": "e456c7c436b9a642"
+    "serializedBytes": 2113,
+    "fnv1a64": "25125fc286c140d6"
   },
   {
     "integrationId": "s3_compatible",
