@@ -12,12 +12,12 @@
 //! ```rust,ignore
 //! use std::sync::Arc;
 //! use runtara_environment::runtime::EnvironmentRuntime;
-//! use runtara_environment::runner::runner_from_env;
+//! use runtara_environment::runner::build_runner;
 //!
 //! #[tokio::main]
 //! async fn main() -> anyhow::Result<()> {
 //!     let pool = sqlx::PgPool::connect("postgres://...").await?;
-//!     let runner = runner_from_env(persistence.clone())?;
+//!     let runner = build_runner(persistence.clone())?;
 //!
 //!     let runtime = EnvironmentRuntime::builder()
 //!         .pool(pool)
@@ -44,13 +44,13 @@
 //! use std::sync::Arc;
 //! use runtara_core::persistence::PostgresPersistence;
 //! use runtara_environment::runtime::EnvironmentRuntime;
-//! use runtara_environment::runner::runner_from_env;
+//! use runtara_environment::runner::build_runner;
 //!
 //! #[tokio::main]
 //! async fn main() -> anyhow::Result<()> {
 //!     let pool = sqlx::PgPool::connect("postgres://...").await?;
 //!     let persistence = Arc::new(PostgresPersistence::new(pool.clone()));
-//!     let runner = runner_from_env(persistence.clone())?;
+//!     let runner = build_runner(persistence.clone())?;
 //!
 //!     let runtime = EnvironmentRuntime::builder()
 //!         .pool(pool)
@@ -635,7 +635,6 @@ impl EnvironmentRuntime {
                 instance_id: info.instance_id.clone(),
                 tenant_id: info.tenant_id.clone(),
                 started_at: info.started_at,
-                child: None,
                 metrics: None,
             };
             if let Err(e) = self.state.runner.stop(&handle).await {

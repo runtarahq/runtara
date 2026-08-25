@@ -289,7 +289,6 @@ impl HeartbeatMonitor {
             instance_id: container.instance_id.clone(),
             tenant_id: container.tenant_id.clone(),
             started_at: container.started_at,
-            child: None,
             metrics: None,
         };
         let runner_stopped = match self.runner.stop(&handle).await {

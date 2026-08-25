@@ -83,10 +83,9 @@ impl EmbeddedRuntara {
         info!("✓ runtara-core started on {}", core_http_addr);
 
         // Create the workflow runner. Workflows are compiled to wasm32-wasip2
-        // and executed either via the wasmtime CLI (one process per instance)
-        // or the embedded in-process engine — selected by RUNTARA_RUNNER.
+        // and executed on the embedded in-process engine.
         let runner: Arc<dyn runtara_environment::runner::Runner> =
-            runtara_environment::runner::runner_from_env(persistence.clone())
+            runtara_environment::runner::build_runner(persistence.clone())
                 .map_err(|e| anyhow::anyhow!("build workflow runner: {e}"))?;
         info!(
             runner_type = runner.runner_type(),

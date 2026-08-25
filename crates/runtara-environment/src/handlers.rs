@@ -726,8 +726,7 @@ pub async fn handle_start_instance(
                 "Instance launched successfully"
             );
 
-            // Clone values for monitor before moving them
-            let tenant_id_for_monitor = request.tenant_id.clone();
+            // Clone values for the registry before moving them
             let handle_id_for_registry = handle.handle_id.clone();
 
             // Register in container registry
@@ -765,8 +764,6 @@ pub async fn handle_start_instance(
                 state.pool.clone(),
                 state.runner.clone(),
                 handle,
-                tenant_id_for_monitor,
-                state.data_dir.clone(),
                 state.persistence.clone(),
                 timeout,
                 state.drain.clone(),
@@ -873,7 +870,6 @@ pub async fn handle_stop_instance(
         instance_id: request.instance_id.clone(),
         tenant_id: container.tenant_id,
         started_at: container.started_at,
-        child: None,
         metrics: None,
     };
 
@@ -1099,8 +1095,7 @@ pub async fn handle_resume_instance(
                 "Instance resumed successfully"
             );
 
-            // Clone values for monitor before moving them
-            let tenant_id_for_monitor = instance.tenant_id.clone();
+            // Clone values for the registry before moving them
             let handle_id_for_registry = handle.handle_id.clone();
 
             // Register in container registry
@@ -1125,8 +1120,6 @@ pub async fn handle_resume_instance(
                 state.pool.clone(),
                 state.runner.clone(),
                 handle,
-                tenant_id_for_monitor,
-                state.data_dir.clone(),
                 state.persistence.clone(),
                 options.timeout,
                 state.drain.clone(),
@@ -1219,8 +1212,6 @@ pub fn spawn_container_monitor(
     pool: PgPool,
     runner: Arc<dyn Runner>,
     handle: RunnerHandle,
-    _tenant_id: String,
-    _data_dir: PathBuf,
     persistence: Arc<dyn Persistence>,
     timeout: Duration,
     drain: DrainController,

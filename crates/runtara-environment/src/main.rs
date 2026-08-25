@@ -113,8 +113,7 @@ async fn main() -> anyhow::Result<()> {
 }
 
 fn build_runner(persistence: Arc<dyn runtara_core::persistence::Persistence>) -> Arc<dyn Runner> {
-    runtara_environment::runner::runner_from_env(persistence)
-        .expect("failed to build workflow runner (RUNTARA_RUNNER)")
+    runtara_environment::runner::build_runner(persistence).expect("failed to build workflow runner")
 }
 
 /// Wait for either SIGINT (Ctrl+C) or SIGTERM on Unix; on non-Unix fall back

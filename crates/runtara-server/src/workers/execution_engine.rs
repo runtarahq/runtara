@@ -87,7 +87,6 @@ pub enum ExecutionError {
         version: i32,
         error: String,
     },
-    BundlePreparationFailed(String),
     RuntimeError(String),
     DatabaseError(String),
     NotConnected(String),
@@ -132,9 +131,6 @@ impl std::fmt::Display for ExecutionError {
                     workflow_id, version, error
                 )
             }
-            ExecutionError::BundlePreparationFailed(msg) => {
-                write!(f, "Bundle preparation failed: {}", msg)
-            }
             ExecutionError::RuntimeError(msg) => write!(f, "Runtime error: {}", msg),
             ExecutionError::DatabaseError(msg) => write!(f, "Database error: {}", msg),
             ExecutionError::NotConnected(msg) => write!(f, "Not connected: {}", msg),
@@ -162,7 +158,6 @@ impl ExecutionError {
             ExecutionError::CompilationTimeout(_) => StatusCode::GATEWAY_TIMEOUT,
             ExecutionError::NotCompiled { .. } => StatusCode::CONFLICT,
             ExecutionError::WorkflowNotRunnable { .. } => StatusCode::UNPROCESSABLE_ENTITY,
-            ExecutionError::BundlePreparationFailed(_) => StatusCode::INTERNAL_SERVER_ERROR,
             ExecutionError::RuntimeError(_) => StatusCode::INTERNAL_SERVER_ERROR,
             ExecutionError::DatabaseError(_) => StatusCode::INTERNAL_SERVER_ERROR,
             ExecutionError::NotConnected(_) => StatusCode::SERVICE_UNAVAILABLE,

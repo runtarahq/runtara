@@ -1282,7 +1282,6 @@ async fn test_spawn_container_monitor_timeout_enforcement() {
     skip_if_no_db!();
     let pool = get_test_pool().await;
 
-    let temp_dir = tempfile::tempdir().unwrap();
     let instance_id = Uuid::new_v4().to_string();
     let tenant_id = "test-tenant-timeout";
 
@@ -1308,7 +1307,6 @@ async fn test_spawn_container_monitor_timeout_enforcement() {
         instance_id: instance_id.clone(),
         tenant_id: tenant_id.to_string(),
         started_at: Utc::now(),
-        child: None,
         metrics: None,
     };
 
@@ -1338,8 +1336,6 @@ async fn test_spawn_container_monitor_timeout_enforcement() {
         pool.clone(),
         runner.clone(),
         handle.clone(),
-        tenant_id.to_string(),
-        temp_dir.path().to_path_buf(),
         persistence.clone(),
         Duration::from_millis(100),
         DrainController::new(),
@@ -1397,7 +1393,6 @@ async fn test_spawn_container_monitor_no_timeout_on_quick_completion() {
     skip_if_no_db!();
     let pool = get_test_pool().await;
 
-    let temp_dir = tempfile::tempdir().unwrap();
     let instance_id = Uuid::new_v4().to_string();
     let tenant_id = "test-tenant-no-timeout";
 
@@ -1437,8 +1432,6 @@ async fn test_spawn_container_monitor_no_timeout_on_quick_completion() {
         pool.clone(),
         runner.clone(),
         handle.clone(),
-        tenant_id.to_string(),
-        temp_dir.path().to_path_buf(),
         persistence.clone(),
         Duration::from_secs(10),
         DrainController::new(),
@@ -1488,7 +1481,6 @@ async fn test_spawn_container_monitor_timeout_race_condition() {
     skip_if_no_db!();
     let pool = get_test_pool().await;
 
-    let temp_dir = tempfile::tempdir().unwrap();
     let instance_id = Uuid::new_v4().to_string();
     let tenant_id = "test-tenant-race";
 
@@ -1527,8 +1519,6 @@ async fn test_spawn_container_monitor_timeout_race_condition() {
         pool.clone(),
         runner.clone(),
         handle.clone(),
-        tenant_id.to_string(),
-        temp_dir.path().to_path_buf(),
         persistence.clone(),
         Duration::from_millis(200),
         DrainController::new(),

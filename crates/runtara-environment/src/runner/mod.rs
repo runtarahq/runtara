@@ -16,22 +16,19 @@ pub use traits::*;
 
 /// Build the workflow runner: the in-process embedded wasmtime engine.
 ///
-/// `RUNTARA_RUNNER` is honored only to warn — the CLI process runner
-/// (`wasm` / `wasmtime`) was removed after the embedded engine became the
-/// default, so every value resolves to the embedded runner.
-pub fn runner_from_env(
+/// `RUNTARA_RUNNER` selected between backends when more than one existed. It is
+/// now accepted and ignored, with a warning, so a stale operator config does not
+/// fail a boot.
+pub fn build_runner(
     persistence: std::sync::Arc<dyn runtara_core::persistence::Persistence>,
 ) -> Result<std::sync::Arc<dyn Runner>> {
-    let requested = std::env::var("RUNTARA_RUNNER").unwrap_or_default();
-    match requested.to_ascii_lowercase().as_str() {
-        "" | "embedded" | "wasm-embedded" => {}
-        other => {
-            tracing::warn!(
-                requested = %other,
-                "RUNTARA_RUNNER is set but the CLI process runner has been removed; \
-                 using the embedded in-process engine"
-            );
-        }
+    if let Ok(requested) = std::env::var("RUNTARA_RUNNER")
+        && !requested.is_empty()
+    {
+        tracing::warn!(
+            requested = %requested,
+            "RUNTARA_RUNNER is set but only the embedded in-process engine exists; ignoring"
+        );
     }
     let runner = EmbeddedWasmRunner::new(WorkflowRunnerConfig::from_env(), persistence)?;
     tracing::info!("Using EmbeddedWasmRunner (in-process wasmtime) for workflow execution");

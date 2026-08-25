@@ -343,8 +343,6 @@ impl WakeScheduler {
                     self.pool.clone(),
                     self.runner.clone(),
                     handle,
-                    instance.tenant_id.clone(),
-                    self.config.data_dir.clone(),
                     self.persistence.clone(),
                     options.timeout,
                     self.drain.clone(),

@@ -721,7 +721,6 @@ impl Runner for EmbeddedWasmRunner {
             instance_id: options.instance_id.clone(),
             tenant_id: options.tenant_id.clone(),
             started_at: chrono::Utc::now(),
-            child: None,
             metrics: Some(metrics),
         })
     }

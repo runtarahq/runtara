@@ -20,14 +20,6 @@ pub enum RunnerError {
     #[error("Binary not found: {0}")]
     BinaryNotFound(String),
 
-    /// OCI bundle was not found.
-    #[error("Bundle not found: {0}")]
-    BundleNotFound(String),
-
-    /// Failed to create OCI bundle.
-    #[error("Failed to create bundle: {0}")]
-    BundleCreation(String),
-
     /// Execution timed out.
     #[error("Execution timeout")]
     Timeout,
@@ -36,8 +28,8 @@ pub enum RunnerError {
     #[error("Execution cancelled")]
     Cancelled,
 
-    /// Container/process failed to start.
-    #[error("Container start failed: {0}")]
+    /// The workflow guest failed to start.
+    #[error("Start failed: {0}")]
     StartFailed(String),
 
     /// Process exited with non-zero code.
@@ -101,11 +93,6 @@ pub struct RunnerHandle {
     pub tenant_id: String,
     /// When the instance was started
     pub started_at: chrono::DateTime<chrono::Utc>,
-    /// Child process handle for waiting on exit (WASM runner).
-    /// When present, the monitor uses child.wait() instead of PID polling
-    /// to detect process exit. This ensures the exit code is available and
-    /// the process has fully completed before crash detection runs.
-    pub child: Option<std::sync::Arc<tokio::sync::Mutex<Option<tokio::process::Child>>>>,
     /// Resource metrics sampled while the process is alive.
     pub metrics: Option<std::sync::Arc<tokio::sync::Mutex<ContainerMetrics>>>,
 }
@@ -119,10 +106,6 @@ pub struct ContainerMetrics {
     pub memory_current_bytes: Option<u64>,
     /// Total CPU time in microseconds
     pub cpu_usage_usec: Option<u64>,
-    /// User CPU time in microseconds
-    pub cpu_user_usec: Option<u64>,
-    /// System CPU time in microseconds
-    pub cpu_system_usec: Option<u64>,
 }
 
 /// Result of a synchronous instance execution.
@@ -195,9 +178,7 @@ pub trait Runner: Send + Sync {
     /// Wait for the instance to exit, polling with the given interval.
     ///
     /// The default implementation polls [`Runner::is_running`] at `poll_interval`.
-    /// Runners that own a `Child` on the handle should override
-    /// this to use `child.wait()` so process exit is observed without a poll
-    /// budget and so all stdio is flushed before the monitor proceeds.
+    /// Runners that can await their run directly should override it.
     ///
     /// Implementations must be cancel-safe: when the surrounding `select!` drops
     /// this future on a timeout, no resources should leak.

@@ -164,7 +164,6 @@ impl Runner for MockRunner {
             instance_id: options.instance_id.clone(),
             tenant_id: options.tenant_id.clone(),
             started_at: Utc::now(),
-            child: None,
             metrics: None,
         };
 
