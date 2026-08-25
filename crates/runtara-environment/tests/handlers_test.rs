@@ -10,10 +10,9 @@ use runtara_environment::container_registry::{ContainerInfo, ContainerRegistry};
 use runtara_environment::db;
 use runtara_environment::handlers::{
     DrainController, EnvironmentHandlerState, GetCapabilityRequest, RegisterImageRequest,
-    ResumeInstanceRequest, StartInstanceRequest, StopInstanceRequest, TestCapabilityRequest,
-    detect_stale_monitor, handle_get_capability, handle_health_check, handle_list_agents,
-    handle_register_image, handle_resume_instance, handle_start_instance, handle_stop_instance,
-    handle_test_capability, spawn_container_monitor,
+    ResumeInstanceRequest, StartInstanceRequest, StopInstanceRequest, detect_stale_monitor,
+    handle_get_capability, handle_health_check, handle_list_agents, handle_register_image,
+    handle_resume_instance, handle_start_instance, handle_stop_instance, spawn_container_monitor,
 };
 use runtara_environment::image_registry::{ImageRegistry, RunnerType};
 use runtara_environment::runner::MockRunner;
@@ -1062,94 +1061,6 @@ async fn test_get_capability_wrong_agent() {
         panic!("removed environment capability handler unexpectedly succeeded");
     };
     assert!(error.to_string().contains("GET /api/runtime/agents/"));
-}
-
-#[tokio::test]
-async fn test_test_capability_request_creation() {
-    // Unit test for TestCapabilityRequest struct
-    let request = TestCapabilityRequest {
-        tenant_id: "test-tenant".to_string(),
-        agent_id: "utils".to_string(),
-        capability_id: "random-double".to_string(),
-        input: serde_json::json!({}),
-        connection: None,
-        timeout_ms: Some(5000),
-    };
-
-    assert_eq!(request.tenant_id, "test-tenant");
-    assert_eq!(request.agent_id, "utils");
-    assert_eq!(request.capability_id, "random-double");
-    assert_eq!(request.timeout_ms, Some(5000));
-    assert!(request.connection.is_none());
-}
-
-#[tokio::test]
-async fn test_test_capability_with_connection() {
-    // Unit test for TestCapabilityRequest with connection
-    let connection = serde_json::json!({
-        "integration_id": "bearer",
-        "parameters": {
-            "base_url": "https://api.example.com",
-            "token": "secret-token"
-        }
-    });
-
-    let request = TestCapabilityRequest {
-        tenant_id: "test-tenant".to_string(),
-        agent_id: "http".to_string(),
-        capability_id: "http-request".to_string(),
-        input: serde_json::json!({
-            "url": "/api/users",
-            "method": "GET"
-        }),
-        connection: Some(connection.clone()),
-        timeout_ms: None,
-    };
-
-    assert!(request.connection.is_some());
-    assert_eq!(
-        request.connection.as_ref().unwrap()["integration_id"],
-        "bearer"
-    );
-}
-
-// Note: Full integration tests for handle_test_capability require OCI runtime
-// and compiled test harness binary, so they are best run in E2E tests.
-// The following test validates the handler returns appropriate errors when
-// test harness is not available.
-
-#[tokio::test]
-async fn test_test_capability_no_harness_binary() {
-    skip_if_no_db!();
-    let pool = get_test_pool().await;
-
-    // Create a temp dir that doesn't have the test harness binary
-    let temp_dir = tempfile::TempDir::new().unwrap();
-    let state = create_test_state(pool, temp_dir.path().to_path_buf());
-
-    let request = TestCapabilityRequest {
-        tenant_id: "test-tenant".to_string(),
-        agent_id: "utils".to_string(),
-        capability_id: "random-double".to_string(),
-        input: serde_json::json!({}),
-        connection: None,
-        timeout_ms: Some(1000),
-    };
-
-    let response = handle_test_capability(&state, request)
-        .await
-        .expect("Test capability should not panic");
-
-    // Without a compiled test harness binary, this should fail gracefully
-    assert!(!response.success);
-    assert!(response.error.is_some());
-    // Error should indicate test harness is not available
-    let error = response.error.as_ref().unwrap();
-    assert!(
-        error.contains("harness") || error.contains("not found") || error.contains("not available"),
-        "Error should mention harness issue: {}",
-        error
-    );
 }
 
 // ============================================================================

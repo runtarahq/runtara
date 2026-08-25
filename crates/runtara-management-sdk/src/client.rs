@@ -24,7 +24,6 @@ use crate::types::{
     MetricsGranularity, RegisterImageOptions, RegisterImageResult, RegisterImageStreamOptions,
     RunnerType, ScopeInfo, SignalType, StartInstanceOptions, StartInstanceResult, StepStatus,
     StepSummary, StopInstanceOptions, TenantMetricsResult, TerminationReason,
-    TestCapabilityOptions, TestCapabilityResult,
 };
 
 // ============================================================================
@@ -290,17 +289,6 @@ struct MetricsBucketJson {
     max_memory_bytes: Option<i64>,
     #[serde(default)]
     success_rate_percent: Option<f64>,
-}
-
-#[derive(Debug, Deserialize)]
-struct TestCapabilityJson {
-    success: bool,
-    #[serde(default)]
-    output: Option<serde_json::Value>,
-    #[serde(default)]
-    error: Option<String>,
-    #[serde(default)]
-    execution_time_ms: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1500,48 +1488,6 @@ impl ManagementSdk {
             total_count: json.total_count,
             limit: json.limit as u32,
             offset: json.offset as u32,
-        })
-    }
-
-    // =========================================================================
-    // Agent Testing
-    // =========================================================================
-
-    /// Test a single agent capability.
-    #[instrument(skip(self, options), fields(agent_id = %options.agent_id, capability_id = %options.capability_id))]
-    pub async fn test_capability(
-        &self,
-        options: TestCapabilityOptions,
-    ) -> Result<TestCapabilityResult> {
-        info!("Testing capability");
-
-        let body = serde_json::json!({
-            "tenant_id": options.tenant_id,
-            "agent_id": options.agent_id,
-            "capability_id": options.capability_id,
-            "input": options.input,
-            "connection": options.connection,
-            "timeout_ms": options.timeout_ms,
-        });
-
-        let resp = self
-            .client
-            .post(self.url("/api/v1/agents/test"))
-            .json(&body)
-            .send()
-            .await?;
-
-        if !resp.status().is_success() && resp.status().as_u16() != 200 {
-            return Err(Self::parse_error_response(resp).await);
-        }
-
-        let json: TestCapabilityJson = resp.json().await?;
-
-        Ok(TestCapabilityResult {
-            success: json.success,
-            output: json.output,
-            error: json.error,
-            execution_time_ms: json.execution_time_ms,
         })
     }
 

@@ -24,7 +24,7 @@ use tracing::{error, info, warn};
 use crate::db;
 use crate::handlers::{
     self, EnvironmentHandlerState, GetCapabilityRequest, RegisterImageRequest,
-    ResumeInstanceRequest, StartInstanceRequest, StopInstanceRequest, TestCapabilityRequest,
+    ResumeInstanceRequest, StartInstanceRequest, StopInstanceRequest,
 };
 use crate::image_registry::{ImageRegistry, RunnerType};
 
@@ -450,20 +450,6 @@ struct MetricsBucketJson {
     max_memory_bytes: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     success_rate_percent: Option<f64>,
-}
-
-/// Test capability request (JSON body).
-#[derive(Debug, Deserialize)]
-struct TestCapabilityJsonRequest {
-    tenant_id: String,
-    agent_id: String,
-    capability_id: String,
-    #[serde(default)]
-    input: Value,
-    #[serde(default)]
-    connection: Option<Value>,
-    #[serde(default)]
-    timeout_ms: Option<u32>,
 }
 
 // ============================================================================
@@ -1968,53 +1954,6 @@ async fn handle_get_tenant_metrics(
     .into_response()
 }
 
-/// POST /api/v1/agents/test — test capability
-async fn handle_test_capability(
-    State(state): State<Arc<EnvironmentHandlerState>>,
-    Json(body): Json<TestCapabilityJsonRequest>,
-) -> impl IntoResponse {
-    let req = TestCapabilityRequest {
-        tenant_id: body.tenant_id,
-        agent_id: body.agent_id,
-        capability_id: body.capability_id,
-        input: body.input,
-        connection: body.connection,
-        timeout_ms: body.timeout_ms,
-    };
-
-    match handlers::handle_test_capability(&state, req).await {
-        Ok(resp) => {
-            if resp.success {
-                Json(json!({
-                    "success": true,
-                    "output": resp.output,
-                    "execution_time_ms": resp.execution_time_ms,
-                }))
-                .into_response()
-            } else {
-                (
-                    StatusCode::OK,
-                    Json(json!({
-                        "success": false,
-                        "error": resp.error,
-                        "execution_time_ms": resp.execution_time_ms,
-                    })),
-                )
-                    .into_response()
-            }
-        }
-        Err(e) => {
-            error!("Test capability error: {}", e);
-            error_response_from(
-                "TEST_CAPABILITY_ERROR",
-                e,
-                StatusCode::INTERNAL_SERVER_ERROR,
-            )
-            .into_response()
-        }
-    }
-}
-
 /// GET /api/v1/agents — list agents
 async fn handle_list_agents(
     State(state): State<Arc<EnvironmentHandlerState>>,
@@ -2154,7 +2093,6 @@ pub fn environment_http_router(state: Arc<EnvironmentHandlerState>) -> Router {
             get(handle_get_tenant_metrics),
         )
         // Agent testing
-        .route("/api/v1/agents/test", post(handle_test_capability))
         .route("/api/v1/agents", get(handle_list_agents))
         .route(
             "/api/v1/agents/{agent_id}/capabilities/{capability_id}",

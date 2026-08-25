@@ -1419,72 +1419,6 @@ pub fn spawn_container_monitor(
     });
 }
 
-// ============================================================================
-// Agent Testing
-// ============================================================================
-
-/// Request to test a capability.
-pub struct TestCapabilityRequest {
-    /// Tenant ID for isolation.
-    pub tenant_id: String,
-    /// Agent module name (e.g., "http", "utils", "transform").
-    pub agent_id: String,
-    /// Capability ID (e.g., "http-request", "random-double").
-    pub capability_id: String,
-    /// Capability input as JSON.
-    pub input: serde_json::Value,
-    /// Optional connection credentials.
-    pub connection: Option<serde_json::Value>,
-    /// Execution timeout in milliseconds (default: 30000).
-    pub timeout_ms: Option<u32>,
-}
-
-/// Response from testing a capability.
-pub struct TestCapabilityResponse {
-    /// Whether the test succeeded.
-    pub success: bool,
-    /// Output value on success (JSON).
-    pub output: Option<serde_json::Value>,
-    /// Error message on failure.
-    pub error: Option<String>,
-    /// Execution time in milliseconds.
-    pub execution_time_ms: u64,
-}
-
-/// Handle test capability request.
-///
-/// **Deprecated.** This used to run a `runtara-test-harness` binary inside
-/// an OCI container, but the OCI runner was removed in Phase 3 step 11.
-/// The replacement is the `ComponentDispatcherService` in `runtara-server`,
-/// reachable via `POST /api/runtime/agents/{name}/capabilities/{cap}/test`.
-/// This endpoint now returns an explanatory error so existing clients see
-/// a clear migration path instead of an opaque crash.
-#[instrument(skip(state, request), fields(
-    tenant_id = %request.tenant_id,
-    agent_id = %request.agent_id,
-    capability_id = %request.capability_id,
-))]
-pub async fn handle_test_capability(
-    state: &EnvironmentHandlerState,
-    request: TestCapabilityRequest,
-) -> Result<TestCapabilityResponse> {
-    let _ = state;
-    let _ = request;
-    Ok(TestCapabilityResponse {
-        success: false,
-        output: None,
-        error: Some(
-            "Environment-side /api/v1/agents/test was removed when the OCI \
-             test-harness runner was deleted. Use the server's in-process \
-             component dispatcher instead: POST \
-             /api/runtime/agents/{name}/capabilities/{capability}/test on \
-             runtara-server."
-                .to_string(),
-        ),
-        execution_time_ms: 0,
-    })
-}
-
 /// Response for listing agents.
 pub struct ListAgentsResponse {
     /// JSON-encoded list of agents.
@@ -1498,7 +1432,7 @@ pub async fn handle_list_agents(_state: &EnvironmentHandlerState) -> Result<List
     // The environment is no longer the agent-metadata authority. The agent
     // catalog now lives on runtara-server, sourced from the in-process
     // component dispatcher (component `meta.json`). This legacy endpoint is
-    // deprecated alongside `handle_test_capability`.
+    // deprecated.
     Err(crate::error::Error::Other(
         "Environment-side /api/v1/agents was removed. Use runtara-server's \
          GET /api/runtime/agents instead."
