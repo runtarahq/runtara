@@ -261,7 +261,7 @@ mod tests {
         LaunchOptions {
             instance_id: "test-instance-123".to_string(),
             tenant_id: "test-tenant".to_string(),
-            bundle_path: PathBuf::from("/test/bundle"),
+            wasm_path: PathBuf::from("/test/workflow.wasm"),
             input: serde_json::json!({"key": "value"}),
             timeout: std::time::Duration::from_secs(30),
             runtara_core_addr: "127.0.0.1:8001".to_string(),

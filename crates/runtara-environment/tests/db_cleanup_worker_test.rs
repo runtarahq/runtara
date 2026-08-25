@@ -43,8 +43,8 @@ async fn create_test_image(pool: &PgPool, tenant_id: &str) -> String {
     let image_name = format!("test-image-{}", image_id);
     sqlx::query(
         r#"
-        INSERT INTO images (image_id, tenant_id, name, description, binary_path, bundle_path, runner_type)
-        VALUES ($1, $2, $3, 'Test image', '/usr/bin/test', '/tmp/test-bundle', 'mock')
+        INSERT INTO images (image_id, tenant_id, name, description, binary_path)
+        VALUES ($1, $2, $3, 'Test image', '/usr/bin/test')
         "#,
     )
     .bind(&image_id)

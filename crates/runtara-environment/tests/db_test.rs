@@ -138,7 +138,7 @@ async fn create_test_image(
 ) -> Result<(), sqlx::Error> {
     let image_name = format!("test-image-{}", image_id);
     sqlx::query(
-        "INSERT INTO images (image_id, tenant_id, name, binary_path, runner_type) VALUES ($1, $2, $3, '/test', 'mock')"
+        "INSERT INTO images (image_id, tenant_id, name, binary_path) VALUES ($1, $2, $3, '/test')",
     )
     .bind(image_id)
     .bind(tenant_id)

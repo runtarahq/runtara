@@ -567,9 +567,7 @@ pub async fn handle_start_instance(
         });
     }
 
-    // Every image is wasm now, so the launcher always reads the binary
-    // directly. OCI bundle paths are vestigial from the rustc-direct era.
-    let bundle_path = PathBuf::from(&image.binary_path);
+    let wasm_path = PathBuf::from(&image.binary_path);
 
     // Generate or use provided instance ID
     let instance_id = request
@@ -589,10 +587,10 @@ pub async fn handle_start_instance(
     // Validate the filesystem half of the image registration before writing
     // any instance state. Otherwise a stale image row creates a failed instance
     // and the trigger retry collides with that row after recompilation.
-    if !bundle_path.is_file() {
+    if !wasm_path.is_file() {
         warn!(
             image_id = %request.image_id,
-            binary_path = %bundle_path.display(),
+            binary_path = %wasm_path.display(),
             "Registered image artifact is missing"
         );
         return Ok(StartInstanceResponse {
@@ -680,11 +678,11 @@ pub async fn handle_start_instance(
         });
     }
 
-    // Build launch options (using the shared image bundle)
+    // Build launch options (using the shared image artifact)
     let options = LaunchOptions {
         instance_id: instance_id.clone(),
         tenant_id: request.tenant_id.clone(),
-        bundle_path,
+        wasm_path,
         input,
         timeout,
         runtara_core_addr: state.core_addr.clone(),
@@ -711,11 +709,8 @@ pub async fn handle_start_instance(
                 instance_id: instance_id.clone(),
                 tenant_id: request.tenant_id,
                 binary_path: image.binary_path,
-                bundle_path: image.bundle_path,
                 started_at: handle.started_at,
-                pid: None,
                 timeout_seconds: Some(timeout.as_secs() as i64),
-                process_killed: false,
             };
             if let Err(e) = container_registry.register(&container_info).await {
                 warn!(error = %e, "Failed to register container (instance still running)");
@@ -997,7 +992,7 @@ pub async fn handle_resume_instance(
     }
 
     // Every image is wasm now, so always read binary directly.
-    let bundle_path = PathBuf::from(&image.binary_path);
+    let wasm_path = PathBuf::from(&image.binary_path);
 
     // Honor the per-instance timeout persisted at first launch so a long replay
     // isn't force-killed by a hardcoded default; fall back to the configured
@@ -1013,7 +1008,7 @@ pub async fn handle_resume_instance(
     let options = LaunchOptions {
         instance_id: request.instance_id.clone(),
         tenant_id: instance.tenant_id.clone(),
-        bundle_path,
+        wasm_path,
         input: serde_json::json!({}), // Input was consumed on first run
         timeout,
         runtara_core_addr: state.core_addr.clone(),
@@ -1080,11 +1075,8 @@ pub async fn handle_resume_instance(
                 instance_id: request.instance_id.clone(),
                 tenant_id: instance.tenant_id,
                 binary_path: image.binary_path,
-                bundle_path: image.bundle_path,
                 started_at: handle.started_at,
-                pid: None,
                 timeout_seconds: Some(timeout.as_secs() as i64),
-                process_killed: false,
             };
             if let Err(e) = container_registry.register(&container_info).await {
                 warn!(error = %e, "Failed to register container");
@@ -1491,7 +1483,6 @@ mod tests {
             name: "test-image".to_string(),
             description: None,
             binary_path: "/tmp/binary".to_string(),
-            bundle_path: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
             metadata,

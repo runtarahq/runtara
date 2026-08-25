@@ -68,8 +68,8 @@ pub struct LaunchOptions {
     pub instance_id: String,
     /// Tenant ID
     pub tenant_id: String,
-    /// Path to the image's bundle directory (shared across instances of the same image)
-    pub bundle_path: std::path::PathBuf,
+    /// Path to the image's composed `workflow.wasm`.
+    pub wasm_path: std::path::PathBuf,
     /// Input data for the instance
     pub input: Value,
     /// Execution timeout

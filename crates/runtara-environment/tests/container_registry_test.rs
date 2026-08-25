@@ -42,11 +42,8 @@ fn create_test_container_info(instance_id: &str, tenant_id: &str) -> ContainerIn
         instance_id: instance_id.to_string(),
         tenant_id: tenant_id.to_string(),
         binary_path: "/usr/bin/test".to_string(),
-        bundle_path: Some("/tmp/bundle".to_string()),
         started_at: Utc::now(),
-        pid: None,
         timeout_seconds: Some(300),
-        process_killed: false,
     }
 }
 
@@ -217,19 +214,14 @@ fn test_container_info_creation() {
         instance_id: "instance-456".to_string(),
         tenant_id: "tenant-789".to_string(),
         binary_path: "/usr/bin/test".to_string(),
-        bundle_path: Some("/tmp/bundle".to_string()),
         started_at: Utc::now(),
-        pid: Some(12345),
         timeout_seconds: Some(300),
-        process_killed: false,
     };
 
     assert_eq!(info.container_id, "container-123");
     assert_eq!(info.instance_id, "instance-456");
     assert_eq!(info.tenant_id, "tenant-789");
     assert_eq!(info.binary_path, "/usr/bin/test");
-    assert_eq!(info.bundle_path, Some("/tmp/bundle".to_string()));
-    assert_eq!(info.pid, Some(12345));
     assert_eq!(info.timeout_seconds, Some(300));
 }
 
@@ -240,15 +232,10 @@ fn test_container_info_optional_fields() {
         instance_id: "i1".to_string(),
         tenant_id: "t1".to_string(),
         binary_path: "/bin/test".to_string(),
-        bundle_path: None,
         started_at: Utc::now(),
-        pid: None,
         timeout_seconds: None,
-        process_killed: false,
     };
 
-    assert!(info.bundle_path.is_none());
-    assert!(info.pid.is_none());
     assert!(info.timeout_seconds.is_none());
 }
 
@@ -310,7 +297,6 @@ async fn test_register_upsert() {
 
     // Update and re-register (upsert)
     info.binary_path = "/new/path".to_string();
-    info.pid = Some(99999);
     registry
         .register(&info)
         .await
@@ -319,7 +305,6 @@ async fn test_register_upsert() {
     // Verify update
     let retrieved = registry.get(&instance_id).await.unwrap().unwrap();
     assert_eq!(retrieved.binary_path, "/new/path");
-    assert_eq!(retrieved.pid, Some(99999));
 
     cleanup_instance(&pool, &instance_id).await;
 }
@@ -982,18 +967,13 @@ async fn test_container_with_no_optional_fields() {
         instance_id: instance_id.clone(),
         tenant_id: "tenant".to_string(),
         binary_path: "/bin/test".to_string(),
-        bundle_path: None,
         started_at: Utc::now(),
-        pid: None,
         timeout_seconds: None,
-        process_killed: false,
     };
 
     registry.register(&info).await.unwrap();
 
     let retrieved = registry.get(&instance_id).await.unwrap().unwrap();
-    assert!(retrieved.bundle_path.is_none());
-    assert!(retrieved.pid.is_none());
     assert!(retrieved.timeout_seconds.is_none());
 
     cleanup_instance(&pool, &instance_id).await;

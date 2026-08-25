@@ -234,16 +234,14 @@ impl WakeScheduler {
                     ))
                 })?;
 
-        // Get the image to find bundle path
+        // Get the image to find its wasm artifact
         let image = self
             .image_registry
             .get(&image_id)
             .await?
             .ok_or_else(|| crate::error::Error::ImageNotFound(image_id.clone()))?;
 
-        // Every image is wasm now, so read the binary directly — `bundle_path`
-        // is a legacy field that in-process compile registration leaves unset.
-        let bundle_path = std::path::PathBuf::from(&image.binary_path);
+        let wasm_path = std::path::PathBuf::from(&image.binary_path);
 
         // Honor the per-instance timeout persisted at first launch so a workflow
         // that durably sleeps longer than the old hardcoded 300s isn't force-killed
@@ -259,7 +257,7 @@ impl WakeScheduler {
         let options = LaunchOptions {
             instance_id: instance.instance_id.clone(),
             tenant_id: instance.tenant_id.clone(),
-            bundle_path,
+            wasm_path,
             input: serde_json::json!({}), // Input was already consumed on first run
             timeout,
             runtara_core_addr: self.config.core_addr.clone(),
@@ -326,11 +324,8 @@ impl WakeScheduler {
                     instance_id: instance.instance_id.clone(),
                     tenant_id: instance.tenant_id.clone(),
                     binary_path: image.binary_path.clone(),
-                    bundle_path: image.bundle_path.clone(),
                     started_at: handle.started_at,
-                    pid: None,
                     timeout_seconds: Some(options.timeout.as_secs() as i64),
-                    process_killed: false,
                 };
                 if let Err(e) = container_registry.register(&container_info).await {
                     warn!(error = %e, "Failed to register container (instance still running)");

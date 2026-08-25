@@ -224,8 +224,8 @@ echo "  Server up (PID ${SERVER_PID})"
 
 print_step "Seeding a blocked run and a fully answered run..."
 psql_quiet -d "${TEST_DB_RUNTIME}" -c "
-    INSERT INTO images (image_id, tenant_id, name, binary_path, runner_type)
-    VALUES ('${IMAGE_ID}', '${TENANT}', '${WORKFLOW}:1', '/dev/null', 'wasm');
+    INSERT INTO images (image_id, tenant_id, name, binary_path)
+    VALUES ('${IMAGE_ID}', '${TENANT}', '${WORKFLOW}:1', '/dev/null');
 " >/dev/null
 seed_instance "${INSTANCE_BLOCKED}"
 seed_instance "${INSTANCE_ANSWERED}"

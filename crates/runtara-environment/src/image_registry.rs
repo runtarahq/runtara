@@ -24,8 +24,6 @@ pub struct Image {
     pub description: Option<String>,
     /// Path to the executable binary
     pub binary_path: String,
-    /// Unused; retained until the column is dropped.
-    pub bundle_path: Option<String>,
     /// When the image was created
     pub created_at: DateTime<Utc>,
     /// When the image was last updated
@@ -50,13 +48,12 @@ impl ImageRegistry {
         sqlx::query(
             r#"
             INSERT INTO images (
-                image_id, tenant_id, name, description, binary_path, bundle_path,
-                runner_type, created_at, updated_at, metadata
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                image_id, tenant_id, name, description, binary_path,
+                created_at, updated_at, metadata
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             ON CONFLICT (tenant_id, name) DO UPDATE SET
                 description = EXCLUDED.description,
                 binary_path = EXCLUDED.binary_path,
-                bundle_path = EXCLUDED.bundle_path,
                 updated_at = EXCLUDED.updated_at,
                 metadata = EXCLUDED.metadata
             "#,
@@ -66,8 +63,6 @@ impl ImageRegistry {
         .bind(&image.name)
         .bind(&image.description)
         .bind(&image.binary_path)
-        .bind(&image.bundle_path)
-        .bind("wasm")
         .bind(image.created_at)
         .bind(image.updated_at)
         .bind(&image.metadata)
@@ -87,7 +82,7 @@ impl ImageRegistry {
     pub async fn get(&self, image_id: &str) -> Result<Option<Image>> {
         let row: Option<ImageRow> = sqlx::query_as(
             r#"
-            SELECT image_id, tenant_id, name, description, binary_path, bundle_path,
+            SELECT image_id, tenant_id, name, description, binary_path,
                    created_at, updated_at, metadata
             FROM images
             WHERE image_id = $1
@@ -104,7 +99,7 @@ impl ImageRegistry {
     pub async fn get_by_name(&self, tenant_id: &str, name: &str) -> Result<Option<Image>> {
         let row: Option<ImageRow> = sqlx::query_as(
             r#"
-            SELECT image_id, tenant_id, name, description, binary_path, bundle_path,
+            SELECT image_id, tenant_id, name, description, binary_path,
                    created_at, updated_at, metadata
             FROM images
             WHERE tenant_id = $1 AND name = $2
@@ -122,7 +117,7 @@ impl ImageRegistry {
     pub async fn list(&self, tenant_id: &str) -> Result<Vec<Image>> {
         let rows: Vec<ImageRow> = sqlx::query_as(
             r#"
-            SELECT image_id, tenant_id, name, description, binary_path, bundle_path,
+            SELECT image_id, tenant_id, name, description, binary_path,
                    created_at, updated_at, metadata
             FROM images
             WHERE tenant_id = $1
@@ -145,7 +140,7 @@ impl ImageRegistry {
     ) -> Result<Vec<Image>> {
         let rows: Vec<ImageRow> = sqlx::query_as(
             r#"
-            SELECT image_id, tenant_id, name, description, binary_path, bundle_path,
+            SELECT image_id, tenant_id, name, description, binary_path,
                    created_at, updated_at, metadata
             FROM images
             WHERE tenant_id = $1
@@ -166,7 +161,7 @@ impl ImageRegistry {
     pub async fn list_all(&self, limit: i64, offset: i64) -> Result<Vec<Image>> {
         let rows: Vec<ImageRow> = sqlx::query_as(
             r#"
-            SELECT image_id, tenant_id, name, description, binary_path, bundle_path,
+            SELECT image_id, tenant_id, name, description, binary_path,
                    created_at, updated_at, metadata
             FROM images
             ORDER BY created_at DESC
@@ -200,7 +195,6 @@ struct ImageRow {
     name: String,
     description: Option<String>,
     binary_path: String,
-    bundle_path: Option<String>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
     metadata: Option<serde_json::Value>,
@@ -214,7 +208,6 @@ impl From<ImageRow> for Image {
             name: row.name,
             description: row.description,
             binary_path: row.binary_path,
-            bundle_path: row.bundle_path,
             created_at: row.created_at,
             updated_at: row.updated_at,
             metadata: row.metadata,
@@ -229,7 +222,6 @@ pub struct ImageBuilder {
     name: String,
     description: Option<String>,
     binary_path: String,
-    bundle_path: Option<String>,
     metadata: Option<serde_json::Value>,
 }
 
@@ -246,7 +238,6 @@ impl ImageBuilder {
             name: name.into(),
             description: None,
             binary_path: binary_path.into(),
-            bundle_path: None,
             metadata: None,
         }
     }
@@ -280,7 +271,6 @@ impl ImageBuilder {
             name: self.name,
             description: self.description,
             binary_path: self.binary_path,
-            bundle_path: self.bundle_path,
             created_at: now,
             updated_at: now,
             metadata: self.metadata,

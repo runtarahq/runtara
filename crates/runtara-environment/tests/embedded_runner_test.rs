@@ -97,7 +97,7 @@ fn options(instance_id: &str, wasm_path: &Path) -> LaunchOptions {
     LaunchOptions {
         instance_id: instance_id.to_string(),
         tenant_id: "embedded-test".to_string(),
-        bundle_path: wasm_path.to_path_buf(),
+        wasm_path: wasm_path.to_path_buf(),
         input: serde_json::Value::Null,
         timeout: Duration::from_secs(30),
         runtara_core_addr: "127.0.0.1:1".to_string(),

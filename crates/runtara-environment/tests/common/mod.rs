@@ -196,23 +196,16 @@ impl TestContext {
             .join("test_binary")
             .to_string_lossy()
             .to_string();
-        let bundle_path = self
-            .data_dir
-            .join("test_bundle")
-            .to_string_lossy()
-            .to_string();
-
         sqlx::query(
             r#"
-            INSERT INTO images (image_id, tenant_id, name, description, binary_path, bundle_path, runner_type)
-            VALUES ($1, $2, $3, 'Test image', $4, $5, 'mock')
+            INSERT INTO images (image_id, tenant_id, name, description, binary_path)
+            VALUES ($1, $2, $3, 'Test image', $4)
             "#,
         )
         .bind(image_id.to_string())
         .bind(tenant_id)
         .bind(name)
         .bind(&binary_path)
-        .bind(&bundle_path)
         .execute(&self.pool)
         .await
         .expect("Failed to create test image");

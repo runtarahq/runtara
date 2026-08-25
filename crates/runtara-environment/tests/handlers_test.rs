@@ -324,8 +324,8 @@ async fn test_start_instance_success() {
     let image_name = format!("test-image-{}", image_id);
     sqlx::query(
         r#"
-        INSERT INTO images (image_id, tenant_id, name, description, binary_path, bundle_path, runner_type)
-        VALUES ($1, 'test-tenant', $2, 'desc', $3, '/tmp/test-bundle', 'mock')
+        INSERT INTO images (image_id, tenant_id, name, description, binary_path)
+        VALUES ($1, 'test-tenant', $2, 'desc', $3)
         "#,
     )
     .bind(&image_id)
@@ -374,8 +374,8 @@ async fn test_start_instance_with_custom_id() {
     let image_name = format!("test-image-{}", image_id);
     sqlx::query(
         r#"
-        INSERT INTO images (image_id, tenant_id, name, description, binary_path, bundle_path, runner_type)
-        VALUES ($1, 'test-tenant', $2, 'desc', $3, '/tmp/test-bundle', 'mock')
+        INSERT INTO images (image_id, tenant_id, name, description, binary_path)
+        VALUES ($1, 'test-tenant', $2, 'desc', $3)
         "#,
     )
     .bind(&image_id)
@@ -424,8 +424,8 @@ async fn test_start_instance_replay_is_deduplicated_without_second_launch() {
     let image_name = format!("test-image-idempotent-{image_id}");
     sqlx::query(
         r#"
-        INSERT INTO images (image_id, tenant_id, name, description, binary_path, bundle_path, runner_type)
-        VALUES ($1, 'test-tenant', $2, 'desc', $3, NULL, 'mock')
+        INSERT INTO images (image_id, tenant_id, name, description, binary_path)
+        VALUES ($1, 'test-tenant', $2, 'desc', $3)
         "#,
     )
     .bind(&image_id)
@@ -470,8 +470,8 @@ async fn test_start_instance_missing_artifact_does_not_reserve_instance_id() {
     let missing_binary = temp_dir.path().join("missing-image/binary");
     sqlx::query(
         r#"
-        INSERT INTO images (image_id, tenant_id, name, description, binary_path, bundle_path, runner_type)
-        VALUES ($1, 'test-tenant', $2, 'desc', $3, NULL, 'wasm')
+        INSERT INTO images (image_id, tenant_id, name, description, binary_path)
+        VALUES ($1, 'test-tenant', $2, 'desc', $3)
         "#,
     )
     .bind(&image_id)
@@ -522,8 +522,8 @@ async fn test_start_instance_rejects_same_id_for_different_image() {
     for image_id in [&first_image_id, &second_image_id] {
         sqlx::query(
             r#"
-            INSERT INTO images (image_id, tenant_id, name, description, binary_path, bundle_path, runner_type)
-            VALUES ($1, 'test-tenant', $2, 'desc', $3, NULL, 'mock')
+            INSERT INTO images (image_id, tenant_id, name, description, binary_path)
+            VALUES ($1, 'test-tenant', $2, 'desc', $3)
             "#,
         )
         .bind(image_id)
@@ -651,8 +651,8 @@ async fn test_stop_instance_with_registered_container() {
     let image_name = format!("test-image-{}", image_id);
     sqlx::query(
         r#"
-        INSERT INTO images (image_id, tenant_id, name, description, binary_path, bundle_path, runner_type)
-        VALUES ($1, 'test-tenant', $2, 'desc', $3, '/tmp/test-bundle', 'mock')
+        INSERT INTO images (image_id, tenant_id, name, description, binary_path)
+        VALUES ($1, 'test-tenant', $2, 'desc', $3)
         "#,
     )
     .bind(&image_id)
@@ -672,11 +672,8 @@ async fn test_stop_instance_with_registered_container() {
         instance_id: instance_id.clone(),
         tenant_id: "test-tenant".to_string(),
         binary_path: "/bin/true".to_string(),
-        bundle_path: None,
         started_at: Utc::now(),
-        pid: None,
         timeout_seconds: Some(300),
-        process_killed: false,
     };
     container_registry.register(&container_info).await.unwrap();
 
@@ -737,8 +734,8 @@ async fn test_resume_instance_wrong_status() {
     let image_name = format!("test-image-{}", image_id);
     sqlx::query(
         r#"
-        INSERT INTO images (image_id, tenant_id, name, description, binary_path, bundle_path, runner_type)
-        VALUES ($1, 'test-tenant', $2, 'desc', $3, '/tmp/test-bundle', 'mock')
+        INSERT INTO images (image_id, tenant_id, name, description, binary_path)
+        VALUES ($1, 'test-tenant', $2, 'desc', $3)
         "#,
     )
     .bind(&image_id)
@@ -784,8 +781,8 @@ async fn test_resume_instance_without_checkpoint_replays_from_start() {
     let image_name = format!("test-image-{}", image_id);
     sqlx::query(
         r#"
-        INSERT INTO images (image_id, tenant_id, name, description, binary_path, bundle_path, runner_type)
-        VALUES ($1, 'test-tenant', $2, 'desc', $3, '/tmp/test-bundle', 'mock')
+        INSERT INTO images (image_id, tenant_id, name, description, binary_path)
+        VALUES ($1, 'test-tenant', $2, 'desc', $3)
         "#,
     )
     .bind(&image_id)
@@ -825,8 +822,8 @@ async fn test_resume_instance_success() {
     let image_name = format!("test-image-{}", image_id);
     sqlx::query(
         r#"
-        INSERT INTO images (image_id, tenant_id, name, description, binary_path, bundle_path, runner_type)
-        VALUES ($1, 'test-tenant', $2, 'desc', $3, '/tmp/test-bundle', 'mock')
+        INSERT INTO images (image_id, tenant_id, name, description, binary_path)
+        VALUES ($1, 'test-tenant', $2, 'desc', $3)
         "#,
     )
     .bind(&image_id)
@@ -893,8 +890,8 @@ async fn test_start_instance_tenant_isolation() {
     let image_name = format!("tenant-a-image-{}", image_id);
     sqlx::query(
         r#"
-        INSERT INTO images (image_id, tenant_id, name, description, binary_path, bundle_path, runner_type)
-        VALUES ($1, 'tenant-A', $2, 'Owned by tenant A', $3, '/tmp/test-bundle', 'mock')
+        INSERT INTO images (image_id, tenant_id, name, description, binary_path)
+        VALUES ($1, 'tenant-A', $2, 'Owned by tenant A', $3)
         "#,
     )
     .bind(&image_id)
@@ -943,8 +940,8 @@ async fn test_start_instance_same_tenant_allowed() {
     let image_name = format!("tenant-a-image-{}", image_id);
     sqlx::query(
         r#"
-        INSERT INTO images (image_id, tenant_id, name, description, binary_path, bundle_path, runner_type)
-        VALUES ($1, 'tenant-A', $2, 'Owned by tenant A', $3, '/tmp/test-bundle', 'mock')
+        INSERT INTO images (image_id, tenant_id, name, description, binary_path)
+        VALUES ($1, 'tenant-A', $2, 'Owned by tenant A', $3)
         "#,
     )
     .bind(&image_id)
@@ -1070,8 +1067,8 @@ async fn test_start_instance_stores_env() {
     let image_name = format!("test-image-env-{}", image_id);
     sqlx::query(
         r#"
-        INSERT INTO images (image_id, tenant_id, name, description, binary_path, bundle_path, runner_type)
-        VALUES ($1, 'test-tenant', $2, 'desc', $3, '/tmp/test-bundle', 'mock')
+        INSERT INTO images (image_id, tenant_id, name, description, binary_path)
+        VALUES ($1, 'test-tenant', $2, 'desc', $3)
         "#,
     )
     .bind(&image_id)
@@ -1129,8 +1126,8 @@ async fn test_start_instance_empty_env() {
     let image_name = format!("test-image-no-env-{}", image_id);
     sqlx::query(
         r#"
-        INSERT INTO images (image_id, tenant_id, name, description, binary_path, bundle_path, runner_type)
-        VALUES ($1, 'test-tenant', $2, 'desc', $3, '/tmp/test-bundle', 'mock')
+        INSERT INTO images (image_id, tenant_id, name, description, binary_path)
+        VALUES ($1, 'test-tenant', $2, 'desc', $3)
         "#,
     )
     .bind(&image_id)
@@ -1215,7 +1212,7 @@ async fn test_spawn_container_monitor_timeout_enforcement() {
         .launch_detached(&LaunchOptions {
             instance_id: instance_id.clone(),
             tenant_id: tenant_id.to_string(),
-            bundle_path: PathBuf::from("/test/bundle"),
+            wasm_path: PathBuf::from("/test/workflow.wasm"),
             input: serde_json::json!({}),
             timeout: Duration::from_millis(100),
             runtara_core_addr: "127.0.0.1:8001".to_string(),
@@ -1317,7 +1314,7 @@ async fn test_spawn_container_monitor_no_timeout_on_quick_completion() {
         .launch_detached(&LaunchOptions {
             instance_id: instance_id.clone(),
             tenant_id: tenant_id.to_string(),
-            bundle_path: PathBuf::from("/test/bundle"),
+            wasm_path: PathBuf::from("/test/workflow.wasm"),
             input: serde_json::json!({}),
             timeout: Duration::from_secs(10), // Long timeout
             runtara_core_addr: "127.0.0.1:8001".to_string(),
@@ -1404,7 +1401,7 @@ async fn test_spawn_container_monitor_timeout_race_condition() {
         .launch_detached(&LaunchOptions {
             instance_id: instance_id.clone(),
             tenant_id: tenant_id.to_string(),
-            bundle_path: PathBuf::from("/test/bundle"),
+            wasm_path: PathBuf::from("/test/workflow.wasm"),
             input: serde_json::json!({}),
             timeout: Duration::from_millis(200),
             runtara_core_addr: "127.0.0.1:8001".to_string(),
@@ -1463,11 +1460,8 @@ fn make_container_info(instance_id: &str, tenant_id: &str, container_id: &str) -
         instance_id: instance_id.to_string(),
         tenant_id: tenant_id.to_string(),
         binary_path: "/usr/bin/test".to_string(),
-        bundle_path: Some("/tmp/bundle".to_string()),
         started_at: Utc::now(),
-        pid: None,
         timeout_seconds: Some(60),
-        process_killed: false,
     }
 }
 
@@ -1531,7 +1525,7 @@ async fn test_wait_for_exit_default_impl_returns_on_not_running() {
         .launch_detached(&LaunchOptions {
             instance_id: instance_id.clone(),
             tenant_id: tenant_id.to_string(),
-            bundle_path: PathBuf::from("/test/bundle"),
+            wasm_path: PathBuf::from("/test/workflow.wasm"),
             input: serde_json::json!({}),
             timeout: Duration::from_secs(10),
             runtara_core_addr: "127.0.0.1:8001".to_string(),

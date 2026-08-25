@@ -185,8 +185,8 @@ echo "  Server up (PID ${SERVER_PID})"
 print_step "Seeding one instance per status..."
 IMAGE_ID="multistatus-image"
 psql_quiet -d "${TEST_DB_RUNTIME}" -c "
-    INSERT INTO images (image_id, tenant_id, name, binary_path, runner_type)
-    VALUES ('${IMAGE_ID}', '${TENANT}', 'multistatus:1', '/dev/null', 'wasm');
+    INSERT INTO images (image_id, tenant_id, name, binary_path)
+    VALUES ('${IMAGE_ID}', '${TENANT}', 'multistatus:1', '/dev/null');
 " >/dev/null
 seed_instance "multistatus-failed"    failed
 seed_instance "multistatus-cancelled" cancelled

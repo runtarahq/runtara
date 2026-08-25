@@ -407,7 +407,7 @@ impl Runner for EmbeddedWasmRunner {
     ) -> Result<LaunchResult> {
         let start = std::time::Instant::now();
 
-        let wasm_path = options.bundle_path.clone();
+        let wasm_path = options.wasm_path.clone();
         if !wasm_path.exists() {
             return Err(RunnerError::BinaryNotFound(wasm_path.display().to_string()));
         }
@@ -525,7 +525,7 @@ impl Runner for EmbeddedWasmRunner {
     }
 
     async fn launch_detached(&self, options: &LaunchOptions) -> Result<RunnerHandle> {
-        let wasm_path = options.bundle_path.clone();
+        let wasm_path = options.wasm_path.clone();
         if !wasm_path.exists() {
             return Err(RunnerError::BinaryNotFound(wasm_path.display().to_string()));
         }
@@ -712,7 +712,7 @@ impl Runner for EmbeddedWasmRunner {
 
         info!(
             instance_id = %options.instance_id,
-            wasm = %options.bundle_path.display(),
+            wasm = %options.wasm_path.display(),
             "Launched embedded workflow run (detached)"
         );
 

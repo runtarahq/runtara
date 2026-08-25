@@ -23,16 +23,10 @@ pub struct ContainerInfo {
     pub tenant_id: String,
     /// Path to the executable binary
     pub binary_path: String,
-    /// Unused; retained until the column is dropped.
-    pub bundle_path: Option<String>,
     /// When the container was started
     pub started_at: DateTime<Utc>,
-    /// Process ID (if known)
-    pub pid: Option<i32>,
     /// Execution timeout in seconds
     pub timeout_seconds: Option<i64>,
-    /// Whether the process has been confirmed killed
-    pub process_killed: bool,
 }
 
 /// Cancellation request stored in PostgreSQL
@@ -129,26 +123,21 @@ impl ContainerRegistry {
         sqlx::query(
             r#"
             INSERT INTO container_registry (
-                container_id, instance_id, tenant_id, binary_path, bundle_path,
-                started_at, pid, timeout_seconds, process_killed
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, FALSE)
+                container_id, instance_id, tenant_id, binary_path,
+                started_at, timeout_seconds
+            ) VALUES ($1, $2, $3, $4, $5, $6)
             ON CONFLICT (instance_id) DO UPDATE SET
                 container_id = EXCLUDED.container_id,
                 binary_path = EXCLUDED.binary_path,
-                bundle_path = EXCLUDED.bundle_path,
                 started_at = EXCLUDED.started_at,
-                pid = EXCLUDED.pid,
-                timeout_seconds = EXCLUDED.timeout_seconds,
-                process_killed = FALSE
+                timeout_seconds = EXCLUDED.timeout_seconds
             "#,
         )
         .bind(&info.container_id)
         .bind(&info.instance_id)
         .bind(&info.tenant_id)
         .bind(&info.binary_path)
-        .bind(&info.bundle_path)
         .bind(info.started_at)
-        .bind(info.pid)
         .bind(info.timeout_seconds)
         .execute(&self.pool)
         .await?;
