@@ -13,16 +13,12 @@ use tokio::time::Instant;
 /// production values; [`RetryPolicy::default`] is what the server runs with.
 #[derive(Debug, Clone, Copy)]
 pub struct RetryPolicy {
-    /// First backoff step for the startup fetch; doubles up to `max_backoff`.
+    /// First retry gap while the cache is empty; doubles up to `empty_retry_interval`.
     pub initial_backoff: Duration,
-    pub max_backoff: Duration,
-    /// How long the startup fetch may keep retrying before the server continues without keys.
-    pub startup_budget: Duration,
+    /// Ceiling for the empty-cache retry gap, and the steady retry rate once reached.
+    pub empty_retry_interval: Duration,
     /// Background refresh interval once the cache holds keys.
     pub refresh_interval: Duration,
-    /// Background refresh interval while the cache is still empty — far shorter, because in
-    /// that state every authenticated request is failing.
-    pub empty_retry_interval: Duration,
     /// Minimum gap between refreshes triggered from the request path, so a cache miss storm
     /// cannot fan out one upstream fetch per request.
     pub miss_cooldown: Duration,
@@ -32,10 +28,8 @@ impl Default for RetryPolicy {
     fn default() -> Self {
         Self {
             initial_backoff: Duration::from_millis(250),
-            max_backoff: Duration::from_secs(8),
-            startup_budget: Duration::from_secs(30),
-            refresh_interval: Duration::from_secs(3600),
             empty_retry_interval: Duration::from_secs(15),
+            refresh_interval: Duration::from_secs(3600),
             miss_cooldown: Duration::from_secs(10),
         }
     }
@@ -72,21 +66,26 @@ struct JwksResponse {
 }
 
 impl JwksCache {
-    /// Create a JWKS cache, arm its background refresher, and populate it.
+    /// Create a JWKS cache, populate it, and arm its background refresher.
     ///
-    /// Never panics, and never gives up. A failed startup fetch used to be terminal: one
-    /// unlucky request during boot left the process alive but unable to validate any token
-    /// for the rest of its life, because the refresher was armed on the line *after* the
-    /// fetch and so was never spawned. Now the refresher is armed first, the initial fetch
-    /// retries with bounded backoff, and if the endpoint is still unreachable when that
-    /// budget runs out the server starts anyway and the refresher keeps trying until it
-    /// succeeds. Readiness is reported separately by [`JwksCache::is_ready`].
+    /// Never panics. A failed startup fetch used to be terminal: one unlucky request during
+    /// boot left the process alive but unable to validate any token for the rest of its life,
+    /// because the refresher was armed on the line *after* the fetch and so was never spawned.
+    ///
+    /// The fetch is attempted exactly ONCE here. On the happy path that populates the cache
+    /// before the server serves its first request, which is what callers expect and costs a
+    /// single round trip. On failure it does NOT retry inline: blocking startup on a retry
+    /// loop left the listening port unbound for ~30s, which is precisely the window
+    /// [`JwksCache::is_ready`] exists to report on — a monitor saw connection-refused, which
+    /// is indistinguishable from a dead process. Retrying belongs to the background
+    /// refresher, which starts fast and backs off, so the server binds immediately and
+    /// reports itself unready until the keys land.
     pub async fn new(jwks_uri: String) -> Arc<Self> {
         Self::with_policy(jwks_uri, RetryPolicy::default()).await
     }
 
     /// [`JwksCache::new`] with explicit timings — for tests that cannot wait out the
-    /// production backoff and refresh intervals.
+    /// production retry and refresh intervals.
     pub async fn with_policy(jwks_uri: String, policy: RetryPolicy) -> Arc<Self> {
         let cache = Arc::new(Self {
             keys: RwLock::new(HashMap::new()),
@@ -97,10 +96,20 @@ impl JwksCache {
             last_attempt: RwLock::new(None),
         });
 
-        // Armed BEFORE the first fetch: this is the path that recovers a failed startup, so
-        // it must exist even when that fetch never succeeds.
+        // Nothing else can be refreshing yet — the refresher is armed below, deliberately
+        // after this attempt so its first interval reflects the real outcome rather than the
+        // empty cache every process starts with.
+        if let Err(e) = cache.refresh_and_record().await {
+            tracing::error!(
+                jwks_uri = %cache.jwks_uri,
+                error = %e,
+                "JWKS unavailable at startup — serving with an EMPTY key cache; every token \
+                 validation will fail, and /ready reports 503, until a background refresh \
+                 succeeds"
+            );
+        }
+
         Self::spawn_refresh_task(cache.clone());
-        cache.populate_with_retry().await;
         cache
     }
 
@@ -108,39 +117,6 @@ impl JwksCache {
     /// to validate will be rejected, whatever the token.
     pub async fn is_ready(&self) -> bool {
         !self.keys.read().await.is_empty()
-    }
-
-    /// Fetch the JWKS, retrying transient failures with exponential backoff until the
-    /// startup budget is spent. Returns either way — the caller starts serving regardless.
-    async fn populate_with_retry(&self) {
-        let deadline = Instant::now() + self.policy.startup_budget;
-        let mut backoff = self.policy.initial_backoff;
-
-        for attempt in 1.. {
-            let Err(e) = self.refresh().await else {
-                return;
-            };
-
-            if Instant::now() >= deadline {
-                tracing::error!(
-                    jwks_uri = %self.jwks_uri,
-                    attempts = attempt,
-                    error = %e,
-                    "JWKS unavailable at startup — starting with an EMPTY key cache; every \
-                     token validation will fail until a background refresh succeeds"
-                );
-                return;
-            }
-
-            tracing::warn!(
-                attempt,
-                error = %e,
-                backoff_ms = backoff.as_millis() as u64,
-                "JWKS fetch failed at startup; retrying"
-            );
-            tokio::time::sleep(backoff).await;
-            backoff = (backoff * 2).min(self.policy.max_backoff);
-        }
     }
 
     /// Fetch JWKS from the endpoint and update the cache.
@@ -261,28 +237,31 @@ impl JwksCache {
         }
     }
 
-    /// Spawn the background refresher. Armed by [`JwksCache::with_policy`] before the first
-    /// fetch, so it is running even when that fetch fails.
+    /// Spawn the background refresher — the single retry path once startup has had its one
+    /// attempt.
     ///
-    /// The interval adapts: while the cache is empty it retries on `empty_retry_interval` and
-    /// re-logs the condition every time, because an empty cache means the process is
-    /// rejecting every token and a single line at boot is exactly what gets missed. Once keys
-    /// are loaded it settles to `refresh_interval`.
+    /// While the cache is empty it retries starting at `initial_backoff` and doubling up to
+    /// `empty_retry_interval`, re-logging the condition each time: an empty cache means the
+    /// process is rejecting every token, and a single line at boot is exactly what gets
+    /// missed. Once keys are loaded the backoff resets and it settles to `refresh_interval`.
     fn spawn_refresh_task(cache: Arc<Self>) {
         tokio::spawn(async move {
+            let mut empty_backoff = cache.policy.initial_backoff;
             loop {
-                let ready = cache.is_ready().await;
-                let wait = if ready {
+                let wait = if cache.is_ready().await {
+                    empty_backoff = cache.policy.initial_backoff;
                     cache.policy.refresh_interval
                 } else {
-                    cache.policy.empty_retry_interval
+                    let wait = empty_backoff;
+                    empty_backoff = (empty_backoff * 2).min(cache.policy.empty_retry_interval);
+                    wait
                 };
                 tokio::time::sleep(wait).await;
 
                 if !cache.is_ready().await {
                     tracing::error!(
                         jwks_uri = %cache.jwks_uri,
-                        "JWKS cache is still EMPTY — all token validation is failing; retrying"
+                        "JWKS cache is EMPTY — all token validation is failing; retrying"
                     );
                 }
 

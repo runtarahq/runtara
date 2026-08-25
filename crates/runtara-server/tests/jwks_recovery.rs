@@ -44,10 +44,8 @@ fn jwks_body() -> serde_json::Value {
 fn fast_policy() -> RetryPolicy {
     RetryPolicy {
         initial_backoff: Duration::from_millis(10),
-        max_backoff: Duration::from_millis(40),
-        startup_budget: Duration::from_millis(500),
-        refresh_interval: Duration::from_secs(300),
         empty_retry_interval: Duration::from_secs(300),
+        refresh_interval: Duration::from_secs(300),
         miss_cooldown: Duration::from_millis(50),
     }
 }
@@ -68,37 +66,86 @@ fn uri(server: &MockServer) -> String {
     format!("{}{}", server.uri(), JWKS_PATH)
 }
 
-/// The regression: a JWKS endpoint that fails and then recovers must leave the cache
-/// populated. On the old code the first failure panicked and the process exited 101.
+/// A reachable endpoint must leave the cache populated before `with_policy` returns — the
+/// happy path still warms the cache before the server serves its first request.
 #[tokio::test]
-async fn transient_startup_failure_is_retried_until_it_succeeds() {
+async fn successful_startup_populates_before_returning() {
     let server = MockServer::start().await;
-
-    // First two attempts fail; the third serves a valid document.
-    Mock::given(method("GET"))
-        .and(path(JWKS_PATH))
-        .respond_with(ResponseTemplate::new(503))
-        .up_to_n_times(2)
-        .with_priority(1)
-        .mount(&server)
-        .await;
-    Mock::given(method("GET"))
-        .and(path(JWKS_PATH))
-        .respond_with(ResponseTemplate::new(200).set_body_json(jwks_body()))
-        .with_priority(2)
-        .mount(&server)
-        .await;
+    mount_jwks(
+        &server,
+        ResponseTemplate::new(200).set_body_json(jwks_body()),
+    )
+    .await;
 
     let cache = JwksCache::with_policy(uri(&server), fast_policy()).await;
 
-    assert!(
-        cache.is_ready().await,
-        "cache should be populated after the endpoint recovered"
-    );
+    assert!(cache.is_ready().await, "cache should be warm on return");
     assert_eq!(
         request_count(&server).await,
-        3,
-        "expected two failures then one success"
+        1,
+        "one round trip, not a loop"
+    );
+}
+
+/// Startup must not BLOCK on an unreachable endpoint.
+///
+/// Found on the dev canary: retrying inline held the listening port unbound for ~32s, so
+/// `/ready` could not report 503 during exactly the window it exists for — a monitor saw
+/// connection-refused, indistinguishable from a dead process. One attempt, then hand off.
+#[tokio::test]
+async fn startup_does_not_block_on_an_unreachable_endpoint() {
+    let server = MockServer::start().await;
+    // Every request hangs well past any sane startup budget.
+    mount_jwks(
+        &server,
+        ResponseTemplate::new(200).set_delay(Duration::from_secs(30)),
+    )
+    .await;
+
+    let started = std::time::Instant::now();
+    let cache = tokio::time::timeout(
+        Duration::from_secs(20),
+        JwksCache::with_policy(uri(&server), fast_policy()),
+    )
+    .await
+    .expect("startup must not block on the JWKS endpoint");
+
+    assert!(!cache.is_ready().await, "cache is empty, so report unready");
+    assert!(
+        started.elapsed() < Duration::from_secs(15),
+        "startup took {:?} — it is retrying inline again",
+        started.elapsed()
+    );
+}
+
+/// A healthy start must not trigger a second fetch moments later.
+///
+/// Also found on the canary: arming the refresher *before* the first fetch meant it always
+/// picked its empty-cache interval, so every successful boot paid a redundant round trip.
+#[tokio::test]
+async fn healthy_startup_does_not_trigger_a_redundant_refresh() {
+    let server = MockServer::start().await;
+    mount_jwks(
+        &server,
+        ResponseTemplate::new(200).set_body_json(jwks_body()),
+    )
+    .await;
+
+    let policy = RetryPolicy {
+        // Short enough that a refresher using the EMPTY interval would fire during the wait.
+        empty_retry_interval: Duration::from_millis(100),
+        refresh_interval: Duration::from_secs(300),
+        ..fast_policy()
+    };
+    let cache = JwksCache::with_policy(uri(&server), policy).await;
+    assert!(cache.is_ready().await);
+
+    tokio::time::sleep(Duration::from_millis(600)).await;
+
+    assert_eq!(
+        request_count(&server).await,
+        1,
+        "a warm cache should sit on the hourly interval, not the empty-cache one"
     );
 }
 
@@ -115,9 +162,10 @@ async fn permanent_startup_failure_leaves_an_empty_cache_without_panicking() {
         !cache.is_ready().await,
         "cache must report unready when no key was ever fetched"
     );
-    assert!(
-        request_count(&server).await > 1,
-        "the startup budget should have covered more than a single attempt"
+    assert_eq!(
+        request_count(&server).await,
+        1,
+        "startup makes exactly one attempt; retrying is the refresher's job"
     );
 }
 
@@ -172,6 +220,10 @@ async fn concurrent_cache_misses_collapse_into_one_fetch() {
     .await;
 
     let cache = JwksCache::with_policy(uri(&server), fast_policy()).await;
+
+    // The startup fetch stamps the attempt clock, so wait out the miss cooldown first —
+    // otherwise this measures the cooldown (covered by its own test) rather than coalescing.
+    tokio::time::sleep(Duration::from_millis(120)).await;
     let after_startup = request_count(&server).await;
 
     let mut tasks = Vec::new();
