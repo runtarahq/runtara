@@ -374,9 +374,6 @@ async fn test_list_all_registered() {
 
     let registry = ContainerRegistry::new(pool.clone());
 
-    // Get initial count (may include containers from other parallel tests)
-    let initial_count = registry.list_all_registered().await.unwrap().len();
-
     let instance1 = Uuid::new_v4().to_string();
     let instance2 = Uuid::new_v4().to_string();
 
@@ -389,14 +386,10 @@ async fn test_list_all_registered() {
         .await
         .unwrap();
 
-    // Should have 2 more than initial count
+    // Assert only on this test's own rows. A global count is racy: sibling
+    // tests register and clean up against the same table concurrently, so
+    // `len()` can drop between the two reads.
     let all = registry.list_all_registered().await.unwrap();
-    assert!(
-        all.len() >= initial_count + 2,
-        "Should have at least 2 more containers after registering"
-    );
-
-    // Verify our specific containers are in the list
     assert!(
         all.iter().any(|c| c.instance_id == instance1),
         "instance1 should be in the list"
