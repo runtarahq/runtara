@@ -29,7 +29,7 @@ async fn get_pool() -> Option<PgPool> {
     Some(pool)
 }
 
-use runtara_environment::image_registry::{ImageBuilder, ImageRegistry, RunnerType};
+use runtara_environment::image_registry::{ImageBuilder, ImageRegistry};
 
 #[tokio::test]
 async fn test_register_and_get_image() {
@@ -42,7 +42,6 @@ async fn test_register_and_get_image() {
 
     let image = ImageBuilder::new(tenant_id, &name, "/tmp/test-binary")
         .description("Test image")
-        .runner_type(RunnerType::Wasm)
         .build();
 
     let image_id = image.image_id.clone();
@@ -62,7 +61,6 @@ async fn test_register_and_get_image() {
     assert_eq!(retrieved.tenant_id, tenant_id);
     assert_eq!(retrieved.name, name);
     assert_eq!(retrieved.description, Some("Test image".to_string()));
-    assert_eq!(retrieved.runner_type, RunnerType::Wasm);
 
     // Cleanup
     registry
@@ -258,38 +256,6 @@ async fn test_image_with_metadata() {
         .expect("Failed to get image")
         .expect("Image not found");
     assert_eq!(retrieved.metadata, Some(metadata));
-
-    // Cleanup
-    registry
-        .delete(&image_id)
-        .await
-        .expect("Failed to delete image");
-}
-
-#[tokio::test]
-async fn test_runner_type_default() {
-    skip_if_no_db!();
-    let pool = get_pool().await.expect("Failed to connect to database");
-    let registry = ImageRegistry::new(pool.clone());
-
-    let tenant_id = "test-tenant";
-    let name = format!("test-image-runner-{}", Uuid::new_v4());
-
-    // Build without specifying runner_type - should default to Wasm
-    let image = ImageBuilder::new(tenant_id, &name, "/tmp/test-binary").build();
-    let image_id = image.image_id.clone();
-
-    registry
-        .register(&image)
-        .await
-        .expect("Failed to register image");
-
-    let retrieved = registry
-        .get(&image_id)
-        .await
-        .expect("Failed to get image")
-        .expect("Image not found");
-    assert_eq!(retrieved.runner_type, RunnerType::Wasm);
 
     // Cleanup
     registry

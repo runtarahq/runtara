@@ -14,7 +14,7 @@ use crate::valkey::compilation_progress::{CompilationStage, ProgressReporter};
 use opentelemetry::KeyValue;
 use redis::aio::ConnectionManager;
 use runtara_dsl::parse_execution_graph;
-use runtara_management_sdk::{ImageSummary, RegisterImageStreamOptions, RunnerType};
+use runtara_management_sdk::{ImageSummary, RegisterImageStreamOptions};
 use runtara_workflows::compile::ProgressCallback;
 use runtara_workflows::direct_wasm::{
     DIRECT_WORKFLOW_ARTIFACT_METADATA_FILENAME, DirectArtifactMetadata,
@@ -1008,7 +1008,6 @@ impl CompilationService {
                     "Workflow {} version {}",
                     registration.workflow_id, registration.version
                 ))
-                .with_runner_type(RunnerType::Wasm)
                 .with_sha256(&compilation_result.binary_checksum)
                 .with_metadata(workflow_image_metadata(
                     compilation_result,
@@ -1279,7 +1278,6 @@ mod tests {
             tenant_id: "tenant-a".to_string(),
             name: "workflow-a:7".to_string(),
             description: None,
-            runner_type: RunnerType::Wasm,
             created_at: chrono::Utc::now(),
             metadata: Some(metadata),
         }

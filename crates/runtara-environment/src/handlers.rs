@@ -16,7 +16,7 @@ use runtara_core::persistence::{CompleteInstanceParams, Persistence};
 use crate::container_registry::{ContainerInfo, ContainerRegistry};
 use crate::db;
 use crate::error::Result;
-use crate::image_registry::{ImageBuilder, ImageRegistry, RunnerType};
+use crate::image_registry::{ImageBuilder, ImageRegistry};
 use crate::runner::{LaunchOptions, Runner, RunnerHandle};
 
 /// Shared drain state for the environment runtime.
@@ -220,8 +220,6 @@ pub struct RegisterImageRequest {
     pub description: Option<String>,
     /// Binary content of the image.
     pub binary: Vec<u8>,
-    /// Runner type (OCI, Native, Wasm).
-    pub runner_type: RunnerType,
     /// Optional metadata.
     pub metadata: Option<serde_json::Value>,
 }
@@ -325,8 +323,7 @@ pub async fn handle_register_image(
         &request.tenant_id,
         &request.name,
         binary_path.to_string_lossy(),
-    )
-    .runner_type(request.runner_type);
+    );
 
     if let Some(desc) = &request.description {
         builder = builder.description(desc);
@@ -1483,7 +1480,7 @@ pub async fn handle_get_capability(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::image_registry::{Image, RunnerType};
+    use crate::image_registry::Image;
     use chrono::Utc;
     use serde_json::json;
 
@@ -1495,7 +1492,6 @@ mod tests {
             description: None,
             binary_path: "/tmp/binary".to_string(),
             bundle_path: None,
-            runner_type: RunnerType::Wasm,
             created_at: Utc::now(),
             updated_at: Utc::now(),
             metadata,

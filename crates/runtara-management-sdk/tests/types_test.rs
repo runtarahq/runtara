@@ -4,7 +4,7 @@
 
 use runtara_management_sdk::{
     HealthStatus, InstanceStatus, ListImagesOptions, ListInstancesOptions, RegisterImageOptions,
-    RegisterImageResult, RegisterImageStreamOptions, RunnerType, SignalType, StartInstanceOptions,
+    RegisterImageResult, RegisterImageStreamOptions, SignalType, StartInstanceOptions,
     StartInstanceResult, StopInstanceOptions,
 };
 
@@ -47,18 +47,6 @@ fn test_signal_type_to_i32() {
     assert_eq!(i32::from(SignalType::Cancel), 0);
     assert_eq!(i32::from(SignalType::Pause), 1);
     assert_eq!(i32::from(SignalType::Resume), 2);
-}
-
-#[test]
-fn test_runner_type_default() {
-    assert_eq!(RunnerType::default(), RunnerType::Wasm);
-}
-
-#[test]
-fn test_runner_type_to_i32() {
-    // Wire codes preserved from the multi-variant era. `Wasm = 2`
-    // matches the legacy proto numbering.
-    assert_eq!(i32::from(RunnerType::Wasm), 2);
 }
 
 #[test]
@@ -135,14 +123,12 @@ fn test_register_image_options_builder() {
     let binary = vec![0, 1, 2, 3, 4];
     let opts = RegisterImageOptions::new("tenant-abc", "my-image", binary.clone())
         .with_description("Test image")
-        .with_runner_type(RunnerType::Wasm)
         .with_metadata(serde_json::json!({"version": "1.0"}));
 
     assert_eq!(opts.tenant_id, "tenant-abc");
     assert_eq!(opts.name, "my-image");
     assert_eq!(opts.binary, binary);
     assert_eq!(opts.description, Some("Test image".to_string()));
-    assert_eq!(opts.runner_type, RunnerType::Wasm);
     assert!(opts.metadata.is_some());
 }
 
@@ -150,7 +136,6 @@ fn test_register_image_options_builder() {
 fn test_register_image_stream_options_builder() {
     let opts = RegisterImageStreamOptions::new("tenant-abc", "my-image", 1024)
         .with_description("Stream test")
-        .with_runner_type(RunnerType::Wasm)
         .with_metadata(serde_json::json!({"type": "wasm"}))
         .with_sha256("abc123");
 
@@ -158,7 +143,6 @@ fn test_register_image_stream_options_builder() {
     assert_eq!(opts.name, "my-image");
     assert_eq!(opts.binary_size, 1024);
     assert_eq!(opts.description, Some("Stream test".to_string()));
-    assert_eq!(opts.runner_type, RunnerType::Wasm);
     assert!(opts.metadata.is_some());
     assert_eq!(opts.sha256, Some("abc123".to_string()));
 }
@@ -203,13 +187,6 @@ fn test_signal_type_serialize() {
     let signal = SignalType::Pause;
     let json = serde_json::to_string(&signal).unwrap();
     assert_eq!(json, "\"pause\"");
-}
-
-#[test]
-fn test_runner_type_serialize() {
-    let runner = RunnerType::Wasm;
-    let json = serde_json::to_string(&runner).unwrap();
-    assert_eq!(json, "\"wasm\"");
 }
 
 #[test]

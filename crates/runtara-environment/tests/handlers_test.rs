@@ -14,7 +14,7 @@ use runtara_environment::handlers::{
     handle_get_capability, handle_health_check, handle_list_agents, handle_register_image,
     handle_resume_instance, handle_start_instance, handle_stop_instance, spawn_container_monitor,
 };
-use runtara_environment::image_registry::{ImageRegistry, RunnerType};
+use runtara_environment::image_registry::ImageRegistry;
 use runtara_environment::runner::MockRunner;
 use runtara_environment::runner::{LaunchOptions, Runner, RunnerHandle};
 use sqlx::PgPool;
@@ -217,7 +217,6 @@ async fn test_register_image_success() {
         name: "test-image".to_string(),
         description: Some("Test image description".to_string()),
         binary: vec![0x7f, 0x45, 0x4c, 0x46], // ELF magic bytes
-        runner_type: RunnerType::Wasm,
         metadata: Some(serde_json::json!({"key": "value"})),
     };
 
@@ -255,7 +254,6 @@ async fn test_register_image_empty_tenant_id() {
         name: "test-image".to_string(),
         description: None,
         binary: vec![1, 2, 3],
-        runner_type: RunnerType::Wasm,
         metadata: None,
     };
 
@@ -278,7 +276,6 @@ async fn test_register_image_empty_name() {
         name: String::new(), // Empty
         description: None,
         binary: vec![1, 2, 3],
-        runner_type: RunnerType::Wasm,
         metadata: None,
     };
 
@@ -301,7 +298,6 @@ async fn test_register_image_empty_binary() {
         name: "test-image".to_string(),
         description: None,
         binary: vec![], // Empty
-        runner_type: RunnerType::Wasm,
         metadata: None,
     };
 
@@ -876,13 +872,6 @@ fn test_health_check_response_debug() {
     assert!(debug_str.contains("healthy"));
     assert!(debug_str.contains("1.0.0"));
     assert!(debug_str.contains("12345"));
-}
-
-#[test]
-fn test_runner_type_values() {
-    // Only `Wasm` exists post Phase 3 step 11; the OCI / Native asserts
-    // that used to live here went with the variants they tested.
-    assert_eq!(RunnerType::Wasm.to_string(), "wasm");
 }
 
 // ============================================================================

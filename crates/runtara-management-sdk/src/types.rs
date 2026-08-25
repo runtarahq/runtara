@@ -523,30 +523,6 @@ impl ListInstancesOptions {
 }
 
 /// Runner type for images.
-/// Type of runner. Only `Wasm` exists today; the OCI and native
-/// variants were removed in Phase 3 step 11. The enum is kept (rather
-/// than collapsed to a unit type) so the wire field stays a stable
-/// string and future runners can slot in without a breaking change.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RunnerType {
-    /// WebAssembly runner. Matches the components-mode compile path in
-    /// `runtara-workflows`, which always produces a composed
-    /// `workflow.wasm`.
-    #[default]
-    Wasm,
-}
-
-impl From<RunnerType> for i32 {
-    fn from(runner: RunnerType) -> Self {
-        // Wire codes match the historical proto numbering — keep `Wasm = 2`
-        // so wire-compatible clients still parse correctly.
-        match runner {
-            RunnerType::Wasm => 2,
-        }
-    }
-}
-
 /// Options for registering an image.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RegisterImageOptions {
@@ -558,8 +534,6 @@ pub struct RegisterImageOptions {
     pub description: Option<String>,
     /// Compiled binary content.
     pub binary: Vec<u8>,
-    /// Type of runner to use.
-    pub runner_type: RunnerType,
     /// Optional metadata (JSON).
     pub metadata: Option<serde_json::Value>,
 }
@@ -578,12 +552,6 @@ impl RegisterImageOptions {
     /// Set the description.
     pub fn with_description(mut self, description: impl Into<String>) -> Self {
         self.description = Some(description.into());
-        self
-    }
-
-    /// Set the runner type.
-    pub fn with_runner_type(mut self, runner_type: RunnerType) -> Self {
-        self.runner_type = runner_type;
         self
     }
 
@@ -618,8 +586,6 @@ pub struct RegisterImageStreamOptions {
     pub description: Option<String>,
     /// Size of the binary in bytes.
     pub binary_size: u64,
-    /// Type of runner to use.
-    pub runner_type: RunnerType,
     /// Optional metadata (JSON).
     pub metadata: Option<serde_json::Value>,
     /// Optional SHA256 checksum for verification.
@@ -634,7 +600,6 @@ impl RegisterImageStreamOptions {
             name: name.into(),
             binary_size,
             description: None,
-            runner_type: RunnerType::default(),
             metadata: None,
             sha256: None,
         }
@@ -643,12 +608,6 @@ impl RegisterImageStreamOptions {
     /// Set the description.
     pub fn with_description(mut self, description: impl Into<String>) -> Self {
         self.description = Some(description.into());
-        self
-    }
-
-    /// Set the runner type.
-    pub fn with_runner_type(mut self, runner_type: RunnerType) -> Self {
-        self.runner_type = runner_type;
         self
     }
 
@@ -676,8 +635,6 @@ pub struct ImageSummary {
     pub name: String,
     /// Description.
     pub description: Option<String>,
-    /// Runner type.
-    pub runner_type: RunnerType,
     /// When the image was created.
     pub created_at: DateTime<Utc>,
     /// Optional metadata stored with the image.
@@ -1554,32 +1511,6 @@ mod tests {
     }
 
     // ========================================================================
-    // RunnerType tests
-    // ========================================================================
-
-    #[test]
-    fn test_runner_type_default() {
-        assert_eq!(RunnerType::default(), RunnerType::Wasm);
-    }
-
-    #[test]
-    fn test_runner_type_to_i32() {
-        // Wire codes preserved from the multi-variant era. `Wasm = 2`
-        // matches the legacy proto numbering.
-        assert_eq!(i32::from(RunnerType::Wasm), 2);
-    }
-
-    #[test]
-    fn test_runner_type_serde() {
-        let runner = RunnerType::Wasm;
-        let json = serde_json::to_string(&runner).unwrap();
-        assert_eq!(json, "\"wasm\"");
-
-        let deserialized: RunnerType = serde_json::from_str(&json).unwrap();
-        assert_eq!(deserialized, RunnerType::Wasm);
-    }
-
-    // ========================================================================
     // StartInstanceOptions tests
     // ========================================================================
 
@@ -1773,14 +1704,12 @@ mod tests {
         let binary = vec![1, 2, 3, 4];
         let opts = RegisterImageOptions::new("tenant-1", "my-image", binary.clone())
             .with_description("Test image")
-            .with_runner_type(RunnerType::Wasm)
             .with_metadata(json!({"version": "1.0"}));
 
         assert_eq!(opts.tenant_id, "tenant-1");
         assert_eq!(opts.name, "my-image");
         assert_eq!(opts.binary, binary);
         assert_eq!(opts.description, Some("Test image".to_string()));
-        assert_eq!(opts.runner_type, RunnerType::Wasm);
         assert_eq!(opts.metadata, Some(json!({"version": "1.0"})));
     }
 
@@ -1789,7 +1718,6 @@ mod tests {
         let opts = RegisterImageOptions::new("tenant-1", "my-image", vec![1, 2, 3]);
 
         assert!(opts.description.is_none());
-        assert_eq!(opts.runner_type, RunnerType::Wasm);
         assert!(opts.metadata.is_none());
     }
 
@@ -1801,7 +1729,6 @@ mod tests {
     fn test_register_image_stream_options_builder() {
         let opts = RegisterImageStreamOptions::new("tenant-1", "my-image", 1024)
             .with_description("Streaming image")
-            .with_runner_type(RunnerType::Wasm)
             .with_metadata(json!({"tag": "latest"}))
             .with_sha256("abc123");
 
@@ -1809,7 +1736,6 @@ mod tests {
         assert_eq!(opts.name, "my-image");
         assert_eq!(opts.binary_size, 1024);
         assert_eq!(opts.description, Some("Streaming image".to_string()));
-        assert_eq!(opts.runner_type, RunnerType::Wasm);
         assert_eq!(opts.metadata, Some(json!({"tag": "latest"})));
         assert_eq!(opts.sha256, Some("abc123".to_string()));
     }

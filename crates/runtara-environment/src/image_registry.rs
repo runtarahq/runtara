@@ -11,44 +11,6 @@ use sqlx::PgPool;
 
 use crate::error::Result;
 
-/// Type of runner that should be used for an image.
-///
-/// Only `Wasm` exists today — the OCI and native runners were removed in
-/// Phase 3 step 11 once components-mode became the only compile path.
-/// The enum stays so the wire field on the image registration API + the
-/// `runner_type` DB column can grow new variants without a schema change.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
-#[sqlx(type_name = "text", rename_all = "lowercase")]
-#[serde(rename_all = "lowercase")]
-pub enum RunnerType {
-    /// WebAssembly runner. Every image registered today carries this value.
-    #[default]
-    Wasm,
-}
-
-impl std::fmt::Display for RunnerType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            RunnerType::Wasm => write!(f, "wasm"),
-        }
-    }
-}
-
-impl std::str::FromStr for RunnerType {
-    type Err = String;
-
-    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "wasm" => Ok(RunnerType::Wasm),
-            // `oci` and `native` used to map to dedicated runners; coerce
-            // them to `Wasm` rather than erroring so old image rows + old
-            // clients still land somewhere sensible.
-            "oci" | "native" => Ok(RunnerType::Wasm),
-            _ => Err(format!("Unknown runner type: {}", s)),
-        }
-    }
-}
-
 /// An image that can be launched as an instance.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Image {
@@ -64,8 +26,6 @@ pub struct Image {
     pub binary_path: String,
     /// Unused; retained until the column is dropped.
     pub bundle_path: Option<String>,
-    /// Type of runner to use
-    pub runner_type: RunnerType,
     /// When the image was created
     pub created_at: DateTime<Utc>,
     /// When the image was last updated
@@ -87,8 +47,6 @@ impl ImageRegistry {
 
     /// Register a new image
     pub async fn register(&self, image: &Image) -> Result<()> {
-        let runner_type_str = image.runner_type.to_string();
-
         sqlx::query(
             r#"
             INSERT INTO images (
@@ -99,7 +57,6 @@ impl ImageRegistry {
                 description = EXCLUDED.description,
                 binary_path = EXCLUDED.binary_path,
                 bundle_path = EXCLUDED.bundle_path,
-                runner_type = EXCLUDED.runner_type,
                 updated_at = EXCLUDED.updated_at,
                 metadata = EXCLUDED.metadata
             "#,
@@ -110,7 +67,7 @@ impl ImageRegistry {
         .bind(&image.description)
         .bind(&image.binary_path)
         .bind(&image.bundle_path)
-        .bind(&runner_type_str)
+        .bind("wasm")
         .bind(image.created_at)
         .bind(image.updated_at)
         .bind(&image.metadata)
@@ -120,7 +77,6 @@ impl ImageRegistry {
         tracing::info!(
             image_id = %image.image_id,
             name = %image.name,
-            runner_type = %runner_type_str,
             "Registered image"
         );
 
@@ -132,7 +88,7 @@ impl ImageRegistry {
         let row: Option<ImageRow> = sqlx::query_as(
             r#"
             SELECT image_id, tenant_id, name, description, binary_path, bundle_path,
-                   runner_type, created_at, updated_at, metadata
+                   created_at, updated_at, metadata
             FROM images
             WHERE image_id = $1
             "#,
@@ -149,7 +105,7 @@ impl ImageRegistry {
         let row: Option<ImageRow> = sqlx::query_as(
             r#"
             SELECT image_id, tenant_id, name, description, binary_path, bundle_path,
-                   runner_type, created_at, updated_at, metadata
+                   created_at, updated_at, metadata
             FROM images
             WHERE tenant_id = $1 AND name = $2
             "#,
@@ -167,7 +123,7 @@ impl ImageRegistry {
         let rows: Vec<ImageRow> = sqlx::query_as(
             r#"
             SELECT image_id, tenant_id, name, description, binary_path, bundle_path,
-                   runner_type, created_at, updated_at, metadata
+                   created_at, updated_at, metadata
             FROM images
             WHERE tenant_id = $1
             ORDER BY name
@@ -190,7 +146,7 @@ impl ImageRegistry {
         let rows: Vec<ImageRow> = sqlx::query_as(
             r#"
             SELECT image_id, tenant_id, name, description, binary_path, bundle_path,
-                   runner_type, created_at, updated_at, metadata
+                   created_at, updated_at, metadata
             FROM images
             WHERE tenant_id = $1
             ORDER BY created_at DESC
@@ -211,7 +167,7 @@ impl ImageRegistry {
         let rows: Vec<ImageRow> = sqlx::query_as(
             r#"
             SELECT image_id, tenant_id, name, description, binary_path, bundle_path,
-                   runner_type, created_at, updated_at, metadata
+                   created_at, updated_at, metadata
             FROM images
             ORDER BY created_at DESC
             LIMIT $1 OFFSET $2
@@ -245,7 +201,6 @@ struct ImageRow {
     description: Option<String>,
     binary_path: String,
     bundle_path: Option<String>,
-    runner_type: String,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
     metadata: Option<serde_json::Value>,
@@ -260,7 +215,6 @@ impl From<ImageRow> for Image {
             description: row.description,
             binary_path: row.binary_path,
             bundle_path: row.bundle_path,
-            runner_type: row.runner_type.parse().unwrap_or_default(),
             created_at: row.created_at,
             updated_at: row.updated_at,
             metadata: row.metadata,
@@ -276,7 +230,6 @@ pub struct ImageBuilder {
     description: Option<String>,
     binary_path: String,
     bundle_path: Option<String>,
-    runner_type: RunnerType,
     metadata: Option<serde_json::Value>,
 }
 
@@ -294,7 +247,6 @@ impl ImageBuilder {
             description: None,
             binary_path: binary_path.into(),
             bundle_path: None,
-            runner_type: RunnerType::default(),
             metadata: None,
         }
     }
@@ -308,12 +260,6 @@ impl ImageBuilder {
     /// Set description
     pub fn description(mut self, description: impl Into<String>) -> Self {
         self.description = Some(description.into());
-        self
-    }
-
-    /// Set runner type
-    pub fn runner_type(mut self, runner_type: RunnerType) -> Self {
-        self.runner_type = runner_type;
         self
     }
 
@@ -335,7 +281,6 @@ impl ImageBuilder {
             description: self.description,
             binary_path: self.binary_path,
             bundle_path: self.bundle_path,
-            runner_type: self.runner_type,
             created_at: now,
             updated_at: now,
             metadata: self.metadata,

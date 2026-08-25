@@ -26,7 +26,7 @@ use crate::handlers::{
     self, EnvironmentHandlerState, GetCapabilityRequest, RegisterImageRequest,
     ResumeInstanceRequest, StartInstanceRequest, StopInstanceRequest,
 };
-use crate::image_registry::{ImageRegistry, RunnerType};
+use crate::image_registry::ImageRegistry;
 
 /// Maximum body size for image uploads (64 MB).
 const MAX_BODY_SIZE: usize = 64 * 1024 * 1024;
@@ -44,8 +44,6 @@ struct RegisterImageJsonRequest {
     description: Option<String>,
     /// Base64-encoded binary content.
     binary: String,
-    #[serde(default)]
-    runner_type: Option<String>,
     #[serde(default)]
     metadata: Option<Value>,
 }
@@ -68,7 +66,6 @@ struct ImageSummaryJson {
     name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<String>,
-    runner_type: String,
     created_at_ms: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     metadata: Option<Value>,
@@ -456,18 +453,6 @@ struct MetricsBucketJson {
 // Helper functions
 // ============================================================================
 
-fn runner_type_from_string(_s: &str) -> RunnerType {
-    // Only one variant exists today — coerce every wire value to it.
-    // See `image_registry::RunnerType` for why the enum stays.
-    RunnerType::Wasm
-}
-
-fn runner_type_to_string(rt: RunnerType) -> &'static str {
-    match rt {
-        RunnerType::Wasm => "wasm",
-    }
-}
-
 fn instance_status_to_string(status: &str) -> &str {
     match status {
         "pending" => "pending",
@@ -598,18 +583,11 @@ async fn handle_register_image(
         }
     };
 
-    let runner_type = body
-        .runner_type
-        .as_deref()
-        .map(runner_type_from_string)
-        .unwrap_or_default();
-
     let req = RegisterImageRequest {
         tenant_id: body.tenant_id,
         name: body.name,
         description: body.description,
         binary,
-        runner_type,
         metadata: body.metadata,
     };
 
@@ -656,7 +634,6 @@ async fn handle_register_image_upload(
     let mut tenant_id = String::new();
     let mut name = String::new();
     let mut description: Option<String> = None;
-    let mut runner_type_str: Option<String> = None;
     let mut metadata: Option<Value> = None;
     let mut sha256_expected: Option<String> = None;
     let mut binary_data: Option<Vec<u8>> = None;
@@ -673,8 +650,10 @@ async fn handle_register_image_upload(
             "description" => {
                 description = Some(field.text().await.unwrap_or_default());
             }
+            // `runner_type` selected between backends when more than one
+            // existed. Accept and ignore it so older clients don't 400.
             "runner_type" => {
-                runner_type_str = Some(field.text().await.unwrap_or_default());
+                let _ = field.text().await;
             }
             "metadata" => {
                 if let Ok(text) = field.text().await {
@@ -789,17 +768,9 @@ async fn handle_register_image_upload(
         .into_response();
     }
 
-    // Only one runner type exists — `Wasm`. We still let callers send
-    // `runner_type` for wire compatibility (it just coerces).
-    let runner_type = runner_type_str
-        .as_deref()
-        .map(runner_type_from_string)
-        .unwrap_or_default();
-
     // Build image
     let mut builder =
-        crate::image_registry::ImageBuilder::new(&tenant_id, &name, binary_path.to_string_lossy())
-            .runner_type(runner_type);
+        crate::image_registry::ImageBuilder::new(&tenant_id, &name, binary_path.to_string_lossy());
 
     if let Some(desc) = &description {
         builder = builder.description(desc);
@@ -873,7 +844,6 @@ async fn handle_list_images(
                     tenant_id: img.tenant_id,
                     name: img.name,
                     description: img.description,
-                    runner_type: runner_type_to_string(img.runner_type).to_string(),
                     created_at_ms: img.created_at.timestamp_millis(),
                     metadata: img.metadata,
                 })
@@ -925,7 +895,6 @@ async fn handle_get_image(
                     tenant_id: img.tenant_id,
                     name: img.name,
                     description: img.description,
-                    runner_type: runner_type_to_string(img.runner_type).to_string(),
                     created_at_ms: img.created_at.timestamp_millis(),
                     metadata: img.metadata,
                 }

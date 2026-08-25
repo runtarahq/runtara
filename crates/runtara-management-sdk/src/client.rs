@@ -22,8 +22,8 @@ use crate::types::{
     ListEventsResult, ListImagesOptions, ListImagesResult, ListInstancesOptions,
     ListInstancesResult, ListStepSummariesOptions, ListStepSummariesResult, MetricsBucket,
     MetricsGranularity, RegisterImageOptions, RegisterImageResult, RegisterImageStreamOptions,
-    RunnerType, ScopeInfo, SignalType, StartInstanceOptions, StartInstanceResult, StepStatus,
-    StepSummary, StopInstanceOptions, TenantMetricsResult, TerminationReason,
+    ScopeInfo, SignalType, StartInstanceOptions, StartInstanceResult, StepStatus, StepSummary,
+    StopInstanceOptions, TenantMetricsResult, TerminationReason,
 };
 
 // ============================================================================
@@ -145,7 +145,6 @@ struct ImageSummaryJson {
     name: String,
     #[serde(default)]
     description: Option<String>,
-    runner_type: String,
     created_at_ms: i64,
     #[serde(default)]
     metadata: Option<serde_json::Value>,
@@ -315,19 +314,6 @@ struct ErrorResponseJson {
 // ============================================================================
 // Helper functions
 // ============================================================================
-
-fn runner_type_from_string(_s: &str) -> RunnerType {
-    // Only one variant is left — every wire value coerces to it. We still
-    // take the string so the signature stays stable for callers that may
-    // someday route into multiple variants again.
-    RunnerType::Wasm
-}
-
-fn runner_type_to_string(rt: RunnerType) -> &'static str {
-    match rt {
-        RunnerType::Wasm => "wasm",
-    }
-}
 
 fn instance_status_from_string(s: &str) -> InstanceStatus {
     match s {
@@ -780,11 +766,7 @@ impl ManagementSdk {
         &self,
         options: RegisterImageOptions,
     ) -> Result<RegisterImageResult> {
-        info!(
-            binary_size = options.binary.len(),
-            runner_type = ?options.runner_type,
-            "Registering image"
-        );
+        info!(binary_size = options.binary.len(), "Registering image");
 
         let binary_b64 = base64::engine::general_purpose::STANDARD.encode(&options.binary);
 
@@ -793,7 +775,6 @@ impl ManagementSdk {
             "name": options.name,
             "description": options.description,
             "binary": binary_b64,
-            "runner_type": runner_type_to_string(options.runner_type),
             "metadata": options.metadata,
         });
 
@@ -829,7 +810,6 @@ impl ManagementSdk {
     ) -> Result<RegisterImageResult> {
         info!(
             binary_size = options.binary_size,
-            runner_type = ?options.runner_type,
             "Registering image via streaming (HTTP multipart)"
         );
 
@@ -844,11 +824,6 @@ impl ManagementSdk {
         if let Some(description) = options.description {
             form = form.text("description", description);
         }
-
-        form = form.text(
-            "runner_type",
-            runner_type_to_string(options.runner_type).to_string(),
-        );
 
         if let Some(metadata) = options.metadata {
             form = form.text("metadata", serde_json::to_string(&metadata)?);
@@ -919,7 +894,6 @@ impl ManagementSdk {
                 tenant_id: img.tenant_id,
                 name: img.name,
                 description: img.description,
-                runner_type: runner_type_from_string(&img.runner_type),
                 created_at: ms_to_datetime(img.created_at_ms),
                 metadata: img.metadata,
             })
@@ -959,7 +933,6 @@ impl ManagementSdk {
                 tenant_id: img.tenant_id,
                 name: img.name,
                 description: img.description,
-                runner_type: runner_type_from_string(&img.runner_type),
                 created_at: ms_to_datetime(img.created_at_ms),
                 metadata: img.metadata,
             })),
