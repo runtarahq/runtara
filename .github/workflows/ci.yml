@@ -437,10 +437,47 @@ jobs:
       - name: Run all workspace unit tests
         run: cargo test --workspace --lib
 
-      # runtara-agent-macro also carries a tests/ directory (trybuild-style
-      # expansion checks), which --lib does not cover.
-      - name: Run runtara-agent-macro integration tests
-        run: cargo test -p runtara-agent-macro --tests
+      # `--lib` above selects ONLY library targets, so every tests/ directory in
+      # the workspace is invisible to it. Each crate whose integration tests are
+      # hermetic (no Docker, no database) is named here; the ones that need a
+      # container get their own job. When you add a tests/ file to a crate that
+      # is not listed in some CI step, nothing runs it — that is how the
+      # connection-form drift detector sat red from 2026-08-13 to 2026-08-25.
+      - name: Run hermetic integration tests
+        run: |
+          cargo test --tests \
+            -p runtara-agent-macro \
+            -p runtara-agents \
+            -p runtara-management-sdk \
+            -p runtara-agent-mcp
+
+  # runtara-connections owns 12 integration tests and had no CI job at all.
+  # Eight of them provision their own Postgres through testcontainers, so this
+  # needs Docker (present on ubuntu-latest) but no `services:` block. Serialized
+  # because the suites share container ports and the connection tables.
+  test-connections:
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: Restore build cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ github.sha }}
+
+      - name: Run runtara-connections tests
+        run: cargo test -p runtara-connections -- --test-threads=1
 
   # WIT-only sanity: the canonical agent contract package parses and its
   # wasi:* dependency tree resolves. Cheap; catches deps.toml / lockfile drift
@@ -574,6 +611,7 @@ jobs:
       - test-server
       - test-environment
       - test-units
+      - test-connections
       - wit-package
       - components-build
     if: |

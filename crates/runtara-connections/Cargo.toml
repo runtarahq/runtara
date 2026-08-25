@@ -66,6 +66,16 @@ runtara-agents = { path = "../runtara-agents", default-features = false }
 utoipa = { version = "5", optional = true }
 
 [dev-dependencies]
+# Selects a backend for the `runtara-http` that arrives transitively via
+# `runtara-agents`. The library takes `runtara-agents` with
+# `default-features = false` to keep its native C deps (ssh2/OpenSSL, calamine,
+# zip) out of this crate, which also drops `runtara-http/native` and leaves
+# `runtara-http` with no backend — it then fails closed at build time. In a
+# whole-workspace build another crate happens to turn `native` back on, so this
+# only bites when the crate is built on its own, as `cargo test -p
+# runtara-connections` does. Naming it here fixes the test build without
+# putting the agents' C toolchain back on the library's dependency graph.
+runtara-http = { workspace = true, features = ["native"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 wiremock = "0.6"
 testcontainers = "0.27"
