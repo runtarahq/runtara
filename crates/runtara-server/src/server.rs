@@ -661,6 +661,32 @@ async fn health_handler(encryption_enabled: bool) -> Json<HealthResponse> {
     })
 }
 
+/// Readiness, as distinct from liveness: can this process actually validate the tokens it is
+/// about to be presented?
+///
+/// `/health` answers "the port is open", which stays true while the JWKS cache is empty and
+/// every authenticated request is being rejected — a server that looks healthy to anything
+/// probing it while serving nothing. This endpoint separates the two, so a monitor can tell
+/// the difference. Unauthenticated by construction: it lives on the public router, and a probe
+/// that needed a valid token could never report that tokens cannot be validated.
+async fn readiness_handler(providers: auth::AuthProviders) -> impl axum::response::IntoResponse {
+    if providers.is_ready().await {
+        (
+            axum::http::StatusCode::OK,
+            Json(serde_json::json!({ "status": "ready" })),
+        )
+    } else {
+        (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "status": "not_ready",
+                "reason": "jwks_cache_empty",
+                "detail": "no signing keys loaded; every token will be rejected until a refresh succeeds",
+            })),
+        )
+    }
+}
+
 /// The static role → permission map runtara enforces, as JSON. Unauthenticated and
 /// tenant-independent — the distribution mechanism for smo-management and the admin UI so they
 /// render exactly what runtara enforces (see `docs/security/user-management-contracts.md`).
@@ -2129,10 +2155,18 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         .layer(DefaultBodyLimit::max(TENANT_REQUEST_BODY_LIMIT_BYTES));
 
     // Create router for public/global endpoints (no tenant auth required)
+    let readiness_providers = auth_providers.clone();
     let public_routes = Router::new()
         .route(
             "/health",
             get(move || async move { health_handler(encryption_enabled).await }),
+        )
+        .route(
+            "/ready",
+            get(move || {
+                let providers = readiness_providers.clone();
+                async move { readiness_handler(providers).await }
+            }),
         )
         // Unauthenticated: the permission map is static and the same for every tenant.
         .route("/api/runtime/permissions", get(permissions_handler));
