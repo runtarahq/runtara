@@ -98,6 +98,24 @@ pub struct AuthProviders {
     pub api: Arc<dyn AuthProvider>,
     pub mcp: Arc<dyn AuthProvider>,
     pub kind: AuthProviderKind,
+    /// The JWKS cache backing `oidc` mode, so readiness can be reported. `None` in the modes
+    /// that validate no signatures and therefore have nothing to load.
+    jwks_cache: Option<Arc<crate::auth::jwks::JwksCache>>,
+}
+
+impl AuthProviders {
+    /// Whether this process can actually validate the tokens it will be presented.
+    ///
+    /// In `oidc` mode that means the JWKS cache holds at least one signing key; an empty cache
+    /// rejects every token regardless of how well-formed it is, which is indistinguishable
+    /// from a healthy server to anything that only checks whether the port answers. The other
+    /// modes verify no signatures, so they are always ready.
+    pub async fn is_ready(&self) -> bool {
+        match &self.jwks_cache {
+            Some(cache) => cache.is_ready().await,
+            None => true,
+        }
+    }
 }
 
 impl AuthProviders {
@@ -156,8 +174,9 @@ impl AuthProviders {
             );
         }
 
+        // `new` arms the background refresher itself — it has to exist before the first
+        // fetch, so that a failed one can still be recovered.
         let jwks_cache = crate::auth::jwks::JwksCache::new(jwks_uri.clone()).await;
-        crate::auth::jwks::JwksCache::spawn_refresh_task(jwks_cache.clone(), 3600);
 
         let api = Arc::new(OidcProvider::new(
             crate::auth::JwtConfig {
@@ -184,7 +203,7 @@ impl AuthProviders {
                 // token that omits `aud`. Default off keeps today's lax pass-through.
                 require_audience_present: require_mcp_audience,
             },
-            jwks_cache,
+            jwks_cache.clone(),
             tenant_id,
         )) as Arc<dyn AuthProvider>;
 
@@ -192,6 +211,7 @@ impl AuthProviders {
             api,
             mcp,
             kind: AuthProviderKind::Oidc,
+            jwks_cache: Some(jwks_cache),
         }
     }
 
@@ -203,6 +223,7 @@ impl AuthProviders {
             api: provider.clone(),
             mcp: provider,
             kind: AuthProviderKind::Local,
+            jwks_cache: None,
         }
     }
 
@@ -217,6 +238,7 @@ impl AuthProviders {
             api: provider.clone(),
             mcp: provider,
             kind: AuthProviderKind::TrustProxy,
+            jwks_cache: None,
         }
     }
 }
@@ -253,5 +275,56 @@ mod tests {
             msg.contains("OAUTH2_MCP_AUDIENCE"),
             "panic message must name the missing var, got: {msg}"
         );
+    }
+
+    /// Startup must survive an unreachable JWKS endpoint.
+    ///
+    /// This is the wiring the unit tests in `auth::jwks` cannot reach: they prove the cache
+    /// retries, but `oidc_from_env` is what the server actually calls at boot, and it used to
+    /// take the whole process down with it. `start_paused` lets the real 30s startup budget
+    /// elapse against tokio's clock instead of the wall.
+    #[tokio::test(start_paused = true)]
+    async fn oidc_from_env_survives_an_unreachable_jwks_endpoint() {
+        let _lock = ENV_MUTEX.lock().await;
+        let mut guard = EnvGuard::new();
+        // Port 1 refuses immediately — an endpoint that is reachably broken, as in a boot race.
+        guard.set("OAUTH2_JWKS_URI", "http://127.0.0.1:1/jwks.json");
+        guard.set("OAUTH2_ISSUER", "http://127.0.0.1:1/");
+        guard.remove("RUNTARA_MCP_REQUIRE_AUDIENCE");
+        guard.remove("OAUTH2_MCP_AUDIENCE");
+
+        let providers = match tokio::spawn(AuthProviders::oidc_from_env("org_test".to_string()))
+            .await
+        {
+            Ok(providers) => providers,
+            Err(e) => panic!("startup must not die when JWKS is unreachable, but it did: {e:?}"),
+        };
+
+        assert_eq!(providers.kind, AuthProviderKind::Oidc);
+
+        // ...and it must report itself UNREADY rather than quietly serving as if it could
+        // validate tokens. This is the signal that distinguishes it from a healthy process.
+        assert!(
+            !providers.is_ready().await,
+            "a process with no signing keys must not report ready"
+        );
+    }
+
+    /// The modes that verify no signatures have no JWKS to load, so readiness must not gate on
+    /// one — otherwise a local or trust_proxy deployment would report unready forever.
+    #[tokio::test]
+    async fn signature_less_providers_are_always_ready() {
+        for providers in [AuthProviders::local("org_test".to_string()), {
+            let _lock = ENV_MUTEX.lock().await;
+            let mut guard = EnvGuard::new();
+            guard.remove("TRUST_PROXY_USER_HEADER");
+            AuthProviders::trust_proxy_from_env("org_test".to_string())
+        }] {
+            assert!(
+                providers.is_ready().await,
+                "{:?} verifies no signatures and has nothing to load",
+                providers.kind
+            );
+        }
     }
 }
