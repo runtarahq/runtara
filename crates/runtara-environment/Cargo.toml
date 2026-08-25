@@ -5,8 +5,8 @@ rust-version.workspace = true
 version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Environment server for runtara - image registry, OCI runner, and instance management"
-keywords = ["durable", "workflow", "oci", "container"]
+description = "Environment server for runtara - image registry, workflow runner, and instance management"
+keywords = ["durable", "workflow", "wasm", "wasmtime"]
 categories = ["asynchronous", "development-tools"]
 
 [lib]

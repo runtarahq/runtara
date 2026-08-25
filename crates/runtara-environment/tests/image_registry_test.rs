@@ -267,44 +267,6 @@ async fn test_image_with_metadata() {
 }
 
 #[tokio::test]
-async fn test_update_paths() {
-    skip_if_no_db!();
-    let pool = get_pool().await.expect("Failed to connect to database");
-    let registry = ImageRegistry::new(pool.clone());
-
-    let tenant_id = "test-tenant";
-    let name = format!("test-image-paths-{}", Uuid::new_v4());
-
-    let image = ImageBuilder::new(tenant_id, &name, "/tmp/original-binary").build();
-    let image_id = image.image_id.clone();
-
-    registry
-        .register(&image)
-        .await
-        .expect("Failed to register image");
-
-    // Update paths
-    registry
-        .update_paths(&image_id, "/tmp/new-binary", Some("/tmp/new-bundle"))
-        .await
-        .expect("Failed to update paths");
-
-    let retrieved = registry
-        .get(&image_id)
-        .await
-        .expect("Failed to get image")
-        .expect("Image not found");
-    assert_eq!(retrieved.binary_path, "/tmp/new-binary");
-    assert_eq!(retrieved.bundle_path, Some("/tmp/new-bundle".to_string()));
-
-    // Cleanup
-    registry
-        .delete(&image_id)
-        .await
-        .expect("Failed to delete image");
-}
-
-#[tokio::test]
 async fn test_runner_type_default() {
     skip_if_no_db!();
     let pool = get_pool().await.expect("Failed to connect to database");
@@ -313,7 +275,7 @@ async fn test_runner_type_default() {
     let tenant_id = "test-tenant";
     let name = format!("test-image-runner-{}", Uuid::new_v4());
 
-    // Build without specifying runner_type - should default to OCI
+    // Build without specifying runner_type - should default to Wasm
     let image = ImageBuilder::new(tenant_id, &name, "/tmp/test-binary").build();
     let image_id = image.image_id.clone();
 

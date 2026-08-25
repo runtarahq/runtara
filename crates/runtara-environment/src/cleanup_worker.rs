@@ -179,7 +179,7 @@ impl CleanupWorker {
             // Skip known non-tenant directories
             if matches!(
                 tenant_name_str.as_ref(),
-                "bundles" | "images" | "logs" | "library_cache" | "pids"
+                "images" | "logs" | "library_cache" | "pids"
             ) {
                 continue;
             }
@@ -363,9 +363,6 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
 
         // Create special directories that should be skipped
-        tokio::fs::create_dir_all(temp_dir.path().join("bundles"))
-            .await
-            .unwrap();
         tokio::fs::create_dir_all(temp_dir.path().join("images"))
             .await
             .unwrap();
@@ -384,7 +381,6 @@ mod tests {
         worker.cleanup_old_directories().await.unwrap();
 
         // Special directories should still exist
-        assert!(temp_dir.path().join("bundles").exists());
         assert!(temp_dir.path().join("images").exists());
         assert!(temp_dir.path().join("logs").exists());
     }

@@ -43,9 +43,6 @@ runtara-dsl = { path = "../runtara-dsl" }
 runtara-workflow-wit = { path = "../runtara-workflow-wit" }
 
 # Embedded wasmtime engine + WASI Preview 2 support.
-# wasmtime crate version is independent of the wasmtime CLI version pinned in
-# scripts/build-bundle.sh — the CLI is a separate process used by WasmRunner
-# and goes away in Phase 6.
 wasmtime = { version = "46", default-features = false, features = [
     "std",
     "anyhow",

@@ -194,7 +194,7 @@ impl EnvironmentRuntimeBuilder {
         self
     }
 
-    /// Set the data directory for images, bundles, and instance I/O.
+    /// Set the data directory for images and instance I/O.
     ///
     /// Default: `.data`
     pub fn data_dir(mut self, path: impl Into<PathBuf>) -> Self {

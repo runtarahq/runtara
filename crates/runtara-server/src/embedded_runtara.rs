@@ -212,7 +212,7 @@ pub async fn create_runtara_pool()
 /// - `RUNTARA_EMBEDDED` (default: true) - Enable embedded server
 /// - `RUNTARA_CORE_PORT` (default: 8001) - Port for instance connections
 /// - `RUNTARA_ENVIRONMENT_PORT` (default: 8002) - Port for management protocol
-/// - `DATA_DIR` (default: .data) - Directory for images, bundles, I/O
+/// - `DATA_DIR` (default: .data) - Directory for images and instance I/O
 pub async fn maybe_start_embedded()
 -> Result<Option<EmbeddedRuntara>, Box<dyn std::error::Error + Send + Sync>> {
     let embedded_enabled = std::env::var("RUNTARA_EMBEDDED")

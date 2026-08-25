@@ -28,7 +28,6 @@ env:
   WASM_PACK_VERSION: "0.13.1"
   WIT_DEPS_VERSION: "0.6.0"
   WASM_TOOLS_VERSION: "1.252.0"
-  WASMTIME_VERSION: "46.0.1"
 
 jobs:
   notify-start:
@@ -516,38 +515,6 @@ jobs:
           target: wasm32-wasip2
           cache: true
           cache-workspaces: ". -> target"
-
-      # direct_wasm_execute runs the composed artifacts
-      # through the same CLI used by bundled environments. Keep the version
-      # aligned with scripts/build-bundle.sh.
-      - name: Cache wasmtime binary
-        id: cache-wasmtime
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/bin/wasmtime
-          key: wasmtime-${{ runner.os }}-${{ runner.arch }}-${{ env.WASMTIME_VERSION }}
-
-      - name: Install wasmtime
-        if: steps.cache-wasmtime.outputs.cache-hit != 'true'
-        env:
-          RUNNER_ARCH_LOCAL: ${{ runner.arch }}
-        run: |
-          set -euo pipefail
-          version="$WASMTIME_VERSION"
-          case "$RUNNER_ARCH_LOCAL" in
-            X64) asset="wasmtime-v${version}-x86_64-linux" ;;
-            ARM64) asset="wasmtime-v${version}-aarch64-linux" ;;
-            *) echo "Unsupported runner arch: $RUNNER_ARCH_LOCAL" >&2; exit 1 ;;
-          esac
-          curl -fSL -o /tmp/wasmtime.tar.xz \
-            "https://github.com/bytecodealliance/wasmtime/releases/download/v${version}/${asset}.tar.xz"
-          tar -xJf /tmp/wasmtime.tar.xz -C /tmp
-          mkdir -p ~/.cargo/bin
-          cp "/tmp/${asset}/wasmtime" ~/.cargo/bin/wasmtime
-          chmod +x ~/.cargo/bin/wasmtime
-
-      - name: Verify wasmtime
-        run: wasmtime --version
 
       - name: Build all agent components + emit sidecar meta.json
         env:

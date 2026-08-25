@@ -14,7 +14,7 @@ pub struct Config {
     pub http_addr: SocketAddr,
     /// Address of Runtara Core (for proxying signals and passing to instances)
     pub core_addr: String,
-    /// Data directory for images, bundles, and instance I/O
+    /// Data directory for images and instance I/O
     pub data_dir: PathBuf,
     /// Skip TLS certificate verification (passed to instances)
     pub skip_cert_verification: bool,

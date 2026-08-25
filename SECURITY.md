@@ -57,7 +57,6 @@ When deploying Runtara:
 ### Configuration
 
 - Never set `RUNTARA_SKIP_CERT_VERIFICATION=true` in production
-- Review and restrict container capabilities when using OCI runner
 - Use separate database credentials for different environments
 
 ## Known Security Considerations

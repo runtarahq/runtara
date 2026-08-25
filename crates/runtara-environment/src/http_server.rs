@@ -779,7 +779,6 @@ async fn handle_register_image_upload(
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let images_dir = state.data_dir.join("images").join(&image_id);
     let binary_path = images_dir.join("binary");
-    let bundle_path = images_dir.join("bundle");
 
     if let Err(e) = std::fs::create_dir_all(&images_dir) {
         error!(error = %e, "Failed to create image directory");
@@ -804,24 +803,12 @@ async fn handle_register_image_upload(
         .into_response();
     }
 
-    // Make executable
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&binary_path, std::fs::Permissions::from_mode(0o755));
-    }
-
     // Only one runner type exists — `Wasm`. We still let callers send
     // `runner_type` for wire compatibility (it just coerces).
     let runner_type = runner_type_str
         .as_deref()
         .map(runner_type_from_string)
         .unwrap_or_default();
-
-    // OCI bundle dir is no longer populated; keep the field unused so
-    // the unused-binding lint doesn't fire.
-    let _ = bundle_path;
-    let bundle_path_str: Option<String> = None;
 
     // Build image
     let mut builder =
@@ -830,9 +817,6 @@ async fn handle_register_image_upload(
 
     if let Some(desc) = &description {
         builder = builder.description(desc);
-    }
-    if let Some(bp) = &bundle_path_str {
-        builder = builder.bundle_path(bp);
     }
     if let Some(meta) = metadata {
         builder = builder.metadata(meta);

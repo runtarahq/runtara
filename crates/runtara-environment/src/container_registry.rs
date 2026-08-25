@@ -23,7 +23,7 @@ pub struct ContainerInfo {
     pub tenant_id: String,
     /// Path to the executable binary
     pub binary_path: String,
-    /// Path to the OCI bundle (if containerized)
+    /// Unused; retained until the column is dropped.
     pub bundle_path: Option<String>,
     /// When the container was started
     pub started_at: DateTime<Utc>,

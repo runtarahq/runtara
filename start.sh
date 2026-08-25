@@ -71,7 +71,6 @@ setup_directories() {
     print_status "Setting up directories..."
     mkdir -p "${PID_DIR}"
     mkdir -p "${LOG_DIR}"
-    mkdir -p "${DATA_DIR}/bundles"
 }
 
 check_database() {

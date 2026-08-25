@@ -7,7 +7,7 @@
 //! `cargo component build --release --target wasm32-wasip2 -p
 //! runtara-agent-crypto` first.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use runtara_component_host::{ComponentDispatcherService, DispatcherEnv, TestCapabilityRequest};
 
@@ -264,6 +264,3 @@ async fn dispatcher_loads_full_production_bundle() -> anyhow::Result<()> {
     }
     Ok(())
 }
-
-#[allow(dead_code)]
-fn _bundle_path_unused(_: &Path) {}

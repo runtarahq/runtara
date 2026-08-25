@@ -122,7 +122,7 @@
 //! | `RUNTARA_DATABASE_URL` | Yes* | - | Fallback if above not set |
 //! | `RUNTARA_ENV_HTTP_PORT` | No | `8002` | HTTP server port |
 //! | `RUNTARA_CORE_ADDR` | No | `127.0.0.1:8001` | runtara-core address |
-//! | `DATA_DIR` | No | `.data` | Data directory for images and bundles |
+//! | `DATA_DIR` | No | `.data` | Data directory for images and instance I/O |
 //! | `RUNTARA_SKIP_CERT_VERIFICATION` | No | `false` | Skip TLS verification |
 //!
 //! # Modules

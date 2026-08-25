@@ -3,7 +3,6 @@
 #
 # The bundle contains:
 #   - runtara-server binary
-#   - Wasmtime CLI binary
 #   - 25 pre-built agent components (.wasm + .meta.json each) plus the 2 shared
 #     workflow stdlib/runtime components used by direct composition
 #   - License files

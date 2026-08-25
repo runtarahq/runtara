@@ -300,7 +300,6 @@ pub async fn handle_register_image(
     // Create directories
     let images_dir = state.data_dir.join("images").join(&image_id);
     let binary_path = images_dir.join("binary");
-    let bundle_path = images_dir.join("bundle");
 
     if let Err(e) = std::fs::create_dir_all(&images_dir) {
         error!(error = %e, "Failed to create image directory");
@@ -321,23 +320,6 @@ pub async fn handle_register_image(
         });
     }
 
-    // Make binary executable
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if let Err(e) =
-            std::fs::set_permissions(&binary_path, std::fs::Permissions::from_mode(0o755))
-        {
-            warn!(error = %e, "Failed to set binary permissions");
-        }
-    }
-
-    // OCI bundles used to be created here for `RunnerType::Oci`; the OCI
-    // runner was removed in Phase 3 step 11, so every image is wasm now
-    // and `bundle_path` stays unused on disk.
-    let _ = bundle_path;
-    let bundle_path_str: Option<String> = None;
-
     // Build image
     let mut builder = ImageBuilder::new(
         &request.tenant_id,
@@ -348,10 +330,6 @@ pub async fn handle_register_image(
 
     if let Some(desc) = &request.description {
         builder = builder.description(desc);
-    }
-
-    if let Some(bp) = &bundle_path_str {
-        builder = builder.bundle_path(bp);
     }
 
     if let Some(meta) = request.metadata {

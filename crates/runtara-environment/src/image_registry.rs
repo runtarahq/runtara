@@ -62,7 +62,7 @@ pub struct Image {
     pub description: Option<String>,
     /// Path to the executable binary
     pub binary_path: String,
-    /// Path to OCI bundle (for OCI runner)
+    /// Unused; retained until the column is dropped.
     pub bundle_path: Option<String>,
     /// Type of runner to use
     pub runner_type: RunnerType,
@@ -234,30 +234,6 @@ impl ImageRegistry {
 
         Ok(result.rows_affected() > 0)
     }
-
-    /// Update image binary path and bundle path
-    pub async fn update_paths(
-        &self,
-        image_id: &str,
-        binary_path: &str,
-        bundle_path: Option<&str>,
-    ) -> Result<()> {
-        sqlx::query(
-            r#"
-            UPDATE images
-            SET binary_path = $2, bundle_path = $3, updated_at = $4
-            WHERE image_id = $1
-            "#,
-        )
-        .bind(image_id)
-        .bind(binary_path)
-        .bind(bundle_path)
-        .bind(Utc::now())
-        .execute(&self.pool)
-        .await?;
-
-        Ok(())
-    }
 }
 
 /// Internal row type for database queries
@@ -332,12 +308,6 @@ impl ImageBuilder {
     /// Set description
     pub fn description(mut self, description: impl Into<String>) -> Self {
         self.description = Some(description.into());
-        self
-    }
-
-    /// Set bundle path
-    pub fn bundle_path(mut self, bundle_path: impl Into<String>) -> Self {
-        self.bundle_path = Some(bundle_path.into());
         self
     }
 
