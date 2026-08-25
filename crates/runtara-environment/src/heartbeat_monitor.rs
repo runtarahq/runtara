@@ -6,7 +6,7 @@
 //! (checkpoints, heartbeats, custom events) within the configured timeout
 //! are marked as failed. This prevents instances from getting stuck in
 //! the "running" state when:
-//! - The container crashes without sending a failed event
+//! - The workflow guest crashes without sending a failed event
 //! - Network issues prevent event delivery
 //! - The process is killed externally
 //!
@@ -18,8 +18,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use nix::sys::signal::{self, Signal};
-use nix::unistd::Pid;
 use runtara_core::persistence::{CompleteInstanceParams, Persistence};
 use sqlx::PgPool;
 use tokio::sync::Notify;
@@ -78,8 +76,6 @@ struct StaleContainer {
     started_at: DateTime<Utc>,
     /// Last activity timestamp from instance_events table (any event counts as activity).
     last_activity: Option<DateTime<Utc>>,
-    /// Process ID (if known), used to build RunnerHandle for stopping.
-    pid: Option<i32>,
 }
 
 /// Information about an orphaned instance.
@@ -139,13 +135,6 @@ impl HeartbeatMonitor {
             heartbeat_timeout_secs = self.config.heartbeat_timeout.as_secs(),
             "Heartbeat monitor started"
         );
-
-        // Immediately kill any surviving processes from a previous run.
-        // After a platform restart, container_registry entries survive in PostgreSQL
-        // but the processes may still be running as zombies.
-        if let Err(e) = self.kill_surviving_processes().await {
-            error!(error = %e, "Failed to clean up surviving processes on startup");
-        }
 
         loop {
             tokio::select! {
@@ -242,7 +231,6 @@ impl HeartbeatMonitor {
                 String,
                 DateTime<Utc>,
                 Option<DateTime<Utc>>,
-                Option<i32>,
             ),
         >(
             r#"
@@ -251,8 +239,7 @@ impl HeartbeatMonitor {
                 cr.container_id,
                 cr.tenant_id,
                 cr.started_at,
-                (SELECT MAX(ie.created_at) FROM instance_events ie WHERE ie.instance_id = cr.instance_id) as last_activity,
-                cr.pid
+                (SELECT MAX(ie.created_at) FROM instance_events ie WHERE ie.instance_id = cr.instance_id) as last_activity
             FROM container_registry cr
             WHERE
                 -- Never received any event and container started before cutoff
@@ -267,14 +254,13 @@ impl HeartbeatMonitor {
         .await?
         .into_iter()
         .map(
-            |(instance_id, container_id, tenant_id, started_at, last_activity, pid)| {
+            |(instance_id, container_id, tenant_id, started_at, last_activity)| {
                 StaleContainer {
                     instance_id,
                     container_id,
                     tenant_id,
                     started_at,
                     last_activity,
-                    pid,
                 }
             },
         )
@@ -292,7 +278,6 @@ impl HeartbeatMonitor {
         warn!(
             instance_id = %container.instance_id,
             container_id = %container.container_id,
-            pid = ?container.pid,
             started_at = %container.started_at,
             last_activity = ?container.last_activity,
             "Failing stale instance"
@@ -304,7 +289,6 @@ impl HeartbeatMonitor {
             instance_id: container.instance_id.clone(),
             tenant_id: container.tenant_id.clone(),
             started_at: container.started_at,
-            spawned_pid: container.pid.map(|p| p as u32),
             child: None,
             metrics: None,
         };
@@ -320,15 +304,7 @@ impl HeartbeatMonitor {
             }
         };
 
-        // Step 2: Direct PID kill as backup + confirmation
-        let pid_confirmed_dead = self.kill_and_confirm_pid(container.pid).await;
-
-        // Step 3: Mark process_killed in container_registry
-        self.container_registry
-            .mark_process_killed(&container.instance_id)
-            .await?;
-
-        // Step 4: Build error message with kill evidence
+        // Step 2: Build error message with kill evidence
         let base_msg = match container.last_activity {
             Some(last_event) => format!(
                 "Instance stale: no activity since {} (timeout: {}s)",
@@ -342,11 +318,11 @@ impl HeartbeatMonitor {
             ),
         };
         let error_message = format!(
-            "{} [pid={:?}, container_id={}, runner_stopped={}, pid_confirmed_dead={}]",
-            base_msg, container.pid, container.container_id, runner_stopped, pid_confirmed_dead
+            "{} [container_id={}, runner_stopped={}]",
+            base_msg, container.container_id, runner_stopped
         );
 
-        // Step 5: Mark instance as failed in Core persistence with termination tracking
+        // Step 3: Mark instance as failed in Core persistence with termination tracking
         self.core_persistence
             .complete_instance(
                 CompleteInstanceParams::new(&container.instance_id, "failed")
@@ -357,16 +333,14 @@ impl HeartbeatMonitor {
             .await
             .map_err(|e| crate::error::Error::Other(format!("Core persistence error: {}", e)))?;
 
-        // Step 6: Clean up container registry entry
+        // Step 4: Clean up container registry entry
         self.container_registry
             .cleanup(&container.instance_id)
             .await?;
 
         info!(
             instance_id = %container.instance_id,
-            pid = ?container.pid,
             runner_stopped = runner_stopped,
-            pid_confirmed_dead = pid_confirmed_dead,
             "Stale instance killed, marked as failed, and cleaned up"
         );
 
@@ -457,107 +431,6 @@ impl HeartbeatMonitor {
             outcome = ?outcome,
             "Orphaned instance recovery decision"
         );
-    }
-
-    // =========================================================================
-    // PID Killing Utilities
-    // =========================================================================
-
-    /// Kill surviving processes from a previous run.
-    ///
-    /// Called on startup to handle the platform-restart edge case:
-    /// container_registry entries with PIDs survive in PostgreSQL,
-    /// but the processes may still be running as zombies.
-    async fn kill_surviving_processes(&self) -> crate::error::Result<()> {
-        let unkilled = self.container_registry.get_unkilled_containers().await?;
-
-        if unkilled.is_empty() {
-            debug!("No surviving processes to clean up on startup");
-            return Ok(());
-        }
-
-        info!(
-            count = unkilled.len(),
-            "Found containers with unconfirmed process kills, cleaning up"
-        );
-
-        for container in &unkilled {
-            let pid_confirmed_dead = self.kill_and_confirm_pid(container.pid).await;
-
-            // Mark process as killed in container_registry
-            self.container_registry
-                .mark_process_killed(&container.instance_id)
-                .await?;
-
-            let error_message = format!(
-                "Process killed on startup (previous run) [pid={:?}, container_id={}, pid_confirmed_dead={}]",
-                container.pid, container.container_id, pid_confirmed_dead
-            );
-
-            // Mark instance as failed in Core persistence
-            self.core_persistence
-                .complete_instance(
-                    CompleteInstanceParams::new(&container.instance_id, "failed")
-                        .if_running()
-                        .with_termination("crashed", None)
-                        .with_error(&error_message),
-                )
-                .await
-                .map_err(|e| {
-                    crate::error::Error::Other(format!("Core persistence error: {}", e))
-                })?;
-
-            // Clean up container registry entry
-            self.container_registry
-                .cleanup(&container.instance_id)
-                .await?;
-
-            info!(
-                instance_id = %container.instance_id,
-                pid = ?container.pid,
-                pid_confirmed_dead = pid_confirmed_dead,
-                "Cleaned up surviving process from previous run"
-            );
-        }
-
-        Ok(())
-    }
-
-    /// Send SIGKILL to a PID and confirm the process is dead.
-    ///
-    /// Returns true if the process is confirmed dead (either was already dead
-    /// or was successfully killed). Returns false if the process could not be
-    /// confirmed dead (e.g. no PID available, or kill failed and /proc still exists).
-    async fn kill_and_confirm_pid(&self, pid: Option<i32>) -> bool {
-        let Some(pid) = pid else {
-            return false;
-        };
-
-        // Send SIGKILL directly
-        let kill_result = signal::kill(Pid::from_raw(pid), Signal::SIGKILL);
-        match &kill_result {
-            Ok(()) => {
-                debug!(pid = pid, "Sent SIGKILL to process");
-            }
-            Err(nix::errno::Errno::ESRCH) => {
-                debug!(pid = pid, "Process already dead (ESRCH)");
-                return true;
-            }
-            Err(e) => {
-                warn!(pid = pid, error = %e, "Failed to send SIGKILL to process");
-            }
-        }
-
-        // Wait briefly for the process to die
-        tokio::time::sleep(Duration::from_millis(200)).await;
-
-        // Confirm via /proc/{pid}
-        let alive = std::path::Path::new(&format!("/proc/{}", pid)).exists();
-        if alive {
-            warn!(pid = pid, "Process still alive after SIGKILL");
-        }
-
-        !alive
     }
 }
 

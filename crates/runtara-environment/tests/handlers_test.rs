@@ -1308,7 +1308,6 @@ async fn test_spawn_container_monitor_timeout_enforcement() {
         instance_id: instance_id.clone(),
         tenant_id: tenant_id.to_string(),
         started_at: Utc::now(),
-        spawned_pid: None,
         child: None,
         metrics: None,
     };
@@ -1343,7 +1342,6 @@ async fn test_spawn_container_monitor_timeout_enforcement() {
         temp_dir.path().to_path_buf(),
         persistence.clone(),
         Duration::from_millis(100),
-        None, // No PID for test
         DrainController::new(),
     );
 
@@ -1443,7 +1441,6 @@ async fn test_spawn_container_monitor_no_timeout_on_quick_completion() {
         temp_dir.path().to_path_buf(),
         persistence.clone(),
         Duration::from_secs(10),
-        None, // No PID for test
         DrainController::new(),
     );
 
@@ -1534,7 +1531,6 @@ async fn test_spawn_container_monitor_timeout_race_condition() {
         temp_dir.path().to_path_buf(),
         persistence.clone(),
         Duration::from_millis(200),
-        None, // No PID for test
         DrainController::new(),
     );
 

@@ -635,7 +635,6 @@ impl EnvironmentRuntime {
                 instance_id: info.instance_id.clone(),
                 tenant_id: info.tenant_id.clone(),
                 started_at: info.started_at,
-                spawned_pid: info.pid.map(|p| p as u32),
                 child: None,
                 metrics: None,
             };
@@ -827,19 +826,16 @@ impl EnvironmentRuntime {
     }
 }
 
-/// Check if a process is alive by checking /proc/<pid> existence.
-fn is_process_alive(pid: i32) -> bool {
-    std::path::Path::new(&format!("/proc/{}", pid)).exists()
-}
-
 /// Recover orphaned containers on startup.
 ///
 /// When the Environment restarts, there may be containers in the registry
 /// that were running before the restart. This function checks each one:
 ///
-/// - If PID exists → the container is still running (will be handled by heartbeat monitor)
-/// - If PID is gone + Core shows terminal status → clean up registry
-/// - If PID is gone + Core shows "running" → mark as crashed and clean up
+/// Workflow guests run in-process, so an Environment restart necessarily killed
+/// every one of them. Each registry entry is therefore stale by definition:
+///
+/// - Core shows terminal status → clean up registry
+/// - Core still shows "running" → mark as crashed and clean up
 ///
 /// This prevents "zombie" entries in the registry and ensures crashed instances
 /// are properly marked.
@@ -864,25 +860,7 @@ async fn recover_orphaned_containers(pool: &PgPool, persistence: &dyn Persistenc
     for container in containers {
         let instance_id = &container.instance_id;
 
-        // Check if process is still alive
-        let is_alive = if let Some(pid) = container.pid {
-            is_process_alive(pid)
-        } else {
-            // No PID recorded - can't check, assume dead
-            false
-        };
-
-        if is_alive {
-            // Process is still running - heartbeat monitor will handle it
-            debug!(
-                instance_id = %instance_id,
-                pid = ?container.pid,
-                "Container process still alive, leaving for heartbeat monitor"
-            );
-            continue;
-        }
-
-        // Process is gone - check Core status
+        // The guest died with the previous process — check Core status.
         match persistence.get_instance(instance_id).await {
             Ok(Some(inst)) => {
                 let status = inst.status.as_str();
@@ -905,7 +883,6 @@ async fn recover_orphaned_containers(pool: &PgPool, persistence: &dyn Persistenc
                     warn!(
                         instance_id = %instance_id,
                         status = %status,
-                        pid = ?container.pid,
                         "Found orphaned container (process gone, Core shows running) - recovering after Environment restart"
                     );
 

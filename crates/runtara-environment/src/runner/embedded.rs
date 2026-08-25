@@ -721,7 +721,6 @@ impl Runner for EmbeddedWasmRunner {
             instance_id: options.instance_id.clone(),
             tenant_id: options.tenant_id.clone(),
             started_at: chrono::Utc::now(),
-            spawned_pid: None,
             child: None,
             metrics: Some(metrics),
         })
@@ -779,10 +778,6 @@ impl Runner for EmbeddedWasmRunner {
         };
 
         (None, stderr, metrics)
-    }
-
-    async fn get_pid(&self, _handle: &RunnerHandle) -> Option<u32> {
-        None
     }
 }
 

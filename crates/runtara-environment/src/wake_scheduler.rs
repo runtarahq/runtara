@@ -319,16 +319,6 @@ impl WakeScheduler {
                     "Instance woken successfully"
                 );
 
-                // Get PID from runner (for PID-based termination detection)
-                let pid = self.runner.get_pid(&handle).await.map(|p| p as i32);
-                if pid.is_some() {
-                    debug!(
-                        instance_id = %instance.instance_id,
-                        pid = ?pid,
-                        "Captured container PID for monitoring (wake)"
-                    );
-                }
-
                 // Register in container registry
                 let container_registry = ContainerRegistry::new(self.pool.clone());
                 let container_info = ContainerInfo {
@@ -338,7 +328,7 @@ impl WakeScheduler {
                     binary_path: image.binary_path.clone(),
                     bundle_path: image.bundle_path.clone(),
                     started_at: handle.started_at,
-                    pid,
+                    pid: None,
                     timeout_seconds: Some(options.timeout.as_secs() as i64),
                     process_killed: false,
                 };
@@ -357,7 +347,6 @@ impl WakeScheduler {
                     self.config.data_dir.clone(),
                     self.persistence.clone(),
                     options.timeout,
-                    pid,
                     self.drain.clone(),
                 );
             }

@@ -168,7 +168,6 @@ async fn launch_detached_completes_and_clears_registry() {
         .launch_detached(&options("inst-detached", &wasm))
         .await
         .expect("launch");
-    assert_eq!(handle.spawned_pid, None);
     assert!(handle.child.is_none());
 
     tokio::time::timeout(

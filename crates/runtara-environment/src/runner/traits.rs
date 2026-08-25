@@ -101,10 +101,6 @@ pub struct RunnerHandle {
     pub tenant_id: String,
     /// When the instance was started
     pub started_at: chrono::DateTime<chrono::Utc>,
-    /// PID of the spawned wrapper process (pasta or crun).
-    /// Captured immediately from `child.id()` at spawn time.
-    /// More reliable than querying `crun state` which may have timing issues.
-    pub spawned_pid: Option<u32>,
     /// Child process handle for waiting on exit (WASM runner).
     /// When present, the monitor uses child.wait() instead of PID polling
     /// to detect process exit. This ensures the exit code is available and
@@ -195,15 +191,6 @@ pub trait Runner: Send + Sync {
         &self,
         handle: &RunnerHandle,
     ) -> (Option<Value>, Option<String>, ContainerMetrics);
-
-    /// Get the process ID for a running instance.
-    ///
-    /// Returns None if the PID cannot be determined (e.g., process not running,
-    /// or runner type doesn't support PID tracking).
-    async fn get_pid(&self, handle: &RunnerHandle) -> Option<u32> {
-        let _ = handle;
-        None
-    }
 
     /// Wait for the instance to exit, polling with the given interval.
     ///

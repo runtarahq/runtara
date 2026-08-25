@@ -211,17 +211,6 @@ impl ContainerRegistry {
         Ok(container)
     }
 
-    /// Update container PID after spawn
-    pub async fn update_pid(&self, instance_id: &str, pid: i32) -> Result<()> {
-        sqlx::query("UPDATE container_registry SET pid = $1 WHERE instance_id = $2")
-            .bind(pid)
-            .bind(instance_id)
-            .execute(&self.pool)
-            .await?;
-
-        Ok(())
-    }
-
     // ===== Cancellation =====
 
     /// Request cancellation of a container
@@ -395,29 +384,6 @@ impl ContainerRegistry {
             .await?;
 
         Ok(())
-    }
-
-    // ===== Process Kill Tracking =====
-
-    /// Mark a container's process as confirmed killed.
-    pub async fn mark_process_killed(&self, instance_id: &str) -> Result<()> {
-        sqlx::query("UPDATE container_registry SET process_killed = TRUE WHERE instance_id = $1")
-            .bind(instance_id)
-            .execute(&self.pool)
-            .await?;
-
-        Ok(())
-    }
-
-    /// Get all containers with unconfirmed process kills (pid set, not confirmed dead).
-    pub async fn get_unkilled_containers(&self) -> Result<Vec<ContainerInfo>> {
-        let containers = sqlx::query_as::<_, ContainerInfo>(
-            "SELECT * FROM container_registry WHERE pid IS NOT NULL AND process_killed = FALSE",
-        )
-        .fetch_all(&self.pool)
-        .await?;
-
-        Ok(containers)
     }
 
     // ===== Cleanup =====

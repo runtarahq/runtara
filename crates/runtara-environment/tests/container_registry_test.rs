@@ -438,31 +438,6 @@ async fn test_get_nonexistent() {
     assert!(result.is_none());
 }
 
-#[tokio::test]
-async fn test_update_pid() {
-    skip_if_no_db!();
-    let pool = get_test_pool().await;
-
-    let registry = ContainerRegistry::new(pool.clone());
-    let instance_id = Uuid::new_v4().to_string();
-    let info = create_test_container_info(&instance_id, "tenant-1");
-
-    registry.register(&info).await.unwrap();
-
-    // Verify no PID initially
-    let retrieved = registry.get(&instance_id).await.unwrap().unwrap();
-    assert!(retrieved.pid.is_none());
-
-    // Update PID
-    registry.update_pid(&instance_id, 12345).await.unwrap();
-
-    // Verify PID updated
-    let retrieved = registry.get(&instance_id).await.unwrap().unwrap();
-    assert_eq!(retrieved.pid, Some(12345));
-
-    cleanup_instance(&pool, &instance_id).await;
-}
-
 // ============================================================================
 // Cancellation Tests
 // ============================================================================
@@ -988,7 +963,6 @@ async fn test_operations_on_nonexistent_container() {
 
     // All these should succeed (no error) but have no effect
     registry.unregister(instance_id).await.unwrap();
-    registry.update_pid(instance_id, 12345).await.unwrap();
     registry.clear_cancellation(instance_id).await.unwrap();
     registry.clear_status(instance_id).await.unwrap();
     registry.clear_heartbeat(instance_id).await.unwrap();

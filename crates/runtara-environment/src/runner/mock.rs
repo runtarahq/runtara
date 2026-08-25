@@ -164,7 +164,6 @@ impl Runner for MockRunner {
             instance_id: options.instance_id.clone(),
             tenant_id: options.tenant_id.clone(),
             started_at: Utc::now(),
-            spawned_pid: None, // Mock doesn't spawn real processes
             child: None,
             metrics: None,
         };

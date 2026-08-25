@@ -730,17 +730,7 @@ pub async fn handle_start_instance(
             let tenant_id_for_monitor = request.tenant_id.clone();
             let handle_id_for_registry = handle.handle_id.clone();
 
-            // Use the PID captured at spawn time (more reliable than querying crun state)
-            let pid = handle.spawned_pid.map(|p| p as i32);
-            if pid.is_some() {
-                debug!(
-                    instance_id = %instance_id,
-                    pid = ?pid,
-                    "Using spawned process PID for monitoring"
-                );
-            }
-
-            // Register in container registry (with PID if available)
+            // Register in container registry
             let container_registry = ContainerRegistry::new(state.pool.clone());
             let container_info = ContainerInfo {
                 container_id: handle_id_for_registry,
@@ -749,7 +739,7 @@ pub async fn handle_start_instance(
                 binary_path: image.binary_path,
                 bundle_path: image.bundle_path,
                 started_at: handle.started_at,
-                pid,
+                pid: None,
                 timeout_seconds: Some(timeout.as_secs() as i64),
                 process_killed: false,
             };
@@ -779,7 +769,6 @@ pub async fn handle_start_instance(
                 state.data_dir.clone(),
                 state.persistence.clone(),
                 timeout,
-                pid,
                 state.drain.clone(),
             );
 
@@ -884,7 +873,6 @@ pub async fn handle_stop_instance(
         instance_id: request.instance_id.clone(),
         tenant_id: container.tenant_id,
         started_at: container.started_at,
-        spawned_pid: container.pid.map(|p| p as u32),
         child: None,
         metrics: None,
     };
@@ -1115,17 +1103,7 @@ pub async fn handle_resume_instance(
             let tenant_id_for_monitor = instance.tenant_id.clone();
             let handle_id_for_registry = handle.handle_id.clone();
 
-            // Get PID from runner (for PID-based termination detection)
-            let pid = state.runner.get_pid(&handle).await.map(|p| p as i32);
-            if pid.is_some() {
-                debug!(
-                    instance_id = %request.instance_id,
-                    pid = ?pid,
-                    "Captured container PID for monitoring (resume)"
-                );
-            }
-
-            // Register in container registry (with PID if available)
+            // Register in container registry
             let container_registry = ContainerRegistry::new(state.pool.clone());
             let container_info = ContainerInfo {
                 container_id: handle_id_for_registry,
@@ -1134,7 +1112,7 @@ pub async fn handle_resume_instance(
                 binary_path: image.binary_path,
                 bundle_path: image.bundle_path,
                 started_at: handle.started_at,
-                pid,
+                pid: None,
                 timeout_seconds: Some(timeout.as_secs() as i64),
                 process_killed: false,
             };
@@ -1151,7 +1129,6 @@ pub async fn handle_resume_instance(
                 state.data_dir.clone(),
                 state.persistence.clone(),
                 options.timeout,
-                pid,
                 state.drain.clone(),
             );
 
@@ -1246,7 +1223,6 @@ pub fn spawn_container_monitor(
     _data_dir: PathBuf,
     persistence: Arc<dyn Persistence>,
     timeout: Duration,
-    pid: Option<i32>,
     drain: DrainController,
 ) {
     let instance_id = handle.instance_id.clone();
@@ -1266,7 +1242,6 @@ pub fn spawn_container_monitor(
             _ = &mut wait_fut => {
                 info!(
                     instance_id = %instance_id,
-                    pid = ?pid,
                     "Process terminated, checking Core status"
                 );
 
@@ -1413,13 +1388,11 @@ pub fn spawn_container_monitor(
                                             }
                                             info!(
                                                 instance_id = %instance_id,
-                                                pid = ?pid,
                                                 "Process terminated during drain - suspended for shutdown"
                                             );
                                         } else {
                                             warn!(
                                                 instance_id = %instance_id,
-                                                pid = ?pid,
                                                 "Process terminated without SDK event - marked as crashed"
                                             );
                                         }
