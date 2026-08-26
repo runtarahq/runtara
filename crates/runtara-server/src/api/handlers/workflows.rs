@@ -7,9 +7,6 @@
 //! - Maps service errors to HTTP status codes
 //! - Returns standardized API responses
 
-// Allow dead code temporarily - handlers will be wired up in routing layer
-#![allow(dead_code)]
-
 use axum::{
     extract::{Extension, Path, Query, State},
     http::StatusCode,
