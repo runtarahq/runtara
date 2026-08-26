@@ -726,7 +726,7 @@ pub trait Persistence: Send + Sync {
     /// (checkpoints, events, signals, etc.) are automatically cleaned up.
     ///
     /// Environment implementations should override this to clean up environment-specific
-    /// tables (container_registry, container_status, etc.) before calling the parent.
+    /// tables (container_registry, instance_images, etc.) before calling the parent.
     ///
     /// Returns the count of deleted instances.
     async fn delete_instances_batch(&self, _instance_ids: &[String]) -> Result<u64, CoreError> {

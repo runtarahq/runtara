@@ -53,11 +53,6 @@ async fn cleanup_instance(pool: &PgPool, instance_id: &str) {
         .execute(pool)
         .await
         .ok();
-    sqlx::query("DELETE FROM container_status WHERE instance_id = $1")
-        .bind(instance_id)
-        .execute(pool)
-        .await
-        .ok();
 }
 
 // ============================================================================
@@ -167,24 +162,6 @@ async fn test_register_upsert() {
 }
 
 #[tokio::test]
-async fn test_unregister() {
-    skip_if_no_db!();
-    let pool = get_test_pool().await;
-
-    let registry = ContainerRegistry::new(pool.clone());
-    let instance_id = Uuid::new_v4().to_string();
-    let info = create_test_container_info(&instance_id, "tenant-1");
-
-    registry.register(&info).await.unwrap();
-    assert!(registry.get(&instance_id).await.unwrap().is_some());
-
-    registry.unregister(&instance_id).await.unwrap();
-    assert!(registry.get(&instance_id).await.unwrap().is_none());
-
-    cleanup_instance(&pool, &instance_id).await;
-}
-
-#[tokio::test]
 async fn test_list_all_registered() {
     skip_if_no_db!();
     let pool = get_test_pool().await;
@@ -245,19 +222,10 @@ async fn test_cleanup_single_container() {
     let registry = ContainerRegistry::new(pool.clone());
     let instance_id = Uuid::new_v4().to_string();
 
-    // cleanup() clears both tables in one transaction. Only container_registry
-    // still has a writer in the codebase, so seed container_status directly —
-    // the point of the test is that cleanup() empties both, whoever wrote them.
+    // cleanup() drops the registry entry once an instance reaches a terminal
+    // state.
     let info = create_test_container_info(&instance_id, "tenant-1");
     registry.register(&info).await.unwrap();
-    sqlx::query(
-        "INSERT INTO container_status (instance_id, status, updated_at) VALUES ($1, $2, NOW())",
-    )
-    .bind(&instance_id)
-    .bind(serde_json::json!({"status": "running"}))
-    .execute(&pool)
-    .await
-    .unwrap();
 
     for table in TRACKING_TABLES {
         assert_eq!(
@@ -279,7 +247,7 @@ async fn test_cleanup_single_container() {
 }
 
 /// Every table `ContainerRegistry::cleanup` is responsible for emptying.
-const TRACKING_TABLES: [&str; 2] = ["container_registry", "container_status"];
+const TRACKING_TABLES: [&str; 1] = ["container_registry"];
 
 async fn row_count(pool: &PgPool, table: &str, instance_id: &str) -> i64 {
     // Table names come from the const above, never from test input.
@@ -305,7 +273,6 @@ async fn test_operations_on_nonexistent_container() {
     let instance_id = "nonexistent-instance";
 
     // All these should succeed (no error) but have no effect
-    registry.unregister(instance_id).await.unwrap();
     registry.cleanup(instance_id).await.unwrap();
 }
 

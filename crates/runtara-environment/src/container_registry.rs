@@ -75,21 +75,6 @@ impl ContainerRegistry {
         Ok(())
     }
 
-    /// Unregister a container (on completion or cleanup)
-    pub async fn unregister(&self, instance_id: &str) -> Result<()> {
-        sqlx::query("DELETE FROM container_registry WHERE instance_id = $1")
-            .bind(instance_id)
-            .execute(&self.pool)
-            .await?;
-
-        tracing::debug!(
-            instance_id = %instance_id,
-            "Unregistered container from registry"
-        );
-
-        Ok(())
-    }
-
     /// List all registered containers (all tenants)
     pub async fn list_all_registered(&self) -> Result<Vec<ContainerInfo>> {
         let containers = sqlx::query_as::<_, ContainerInfo>("SELECT * FROM container_registry")
@@ -113,22 +98,12 @@ impl ContainerRegistry {
 
     // ===== Cleanup =====
 
-    /// Full cleanup for a container (registry + status)
+    /// Drop a container's registry entry, once it has reached a terminal state.
     pub async fn cleanup(&self, instance_id: &str) -> Result<()> {
-        // Use a transaction to ensure atomicity
-        let mut tx = self.pool.begin().await?;
-
         sqlx::query("DELETE FROM container_registry WHERE instance_id = $1")
             .bind(instance_id)
-            .execute(&mut *tx)
+            .execute(&self.pool)
             .await?;
-
-        sqlx::query("DELETE FROM container_status WHERE instance_id = $1")
-            .bind(instance_id)
-            .execute(&mut *tx)
-            .await?;
-
-        tx.commit().await?;
 
         tracing::debug!(
             instance_id = %instance_id,

@@ -78,11 +78,6 @@ async fn cleanup(pool: &PgPool, instance_id: Option<&str>, image_id: Option<&str
             .execute(pool)
             .await
             .ok();
-        sqlx::query("DELETE FROM container_status WHERE instance_id = $1")
-            .bind(inst_id)
-            .execute(pool)
-            .await
-            .ok();
         sqlx::query("DELETE FROM wake_queue WHERE instance_id = $1")
             .bind(inst_id)
             .execute(pool)
