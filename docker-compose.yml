@@ -89,9 +89,15 @@ services:
       # server before the drain finishes (it then falls back to abrupt-restart
       # recovery on the next `up`).
       RUNTARA_SHUTDOWN_GRACE_MS: "30000"
-    # Wait for the in-process drain (RUNTARA_SHUTDOWN_GRACE_MS above) before
-    # SIGKILL. Keep this slightly larger than the drain window.
-    stop_grace_period: 35s
+    # Shutdown runs two waits back to back, and `stop_grace_period` has to cover
+    # their sum, not the larger of them:
+    #   1. the execution drain above          RUNTARA_SHUTDOWN_GRACE_MS  30s
+    #   2. runtara-core draining in-flight    RUNTARA_CORE_SHUTDOWN_GRACE_MS
+    #      instance requests                                              5s
+    # 40s leaves a small margin over that 35s. Raise either grace and this has
+    # to move too, or SIGKILL lands mid-drain — the abrupt restart this is here
+    # to avoid.
+    stop_grace_period: 40s
     # Publish the *proxy's* listen port (8080). Ports must be declared on the
     # network-namespace owner, which the sidecar joins via network_mode below.
     ports:

@@ -48,7 +48,14 @@ use crate::server::InstanceServerState;
 
 /// How long [`CoreRuntime::shutdown`] waits for in-flight requests to finish
 /// before it stops waiting and aborts the server task.
-pub const DEFAULT_SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
+///
+/// Deliberately short. This wait is a backstop for the instance-protocol
+/// requests still on the wire — checkpoints, events, signal acks — which take
+/// milliseconds. In an embedded host it is a *second* phase, appended after
+/// that host's own execution drain, so a generous value here eats into the
+/// process-level shutdown budget (`stop_grace_period` in `docker-compose.yml`)
+/// for no benefit.
+pub const DEFAULT_SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 
 /// Builder for creating a [`CoreRuntime`].
 pub struct CoreRuntimeBuilder {
@@ -252,10 +259,18 @@ impl CoreRuntime {
     /// Stops accepting new connections and waits for the requests already in
     /// flight to finish, so an instance mid-checkpoint gets to finish writing
     /// instead of being severed. The wait is bounded by the grace period from
-    /// [`CoreRuntimeBuilder::shutdown_grace`]; if it expires the server task is
-    /// aborted and whatever is still in flight is cut off.
+    /// [`CoreRuntimeBuilder::shutdown_grace`].
     ///
-    /// Pair this with [`set_draining`](Self::set_draining): flip the drain flag
+    /// When that grace expires the server task is aborted, which ends *this
+    /// wait* — not the requests. axum serves each connection on its own
+    /// spawned task, so a straggler keeps running detached; what actually
+    /// severs it is the process exiting afterwards. A caller that tears down
+    /// shared resources (a connection pool, telemetry) right after this
+    /// returns should treat a grace expiry as "handlers may still be running".
+    ///
+    /// The grace only covers requests already accepted. An instance that has
+    /// not yet issued its final checkpoint POST is not protected by it, so
+    /// pair this with [`set_draining`](Self::set_draining): flip the drain flag
     /// first so no new instances register, give running ones time to reach a
     /// checkpoint, and only then call this.
     pub async fn shutdown(mut self) -> Result<()> {
@@ -326,10 +341,11 @@ mod tests {
         /// How long `health_check_db` blocks, so a test can hold a request in
         /// flight across a shutdown.
         health_delay: Duration,
-        /// Fired on entry to `health_check_db`. Lets a test prove the request is
-        /// inside the handler at the moment shutdown is signalled instead of
-        /// inferring it from timing — the mistake that made two earlier attempts
-        /// at this look like failures.
+        /// Fired on entry to `health_check_db`, so a test can establish that the
+        /// request is inside the handler before it signals shutdown. Inferring
+        /// that from elapsed time instead is unreliable: the request can finish
+        /// first, and the test then passes against a runtime that never drained
+        /// anything.
         health_entered: Arc<Notify>,
     }
 
