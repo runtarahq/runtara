@@ -86,7 +86,9 @@ pub async fn handle_checkpoint(
             state: existing.state,
             pending_signal,
             custom_signal,
-            last_error: None, // TODO: Fetch last error from error_history when available
+            // error_history was dropped in core migration 017 — it was created,
+            // indexed and never written. Nothing populates last_error today.
+            last_error: None,
         });
     }
 
