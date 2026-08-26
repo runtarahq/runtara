@@ -35,20 +35,27 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use anyhow::Result;
+use tokio::sync::Notify;
 use tokio::task::JoinHandle;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::instance_handlers::InstanceHandlerState;
 use crate::persistence::Persistence;
 use crate::server::InstanceServerState;
+
+/// How long [`CoreRuntime::shutdown`] waits for in-flight requests to finish
+/// before it stops waiting and aborts the server task.
+pub const DEFAULT_SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
 
 /// Builder for creating a [`CoreRuntime`].
 pub struct CoreRuntimeBuilder {
     persistence: Option<Arc<dyn Persistence>>,
     bind_addr: SocketAddr,
     max_concurrent_instances: u32,
+    shutdown_grace: Duration,
 }
 
 impl std::fmt::Debug for CoreRuntimeBuilder {
@@ -57,6 +64,7 @@ impl std::fmt::Debug for CoreRuntimeBuilder {
             .field("persistence", &self.persistence.as_ref().map(|_| "..."))
             .field("bind_addr", &self.bind_addr)
             .field("max_concurrent_instances", &self.max_concurrent_instances)
+            .field("shutdown_grace", &self.shutdown_grace)
             .finish()
     }
 }
@@ -67,6 +75,7 @@ impl Default for CoreRuntimeBuilder {
             persistence: None,
             bind_addr: "0.0.0.0:8001".parse().unwrap(),
             max_concurrent_instances: 0,
+            shutdown_grace: DEFAULT_SHUTDOWN_GRACE,
         }
     }
 }
@@ -99,6 +108,18 @@ impl CoreRuntimeBuilder {
         self
     }
 
+    /// How long [`CoreRuntime::shutdown`] waits for in-flight requests to
+    /// finish before aborting the server task.
+    ///
+    /// Default: [`DEFAULT_SHUTDOWN_GRACE`]. Set this above the slowest request
+    /// the deployment expects to serve; the wait ends as soon as the last
+    /// request finishes, so a generous value costs nothing when nothing is in
+    /// flight.
+    pub fn shutdown_grace(mut self, grace: Duration) -> Self {
+        self.shutdown_grace = grace;
+        self
+    }
+
     /// Build the runtime configuration.
     ///
     /// Returns an error if required fields are missing.
@@ -111,6 +132,7 @@ impl CoreRuntimeBuilder {
             persistence,
             bind_addr: self.bind_addr,
             max_concurrent_instances: self.max_concurrent_instances,
+            shutdown_grace: self.shutdown_grace,
         })
     }
 }
@@ -120,6 +142,7 @@ pub struct CoreRuntimeConfig {
     persistence: Arc<dyn Persistence>,
     bind_addr: SocketAddr,
     max_concurrent_instances: u32,
+    shutdown_grace: Duration,
 }
 
 impl std::fmt::Debug for CoreRuntimeConfig {
@@ -128,6 +151,7 @@ impl std::fmt::Debug for CoreRuntimeConfig {
             .field("persistence", &"...")
             .field("bind_addr", &self.bind_addr)
             .field("max_concurrent_instances", &self.max_concurrent_instances)
+            .field("shutdown_grace", &self.shutdown_grace)
             .finish()
     }
 }
@@ -143,8 +167,15 @@ impl CoreRuntimeConfig {
 
         let bind_addr = self.bind_addr;
         let server_state = state.clone();
+        let shutdown_signal = Arc::new(Notify::new());
+        let server_shutdown = Arc::clone(&shutdown_signal);
         let server_handle = tokio::spawn(async move {
-            crate::server::http_server::run_http_server(bind_addr, server_state).await
+            crate::server::http_server::run_http_server_with_shutdown(
+                bind_addr,
+                server_state,
+                async move { server_shutdown.notified().await },
+            )
+            .await
         });
 
         info!(addr = %bind_addr, "CoreRuntime started");
@@ -154,6 +185,8 @@ impl CoreRuntimeConfig {
             state,
             bind_addr,
             draining,
+            shutdown_signal,
+            shutdown_grace: self.shutdown_grace,
         })
     }
 }
@@ -169,6 +202,8 @@ pub struct CoreRuntime {
     state: Arc<InstanceServerState>,
     bind_addr: SocketAddr,
     draining: Arc<AtomicBool>,
+    shutdown_signal: Arc<Notify>,
+    shutdown_grace: Duration,
 }
 
 impl CoreRuntime {
@@ -214,14 +249,41 @@ impl CoreRuntime {
 
     /// Gracefully shut down the runtime.
     ///
-    /// This aborts the HTTP server and waits for it to complete.
-    pub async fn shutdown(self) -> Result<()> {
-        info!("CoreRuntime shutting down...");
+    /// Stops accepting new connections and waits for the requests already in
+    /// flight to finish, so an instance mid-checkpoint gets to finish writing
+    /// instead of being severed. The wait is bounded by the grace period from
+    /// [`CoreRuntimeBuilder::shutdown_grace`]; if it expires the server task is
+    /// aborted and whatever is still in flight is cut off.
+    ///
+    /// Pair this with [`set_draining`](Self::set_draining): flip the drain flag
+    /// first so no new instances register, give running ones time to reach a
+    /// checkpoint, and only then call this.
+    pub async fn shutdown(mut self) -> Result<()> {
+        info!(
+            grace_ms = self.shutdown_grace.as_millis() as u64,
+            "CoreRuntime shutting down..."
+        );
 
-        // Abort HTTP server
-        self.server_handle.abort();
+        // Ask the HTTP server to stop accepting and drain what it is serving.
+        // `notify_one` rather than `notify_waiters` so the request is not lost
+        // if the server task has not polled the shutdown future yet.
+        self.shutdown_signal.notify_one();
 
-        match self.server_handle.await {
+        let drained = tokio::time::timeout(self.shutdown_grace, &mut self.server_handle).await;
+
+        let outcome = match drained {
+            Ok(joined) => joined,
+            Err(_) => {
+                warn!(
+                    grace_ms = self.shutdown_grace.as_millis() as u64,
+                    "CoreRuntime shutdown grace expired with requests still in flight; aborting"
+                );
+                self.server_handle.abort();
+                (&mut self.server_handle).await
+            }
+        };
+
+        match outcome {
             Ok(Ok(())) => {
                 info!("CoreRuntime shutdown complete");
                 Ok(())
@@ -257,9 +319,35 @@ mod tests {
     };
     use async_trait::async_trait;
     use chrono::{DateTime, Utc};
+    use std::time::Instant;
 
-    /// Mock persistence for testing the runtime builder without database.
-    struct MockPersistence;
+    /// Mock persistence for testing the runtime without a database.
+    struct MockPersistence {
+        /// How long `health_check_db` blocks, so a test can hold a request in
+        /// flight across a shutdown.
+        health_delay: Duration,
+        /// Fired on entry to `health_check_db`. Lets a test prove the request is
+        /// inside the handler at the moment shutdown is signalled instead of
+        /// inferring it from timing — the mistake that made two earlier attempts
+        /// at this look like failures.
+        health_entered: Arc<Notify>,
+    }
+
+    impl MockPersistence {
+        fn new() -> Self {
+            Self {
+                health_delay: Duration::ZERO,
+                health_entered: Arc::new(Notify::new()),
+            }
+        }
+
+        fn slow_health(health_delay: Duration, health_entered: Arc<Notify>) -> Self {
+            Self {
+                health_delay,
+                health_entered,
+            }
+        }
+    }
 
     #[async_trait]
     impl Persistence for MockPersistence {
@@ -403,6 +491,10 @@ mod tests {
         }
 
         async fn health_check_db(&self) -> Result<bool, CoreError> {
+            self.health_entered.notify_one();
+            if !self.health_delay.is_zero() {
+                tokio::time::sleep(self.health_delay).await;
+            }
             Ok(true)
         }
 
@@ -466,6 +558,122 @@ mod tests {
         }
     }
 
+    /// Claim a port by binding and releasing it. `start()` binds asynchronously
+    /// inside the spawned server task, so callers pair this with
+    /// [`wait_until_listening`].
+    async fn free_port() -> SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        addr
+    }
+
+    async fn wait_until_listening(addr: SocketAddr) {
+        for _ in 0..100 {
+            if tokio::net::TcpStream::connect(addr).await.is_ok() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("server never started listening on {addr}");
+    }
+
+    /// `GET /health`, read until the server closes the connection. Returns
+    /// whatever arrived — empty or partial if the connection was severed.
+    async fn get_health(addr: SocketAddr) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        stream
+            .write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let mut buf = Vec::new();
+        let _ = stream.read_to_end(&mut buf).await;
+        String::from_utf8_lossy(&buf).into_owned()
+    }
+
+    #[tokio::test]
+    async fn shutdown_lets_an_in_flight_request_finish() {
+        let entered = Arc::new(Notify::new());
+        let addr = free_port().await;
+        let runtime = CoreRuntime::builder()
+            .persistence(Arc::new(MockPersistence::slow_health(
+                Duration::from_millis(800),
+                Arc::clone(&entered),
+            )))
+            .bind_addr(addr)
+            .shutdown_grace(Duration::from_secs(10))
+            .build()
+            .unwrap()
+            .start()
+            .await
+            .unwrap();
+
+        wait_until_listening(addr).await;
+        let client = tokio::spawn(get_health(addr));
+        entered.notified().await;
+
+        let started = Instant::now();
+        runtime.shutdown().await.unwrap();
+        let waited = started.elapsed();
+
+        let response = client.await.unwrap();
+        assert!(
+            response.starts_with("HTTP/1.1 200"),
+            "in-flight request was severed by shutdown: {response:?}"
+        );
+        assert!(
+            waited >= Duration::from_millis(500),
+            "shutdown returned before the in-flight request finished: {waited:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_stops_waiting_once_the_grace_expires() {
+        let entered = Arc::new(Notify::new());
+        let addr = free_port().await;
+        let runtime = CoreRuntime::builder()
+            .persistence(Arc::new(MockPersistence::slow_health(
+                Duration::from_secs(3),
+                Arc::clone(&entered),
+            )))
+            .bind_addr(addr)
+            .shutdown_grace(Duration::from_millis(300))
+            .build()
+            .unwrap()
+            .start()
+            .await
+            .unwrap();
+
+        wait_until_listening(addr).await;
+        let client = tokio::spawn(get_health(addr));
+        entered.notified().await;
+
+        let started = Instant::now();
+        runtime.shutdown().await.unwrap();
+        let waited = started.elapsed();
+
+        assert!(
+            waited >= Duration::from_millis(300),
+            "shutdown gave up before its grace elapsed: {waited:?}"
+        );
+        assert!(
+            waited < Duration::from_secs(2),
+            "shutdown waited past its grace for a request that needed 3s: {waited:?}"
+        );
+        // axum spawns a task per connection (`handle_connection` in its `serve`
+        // module), so aborting the serve task ends the *wait*, not the request
+        // itself — what severs the straggler is the process exiting afterwards.
+        // The property under test is that shutdown is bounded, so assert the
+        // request really was still running when it returned.
+        assert!(
+            !client.is_finished(),
+            "the request finished on its own; the grace never actually expired"
+        );
+        client.abort();
+    }
+
     #[test]
     fn test_builder_default() {
         let builder = CoreRuntimeBuilder::default();
@@ -482,7 +690,7 @@ mod tests {
 
     #[test]
     fn test_builder_persistence() {
-        let persistence = Arc::new(MockPersistence);
+        let persistence = Arc::new(MockPersistence::new());
         let builder = CoreRuntimeBuilder::new().persistence(persistence);
         assert!(builder.persistence.is_some());
     }
@@ -496,7 +704,7 @@ mod tests {
 
     #[test]
     fn test_builder_chaining() {
-        let persistence = Arc::new(MockPersistence);
+        let persistence = Arc::new(MockPersistence::new());
         let addr: SocketAddr = "127.0.0.1:9001".parse().unwrap();
         let builder = CoreRuntimeBuilder::new()
             .persistence(persistence)
@@ -515,7 +723,7 @@ mod tests {
 
     #[test]
     fn test_builder_debug_with_persistence() {
-        let persistence = Arc::new(MockPersistence);
+        let persistence = Arc::new(MockPersistence::new());
         let builder = CoreRuntimeBuilder::new().persistence(persistence);
         let debug_str = format!("{:?}", builder);
         assert!(debug_str.contains("CoreRuntimeBuilder"));
@@ -533,7 +741,7 @@ mod tests {
 
     #[test]
     fn test_builder_build_success() {
-        let persistence = Arc::new(MockPersistence);
+        let persistence = Arc::new(MockPersistence::new());
         let result = CoreRuntimeBuilder::new().persistence(persistence).build();
         assert!(result.is_ok());
         let config = result.unwrap();
@@ -542,7 +750,7 @@ mod tests {
 
     #[test]
     fn test_builder_build_with_custom_addr() {
-        let persistence = Arc::new(MockPersistence);
+        let persistence = Arc::new(MockPersistence::new());
         let addr: SocketAddr = "0.0.0.0:9002".parse().unwrap();
         let result = CoreRuntimeBuilder::new()
             .persistence(persistence)
@@ -561,7 +769,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_runtime_start_and_shutdown() {
-        let persistence = Arc::new(MockPersistence);
+        let persistence = Arc::new(MockPersistence::new());
         // Use port 0 to let OS assign an available port
         let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
 

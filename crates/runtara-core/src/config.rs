@@ -13,6 +13,8 @@ pub struct Config {
     pub http_addr: SocketAddr,
     /// Maximum concurrent instances
     pub max_concurrent_instances: u32,
+    /// How long shutdown waits for in-flight requests before aborting them
+    pub shutdown_grace_ms: u64,
 }
 
 impl Config {
@@ -24,6 +26,10 @@ impl Config {
     /// Optional (with defaults):
     /// - `RUNTARA_HTTP_PORT`: HTTP server port (default: 8001)
     /// - `RUNTARA_MAX_CONCURRENT_INSTANCES`: Max concurrent instances (default: 32)
+    /// - `RUNTARA_CORE_SHUTDOWN_GRACE_MS`: How long shutdown waits for in-flight
+    ///   requests to finish before aborting them (default: 30000). Distinct from
+    ///   runtara-server's `RUNTARA_SHUTDOWN_GRACE_MS`, which bounds a different
+    ///   phase — the two share a process in the embedded server.
     pub fn from_env() -> Result<Self, ConfigError> {
         let database_url = std::env::var("RUNTARA_DATABASE_URL")
             .map_err(|_| ConfigError::Missing("RUNTARA_DATABASE_URL"))?;
@@ -45,10 +51,21 @@ impl Config {
                 )
             })?;
 
+        let shutdown_grace_ms: u64 = std::env::var("RUNTARA_CORE_SHUTDOWN_GRACE_MS")
+            .unwrap_or_else(|_| "30000".to_string())
+            .parse()
+            .map_err(|_| {
+                ConfigError::Invalid(
+                    "RUNTARA_CORE_SHUTDOWN_GRACE_MS",
+                    "must be a non-negative integer number of milliseconds",
+                )
+            })?;
+
         Ok(Self {
             database_url,
             http_addr: SocketAddr::from(([0, 0, 0, 0], http_port)),
             max_concurrent_instances,
+            shutdown_grace_ms,
         })
     }
 }

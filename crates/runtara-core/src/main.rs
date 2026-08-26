@@ -11,6 +11,7 @@
 //! are handled by runtara-environment.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use sqlx::postgres::PgPoolOptions;
@@ -91,6 +92,7 @@ async fn main() -> Result<()> {
     let runtime = CoreRuntime::builder()
         .persistence(persistence)
         .bind_addr(config.http_addr)
+        .shutdown_grace(Duration::from_millis(config.shutdown_grace_ms))
         .build()?
         .start()
         .await?;
