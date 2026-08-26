@@ -265,20 +265,6 @@ pub struct ErrorHistoryRecord {
     pub created_at: DateTime<Utc>,
 }
 
-/// Wake queue entry from the persistence layer.
-#[derive(Debug, Clone, sqlx::FromRow)]
-pub struct WakeEntry {
-    /// Database primary key.
-    pub id: i64,
-    /// Instance to wake.
-    pub instance_id: String,
-    /// Checkpoint to resume from.
-    pub checkpoint_id: String,
-    /// When to wake the instance.
-    pub wake_at: DateTime<Utc>,
-    /// When this wake entry was created.
-    pub created_at: DateTime<Utc>,
-}
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 

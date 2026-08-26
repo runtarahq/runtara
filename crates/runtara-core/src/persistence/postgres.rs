@@ -130,7 +130,6 @@ async fn record_resources_from_db(pool: &PgPool, instance_id: &str) {
 use super::{
     CheckpointRecord, CompleteInstanceParams, CustomSignalRecord, EventRecord, InstanceRecord,
     ListEventsFilter, ListStepSummariesFilter, Persistence, SignalRecord, StepSummaryRecord,
-    WakeEntry,
 };
 
 // ============================================================================
@@ -349,71 +348,6 @@ pub async fn load_retry_history(
     .await?;
 
     Ok(records)
-}
-
-// ============================================================================
-// Wake Queue Operations
-// ============================================================================
-
-/// Schedule a wake for an instance.
-/// Uses ON CONFLICT to replace existing wake entry for the same instance.
-pub async fn schedule_wake(
-    pool: &PgPool,
-    instance_id: &str,
-    checkpoint_id: &str,
-    wake_at: DateTime<Utc>,
-) -> Result<(), CoreError> {
-    sqlx::query(
-        r#"
-        INSERT INTO wake_queue (instance_id, checkpoint_id, wake_at, created_at)
-        VALUES ($1, $2, $3, NOW())
-        ON CONFLICT (instance_id) DO UPDATE
-        SET checkpoint_id = EXCLUDED.checkpoint_id,
-            wake_at = EXCLUDED.wake_at,
-            created_at = NOW()
-        "#,
-    )
-    .bind(instance_id)
-    .bind(checkpoint_id)
-    .bind(wake_at)
-    .execute(pool)
-    .await?;
-
-    Ok(())
-}
-
-/// Get a wake entry for an instance.
-pub async fn get_wake_entry(
-    pool: &PgPool,
-    instance_id: &str,
-) -> Result<Option<WakeEntry>, CoreError> {
-    let record = sqlx::query_as::<_, WakeEntry>(
-        r#"
-        SELECT id, instance_id, checkpoint_id, wake_at, created_at
-        FROM wake_queue
-        WHERE instance_id = $1
-        "#,
-    )
-    .bind(instance_id)
-    .fetch_optional(pool)
-    .await?;
-
-    Ok(record)
-}
-
-/// Clear wake entry for an instance.
-pub async fn clear_wake(pool: &PgPool, instance_id: &str) -> Result<(), CoreError> {
-    sqlx::query(
-        r#"
-        DELETE FROM wake_queue
-        WHERE instance_id = $1
-        "#,
-    )
-    .bind(instance_id)
-    .execute(pool)
-    .await?;
-
-    Ok(())
 }
 
 // ============================================================================
@@ -1150,9 +1084,6 @@ mod tests {
 
         cleanup_test_instance(&pool, instance_id).await;
     }
-
-    // NOTE: Legacy wake_queue tests removed - wake scheduling now uses sleep_until column
-    // on the instances table (see migration 003_drop_wake_queue.sql)
 
     #[tokio::test]
     async fn test_insert_event() {
