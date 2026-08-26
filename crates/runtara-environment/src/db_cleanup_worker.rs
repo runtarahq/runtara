@@ -13,7 +13,6 @@
 //! Environment-specific tables cleaned before instance deletion:
 //! - `container_registry`
 //! - `container_status`
-//! - `container_cancellations`
 //! - `container_heartbeats`
 //! - `instance_images`
 
@@ -258,12 +257,6 @@ impl DbCleanupWorker {
 
         // container_status
         sqlx::query("DELETE FROM container_status WHERE instance_id = ANY($1)")
-            .bind(instance_ids)
-            .execute(&mut *tx)
-            .await?;
-
-        // container_cancellations
-        sqlx::query("DELETE FROM container_cancellations WHERE instance_id = ANY($1)")
             .bind(instance_ids)
             .execute(&mut *tx)
             .await?;

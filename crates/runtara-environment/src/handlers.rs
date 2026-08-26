@@ -777,6 +777,10 @@ pub struct StopInstanceRequest {
     /// Reason for stopping.
     pub reason: String,
     /// Grace period before force kill in seconds.
+    ///
+    /// Accepted for wire compatibility but not currently observed: the stop
+    /// path cancels the guest immediately via `Runner::stop`. It previously
+    /// only ever populated the cancellation token, which nothing read.
     pub grace_period_seconds: u64,
 }
 
@@ -824,15 +828,6 @@ pub async fn handle_stop_instance(
             });
         }
     };
-
-    // Request cancellation
-    let grace_period = Duration::from_secs(request.grace_period_seconds.max(1));
-    if let Err(e) = container_registry
-        .request_cancellation(&request.instance_id, grace_period, &request.reason)
-        .await
-    {
-        warn!(error = %e, "Failed to write cancellation token");
-    }
 
     // Build runner handle and stop
     let handle = RunnerHandle {

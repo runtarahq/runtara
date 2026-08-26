@@ -8,7 +8,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
-use std::time::Duration;
 
 use crate::error::Result;
 
@@ -112,45 +111,9 @@ impl ContainerRegistry {
         Ok(container)
     }
 
-    // ===== Cancellation =====
-
-    /// Request cancellation of a container
-    pub async fn request_cancellation(
-        &self,
-        instance_id: &str,
-        grace_period: Duration,
-        reason: &str,
-    ) -> Result<()> {
-        sqlx::query(
-            r#"
-            INSERT INTO container_cancellations (instance_id, requested_at, grace_period_seconds, reason)
-            VALUES ($1, $2, $3, $4)
-            ON CONFLICT (instance_id) DO UPDATE SET
-                requested_at = EXCLUDED.requested_at,
-                grace_period_seconds = EXCLUDED.grace_period_seconds,
-                reason = EXCLUDED.reason
-            "#,
-        )
-        .bind(instance_id)
-        .bind(Utc::now())
-        .bind(grace_period.as_secs() as i32)
-        .bind(reason)
-        .execute(&self.pool)
-        .await?;
-
-        tracing::info!(
-            instance_id = %instance_id,
-            grace_period_secs = grace_period.as_secs(),
-            reason = %reason,
-            "Wrote cancellation token"
-        );
-
-        Ok(())
-    }
-
     // ===== Cleanup =====
 
-    /// Full cleanup for a container (registry, status, heartbeat, cancellation)
+    /// Full cleanup for a container (registry, status, heartbeat)
     pub async fn cleanup(&self, instance_id: &str) -> Result<()> {
         // Use a transaction to ensure atomicity
         let mut tx = self.pool.begin().await?;
@@ -161,11 +124,6 @@ impl ContainerRegistry {
             .await?;
 
         sqlx::query("DELETE FROM container_status WHERE instance_id = $1")
-            .bind(instance_id)
-            .execute(&mut *tx)
-            .await?;
-
-        sqlx::query("DELETE FROM container_cancellations WHERE instance_id = $1")
             .bind(instance_id)
             .execute(&mut *tx)
             .await?;

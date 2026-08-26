@@ -579,7 +579,7 @@ impl EnvironmentRuntime {
 
         info!(active_count = active.len(), "Signalling active instances");
 
-        // Write signal + cancellation token for every active instance.
+        // Signal every active instance; the guest picks this up from core.
         for info in &active {
             if let Err(e) = self
                 .state
@@ -591,16 +591,6 @@ impl EnvironmentRuntime {
                     instance_id = %info.instance_id,
                     error = %e,
                     "Failed to insert shutdown signal"
-                );
-            }
-            if let Err(e) = container_registry
-                .request_cancellation(&info.instance_id, grace, "shutdown_requested")
-                .await
-            {
-                warn!(
-                    instance_id = %info.instance_id,
-                    error = %e,
-                    "Failed to write cancellation token"
                 );
             }
         }

@@ -7,7 +7,6 @@ mod common;
 use chrono::Utc;
 use runtara_environment::container_registry::{ContainerInfo, ContainerRegistry};
 use sqlx::PgPool;
-use std::time::Duration;
 use uuid::Uuid;
 
 /// Required preflight for the explicitly feature-gated database suite.
@@ -55,11 +54,6 @@ async fn cleanup_instance(pool: &PgPool, instance_id: &str) {
         .await
         .ok();
     sqlx::query("DELETE FROM container_status WHERE instance_id = $1")
-        .bind(instance_id)
-        .execute(pool)
-        .await
-        .ok();
-    sqlx::query("DELETE FROM container_cancellations WHERE instance_id = $1")
         .bind(instance_id)
         .execute(pool)
         .await
@@ -245,74 +239,6 @@ async fn test_get_nonexistent() {
 }
 
 // ============================================================================
-// Cancellation Tests
-// ============================================================================
-
-#[tokio::test]
-async fn test_request_cancellation() {
-    skip_if_no_db!();
-    let pool = get_test_pool().await;
-
-    let registry = ContainerRegistry::new(pool.clone());
-    let instance_id = Uuid::new_v4().to_string();
-
-    // Request cancellation
-    registry
-        .request_cancellation(&instance_id, Duration::from_secs(30), "test cancellation")
-        .await
-        .unwrap();
-
-    // Assert on the row directly: nothing in the codebase reads this table any
-    // more, so there is no getter to go through.
-    let (grace, reason) = sqlx::query_as::<_, (i32, String)>(
-        "SELECT grace_period_seconds, reason FROM container_cancellations WHERE instance_id = $1",
-    )
-    .bind(&instance_id)
-    .fetch_one(&pool)
-    .await
-    .expect("Should have cancellation request");
-
-    assert_eq!(grace, 30);
-    assert_eq!(reason, "test cancellation");
-
-    cleanup_instance(&pool, &instance_id).await;
-}
-
-#[tokio::test]
-async fn test_cancellation_upsert() {
-    skip_if_no_db!();
-    let pool = get_test_pool().await;
-
-    let registry = ContainerRegistry::new(pool.clone());
-    let instance_id = Uuid::new_v4().to_string();
-
-    // Request first cancellation
-    registry
-        .request_cancellation(&instance_id, Duration::from_secs(30), "first reason")
-        .await
-        .unwrap();
-
-    // Request second cancellation (should update)
-    registry
-        .request_cancellation(&instance_id, Duration::from_secs(60), "second reason")
-        .await
-        .unwrap();
-
-    // Should have updated values
-    let (grace, reason) = sqlx::query_as::<_, (i32, String)>(
-        "SELECT grace_period_seconds, reason FROM container_cancellations WHERE instance_id = $1",
-    )
-    .bind(&instance_id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(grace, 60);
-    assert_eq!(reason, "second reason");
-
-    cleanup_instance(&pool, &instance_id).await;
-}
-
-// ============================================================================
 // Cleanup Tests
 // ============================================================================
 
@@ -324,16 +250,11 @@ async fn test_cleanup_single_container() {
     let registry = ContainerRegistry::new(pool.clone());
     let instance_id = Uuid::new_v4().to_string();
 
-    // cleanup() clears four tables in one transaction. Only container_registry
-    // and container_cancellations still have writers in the codebase, so seed
-    // the other two directly — the point of the test is that cleanup() empties
-    // all four, whoever wrote them.
+    // cleanup() clears three tables in one transaction. Only container_registry
+    // still has a writer in the codebase, so seed the other two directly — the
+    // point of the test is that cleanup() empties all three, whoever wrote them.
     let info = create_test_container_info(&instance_id, "tenant-1");
     registry.register(&info).await.unwrap();
-    registry
-        .request_cancellation(&instance_id, Duration::from_secs(30), "test")
-        .await
-        .unwrap();
     sqlx::query(
         "INSERT INTO container_heartbeats (instance_id, last_heartbeat) VALUES ($1, NOW())",
     )
@@ -370,10 +291,9 @@ async fn test_cleanup_single_container() {
 }
 
 /// Every table `ContainerRegistry::cleanup` is responsible for emptying.
-const TRACKING_TABLES: [&str; 4] = [
+const TRACKING_TABLES: [&str; 3] = [
     "container_registry",
     "container_status",
-    "container_cancellations",
     "container_heartbeats",
 ];
 
