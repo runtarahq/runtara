@@ -4,6 +4,8 @@
 
 use std::net::SocketAddr;
 
+use crate::runtime::DEFAULT_SHUTDOWN_GRACE;
+
 /// Runtara Core configuration
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -13,6 +15,8 @@ pub struct Config {
     pub http_addr: SocketAddr,
     /// Maximum concurrent instances
     pub max_concurrent_instances: u32,
+    /// How long shutdown waits for in-flight requests before aborting them
+    pub shutdown_grace_ms: u64,
 }
 
 impl Config {
@@ -24,6 +28,11 @@ impl Config {
     /// Optional (with defaults):
     /// - `RUNTARA_HTTP_PORT`: HTTP server port (default: 8001)
     /// - `RUNTARA_MAX_CONCURRENT_INSTANCES`: Max concurrent instances (default: 32)
+    /// - `RUNTARA_CORE_SHUTDOWN_GRACE_MS`: How long shutdown waits for in-flight
+    ///   instance-protocol requests to finish before it stops waiting (default:
+    ///   [`DEFAULT_SHUTDOWN_GRACE`]). Distinct from runtara-server's
+    ///   `RUNTARA_SHUTDOWN_GRACE_MS`, which bounds a different phase — the two
+    ///   share a process in the embedded server, and their waits are additive.
     pub fn from_env() -> Result<Self, ConfigError> {
         let database_url = std::env::var("RUNTARA_DATABASE_URL")
             .map_err(|_| ConfigError::Missing("RUNTARA_DATABASE_URL"))?;
@@ -45,10 +54,23 @@ impl Config {
                 )
             })?;
 
+        let shutdown_grace_ms: u64 = match std::env::var("RUNTARA_CORE_SHUTDOWN_GRACE_MS") {
+            Ok(raw) => raw.parse().map_err(|_| {
+                ConfigError::Invalid(
+                    "RUNTARA_CORE_SHUTDOWN_GRACE_MS",
+                    "must be a non-negative integer number of milliseconds",
+                )
+            })?,
+            // Read the runtime's own constant rather than repeating the number,
+            // so the documented default cannot drift from the applied one.
+            Err(_) => DEFAULT_SHUTDOWN_GRACE.as_millis() as u64,
+        };
+
         Ok(Self {
             database_url,
             http_addr: SocketAddr::from(([0, 0, 0, 0], http_port)),
             max_concurrent_instances,
+            shutdown_grace_ms,
         })
     }
 }

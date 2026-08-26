@@ -2746,8 +2746,11 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Always tear down the embedded server so ports/pools close cleanly.
-    // `shutdown()` aborts the HTTP server and notifies workers; it does not
-    // poll for in-flight work, so it stays fast even when drain was skipped.
+    // `shutdown()` notifies workers and drains core's in-flight instance
+    // requests before stopping, bounded by core's own shutdown grace — so this
+    // adds up to that grace on top of the drain above. It is not free in the
+    // dev-mode branch either: the drain was skipped there, so a guest parked in
+    // a durable delay still holds a request that this waits on.
     if let Some(runtara) = embedded_runtara {
         println!("Shutting down embedded Runtara server...");
         if let Err(e) = runtara.shutdown().await {

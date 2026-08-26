@@ -6,6 +6,7 @@
 //! This enables workflows (native or WASM) using the HTTP SDK backend
 //! to communicate with runtara-core.
 
+use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -914,13 +915,34 @@ pub fn instance_http_router(state: Arc<InstanceHandlerState>) -> Router {
         .with_state(state)
 }
 
-/// Run the instance HTTP server.
+/// Run the instance HTTP server until the process ends.
 ///
 /// Starts an axum HTTP server on the given address, serving the instance
 /// protocol API for all clients (native workflows, WASM workflows, debugging, etc.).
+///
+/// This never returns on its own. To be able to stop the server without
+/// severing in-flight requests, use [`run_http_server_with_shutdown`].
 pub async fn run_http_server(
     bind_addr: SocketAddr,
     state: Arc<InstanceHandlerState>,
+) -> anyhow::Result<()> {
+    run_http_server_with_shutdown(bind_addr, state, std::future::pending()).await
+}
+
+/// Run the instance HTTP server until `shutdown` resolves.
+///
+/// Once `shutdown` completes the listener stops accepting, and the server waits
+/// for the requests already being served to finish before returning. Instances
+/// mid-checkpoint therefore get to finish writing rather than being cut off —
+/// which is the whole point of the drain sequence in
+/// [`CoreRuntime`](crate::runtime::CoreRuntime).
+///
+/// Nothing here bounds that wait: a caller that needs shutdown to be bounded
+/// applies its own deadline, as `CoreRuntime::shutdown` does.
+pub async fn run_http_server_with_shutdown(
+    bind_addr: SocketAddr,
+    state: Arc<InstanceHandlerState>,
+    shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> anyhow::Result<()> {
     let app = instance_http_router(state);
     let listener = tokio::net::TcpListener::bind(bind_addr).await?;
@@ -928,6 +950,7 @@ pub async fn run_http_server(
     info!(addr = %bind_addr, "Instance HTTP server starting");
 
     axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown)
         .await
         .map_err(|e| anyhow::anyhow!("HTTP server error: {}", e))?;
 
