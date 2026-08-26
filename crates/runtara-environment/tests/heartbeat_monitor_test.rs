@@ -177,11 +177,6 @@ async fn cleanup(pool: &PgPool, instance_id: &str) {
         .execute(pool)
         .await
         .ok();
-    sqlx::query("DELETE FROM container_heartbeats WHERE instance_id = $1")
-        .bind(instance_id)
-        .execute(pool)
-        .await
-        .ok();
     sqlx::query("DELETE FROM container_registry WHERE instance_id = $1")
         .bind(instance_id)
         .execute(pool)

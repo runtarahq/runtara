@@ -67,8 +67,6 @@ struct InstanceStatusJson {
     #[serde(default)]
     stderr: Option<String>,
     #[serde(default)]
-    heartbeat_at_ms: Option<i64>,
-    #[serde(default)]
     retry_count: Option<u32>,
     #[serde(default)]
     max_retries: Option<u32>,
@@ -582,7 +580,6 @@ impl ManagementSdk {
                 .unwrap_or_else(Utc::now),
             started_at: opt_ms_to_datetime(json.started_at_ms),
             finished_at: opt_ms_to_datetime(json.finished_at_ms),
-            heartbeat_at: opt_ms_to_datetime(json.heartbeat_at_ms),
             input: json.input.as_deref().and_then(decode_base64_json),
             output: json.output.as_deref().and_then(decode_base64_json),
             error: json.error,

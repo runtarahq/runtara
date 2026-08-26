@@ -203,7 +203,6 @@ export interface WorkflowInstanceWithMetadata extends WorkflowInstanceDto {
     retryCount?: number;
     maxRetries?: number;
     workerId?: string;
-    heartbeatAt?: string;
     additionalMetadata?: Record<string, unknown>;
   };
 }

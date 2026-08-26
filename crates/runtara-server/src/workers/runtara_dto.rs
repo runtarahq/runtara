@@ -27,7 +27,6 @@ pub struct ExecutionWithMetadata {
     pub workflow_name: Option<String>,
     pub workflow_description: Option<String>,
     pub worker_id: Option<String>,
-    pub heartbeat_at: Option<DateTime<Utc>>,
     pub retry_count: Option<i32>,
     pub max_retries: Option<i32>,
     pub additional_metadata: Option<Value>,
@@ -287,7 +286,6 @@ pub fn runtara_info_to_execution_with_metadata(
         workflow_name,
         workflow_description,
         worker_id: None, // Not tracked by Runtara at server level
-        heartbeat_at: info.heartbeat_at,
         retry_count: Some(info.retry_count as i32),
         max_retries: Some(info.max_retries as i32),
         additional_metadata: None,

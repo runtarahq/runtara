@@ -167,8 +167,6 @@ struct InstanceStatusJsonResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     stderr: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    heartbeat_at_ms: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     retry_count: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_retries: Option<u32>,
@@ -1109,7 +1107,6 @@ async fn handle_get_instance_status(
                     .map(|i| base64::engine::general_purpose::STANDARD.encode(&i)),
                 error: inst.error,
                 stderr: inst.stderr,
-                heartbeat_at_ms: inst.heartbeat_at.map(|t| t.timestamp_millis()),
                 retry_count: Some(inst.attempt as u32),
                 max_retries: Some(inst.max_attempts as u32),
                 memory_peak_bytes: inst.memory_peak_bytes.map(|v| v as u64),
@@ -1134,7 +1131,6 @@ async fn handle_get_instance_status(
             input: None,
             error: None,
             stderr: None,
-            heartbeat_at_ms: None,
             retry_count: None,
             max_retries: None,
             memory_peak_bytes: None,

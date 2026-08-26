@@ -99,8 +99,6 @@ pub struct InstanceFull {
     pub started_at: Option<DateTime<Utc>>,
     /// When the instance finished.
     pub finished_at: Option<DateTime<Utc>>,
-    /// Last heartbeat timestamp (from container_heartbeats table).
-    pub heartbeat_at: Option<DateTime<Utc>>,
     /// Current attempt number.
     pub attempt: i32,
     /// Maximum allowed attempts.
@@ -144,13 +142,12 @@ pub async fn get_instance_full(
         SELECT i.instance_id, i.tenant_id, ii.image_id, img.name as image_name,
                i.status::TEXT as status, i.input, i.output, i.error, i.stderr, i.checkpoint_id,
                i.created_at, i.started_at, i.finished_at,
-               ch.last_heartbeat as heartbeat_at, i.attempt, i.max_attempts,
+               i.attempt, i.max_attempts,
                i.memory_peak_bytes, i.cpu_usage_usec,
                i.termination_reason::TEXT as termination_reason, i.exit_code
         FROM instances i
         LEFT JOIN instance_images ii ON i.instance_id = ii.instance_id
         LEFT JOIN images img ON ii.image_id = img.image_id
-        LEFT JOIN container_heartbeats ch ON i.instance_id = ch.instance_id
         WHERE i.instance_id = $1
         "#,
     )
@@ -910,7 +907,6 @@ mod tests {
             created_at: Utc::now(),
             started_at: Some(Utc::now()),
             finished_at: None,
-            heartbeat_at: Some(Utc::now()),
             attempt: 1,
             max_attempts: 3,
             memory_peak_bytes: Some(536_870_912), // 512 MB
@@ -921,7 +917,6 @@ mod tests {
 
         let debug_str = format!("{:?}", instance);
         assert!(debug_str.contains("InstanceFull"));
-        assert!(debug_str.contains("heartbeat_at"));
         assert!(debug_str.contains("memory_peak_bytes"));
         assert!(debug_str.contains("cpu_usage_usec"));
     }
@@ -943,7 +938,6 @@ mod tests {
             created_at: now,
             started_at: Some(now),
             finished_at: Some(now),
-            heartbeat_at: Some(now),
             attempt: 1,
             max_attempts: 3,
             memory_peak_bytes: Some(1_073_741_824), // 1 GB
@@ -955,7 +949,6 @@ mod tests {
         let cloned = instance.clone();
 
         assert_eq!(instance.instance_id, cloned.instance_id);
-        assert_eq!(instance.heartbeat_at, cloned.heartbeat_at);
         assert_eq!(instance.output, cloned.output);
         assert_eq!(instance.memory_peak_bytes, cloned.memory_peak_bytes);
         assert_eq!(instance.cpu_usage_usec, cloned.cpu_usage_usec);
@@ -977,7 +970,6 @@ mod tests {
             created_at: Utc::now(),
             started_at: None,
             finished_at: None,
-            heartbeat_at: None,
             attempt: 0,
             max_attempts: 3,
             memory_peak_bytes: None,
@@ -986,7 +978,6 @@ mod tests {
             exit_code: None,
         };
 
-        assert!(instance.heartbeat_at.is_none());
         assert!(instance.started_at.is_none());
         assert!(instance.memory_peak_bytes.is_none());
         assert!(instance.cpu_usage_usec.is_none());
@@ -1008,7 +999,6 @@ mod tests {
             created_at: Utc::now(),
             started_at: Some(Utc::now()),
             finished_at: Some(Utc::now()),
-            heartbeat_at: None,
             attempt: 1,
             max_attempts: 1,
             memory_peak_bytes: Some(2_147_483_648), // 2 GB
@@ -1039,7 +1029,6 @@ mod tests {
             created_at: Utc::now(),
             started_at: Some(Utc::now()),
             finished_at: Some(Utc::now()),
-            heartbeat_at: None,
             attempt: 1,
             max_attempts: 1,
             memory_peak_bytes: None,

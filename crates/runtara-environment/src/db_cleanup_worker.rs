@@ -13,7 +13,6 @@
 //! Environment-specific tables cleaned before instance deletion:
 //! - `container_registry`
 //! - `container_status`
-//! - `container_heartbeats`
 //! - `instance_images`
 
 use std::sync::Arc;
@@ -257,12 +256,6 @@ impl DbCleanupWorker {
 
         // container_status
         sqlx::query("DELETE FROM container_status WHERE instance_id = ANY($1)")
-            .bind(instance_ids)
-            .execute(&mut *tx)
-            .await?;
-
-        // container_heartbeats
-        sqlx::query("DELETE FROM container_heartbeats WHERE instance_id = ANY($1)")
             .bind(instance_ids)
             .execute(&mut *tx)
             .await?;

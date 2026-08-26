@@ -58,11 +58,6 @@ async fn cleanup_instance(pool: &PgPool, instance_id: &str) {
         .execute(pool)
         .await
         .ok();
-    sqlx::query("DELETE FROM container_heartbeats WHERE instance_id = $1")
-        .bind(instance_id)
-        .execute(pool)
-        .await
-        .ok();
 }
 
 // ============================================================================
@@ -250,18 +245,11 @@ async fn test_cleanup_single_container() {
     let registry = ContainerRegistry::new(pool.clone());
     let instance_id = Uuid::new_v4().to_string();
 
-    // cleanup() clears three tables in one transaction. Only container_registry
-    // still has a writer in the codebase, so seed the other two directly — the
-    // point of the test is that cleanup() empties all three, whoever wrote them.
+    // cleanup() clears both tables in one transaction. Only container_registry
+    // still has a writer in the codebase, so seed container_status directly —
+    // the point of the test is that cleanup() empties both, whoever wrote them.
     let info = create_test_container_info(&instance_id, "tenant-1");
     registry.register(&info).await.unwrap();
-    sqlx::query(
-        "INSERT INTO container_heartbeats (instance_id, last_heartbeat) VALUES ($1, NOW())",
-    )
-    .bind(&instance_id)
-    .execute(&pool)
-    .await
-    .unwrap();
     sqlx::query(
         "INSERT INTO container_status (instance_id, status, updated_at) VALUES ($1, $2, NOW())",
     )
@@ -291,11 +279,7 @@ async fn test_cleanup_single_container() {
 }
 
 /// Every table `ContainerRegistry::cleanup` is responsible for emptying.
-const TRACKING_TABLES: [&str; 3] = [
-    "container_registry",
-    "container_status",
-    "container_heartbeats",
-];
+const TRACKING_TABLES: [&str; 2] = ["container_registry", "container_status"];
 
 async fn row_count(pool: &PgPool, table: &str, instance_id: &str) -> i64 {
     // Table names come from the const above, never from test input.

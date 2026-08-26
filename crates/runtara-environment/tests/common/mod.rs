@@ -143,15 +143,6 @@ impl TestContext {
         .await
         .ok();
 
-        sqlx::query(
-            "DELETE FROM container_heartbeats WHERE instance_id IN \
-             (SELECT instance_id FROM instances WHERE tenant_id = $1)",
-        )
-        .bind(tenant_id)
-        .execute(&self.pool)
-        .await
-        .ok();
-
         sqlx::query("DELETE FROM instance_images WHERE tenant_id = $1")
             .bind(tenant_id)
             .execute(&self.pool)
@@ -246,15 +237,6 @@ impl TestContext {
             // Delete from tables that reference instance_id (use subquery)
             sqlx::query(
                 "DELETE FROM container_status WHERE instance_id IN \
-                 (SELECT instance_id FROM instances WHERE tenant_id = $1)",
-            )
-            .bind(tenant_id)
-            .execute(&self.pool)
-            .await
-            .ok();
-
-            sqlx::query(
-                "DELETE FROM container_heartbeats WHERE instance_id IN \
                  (SELECT instance_id FROM instances WHERE tenant_id = $1)",
             )
             .bind(tenant_id)

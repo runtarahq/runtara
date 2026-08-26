@@ -205,8 +205,6 @@ pub struct InstanceInfo {
     pub started_at: Option<DateTime<Utc>>,
     /// When the instance finished (if finished).
     pub finished_at: Option<DateTime<Utc>>,
-    /// Last heartbeat timestamp from the executor.
-    pub heartbeat_at: Option<DateTime<Utc>>,
 
     // Execution data
     /// Input data provided when starting the instance.
@@ -1855,7 +1853,6 @@ mod tests {
             created_at: Utc::now(),
             started_at: Some(Utc::now()),
             finished_at: Some(Utc::now()),
-            heartbeat_at: None,
             input: None,
             output: Some(json!({"result": "success"})),
             error: None,
@@ -1886,7 +1883,6 @@ mod tests {
             created_at: Utc::now(),
             started_at: Some(Utc::now()),
             finished_at: None,
-            heartbeat_at: Some(Utc::now()),
             input: Some(json!({"key": "value"})),
             output: None,
             error: None,
@@ -1917,7 +1913,6 @@ mod tests {
             created_at: Utc::now(),
             started_at: Some(Utc::now()),
             finished_at: Some(Utc::now()),
-            heartbeat_at: None,
             input: None,
             output: Some(json!("done")),
             error: None,
@@ -1955,7 +1950,6 @@ mod tests {
             created_at: Utc::now(),
             started_at: Some(Utc::now()),
             finished_at: Some(Utc::now()),
-            heartbeat_at: None,
             input: None,
             output: None,
             error: Some("Connection refused".to_string()),

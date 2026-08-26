@@ -113,7 +113,7 @@ impl ContainerRegistry {
 
     // ===== Cleanup =====
 
-    /// Full cleanup for a container (registry, status, heartbeat)
+    /// Full cleanup for a container (registry + status)
     pub async fn cleanup(&self, instance_id: &str) -> Result<()> {
         // Use a transaction to ensure atomicity
         let mut tx = self.pool.begin().await?;
@@ -124,11 +124,6 @@ impl ContainerRegistry {
             .await?;
 
         sqlx::query("DELETE FROM container_status WHERE instance_id = $1")
-            .bind(instance_id)
-            .execute(&mut *tx)
-            .await?;
-
-        sqlx::query("DELETE FROM container_heartbeats WHERE instance_id = $1")
             .bind(instance_id)
             .execute(&mut *tx)
             .await?;

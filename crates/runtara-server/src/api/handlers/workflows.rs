@@ -2012,7 +2012,6 @@ pub async fn get_instance_handler(
                     "workflowName": execution_data.workflow_name,
                     "workflowDescription": execution_data.workflow_description,
                     "workerId": execution_data.worker_id,
-                    "heartbeatAt": execution_data.heartbeat_at.map(|t| t.to_rfc3339()),
                     "retryCount": execution_data.retry_count,
                     "maxRetries": execution_data.max_retries,
                     "additionalMetadata": execution_data.additional_metadata,
