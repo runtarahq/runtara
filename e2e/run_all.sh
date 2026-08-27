@@ -81,6 +81,12 @@ run_test "Channel session re-flush provenance guard" "${SCRIPT_DIR}/test_channel
 # docker + python3 + jq. Nothing egresses — every case fail-closes at the proxy.
 run_test "Connection named endpoints (QuickBooks Online)" "${SCRIPT_DIR}/test_connection_named_endpoint.sh"
 
+# runtara-core shutdown. Self-contained and the cheapest test here: it builds
+# and drives the standalone core binary on its own SQLite file and free port,
+# so it needs only cargo, curl and python3 — no docker, no Postgres, no
+# ./start.sh.
+run_test "runtara-core SIGTERM drain + concurrency cap (regression)" "${SCRIPT_DIR}/test_core_sigterm_drain.sh"
+
 # Summary
 echo "=========================================="
 echo "Test Results"

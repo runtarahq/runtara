@@ -107,9 +107,14 @@ impl CoreRuntimeBuilder {
         self
     }
 
-    /// Enforce a ceiling on the number of active instances. New-registration
-    /// requests beyond the cap are rejected with `429 Too Many Requests`.
-    /// Default (`0`) disables the check.
+    /// Enforce a ceiling on how many instances may be `running` at once.
+    /// New-registration requests beyond the cap are rejected with
+    /// `429 Too Many Requests`. Default (`0`) disables the check.
+    ///
+    /// Only `running` counts. A resume is exempt, and a `suspended` instance —
+    /// parked in a durable sleep or waiting on a signal, possibly for days —
+    /// holds no slot. What the cap bounds is concurrent execution, not the
+    /// number of workflows in flight.
     pub fn max_concurrent_instances(mut self, limit: u32) -> Self {
         self.max_concurrent_instances = limit;
         self

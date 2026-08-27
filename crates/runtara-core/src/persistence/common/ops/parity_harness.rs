@@ -261,11 +261,27 @@ pub async fn run_parity_sequence<P: Persistence>(backend: &P) {
         .expect("clear_instance_sleep failed");
 
     // --- listing ------------------------------------------------------------
+    // The instance is `suspended` by this point, and a suspended instance
+    // occupies no concurrency slot. Re-running it proves both backends agree
+    // on that: count while parked, count again once it is back to `running`,
+    // and require the slot to appear only in the second reading.
+    let parked = backend
+        .count_active_instances()
+        .await
+        .expect("count_active_instances (suspended) failed");
+    backend
+        .update_instance_status(&instance_id, "running", None)
+        .await
+        .expect("update_instance_status running (re-run) failed");
     let active = backend
         .count_active_instances()
         .await
-        .expect("count_active_instances failed");
-    assert!(active >= 1);
+        .expect("count_active_instances (running) failed");
+    assert_eq!(
+        active,
+        parked + 1,
+        "a suspended instance must not hold a concurrency slot"
+    );
     let listed = backend
         .list_instances(Some(tenant_id), None, 50, 0)
         .await
