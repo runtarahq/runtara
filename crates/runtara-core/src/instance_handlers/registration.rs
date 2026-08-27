@@ -11,6 +11,7 @@ use super::types::{
     ERROR_MAX_CONCURRENT_INSTANCES, ERROR_SERVER_DRAINING, RegisterInstanceRequest,
     RegisterInstanceResponse,
 };
+use crate::error::CoreError;
 use crate::persistence::EventRecord;
 
 /// Handle instance registration request.
@@ -23,15 +24,16 @@ use crate::persistence::EventRecord;
 /// Two distinct channels, because the caller has to tell them apart:
 ///
 /// A `success: false` response means the caller cannot register right now and
-/// the fault is theirs or the cluster's — empty `instance_id`/`tenant_id`, a
-/// `checkpoint_id` that doesn't exist, the core draining, the concurrency cap.
-/// The HTTP layer renders these as 4xx (or the 503/429 the drain and cap
-/// sentinels ask for).
+/// the fault is theirs or the cluster's — empty `instance_id`/`tenant_id`, the
+/// core draining, the concurrency cap. The HTTP layer renders these as 4xx (or
+/// the 503/429 the drain and cap sentinels ask for).
 ///
-/// An `Err` means the write itself failed. That is the server's problem and is
-/// worth retrying, so it carries the underlying [`CoreError`] and the HTTP layer
-/// renders it as a 5xx. Reporting it as `success: false` would tell the caller
-/// its request was wrong and to stop.
+/// An `Err` carries a [`CoreError`] and lets the HTTP layer pick the status from
+/// it: `CheckpointNotFound` for a resume naming a checkpoint that isn't there
+/// (404, matching what the checkpoint route answers for the same fact), and the
+/// persistence errors for a read or write that failed (503, because that is the
+/// server's problem and is worth retrying). Reporting a failed write as
+/// `success: false` would instead tell the caller its request was wrong.
 #[instrument(skip(state, request), fields(
     instance_id = %request.instance_id,
     tenant_id = %request.tenant_id,
@@ -82,25 +84,26 @@ pub async fn handle_register_instance(
 
     // 4. If checkpoint_id provided, verify it exists
     if let Some(ref cp_id) = request.checkpoint_id {
-        let checkpoint = state
+        // A read that fails is the server's problem, propagated for the same
+        // reason as the writes below: reporting it as a refusal would tell a
+        // resuming caller its request was wrong and stop it retrying a blip.
+        // A checkpoint that is genuinely absent is the caller's problem, and
+        // carries the error the checkpoint route already uses for it so both
+        // routes answer the same status for the same fact.
+        match state
             .persistence
             .load_checkpoint(&request.instance_id, cp_id)
-            .await;
-        match checkpoint {
-            Ok(Some(_)) => {
+            .await?
+        {
+            Some(_) => {
                 debug!(checkpoint_id = %cp_id, "Checkpoint found for resume");
             }
-            Ok(None) => {
-                return Ok(RegisterInstanceResponse {
-                    success: false,
-                    error: format!("Checkpoint '{}' not found", cp_id),
-                });
-            }
-            Err(e) => {
-                return Ok(RegisterInstanceResponse {
-                    success: false,
-                    error: format!("Failed to verify checkpoint: {}", e),
-                });
+            None => {
+                return Err(CoreError::CheckpointNotFound {
+                    instance_id: request.instance_id.clone(),
+                    checkpoint_id: Some(cp_id.clone()),
+                }
+                .into());
             }
         }
     }
@@ -179,7 +182,6 @@ mod tests {
     use std::sync::atomic::Ordering;
 
     use super::*;
-    use crate::error::CoreError;
     use crate::instance_handlers::mock_persistence::{
         MockPersistence, make_checkpoint, make_instance,
     };
@@ -281,9 +283,15 @@ mod tests {
             checkpoint_id: Some("nonexistent".to_string()),
         };
 
-        let result = handle_register_instance(&state, request).await.unwrap();
-        assert!(!result.success);
-        assert!(result.error.contains("not found"));
+        let err = match handle_register_instance(&state, request).await {
+            Ok(_) => panic!("a missing checkpoint must not report success: false"),
+            Err(e) => e,
+        };
+        // Carries the same error the checkpoint route raises, so both answer 404.
+        assert!(matches!(
+            err.downcast_ref::<CoreError>(),
+            Some(CoreError::CheckpointNotFound { .. })
+        ));
     }
 
     #[tokio::test]

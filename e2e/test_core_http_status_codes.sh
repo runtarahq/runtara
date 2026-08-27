@@ -178,7 +178,18 @@ status="$(call -X POST "${API}/inst-live/checkpoint" -H 'Content-Type: applicati
 expect "checkpoint on running instance" 200 "" "${status}"
 
 # ---------------------------------------------------------------------------
-# 5. The logging half: a caller's mistake is a WARN, not an ERROR. Without this
+# 5. Registering a resume against a checkpoint that does not exist. The same
+#    fact as a missing checkpoint anywhere else, so it must get the same 404 —
+#    /register used to answer 400 for it, because it reports refusals through
+#    its own response shape rather than through the error type.
+# ---------------------------------------------------------------------------
+print_step "Resuming from a checkpoint that does not exist"
+status="$(call -X POST "${API}/inst-live/register" -H 'Content-Type: application/json' \
+    -d '{"tenant_id":"e2e-status","checkpoint_id":"no-such-checkpoint"}')"
+expect "register resuming from a missing checkpoint" 404 REGISTER_ERROR "${status}"
+
+# ---------------------------------------------------------------------------
+# 6. The logging half: a caller's mistake is a WARN, not an ERROR. Without this
 #    the status codes could be right while the logs still read like an outage.
 # ---------------------------------------------------------------------------
 print_step "Caller errors are logged at WARN, not ERROR"
@@ -189,5 +200,17 @@ if grep -q "ERROR.*Checkpoint handler error" "${LOG_FILE}"; then
     fail "a 4xx checkpoint failure was logged at ERROR — that is the noise this change removes"
 fi
 echo "  $(grep -c "WARN.*Checkpoint handler error" "${LOG_FILE}") WARN, 0 ERROR for checkpoint failures"
+
+# ---------------------------------------------------------------------------
+# 7. The drain refusal keeps its Retry-After. The header is shared with the new
+#    5xx answers, so a regression in one would show up here.
+# ---------------------------------------------------------------------------
+print_step "A refusal still tells the client when to come back"
+HEADERS="$(curl -sS -D - -o /dev/null -X POST "${API}/ghost-2/checkpoint" \
+    -H 'Content-Type: application/json' -d "${CHECKPOINT}")"
+if grep -qi "^retry-after:" <<<"${HEADERS}"; then
+    fail "a 404 carried Retry-After — that header belongs to \"come back later\", not \"you were wrong\""
+fi
+echo "  404 carries no Retry-After, as intended"
 
 print_success "Instance protocol status codes and log levels are correct"

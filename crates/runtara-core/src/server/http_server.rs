@@ -15,7 +15,7 @@ use axum::{
     Router,
     extract::{Path, State},
     http::StatusCode,
-    response::{IntoResponse, Json},
+    response::{IntoResponse, Json, Response},
     routing::{get, post},
 };
 use base64::Engine;
@@ -229,16 +229,19 @@ fn status_for(err: &anyhow::Error) -> StatusCode {
         .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
 }
 
+/// How long a client should wait before retrying, in seconds. Shared with the
+/// drain and concurrency-cap refusals so every "come back later" this server
+/// sends asks for the same delay.
+const RETRY_AFTER_SECONDS: &str = "30";
+
 /// Render a handler failure: status from the error's own classification, body in
 /// the established `{error, code}` shape carrying the caller's route code.
 ///
 /// Server-side failures log at `error`, caller mistakes at `warn` — a checkpoint
-/// racing a drain is routine and should stop reading like an outage.
-fn core_error_response(
-    route_code: &str,
-    context: &str,
-    err: impl Into<anyhow::Error>,
-) -> (StatusCode, Json<Value>) {
+/// racing a drain is routine and should stop reading like an outage. A 503 also
+/// carries `Retry-After`, since telling a client to retry without saying when
+/// invites it to hammer a server that is already struggling.
+fn core_error_response(route_code: &str, context: &str, err: impl Into<anyhow::Error>) -> Response {
     let err: anyhow::Error = err.into();
     let status = status_for(&err);
     if status.is_server_error() {
@@ -259,13 +262,16 @@ fn core_error_response(
         );
     }
 
-    (
-        status,
-        Json(json!({
-            "error": err.to_string(),
-            "code": route_code,
-        })),
-    )
+    let body = Json(json!({
+        "error": err.to_string(),
+        "code": route_code,
+    }));
+
+    if status == StatusCode::SERVICE_UNAVAILABLE {
+        (status, [("Retry-After", RETRY_AFTER_SECONDS)], body).into_response()
+    } else {
+        (status, body).into_response()
+    }
 }
 
 // ============================================================================
@@ -309,15 +315,13 @@ async fn register_handler(
                 if status == StatusCode::SERVICE_UNAVAILABLE
                     || status == StatusCode::TOO_MANY_REQUESTS
                 {
-                    (status, [("Retry-After", "30")], body).into_response()
+                    (status, [("Retry-After", RETRY_AFTER_SECONDS)], body).into_response()
                 } else {
                     (status, body).into_response()
                 }
             }
         }
-        Err(e) => {
-            core_error_response("REGISTER_ERROR", "Register handler error", e).into_response()
-        }
+        Err(e) => core_error_response("REGISTER_ERROR", "Register handler error", e),
     }
 }
 
@@ -387,9 +391,7 @@ async fn checkpoint_handler(
             })
             .into_response()
         }
-        Err(e) => {
-            core_error_response("CHECKPOINT_ERROR", "Checkpoint handler error", e).into_response()
-        }
+        Err(e) => core_error_response("CHECKPOINT_ERROR", "Checkpoint handler error", e),
     }
 }
 
@@ -429,9 +431,7 @@ async fn poll_signals_handler(
             })
             .into_response()
         }
-        Err(e) => {
-            core_error_response("POLL_SIGNALS_ERROR", "Poll signals error", e).into_response()
-        }
+        Err(e) => core_error_response("POLL_SIGNALS_ERROR", "Poll signals error", e),
     }
 }
 
@@ -462,8 +462,7 @@ async fn poll_custom_signal_handler(
             })
             .into_response()
         }
-        Err(e) => core_error_response("POLL_CUSTOM_SIGNAL_ERROR", "Poll custom signal error", e)
-            .into_response(),
+        Err(e) => core_error_response("POLL_CUSTOM_SIGNAL_ERROR", "Poll custom signal error", e),
     }
 }
 
@@ -520,7 +519,7 @@ async fn instance_event_handler(
                     .into_response()
             }
         }
-        Err(e) => core_error_response("EVENT_ERROR", "Instance event error", e).into_response(),
+        Err(e) => core_error_response("EVENT_ERROR", "Instance event error", e),
     }
 }
 
@@ -561,9 +560,7 @@ async fn completed_handler(
 
     match instance_handlers::handle_instance_event(&state, event).await {
         Ok(_) => Json(SuccessResponse { success: true }).into_response(),
-        Err(e) => {
-            core_error_response("COMPLETED_ERROR", "Completed handler error", e).into_response()
-        }
+        Err(e) => core_error_response("COMPLETED_ERROR", "Completed handler error", e),
     }
 }
 
@@ -589,7 +586,7 @@ async fn failed_handler(
 
     match instance_handlers::handle_instance_event(&state, event).await {
         Ok(_) => Json(SuccessResponse { success: true }).into_response(),
-        Err(e) => core_error_response("FAILED_ERROR", "Failed handler error", e).into_response(),
+        Err(e) => core_error_response("FAILED_ERROR", "Failed handler error", e),
     }
 }
 
@@ -609,9 +606,7 @@ async fn suspended_handler(
 
     match instance_handlers::handle_instance_event(&state, event).await {
         Ok(_) => Json(SuccessResponse { success: true }).into_response(),
-        Err(e) => {
-            core_error_response("SUSPENDED_ERROR", "Suspended handler error", e).into_response()
-        }
+        Err(e) => core_error_response("SUSPENDED_ERROR", "Suspended handler error", e),
     }
 }
 
@@ -644,7 +639,7 @@ async fn sleep_handler(
 
     match instance_handlers::handle_sleep(&state, request).await {
         Ok(_) => Json(SuccessResponse { success: true }).into_response(),
-        Err(e) => core_error_response("SLEEP_ERROR", "Sleep handler error", e).into_response(),
+        Err(e) => core_error_response("SLEEP_ERROR", "Sleep handler error", e),
     }
 }
 
@@ -679,7 +674,7 @@ async fn signal_ack_handler(
 
     match instance_handlers::handle_signal_ack(&state, ack).await {
         Ok(()) => Json(SuccessResponse { success: true }).into_response(),
-        Err(e) => core_error_response("SIGNAL_ACK_ERROR", "Signal ack error", e).into_response(),
+        Err(e) => core_error_response("SIGNAL_ACK_ERROR", "Signal ack error", e),
     }
 }
 
@@ -700,7 +695,7 @@ async fn retry_handler(
 
     match instance_handlers::handle_retry_attempt(&state, event).await {
         Ok(()) => Json(SuccessResponse { success: true }).into_response(),
-        Err(e) => core_error_response("RETRY_ERROR", "Retry attempt error", e).into_response(),
+        Err(e) => core_error_response("RETRY_ERROR", "Retry attempt error", e),
     }
 }
 
@@ -758,7 +753,7 @@ async fn status_handler(
             })
             .into_response()
         }
-        Err(e) => core_error_response("STATUS_ERROR", "Status handler error", e).into_response(),
+        Err(e) => core_error_response("STATUS_ERROR", "Status handler error", e),
     }
 }
 
@@ -795,7 +790,7 @@ async fn input_handler(
             })),
         )
             .into_response(),
-        Err(e) => core_error_response("INPUT_ERROR", "Input handler error", e).into_response(),
+        Err(e) => core_error_response("INPUT_ERROR", "Input handler error", e),
     }
 }
 
@@ -944,7 +939,17 @@ mod tests {
     /// into, so a mapping that is correct in isolation but mis-wired still fails.
     async fn send(router: Router, request: Request<Body>) -> (StatusCode, Value) {
         let response = router.oneshot(request).await.expect("router call failed");
+        let (status, body, _) = read(response).await;
+        (status, body)
+    }
+
+    /// Unpack a response into `(status, body, retry_after)`.
+    async fn read(response: Response) -> (StatusCode, Value, Option<String>) {
         let status = response.status();
+        let retry_after = response
+            .headers()
+            .get("Retry-After")
+            .map(|v| v.to_str().expect("Retry-After was not text").to_string());
         let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .expect("failed to read body");
@@ -953,7 +958,7 @@ mod tests {
         } else {
             serde_json::from_slice(&bytes).expect("body was not JSON")
         };
-        (status, body)
+        (status, body, retry_after)
     }
 
     fn post(path: &str, body: Value) -> Request<Body> {
@@ -1067,21 +1072,42 @@ mod tests {
         assert_eq!(status_for(&wrapped), StatusCode::NOT_FOUND);
     }
 
-    #[test]
-    fn core_error_response_keeps_the_route_code_in_the_body() {
+    #[tokio::test]
+    async fn core_error_response_keeps_the_route_code_in_the_body() {
         // The status is what this ticket changes; the body shape is a contract
         // existing clients already read, so it must not move with it.
-        let (status, body) = core_error_response(
+        let (status, body, retry_after) = read(core_error_response(
             "CHECKPOINT_ERROR",
             "Checkpoint handler error",
             CoreError::InstanceNotFound {
                 instance_id: "inst-1".into(),
             },
-        );
+        ))
+        .await;
 
         assert_eq!(status, StatusCode::NOT_FOUND);
-        assert_eq!(body.0["code"], "CHECKPOINT_ERROR");
-        assert!(body.0["error"].as_str().unwrap().contains("inst-1"));
+        assert_eq!(body["code"], "CHECKPOINT_ERROR");
+        assert!(body["error"].as_str().unwrap().contains("inst-1"));
+        // Retry-After belongs to "come back later", not to "you were wrong".
+        assert_eq!(retry_after, None);
+    }
+
+    #[tokio::test]
+    async fn a_503_says_when_to_come_back() {
+        // The drain and cap refusals already send this. A 503 without it invites
+        // a client to hammer a server that is already struggling.
+        let (status, _, retry_after) = read(core_error_response(
+            "REGISTER_ERROR",
+            "Register handler error",
+            CoreError::DatabaseError {
+                operation: "register_instance".into(),
+                details: "connection refused".into(),
+            },
+        ))
+        .await;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(retry_after.as_deref(), Some(RETRY_AFTER_SECONDS));
     }
 
     #[tokio::test]
@@ -1121,16 +1147,37 @@ mod tests {
         let persistence = MockPersistence::new();
         persistence.set_fail_register();
 
+        let response = router_over(persistence)
+            .oneshot(post(
+                "/api/v1/instances/inst-1/register",
+                json!({ "tenant_id": "t1" }),
+            ))
+            .await
+            .expect("router call failed");
+        let (status, body, retry_after) = read(response).await;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["code"], "REGISTER_ERROR");
+        assert_eq!(retry_after.as_deref(), Some(RETRY_AFTER_SECONDS));
+    }
+
+    #[tokio::test]
+    async fn resuming_from_a_missing_checkpoint_is_not_found() {
+        // The same fact as a missing checkpoint on the checkpoint route, so it
+        // has to get the same status — registration used to answer 400 here.
+        let persistence =
+            MockPersistence::new().with_instance(make_instance("inst-1", "t1", "pending"));
+
         let (status, body) = send(
             router_over(persistence),
             post(
                 "/api/v1/instances/inst-1/register",
-                json!({ "tenant_id": "t1" }),
+                json!({ "tenant_id": "t1", "checkpoint_id": "nope" }),
             ),
         )
         .await;
 
-        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(status, StatusCode::NOT_FOUND);
         assert_eq!(body["code"], "REGISTER_ERROR");
     }
 
