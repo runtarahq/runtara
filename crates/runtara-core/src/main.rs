@@ -92,6 +92,7 @@ async fn main() -> Result<()> {
     let runtime = CoreRuntime::builder()
         .persistence(persistence)
         .bind_addr(config.http_addr)
+        .max_concurrent_instances(config.max_concurrent_instances)
         .shutdown_grace(Duration::from_millis(config.shutdown_grace_ms))
         .build()?
         .start()
@@ -99,12 +100,81 @@ async fn main() -> Result<()> {
 
     info!(addr = %config.http_addr, "Runtara Core ready");
 
-    // Wait for shutdown signal
-    tokio::signal::ctrl_c().await?;
-    info!("Shutting down...");
+    // Wait for a shutdown signal. Container runtimes, Kubernetes and systemd
+    // all stop a process with SIGTERM, so listening for SIGINT alone means the
+    // default disposition kills us and the drain below never runs.
+    let signal = wait_for_shutdown_signal().await?;
+    info!(signal, "Shutdown signal received");
 
-    // Graceful shutdown
+    // Refuse new registrations first, then drain. Ordering matters: draining
+    // before the server stops accepting is what lets an instance already
+    // running reach a checkpoint and suspend instead of being severed.
+    runtime.set_draining();
     runtime.shutdown().await?;
 
     Ok(())
+}
+
+/// Wait for either SIGINT (Ctrl+C) or SIGTERM on Unix; on non-Unix fall back
+/// to SIGINT only. Returns the name of the signal that arrived, so the log
+/// distinguishes a container stop from an operator pressing Ctrl+C.
+#[cfg(unix)]
+async fn wait_for_shutdown_signal() -> Result<&'static str> {
+    use tokio::signal::unix::{SignalKind, signal};
+
+    let mut sigterm = signal(SignalKind::terminate())?;
+    tokio::select! {
+        r = tokio::signal::ctrl_c() => r.map(|()| "SIGINT").map_err(Into::into),
+        _ = sigterm.recv() => Ok("SIGTERM"),
+    }
+}
+
+#[cfg(not(unix))]
+async fn wait_for_shutdown_signal() -> Result<&'static str> {
+    tokio::signal::ctrl_c()
+        .await
+        .map(|()| "SIGINT")
+        .map_err(Into::into)
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::process::Command;
+
+    /// SIGTERM is what a container stop, a Kubernetes eviction and a
+    /// `systemctl stop` all send. Awaiting only `ctrl_c()` leaves SIGTERM's
+    /// default disposition in place, so the process dies before any drain runs.
+    #[tokio::test]
+    async fn wait_for_shutdown_signal_returns_on_sigterm() {
+        // Install a handler up front, so the default disposition — which would
+        // take this test process down — is replaced before we raise anything.
+        let _installed =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
+
+        let waiter = tokio::spawn(wait_for_shutdown_signal());
+
+        // A tokio `Signal` only observes deliveries that happen after it is
+        // created, and the one under test is created inside the spawned task.
+        // Re-raise until it reacts rather than racing a single kill against
+        // the spawn; repeat deliveries coalesce, so this costs nothing.
+        let pid = std::process::id().to_string();
+        for _ in 0..100 {
+            if waiter.is_finished() {
+                break;
+            }
+            Command::new("kill").args(["-TERM", &pid]).status().unwrap();
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        assert!(
+            waiter.is_finished(),
+            "wait_for_shutdown_signal never returned after SIGTERM"
+        );
+        assert_eq!(
+            waiter.await.unwrap().unwrap(),
+            "SIGTERM",
+            "shutdown wait reported the wrong signal"
+        );
+    }
 }
