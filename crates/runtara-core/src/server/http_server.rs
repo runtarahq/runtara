@@ -15,7 +15,7 @@ use axum::{
     Router,
     extract::{Path, State},
     http::StatusCode,
-    response::{IntoResponse, Json},
+    response::{IntoResponse, Json, Response},
     routing::{get, post},
 };
 use base64::Engine;
@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracing::{error, info, warn};
 
+use crate::error::CoreError;
 use crate::instance_handlers::{
     self, CheckpointRequest as HandlerCheckpointRequest,
     GetInstanceStatusRequest as HandlerGetStatusRequest, InstanceEvent as HandlerInstanceEvent,
@@ -185,6 +186,95 @@ fn event_type_from_string(s: &str) -> i32 {
 }
 
 // ============================================================================
+// Helper: map handler failures onto the wire
+// ============================================================================
+
+/// The HTTP status that describes a [`CoreError`].
+///
+/// 4xx says "stop, the request is wrong"; 5xx says "retry, I am unwell".
+/// Collapsing both onto 500 makes an ordinary drain race — a checkpoint landing
+/// on an instance that already finished — indistinguishable from the database
+/// being down.
+///
+/// The match is exhaustive on purpose: a new variant then fails to compile until
+/// someone decides what it means on the wire, rather than silently defaulting
+/// back to 500.
+fn status_for_core(err: &CoreError) -> StatusCode {
+    match err {
+        // The caller named something that is not there.
+        CoreError::InstanceNotFound { .. } | CoreError::CheckpointNotFound { .. } => {
+            StatusCode::NOT_FOUND
+        }
+        // The thing exists but is not in a state that accepts this request.
+        CoreError::InvalidInstanceState { .. } | CoreError::InstanceAlreadyExists { .. } => {
+            StatusCode::CONFLICT
+        }
+        // The request itself is malformed.
+        CoreError::ValidationError { .. } => StatusCode::BAD_REQUEST,
+        // The server could not do its job. Retrying may work.
+        CoreError::DatabaseError { .. }
+        | CoreError::CheckpointSaveFailed { .. }
+        | CoreError::SignalDeliveryFailed { .. } => StatusCode::SERVICE_UNAVAILABLE,
+    }
+}
+
+/// The status for a handler failure.
+///
+/// Handlers return `anyhow::Error`, so the classification is only available when
+/// a [`CoreError`] is underneath. When there is none, nothing has told us the
+/// failure is the caller's fault, and 500 is the honest answer.
+fn status_for(err: &anyhow::Error) -> StatusCode {
+    err.downcast_ref::<CoreError>()
+        .map(status_for_core)
+        .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+/// How long a client should wait before retrying, in seconds. Shared with the
+/// drain and concurrency-cap refusals so every "come back later" this server
+/// sends asks for the same delay.
+const RETRY_AFTER_SECONDS: &str = "30";
+
+/// Render a handler failure: status from the error's own classification, body in
+/// the established `{error, code}` shape carrying the caller's route code.
+///
+/// Server-side failures log at `error`, caller mistakes at `warn` — a checkpoint
+/// racing a drain is routine and should stop reading like an outage. A 503 also
+/// carries `Retry-After`, since telling a client to retry without saying when
+/// invites it to hammer a server that is already struggling.
+fn core_error_response(route_code: &str, context: &str, err: impl Into<anyhow::Error>) -> Response {
+    let err: anyhow::Error = err.into();
+    let status = status_for(&err);
+    if status.is_server_error() {
+        error!(
+            code = route_code,
+            status = status.as_u16(),
+            "{}: {}",
+            context,
+            err
+        );
+    } else {
+        warn!(
+            code = route_code,
+            status = status.as_u16(),
+            "{}: {}",
+            context,
+            err
+        );
+    }
+
+    let body = Json(json!({
+        "error": err.to_string(),
+        "code": route_code,
+    }));
+
+    if status == StatusCode::SERVICE_UNAVAILABLE {
+        (status, [("Retry-After", RETRY_AFTER_SECONDS)], body).into_response()
+    } else {
+        (status, body).into_response()
+    }
+}
+
+// ============================================================================
 // HTTP handlers
 // ============================================================================
 
@@ -225,23 +315,13 @@ async fn register_handler(
                 if status == StatusCode::SERVICE_UNAVAILABLE
                     || status == StatusCode::TOO_MANY_REQUESTS
                 {
-                    (status, [("Retry-After", "30")], body).into_response()
+                    (status, [("Retry-After", RETRY_AFTER_SECONDS)], body).into_response()
                 } else {
                     (status, body).into_response()
                 }
             }
         }
-        Err(e) => {
-            error!("Register handler error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": e.to_string(),
-                    "code": "REGISTER_ERROR"
-                })),
-            )
-                .into_response()
-        }
+        Err(e) => core_error_response("REGISTER_ERROR", "Register handler error", e),
     }
 }
 
@@ -311,17 +391,7 @@ async fn checkpoint_handler(
             })
             .into_response()
         }
-        Err(e) => {
-            error!("Checkpoint handler error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": e.to_string(),
-                    "code": "CHECKPOINT_ERROR"
-                })),
-            )
-                .into_response()
-        }
+        Err(e) => core_error_response("CHECKPOINT_ERROR", "Checkpoint handler error", e),
     }
 }
 
@@ -361,17 +431,7 @@ async fn poll_signals_handler(
             })
             .into_response()
         }
-        Err(e) => {
-            error!("Poll signals error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": e.to_string(),
-                    "code": "POLL_SIGNALS_ERROR"
-                })),
-            )
-                .into_response()
-        }
+        Err(e) => core_error_response("POLL_SIGNALS_ERROR", "Poll signals error", e),
     }
 }
 
@@ -402,17 +462,7 @@ async fn poll_custom_signal_handler(
             })
             .into_response()
         }
-        Err(e) => {
-            error!("Poll custom signal error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": e.to_string(),
-                    "code": "POLL_CUSTOM_SIGNAL_ERROR"
-                })),
-            )
-                .into_response()
-        }
+        Err(e) => core_error_response("POLL_CUSTOM_SIGNAL_ERROR", "Poll custom signal error", e),
     }
 }
 
@@ -456,6 +506,8 @@ async fn instance_event_handler(
             if resp.success {
                 Json(SuccessResponse { success: true }).into_response()
             } else {
+                // No `CoreError` underneath to classify — this arm carries only a
+                // string, so 500 is the honest answer rather than a guess.
                 let error = resp.error.unwrap_or_else(|| "Unknown error".to_string());
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -467,17 +519,7 @@ async fn instance_event_handler(
                     .into_response()
             }
         }
-        Err(e) => {
-            error!("Instance event error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": e.to_string(),
-                    "code": "EVENT_ERROR"
-                })),
-            )
-                .into_response()
-        }
+        Err(e) => core_error_response("EVENT_ERROR", "Instance event error", e),
     }
 }
 
@@ -518,17 +560,7 @@ async fn completed_handler(
 
     match instance_handlers::handle_instance_event(&state, event).await {
         Ok(_) => Json(SuccessResponse { success: true }).into_response(),
-        Err(e) => {
-            error!("Completed handler error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": e.to_string(),
-                    "code": "COMPLETED_ERROR"
-                })),
-            )
-                .into_response()
-        }
+        Err(e) => core_error_response("COMPLETED_ERROR", "Completed handler error", e),
     }
 }
 
@@ -554,17 +586,7 @@ async fn failed_handler(
 
     match instance_handlers::handle_instance_event(&state, event).await {
         Ok(_) => Json(SuccessResponse { success: true }).into_response(),
-        Err(e) => {
-            error!("Failed handler error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": e.to_string(),
-                    "code": "FAILED_ERROR"
-                })),
-            )
-                .into_response()
-        }
+        Err(e) => core_error_response("FAILED_ERROR", "Failed handler error", e),
     }
 }
 
@@ -584,17 +606,7 @@ async fn suspended_handler(
 
     match instance_handlers::handle_instance_event(&state, event).await {
         Ok(_) => Json(SuccessResponse { success: true }).into_response(),
-        Err(e) => {
-            error!("Suspended handler error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": e.to_string(),
-                    "code": "SUSPENDED_ERROR"
-                })),
-            )
-                .into_response()
-        }
+        Err(e) => core_error_response("SUSPENDED_ERROR", "Suspended handler error", e),
     }
 }
 
@@ -627,17 +639,7 @@ async fn sleep_handler(
 
     match instance_handlers::handle_sleep(&state, request).await {
         Ok(_) => Json(SuccessResponse { success: true }).into_response(),
-        Err(e) => {
-            error!("Sleep handler error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": e.to_string(),
-                    "code": "SLEEP_ERROR"
-                })),
-            )
-                .into_response()
-        }
+        Err(e) => core_error_response("SLEEP_ERROR", "Sleep handler error", e),
     }
 }
 
@@ -672,17 +674,7 @@ async fn signal_ack_handler(
 
     match instance_handlers::handle_signal_ack(&state, ack).await {
         Ok(()) => Json(SuccessResponse { success: true }).into_response(),
-        Err(e) => {
-            warn!("Signal ack error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": e.to_string(),
-                    "code": "SIGNAL_ACK_ERROR"
-                })),
-            )
-                .into_response()
-        }
+        Err(e) => core_error_response("SIGNAL_ACK_ERROR", "Signal ack error", e),
     }
 }
 
@@ -703,17 +695,7 @@ async fn retry_handler(
 
     match instance_handlers::handle_retry_attempt(&state, event).await {
         Ok(()) => Json(SuccessResponse { success: true }).into_response(),
-        Err(e) => {
-            warn!("Retry attempt error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": e.to_string(),
-                    "code": "RETRY_ERROR"
-                })),
-            )
-                .into_response()
-        }
+        Err(e) => core_error_response("RETRY_ERROR", "Retry attempt error", e),
     }
 }
 
@@ -771,17 +753,7 @@ async fn status_handler(
             })
             .into_response()
         }
-        Err(e) => {
-            error!("Status handler error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": e.to_string(),
-                    "code": "STATUS_ERROR"
-                })),
-            )
-                .into_response()
-        }
+        Err(e) => core_error_response("STATUS_ERROR", "Status handler error", e),
     }
 }
 
@@ -818,17 +790,7 @@ async fn input_handler(
             })),
         )
             .into_response(),
-        Err(e) => {
-            error!("Input handler error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": e.to_string(),
-                    "code": "INPUT_ERROR"
-                })),
-            )
-                .into_response()
-        }
+        Err(e) => core_error_response("INPUT_ERROR", "Input handler error", e),
     }
 }
 
@@ -956,4 +918,296 @@ pub async fn run_http_server_with_shutdown(
 
     info!("Instance HTTP server stopped");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::instance_handlers::mock_persistence::{MockPersistence, make_instance};
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower::ServiceExt;
+
+    fn router_over(persistence: MockPersistence) -> Router {
+        instance_http_router(Arc::new(InstanceHandlerState::new(Arc::new(persistence))))
+    }
+
+    /// Drive a request through the real router and return `(status, body)`.
+    ///
+    /// Going through `oneshot` rather than calling the handler directly is the
+    /// point: it exercises the routing and extraction the handlers are wired
+    /// into, so a mapping that is correct in isolation but mis-wired still fails.
+    async fn send(router: Router, request: Request<Body>) -> (StatusCode, Value) {
+        let response = router.oneshot(request).await.expect("router call failed");
+        let (status, body, _) = read(response).await;
+        (status, body)
+    }
+
+    /// Unpack a response into `(status, body, retry_after)`.
+    async fn read(response: Response) -> (StatusCode, Value, Option<String>) {
+        let status = response.status();
+        let retry_after = response
+            .headers()
+            .get("Retry-After")
+            .map(|v| v.to_str().expect("Retry-After was not text").to_string());
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("failed to read body");
+        let body = if bytes.is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_slice(&bytes).expect("body was not JSON")
+        };
+        (status, body, retry_after)
+    }
+
+    fn post(path: &str, body: Value) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("Content-Type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    }
+
+    fn get(path: &str) -> Request<Body> {
+        Request::builder()
+            .method("GET")
+            .uri(path)
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    fn checkpoint_body() -> Value {
+        json!({ "checkpoint_id": "cp-1", "state": "aGk=" })
+    }
+
+    #[test]
+    fn status_for_core_classifies_every_core_error() {
+        // Exhaustive by construction: `CoreError` has eight variants and all
+        // eight are listed here, so a new one cannot slip through untested.
+        let cases: Vec<(CoreError, StatusCode)> = vec![
+            (
+                CoreError::InstanceNotFound {
+                    instance_id: "i".into(),
+                },
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                CoreError::CheckpointNotFound {
+                    instance_id: "i".into(),
+                    checkpoint_id: Some("cp".into()),
+                },
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                CoreError::InvalidInstanceState {
+                    instance_id: "i".into(),
+                    expected: "running".into(),
+                    actual: "completed".into(),
+                },
+                StatusCode::CONFLICT,
+            ),
+            (
+                CoreError::InstanceAlreadyExists {
+                    instance_id: "i".into(),
+                },
+                StatusCode::CONFLICT,
+            ),
+            (
+                CoreError::ValidationError {
+                    field: "instance_id".into(),
+                    message: "required".into(),
+                },
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                CoreError::DatabaseError {
+                    operation: "insert".into(),
+                    details: "connection refused".into(),
+                },
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+            (
+                CoreError::CheckpointSaveFailed {
+                    instance_id: "i".into(),
+                    reason: "disk full".into(),
+                },
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+            (
+                CoreError::SignalDeliveryFailed {
+                    instance_id: "i".into(),
+                    signal_type: "cancel".into(),
+                    reason: "timeout".into(),
+                },
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+        ];
+
+        for (error, expected) in cases {
+            assert_eq!(
+                status_for_core(&error),
+                expected,
+                "{:?} should map to {}",
+                error,
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn an_error_with_no_core_error_underneath_stays_internal() {
+        // Handlers return `anyhow::Error`, so a failure can arrive with nothing
+        // that classifies it. That case must keep answering 500 rather than
+        // being guessed into a 4xx the caller would wrongly treat as final.
+        let opaque = anyhow::anyhow!("something went wrong");
+        assert_eq!(status_for(&opaque), StatusCode::INTERNAL_SERVER_ERROR);
+
+        // ...and a `CoreError` still classifies once wrapped by anyhow, which is
+        // how every handler error actually reaches the HTTP layer.
+        let wrapped = anyhow::Error::from(CoreError::InstanceNotFound {
+            instance_id: "i".into(),
+        });
+        assert_eq!(status_for(&wrapped), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn core_error_response_keeps_the_route_code_in_the_body() {
+        // The status is what this ticket changes; the body shape is a contract
+        // existing clients already read, so it must not move with it.
+        let (status, body, retry_after) = read(core_error_response(
+            "CHECKPOINT_ERROR",
+            "Checkpoint handler error",
+            CoreError::InstanceNotFound {
+                instance_id: "inst-1".into(),
+            },
+        ))
+        .await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "CHECKPOINT_ERROR");
+        assert!(body["error"].as_str().unwrap().contains("inst-1"));
+        // Retry-After belongs to "come back later", not to "you were wrong".
+        assert_eq!(retry_after, None);
+    }
+
+    #[tokio::test]
+    async fn a_503_says_when_to_come_back() {
+        // The drain and cap refusals already send this. A 503 without it invites
+        // a client to hammer a server that is already struggling.
+        let (status, _, retry_after) = read(core_error_response(
+            "REGISTER_ERROR",
+            "Register handler error",
+            CoreError::DatabaseError {
+                operation: "register_instance".into(),
+                details: "connection refused".into(),
+            },
+        ))
+        .await;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(retry_after.as_deref(), Some(RETRY_AFTER_SECONDS));
+    }
+
+    #[tokio::test]
+    async fn checkpoint_on_an_unknown_instance_is_not_found() {
+        let (status, body) = send(
+            router_over(MockPersistence::new()),
+            post("/api/v1/instances/nope/checkpoint", checkpoint_body()),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "CHECKPOINT_ERROR");
+    }
+
+    #[tokio::test]
+    async fn checkpoint_on_a_terminal_instance_is_a_conflict() {
+        // The drain race this ticket exists for: the instance finished between
+        // the client's last step and this checkpoint. The client is wrong, not
+        // the server, and retrying will never help.
+        let persistence =
+            MockPersistence::new().with_instance(make_instance("done", "t1", "completed"));
+
+        let (status, body) = send(
+            router_over(persistence),
+            post("/api/v1/instances/done/checkpoint", checkpoint_body()),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["code"], "CHECKPOINT_ERROR");
+    }
+
+    #[tokio::test]
+    async fn a_database_failure_is_service_unavailable() {
+        // The other half of the distinction: same route, but the server really
+        // is unwell, so the client should back off rather than give up.
+        let persistence = MockPersistence::new();
+        persistence.set_fail_register();
+
+        let response = router_over(persistence)
+            .oneshot(post(
+                "/api/v1/instances/inst-1/register",
+                json!({ "tenant_id": "t1" }),
+            ))
+            .await
+            .expect("router call failed");
+        let (status, body, retry_after) = read(response).await;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["code"], "REGISTER_ERROR");
+        assert_eq!(retry_after.as_deref(), Some(RETRY_AFTER_SECONDS));
+    }
+
+    #[tokio::test]
+    async fn resuming_from_a_missing_checkpoint_is_not_found() {
+        // The same fact as a missing checkpoint on the checkpoint route, so it
+        // has to get the same status — registration used to answer 400 here.
+        let persistence =
+            MockPersistence::new().with_instance(make_instance("inst-1", "t1", "pending"));
+
+        let (status, body) = send(
+            router_over(persistence),
+            post(
+                "/api/v1/instances/inst-1/register",
+                json!({ "tenant_id": "t1", "checkpoint_id": "nope" }),
+            ),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "REGISTER_ERROR");
+    }
+
+    #[tokio::test]
+    async fn input_of_an_unknown_instance_stays_not_found() {
+        // Already 404 before this change — pinned so the rewrite cannot regress it.
+        let (status, body) = send(
+            router_over(MockPersistence::new()),
+            get("/api/v1/instances/nope/input"),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["found"], false);
+    }
+
+    #[tokio::test]
+    async fn a_checkpoint_that_succeeds_is_untouched() {
+        // The rewrite touched every error arm; this proves it left the happy
+        // path — and its response body — alone.
+        let persistence =
+            MockPersistence::new().with_instance(make_instance("live", "t1", "running"));
+
+        let (status, body) = send(
+            router_over(persistence),
+            post("/api/v1/instances/live/checkpoint", checkpoint_body()),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["found"], false);
+    }
 }
