@@ -37,25 +37,7 @@ pub async fn handle_checkpoint(
     );
 
     // 1. Validate instance exists and is running
-    let instance = state.persistence.get_instance(&request.instance_id).await?;
-    match instance {
-        Some(inst) => {
-            if inst.status != "running" {
-                return Err(CoreError::InvalidInstanceState {
-                    instance_id: request.instance_id.clone(),
-                    expected: "running".to_string(),
-                    actual: inst.status,
-                }
-                .into());
-            }
-        }
-        None => {
-            return Err(CoreError::InstanceNotFound {
-                instance_id: request.instance_id.clone(),
-            }
-            .into());
-        }
-    }
+    ensure_instance_running(state.persistence.as_ref(), &request.instance_id).await?;
 
     // 2. Check if checkpoint already exists
     if let Some(existing) = state
@@ -147,6 +129,31 @@ pub async fn handle_checkpoint(
         custom_signal,
         last_error: None,
     })
+}
+
+/// Validate that an instance exists and is still running.
+///
+/// Every handler that writes on an instance's behalf owes the caller this
+/// check first. Falling straight through to the write turns "you named an
+/// instance that does not exist" into whatever the storage layer happens to
+/// say — on SQLite, a foreign-key violation surfaced as
+/// `CheckpointSaveFailed`, which is classified `Transient` and tells the
+/// client to retry a request that can never succeed.
+async fn ensure_instance_running(
+    persistence: &dyn Persistence,
+    instance_id: &str,
+) -> std::result::Result<(), CoreError> {
+    match persistence.get_instance(instance_id).await? {
+        Some(inst) if inst.status == "running" => Ok(()),
+        Some(inst) => Err(CoreError::InvalidInstanceState {
+            instance_id: instance_id.to_string(),
+            expected: "running".to_string(),
+            actual: inst.status,
+        }),
+        None => Err(CoreError::InstanceNotFound {
+            instance_id: instance_id.to_string(),
+        }),
+    }
 }
 
 /// Helper to get the pending instance-wide signal for an instance.
@@ -247,7 +254,15 @@ pub async fn handle_sleep(
         "Processing sleep request"
     );
 
-    // 1. Save checkpoint before sleeping (for durability)
+    // 1. Validate instance exists and is running, exactly as the checkpoint
+    // path does. The save below writes a row keyed on the instance, so an
+    // unknown instance would otherwise be reported as a checkpoint-save
+    // failure — a retryable-looking error for a caller mistake. The check is
+    // unconditional: sleeping out the clock on behalf of an instance that
+    // isn't running is just as wrong when there is no checkpoint to save.
+    ensure_instance_running(state.persistence.as_ref(), &request.instance_id).await?;
+
+    // 2. Save checkpoint before sleeping (for durability)
     if !request.checkpoint_id.is_empty() {
         state
             .persistence
@@ -263,7 +278,7 @@ pub async fn handle_sleep(
         debug!(checkpoint_id = %request.checkpoint_id, "Sleep checkpoint saved");
     }
 
-    // 2. Sleep in-process; environment may hibernate managed instances separately.
+    // 3. Sleep in-process; environment may hibernate managed instances separately.
     let deadline = Instant::now() + Duration::from_millis(request.duration_ms);
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -460,6 +475,89 @@ mod tests {
         let cs = result.custom_signal.unwrap();
         assert_eq!(cs.checkpoint_id, "cp-1");
         assert_eq!(cs.payload, b"custom payload");
+    }
+
+    /// A sleep against an instance that does not exist is a caller error and
+    /// must say so. It used to fall through to `save_checkpoint`, where SQLite
+    /// answered with a foreign-key violation reported as
+    /// `CheckpointSaveFailed` — classified `Transient`, so the client was told
+    /// to retry a request that can never succeed. `MockPersistence` does not
+    /// enforce the foreign key, so this asserts on the validation itself.
+    #[tokio::test(start_paused = true)]
+    async fn test_sleep_instance_not_found() {
+        let persistence = Arc::new(MockPersistence::new());
+        let state = InstanceHandlerState::new(persistence.clone());
+
+        let request = SleepRequest {
+            instance_id: "does-not-exist".to_string(),
+            duration_ms: 30_000,
+            checkpoint_id: "delay-1".to_string(),
+            state: b"sleep state".to_vec(),
+        };
+        let Err(error) = handle_sleep(&state, request).await else {
+            panic!("an unknown instance must be rejected, not slept on");
+        };
+
+        assert!(
+            matches!(
+                error.downcast_ref::<CoreError>(),
+                Some(CoreError::InstanceNotFound { instance_id }) if instance_id == "does-not-exist"
+            ),
+            "expected InstanceNotFound, got: {error:?}"
+        );
+        assert!(
+            persistence
+                .load_checkpoint("does-not-exist", "delay-1")
+                .await
+                .unwrap()
+                .is_none(),
+            "nothing may be written for an instance that does not exist"
+        );
+    }
+
+    /// The validation is unconditional: an empty `checkpoint_id` skips the save,
+    /// but sleeping out the clock for an instance that does not exist is just as
+    /// wrong, and returning `Ok` after it would be worse.
+    #[tokio::test(start_paused = true)]
+    async fn test_sleep_without_checkpoint_still_validates_instance() {
+        let persistence = Arc::new(MockPersistence::new());
+        let state = InstanceHandlerState::new(persistence);
+
+        let Err(error) = handle_sleep(&state, sleep_request(30_000)).await else {
+            panic!("an unknown instance must be rejected even with no checkpoint to save");
+        };
+
+        assert!(
+            matches!(
+                error.downcast_ref::<CoreError>(),
+                Some(CoreError::InstanceNotFound { .. })
+            ),
+            "expected InstanceNotFound, got: {error:?}"
+        );
+    }
+
+    /// A finished instance is the other caller error the checkpoint path already
+    /// reports: the sleep would park on a run nobody is waiting for.
+    #[tokio::test(start_paused = true)]
+    async fn test_sleep_instance_not_running() {
+        let persistence = Arc::new(MockPersistence::new().with_instance(make_instance(
+            "inst-1",
+            "tenant-1",
+            "cancelled",
+        )));
+        let state = InstanceHandlerState::new(persistence);
+
+        let Err(error) = handle_sleep(&state, sleep_request(30_000)).await else {
+            panic!("a terminal instance must be rejected");
+        };
+
+        assert!(
+            matches!(
+                error.downcast_ref::<CoreError>(),
+                Some(CoreError::InvalidInstanceState { actual, .. }) if actual == "cancelled"
+            ),
+            "expected InvalidInstanceState, got: {error:?}"
+        );
     }
 
     /// A sleep request for `duration_ms` against the shared test instance.
