@@ -1,7 +1,7 @@
 #!/bin/bash
 # E2E Test: object-model raw SQL capabilities (query-sql / execute-sql)
 #
-# Exercises the full feature from docs/object-model-raw-sql-plan-2026-07-03.md
+# Exercises the full Object Model raw-SQL feature
 # against a self-contained server stack:
 #
 #   Leg 1  Main graph, all six motivating SQL features:

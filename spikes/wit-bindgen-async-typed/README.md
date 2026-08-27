@@ -1,6 +1,6 @@
 # Spike S3 — wit-bindgen sync-impl of an async-typed export
 
-Answers the ABI v2 agent-migration question from `docs/wasip3-parallelism.md`:
+Answers the ABI v2 agent-migration question:
 **can current wit-bindgen sync-implement an `async func` export?**
 
 Yes — `wit_bindgen::generate!({ ..., async: false })` on wit-bindgen 0.58:

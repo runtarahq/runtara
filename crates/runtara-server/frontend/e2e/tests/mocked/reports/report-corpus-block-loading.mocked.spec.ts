@@ -3,7 +3,6 @@
 // backend half lives in `crates/runtara-server/tests/reports_corpus.rs`,
 // `reports_runtime_corpus.rs`, and `reports_render_corpus.rs`.
 //
-// See `docs/reports-refactoring-plan.md` Phase 0.
 import type { Page, Route } from '@playwright/test';
 import {
   buildObjectModelConnection,

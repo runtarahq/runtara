@@ -14,8 +14,7 @@ interface EntitlementRouteProps {
  *
  * Composes inside `<PrivateRoute>`: auth-then-entitlement. An unauthenticated
  * user hitting a gated URL must still go through login first; only then do
- * we decide whether they're allowed to *see* the feature. See
- * `docs/entitlements.md`.
+ * we decide whether they're allowed to *see* the feature.
  *
  * Hidden menu items in the sidebar are not enough on their own — a user can
  * paste the URL directly. This wrapper is the second-line defense.

@@ -27,7 +27,7 @@ wasm-js = []
 
 [dependencies]
 base64 = { workspace = true }
-# host-io transport bindings (route (b), docs/wasip3-parallelism.md §3.6).
+# host-io transport bindings (route (b)).
 wit-bindgen = { version = "0.58", optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

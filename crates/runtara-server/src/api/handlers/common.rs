@@ -18,8 +18,7 @@ use crate::workers::execution_engine::ExecutionError;
 /// canonical `{success: false, message: <display>, data: null}` shape
 /// **except** for `EntitlementDenied`, which carries the documented
 /// entitlement body (`{error, code, limit, maximum, message}`) so callers
-/// can switch on the stable `code` field (see
-/// `docs/entitlements.md` § Error Model).
+/// can switch on the stable `code` field.
 pub fn execution_error_response(err: &ExecutionError) -> (StatusCode, Json<Value>) {
     if let ExecutionError::EntitlementDenied(denial) = err {
         return (err.http_status(), Json(denial.json_body()));

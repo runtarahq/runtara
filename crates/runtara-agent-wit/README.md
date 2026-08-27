@@ -13,7 +13,7 @@ The canonical `runtara:agent@0.1.0` WIT package. Every runtara agent component i
 
 ## Bumping the contract
 
-Edit `wit/runtara-agent.wit` and update `package runtara:agent@<X.Y.Z>;` per the semver policy in [`docs/wasm-components-migration-plan.md` § 4.4](../../docs/wasm-components-migration-plan.md):
+Edit `wit/runtara-agent.wit` and update `package runtara:agent@<X.Y.Z>;` per the semver policy:
 
 | Change                              | Bump      |
 | ----------------------------------- | --------- |

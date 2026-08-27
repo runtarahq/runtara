@@ -15,8 +15,6 @@
 //! - `registry` — load components from a manifest, pre-instantiate, cache.
 //! - `dispatcher` — `ComponentDispatcherService` replacing the legacy
 //!   `DispatcherService`.
-//!
-//! See docs/wasm-components-migration-plan.md § 6.
 
 pub mod bindings;
 pub mod connection_resolver_host;

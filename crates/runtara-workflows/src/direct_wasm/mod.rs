@@ -7,7 +7,7 @@
 //! runnable WASI component *without* `rustc` — emitting the core module byte-by-byte
 //! and composing it with prebuilt shared + per-agent components.
 //!
-//! Pipeline (see `docs/direct-compilation-architecture.md` for the overview):
+//! Pipeline:
 //! `manifest` flattens the DSL graph into a normalized, integer-addressable IR;
 //! `support` gates whether that graph is fully lowerable (else the caller falls
 //! back to the generated compiler); `plan` shapes it into a structured run-plan
@@ -65,7 +65,7 @@ pub use support::{
     analyze_direct_wasm_support_with_child_workflows,
 };
 
-/// Component id of parallel-pool member `n` (docs/wasip3-parallelism.md §3.5)
+/// Component id of parallel-pool member `n`
 /// — shared naming between the emitter, the world WIT, and the wac script.
 pub(crate) fn split_parallel_pool_member_component_id(base: &str, member: u32) -> String {
     if member == 0 {

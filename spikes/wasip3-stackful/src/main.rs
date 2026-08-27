@@ -1,4 +1,4 @@
-//! Spike S1 (docs/wasip3-parallelism.md §5 Phase 1): stackful async lift,
+//! Spike S1 (wasip3 parallelism plan, Phase 1): stackful async lift,
 //! hand-emitted with the production wasm-tools pins, running on wasmtime 46.
 //!
 //! Exit criteria checked here:

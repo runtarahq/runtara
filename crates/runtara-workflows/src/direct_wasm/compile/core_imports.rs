@@ -146,7 +146,7 @@ pub(super) struct DirectCoreImportIndices {
     stdlib_step_debug_end: Option<u32>,
     stdlib_step_debug_error: Option<u32>,
     agent_invokes: BTreeMap<String, DirectAgentInvokeImport>,
-    // Parallel-split surface (docs/wasip3-parallelism.md Phase 3): the CM-async
+    // Parallel-split surface (Phase 3): the CM-async
     // builtins and per-agent async-lowered invokes, populated directly by
     // `core_module` (they are extra CORE imports, not WIT world functions).
     pub(super) waitable_set_new: Option<u32>,

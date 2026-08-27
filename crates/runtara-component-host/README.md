@@ -59,4 +59,4 @@ println!("{}", result.output.unwrap());  // {"hash":"2cf24...","algorithm":"sha2
 
 ## Where it slots in
 
-`runtara-server` builds a `ComponentDispatcherService` at boot when `RUNTARA_AGENT_COMPONENTS_DIR` is set, plugs it into `AgentTestingService`, and routes `POST /api/runtime/agents/{name}/capabilities/{cap}/test?engine=components` through this crate. See [`docs/wasm-components-migration-plan.md` § 6](../../docs/wasm-components-migration-plan.md).
+`runtara-server` builds a `ComponentDispatcherService` at boot when `RUNTARA_AGENT_COMPONENTS_DIR` is set, plugs it into `AgentTestingService`, and routes `POST /api/runtime/agents/{name}/capabilities/{cap}/test?engine=components` through this crate.

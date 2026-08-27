@@ -33,9 +33,8 @@ export type MenuItem = {
   allowedGroups: string[];
   /** When set, this entry is hidden unless the resolved entitlement snapshot
    *  has the feature enabled. Workflows / Triggers / Connections / Analytics
-   *  / Invocation History are intentionally always-on per
-   *  `docs/entitlements.md` ("Files / Connections / Triggers / Analytics /
-   *  Invocation History" decision). */
+   *  / Invocation History are intentionally always-on (the "Files /
+   *  Connections / Triggers / Analytics / Invocation History" decision). */
   requiresFeature?: FeatureKey;
   children?: MenuChild[];
 };

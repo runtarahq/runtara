@@ -4863,7 +4863,7 @@ export interface SplitConfig {
    * as component-model-async subtasks and their I/O overlaps. Ineligible
    * shapes keep the strictly sequential execution (advisory W073).
    * Results, error routing, and `dontStopOnFailed` semantics are identical
-   * to sequential execution. See docs/wasip3-parallelism.md.
+   * to sequential execution.
    * @format int32
    * @min 0
    */

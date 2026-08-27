@@ -1,7 +1,7 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Host side of `runtara:host-io/http` — the concurrent HTTP hop for agent
-//! requests (docs/wasip3-parallelism.md §3.6 route (b)).
+//! requests.
 //!
 //! Agents' PROXIED requests (`runtara-http::call_agent` under WASI) arrive
 //! here as one buffered JSON envelope; the host performs the actual dial with
@@ -34,9 +34,9 @@ pub(crate) fn add_host_io_to_linker<T: Send + 'static>(linker: &mut Linker<T>) -
             Ok((response,))
         })
     })?;
-    // Concurrent timer for in-window retry backoff (docs/wasip3-parallelism.md
-    // §3.4): a sleep is just another waitable in the window's set, so item
-    // backoffs overlap instead of serializing through assembly.
+    // Concurrent timer for in-window retry backoff: a sleep is just
+    // another waitable in the window's set, so item backoffs overlap
+    // instead of serializing through assembly.
     let mut timers = linker.instance("runtara:host-io/timers@0.1.0")?;
     timers.func_wrap_concurrent("sleep", |_accessor, (ms,): (u64,)| {
         Box::pin(async move {

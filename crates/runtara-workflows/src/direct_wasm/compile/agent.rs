@@ -86,7 +86,7 @@ pub(super) fn emit_agent_plan(
     // `chat-completion` choice into the `{response, iterations, toolCalls}`
     // envelope). Both share the rest of the invoke/checkpoint/retry path.
     output_fn: u32,
-    // Parallel-split memoization (docs/wasip3-parallelism.md Phase 3): a local
+    // Parallel-split memoization (Phase 3): a local
     // holding this item's slot pointer. When the slot's state is non-zero the
     // launch pass already ran the invoke — its canonical result is copied from
     // the slot to the retptr scratch instead of re-invoking; an EMPTY slot

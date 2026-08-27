@@ -239,7 +239,7 @@ Runtara workflows are described as JSON execution graphs. A minimal workflow:
 
 Useful references:
 
-- `docs/dsl_spec.json`
+- The live DSL JSON Schema: `GET /api/runtime/specs/dsl`
 - `crates/runtara-dsl/README.md`
 - `crates/runtara-workflows/README.md`
 
@@ -250,7 +250,7 @@ Useful references:
 - Management plane: `crates/runtara-environment`
 - Workflow compiler: `crates/runtara-workflows`
 - Local development stack: `dev/README.md`
-- Proxy and deployment notes: `docs/reference/proxy/README.md`
+- Deployment notes: `docs/deployment/`
 
 ## License
 

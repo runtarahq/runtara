@@ -49,8 +49,7 @@ wasmtime = { version = "46", default-features = false, features = [
     "runtime",
     "component-model",
     # CM-async (WASIp3): concurrent host imports (func_wrap_concurrent), the
-    # in-store event loop, and the async-typed agent/lifecycle ABI v2. See
-    # docs/wasip3-parallelism.md.
+    # in-store event loop, and the async-typed agent/lifecycle ABI v2.
     "component-model-async",
     "async",
     "cranelift",
@@ -67,7 +66,7 @@ wasmtime-wasi-http = "46"
 
 # Plumbing
 anyhow = "1"
-# host-io concurrent HTTP hop (docs/wasip3-parallelism.md route (b)). Same
+# host-io concurrent HTTP hop (route (b)). Same
 # hyper family wasmtime-wasi-http already pulls in.
 hyper = { version = "1", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "tokio"] }

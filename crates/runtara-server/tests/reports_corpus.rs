@@ -1,6 +1,6 @@
 //! Reports corpus tests — Phase 0 of the reports refactor.
 //!
-//! See `docs/reports-refactoring-plan.md`. This file owns the fixture corpus
+//! This file owns the fixture corpus
 //! that every later phase has to keep green:
 //!
 //! - DTO round-trip: deserialize → serialize → deserialize → serialize must

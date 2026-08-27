@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Host-mediated HTTP transport — `runtara:host-io/http.request`.
 //!
-//! The wasip3-parallelism route (b) (docs/wasip3-parallelism.md §3.6): the
+//! The wasip3-parallelism route (b): the
 //! guest hands the whole buffered request to ONE host import whose host-side
 //! binding is `func_wrap_concurrent`, so a pending request parks only the
 //! CALLING task. Concurrent Split subtasks therefore overlap their agent

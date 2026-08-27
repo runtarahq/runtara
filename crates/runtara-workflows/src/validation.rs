@@ -1328,7 +1328,7 @@ impl std::fmt::Display for ValidationWarning {
             } => {
                 write!(
                     f,
-                    "[W073] Split step '{}' sets parallelism={} — concurrent windows apply only to non-durable-compatible single-Agent bodies (no breakpoints, no split retries/timeout, not a workflow-agent child); other shapes run sequentially. See docs/wasip3-parallelism.md.",
+                    "[W073] Split step '{}' sets parallelism={} — concurrent windows apply only to non-durable-compatible single-Agent bodies (no breakpoints, no split retries/timeout, not a workflow-agent child); other shapes run sequentially.",
                     step_id, parallelism
                 )
             }

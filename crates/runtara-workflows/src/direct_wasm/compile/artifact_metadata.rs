@@ -297,8 +297,7 @@ pub(super) fn resolve_agent_component_dependencies(
         .collect()
 }
 
-/// Stale-artifact gate for composed workflow-agents (checkpoint namespacing,
-/// docs/workflow-agent-checkpoint-namespace-plan.md §5).
+/// Stale-artifact gate for composed workflow-agents (checkpoint namespacing).
 ///
 /// A DURABLE workflow-agent child shares the composing parent instance's
 /// checkpoint store; the parent namespaces the child's keys by injecting

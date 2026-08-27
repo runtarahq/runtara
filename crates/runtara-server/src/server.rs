@@ -366,7 +366,7 @@ use runtime_client::RuntimeClient;
             runtara_connections::types::RateLimitTimelineData,
             runtara_connections::types::RateLimitTimelineResponse,
             // Reports DTOs (sourced from runtara-report-dsl crate, Phase 1 of
-            // the reports refactor — see docs/reports-refactoring-plan.md).
+            // the reports refactor).
             // Registering these here makes them available to
             // `swagger-typescript-api` so the FE can drop its hand-maintained
             // types.ts in Phase 2.

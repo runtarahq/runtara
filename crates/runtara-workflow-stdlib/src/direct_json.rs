@@ -5290,7 +5290,7 @@ fn embed_workflow_cache_key(step_id: &str, source: &Value) -> String {
 /// definition shared by EmbedWorkflow children (inlined; prefix rides the
 /// in-process variables) and composed workflow-agent children (prefix rides
 /// the child's input envelope) — so both child kinds are indistinguishable in
-/// checkpoint key-space. See docs/workflow-agent-checkpoint-namespace-plan.md.
+/// checkpoint key-space.
 pub fn child_cache_prefix(step_id: &str, source: &Value) -> String {
     let parent_variables = source.get("variables").and_then(Value::as_object);
     let loop_indices_suffix = parent_variables

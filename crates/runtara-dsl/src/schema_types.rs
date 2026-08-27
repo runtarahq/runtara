@@ -1709,7 +1709,7 @@ pub enum SchemaFieldType {
     /// the bound connection must belong to. This is how a workflow declares the
     /// connections a CALLER must supply — including a workflow compiled as an
     /// agent, whose `connection`-typed inputs ARE its capability's connection
-    /// requirements. See docs/workflow-agent-connections.md.
+    /// requirements.
     Connection,
 }
 
@@ -2117,7 +2117,7 @@ pub struct SplitConfig {
     /// as component-model-async subtasks and their I/O overlaps. Ineligible
     /// shapes keep the strictly sequential execution (advisory W073).
     /// Results, error routing, and `dontStopOnFailed` semantics are identical
-    /// to sequential execution. See docs/wasip3-parallelism.md.
+    /// to sequential execution.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parallelism: Option<u32>,
 

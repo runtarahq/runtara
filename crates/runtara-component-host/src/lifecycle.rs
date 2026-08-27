@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Host-side mirror of `runtara:workflow-lifecycle/lifecycle` — the unified
 //! invoke export a workflow compiled with the invoke ABI exposes instead of
-//! `wasi:cli/run` (Phase 3 of docs/unify-agents-workflows-plan.md).
+//! `wasi:cli/run` (Phase 3 of the agent/workflow unification).
 //!
 //! Field order and kebab names must match the WIT exactly; wasmtime
 //! type-checks them against the component's export when the typed function is

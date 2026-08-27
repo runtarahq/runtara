@@ -38,7 +38,7 @@ pub const DIRECT_AGENT_WIT_VERSION: &str = "0.4.0";
 ///   surfaces as a component-level import of the composed artifact — exactly
 ///   like the WASI interfaces already do — for the embedding host to satisfy
 ///   natively via `add_to_linker` (no HTTP loopback). The production default
-///   since Phase 2 of docs/unify-agents-workflows-plan.md.
+///   since Phase 2 of the agent/workflow unification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RuntimeBinding {
     /// Compose the prebuilt runtime component in (guest does HTTP to core).
@@ -48,8 +48,8 @@ pub enum RuntimeBinding {
     HostImport,
 }
 
-/// The workflow's top-level export shape (Phase 3 of
-/// docs/unify-agents-workflows-plan.md).
+/// The workflow's top-level export shape (Phase 3 of the agent/workflow
+/// unification).
 ///
 /// - [`CliRunHttp`](Self::CliRunHttp): the legacy shape — export
 ///   `wasi:cli/run`, input pulled via `runtime.load-input`, terminal status
@@ -69,8 +69,8 @@ pub enum WorkflowAbi {
     /// rollback lever.
     CliRunHttp,
     /// Unified: export `lifecycle.invoke`, input/result at the call boundary.
-    /// The production default since Phase 5 of
-    /// docs/unify-agents-workflows-plan.md.
+    /// The production default since Phase 5 of the agent/workflow
+    /// unification.
     #[default]
     InvokeHostImports,
     /// Workflow-as-agent: export `runtara:agent-<slug>/capabilities.invoke(
@@ -227,7 +227,7 @@ pub fn emit_direct_component_artifacts_configured(
 }
 
 /// [`emit_direct_component_artifacts_configured`] plus the parallel-Split
-/// instance pools (docs/wasip3-parallelism.md §3.5): each pooled agent adds
+/// instance pools: each pooled agent adds
 /// phantom `…-par<n>` world imports and extra wac instantiations of the SAME
 /// package, wired by explicit argument name.
 pub fn emit_direct_component_artifacts_with_pools(
@@ -667,7 +667,7 @@ world workflow {
 
     #[test]
     fn default_binding_is_host_import() {
-        // Phase 2 of docs/unify-agents-workflows-plan.md: new compiles
+        // Phase 2 of the agent/workflow unification: new compiles
         // surface the runtime interface as a host-satisfied import; the
         // Composed binding stays available for the CLI A/B axis and old
         // artifacts keep running unchanged (they carry their own runtime).

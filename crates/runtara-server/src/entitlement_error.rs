@@ -2,7 +2,7 @@
 //!
 //! Every place where an entitlement gate denies a request goes through this
 //! module, so the stable error `code`, status, and JSON body shape are
-//! defined in exactly one spot — see `docs/entitlements.md`. REST handlers
+//! defined in exactly one spot. REST handlers
 //! return `EntitlementDenial` (it implements `IntoResponse`); MCP tools call
 //! [`EntitlementDenial::to_rmcp_error`] to surface the same structured
 //! information through the JSON-RPC envelope with `code` preserved in `data`.
@@ -16,7 +16,6 @@ use crate::entitlements::{EntitlementError, FeatureKey};
 
 /// Stable error codes returned in the response body. The UI, MCP clients, and
 /// downstream tooling switch on these strings, so they MUST NOT change.
-/// See `docs/entitlements.md:200-237`.
 pub mod codes {
     pub const ENTITLEMENT_REQUIRED: &str = "ENTITLEMENT_REQUIRED";
     pub const AGENT_NOT_ENABLED: &str = "AGENT_NOT_ENABLED";

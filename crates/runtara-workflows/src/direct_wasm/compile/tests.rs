@@ -3544,7 +3544,7 @@ fn direct_compile_supports_fanout_diamond_graph() {
     // The diamond runs its two branches CONCURRENTLY: `start`, then a
     // `ParallelBranches` window over the single-Agent branches {left, right}, then
     // the `join` Finish as the shared merge continuation
-    // (docs/wasip3-parallel-branches-plan.md Phase 4a).
+    // (Phase 4a).
     let manifest: DirectWorkflowManifest =
         serde_json::from_slice(&fs::read(&result.manifest_path).expect("manifest"))
             .expect("manifest json");
@@ -10705,8 +10705,8 @@ fn workflow_abi_env_lever_defaults_invoke() {
 
 #[test]
 fn generated_workflow_slugs_are_wit_valid_packages() {
-    // The slug plan allows leading digits (docs/workflow-slug-plan.md,
-    // decision 3) on the premise that wit-parser accepts digit-led words in
+    // The slug plan allows leading digits (decision 3) on the premise that
+    // wit-parser accepts digit-led words in
     // package names. This asserts that premise against the REAL parser via
     // the same `agent_wit_package` template the composition path uses — if a
     // wit-parser upgrade tightens the grammar, this fails here instead of as
@@ -10729,7 +10729,7 @@ fn generated_workflow_slugs_are_wit_valid_packages() {
     }
 }
 
-// ── Parallel Split (docs/wasip3-parallelism.md Phase 3) ──────────────────────
+// ── Parallel Split (Phase 3) ──────────────────────
 
 /// `parallelism > 1` over an eligible single-Agent body lowers to the
 /// launch/drain/assemble windows: the logic component must carry the

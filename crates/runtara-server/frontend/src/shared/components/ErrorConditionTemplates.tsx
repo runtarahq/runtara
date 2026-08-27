@@ -20,8 +20,6 @@ interface ErrorConditionTemplatesProps {
 /**
  * Quick-select templates for error handling conditions.
  * Displays pre-built conditions for common error handling patterns using the __error context.
- *
- * @see docs/structured-errors.md for __error context documentation
  */
 export function ErrorConditionTemplates({
   onSelect,

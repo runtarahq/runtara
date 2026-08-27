@@ -85,7 +85,7 @@ pub(super) enum DirectRunPlan {
         /// Requested concurrency window from the Split's `parallelism` config
         /// (None / Some(0|1) = sequential). Whether the window actually runs
         /// concurrently is decided at emission time by the eligibility rules
-        /// in `split.rs` (docs/wasip3-parallelism.md Phase 3); ineligible
+        /// in `split.rs` (Phase 3); ineligible
         /// bodies degrade to the sequential lowering.
         parallel_window: Option<u32>,
         nested_plan: Box<DirectRunPlan>,
@@ -208,8 +208,8 @@ pub(super) enum DirectRunPlan {
         /// `None` when the branches are terminal (no merge).
         merge_plan: Option<Box<DirectRunPlan>>,
     },
-    /// An unconditional fan-out whose branches run CONCURRENTLY, then re-converge
-    /// (docs/wasip3-parallel-branches-plan.md). Unlike the linearised default,
+    /// An unconditional fan-out whose branches run CONCURRENTLY, then
+    /// re-converge. Unlike the linearised default,
     /// every branch's agent invoke is launched into the same waitable-set and the
     /// window drains them together before assembling each branch's result into the
     /// `steps` context in order — sequential-identical by construction (assemble IS
@@ -1399,8 +1399,8 @@ fn normal_flow_plan(
         // duplicating the shared continuation into earlier branches and
         // running steps before their inputs exist).
         if default_edges.len() > 1 {
-            // Concurrent fan-out (docs/wasip3-parallel-branches-plan.md): when the
-            // branches form a clean single-Agent diamond, emit them as a
+            // Concurrent fan-out: when the branches form a clean
+            // single-Agent diamond, emit them as a
             // ParallelBranches window so the branch agents run concurrently.
             // Anything else falls through to the sequential topological
             // linearization below (widened in later phases).
@@ -1637,8 +1637,8 @@ fn direct_find_merge_point(
 }
 
 /// Try to lower an unconditional fan-out at `from_step` as concurrent
-/// `ParallelBranches` (docs/wasip3-parallel-branches-plan.md). Phase 4a: only a
-/// clean single-Agent diamond qualifies — every branch is exactly one Agent step
+/// `ParallelBranches`. Phase 4a: only a clean single-Agent diamond
+/// qualifies — every branch is exactly one Agent step
 /// Whether the normal-flow region forward-reachable from `from_step` (bounded by
 /// `stop_at`) is SINGLE-ENTRY: every reachable step's normal-flow predecessors are
 /// `from_step` or themselves inside the region. A `false` result means an external
@@ -3332,8 +3332,8 @@ mod tests {
     }
 
     /// A clean single-Agent diamond `a → {b, c} → m → finish` lowers to
-    /// concurrent `ParallelBranches` (docs/wasip3-parallel-branches-plan.md 4a):
-    /// the two branch agents form the window and the merge `m` runs once after.
+    /// concurrent `ParallelBranches` (Phase 4a): the two branch agents form
+    /// the window and the merge `m` runs once after.
     #[test]
     fn single_agent_diamond_lowers_to_parallel_branches() {
         let mut steps = serde_json::Map::new();

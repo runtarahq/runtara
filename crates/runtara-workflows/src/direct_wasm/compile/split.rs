@@ -335,7 +335,7 @@ pub(super) fn emit_split_plan(
     handled_target: Option<DirectHandledTarget>,
 ) {
     let has_error_plan = error_plan.is_some();
-    // Concurrent window (docs/wasip3-parallelism.md Phase 3): Some only when
+    // Concurrent window (Phase 3): Some only when
     // the requested `parallelism` may actually run concurrently. Ineligible
     // shapes silently keep the sequential lowering (advisory W073 covers the
     // authoring-time signal).

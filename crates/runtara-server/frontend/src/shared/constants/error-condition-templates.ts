@@ -8,8 +8,6 @@ import type { Condition } from '@/shared/components/ui/condition-editor';
  * References use the canonical `steps.__error.*` path (validation.rs W053):
  * the bare `__error.*` root still resolves for back-compat but warns and is
  * not typo-checked.
- *
- * @see docs/structured-errors.md for the error context structure
  */
 
 interface ErrorConditionTemplate {

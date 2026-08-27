@@ -15,7 +15,7 @@
 //! `&'static` statics on the host architecture and writes
 //! `runtara_agent_compression.meta.json` next to the `.wasm`.
 //!
-//! See `docs/wasm-components-migration-plan.md § 5.6` for the wrapper pattern.
+//! See the sibling agent crates for the wrapper pattern.
 #![allow(clippy::result_large_err)]
 
 use runtara_agent_macro::{CapabilityInput, CapabilityOutput, capability};
@@ -36,7 +36,7 @@ mod bindings {
         path: ["../../runtara-agent-wit/wit", "wit"],
         world: "runtara:agent-compression/agent",
         // Sync impls of the async-TYPED invoke (sync lift; see
-        // docs/wasip3-parallelism.md ABI v2 + spikes/wit-bindgen-async-typed).
+        // spikes/wit-bindgen-async-typed).
         async: false,
         generate_all,
     });

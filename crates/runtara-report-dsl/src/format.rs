@@ -6,9 +6,6 @@
 //! formatter (uses `Intl`); the server supplies `SimpleAsciiFormatter` by
 //! default and can swap to an ICU-backed impl in the future without
 //! touching call sites.
-//!
-//! See `docs/reports-refactoring-plan.md` § "Phase 2 sub-plan: utils.ts
-//! swap" for the architectural decisions behind this module.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

@@ -2,7 +2,7 @@
 
 RUNTARA ships a per-process entitlement system that gates product features (Reports, Database, API access, MCP), the agent allowlist, and a handful of numeric tier limits. Entitlements are env-driven, resolved once at startup, and enforced on every authenticated entry point — REST, MCP tools, and the internal routes the WASM workflow runtime calls.
 
-This document is the operator-facing reference. For engineering details — the data model, enforcement points, error codes, and the rationale for each design choice — see [`docs/entitlements.md`](../entitlements.md).
+This document is the operator-facing reference. For engineering details — the data model, enforcement points, and error codes — see the `entitlements`, `entitlement_error`, and `middleware::entitlement` modules in `crates/runtara-server`.
 
 ## Quick start
 
@@ -38,7 +38,7 @@ Lower-numbered layers are applied first, then overridden by higher-numbered ones
 2. `RUNTARA_ENTITLEMENTS_JSON`.
 3. `RUNTARA_ENTITLEMENT_OVERRIDES_JSON`.
 
-`null` in a JSON layer means **inherit from below**, not "uncap". To remove a cap a lower layer imposes, restate it as a large explicit value — see [`docs/entitlements.md`](../entitlements.md#limit-merge-semantics-current-state) for the rationale.
+`null` in a JSON layer means **inherit from below**, not "uncap". To remove a cap a lower layer imposes, restate it as a large explicit value.
 
 ### JSON shape
 
@@ -156,7 +156,7 @@ Common shapes:
 
 ### Tenant says "I can't save my workflow"
 
-If the tenant's workflow uses an agent that's no longer in their allowlist, the management plane will reject the save with `AGENT_NOT_ENABLED`. This is intentional: the workflow becomes uneditable until either the entitlement is restored or the forbidden step is removed (which requires temporarily restoring the entitlement). See [`docs/entitlements.md`](../entitlements.md#stale-workflows-after-entitlement-changes-expected-behavior) for the full table of behaviors.
+If the tenant's workflow uses an agent that's no longer in their allowlist, the management plane will reject the save with `AGENT_NOT_ENABLED`. This is intentional: the workflow becomes uneditable until either the entitlement is restored or the forbidden step is removed (which requires temporarily restoring the entitlement).
 
 Server-side, you'll see one `WARN entitlement denial code=AGENT_NOT_ENABLED agent=Some("<module>")` line per blocked save attempt — grep for the tenant's id and the agent name to confirm.
 
@@ -208,5 +208,4 @@ The audit fields include `tenant_id` by default. If your log sink is shared acro
 
 ## Beyond this doc
 
-- Engineering reference: [`docs/entitlements.md`](../entitlements.md) — data model, enforcement points, full error codes, sub-phase history.
 - Authentication: [`docs/deployment/auth-modes.md`](auth-modes.md) — `AUTH_PROVIDER` and related env. Pairs with entitlements (auth answers "who", entitlements answer "what can they do").

@@ -1,5 +1,5 @@
 // Canonical WIT contract for the workflow invoke export (the unified
-// agent-shaped entry point — Phase 3 of docs/unify-agents-workflows-plan.md).
+// agent-shaped entry point — Phase 3 of the agent/workflow unification).
 //
 // A workflow compiled with the invoke ABI exports `lifecycle` instead of
 // `wasi:cli/run`: input arrives as the call argument (JSON bytes, the
@@ -41,7 +41,7 @@ interface lifecycle {
         suspended(list<wake>),
     }
 
-    /// Async-TYPED since 0.2.0 (docs/wasip3-parallelism.md ABI v2): blocking
+    /// Async-TYPED since 0.2.0 (ABI v2): blocking
     /// legality is keyed to the function type under the ratified
     /// component-model-async rules, and a workflow's task must be allowed to
     /// block — it transitively enters async-typed agent exports and, in

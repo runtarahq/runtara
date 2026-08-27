@@ -52,7 +52,7 @@ fn agents() -> Vec<(&'static str, AgentInfo)> {
         ("xlsx", runtara_agent_xlsx::agent_info()),
         ("xml", runtara_agent_xml::agent_info()),
         // Subsequent agents are added here as they migrate to the macro-derived
-        // metadata path. See docs/wasm-components-migration-plan.md.
+        // metadata path.
     ]
 }
 

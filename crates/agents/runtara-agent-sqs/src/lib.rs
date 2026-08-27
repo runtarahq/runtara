@@ -23,8 +23,7 @@
 //! connection's region (or an explicit `endpoint` override for LocalStack /
 //! VPC endpoints). Server-side encryption (SSE-KMS / SSE-SQS) is a *queue*
 //! attribute set at create/update time — never per message — so custom KMS key
-//! ids live on `create-queue` / `set-queue-attributes`. See
-//! docs/sqs-agent-plan.md.
+//! ids live on `create-queue` / `set-queue-attributes`.
 #![allow(clippy::result_large_err)]
 
 use runtara_agent_macro::{CapabilityInput, CapabilityOutput, capability};
@@ -44,7 +43,7 @@ mod bindings {
         path: ["../../runtara-agent-wit/wit", "wit"],
         world: "runtara:agent-sqs/agent",
         // Sync impls of the async-TYPED invoke (sync lift; see
-        // docs/wasip3-parallelism.md ABI v2 + spikes/wit-bindgen-async-typed).
+        // spikes/wit-bindgen-async-typed).
         async: false,
         generate_all,
     });

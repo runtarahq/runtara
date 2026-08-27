@@ -21,7 +21,7 @@
 #
 # Set RUNTARA_AGENT_COMPONENTS_DIR=<workspace>/target/wasm32-wasip2/release in
 # the server env to load agents at boot and to let direct composition find the
-# shared workflow components. See docs/wasm-components-migration-plan.md.
+# shared workflow components.
 
 set -euo pipefail
 

@@ -1,4 +1,4 @@
-//! REST entitlement gates — see `docs/entitlements.md`.
+//! REST entitlement gates.
 //!
 //! - **Feature gates (`require_reports` etc.)**: per-feature middleware
 //!   that short-circuits with a 403 + stable `code` when the feature is off.
@@ -171,7 +171,7 @@ pub fn walk_closure_for_agents<'a>(
 }
 
 /// Compose an infra-shared limit with the tenant's tier cap, using the
-/// stricter of the two. Per docs/entitlements.md § Limit Composition:
+/// stricter of the two:
 /// `effective_limit = min(configured_infra_limit, entitlement_limit)`.
 ///
 /// `None` from the entitlement side means "no tenant cap" — infrastructure
@@ -463,7 +463,7 @@ mod tests {
 
     #[test]
     fn jwt_with_api_disabled_still_passes_through() {
-        // ★ Control case from docs/entitlements.md:450 — the entire purpose
+        // ★ Control case — the entire purpose
         // of the guard is that JWT/session callers are unaffected by `api`.
         let snap = snapshot_api_off();
         assert!(api_key_decision(&snap, &AuthMethod::Jwt).is_ok());

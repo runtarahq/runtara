@@ -1,7 +1,6 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Concurrent parallel-branch lowering (docs/wasip3-parallel-branches-plan.md,
-//! Phases 4a + 4b).
+//! Concurrent parallel-branch lowering (Phases 4a + 4b).
 //!
 //! An unconditional fan-out `A → {branch, branch, …} → M` runs the branches
 //! CONCURRENTLY instead of linearising them. A branch is a linear Agent chain
@@ -1363,7 +1362,7 @@ fn emit_concurrent_branches(
     // that still has one. Assemble runs each step with `next = Join` (the next
     // chain step is handled at the next depth) and MEMOIZES its invoke; its output
     // lands in the SHARED `steps` context that depth d+1 reads. A length-1 chain
-    // (4a) is exactly one depth. (docs/wasip3-parallel-branches-plan.md §4.0.)
+    // (4a) is exactly one depth.
     let join = DirectRunPlan::Join;
     for depth in 0..max_depth {
         // Fresh waitable-set + pending for this depth; slots are reused (assemble

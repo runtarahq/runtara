@@ -76,8 +76,7 @@ describe('agentEnabled', () => {
 
 describe('PERMISSIVE_FALLBACK', () => {
   it('enables every feature key the SPA branches on', () => {
-    // Mirrors backend "no entitlement env set" default — see
-    // `docs/entitlements.md#local-development-default`.
+    // Mirrors the backend "no entitlement env set" default.
     expect(isEnabled(PERMISSIVE_FALLBACK, 'reports')).toBe(true);
     expect(isEnabled(PERMISSIVE_FALLBACK, 'database')).toBe(true);
     expect(isEnabled(PERMISSIVE_FALLBACK, 'api')).toBe(true);

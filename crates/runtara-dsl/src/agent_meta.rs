@@ -1965,9 +1965,8 @@ pub const WORKFLOW_AGENT_CAPABILITY_ID: &str = "run";
 /// The capability's `inputs` ARE the workflow's `inputSchema` fields —
 /// including `connection`-typed ones (surfaced with `type: "connection"`),
 /// which is how a workflow-agent advertises the connections a CALLER must
-/// supply: there is no separate connection-slots descriptor
-/// (docs/workflow-agent-connections.md). `supportsConnections` and
-/// `integrationIds` are derived from those fields.
+/// supply: there is no separate connection-slots descriptor.
+/// `supportsConnections` and `integrationIds` are derived from those fields.
 ///
 /// `hasSideEffects` is conservatively `true` (a workflow may do anything) and
 /// `isIdempotent` `false` — callers must not silently retry a published

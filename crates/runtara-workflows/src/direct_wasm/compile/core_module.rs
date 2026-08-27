@@ -190,7 +190,7 @@ pub(super) fn emit_direct_core_module(
         }
     }
 
-    // Parallel-Split extra CORE imports (docs/wasip3-parallelism.md Phase 3):
+    // Parallel-Split extra CORE imports (Phase 3):
     // the CM-async waitable builtins from the legacy `$root` module, plus an
     // `[async-lower]invoke` per agent referenced by an eligible parallel
     // window. Emitted only when such a window exists, so sequential-only
@@ -645,7 +645,7 @@ const CANONICAL_LOCAL_GROUPS: &[(u32, ValType)] = &[
     // the durable Agent retry per-attempt-result checkpoint scratch.
     (20, ValType::I32),
     // 116 = parallel-Split suspend flag, 117 spare; 118-123 are the
-    // parallel-Split scratch (DIRECT_PSPLIT_*, docs/wasip3-parallelism.md);
+    // parallel-Split scratch (DIRECT_PSPLIT_*);
     // 124-125 are the concurrent-retry-round cursor + timers-fired flag.
     (22, ValType::I32),
 ];

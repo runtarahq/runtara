@@ -134,7 +134,7 @@ world command {
 "#;
 const AGENT_TYPES_WIT: &str = include_str!("../../../runtara-agent-wit/wit/runtara-agent.wit");
 /// Host-satisfied concurrent timer for in-window retry backoff
-/// (docs/wasip3-parallelism.md §3.4). Imported by the workflow world only
+///. Imported by the workflow world only
 /// when a parallel Split window exists; the wac trailing `...` bubbles it to
 /// the composed component where the executor binds it func_wrap_concurrent.
 const HOST_IO_TIMERS_WIT: &str = "\
@@ -378,7 +378,7 @@ const DIRECT_AGENT_ATTEMPT_KEY_LEN_LOCAL: u32 = 113;
 const DIRECT_AGENT_ATTEMPT_ENV_PTR_LOCAL: u32 = 114;
 const DIRECT_AGENT_ATTEMPT_ENV_LEN_LOCAL: u32 = 115;
 
-// ── Parallel Split (docs/wasip3-parallelism.md Phase 3) ─────────────────────
+// ── Parallel Split (Phase 3) ─────────────────────
 // Scratch for the chunked launch/drain/assemble item pipeline. Only one
 // parallel split is ever ACTIVE at a time (eligible bodies are single Agent
 // steps, so parallel splits cannot nest), so these are plain fixed locals with
@@ -542,7 +542,7 @@ pub struct DirectCompilationResult {
     /// on-disk world/wac consistent with the emitted module.
     pub omit_runtime: bool,
     /// Parallel-Split instance pools the emitted module was compiled against
-    /// (docs/wasip3-parallelism.md §3.5). Re-emit paths must thread this so
+    ///. Re-emit paths must thread this so
     /// the world/wac keep the phantom pool imports the module actually calls.
     pub parallel_pools: std::collections::BTreeMap<String, u32>,
 }
@@ -899,7 +899,7 @@ fn store_freeing_sleep_from_raw(raw: Option<&str>) -> bool {
 /// and the omit path in the emitter). Default OFF — the runtime import is kept
 /// and the additive `runtime.complete`/`fail` fire as today. Set to `1`/`true`
 /// to let eligible workflows compile agent-shaped (zero runtime imports). This
-/// is the compile lever behind workflow-as-agent (docs/workflow-as-agent-plan.md).
+/// is the compile lever behind workflow-as-agent.
 fn omit_runtime_from_env() -> bool {
     store_freeing_sleep_from_raw(std::env::var("RUNTARA_DIRECT_OMIT_RUNTIME").ok().as_deref())
 }
@@ -920,7 +920,7 @@ fn workflow_abi_from_raw(raw: Option<&str>) -> super::component::WorkflowAbi {
         Some("invoke") | None => super::component::WorkflowAbi::default(),
         // Unknown values are LOUD, not a silent default: a typo'd lever on an
         // older binary silently compiling the wrong ABI shape is exactly the
-        // failure mode docs/wasip3-parallelism.md §3.1 warns about.
+        // failure mode this lever is meant to protect against.
         Some(other) => {
             tracing::warn!(
                 value = other,
@@ -933,8 +933,8 @@ fn workflow_abi_from_raw(raw: Option<&str>) -> super::component::WorkflowAbi {
 }
 
 /// [`compile_direct_workflow`] with an explicit [`super::component::WorkflowAbi`]
-/// — the flag-gated invoke-export path (Phase 3 of
-/// docs/unify-agents-workflows-plan.md). The default entry keeps the legacy
+/// — the flag-gated invoke-export path (Phase 3 of the agent/workflow
+/// unification). The default entry keeps the legacy
 /// `wasi:cli/run` shape untouched.
 pub fn compile_direct_workflow_with_abi(
     input: DirectCompilationInput,
@@ -1237,7 +1237,7 @@ fn emit_direct_component(
             .with_abi(abi)
             .with_store_freeing_sleep(store_freeing_sleep)
             .with_omit_runtime(omit_runtime);
-    // Parallel-split instance pools (docs/wasip3-parallelism.md §3.5): each
+    // Parallel-split instance pools: each
     // pooled agent contributes phantom world imports (`…-par<n>`) that the wac
     // composition satisfies with extra instantiations of the SAME package.
     let parallel_pools =

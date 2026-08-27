@@ -57,7 +57,7 @@ describe('filterMenu — entitlement gate', () => {
   it('always-on entries stay visible regardless of feature flags', () => {
     // Disabling reports + database must not hide workflows / triggers /
     // connections / analytics / invocation-history — those are tier-independent
-    // per docs/entitlements.md.
+    // by design.
     const out = filterMenu(
       menu,
       [],

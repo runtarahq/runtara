@@ -14,7 +14,7 @@ ALTER TABLE workflows ADD COLUMN IF NOT EXISTS slug TEXT;
 
 -- FULL unique index (not partial on deleted_at IS NULL): a soft-deleted
 -- workflow RESERVES its slug — a published capability id must never be
--- silently reusable by a different workflow (docs/workflow-slug-plan.md,
+-- silently reusable by a different workflow (slug plan,
 -- decision 4). Multiple NULLs are fine (not-yet-backfilled / legacy-deleted
 -- rows don't collide).
 CREATE UNIQUE INDEX IF NOT EXISTS idx_workflows_tenant_slug

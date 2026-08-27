@@ -28,7 +28,7 @@ members = [
     "crates/runtara-object-store",
     # Reports DSL: schema + minijinja + condition evaluator (server-side, also compiled to WASM)
     "crates/runtara-report-dsl",
-    # WASM Component Model migration — see docs/wasm-components-migration-plan.md
+    # WASM Component Model migration
     "crates/runtara-agent-wit",
     "crates/runtara-workflow-wit",
     "crates/runtara-component-host",
@@ -105,7 +105,7 @@ chardetng = "1.0"
 openssl = { version = "0.10", features = ["vendored"] }
 
 # Size-tuned profile for `wasm-pack build --release` outputs (Phase 2 of the
-# reports refactor — see docs/reports-refactoring-plan.md). `runtara-report-dsl`
+# reports refactor). `runtara-report-dsl`
 # compiles to WASM and ships to the frontend; size matters more than build
 # speed.
 [profile.release.package.runtara-report-dsl]

@@ -2,8 +2,8 @@
 # E2E Test: a step binds its connection through a resolvable `connectionRef`
 # (direct-wasm engine).
 #
-# Proves the workflow-as-agent connection design end to end (see
-# docs/workflow-agent-connections.md): a workflow declares a `connection`-typed
+# Proves the workflow-as-agent connection design end to end: a workflow
+# declares a `connection`-typed
 # INPUT and an Agent step binds to it with
 #   "connectionRef": { "valueType": "reference", "value": "data.conn" }
 # instead of a compile-time-pinned `connectionId`. The concrete id is supplied

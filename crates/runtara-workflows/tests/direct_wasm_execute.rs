@@ -1899,7 +1899,7 @@ fn top_level_component_imports(bytes: &[u8]) -> Vec<String> {
     imports
 }
 
-/// Spike B of docs/unify-agents-workflows-plan.md: wac-graph must compose a
+/// Spike B of the agent/workflow unification: wac-graph must compose a
 /// workflow whose directly-declared `runtara:workflow-runtime/runtime` import
 /// is left unsatisfied (no runtime component instantiated), surfacing it as a
 /// component-level import — the same path WASI interfaces already ride. This
@@ -2242,7 +2242,7 @@ impl runtara_component_host::runtime_host::RuntimeHost for PersistingRuntimeHost
     }
 }
 
-/// Phase-1 acceptance (docs/unify-agents-workflows-plan.md): a HostImport
+/// Phase-1 acceptance: a HostImport
 /// composition executes end-to-end through the in-process executor with the
 /// runtime interface satisfied by native host functions — input from memory,
 /// output captured from `complete` — zero HTTP. Instantiation type-checks the
@@ -6380,7 +6380,7 @@ fn direct_wasm_sql_transport_failure_classification() {
 }
 
 // ===========================================================================
-// Invoke ABI (Phase 3 of docs/unify-agents-workflows-plan.md): the workflow
+// Invoke ABI (Phase 3 of the agent/workflow unification): the workflow
 // exports lifecycle.invoke instead of wasi:cli/run — input as the call
 // argument, terminal result as the lifted return value. These are the Spike-E
 // acceptance tests: the emitter's param-fold + result-area writer, the WIT
@@ -7799,7 +7799,7 @@ fn parent_workflow_invokes_published_durable_workflow_agent() {
     std::mem::forget(temp);
 }
 
-/// Checkpoint NAMESPACING (docs/workflow-agent-checkpoint-namespace-plan.md):
+/// Checkpoint NAMESPACING:
 /// a Split fanning out over a DURABLE workflow-agent child gives every
 /// invocation site its own checkpoint namespace. The child's internal step is
 /// deliberately named `call` — the SAME id as the parent's Agent step — the
@@ -9789,7 +9789,7 @@ fn workflow_agent_tool_calls_get_per_call_checkpoint_scopes() {
     std::mem::forget(temp);
 }
 
-// ── Parallel Split overlap (docs/wasip3-parallelism.md Phase 3) ──────────────
+// ── Parallel Split overlap (Phase 3) ──────────────
 
 fn parallel_http_split_graph(url: &str, parallelism: u32) -> String {
     format!(
@@ -9845,8 +9845,8 @@ fn parallel_http_split_graph(url: &str, parallelism: u32) -> String {
 }
 
 /// A single-Agent diamond `start → {b, c} → finish` whose two branches each hit
-/// the mock `/slow-item` endpoint (docs/wasip3-parallel-branches-plan.md Phase
-/// 4a). The branches run concurrently in one waitable-set window; the merge
+/// the mock `/slow-item` endpoint (Phase 4a). The branches run concurrently
+/// in one waitable-set window; the merge
 /// `finish` reads BOTH branch outputs. `durable` toggles per-step checkpoints
 /// (4a.2): durable branches gate the launch on the step checkpoint so a replay
 /// never re-fires them.
@@ -9908,7 +9908,7 @@ fn parallel_http_branches_graph(url: &str, durable: bool) -> String {
 }
 
 /// A non-durable diamond of two-Agent CHAINS `start → {b1→b2, c1→c2} → finish`
-/// (docs/wasip3-parallel-branches-plan.md §4.0, the depth-wavefront). Every branch
+/// (the depth-wavefront). Every branch
 /// step hits `/slow-item`, so a correct wavefront issues the requests in TWO waves
 /// of two ({b1,c1} then {b2,c2}); a serialized run issues four back-to-back.
 fn parallel_http_chain_branches_graph(url: &str) -> String {

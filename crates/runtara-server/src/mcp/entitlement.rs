@@ -3,7 +3,7 @@
 //! Each MCP tool that surfaces a gated feature or references a specific
 //! agent module calls one of these helpers at the top to fail fast with a
 //! stable `code` instead of round-tripping through the internal HTTP router
-//! only to be rejected at the REST gate — see `docs/entitlements.md`.
+//! only to be rejected at the REST gate.
 //!
 //! Both helpers return [`rmcp::ErrorData`] built by
 //! [`crate::entitlement_error::EntitlementDenial::to_rmcp_error`], so the wire

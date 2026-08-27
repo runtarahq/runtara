@@ -1,6 +1,6 @@
 # Spike S1 — stackful async lift, hand-emitted (wasip3 parallelism plan)
 
-Proves the load-bearing bets of `docs/wasip3-parallelism.md` Phase 1:
+Proves the load-bearing bets of the wasip3 parallelism plan, Phase 1:
 
 1. A component whose core module is **hand-emitted with the production pins**
    (wasm-encoder / wit-parser / wit-component **0.247**) can use the

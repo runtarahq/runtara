@@ -1,6 +1,6 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Concurrent Split lowering (docs/wasip3-parallelism.md Phase 3).
+//! Concurrent Split lowering (Phase 3).
 //!
 //! When a Split's `parallelism` window is > 1 and its body is an ELIGIBLE
 //! single-Agent subgraph, the item loop is emitted as chunked windows of a

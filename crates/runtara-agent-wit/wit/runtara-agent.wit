@@ -6,7 +6,7 @@
 // export may still be implemented synchronously (wit-bindgen `async: false`;
 // the callee blocks holding its own instance lock), and callers choose per
 // call site whether to lower it sync (today's sequential emitter) or async
-// (parallel regions, docs/wasip3-parallelism.md). ABI shape is otherwise
+// (parallel regions). ABI shape is otherwise
 // identical to 0.3.0.
 //
 // 0.3.0: the contract is execution-only. `invoke` takes

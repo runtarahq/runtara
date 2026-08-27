@@ -37,7 +37,7 @@ mod bindings {
         path: ["../../runtara-agent-wit/wit", "wit"],
         world: "runtara:agent-s3-storage/agent",
         // Sync impls of the async-TYPED invoke (sync lift; see
-        // docs/wasip3-parallelism.md ABI v2 + spikes/wit-bindgen-async-typed).
+        // spikes/wit-bindgen-async-typed).
         async: false,
         generate_all,
     });

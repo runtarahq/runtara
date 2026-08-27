@@ -518,7 +518,7 @@ fn normalize_plausible_script_src(raw: &str) -> Option<String> {
 ///
 /// `entitlements` is the resolved per-process snapshot, inlined as a nested
 /// JSON object (not a stringified blob) so the SPA can branch on features
-/// before any network request completes — see `docs/entitlements.md`.
+/// before any network request completes.
 fn runtime_config_json(entitlements: &EntitlementSnapshot) -> String {
     use std::fmt::Write;
 

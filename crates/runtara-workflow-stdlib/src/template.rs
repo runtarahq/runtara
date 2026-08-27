@@ -94,16 +94,16 @@ impl CompiledTemplate {
 /// When a render fails because the template referenced a filter/function/test/
 /// method the Runtara template sandbox does not provide, append a pointer to the
 /// supported-helper list so authors don't discover the gap one deploy-execute
-/// cycle at a time. See `docs/templating.md` (SYN-449).
+/// cycle at a time (SYN-449).
 fn unknown_helper_hint(error: &minijinja::Error) -> &'static str {
     match error.kind() {
         ErrorKind::UnknownFilter
         | ErrorKind::UnknownFunction
         | ErrorKind::UnknownTest
         | ErrorKind::UnknownMethod => {
-            " — this helper is not available in Runtara templates; see docs/templating.md \
-             for the supported filters and functions. Note `now()` and `joiner()` are not \
-             provided (use the datetime agent for timestamps)."
+            " — this helper is not available in Runtara templates, which expose a \
+             subset of minijinja's built-in filters and functions. Note `now()` and \
+             `joiner()` are not provided (use the datetime agent for timestamps)."
         }
         _ => "",
     }
@@ -198,11 +198,11 @@ mod tests {
     /// SYN-449: an unknown helper (e.g. `now()`) fails with a hint pointing at the
     /// supported-helper docs instead of a bare minijinja message.
     #[test]
-    fn test_unknown_function_error_mentions_docs() {
+    fn test_unknown_function_error_mentions_hint() {
         let ctx = json!({});
         let err = render_template("{{ now() }}", &ctx).unwrap_err();
         assert!(err.contains("unknown function"), "{err}");
-        assert!(err.contains("docs/templating.md"), "{err}");
+        assert!(err.contains("not available in Runtara templates"), "{err}");
     }
 
     /// A `CompiledTemplate` parses once and renders many times, producing a fresh
@@ -268,10 +268,10 @@ mod tests {
     /// An unknown helper parses fine but fails at render time, and the compiled
     /// path still appends the supported-helper hint.
     #[test]
-    fn test_compiled_template_render_error_mentions_docs() {
+    fn test_compiled_template_render_error_mentions_hint() {
         let tmpl = CompiledTemplate::parse("{{ now() }}").unwrap();
         let err = tmpl.render(&json!({})).unwrap_err();
         assert!(err.contains("unknown function"), "{err}");
-        assert!(err.contains("docs/templating.md"), "{err}");
+        assert!(err.contains("not available in Runtara templates"), "{err}");
     }
 }

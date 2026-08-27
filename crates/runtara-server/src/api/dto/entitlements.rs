@@ -3,7 +3,7 @@
 //! Wire shape returned by `GET /api/runtime/entitlements` and inlined into
 //! `window.__RUNTARA_CONFIG__.entitlements` by the UI handler.
 //!
-//! Mirrors the contract in `docs/entitlements.md`:
+//! The wire contract:
 //! - camelCase keys (`tenantId`, `pricingTier`),
 //! - `pricingTier` as a lowercase string (`default`, `starter`, `premium`, `enterprise`),
 //! - `agents` as a concrete array — the internal "`enabled_agents = None`

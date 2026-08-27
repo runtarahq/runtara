@@ -21,7 +21,7 @@ serde_json = { workspace = true }
 # credentials and SigV4 signing never enter the .wasm binary. The agent names
 # the AWS service (`sqs`) via the `X-Runtara-Aws-Service` header so a single
 # generic `aws_credentials` connection can serve it — no per-service
-# connection type. See docs/sqs-agent-plan.md.
+# connection type.
 runtara-agent-macro = { path = "../../runtara-agent-macro" }
 runtara-dsl = { path = "../../runtara-dsl", default-features = false }
 

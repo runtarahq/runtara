@@ -113,7 +113,7 @@
   .dark {
     color-scheme: dark;
 
-    /* Based on docs/dark-color-theme.md with softer contrast.
+    /* Softer-contrast dark palette.
        These variables are the single source of truth for dark colors — do not
        add .dark class/element overrides on top of them (they make the tokens
        lie: the same token would render differently depending on how it is

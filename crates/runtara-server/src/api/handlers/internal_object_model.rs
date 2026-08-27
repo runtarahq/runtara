@@ -1248,8 +1248,7 @@ fn raw_sql_audit(
 ///
 /// Deliberate exception to the sibling 200-envelope pattern: SQL failures are
 /// status-coded via `raw_sql_error_response` so the agent's `check_status`
-/// classifies them permanent/transient without envelope parsing (see
-/// docs/entitlements.md).
+/// classifies them permanent/transient without envelope parsing.
 pub async fn query_sql(
     headers: axum::http::HeaderMap,
     State(state): State<Arc<ObjectModelState>>,

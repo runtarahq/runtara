@@ -62,7 +62,6 @@ pub struct Config {
     /// Directory containing per-agent WASM components (`runtara_agent_*.wasm`).
     /// When set, `AgentTestingService` routes known agents through the
     /// embedded wasmtime path instead of the legacy dispatcher image.
-    /// See docs/wasm-components-migration-plan.md § 6.
     pub agent_components_dir: Option<std::path::PathBuf>,
     /// Directory containing prebuilt direct workflow stdlib/runtime components
     /// plus agent components. Defaults to `agent_components_dir`.
@@ -504,7 +503,7 @@ pub fn try_tenant_id() -> Option<&'static str> {
 }
 
 /// Returns `min(infra, entitlement)`; entitlement values can only lower the cap, never
-/// raise it. See `docs/entitlements.md` § Limit Composition.
+/// raise it.
 pub fn max_concurrent_executions() -> usize {
     crate::middleware::entitlement::effective_limit(
         get().max_concurrent_executions,

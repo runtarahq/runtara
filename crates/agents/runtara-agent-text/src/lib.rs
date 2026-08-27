@@ -41,7 +41,7 @@ mod bindings {
         path: ["../../runtara-agent-wit/wit", "wit"],
         world: "runtara:agent-text/agent",
         // Sync impls of the async-TYPED invoke (sync lift; see
-        // docs/wasip3-parallelism.md ABI v2 + spikes/wit-bindgen-async-typed).
+        // spikes/wit-bindgen-async-typed).
         async: false,
         generate_all,
     });
@@ -1044,9 +1044,9 @@ fn unknown_helper_hint(error: &minijinja::Error) -> &'static str {
         | ErrorKind::UnknownFunction
         | ErrorKind::UnknownTest
         | ErrorKind::UnknownMethod => {
-            " — this helper is not available in Runtara templates; see docs/templating.md \
-             for the supported filters and functions. Note `now()` and `joiner()` are not \
-             provided (use the datetime agent for timestamps)."
+            " — this helper is not available in Runtara templates, which expose a \
+             subset of minijinja's built-in filters and functions. Note `now()` and \
+             `joiner()` are not provided (use the datetime agent for timestamps)."
         }
         _ => "",
     }
@@ -2333,7 +2333,7 @@ mod tests {
         };
         let err = render_template(input).unwrap_err();
         assert!(
-            err.message.contains("docs/templating.md"),
+            err.message.contains("not available in Runtara templates"),
             "{}",
             err.message
         );

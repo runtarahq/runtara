@@ -25,7 +25,7 @@ export function isFeatureKey(value: unknown): value is FeatureKey {
  * Permissive fallback used when neither `window.__RUNTARA_CONFIG__.entitlements`
  * nor `GET /api/runtime/entitlements` is available. Matches the backend's
  * "no entitlement env set" default so the UI mirrors what an unconfigured
- * server would expose — see `docs/entitlements.md`.
+ * server would expose.
  *
  * In normal operation (server-rendered HTML), the inlined snapshot is always
  * present and this fallback is never reached. It exists for `vite dev`,
