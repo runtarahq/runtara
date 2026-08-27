@@ -13,7 +13,7 @@ pub struct Config {
     pub database_url: String,
     /// HTTP server address for instance communication
     pub http_addr: SocketAddr,
-    /// Maximum concurrent instances
+    /// Maximum instances in `running` at once; `0` disables the cap
     pub max_concurrent_instances: u32,
     /// How long shutdown waits for in-flight requests before aborting them
     pub shutdown_grace_ms: u64,

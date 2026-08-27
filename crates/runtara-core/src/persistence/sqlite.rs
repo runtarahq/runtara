@@ -1125,7 +1125,10 @@ mod tests {
             .await
             .expect("Failed to count active instances");
 
-        assert_eq!(count, 2);
+        // Only the running one. A suspended instance is parked — durable
+        // sleep and signal-waits both land there and can stay for days — so
+        // counting it would let parked work hold a concurrency cap closed.
+        assert_eq!(count, 1);
     }
 
     #[tokio::test]

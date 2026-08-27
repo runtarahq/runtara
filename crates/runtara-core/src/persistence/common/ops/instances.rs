@@ -368,15 +368,31 @@ macro_rules! impl_instance_ops {
                 Ok(result.is_ok())
             }
 
-            /// COUNT instances whose status is `running` or `suspended`.
+            /// COUNT instances that currently occupy a concurrency slot, i.e.
+            /// those whose status is `running`.
+            ///
+            /// `suspended` is deliberately excluded. Durable sleep and a
+            /// signal-wait both park an instance there, and parking is a
+            /// steady state, not a transient one — a workflow can sit
+            /// suspended for days. Counting those rows would let a handful of
+            /// long-parked workflows hold the concurrency cap closed forever,
+            /// with no path back short of manual SQL, even though a suspended
+            /// instance is running no code and holding no host resources.
+            /// It also matches the cap's other half: the check that consumes
+            /// this count exempts resumes, so counting the row a resume would
+            /// walk right past served no purpose.
+            ///
+            /// Caveat for a caller that enforces a cap on this: a row left
+            /// `running` by a crashed host still counts, and nothing inside
+            /// this crate reaps one. The heartbeat monitor that does lives in
+            /// the embedding host.
             pub(crate) async fn op_count_active_instances(
                 pool: &$Pool,
             ) -> ::core::result::Result<i64, $crate::error::CoreError> {
-                let row: (i64,) = ::sqlx::query_as(
-                    "SELECT COUNT(*) FROM instances WHERE status IN ('running', 'suspended')",
-                )
-                .fetch_one(pool)
-                .await?;
+                let row: (i64,) =
+                    ::sqlx::query_as("SELECT COUNT(*) FROM instances WHERE status = 'running'")
+                        .fetch_one(pool)
+                        .await?;
                 Ok(row.0)
             }
         }

@@ -14,7 +14,9 @@
 #     that order. Ordering is the property: refusing new registrations only
 #     helps if it happens while the server is still serving,
 #   * RUNTARA_MAX_CONCURRENT_INSTANCES is applied, not merely logged — the
-#     registration past the cap gets 429, not 200.
+#     registration past the cap gets 429, not 200,
+#   * and the cap counts running work only: suspending an instance frees its
+#     slot, so workflows parked in a durable sleep cannot wedge it shut.
 #
 # Self-contained: needs cargo, curl and SQLite only. No docker, no Postgres, no
 # ./start.sh. Everything runs in this one shell invocation, including the
@@ -68,11 +70,23 @@ PY
 }
 
 print_step "Building runtara-core"
-if ! cargo build -p runtara-core --bin runtara-core >/dev/null 2>&1; then
-    cargo build -p runtara-core --bin runtara-core
+
+# Build from the repo root, not the caller's cwd. `--manifest-path` alone is
+# not enough: rustup resolves rust-toolchain.toml from the working directory,
+# so invoking this from elsewhere builds with whatever toolchain happens to be
+# default and trips the crate's rust-version floor.
+if ! (cd "${PROJECT_ROOT}" && cargo build -p runtara-core --bin runtara-core) >/dev/null 2>&1; then
+    (cd "${PROJECT_ROOT}" && cargo build -p runtara-core --bin runtara-core)
     fail "cargo build failed"
 fi
-CORE_BIN="${PROJECT_ROOT}/target/debug/runtara-core"
+
+# Ask cargo where the binary landed rather than assuming ./target — a shared
+# CI cache sets CARGO_TARGET_DIR, and guessing turns a build that actually
+# succeeded into "binary not found".
+TARGET_DIR="$(cd "${PROJECT_ROOT}" && cargo metadata --format-version 1 --no-deps |
+    python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')"
+[ -n "${TARGET_DIR}" ] || fail "could not resolve cargo target directory"
+CORE_BIN="${TARGET_DIR}/debug/runtara-core"
 [ -x "${CORE_BIN}" ] || fail "runtara-core binary not found at ${CORE_BIN}"
 
 PORT="$(pick_port)"
@@ -135,7 +149,28 @@ fi
 print_success "cap enforced: fresh registration past ${CAP} rejected with 429"
 
 # ---------------------------------------------------------------------------
-# 2. SIGTERM is handled, and the drain happens before the shutdown.
+# 2. Parked work does not hold a slot.
+#
+# Durable sleep and signal-waits both park an instance in `suspended`, and a
+# workflow can sit there for days. If the cap counted those rows, a handful of
+# long-parked workflows would hold it closed forever — there is no reaper in
+# this crate to open it again. Suspending one instance must free exactly one
+# slot.
+# ---------------------------------------------------------------------------
+print_step "Suspending live-1, then registering past the cap again"
+susp_code="$(curl -s -o /dev/null -w '%{http_code}' \
+    -X POST "http://127.0.0.1:${PORT}/api/v1/instances/live-1/suspended")"
+[ "${susp_code}" = "200" ] || fail "suspending live-1 returned ${susp_code}, expected 200"
+
+after_code="$(register "live-after-park")"
+echo "  register live-after-park -> ${after_code}"
+if [ "${after_code}" != "200" ]; then
+    fail "registration after a suspend returned ${after_code}, expected 200 (a parked instance is holding a concurrency slot)"
+fi
+print_success "suspended instance freed its slot"
+
+# ---------------------------------------------------------------------------
+# 3. SIGTERM is handled, and the drain happens before the shutdown.
 # ---------------------------------------------------------------------------
 print_step "Sending SIGTERM to pid ${CORE_PID}"
 kill -TERM "${CORE_PID}"
@@ -165,7 +200,7 @@ fi
 print_success "clean exit on SIGTERM"
 
 # ---------------------------------------------------------------------------
-# 3. Ordering. Presence alone would also pass for a binary that shut the
+# 4. Ordering. Presence alone would also pass for a binary that shut the
 #    server down first and only then flipped the drain flag, which is the bug
 #    this ticket is about.
 # ---------------------------------------------------------------------------

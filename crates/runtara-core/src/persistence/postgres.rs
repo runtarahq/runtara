@@ -1246,7 +1246,7 @@ mod tests {
         create_test_instance(&pool, instance1, "test-tenant").await;
         create_test_instance(&pool, instance2, "test-tenant").await;
 
-        // Set one to running, one to suspended
+        // Set one running, one suspended: only the running one is counted.
         PostgresPersistence::op_update_instance_status(
             &pool,
             &instance1.to_string(),
@@ -1264,10 +1264,30 @@ mod tests {
         .await
         .unwrap();
 
-        let count = PostgresPersistence::op_count_active_instances(&pool)
+        let before = PostgresPersistence::op_count_active_instances(&pool)
             .await
             .unwrap();
-        assert!(count >= 2); // At least our 2 test instances
+
+        // Park the running one. The count must drop by exactly one: a
+        // suspended instance holds no concurrency slot, so parked work cannot
+        // hold a cap closed against fresh registrations.
+        PostgresPersistence::op_update_instance_status(
+            &pool,
+            &instance1.to_string(),
+            "suspended",
+            None,
+        )
+        .await
+        .unwrap();
+
+        let after = PostgresPersistence::op_count_active_instances(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            after,
+            before - 1,
+            "suspending the running instance must free its slot"
+        );
 
         cleanup_test_instance(&pool, instance1).await;
         cleanup_test_instance(&pool, instance2).await;

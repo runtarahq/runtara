@@ -40,6 +40,13 @@ async fn main() -> Result<()> {
 
     info!("Starting Runtara Core");
 
+    // Install the signal listener before the database connect and the
+    // migrations below. Until it exists SIGTERM keeps its default disposition,
+    // so a `docker compose down` during a cold start would kill the process
+    // outright — the same failure this handling exists to avoid, just in the
+    // startup window.
+    let mut shutdown = ShutdownSignal::install()?;
+
     // Load configuration
     let config = Config::from_env().map_err(|e| {
         error!("Configuration error: {}", e);
@@ -52,40 +59,23 @@ async fn main() -> Result<()> {
         "Configuration loaded"
     );
 
-    // Connect to database (Postgres or SQLite)
-    info!("Connecting to database...");
-    let persistence: Arc<dyn Persistence> = if config.database_url.starts_with("postgres://")
-        || config.database_url.starts_with("postgresql://")
-    {
-        let pool = PgPoolOptions::new()
-            .max_connections(10)
-            .connect(&config.database_url)
-            .await?;
-
-        info!("Database connection established (Postgres)");
-
-        // Verify connection
-        let row: (i32,) = sqlx::query_as("SELECT 1").fetch_one(&pool).await?;
-        info!(result = row.0, "Database health check passed");
-
-        info!("Running database migrations...");
-        runtara_core::migrations::run_postgres(&pool).await?;
-        info!("Migrations completed");
-
-        Arc::new(PostgresPersistence::new(pool))
-    } else {
-        let pool = SqlitePoolOptions::new()
-            .max_connections(10)
-            .connect(&config.database_url)
-            .await?;
-
-        info!("Database connection established (SQLite)");
-
-        info!("Running database migrations...");
-        runtara_core::migrations::run_sqlite(&pool).await?;
-        info!("Migrations completed");
-
-        Arc::new(SqlitePersistence::new(pool))
+    // Connect to the database, but let a shutdown signal win the race.
+    //
+    // Installing the handler above is only half the fix: with nothing awaiting
+    // it, a SIGTERM here would be *swallowed* and the process would keep
+    // retrying an unreachable database until the orchestrator lost patience
+    // and sent SIGKILL — slower to die than doing nothing at all. Racing the
+    // two means a stop during a cold start exits promptly. There is nothing to
+    // drain yet: no runtime, so no instance has ever registered.
+    let persistence = tokio::select! {
+        result = connect_persistence(&config) => result?,
+        signal = shutdown.recv() => {
+            match signal {
+                Ok(signal) => info!(signal, "Shutdown signal received during startup"),
+                Err(error) => error!(%error, "Shutdown signal wait failed during startup"),
+            }
+            return Ok(());
+        }
     };
 
     // Start the runtime
@@ -103,8 +93,13 @@ async fn main() -> Result<()> {
     // Wait for a shutdown signal. Container runtimes, Kubernetes and systemd
     // all stop a process with SIGTERM, so listening for SIGINT alone means the
     // default disposition kills us and the drain below never runs.
-    let signal = wait_for_shutdown_signal().await?;
-    info!(signal, "Shutdown signal received");
+    match shutdown.recv().await {
+        Ok(signal) => info!(signal, "Shutdown signal received"),
+        // Fall through to the drain rather than returning. Bailing out here
+        // would drop the runtime without draining it, which is a worse
+        // outcome than shutting down on a signal we failed to name.
+        Err(error) => error!(%error, "Shutdown signal wait failed; draining anyway"),
+    }
 
     // Refuse new registrations first, then drain. Ordering matters: draining
     // before the server stops accepting is what lets an instance already
@@ -115,26 +110,91 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Wait for either SIGINT (Ctrl+C) or SIGTERM on Unix; on non-Unix fall back
-/// to SIGINT only. Returns the name of the signal that arrived, so the log
-/// distinguishes a container stop from an operator pressing Ctrl+C.
-#[cfg(unix)]
-async fn wait_for_shutdown_signal() -> Result<&'static str> {
-    use tokio::signal::unix::{SignalKind, signal};
+/// Connect to the configured database, verify it, and run migrations.
+///
+/// Postgres or SQLite is chosen from the URL scheme.
+async fn connect_persistence(config: &Config) -> Result<Arc<dyn Persistence>> {
+    info!("Connecting to database...");
 
-    let mut sigterm = signal(SignalKind::terminate())?;
-    tokio::select! {
-        r = tokio::signal::ctrl_c() => r.map(|()| "SIGINT").map_err(Into::into),
-        _ = sigterm.recv() => Ok("SIGTERM"),
+    if config.database_url.starts_with("postgres://")
+        || config.database_url.starts_with("postgresql://")
+    {
+        let pool = PgPoolOptions::new()
+            .max_connections(10)
+            .connect(&config.database_url)
+            .await?;
+
+        info!("Database connection established (Postgres)");
+
+        // Verify connection
+        let row: (i32,) = sqlx::query_as("SELECT 1").fetch_one(&pool).await?;
+        info!(result = row.0, "Database health check passed");
+
+        info!("Running database migrations...");
+        runtara_core::migrations::run_postgres(&pool).await?;
+        info!("Migrations completed");
+
+        Ok(Arc::new(PostgresPersistence::new(pool)))
+    } else {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(10)
+            .connect(&config.database_url)
+            .await?;
+
+        info!("Database connection established (SQLite)");
+
+        info!("Running database migrations...");
+        runtara_core::migrations::run_sqlite(&pool).await?;
+        info!("Migrations completed");
+
+        Ok(Arc::new(SqlitePersistence::new(pool)))
     }
 }
 
-#[cfg(not(unix))]
-async fn wait_for_shutdown_signal() -> Result<&'static str> {
-    tokio::signal::ctrl_c()
-        .await
-        .map(|()| "SIGINT")
-        .map_err(Into::into)
+/// A listener for SIGINT (Ctrl+C) and, on Unix, SIGTERM.
+///
+/// Split into install-then-await on purpose: registering the handler replaces
+/// SIGTERM's process-killing default disposition, and that has to happen
+/// before the long-running startup work, not when the server is finally ready
+/// to wait. [`recv`](Self::recv) reports which signal arrived, so a container
+/// stop is distinguishable from an operator pressing Ctrl+C.
+struct ShutdownSignal {
+    #[cfg(unix)]
+    sigterm: tokio::signal::unix::Signal,
+}
+
+impl ShutdownSignal {
+    /// Register the handlers. Call this early.
+    fn install() -> Result<Self> {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{SignalKind, signal};
+            Ok(Self {
+                sigterm: signal(SignalKind::terminate())?,
+            })
+        }
+        // Ctrl+C registers lazily on first await, and there is no SIGTERM to
+        // pre-empt, so there is nothing to install here.
+        #[cfg(not(unix))]
+        Ok(Self {})
+    }
+
+    /// Wait for the first shutdown signal and return its name.
+    #[cfg(unix)]
+    async fn recv(&mut self) -> Result<&'static str> {
+        tokio::select! {
+            r = tokio::signal::ctrl_c() => r.map(|()| "SIGINT").map_err(Into::into),
+            _ = self.sigterm.recv() => Ok("SIGTERM"),
+        }
+    }
+
+    #[cfg(not(unix))]
+    async fn recv(&mut self) -> Result<&'static str> {
+        tokio::signal::ctrl_c()
+            .await
+            .map(|()| "SIGINT")
+            .map_err(Into::into)
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -152,12 +212,12 @@ mod tests {
         let _installed =
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
 
-        let waiter = tokio::spawn(wait_for_shutdown_signal());
+        let mut shutdown = ShutdownSignal::install().unwrap();
+        let waiter = tokio::spawn(async move { shutdown.recv().await });
 
-        // A tokio `Signal` only observes deliveries that happen after it is
-        // created, and the one under test is created inside the spawned task.
-        // Re-raise until it reacts rather than racing a single kill against
-        // the spawn; repeat deliveries coalesce, so this costs nothing.
+        // Re-raise until the waiter reacts rather than racing a single kill
+        // against the spawn; repeat deliveries coalesce, so this costs
+        // nothing.
         let pid = std::process::id().to_string();
         for _ in 0..100 {
             if waiter.is_finished() {
@@ -169,7 +229,7 @@ mod tests {
 
         assert!(
             waiter.is_finished(),
-            "wait_for_shutdown_signal never returned after SIGTERM"
+            "ShutdownSignal never returned after SIGTERM"
         );
         assert_eq!(
             waiter.await.unwrap().unwrap(),

@@ -97,7 +97,8 @@ pub async fn handle_register_instance(
     }
 
     // 5. Enforce RUNTARA_MAX_CONCURRENT_INSTANCES for fresh registrations.
-    //    Resumes are allowed past the cap (they already consumed a slot).
+    //    Resumes are allowed past the cap, and the count behind it covers
+    //    `running` only — a suspended instance holds no slot while parked.
     if !instance_exists && state.max_concurrent_instances > 0 {
         match state.persistence.count_active_instances().await {
             Ok(active) if active >= state.max_concurrent_instances as i64 => {
