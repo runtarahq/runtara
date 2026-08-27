@@ -20,9 +20,18 @@ use crate::persistence::EventRecord;
 ///
 /// # Errors
 ///
-/// Returns an error response if:
-/// - `instance_id` or `tenant_id` is empty
-/// - A specified `checkpoint_id` doesn't exist
+/// Two distinct channels, because the caller has to tell them apart:
+///
+/// A `success: false` response means the caller cannot register right now and
+/// the fault is theirs or the cluster's — empty `instance_id`/`tenant_id`, a
+/// `checkpoint_id` that doesn't exist, the core draining, the concurrency cap.
+/// The HTTP layer renders these as 4xx (or the 503/429 the drain and cap
+/// sentinels ask for).
+///
+/// An `Err` means the write itself failed. That is the server's problem and is
+/// worth retrying, so it carries the underlying [`CoreError`] and the HTTP layer
+/// renders it as a 5xx. Reporting it as `success: false` would tell the caller
+/// its request was wrong and to stop.
 #[instrument(skip(state, request), fields(
     instance_id = %request.instance_id,
     tenant_id = %request.tenant_id,
@@ -122,30 +131,24 @@ pub async fn handle_register_instance(
     if !instance_exists {
         // Self-registration: create instance record
         info!("Instance not found, creating self-registered instance");
-        if let Err(e) = state
+        // Propagate rather than reporting `success: false`. The response's error
+        // string is the caller's-fault channel — drain, cap, bad input — and the
+        // HTTP layer answers it with a 4xx. A persistence failure is the server's
+        // fault and must reach the caller as a 5xx it can retry, which only the
+        // `CoreError` carries.
+        state
             .persistence
             .register_instance(&request.instance_id, &request.tenant_id)
-            .await
-        {
-            return Ok(RegisterInstanceResponse {
-                success: false,
-                error: format!("Failed to create instance: {}", e),
-            });
-        }
+            .await?;
     }
 
     // 5. Update instance status to RUNNING
     let started_at = Utc::now();
-    if let Err(e) = state
+    // Propagated for the same reason as the registration write above.
+    state
         .persistence
         .update_instance_status(&request.instance_id, "running", Some(started_at))
-        .await
-    {
-        return Ok(RegisterInstanceResponse {
-            success: false,
-            error: format!("Failed to update instance status: {}", e),
-        });
-    }
+        .await?;
 
     // 6. Insert started event
     let event = EventRecord {
@@ -176,6 +179,7 @@ mod tests {
     use std::sync::atomic::Ordering;
 
     use super::*;
+    use crate::error::CoreError;
     use crate::instance_handlers::mock_persistence::{
         MockPersistence, make_checkpoint, make_instance,
     };
@@ -280,6 +284,54 @@ mod tests {
         let result = handle_register_instance(&state, request).await.unwrap();
         assert!(!result.success);
         assert!(result.error.contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn a_failed_registration_write_is_an_error_not_a_refusal() {
+        // `success: false` means "the caller cannot register" — drain, cap, bad
+        // input — and the HTTP layer answers those with a 4xx. A write that
+        // failed is the server's problem, so it has to surface as an error the
+        // caller is told to retry, not as a refusal it is told to accept.
+        let persistence = MockPersistence::new();
+        persistence.set_fail_register();
+        let state = InstanceHandlerState::new(Arc::new(persistence));
+
+        let request = RegisterInstanceRequest {
+            instance_id: "inst-1".to_string(),
+            tenant_id: "tenant-1".to_string(),
+            checkpoint_id: None,
+        };
+
+        let err = match handle_register_instance(&state, request).await {
+            Ok(_) => panic!("a failed persistence write must not report success: false"),
+            Err(e) => e,
+        };
+        assert!(matches!(
+            err.downcast_ref::<CoreError>(),
+            Some(CoreError::DatabaseError { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_failed_status_update_is_an_error_not_a_refusal() {
+        let persistence = MockPersistence::new();
+        persistence.set_fail_status_update();
+        let state = InstanceHandlerState::new(Arc::new(persistence));
+
+        let request = RegisterInstanceRequest {
+            instance_id: "inst-1".to_string(),
+            tenant_id: "tenant-1".to_string(),
+            checkpoint_id: None,
+        };
+
+        let err = match handle_register_instance(&state, request).await {
+            Ok(_) => panic!("a failed status update must not report success: false"),
+            Err(e) => e,
+        };
+        assert!(matches!(
+            err.downcast_ref::<CoreError>(),
+            Some(CoreError::DatabaseError { .. })
+        ));
     }
 
     #[tokio::test]

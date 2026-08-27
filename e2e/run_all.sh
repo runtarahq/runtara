@@ -87,6 +87,10 @@ run_test "Connection named endpoints (QuickBooks Online)" "${SCRIPT_DIR}/test_co
 # ./start.sh.
 run_test "runtara-core SIGTERM drain + concurrency cap (regression)" "${SCRIPT_DIR}/test_core_sigterm_drain.sh"
 
+# Instance-protocol status codes. Self-contained on the same terms as the
+# SIGTERM test above — its own core binary, SQLite file and free port.
+run_test "runtara-core instance protocol HTTP status codes (regression)" "${SCRIPT_DIR}/test_core_http_status_codes.sh"
+
 # Summary
 echo "=========================================="
 echo "Test Results"
