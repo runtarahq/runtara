@@ -1,26 +1,17 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Sleep / wake-queue operations shared by both backends.
+//! Sleep / wake-queue operations.
 //!
 //! The `impl_sleep_ops!` macro expands to concrete `impl $Backend { ... }`
 //! blocks with `op_set_instance_sleep`, `op_clear_instance_sleep`, and
 //! `op_get_sleeping_instances_due`. Fields modified are `sleep_until`
 //! on the `instances` table — no other state.
 //!
-//! Phase 2 (SYN-394) changes for SQLite:
-//! - `get_sleeping_instances_due` now wraps both sides of the timestamp
-//!   comparison in `datetime(...)`, so the RFC3339 string stored by
-//!   sqlx-chrono (e.g. `"2026-04-17T18:42:27.123456+00:00"`) compares
-//!   correctly against `datetime('now')` (which yields the SQLite
-//!   canonical `"YYYY-MM-DD HH:MM:SS"` form). The previous inline SQL
-//!   did `sleep_until <= datetime('now')`, a string comparison that
-//!   never matched because `'T'` sorts after space and so RFC3339
-//!   values were always larger. Postgres is unaffected — the
-//!   `datetime()` wrapper is SQL-standard-ish enough that PG's
-//!   `timestamp` comparison treats it as a no-op cast.
-//!
-//! The Postgres side uses `NOW()` via `Dialect::NOW` (which resolves to
-//! `CURRENT_TIMESTAMP` — both backends accept it).
+//! The due-instance scan compares `sleep_until` against `Dialect::NOW`
+//! (`CURRENT_TIMESTAMP`) with both sides passed through
+//! `Dialect::normalize_timestamp`, which is the identity here: the column
+//! is a real `TIMESTAMPTZ`, so the comparison is a native timestamp
+//! comparison and needs no coercion to order correctly.
 
 macro_rules! impl_sleep_ops {
     ($Backend:ty, $Pool:ty, $Dialect:ty) => {
@@ -107,7 +98,7 @@ macro_rules! impl_sleep_ops {
 
             /// SELECT suspended instances whose `sleep_until` is past,
             /// ordered by `sleep_until` ascending. Excludes the `input`
-            /// BLOB — matches legacy behavior on both backends.
+            /// BLOB, which the wake scan never reads.
             pub(crate) async fn op_get_sleeping_instances_due(
                 pool: &$Pool,
                 limit: i64,

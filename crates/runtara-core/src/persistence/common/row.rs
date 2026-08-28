@@ -2,17 +2,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Shared row-marshaling helpers.
 //!
-//! Currently only houses the [`StepSummaryRecord`] extractor, which both
-//! backends implement by hand because the record isn't a
-//! `#[sqlx(FromRow)]` derive target — its `inputs`/`outputs`/`error`
-//! columns are produced by CTEs and take different shapes per backend
-//! (Postgres returns `jsonb` values directly; SQLite returns text that
-//! must be parsed).
-//!
-//! Phase 1 (SYN-394) defines the shared status/text-column extraction
-//! that *is* identical across backends; the JSON columns keep their
-//! backend-specific marshaling until Phase 4 decides how to abstract
-//! the JSON type difference cleanly.
+//! Currently only houses the [`StepSummaryRecord`] extractor, which is
+//! marshaled by hand because the record isn't a `#[sqlx(FromRow)]` derive
+//! target — its `inputs`/`outputs`/`error` columns are computed by CTEs
+//! rather than read straight off a table, and the CTE hands them back as
+//! TEXT, so they need parsing rather than a direct `jsonb` decode.
 
 use crate::persistence::StepStatus;
 
@@ -20,8 +14,8 @@ use crate::persistence::StepStatus;
 ///
 /// The CTE emits `"running"`, `"failed"`, or `"completed"` depending on
 /// whether the paired end event exists and what its payload carries. Any
-/// unexpected value degrades to `Completed` to match the current backend
-/// behavior.
+/// unexpected value degrades to `Completed`, matching the CTE's own
+/// `ELSE` arm.
 pub fn parse_step_status(s: &str) -> StepStatus {
     match s {
         "running" => StepStatus::Running,
@@ -34,11 +28,10 @@ pub fn parse_step_status(s: &str) -> StepStatus {
 /// `serde_json::Value`, yielding `None` if the column is NULL or the
 /// text fails to parse.
 ///
-/// Used by the shared `op_list_step_summaries` path: both backends'
-/// step-summary CTEs now emit `inputs`/`outputs`/`error` as TEXT (via
-/// Postgres `::text` cast on the JSONB extraction or SQLite
-/// `json_extract`). Parsing here centralizes what used to be two
-/// near-identical blocks in each backend.
+/// Used by the shared `op_list_step_summaries` path: the step-summary CTE
+/// emits `inputs`/`outputs`/`error` as TEXT (a `::text` cast on the JSONB
+/// extraction), so every JSON column coming out of that query is parsed
+/// through this one helper instead of each column growing its own decode.
 pub fn decode_json_text(text: Option<String>) -> Option<serde_json::Value> {
     text.and_then(|s| serde_json::from_str(&s).ok())
 }

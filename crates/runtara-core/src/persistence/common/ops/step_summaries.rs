@@ -1,31 +1,23 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Step-summary operations shared by both backends.
+//! Step-summary operations.
 //!
-//! Migrated: `list_step_summaries`, `count_step_summaries`.
+//! Hosts: `list_step_summaries`, `count_step_summaries`.
 //!
 //! The step-summary query is a CTE that pairs `step_debug_start` and
-//! `step_debug_end` events. The two backends used to duplicate the
-//! entire CTE *and* the Rust-side row-marshaling logic. Phase 4 of
-//! SYN-394:
-//! - The CTE SQL moves behind `Dialect::sql_list_step_summaries` /
-//!   `sql_count_step_summaries`. Postgres uses JSONB operators and
-//!   `EXTRACT(MILLISECONDS ...)`; SQLite uses `json_extract` and
-//!   `julianday(...)`.
-//! - Both backends' CTEs now emit `inputs`, `outputs`, `error` as TEXT
-//!   (Postgres via `(jsonb_expr)::text`, SQLite natively from
-//!   `json_extract`). The row-marshaling reuses
-//!   [`crate::persistence::common::row::decode_json_text`] to parse
-//!   those TEXT columns into `serde_json::Value` — previously two
-//!   near-identical `row.get::<Option<Value>, _>` / `row.get::<Option<String>, _>`
-//!   + `serde_json::from_str` blocks in each backend.
+//! `step_debug_end` events. Its SQL lives behind
+//! `Dialect::sql_list_step_summaries` / `sql_count_step_summaries` and
+//! leans on JSONB operators to reach into the payload blob plus
+//! `EXTRACT(MILLISECONDS ...)` for the paired duration.
 //!
-//! This is the riskiest migration in the refactor because the outer
-//! SELECT changed shape on Postgres (JSONB → TEXT). The round-trip
-//! (JSONB serialize → parse) produces an equal `serde_json::Value`,
-//! so `StepSummaryRecord` fields are unchanged from the caller's
-//! perspective, but this path is exercised by the parity harness and
-//! the backend-specific unit tests.
+//! The outer SELECT emits `inputs`, `outputs`, and `error` as TEXT via
+//! `(jsonb_expr)::text` rather than as JSONB, and the row-marshaling
+//! parses them back with
+//! [`crate::persistence::common::row::decode_json_text`]. The
+//! serialize-then-parse round trip yields an equal `serde_json::Value`,
+//! so `StepSummaryRecord` looks the same to every caller; the path is
+//! pinned by `postgres_conformance::run_conformance_sequence` and the
+//! backend unit tests.
 
 macro_rules! impl_step_summary_ops {
     ($Backend:ty, $Pool:ty, $Dialect:ty) => {

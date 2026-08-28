@@ -133,7 +133,7 @@ use super::{
 };
 
 // ============================================================================
-// Shared Operations (SYN-394)
+// Shared Operations
 // ============================================================================
 // The instance + sleep families live in crate::persistence::common::ops and
 // are materialized onto PostgresPersistence via the macros below. The inline
@@ -1327,12 +1327,12 @@ mod tests {
     }
 
     // -------------------------------------------------------------------
-    // Unified complete_instance coverage (SYN-395), ported from the
-    // SQLite suite. These drive the `Persistence` trait rather than the
-    // `op_*` statics so the trait's own layer (previous-status read +
-    // OTLP recording around `op_complete_instance_unified`) is exercised
-    // too, and so the bool/`InstanceNotFound` contract is asserted where
-    // callers actually see it.
+    // Unified complete_instance coverage (SYN-395). These drive the
+    // `Persistence` trait rather than the `op_*` statics so the trait's own
+    // layer (previous-status read + OTLP recording around
+    // `op_complete_instance_unified`) is exercised too, and so the
+    // bool/`InstanceNotFound` contract is asserted where callers actually
+    // see it.
     //
     // Every id is freshly generated because CI runs this suite against one
     // shared `runtara_test` database and `instance_id` is a plain TEXT
@@ -1380,8 +1380,7 @@ mod tests {
     /// from the same place.)
     ///
     /// `termination_reason` is a Postgres ENUM, so it is cast to text here:
-    /// sqlx cannot decode a custom enum type into `String`. The SQLite
-    /// original selects the bare column, which is TEXT there.
+    /// sqlx cannot decode a custom enum type into `String`.
     async fn ci_read_term_fields(
         pool: &PgPool,
         instance_id: &str,
@@ -1499,9 +1498,9 @@ mod tests {
         let pool = test_pool().await;
         let p = PostgresPersistence::new(pool.clone());
 
-        // Generated rather than the SQLite original's literal
-        // "never-registered": this database is shared across the whole
-        // suite, so the id must be one no other test could have inserted.
+        // Generated rather than a fixed literal such as "never-registered":
+        // this database is shared across the whole suite, so the id must be
+        // one no other test could have inserted.
         let missing = ci_instance_id();
 
         let err = p
@@ -1689,7 +1688,7 @@ mod tests {
     }
 
     // ========================================================================
-    // Miscellaneous operation tests (ported from the SQLite suite)
+    // Miscellaneous operation tests: signals, retries, listings, metrics
     // ========================================================================
     //
     // These tests drive the `Persistence` trait rather than the `op_*` statics:
@@ -1868,11 +1867,10 @@ mod tests {
             .await
             .unwrap();
 
-        // Not in the SQLite suite: this pins a real backend divergence.
-        // `insert_signal` here (postgres.rs, the free function) maps an empty
-        // `&[u8]` to `None` before binding, so the column goes NULL; SQLite's
-        // trait impl binds the slice as-is and reads it back as
-        // `Some(vec![])`. Neither backend's ported tests covered it.
+        // `insert_signal` (the free function in this module) maps an empty
+        // `&[u8]` to `None` before binding, so the column goes NULL rather
+        // than holding a zero-length blob, and a reader sees `None` and never
+        // `Some(vec![])`. Nothing else covers that mapping, so pin it here.
         p.insert_signal(&instance_id, "pause", b"").await.unwrap();
 
         let signal = p
@@ -1934,8 +1932,7 @@ mod tests {
             .await
             .expect("Failed to save retry attempt");
 
-        // The synthetic `::retry::N` checkpoint exists (this is all the SQLite
-        // original checked).
+        // The synthetic `::retry::N` checkpoint exists.
         let checkpoint = p
             .load_checkpoint(&instance_id, "durable-fn-1::retry::1")
             .await
@@ -1999,10 +1996,10 @@ mod tests {
         p.register_instance(&instance1, &tenant1).await.unwrap();
         p.register_instance(&instance2, &tenant2).await.unwrap();
 
-        // The SQLite original asserted `list_instances(None, None, ..).len() == 2`
-        // against a private in-memory database. That is a whole-database
-        // assertion and cannot hold here, so the unfiltered path is exercised
-        // with a membership check instead. It is sound because the listing is
+        // An exact count over `list_instances(None, None, ..)` would be a
+        // whole-database assertion and cannot hold against the shared
+        // `runtara_test` database, so the unfiltered path is exercised with a
+        // membership check instead. It is sound because the listing is
         // `ORDER BY created_at DESC`, the suite runs `--test-threads=1`, and
         // every test deletes its rows — so these two are the newest rows in the
         // table at query time and are well inside the limit.
@@ -2040,9 +2037,9 @@ mod tests {
         let pool = test_pool().await;
         let p = PostgresPersistence::new(pool.clone());
 
-        // The SQLite original filtered by status with a None tenant, which is a
-        // whole-database assertion; scoping to a test-unique tenant keeps the
-        // exact count meaningful here.
+        // Filtering by status with a None tenant would be a whole-database
+        // assertion against the shared suite database; scoping to a
+        // test-unique tenant keeps the exact count meaningful here.
         let tenant = misc_tenant_id("by-status");
         let instance1 = misc_instance_id("by-status-1");
         let instance2 = misc_instance_id("by-status-2");
@@ -2099,11 +2096,10 @@ mod tests {
         assert_eq!(row.0, Some(1024 * 1024));
         assert_eq!(row.1, Some(500_000));
 
-        // Added coverage: the SQLite original stopped after one write and
-        // asserted nothing about a second. The two backends genuinely differ
-        // here — Postgres is `SET x = COALESCE(x, $n)` (postgres.rs, first
-        // non-NULL write sticks), SQLite is a plain `SET x = ?1` (overwrite) —
-        // so pin the Postgres semantics explicitly.
+        // The second write is where the semantics live:
+        // `update_instance_metrics` is `SET x = COALESCE(x, $n)`, so the first
+        // non-NULL write sticks and every later one is silently ignored rather
+        // than overwriting it.
         p.update_instance_metrics(&instance_id, Some(9_999_999), Some(1))
             .await
             .expect("Failed to update metrics");
@@ -2151,10 +2147,9 @@ mod tests {
                 .unwrap();
         assert_eq!(row.0, Some("Error: something went wrong\n".to_string()));
 
-        // Added coverage, as in `test_update_instance_metrics`: the SQLite
-        // original wrote once and stopped. Postgres is
-        // `SET stderr = COALESCE(stderr, $2)` (first capture preserved),
-        // SQLite is a plain `SET stderr = ?1` (overwrite).
+        // The second write matters here as in `test_update_instance_metrics`:
+        // `update_instance_stderr` is `SET stderr = COALESCE(stderr, $2)`, so
+        // the first capture is preserved and a later one is ignored.
         p.update_instance_stderr(&instance_id, "second capture\n")
             .await
             .expect("Failed to update stderr");
@@ -2442,11 +2437,10 @@ mod tests {
         assert_eq!(steps[0].status, StepSummaryStatus::Completed);
         assert!(steps[0].completed_at.is_some());
         assert!(steps[0].duration_ms.is_some());
-        // Stronger than the SQLite original (which only asserted `is_some`):
-        // Postgres derives the duration with
-        // `EXTRACT(MILLISECONDS FROM (completed_at - started_at))::bigint`, a
-        // different expression from SQLite's `julianday` arithmetic, so assert
-        // it actually reflects the >= 20ms gap rather than just being present.
+        // Stronger than a bare `is_some`: the duration is derived with
+        // `EXTRACT(MILLISECONDS FROM (completed_at - started_at))::bigint`, so
+        // assert it actually reflects the >= 20ms gap rather than merely being
+        // present.
         assert!(steps[0].duration_ms.unwrap() >= 10);
         // The inputs come back through the JSONB -> TEXT round-trip in the
         // outer SELECT and must still parse to the value that was written.
@@ -2916,10 +2910,10 @@ mod tests {
 
         let instance_id = register_step_summary_instance(&persistence, "pagination").await;
 
-        // Insert 5 steps. The SQLite original slept 5ms between steps to
-        // separate their timestamps; Postgres pages by the start event's
-        // BIGSERIAL `id`, so insertion order is already total and the sleeps
-        // are dropped.
+        // Insert 5 steps back to back, with no sleeps to separate their
+        // timestamps: paging is by the start event's BIGSERIAL `id`, so
+        // insertion order is already a total order and equal `created_at`
+        // values cannot make the pages overlap.
         for i in 1..=5 {
             insert_step_start_pg(
                 &persistence,

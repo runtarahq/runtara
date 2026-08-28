@@ -15,10 +15,10 @@ impl PostgresDialect {
     /// DELETE a batch of instances using PG's native array + `ANY`.
     /// Single bind of `&[String]` — sqlx encodes it as `TEXT[]`.
     ///
-    /// The binding is backend-specific enough (SQLite fans out with one
-    /// bind per element) that the shared retention macro delegates to
-    /// this inherent helper rather than trying to unify inside the
-    /// macro.
+    /// The array bind is specific enough to Postgres that the shared
+    /// retention macro delegates to this inherent helper rather than
+    /// trying to express a variable-arity `IN` list through the dialect
+    /// fragments.
     pub(crate) async fn exec_delete_instances_batch(
         pool: &sqlx::PgPool,
         instance_ids: &[String],

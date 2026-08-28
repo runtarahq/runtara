@@ -2,17 +2,17 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Shared error-mapping helpers for the persistence layer.
 //!
-//! These helpers centralize two patterns that today are inconsistently
-//! applied between the Postgres and SQLite backends (see the SYN-394 plan):
+//! These helpers centralize two patterns that every write path needs and
+//! that sqlx does not give for free:
 //!
 //! 1. Treat a zero `rows_affected` on an `UPDATE` as
-//!    [`CoreError::InstanceNotFound`]. Postgres does this; SQLite currently
-//!    silently no-ops. Subsequent phases migrate SQLite onto these helpers
-//!    to get uniform behavior.
+//!    [`CoreError::InstanceNotFound`], so an update aimed at a row that no
+//!    longer exists surfaces as a 404-equivalent instead of reporting
+//!    success.
 //! 2. Wrap sqlx errors from checkpoint writes into
-//!    [`CoreError::CheckpointSaveFailed`] with the instance ID attached.
-//!    Postgres does this; SQLite relies on the blanket
-//!    `impl From<sqlx::Error> for CoreError` and loses the instance context.
+//!    [`CoreError::CheckpointSaveFailed`] with the instance ID attached —
+//!    the blanket `impl From<sqlx::Error> for CoreError` has no access to
+//!    that context and flattens the failure into a generic `DatabaseError`.
 
 use sqlx::Database;
 
@@ -54,8 +54,8 @@ pub fn wrap_checkpoint_save(err: sqlx::Error, instance_id: &str) -> CoreError {
 
 /// Trait bridging sqlx's per-database `QueryResult` types (each of which
 /// exposes its own `rows_affected()` inherent method) into a generic call
-/// site. Implemented for the concrete `QueryResult` types of the two
-/// backends in use.
+/// site. Implemented for `PgQueryResult`, the only `QueryResult` type the
+/// persistence layer sees.
 pub trait RowsAffected {
     /// Number of rows modified by the query.
     fn rows_affected_generic(&self) -> u64;

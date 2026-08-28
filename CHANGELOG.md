@@ -122,6 +122,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   On first run after upgrade, existing data older than 3 days in terminal
   states will be deleted.
 
+### Removed
+
+- **SQLite is no longer a supported database backend.** `RUNTARA_DATABASE_URL`
+  must now be a PostgreSQL connection string; the standalone `runtara-core`
+  binary rejects any other scheme at startup naming the variable, where it
+  previously treated an unrecognised string as a SQLite file path. This affects
+  only that binary — the shipped bundle and Docker image contain
+  `runtara-server`, which has always been Postgres-only — and no released
+  artifact can open a SQLite database, so there is nothing to migrate. The
+  `SqlitePersistence` and `SqliteDialect` types, the `migrations/sqlite`
+  schema and the sqlx `sqlite` feature are gone; the SQLite schema had not
+  tracked Postgres for nine migrations.
+
 ### Fixed
 
 - `*_CLEANUP_ENABLED` env-var parsing across all four cleanup workers

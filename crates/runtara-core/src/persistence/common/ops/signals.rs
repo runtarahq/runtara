@@ -1,28 +1,31 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Signal-family operations shared by both backends.
+//! Signal-family operations.
 //!
-//! Migrated: `get_pending_signal`, `acknowledge_signal`,
+//! Hosts: `get_pending_signal`, `acknowledge_signal`,
 //! `take_pending_custom_signal`.
 //!
-//! Not migrated (kept inline, see backend files):
-//! - `insert_signal` / `insert_custom_signal` — Postgres transforms an
-//!   empty `&[u8]` payload into `NULL` before binding; SQLite binds the
-//!   empty slice as a zero-length BLOB. Sharing would force a fourth
-//!   cross-backend normalization beyond the three approved in the
-//!   SYN-394 plan, so the insert paths remain per-backend for now.
+//! Not hosted here: `insert_signal` / `insert_custom_signal` stay inline
+//! in the backend file. Both map an empty `&[u8]` payload to `NULL`
+//! before binding, so "signalled, no payload" reads back as an absent
+//! payload instead of a zero-length blob every consumer would have to
+//! distinguish from real content by hand.
+//!
+//! `get_pending_signal` filters `acknowledged_at IS NULL`, so a signal
+//! that has already been acknowledged is never handed out a second time
+//! and cannot re-fire a resumed instance.
 //!
 //! `take_pending_custom_signal` is a **non-destructive** read via
-//! `Dialect::sql_take_pending_custom_signal` (a plain SELECT on both
-//! backends). The row is retained so replay-from-start re-reads the same
-//! signal — see the op's doc comment for the durability rationale.
+//! `Dialect::sql_take_pending_custom_signal` (a plain SELECT). The row is
+//! retained so replay-from-start re-reads the same signal — see the op's
+//! doc comment for the durability rationale.
 
 macro_rules! impl_signal_ops {
     ($Backend:ty, $Pool:ty, $Dialect:ty) => {
         impl $Backend {
-            /// SELECT the pending signal for an instance. Both backends
-            /// filter out acknowledged rows, so a signal a guest already
-            /// consumed is not handed back on the next read.
+            /// SELECT the pending signal for an instance, skipping rows
+            /// already acknowledged (`acknowledged_at IS NULL`), so a signal
+            /// a guest already consumed is not handed back on the next read.
             pub(crate) async fn op_get_pending_signal(
                 pool: &$Pool,
                 instance_id: &str,

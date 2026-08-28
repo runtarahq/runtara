@@ -720,7 +720,11 @@ mod tests {
             host.is_cancelled().await.unwrap(),
             "pending cancel detected"
         );
-        // Server-side ack ran: status transitioned, and the signal is consumed.
+        // Server-side ack ran: status transitioned, and the row it acked is no
+        // longer pending. The second assertion pins the ack actually stamping
+        // `acknowledged_at`, since `get_pending_signal` filters on it being
+        // NULL — a cancel that is acked but still surfaces as pending would
+        // re-cancel the run on every later poll.
         assert_eq!(
             p.get_instance(inst_id.as_str())
                 .await
@@ -771,9 +775,10 @@ mod tests {
         let inst = p.get_instance(inst_id.as_str()).await.unwrap().unwrap();
         assert_eq!(inst.status, "suspended");
         // The ack's complete_instance records why it parked and when to wake.
-        // Both went unasserted while this test ran on SQLite, whose
-        // termination_reason CHECK was frozen at migration 008, so the ack
-        // failed there and the error was swallowed with a warn.
+        // Both assertions pin that the ack reached the database at all: its
+        // error is only warned about, so a `termination_reason` the schema's
+        // CHECK constraint rejects would otherwise leave the park silently
+        // unmarked and unscheduled.
         assert_eq!(
             inst.termination_reason.as_deref(),
             Some("shutdown_requested")

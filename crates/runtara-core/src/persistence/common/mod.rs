@@ -4,7 +4,7 @@
 //!
 //! Contains:
 //! - [`error`] — error-mapping helpers (e.g. `rows_affected == 0 → InstanceNotFound`
-//!   and `CheckpointSaveFailed` wrapping) that eliminate per-backend duplication.
+//!   and `CheckpointSaveFailed` wrapping) shared by every operation family.
 //! - [`row`] — result-marshaling helpers for records that aren't served by
 //!   `#[sqlx(FromRow)]` auto-derive (currently `StepSummaryRecord`).
 //! - [`filters`] — shared predicates and bind ordering for list/count filters.

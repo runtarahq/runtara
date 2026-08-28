@@ -235,10 +235,10 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
         .expect("take_pending_custom_signal failed")
         .expect("custom signal should be readable");
     assert_eq!(taken.checkpoint_id, checkpoint_id);
-    // Reads are non-destructive across backends: a replayed WaitForSignal
-    // re-reads the same signal after a drain/resume, so a second read returns
-    // the row again rather than None (the row is reclaimed by ON DELETE CASCADE
-    // at instance deletion).
+    // Reads are non-destructive: a replayed WaitForSignal re-reads the same
+    // signal after a drain/resume, so a second read returns the row again
+    // rather than None (the row is reclaimed by ON DELETE CASCADE at instance
+    // deletion).
     let taken_again = backend
         .take_pending_custom_signal(&instance_id, checkpoint_id)
         .await
@@ -271,9 +271,9 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
 
     // --- sleep cycle --------------------------------------------------------
     // Verifies both the "not due yet" (running) and "due now" (suspended +
-    // past sleep_until) cases. Phase 2 of SYN-394 normalized SQLite's
-    // timestamp comparison in `op_get_sleeping_instances_due` so this
-    // assertion now holds on both backends.
+    // past sleep_until) cases: `op_get_sleeping_instances_due` reports an
+    // instance only once its status is 'suspended' and its `sleep_until` has
+    // gone by, so a running instance parked in the past stays invisible.
     let wake_at = Utc::now() - Duration::seconds(30);
     backend
         .set_instance_sleep(&instance_id, wake_at)
@@ -334,9 +334,9 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
 
     // --- listing ------------------------------------------------------------
     // The instance is `suspended` by this point, and a suspended instance
-    // occupies no concurrency slot. Re-running it proves both backends agree
-    // on that: count while parked, count again once it is back to `running`,
-    // and require the slot to appear only in the second reading.
+    // occupies no concurrency slot. Re-running it pins that: count while
+    // parked, count again once it is back to `running`, and require the slot
+    // to appear only in the second reading.
     let parked = backend
         .count_active_instances()
         .await

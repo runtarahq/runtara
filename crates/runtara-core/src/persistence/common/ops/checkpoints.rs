@@ -1,36 +1,35 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Checkpoint-family operations shared by both backends.
+//! Checkpoint-family operations.
 //!
-//! Migrates: `save_checkpoint`, `load_checkpoint`, `list_checkpoints`,
+//! Hosts: `save_checkpoint`, `load_checkpoint`, `list_checkpoints`,
 //! `count_checkpoints`.
 //!
-//! Phase 3 (SYN-394) applies `CoreError::CheckpointSaveFailed` wrapping
-//! to `op_save_checkpoint` on both backends via
-//! `common::error::wrap_checkpoint_save`. Previously only Postgres
-//! wrapped `sqlx::Error` into that variant; SQLite fell through the
-//! blanket `From<sqlx::Error> for CoreError` impl and lost the
-//! instance-ID context.
+//! `op_save_checkpoint` routes its `sqlx::Error` through
+//! `common::error::wrap_checkpoint_save` rather than letting it fall
+//! through the blanket `From<sqlx::Error> for CoreError` impl: the
+//! blanket conversion produces a bare `DatabaseError` and drops the
+//! instance ID, which is the only handle a caller has for attributing a
+//! failed save to the run that made it.
 //!
-//! Not migrated here: `save_retry_attempt` (the two backends use
-//! genuinely different schemas for retry — PG has dedicated columns;
-//! SQLite stores the error message in the `state` BLOB). It stays
-//! inline in each backend and gains the same `wrap_checkpoint_save`
-//! treatment as a surgical fix, but its Rust plumbing isn't shared.
+//! Not hosted here: `save_retry_attempt`. It records the attempt number
+//! and error message in dedicated `checkpoints` columns instead of
+//! packing them into the `state` blob, so its Rust plumbing has nothing
+//! to share with the ops below. It stays inline in the backend file and
+//! applies the same `wrap_checkpoint_save` treatment there.
 //!
-//! `save_checkpoint` keeps a per-backend statement behind
-//! `Dialect::sql_save_checkpoint()` because the placeholder style and
-//! the current-time function differ, but the two now agree on
-//! semantics: both upsert on `(instance_id, checkpoint_id)`. A resumed
-//! instance re-saves checkpoints it already wrote, so the save has to
-//! be idempotent on every backend.
+//! `save_checkpoint`'s SQL lives behind `Dialect::sql_save_checkpoint()`
+//! and is an idempotent upsert: `ON CONFLICT (instance_id,
+//! checkpoint_id) DO UPDATE` overwrites `state` and re-stamps
+//! `created_at`, so a step replayed after a drain re-saves its
+//! checkpoint id instead of colliding on the primary key.
 
 macro_rules! impl_checkpoint_ops {
     ($Backend:ty, $Pool:ty, $Dialect:ty) => {
         impl $Backend {
-            /// Upsert a checkpoint row: a repeat save of the same
-            /// `(instance_id, checkpoint_id)` refreshes it instead of
-            /// failing. Wraps any sqlx error into
+            /// Upsert a checkpoint row (`ON CONFLICT ... DO UPDATE`): a
+            /// repeat save of the same `(instance_id, checkpoint_id)`
+            /// refreshes it instead of failing. Wraps any sqlx error into
             /// `CoreError::CheckpointSaveFailed` with the instance ID
             /// attached.
             pub(crate) async fn op_save_checkpoint(

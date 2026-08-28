@@ -1,6 +1,6 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Instance-family operations shared by both backends.
+//! Instance-family operations.
 //!
 //! The `impl_instance_ops!` macro expands to concrete `impl $Backend { ... }`
 //! blocks with one `async fn op_*` per trait method in the family. Each
@@ -8,28 +8,30 @@
 //! binds against the concrete pool type, and routes errors through
 //! [`crate::persistence::common::error`].
 //!
-//! Normalizations applied to SQLite during Phase 2 (SYN-394):
-//! - `UPDATE` writes that target a single instance now raise
-//!   `CoreError::InstanceNotFound` when `rows_affected == 0`, matching
-//!   Postgres. Previously SQLite silently no-op'd.
-//! - `complete_instance` (the unified op, SYN-395) sets `finished_at`
-//!   only when the new status is terminal, matching Postgres'
-//!   `CASE WHEN status IN (...) THEN NOW() ELSE finished_at END`.
-//!   Previously SQLite set `finished_at` unconditionally on every call.
-//! - The same call applies `COALESCE($stderr, stderr)` instead of
-//!   unconditionally overwriting stderr, matching Postgres.
+//! Single-instance `UPDATE` writes raise `CoreError::InstanceNotFound`
+//! when `rows_affected == 0`, so a write aimed at a row that was already
+//! reaped surfaces as a miss rather than a silent no-op the caller reads
+//! as success.
 //!
-//! Operations that are *not* migrated here — `update_instance_metrics`,
-//! `update_instance_stderr` — carry a semantic divergence (Postgres
-//! first-writer-wins via `COALESCE`; SQLite last-writer-wins) that is
-//! explicitly out of scope (see the SYN-394 plan). They remain inline in
-//! their backend files.
+//! `complete_instance` stamps `finished_at` only when the target status
+//! is terminal — `CASE WHEN status IN (...) THEN NOW() ELSE finished_at
+//! END` — and folds `stderr` in as `COALESCE($stderr, stderr)`, so a
+//! non-terminal transition neither declares the run over nor erases
+//! stderr an earlier call already captured.
+//!
+//! Not hosted here: `update_instance_metrics` and
+//! `update_instance_stderr` stay inline in their backend file. Both are
+//! first-writer-wins — `COALESCE(memory_peak_bytes, $2)`,
+//! `COALESCE(stderr, $2)` put the existing column first — so the value
+//! recorded closest to the failure survives, and a later, blander write
+//! from the teardown path cannot overwrite it.
 
 macro_rules! impl_instance_ops {
     ($Backend:ty, $Pool:ty, $Dialect:ty) => {
         impl $Backend {
-            /// INSERT a new instance row with `status='pending'` and a
-            /// backend-appropriate current-timestamp default.
+            /// INSERT a new instance row with `status='pending'` and
+            /// `created_at` stamped from the dialect's current-timestamp
+            /// expression.
             pub(crate) async fn op_register_instance(
                 pool: &$Pool,
                 instance_id: &str,
@@ -168,14 +170,15 @@ macro_rules! impl_instance_ops {
                 not_found_if_empty::<<$Dialect as Dialect>::Database>(&result, instance_id)
             }
 
-            /// Unified `complete_instance` op covering all five legacy
-            /// variants via [`CompleteInstanceParams`].
+            /// The one `complete_instance` op: every status transition
+            /// that carries output, error, or termination detail goes
+            /// through it, shaped by [`CompleteInstanceParams`].
             ///
             /// Semantics:
             /// - `status` is set verbatim with the enum cast suffix.
-            /// - `output` and `error` are overwritten unconditionally (no
-            ///   COALESCE). This matches the legacy `_extended`/`_with_*`
-            ///   variants.
+            /// - `output` and `error` are overwritten unconditionally
+            ///   (no COALESCE), so passing `None` clears the column; the
+            ///   caller writing the transition owns both fields.
             /// - `stderr`, `checkpoint_id`, `termination_reason`, and
             ///   `exit_code` are COALESCEd: `None` leaves the column
             ///   unchanged.
@@ -293,8 +296,9 @@ macro_rules! impl_instance_ops {
                 Ok(())
             }
 
-            /// UPDATE `input` BLOB. Does NOT require the instance to exist —
-            /// matches the legacy behavior on both backends.
+            /// UPDATE `input` BLOB. Does NOT require the instance to
+            /// exist — a write against a missing row is a silent no-op
+            /// rather than an error.
             pub(crate) async fn op_store_instance_input(
                 pool: &$Pool,
                 instance_id: &str,
@@ -314,10 +318,10 @@ macro_rules! impl_instance_ops {
                 Ok(())
             }
 
-            /// SELECT instances with optional tenant/status filters. Output
-            /// excludes the `input` BLOB for efficiency — matches legacy
-            /// behavior on both backends (input defaults to `None` on
-            /// `InstanceRecord` via `#[sqlx(default)]`).
+            /// SELECT instances with optional tenant/status filters.
+            /// Output excludes the `input` BLOB for efficiency; `input`
+            /// falls back to `None` on `InstanceRecord` via
+            /// `#[sqlx(default)]`.
             pub(crate) async fn op_list_instances(
                 pool: &$Pool,
                 tenant_id: ::core::option::Option<&str>,

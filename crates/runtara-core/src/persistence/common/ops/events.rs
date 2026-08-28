@@ -1,20 +1,20 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Event-family operations shared by both backends.
+//! Event-family operations.
 //!
-//! Migrated: `list_events`, `count_events`.
+//! Hosts: `list_events`, `count_events`.
 //!
-//! Not migrated (kept inline): `insert_event`. Postgres binds the
-//! caller-provided `event.created_at` explicitly; SQLite's inline
-//! `INSERT` hardcodes `CURRENT_TIMESTAMP` and silently discards the
-//! caller's timestamp. Sharing would force a fourth cross-backend
-//! normalization beyond the three approved in the SYN-394 plan.
+//! Not hosted here: `insert_event` stays inline in the backend file
+//! because it binds the caller-provided `event.created_at` explicitly
+//! rather than defaulting the column to `NOW()`. The timestamp an event
+//! carries is the one the emitter observed, and ordering a replayed or
+//! back-filled event by its write time instead would scramble the
+//! timeline the debug views reconstruct.
 //!
-//! Preserved divergence (documented on the Dialect SQL strings):
-//! - `payload_contains` uses `ILIKE` on Postgres (case-insensitive)
-//!   and plain `LIKE` on SQLite (case-sensitive). This is a legacy
-//!   divergence called out on [`crate::persistence::ListEventsFilter::payload_contains`]
-//!   and explicitly out of scope for this refactor.
+//! `payload_contains` is a case-INSENSITIVE substring match: the filter
+//! lowers to `convert_from(payload, 'UTF8') ILIKE '%' || $n || '%'` (see
+//! `Dialect::payload_ilike`), so a caller searching for a step id or an
+//! error fragment does not have to reproduce the payload's casing.
 
 macro_rules! impl_event_ops {
     ($Backend:ty, $Pool:ty, $Dialect:ty) => {

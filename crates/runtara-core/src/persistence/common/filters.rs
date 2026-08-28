@@ -3,8 +3,6 @@
 //! Shared filter helpers — mapping [`super::super::StepStatus`] and
 //! [`super::super::EventSortOrder`] onto the string/enum forms expected
 //! by SQL.
-//!
-//! Phase 1 (SYN-394) scaffolding; call sites migrate in Phases 2–5.
 
 use crate::persistence::{EventSortOrder, StepStatus};
 

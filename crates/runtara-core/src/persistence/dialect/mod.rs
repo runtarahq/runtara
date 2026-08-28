@@ -29,85 +29,82 @@ pub enum EnumKind {
 
 /// SQL-dialect abstraction for the persistence layer.
 ///
-/// Implementations are zero-sized types associated with a specific sqlx
+/// The implementation is a zero-sized type associated with a specific sqlx
 /// [`sqlx::Database`]. Shared query-building code composes the fragment
-/// methods to produce dialect-appropriate SQL, and the whole-SQL methods
-/// carry queries too complex to assemble fragment-by-fragment (CTEs,
-/// scope-filtered event queries, etc.).
+/// methods to produce the SQL, and the whole-SQL methods carry queries too
+/// complex to assemble fragment-by-fragment (CTEs, scope-filtered event
+/// queries, etc.).
 pub trait Dialect: Send + Sync + 'static {
     /// sqlx database type this dialect targets.
     type Database: sqlx::Database;
 
     /// Positional placeholder for the 1-indexed argument `idx`.
     ///
-    /// Postgres: `"$1"`. SQLite: `"?1"`.
+    /// Renders `"$1"`, `"$2"`, ... — Postgres resolves binds by position
+    /// number, so `idx` has to match the order the caller `.bind()`s in.
     fn placeholder(idx: usize) -> String;
 
     /// Cast suffix for a `TEXT` literal bound to an enum-typed column.
     ///
-    /// Postgres returns e.g. `"::instance_status"`. SQLite returns `""`
-    /// because enums are stored as plain text. The suffix is appended
-    /// immediately after the placeholder: `{ph}{cast}`.
+    /// Returns e.g. `"::instance_status"`, appended immediately after the
+    /// placeholder as `{ph}{cast}`, because Postgres will not implicitly
+    /// coerce a bound `TEXT` parameter into one of the schema's enum
+    /// types.
     fn enum_cast(kind: EnumKind) -> &'static str;
 
-    /// Current-timestamp keyword. Both backends support `CURRENT_TIMESTAMP`,
-    /// so the default works for both; Postgres-only callers that want
-    /// `NOW()` can still inline it.
+    /// Current-timestamp keyword spliced into generated SQL. Defaults to
+    /// `CURRENT_TIMESTAMP`; call sites that prefer `NOW()` inline it in
+    /// their own whole-SQL strings.
     const NOW: &'static str = "CURRENT_TIMESTAMP";
 
     /// SELECT projection expression for the `status` column of an enum-typed
     /// column that must be decoded as `String`.
     ///
-    /// - Postgres: `"status::text as status"` — `status` is a PG enum and
-    ///   sqlx can't decode it into `String` without the cast.
-    /// - SQLite: `"status"` — `status` is already `TEXT`.
+    /// `"status::text as status"` — `status` is a PG enum, and sqlx has no
+    /// `Decode<String>` for it, so the cast has to happen in the query and
+    /// the alias has to restore the column name the row mapper looks up.
     fn select_status_col() -> &'static str;
 
-    /// Column expression selecting `termination_reason` as text (the Postgres
-    /// column is an enum; SQLite stores plain text).
+    /// Column expression selecting `termination_reason` as text; like
+    /// `status` it is a PG enum, so it needs the same `::text` cast before
+    /// sqlx will decode it into `String`.
     fn select_termination_col() -> &'static str;
 
-    /// Wrap a timestamp expression so it compares correctly with another
+    /// Wrap a timestamp expression so it compares correctly against another
     /// normalized timestamp.
     ///
-    /// - Postgres: returns the expression verbatim — native `timestamp`
-    ///   comparisons already work.
-    /// - SQLite: wraps in `datetime(...)`, which parses both the
-    ///   RFC3339/ISO-with-zone form that sqlx-chrono binds and the
-    ///   space-separated `"YYYY-MM-DD HH:MM:SS"` form produced by
-    ///   `CURRENT_TIMESTAMP`, normalizing both sides before comparison.
-    ///   Without this wrap, SQLite compares TEXT lexicographically and
-    ///   rejects rows because `'T'` > `' '` (space).
+    /// Returns the expression verbatim: Postgres compares `timestamp` /
+    /// `timestamptz` as instants rather than as their text rendering, so a
+    /// bound RFC3339 value and `CURRENT_TIMESTAMP` already line up on both
+    /// sides of a `sleep_until <= now` predicate with no wrapping function.
     fn normalize_timestamp(expr: &str) -> String;
 
-    /// SQL expression extracting a JSON text field from a `BYTEA`/`BLOB`
-    /// payload column.
-    ///
-    /// - Postgres: `convert_from({col}, 'UTF8')::jsonb->>'{key}'`
-    /// - SQLite: `json_extract(CAST({col} AS TEXT), '$.{key}')`
+    /// SQL expression extracting a JSON text field from a `BYTEA` payload
+    /// column: `convert_from({col}, 'UTF8')::jsonb->>'{key}'`. Payloads are
+    /// stored as raw bytes, so they must be decoded to text and parsed as
+    /// `jsonb` before `->>` can reach a key.
     fn json_text(col: &str, key: &str) -> String;
 
-    /// SQL expression for a case-insensitive substring search on a
-    /// `BYTEA`/`BLOB` payload column bound against `arg_placeholder`.
+    /// SQL expression for a substring search on a `BYTEA` payload column
+    /// bound against `arg_placeholder`.
     ///
-    /// Postgres is case-insensitive (`ILIKE`). SQLite is case-sensitive
-    /// (`LIKE`) — this divergence is documented on
-    /// [`super::super::ListEventsFilter::payload_contains`].
+    /// Built on `ILIKE`, so
+    /// [`super::super::ListEventsFilter::payload_contains`] matches
+    /// case-insensitively.
     fn payload_ilike(col: &str, arg_placeholder: &str) -> String;
 
     /// SQL fragment implementing `col IN (...)` against `count` bound values.
     ///
-    /// - Postgres: `{col} = ANY({placeholder(start_idx)})` with a single
-    ///   `Vec<T>` bind.
-    /// - SQLite: `{col} IN ({ph(start_idx)}, {ph(start_idx+1)}, ...)` with
-    ///   one bind per element.
+    /// Renders `{col} = ANY({placeholder(start_idx)})`: Postgres takes the
+    /// whole list as one array bind, so `count` leaves the generated text
+    /// unchanged and the caller binds a single `Vec<T>` rather than fanning
+    /// out one placeholder per element.
     fn in_list(col: &str, count: usize, start_idx: usize) -> String;
 
     /// SQL expression returning milliseconds between two timestamp columns
-    /// (`a - b`).
-    ///
-    /// - Postgres: `EXTRACT(MILLISECONDS FROM ({a} - {b}))::bigint`
-    /// - SQLite: `CAST((julianday({a}) - julianday({b})) * 86400000 AS INTEGER)`
+    /// (`a - b`): `EXTRACT(MILLISECONDS FROM ({a} - {b}))::bigint`. The
+    /// `::bigint` cast is what makes the column decodable as `i64` —
+    /// `EXTRACT` on its own yields `numeric`.
     fn duration_ms(a: &str, b: &str) -> String;
 
     // --- Whole-SQL (for queries where fragment composition loses value) ----
@@ -129,11 +126,11 @@ pub trait Dialect: Send + Sync + 'static {
     ///
     /// Binds (in order): instance_id, checkpoint_id, state.
     ///
-    /// Both backends use `INSERT ... ON CONFLICT DO UPDATE` on
-    /// `(instance_id, checkpoint_id)`, refreshing `state` and `created_at`.
-    /// The save is idempotent by design: the engine replays from the start
-    /// and reads checkpoints as a result cache, so a resumed instance
-    /// re-saves keys it already wrote.
+    /// An idempotent upsert: `INSERT ... ON CONFLICT (instance_id,
+    /// checkpoint_id) DO UPDATE`, refreshing `state` and `created_at` instead
+    /// of tripping the unique constraint. The engine replays from the start and
+    /// reads checkpoints as a result cache, so a resumed instance re-saves keys
+    /// it already wrote.
     fn sql_save_checkpoint() -> &'static str;
 
     /// SQL for `list_checkpoints` (binds: instance_id, checkpoint_id_filter,
@@ -145,25 +142,23 @@ pub trait Dialect: Send + Sync + 'static {
     fn sql_count_checkpoints() -> &'static str;
 
     /// SQL for selecting the pending signal for an instance (bind:
-    /// instance_id). Both backends filter `acknowledged_at IS NULL`, so an
-    /// acknowledged signal is never handed back: the guest acknowledges on
-    /// read precisely so the signal is consumed once, and a redelivered
-    /// cancel/shutdown would re-suspend a relaunched instance on a signal it
-    /// already handled.
+    /// instance_id). Filtered on `acknowledged_at IS NULL`, so an acknowledged
+    /// signal is never handed back: the guest acknowledges on read precisely so
+    /// the signal is consumed once, and a redelivered cancel/shutdown would
+    /// re-suspend a relaunched instance on a signal it already handled.
     fn sql_get_pending_signal() -> &'static str;
 
     /// SQL for acknowledging a pending signal (bind: instance_id).
     fn sql_acknowledge_signal() -> &'static str;
 
     /// SQL for `health_check_db`. Must return a single `BIGINT` (i64)
-    /// column so the shared op can decode as `(i64,)` on both
-    /// backends — Postgres casts the literal via `::bigint` because
-    /// `SELECT 1` alone produces a 32-bit `integer`; SQLite's
-    /// untyped `SELECT 1` decodes as i64 natively.
+    /// column so the shared op can decode it as `(i64,)`, which is why the
+    /// literal carries a `::bigint` cast — `SELECT 1` on its own produces a
+    /// 32-bit `integer` and fails to decode.
     fn sql_health_check() -> &'static str;
 
-    /// SQL for `list_events` with a dialect-appropriate ORDER BY
-    /// direction substituted (callers pass `"ASC"` or `"DESC"`).
+    /// SQL for `list_events` with the ORDER BY direction substituted
+    /// (callers pass `"ASC"` or `"DESC"`).
     /// Binds: instance_id, event_type, subtype, created_after,
     /// created_before, payload_contains, scope_id, parent_scope_id,
     /// root_scopes_only, limit, offset.
@@ -175,9 +170,8 @@ pub trait Dialect: Send + Sync + 'static {
     fn sql_count_events() -> &'static str;
 
     /// SQL for `list_step_summaries`. The CTEs emit `inputs`/`outputs`/
-    /// `error` as TEXT (Postgres casts JSONB via `::text`; SQLite uses
-    /// `json_extract`) so the shared row mapper can parse them
-    /// identically.
+    /// `error` as TEXT (a `::text` cast on the JSONB extraction) so the
+    /// shared row mapper parses every JSON column the same way.
     /// Binds: instance_id, status_filter, step_type, scope_id,
     /// parent_scope_id, root_scopes_only, limit, offset.
     fn sql_list_step_summaries(order_direction: &str) -> String;

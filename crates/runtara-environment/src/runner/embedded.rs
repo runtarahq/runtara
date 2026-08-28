@@ -285,9 +285,10 @@ fn has_on_signal_wake(wakes: &[runtara_component_host::lifecycle::WorkflowWake])
 /// was requested and demonstrably not honoured, and reporting clean success for
 /// it is the failure mode this exists to prevent.
 async fn enforce_unacked_cancel(persistence: &Arc<dyn Persistence>, instance_id: &str) {
-    // Both backends already filter acknowledged rows, so this re-checks what the
-    // query guarantees: this backstop overwrites a terminal status, so a
-    // regression there must not re-cancel a run whose guest handled the signal.
+    // `acknowledged_at` is re-checked even though `get_pending_signal` already
+    // filters on `acknowledged_at IS NULL`: defence in depth. This backstop
+    // overwrites a terminal status, so a regression in that predicate must not
+    // re-cancel a run whose guest handled its signal properly. The check is free.
     match persistence.get_pending_signal(instance_id).await {
         Ok(Some(signal)) if signal.signal_type == "cancel" && signal.acknowledged_at.is_none() => {
             warn!(

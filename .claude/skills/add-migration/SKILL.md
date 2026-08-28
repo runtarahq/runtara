@@ -13,6 +13,11 @@ Two separate migration directories — pick based on what you're changing:
 
 - **Server tables** (workflows, instances, tenants, reports, vector store, ...) → [crates/runtara-server/migrations/](../../../crates/runtara-server/migrations/)
 - **Environment tables** (image registry, runtime instance state) → [crates/runtara-environment/migrations/](../../../crates/runtara-environment/migrations/)
+- **Core execution tables** (instances, checkpoints, signals, instance events) → [crates/runtara-core/migrations/postgresql/](../../../crates/runtara-core/migrations/postgresql/)
+
+  Core uses 3-digit sequential prefixes (`017_...`, so the next is `018_`), not the
+  14-digit timestamps the other two use. It had a parallel `migrations/sqlite/` set
+  until SQLite was removed; there is no sibling file to write any more.
 
 If unsure: changes touched by the server's HTTP handlers go in `runtara-server`; changes touched by the runtime/environment binary go in `runtara-environment`.
 

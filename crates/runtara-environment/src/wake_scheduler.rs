@@ -164,9 +164,10 @@ impl WakeScheduler {
     /// error would strand a healthy sleeper.
     async fn cancel_pending(&self, instance_id: &str) -> bool {
         match self.persistence.get_pending_signal(instance_id).await {
-            // Both backends already filter acknowledged rows, so this re-checks
-            // what the query guarantees: waking is destructive enough that a
-            // regression there must not silently re-cancel a handled run.
+            // `acknowledged_at` is re-checked even though `get_pending_signal`
+            // already filters on `acknowledged_at IS NULL`: defence in depth.
+            // Waking is destructive enough that a regression in that predicate
+            // must not silently re-cancel a handled run. The check is free.
             Ok(Some(signal)) => signal.signal_type == "cancel" && signal.acknowledged_at.is_none(),
             Ok(None) => false,
             Err(e) => {
