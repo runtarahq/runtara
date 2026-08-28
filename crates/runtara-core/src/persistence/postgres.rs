@@ -1264,13 +1264,40 @@ mod tests {
         .await
         .unwrap();
 
-        let before = PostgresPersistence::op_count_active_instances(&pool)
+        // Scoped to this test's own two rows. `op_count_active_instances` is a
+        // database-global `COUNT(*) WHERE status = 'running'`, so a delta taken
+        // across it is only stable while nothing else in the suite holds a row
+        // in `running` — which the complete_instance family does, by
+        // construction. Counting these two ids answers the same question and
+        // cannot be moved by a concurrent test.
+        let ids = [instance1.to_string(), instance2.to_string()];
+        let mine_running = |pool: PgPool, ids: [String; 2]| async move {
+            let (n,): (i64,) = sqlx::query_as(
+                "SELECT COUNT(*) FROM instances WHERE status = 'running' AND instance_id = ANY($1)",
+            )
+            .bind(&ids[..])
+            .fetch_one(&pool)
             .await
             .unwrap();
+            n
+        };
 
-        // Park the running one. The count must drop by exactly one: a
-        // suspended instance holds no concurrency slot, so parked work cannot
-        // hold a cap closed against fresh registrations.
+        assert_eq!(
+            mine_running(pool.clone(), ids.clone()).await,
+            1,
+            "exactly the running one of this test's two instances is counted"
+        );
+
+        // The global counter must see it too, whatever else is running.
+        assert!(
+            PostgresPersistence::op_count_active_instances(&pool)
+                .await
+                .unwrap()
+                >= 1
+        );
+
+        // Park the running one. A suspended instance holds no concurrency slot,
+        // so parked work cannot hold a cap closed against fresh registrations.
         PostgresPersistence::op_update_instance_status(
             &pool,
             &instance1.to_string(),
@@ -1280,12 +1307,9 @@ mod tests {
         .await
         .unwrap();
 
-        let after = PostgresPersistence::op_count_active_instances(&pool)
-            .await
-            .unwrap();
         assert_eq!(
-            after,
-            before - 1,
+            mine_running(pool.clone(), ids.clone()).await,
+            0,
             "suspending the running instance must free its slot"
         );
 
@@ -1300,5 +1324,1770 @@ mod tests {
         let result = PostgresPersistence::op_health_check_db(&pool).await;
         assert!(result.is_ok());
         assert!(result.unwrap());
+    }
+
+    // -------------------------------------------------------------------
+    // Unified complete_instance coverage (SYN-395), ported from the
+    // SQLite suite. These drive the `Persistence` trait rather than the
+    // `op_*` statics so the trait's own layer (previous-status read +
+    // OTLP recording around `op_complete_instance_unified`) is exercised
+    // too, and so the bool/`InstanceNotFound` contract is asserted where
+    // callers actually see it.
+    //
+    // Every id is freshly generated because CI runs this suite against one
+    // shared `runtara_test` database and `instance_id` is a plain TEXT
+    // primary key with no ON CONFLICT on register.
+    //
+    // KNOWN PARALLEL-SUITE INTERACTION: four of these tests hold a row in
+    // `status = 'running'` across await points, and
+    // `op_count_active_instances` is a database-global
+    // `COUNT(*) WHERE status = 'running'` with no tenant scope. The
+    // sibling `test_count_active_instances` asserts a *delta* over that
+    // global count (`after == before - 1`), so it fails whenever one of
+    // these tests flips a row into or out of `running` between its two
+    // reads. Measured on a live shared database: 0/20 failures with this
+    // family idle, 7/20 with it running concurrently. The defect is the
+    // unscoped delta assertion, not this family — a guarded update cannot
+    // be exercised without a `running` row. Fix
+    // `test_count_active_instances` to measure only its own rows before
+    // landing these.
+    // -------------------------------------------------------------------
+
+    /// Fresh, collision-proof instance id for this family.
+    fn ci_instance_id() -> String {
+        format!("pg-complete-instance-{}", Uuid::new_v4())
+    }
+
+    /// String-keyed cleanup: `cleanup_test_instance` takes a `Uuid`, but
+    /// this family registers through the trait with prefixed String ids.
+    async fn ci_cleanup(pool: &PgPool, instance_id: &str) {
+        sqlx::query("DELETE FROM instances WHERE instance_id = $1")
+            .bind(instance_id)
+            .execute(pool)
+            .await
+            .ok();
+    }
+
+    /// Read the two termination columns straight from the row.
+    ///
+    /// `exit_code` is the reason this helper exists: `op_get_instance`'s
+    /// SELECT list does not include it, and `InstanceRecord::exit_code`
+    /// carries `#[sqlx(default)]`, so `get_instance(..).exit_code` is
+    /// *always* `None` no matter what the column holds. Asserting through
+    /// `InstanceRecord` would pass even if the COALESCE were deleted.
+    /// (`termination_reason` *is* projected — as `termination_reason::text`
+    /// — but is read here too so both halves of the COALESCE pair come
+    /// from the same place.)
+    ///
+    /// `termination_reason` is a Postgres ENUM, so it is cast to text here:
+    /// sqlx cannot decode a custom enum type into `String`. The SQLite
+    /// original selects the bare column, which is TEXT there.
+    async fn ci_read_term_fields(
+        pool: &PgPool,
+        instance_id: &str,
+    ) -> (Option<String>, Option<i32>) {
+        sqlx::query_as::<_, (Option<String>, Option<i32>)>(
+            "SELECT termination_reason::text, exit_code FROM instances WHERE instance_id = $1",
+        )
+        .bind(instance_id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_complete_instance_extended() {
+        let pool = test_pool().await;
+        let p = PostgresPersistence::new(pool.clone());
+
+        let instance_id = ci_instance_id();
+        p.register_instance(&instance_id, "test-tenant")
+            .await
+            .unwrap();
+
+        p.complete_instance(
+            CompleteInstanceParams::new(&instance_id, "completed")
+                .with_output(b"output data")
+                .with_stderr("stderr output")
+                .with_checkpoint("final-checkpoint"),
+        )
+        .await
+        .expect("Failed to complete instance");
+
+        // Verify via raw query (InstanceRecord doesn't include stderr).
+        // `status` is cast to text: it is an ENUM column in Postgres.
+        let row: (String, Option<Vec<u8>>, Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT status::text, output, stderr, checkpoint_id \
+             FROM instances WHERE instance_id = $1",
+        )
+        .bind(&instance_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        assert_eq!(row.0, "completed");
+        assert_eq!(row.1, Some(b"output data".to_vec()));
+        assert_eq!(row.2, Some("stderr output".to_string()));
+        assert_eq!(row.3, Some("final-checkpoint".to_string()));
+
+        ci_cleanup(&pool, &instance_id).await;
+    }
+
+    #[tokio::test]
+    async fn test_complete_instance_if_running_success() {
+        let pool = test_pool().await;
+        let p = PostgresPersistence::new(pool.clone());
+
+        let instance_id = ci_instance_id();
+        p.register_instance(&instance_id, "test-tenant")
+            .await
+            .unwrap();
+        p.update_instance_status(&instance_id, "running", Some(Utc::now()))
+            .await
+            .unwrap();
+
+        let applied = p
+            .complete_instance(
+                CompleteInstanceParams::new(&instance_id, "completed")
+                    .if_running()
+                    .with_output(b"done"),
+            )
+            .await
+            .expect("Failed to complete instance");
+
+        assert!(applied);
+
+        let instance = p.get_instance(&instance_id).await.unwrap().unwrap();
+        assert_eq!(instance.status, "completed");
+
+        ci_cleanup(&pool, &instance_id).await;
+    }
+
+    #[tokio::test]
+    async fn test_complete_instance_if_running_skipped() {
+        let pool = test_pool().await;
+        let p = PostgresPersistence::new(pool.clone());
+
+        let instance_id = ci_instance_id();
+        p.register_instance(&instance_id, "test-tenant")
+            .await
+            .unwrap();
+        // Status is 'pending', not 'running'
+
+        let applied = p
+            .complete_instance(
+                CompleteInstanceParams::new(&instance_id, "completed")
+                    .if_running()
+                    .with_output(b"done"),
+            )
+            .await
+            .expect("Query should succeed");
+
+        assert!(!applied);
+
+        let instance = p.get_instance(&instance_id).await.unwrap().unwrap();
+        assert_eq!(instance.status, "pending"); // unchanged
+
+        ci_cleanup(&pool, &instance_id).await;
+    }
+
+    /// Unguarded completion against a missing row must raise
+    /// `InstanceNotFound` — callers rely on this to distinguish a truly
+    /// unknown instance from a race-lost guarded update.
+    #[tokio::test]
+    async fn test_complete_instance_unguarded_miss_returns_instance_not_found() {
+        let pool = test_pool().await;
+        let p = PostgresPersistence::new(pool.clone());
+
+        // Generated rather than the SQLite original's literal
+        // "never-registered": this database is shared across the whole
+        // suite, so the id must be one no other test could have inserted.
+        let missing = ci_instance_id();
+
+        let err = p
+            .complete_instance(CompleteInstanceParams::new(&missing, "completed"))
+            .await
+            .expect_err("must error when unguarded update finds nothing");
+
+        assert!(
+            matches!(&err, CoreError::InstanceNotFound { instance_id } if instance_id == &missing),
+            "expected InstanceNotFound, got {err:?}"
+        );
+    }
+
+    /// Unguarded completion against a live instance returns `Ok(true)`.
+    #[tokio::test]
+    async fn test_complete_instance_unguarded_success_returns_true() {
+        let pool = test_pool().await;
+        let p = PostgresPersistence::new(pool.clone());
+
+        let instance_id = ci_instance_id();
+        p.register_instance(&instance_id, "test-tenant")
+            .await
+            .unwrap();
+
+        let applied = p
+            .complete_instance(CompleteInstanceParams::new(&instance_id, "completed"))
+            .await
+            .expect("unguarded success should not error");
+        assert!(applied, "unguarded update on existing row returns true");
+
+        ci_cleanup(&pool, &instance_id).await;
+    }
+
+    /// Guarded completion against a missing row returns `Ok(false)`,
+    /// not `InstanceNotFound`. This is the "row was already cleaned up"
+    /// race outcome.
+    #[tokio::test]
+    async fn test_complete_instance_guarded_miss_returns_false() {
+        let pool = test_pool().await;
+        let p = PostgresPersistence::new(pool.clone());
+
+        // Generated for the same shared-database reason as the unguarded
+        // miss above.
+        let missing = ci_instance_id();
+
+        let applied = p
+            .complete_instance(CompleteInstanceParams::new(&missing, "completed").if_running())
+            .await
+            .expect("guarded miss must not error");
+        assert!(!applied);
+    }
+
+    /// Non-terminal status (`running`) must leave `finished_at` NULL —
+    /// the CASE clause only fires for terminal statuses.
+    #[tokio::test]
+    async fn test_complete_instance_non_terminal_preserves_finished_at() {
+        let pool = test_pool().await;
+        let p = PostgresPersistence::new(pool.clone());
+
+        let instance_id = ci_instance_id();
+        p.register_instance(&instance_id, "test-tenant")
+            .await
+            .unwrap();
+
+        let applied = p
+            .complete_instance(CompleteInstanceParams::new(&instance_id, "running"))
+            .await
+            .expect("non-terminal transition should succeed");
+        assert!(applied);
+
+        let instance = p.get_instance(&instance_id).await.unwrap().unwrap();
+        assert_eq!(instance.status, "running");
+        assert!(
+            instance.finished_at.is_none(),
+            "non-terminal status must not set finished_at"
+        );
+
+        ci_cleanup(&pool, &instance_id).await;
+    }
+
+    /// Relaunch/resume re-registers via
+    /// `update_instance_status("running", Some(..))`. A row that ran before
+    /// may carry a stale `finished_at` / `termination_reason` from a prior
+    /// suspend or drain force-stop; the running transition must clear both so
+    /// the resumed run never renders a negative duration
+    /// (`finished_at < started_at`).
+    #[tokio::test]
+    async fn test_update_instance_status_running_clears_finished_at() {
+        let pool = test_pool().await;
+        let p = PostgresPersistence::new(pool.clone());
+
+        let instance_id = ci_instance_id();
+        p.register_instance(&instance_id, "test-tenant")
+            .await
+            .unwrap();
+        p.update_instance_status(&instance_id, "running", Some(Utc::now()))
+            .await
+            .unwrap();
+
+        // Suspend the way a drain / durable sleep does: stamps finished_at +
+        // termination_reason. 'sleeping' is a member of the Postgres
+        // `termination_reason` ENUM, so the `$3::termination_reason` cast in
+        // the unified op resolves.
+        p.complete_instance(
+            CompleteInstanceParams::new(&instance_id, "suspended")
+                .with_termination("sleeping", None),
+        )
+        .await
+        .expect("suspend should succeed");
+        let suspended = p.get_instance(&instance_id).await.unwrap().unwrap();
+        assert!(
+            suspended.finished_at.is_some(),
+            "precondition: suspend stamps finished_at"
+        );
+
+        // Relaunch: re-register into running with a later started_at.
+        p.update_instance_status(&instance_id, "running", Some(Utc::now()))
+            .await
+            .unwrap();
+
+        let running = p.get_instance(&instance_id).await.unwrap().unwrap();
+        assert_eq!(running.status, "running");
+        assert!(
+            running.finished_at.is_none(),
+            "relaunch into running must clear the stale finished_at"
+        );
+
+        let (reason, _code) = ci_read_term_fields(&pool, &instance_id).await;
+        assert!(
+            reason.is_none(),
+            "relaunch into running must clear the stale termination_reason"
+        );
+
+        ci_cleanup(&pool, &instance_id).await;
+    }
+
+    /// `termination_reason` and `exit_code` use COALESCE semantics:
+    /// passing `None` leaves the existing values intact. Verified via a raw
+    /// query rather than `get_instance`, because `InstanceRecord::exit_code`
+    /// is never populated by `op_get_instance` — see `ci_read_term_fields`.
+    #[tokio::test]
+    async fn test_complete_instance_termination_fields_coalesce() {
+        let pool = test_pool().await;
+        let p = PostgresPersistence::new(pool.clone());
+
+        let instance_id = ci_instance_id();
+        p.register_instance(&instance_id, "test-tenant")
+            .await
+            .unwrap();
+        p.update_instance_status(&instance_id, "running", Some(Utc::now()))
+            .await
+            .unwrap();
+
+        // First write sets both termination fields. 'crashed' is a member of
+        // the Postgres `termination_reason` ENUM.
+        p.complete_instance(
+            CompleteInstanceParams::new(&instance_id, "failed")
+                .with_termination("crashed", Some(137)),
+        )
+        .await
+        .expect("first completion should succeed");
+
+        let (reason, code) = ci_read_term_fields(&pool, &instance_id).await;
+        assert_eq!(reason.as_deref(), Some("crashed"));
+        assert_eq!(code, Some(137));
+
+        // Second write without termination/exit fields must not clobber.
+        p.complete_instance(CompleteInstanceParams::new(&instance_id, "failed"))
+            .await
+            .expect("second completion should succeed");
+
+        let (reason, code) = ci_read_term_fields(&pool, &instance_id).await;
+        assert_eq!(
+            reason.as_deref(),
+            Some("crashed"),
+            "termination_reason must be preserved across subsequent writes"
+        );
+        assert_eq!(
+            code,
+            Some(137),
+            "exit_code must be preserved across subsequent writes"
+        );
+
+        ci_cleanup(&pool, &instance_id).await;
+    }
+
+    // ========================================================================
+    // Miscellaneous operation tests (ported from the SQLite suite)
+    // ========================================================================
+    //
+    // These tests drive the `Persistence` trait rather than the `op_*` statics:
+    // `insert_signal`, `insert_custom_signal`, `update_instance_metrics` and
+    // `update_instance_stderr` were never migrated to `common/ops` and survive
+    // as free functions in this module, so the trait is the only uniform entry
+    // point across the whole family.
+    //
+    // Every id and tenant is uniquified per run because the integration suite
+    // runs against one shared `runtara_test` database and rows survive between
+    // tests; `op_register_instance` is a bare INSERT with no ON CONFLICT.
+
+    /// Unique instance id for this family. `instances.instance_id` is TEXT, so
+    /// it need not be a bare UUID.
+    fn misc_instance_id(kind: &str) -> String {
+        format!("pg-misc-{}-{}", kind, Uuid::new_v4())
+    }
+
+    /// Unique tenant id for this family, so tenant-scoped listings never see
+    /// rows left behind by other tests.
+    fn misc_tenant_id(kind: &str) -> String {
+        format!("pg-misc-tenant-{}-{}", kind, Uuid::new_v4())
+    }
+
+    /// String-taking cleanup counterpart to `cleanup_test_instance` (which
+    /// takes a `Uuid`). Child tables cascade on delete.
+    async fn cleanup_misc_instance(pool: &PgPool, instance_id: &str) {
+        sqlx::query("DELETE FROM instances WHERE instance_id = $1")
+            .bind(instance_id)
+            .execute(pool)
+            .await
+            .ok();
+    }
+
+    #[tokio::test]
+    async fn test_get_instance_not_found() {
+        let pool = test_pool().await;
+        let p = PostgresPersistence::new(pool.clone());
+
+        // Unique id: a fixed "nonexistent" literal could be created by another
+        // test against this shared database.
+        let missing = misc_instance_id("absent");
+
+        let result = p
+            .get_instance(&missing)
+            .await
+            .expect("Query should succeed");
+
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_list_checkpoints() {
+        let pool = test_pool().await;
+        let p = PostgresPersistence::new(pool.clone());
+
+        let instance_id = misc_instance_id("list-cps");
+        p.register_instance(&instance_id, &misc_tenant_id("list-cps"))
+            .await
+            .unwrap();
+
+        p.save_checkpoint(&instance_id, "cp-1", b"state-1")
+            .await
+            .unwrap();
+        p.save_checkpoint(&instance_id, "cp-2", b"state-2")
+            .await
+            .unwrap();
+        p.save_checkpoint(&instance_id, "cp-3", b"state-3")
+            .await
+            .unwrap();
+
+        let checkpoints = p
+            .list_checkpoints(&instance_id, None, 10, 0, None, None)
+            .await
+            .expect("Failed to list checkpoints");
+
+        // Scoped to this instance's own id, so the shared database's other rows
+        // cannot perturb the count.
+        assert_eq!(checkpoints.len(), 3);
+
+        cleanup_misc_instance(&pool, &instance_id).await;
+    }
+
+    #[tokio::test]
+    async fn test_list_checkpoints_with_filter() {
+        let pool = test_pool().await;
+        let p = PostgresPersistence::new(pool.clone());
+
+        let instance_id = misc_instance_id("filter-cps");
+        p.register_instance(&instance_id, &misc_tenant_id("filter-cps"))
+            .await
+            .unwrap();
+
+        p.save_checkpoint(&instance_id, "cp-1", b"state-1")
+            .await
+            .unwrap();
+        p.save_checkpoint(&instance_id, "cp-2", b"state-2")
+            .await
+            .unwrap();
+
+        let checkpoints = p
+            .list_checkpoints(&instance_id, Some("cp-1"), 10, 0, None, None)
+            .await
+            .expect("Failed to list checkpoints");
+
+        assert_eq!(checkpoints.len(), 1);
+        assert_eq!(checkpoints[0].checkpoint_id, "cp-1");
+
+        cleanup_misc_instance(&pool, &instance_id).await;
+    }
+
+    #[tokio::test]
+    async fn test_count_checkpoints() {
+        let pool = test_pool().await;
+        let p = PostgresPersistence::new(pool.clone());
+
+        let instance_id = misc_instance_id("count-cps");
+        p.register_instance(&instance_id, &misc_tenant_id("count-cps"))
+            .await
+            .unwrap();
+
+        p.save_checkpoint(&instance_id, "cp-1", b"state-1")
+            .await
+            .unwrap();
+        p.save_checkpoint(&instance_id, "cp-2", b"state-2")
+            .await
+            .unwrap();
+
+        let count = p
+            .count_checkpoints(&instance_id, None, None, None)
+            .await
+            .expect("Failed to count checkpoints");
+
+        // Instance-scoped count, not a whole-table count.
+        assert_eq!(count, 2);
+
+        cleanup_misc_instance(&pool, &instance_id).await;
+    }
+
+    #[tokio::test]
+    async fn test_signal_upsert() {
+        let pool = test_pool().await;
+        let p = PostgresPersistence::new(pool.clone());
+
+        let instance_id = misc_instance_id("sig-upsert");
+        p.register_instance(&instance_id, &misc_tenant_id("sig-upsert"))
+            .await
+            .unwrap();
+
+        p.insert_signal(&instance_id, "pause", b"").await.unwrap();
+        p.insert_signal(&instance_id, "cancel", b"new reason")
+            .await
+            .unwrap();
+
+        let signal = p
+            .get_pending_signal(&instance_id)
+            .await
+            .unwrap()
+            .expect("upserted signal should be pending");
+
+        // `pending_signals` is keyed by instance_id, so the second insert
+        // replaces the first outright — the empty first payload is gone.
+        assert_eq!(signal.signal_type, "cancel");
+        assert_eq!(signal.payload, Some(b"new reason".to_vec()));
+
+        cleanup_misc_instance(&pool, &instance_id).await;
+    }
+
+    #[tokio::test]
+    async fn test_signal_empty_payload_stored_as_null() {
+        let pool = test_pool().await;
+        let p = PostgresPersistence::new(pool.clone());
+
+        let instance_id = misc_instance_id("sig-empty");
+        p.register_instance(&instance_id, &misc_tenant_id("sig-empty"))
+            .await
+            .unwrap();
+
+        // Not in the SQLite suite: this pins a real backend divergence.
+        // `insert_signal` here (postgres.rs, the free function) maps an empty
+        // `&[u8]` to `None` before binding, so the column goes NULL; SQLite's
+        // trait impl binds the slice as-is and reads it back as
+        // `Some(vec![])`. Neither backend's ported tests covered it.
+        p.insert_signal(&instance_id, "pause", b"").await.unwrap();
+
+        let signal = p
+            .get_pending_signal(&instance_id)
+            .await
+            .unwrap()
+            .expect("signal should be pending");
+
+        assert_eq!(signal.signal_type, "pause");
+        assert!(
+            signal.payload.is_none(),
+            "empty payload must round-trip as NULL on Postgres"
+        );
+
+        cleanup_misc_instance(&pool, &instance_id).await;
+    }
+
+    #[tokio::test]
+    async fn test_custom_signal_upsert() {
+        let pool = test_pool().await;
+        let p = PostgresPersistence::new(pool.clone());
+
+        let instance_id = misc_instance_id("custom-upsert");
+        p.register_instance(&instance_id, &misc_tenant_id("custom-upsert"))
+            .await
+            .unwrap();
+
+        p.insert_custom_signal(&instance_id, "wait-1", b"payload-1")
+            .await
+            .unwrap();
+        p.insert_custom_signal(&instance_id, "wait-1", b"payload-2")
+            .await
+            .unwrap();
+
+        let signal = p
+            .take_pending_custom_signal(&instance_id, "wait-1")
+            .await
+            .unwrap()
+            .expect("custom signal should exist");
+
+        // ON CONFLICT (instance_id, checkpoint_id) DO UPDATE: the later
+        // payload wins.
+        assert_eq!(signal.payload, Some(b"payload-2".to_vec()));
+
+        cleanup_misc_instance(&pool, &instance_id).await;
+    }
+
+    #[tokio::test]
+    async fn test_save_retry_attempt() {
+        let pool = test_pool().await;
+        let p = PostgresPersistence::new(pool.clone());
+
+        let instance_id = misc_instance_id("retry");
+        p.register_instance(&instance_id, &misc_tenant_id("retry"))
+            .await
+            .unwrap();
+
+        p.save_retry_attempt(&instance_id, "durable-fn-1", 1, Some("connection error"))
+            .await
+            .expect("Failed to save retry attempt");
+
+        // The synthetic `::retry::N` checkpoint exists (this is all the SQLite
+        // original checked).
+        let checkpoint = p
+            .load_checkpoint(&instance_id, "durable-fn-1::retry::1")
+            .await
+            .unwrap();
+        assert!(checkpoint.is_some());
+
+        // Postgres carries dedicated retry columns, so assert them directly
+        // rather than inferring the retry from the checkpoint_id string.
+        let row: (bool, Option<i32>, Option<String>) = sqlx::query_as(
+            "SELECT is_retry_attempt, attempt_number, error_message \
+             FROM checkpoints WHERE instance_id = $1 AND checkpoint_id = $2",
+        )
+        .bind(&instance_id)
+        .bind("durable-fn-1::retry::1")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(row.0, "retry rows must be flagged is_retry_attempt");
+        assert_eq!(row.1, Some(1));
+        assert_eq!(row.2, Some("connection error".to_string()));
+
+        // A second attempt writes a distinct row, and the audit trail reads
+        // back in attempt order.
+        p.save_retry_attempt(&instance_id, "durable-fn-1", 2, Some("timeout"))
+            .await
+            .unwrap();
+
+        let history = load_retry_history(&pool, &instance_id, "durable-fn-1")
+            .await
+            .expect("Failed to load retry history");
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].attempt_number, 1);
+        assert_eq!(history[1].attempt_number, 2);
+        assert_eq!(history[1].error_message, Some("timeout".to_string()));
+
+        // Re-saving the same attempt upserts in place (ON CONFLICT DO UPDATE)
+        // instead of adding a row.
+        p.save_retry_attempt(&instance_id, "durable-fn-1", 2, Some("timeout again"))
+            .await
+            .unwrap();
+
+        let history = load_retry_history(&pool, &instance_id, "durable-fn-1")
+            .await
+            .unwrap();
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[1].error_message, Some("timeout again".to_string()));
+
+        cleanup_misc_instance(&pool, &instance_id).await;
+    }
+
+    #[tokio::test]
+    async fn test_list_instances() {
+        let pool = test_pool().await;
+        let p = PostgresPersistence::new(pool.clone());
+
+        let tenant1 = misc_tenant_id("list-a");
+        let tenant2 = misc_tenant_id("list-b");
+        let instance1 = misc_instance_id("list-a");
+        let instance2 = misc_instance_id("list-b");
+
+        p.register_instance(&instance1, &tenant1).await.unwrap();
+        p.register_instance(&instance2, &tenant2).await.unwrap();
+
+        // The SQLite original asserted `list_instances(None, None, ..).len() == 2`
+        // against a private in-memory database. That is a whole-database
+        // assertion and cannot hold here, so the unfiltered path is exercised
+        // with a membership check instead. It is sound because the listing is
+        // `ORDER BY created_at DESC`, the suite runs `--test-threads=1`, and
+        // every test deletes its rows — so these two are the newest rows in the
+        // table at query time and are well inside the limit.
+        let all = p
+            .list_instances(None, None, 100, 0)
+            .await
+            .expect("Failed to list instances");
+        let all_ids: Vec<&str> = all.iter().map(|i| i.instance_id.as_str()).collect();
+        assert!(all_ids.contains(&instance1.as_str()));
+        assert!(all_ids.contains(&instance2.as_str()));
+
+        // The exact-count assertion survives once it is scoped to a tenant that
+        // only this test uses.
+        let tenant1_only = p
+            .list_instances(Some(&tenant1), None, 10, 0)
+            .await
+            .expect("Failed to list instances");
+        assert_eq!(tenant1_only.len(), 1);
+        assert_eq!(tenant1_only[0].instance_id, instance1);
+        assert_eq!(tenant1_only[0].tenant_id, tenant1);
+
+        let tenant2_only = p
+            .list_instances(Some(&tenant2), None, 10, 0)
+            .await
+            .expect("Failed to list instances");
+        assert_eq!(tenant2_only.len(), 1);
+        assert_eq!(tenant2_only[0].instance_id, instance2);
+
+        cleanup_misc_instance(&pool, &instance1).await;
+        cleanup_misc_instance(&pool, &instance2).await;
+    }
+
+    #[tokio::test]
+    async fn test_list_instances_by_status() {
+        let pool = test_pool().await;
+        let p = PostgresPersistence::new(pool.clone());
+
+        // The SQLite original filtered by status with a None tenant, which is a
+        // whole-database assertion; scoping to a test-unique tenant keeps the
+        // exact count meaningful here.
+        let tenant = misc_tenant_id("by-status");
+        let instance1 = misc_instance_id("by-status-1");
+        let instance2 = misc_instance_id("by-status-2");
+
+        p.register_instance(&instance1, &tenant).await.unwrap();
+        p.register_instance(&instance2, &tenant).await.unwrap();
+
+        p.update_instance_status(&instance1, "running", None)
+            .await
+            .unwrap();
+
+        let running = p
+            .list_instances(Some(&tenant), Some("running"), 10, 0)
+            .await
+            .expect("Failed to list instances");
+
+        assert_eq!(running.len(), 1);
+        assert_eq!(running[0].instance_id, instance1);
+        assert_eq!(running[0].status, "running");
+
+        // The still-pending sibling is excluded by the status filter.
+        let pending = p
+            .list_instances(Some(&tenant), Some("pending"), 10, 0)
+            .await
+            .expect("Failed to list instances");
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].instance_id, instance2);
+
+        cleanup_misc_instance(&pool, &instance1).await;
+        cleanup_misc_instance(&pool, &instance2).await;
+    }
+
+    #[tokio::test]
+    async fn test_update_instance_metrics() {
+        let pool = test_pool().await;
+        let p = PostgresPersistence::new(pool.clone());
+
+        let instance_id = misc_instance_id("metrics");
+        p.register_instance(&instance_id, &misc_tenant_id("metrics"))
+            .await
+            .unwrap();
+
+        p.update_instance_metrics(&instance_id, Some(1024 * 1024), Some(500_000))
+            .await
+            .expect("Failed to update metrics");
+
+        let row: (Option<i64>, Option<i64>) = sqlx::query_as(
+            "SELECT memory_peak_bytes, cpu_usage_usec FROM instances WHERE instance_id = $1",
+        )
+        .bind(&instance_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row.0, Some(1024 * 1024));
+        assert_eq!(row.1, Some(500_000));
+
+        // Added coverage: the SQLite original stopped after one write and
+        // asserted nothing about a second. The two backends genuinely differ
+        // here — Postgres is `SET x = COALESCE(x, $n)` (postgres.rs, first
+        // non-NULL write sticks), SQLite is a plain `SET x = ?1` (overwrite) —
+        // so pin the Postgres semantics explicitly.
+        p.update_instance_metrics(&instance_id, Some(9_999_999), Some(1))
+            .await
+            .expect("Failed to update metrics");
+
+        let row: (Option<i64>, Option<i64>) = sqlx::query_as(
+            "SELECT memory_peak_bytes, cpu_usage_usec FROM instances WHERE instance_id = $1",
+        )
+        .bind(&instance_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            row.0,
+            Some(1024 * 1024),
+            "COALESCE keeps the first recorded memory peak"
+        );
+        assert_eq!(
+            row.1,
+            Some(500_000),
+            "COALESCE keeps the first recorded CPU usage"
+        );
+
+        cleanup_misc_instance(&pool, &instance_id).await;
+    }
+
+    #[tokio::test]
+    async fn test_update_instance_stderr() {
+        let pool = test_pool().await;
+        let p = PostgresPersistence::new(pool.clone());
+
+        let instance_id = misc_instance_id("stderr");
+        p.register_instance(&instance_id, &misc_tenant_id("stderr"))
+            .await
+            .unwrap();
+
+        p.update_instance_stderr(&instance_id, "Error: something went wrong\n")
+            .await
+            .expect("Failed to update stderr");
+
+        let row: (Option<String>,) =
+            sqlx::query_as("SELECT stderr FROM instances WHERE instance_id = $1")
+                .bind(&instance_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(row.0, Some("Error: something went wrong\n".to_string()));
+
+        // Added coverage, as in `test_update_instance_metrics`: the SQLite
+        // original wrote once and stopped. Postgres is
+        // `SET stderr = COALESCE(stderr, $2)` (first capture preserved),
+        // SQLite is a plain `SET stderr = ?1` (overwrite).
+        p.update_instance_stderr(&instance_id, "second capture\n")
+            .await
+            .expect("Failed to update stderr");
+
+        let row: (Option<String>,) =
+            sqlx::query_as("SELECT stderr FROM instances WHERE instance_id = $1")
+                .bind(&instance_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            row.0,
+            Some("Error: something went wrong\n".to_string()),
+            "COALESCE keeps the first captured stderr"
+        );
+
+        cleanup_misc_instance(&pool, &instance_id).await;
+    }
+
+    #[tokio::test]
+    async fn test_store_instance_input() {
+        let pool = test_pool().await;
+        let p = PostgresPersistence::new(pool.clone());
+
+        let instance_id = misc_instance_id("input");
+        p.register_instance(&instance_id, &misc_tenant_id("input"))
+            .await
+            .unwrap();
+
+        let input_data = br#"{"key": "value"}"#;
+        p.store_instance_input(&instance_id, input_data)
+            .await
+            .expect("Failed to store input");
+
+        let row: (Option<Vec<u8>>,) =
+            sqlx::query_as("SELECT input FROM instances WHERE instance_id = $1")
+                .bind(&instance_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(row.0, Some(input_data.to_vec()));
+
+        // `store_instance_input` is a plain overwrite (no COALESCE), unlike the
+        // metrics/stderr writers above.
+        let replacement = br#"{"key": "replaced"}"#;
+        p.store_instance_input(&instance_id, replacement)
+            .await
+            .expect("Failed to store input");
+
+        let row: (Option<Vec<u8>>,) =
+            sqlx::query_as("SELECT input FROM instances WHERE instance_id = $1")
+                .bind(&instance_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(row.0, Some(replacement.to_vec()));
+
+        cleanup_misc_instance(&pool, &instance_id).await;
+    }
+
+    // ========================================================================
+    // Step Summaries Tests
+    // ========================================================================
+    //
+    // These exercise the Postgres step-summary CTE
+    // (`dialect::postgres::PostgresDialect::sql_list_step_summaries` /
+    // `sql_count_step_summaries`) end to end: the `MATERIALIZED` + `OFFSET 0`
+    // planner fences, the BYTEA payload -> `convert_from(...)::jsonb` decode,
+    // the start/end pairing join and every filter it supports.
+    //
+    // `StepStatus` and `EventSortOrder` are NOT among the names postgres.rs
+    // imports from its parent module, so `use super::*` does not bring them
+    // into scope. They are imported here under family-specific aliases so this
+    // block cannot collide with a plain `use` of the same items elsewhere in
+    // the test module.
+    use crate::persistence::EventSortOrder as StepSummarySortOrder;
+    use crate::persistence::StepStatus as StepSummaryStatus;
+
+    /// Unique instance id for one step-summary test.
+    ///
+    /// Every test in this family shares one `runtara_test` database with every
+    /// other test in the suite, and `instance_id` is a TEXT primary key with no
+    /// ON CONFLICT clause behind `register_instance`, so ids must be fresh per
+    /// run.
+    fn step_summary_instance_id(family: &str) -> String {
+        format!("pg-stepsum-{family}-{}", Uuid::new_v4())
+    }
+
+    /// Register a fresh instance for one step-summary test.
+    ///
+    /// Both the id and the tenant are derived from the caller's family label, so
+    /// no two tests share a tenant either — nothing in this family filters by
+    /// tenant today, but a shared tenant is exactly what makes a future
+    /// tenant-scoped assertion elsewhere in the suite flaky.
+    async fn register_step_summary_instance(
+        persistence: &PostgresPersistence,
+        family: &str,
+    ) -> String {
+        let instance_id = step_summary_instance_id(family);
+        persistence
+            .register_instance(&instance_id, &format!("pg-stepsum-tenant-{family}"))
+            .await
+            .unwrap();
+        instance_id
+    }
+
+    /// Delete a step-summary test instance (its `instance_events` rows go with
+    /// it via ON DELETE CASCADE).
+    ///
+    /// The module-level `cleanup_test_instance` takes a `Uuid`; these ids are
+    /// prefixed Strings, so they need their own String-taking cleanup.
+    async fn cleanup_step_summary_instance(pool: &PgPool, instance_id: &str) {
+        sqlx::query("DELETE FROM instances WHERE instance_id = $1")
+            .bind(instance_id)
+            .execute(pool)
+            .await
+            .ok();
+    }
+
+    /// Helper to insert a step_debug_start event.
+    ///
+    /// Goes through `Persistence::insert_event`, which binds the payload to the
+    /// BYTEA `payload` column; the CTE decodes it with
+    /// `convert_from(payload, 'UTF8')::jsonb` under the `subtype` predicate.
+    #[allow(clippy::too_many_arguments)]
+    async fn insert_step_start_pg(
+        persistence: &PostgresPersistence,
+        instance_id: &str,
+        step_id: &str,
+        step_name: Option<&str>,
+        step_type: &str,
+        scope_id: Option<&str>,
+        parent_scope_id: Option<&str>,
+        inputs: Option<serde_json::Value>,
+    ) {
+        let mut payload = serde_json::json!({
+            "step_id": step_id,
+            "step_type": step_type,
+        });
+        if let Some(name) = step_name {
+            payload["step_name"] = serde_json::json!(name);
+        }
+        if let Some(scope) = scope_id {
+            payload["scope_id"] = serde_json::json!(scope);
+        }
+        if let Some(parent) = parent_scope_id {
+            payload["parent_scope_id"] = serde_json::json!(parent);
+        }
+        if let Some(inp) = inputs {
+            payload["inputs"] = inp;
+        }
+
+        let event = EventRecord {
+            id: None,
+            instance_id: instance_id.to_string(),
+            event_type: "custom".to_string(),
+            checkpoint_id: None,
+            payload: Some(serde_json::to_vec(&payload).unwrap()),
+            created_at: Utc::now(),
+            subtype: Some("step_debug_start".to_string()),
+        };
+        persistence.insert_event(&event).await.unwrap();
+    }
+
+    /// Helper to insert a step_debug_end event.
+    async fn insert_step_end_pg(
+        persistence: &PostgresPersistence,
+        instance_id: &str,
+        step_id: &str,
+        scope_id: Option<&str>,
+        outputs: Option<serde_json::Value>,
+        error: Option<serde_json::Value>,
+    ) {
+        let mut payload = serde_json::json!({
+            "step_id": step_id,
+        });
+        if let Some(scope) = scope_id {
+            payload["scope_id"] = serde_json::json!(scope);
+        }
+        if let Some(out) = outputs {
+            payload["outputs"] = out;
+        }
+        if let Some(err) = error {
+            payload["error"] = err;
+        }
+
+        let event = EventRecord {
+            id: None,
+            instance_id: instance_id.to_string(),
+            event_type: "custom".to_string(),
+            checkpoint_id: None,
+            payload: Some(serde_json::to_vec(&payload).unwrap()),
+            created_at: Utc::now(),
+            subtype: Some("step_debug_end".to_string()),
+        };
+        persistence.insert_event(&event).await.unwrap();
+    }
+
+    /// Default (unfiltered) step-summary filter.
+    fn step_summary_filter(sort_order: StepSummarySortOrder) -> ListStepSummariesFilter {
+        ListStepSummariesFilter {
+            sort_order,
+            status: None,
+            step_type: None,
+            scope_id: None,
+            parent_scope_id: None,
+            root_scopes_only: false,
+            step_ids: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_list_step_summaries_empty() {
+        let pool = test_pool().await;
+        let persistence = PostgresPersistence::new(pool.clone());
+
+        let instance_id = register_step_summary_instance(&persistence, "empty").await;
+
+        let filter = step_summary_filter(StepSummarySortOrder::Desc);
+
+        // Both queries are scoped to `instance_id`, so an empty result here is
+        // unaffected by rows other tests leave in the shared database.
+        let steps = persistence
+            .list_step_summaries(&instance_id, &filter, 100, 0)
+            .await
+            .unwrap();
+
+        assert!(steps.is_empty());
+
+        let count = persistence
+            .count_step_summaries(&instance_id, &filter)
+            .await
+            .unwrap();
+
+        assert_eq!(count, 0);
+
+        cleanup_step_summary_instance(&pool, &instance_id).await;
+    }
+
+    #[tokio::test]
+    async fn test_list_step_summaries_completed_step() {
+        let pool = test_pool().await;
+        let persistence = PostgresPersistence::new(pool.clone());
+
+        let instance_id = register_step_summary_instance(&persistence, "completed").await;
+
+        // Insert a completed step (start + end events)
+        insert_step_start_pg(
+            &persistence,
+            &instance_id,
+            "step-1",
+            Some("Fetch Data"),
+            "Http",
+            None,
+            None,
+            Some(serde_json::json!({"url": "/api/data"})),
+        )
+        .await;
+
+        // Gap between the two `created_at` values so the duration is a real,
+        // non-zero millisecond count.
+        tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+
+        insert_step_end_pg(
+            &persistence,
+            &instance_id,
+            "step-1",
+            None,
+            Some(serde_json::json!({"count": 42})),
+            None,
+        )
+        .await;
+
+        let filter = step_summary_filter(StepSummarySortOrder::Desc);
+
+        let steps = persistence
+            .list_step_summaries(&instance_id, &filter, 100, 0)
+            .await
+            .unwrap();
+
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].step_id, "step-1");
+        assert_eq!(steps[0].step_name, Some("Fetch Data".to_string()));
+        assert_eq!(steps[0].step_type, "Http");
+        assert_eq!(steps[0].status, StepSummaryStatus::Completed);
+        assert!(steps[0].completed_at.is_some());
+        assert!(steps[0].duration_ms.is_some());
+        // Stronger than the SQLite original (which only asserted `is_some`):
+        // Postgres derives the duration with
+        // `EXTRACT(MILLISECONDS FROM (completed_at - started_at))::bigint`, a
+        // different expression from SQLite's `julianday` arithmetic, so assert
+        // it actually reflects the >= 20ms gap rather than just being present.
+        assert!(steps[0].duration_ms.unwrap() >= 10);
+        // The inputs come back through the JSONB -> TEXT round-trip in the
+        // outer SELECT and must still parse to the value that was written.
+        assert_eq!(
+            steps[0].inputs,
+            Some(serde_json::json!({"url": "/api/data"}))
+        );
+        assert_eq!(steps[0].outputs, Some(serde_json::json!({"count": 42})));
+        // A sequential step's end event carries no launch/settle pair.
+        assert_eq!(steps[0].launched_at_ms, None);
+        assert_eq!(steps[0].settled_at_ms, None);
+
+        cleanup_step_summary_instance(&pool, &instance_id).await;
+    }
+
+    #[tokio::test]
+    async fn test_list_step_summaries_surfaces_launch_settle_when_present() {
+        let pool = test_pool().await;
+        let persistence = PostgresPersistence::new(pool.clone());
+
+        let instance_id = register_step_summary_instance(&persistence, "launchsettle").await;
+
+        insert_step_start_pg(
+            &persistence,
+            &instance_id,
+            "branch-b",
+            Some("Branch B"),
+            "Agent",
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        // A step_debug_end payload carrying the real parallel-branch launch/settle
+        // pair (as the concurrent scheduler emits). The summary must surface them as
+        // epoch-ms columns so the timeline/replay can prefer the overlapping interval.
+        let payload = serde_json::json!({
+            "step_id": "branch-b",
+            "outputs": {"status_code": 200},
+            "duration_ms": 3,
+            "launched_at_ms": 1_700_000_000_100_i64,
+            "settled_at_ms": 1_700_000_000_500_i64,
+        });
+        persistence
+            .insert_event(&EventRecord {
+                id: None,
+                instance_id: instance_id.clone(),
+                event_type: "custom".to_string(),
+                checkpoint_id: None,
+                payload: Some(serde_json::to_vec(&payload).unwrap()),
+                created_at: Utc::now(),
+                subtype: Some("step_debug_end".to_string()),
+            })
+            .await
+            .unwrap();
+
+        let filter = step_summary_filter(StepSummarySortOrder::Desc);
+
+        let steps = persistence
+            .list_step_summaries(&instance_id, &filter, 100, 0)
+            .await
+            .unwrap();
+
+        assert_eq!(steps.len(), 1);
+        // Postgres reads these as `(ej->>'launched_at_ms')::bigint`; the cast
+        // must survive the JSON-number -> text -> bigint hop intact.
+        assert_eq!(steps[0].launched_at_ms, Some(1_700_000_000_100));
+        assert_eq!(steps[0].settled_at_ms, Some(1_700_000_000_500));
+
+        cleanup_step_summary_instance(&pool, &instance_id).await;
+    }
+
+    #[tokio::test]
+    async fn test_list_step_summaries_running_step() {
+        let pool = test_pool().await;
+        let persistence = PostgresPersistence::new(pool.clone());
+
+        let instance_id = register_step_summary_instance(&persistence, "running").await;
+
+        // Insert only start event (no end = running)
+        insert_step_start_pg(
+            &persistence,
+            &instance_id,
+            "step-running",
+            None,
+            "Transform",
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        let filter = step_summary_filter(StepSummarySortOrder::Desc);
+
+        let steps = persistence
+            .list_step_summaries(&instance_id, &filter, 100, 0)
+            .await
+            .unwrap();
+
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].step_id, "step-running");
+        assert_eq!(steps[0].status, StepSummaryStatus::Running);
+        assert!(steps[0].completed_at.is_none());
+        assert!(steps[0].duration_ms.is_none());
+
+        cleanup_step_summary_instance(&pool, &instance_id).await;
+    }
+
+    #[tokio::test]
+    async fn test_list_step_summaries_failed_step() {
+        let pool = test_pool().await;
+        let persistence = PostgresPersistence::new(pool.clone());
+
+        let instance_id = register_step_summary_instance(&persistence, "failed").await;
+
+        // Insert a failed step
+        insert_step_start_pg(
+            &persistence,
+            &instance_id,
+            "step-failed",
+            Some("Call API"),
+            "Http",
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        insert_step_end_pg(
+            &persistence,
+            &instance_id,
+            "step-failed",
+            None,
+            None,
+            Some(serde_json::json!({"message": "Connection refused"})),
+        )
+        .await;
+
+        let filter = step_summary_filter(StepSummarySortOrder::Desc);
+
+        let steps = persistence
+            .list_step_summaries(&instance_id, &filter, 100, 0)
+            .await
+            .unwrap();
+
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].step_id, "step-failed");
+        assert_eq!(steps[0].status, StepSummaryStatus::Failed);
+        assert!(steps[0].error.is_some());
+        // The CTE emits `(ej->'error')::text` and the shared row mapper parses
+        // it back; check the round-trip, not just presence, since the
+        // `error != 'null'` status test depends on that same text form.
+        assert_eq!(
+            steps[0].error,
+            Some(serde_json::json!({"message": "Connection refused"}))
+        );
+
+        cleanup_step_summary_instance(&pool, &instance_id).await;
+    }
+
+    #[tokio::test]
+    async fn test_list_step_summaries_output_error_envelope_is_failed() {
+        let pool = test_pool().await;
+        let persistence = PostgresPersistence::new(pool.clone());
+
+        let instance_id = register_step_summary_instance(&persistence, "outputerr").await;
+
+        insert_step_start_pg(
+            &persistence,
+            &instance_id,
+            "agent-step",
+            Some("Call Agent"),
+            "Agent",
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        insert_step_end_pg(
+            &persistence,
+            &instance_id,
+            "agent-step",
+            None,
+            Some(serde_json::json!({
+                "_error": true,
+                "error": {"message": "Capability failed"}
+            })),
+            None,
+        )
+        .await;
+
+        let filter = step_summary_filter(StepSummarySortOrder::Desc);
+
+        let steps = persistence
+            .list_step_summaries(&instance_id, &filter, 100, 0)
+            .await
+            .unwrap();
+
+        assert_eq!(steps.len(), 1);
+        // Status comes from `ej->'outputs'->>'_error' = 'true'` — the JSON
+        // boolean must render as the text 'true' for this branch to fire.
+        assert_eq!(steps[0].status, StepSummaryStatus::Failed);
+        assert_eq!(
+            steps[0].error,
+            Some(serde_json::json!({"message": "Capability failed"}))
+        );
+
+        let failed_filter = ListStepSummariesFilter {
+            status: Some(StepSummaryStatus::Failed),
+            ..filter
+        };
+        // Count is instance-scoped, so this is not a whole-table count.
+        assert_eq!(
+            persistence
+                .count_step_summaries(&instance_id, &failed_filter)
+                .await
+                .unwrap(),
+            1
+        );
+
+        cleanup_step_summary_instance(&pool, &instance_id).await;
+    }
+
+    #[tokio::test]
+    async fn test_list_step_summaries_filter_by_status() {
+        let pool = test_pool().await;
+        let persistence = PostgresPersistence::new(pool.clone());
+
+        let instance_id = register_step_summary_instance(&persistence, "bystatus").await;
+
+        // Insert completed step
+        insert_step_start_pg(
+            &persistence,
+            &instance_id,
+            "step-1",
+            None,
+            "Http",
+            None,
+            None,
+            None,
+        )
+        .await;
+        insert_step_end_pg(
+            &persistence,
+            &instance_id,
+            "step-1",
+            None,
+            Some(serde_json::json!({})),
+            None,
+        )
+        .await;
+
+        // Insert running step
+        insert_step_start_pg(
+            &persistence,
+            &instance_id,
+            "step-2",
+            None,
+            "Transform",
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        // Insert failed step
+        insert_step_start_pg(
+            &persistence,
+            &instance_id,
+            "step-3",
+            None,
+            "Http",
+            None,
+            None,
+            None,
+        )
+        .await;
+        insert_step_end_pg(
+            &persistence,
+            &instance_id,
+            "step-3",
+            None,
+            None,
+            Some(serde_json::json!({"error": true})),
+        )
+        .await;
+
+        // Filter by completed
+        let filter = ListStepSummariesFilter {
+            status: Some(StepSummaryStatus::Completed),
+            ..step_summary_filter(StepSummarySortOrder::Desc)
+        };
+
+        let steps = persistence
+            .list_step_summaries(&instance_id, &filter, 100, 0)
+            .await
+            .unwrap();
+
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].step_id, "step-1");
+
+        // Filter by running
+        let filter = ListStepSummariesFilter {
+            status: Some(StepSummaryStatus::Running),
+            ..filter
+        };
+
+        let steps = persistence
+            .list_step_summaries(&instance_id, &filter, 100, 0)
+            .await
+            .unwrap();
+
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].step_id, "step-2");
+
+        // Filter by failed
+        let filter = ListStepSummariesFilter {
+            status: Some(StepSummaryStatus::Failed),
+            ..filter
+        };
+
+        let steps = persistence
+            .list_step_summaries(&instance_id, &filter, 100, 0)
+            .await
+            .unwrap();
+
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].step_id, "step-3");
+
+        cleanup_step_summary_instance(&pool, &instance_id).await;
+    }
+
+    #[tokio::test]
+    async fn test_list_step_summaries_filter_by_step_type() {
+        let pool = test_pool().await;
+        let persistence = PostgresPersistence::new(pool.clone());
+
+        let instance_id = register_step_summary_instance(&persistence, "bytype").await;
+
+        // Insert Http step
+        insert_step_start_pg(
+            &persistence,
+            &instance_id,
+            "step-http",
+            None,
+            "Http",
+            None,
+            None,
+            None,
+        )
+        .await;
+        insert_step_end_pg(&persistence, &instance_id, "step-http", None, None, None).await;
+
+        // Insert Transform step
+        insert_step_start_pg(
+            &persistence,
+            &instance_id,
+            "step-transform",
+            None,
+            "Transform",
+            None,
+            None,
+            None,
+        )
+        .await;
+        insert_step_end_pg(
+            &persistence,
+            &instance_id,
+            "step-transform",
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        let filter = ListStepSummariesFilter {
+            step_type: Some("Http".to_string()),
+            ..step_summary_filter(StepSummarySortOrder::Desc)
+        };
+
+        let steps = persistence
+            .list_step_summaries(&instance_id, &filter, 100, 0)
+            .await
+            .unwrap();
+
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].step_id, "step-http");
+        assert_eq!(steps[0].step_type, "Http");
+
+        cleanup_step_summary_instance(&pool, &instance_id).await;
+    }
+
+    #[tokio::test]
+    async fn test_list_step_summaries_filter_by_step_ids() {
+        let pool = test_pool().await;
+        let persistence = PostgresPersistence::new(pool.clone());
+
+        let instance_id = register_step_summary_instance(&persistence, "byids").await;
+
+        // The quoted id proves the filter binds ids as data (a JSON array
+        // expanded by `jsonb_array_elements_text`) rather than splicing them
+        // into the SQL text.
+        for step_id in ["step-a", "step-b", "step-\"quoted\""] {
+            insert_step_start_pg(
+                &persistence,
+                &instance_id,
+                step_id,
+                None,
+                "Http",
+                None,
+                None,
+                None,
+            )
+            .await;
+            insert_step_end_pg(&persistence, &instance_id, step_id, None, None, None).await;
+        }
+
+        let filter = ListStepSummariesFilter {
+            step_ids: Some(vec!["step-a".to_string(), "step-\"quoted\"".to_string()]),
+            ..step_summary_filter(StepSummarySortOrder::Asc)
+        };
+
+        let steps = persistence
+            .list_step_summaries(&instance_id, &filter, 100, 0)
+            .await
+            .unwrap();
+
+        assert_eq!(steps.len(), 2);
+        // Postgres orders these by the start event's BIGSERIAL `id`, so ascending
+        // order is insertion order regardless of `created_at` clock resolution.
+        assert_eq!(steps[0].step_id, "step-a");
+        assert_eq!(steps[1].step_id, "step-\"quoted\"");
+
+        let count = persistence
+            .count_step_summaries(&instance_id, &filter)
+            .await
+            .unwrap();
+        assert_eq!(count, 2);
+
+        // An id that matches nothing filters everything out.
+        let filter = ListStepSummariesFilter {
+            step_ids: Some(vec!["missing".to_string()]),
+            ..filter
+        };
+        let steps = persistence
+            .list_step_summaries(&instance_id, &filter, 100, 0)
+            .await
+            .unwrap();
+        assert!(steps.is_empty());
+        assert_eq!(
+            persistence
+                .count_step_summaries(&instance_id, &filter)
+                .await
+                .unwrap(),
+            0
+        );
+
+        cleanup_step_summary_instance(&pool, &instance_id).await;
+    }
+
+    #[tokio::test]
+    async fn test_list_step_summaries_pagination() {
+        let pool = test_pool().await;
+        let persistence = PostgresPersistence::new(pool.clone());
+
+        let instance_id = register_step_summary_instance(&persistence, "pagination").await;
+
+        // Insert 5 steps. The SQLite original slept 5ms between steps to
+        // separate their timestamps; Postgres pages by the start event's
+        // BIGSERIAL `id`, so insertion order is already total and the sleeps
+        // are dropped.
+        for i in 1..=5 {
+            insert_step_start_pg(
+                &persistence,
+                &instance_id,
+                &format!("step-{}", i),
+                None,
+                "Http",
+                None,
+                None,
+                None,
+            )
+            .await;
+            insert_step_end_pg(
+                &persistence,
+                &instance_id,
+                &format!("step-{}", i),
+                None,
+                None,
+                None,
+            )
+            .await;
+        }
+
+        let filter = step_summary_filter(StepSummarySortOrder::Asc);
+
+        // Total count for THIS instance only (other tests' rows live in the
+        // same table).
+        let count = persistence
+            .count_step_summaries(&instance_id, &filter)
+            .await
+            .unwrap();
+        assert_eq!(count, 5);
+
+        // Get first page (limit 2)
+        let steps = persistence
+            .list_step_summaries(&instance_id, &filter, 2, 0)
+            .await
+            .unwrap();
+        assert_eq!(steps.len(), 2);
+        assert_eq!(steps[0].step_id, "step-1");
+        assert_eq!(steps[1].step_id, "step-2");
+
+        // Get second page
+        let steps = persistence
+            .list_step_summaries(&instance_id, &filter, 2, 2)
+            .await
+            .unwrap();
+        assert_eq!(steps.len(), 2);
+        assert_eq!(steps[0].step_id, "step-3");
+        assert_eq!(steps[1].step_id, "step-4");
+
+        cleanup_step_summary_instance(&pool, &instance_id).await;
+    }
+
+    #[tokio::test]
+    async fn test_list_step_summaries_with_scopes() {
+        let pool = test_pool().await;
+        let persistence = PostgresPersistence::new(pool.clone());
+
+        let instance_id = register_step_summary_instance(&persistence, "scopes").await;
+
+        // Root level step
+        insert_step_start_pg(
+            &persistence,
+            &instance_id,
+            "step-root",
+            None,
+            "Http",
+            None,
+            None,
+            None,
+        )
+        .await;
+        insert_step_end_pg(&persistence, &instance_id, "step-root", None, None, None).await;
+
+        // Step in scope
+        insert_step_start_pg(
+            &persistence,
+            &instance_id,
+            "step-scoped",
+            None,
+            "Transform",
+            Some("sc_main"),
+            None,
+            None,
+        )
+        .await;
+        insert_step_end_pg(
+            &persistence,
+            &instance_id,
+            "step-scoped",
+            Some("sc_main"),
+            None,
+            None,
+        )
+        .await;
+
+        // Nested step
+        insert_step_start_pg(
+            &persistence,
+            &instance_id,
+            "step-nested",
+            None,
+            "Http",
+            Some("sc_child"),
+            Some("sc_main"),
+            None,
+        )
+        .await;
+        insert_step_end_pg(
+            &persistence,
+            &instance_id,
+            "step-nested",
+            Some("sc_child"),
+            None,
+            None,
+        )
+        .await;
+
+        // Filter by root scopes only
+        let filter = ListStepSummariesFilter {
+            root_scopes_only: true,
+            ..step_summary_filter(StepSummarySortOrder::Desc)
+        };
+
+        let steps = persistence
+            .list_step_summaries(&instance_id, &filter, 100, 0)
+            .await
+            .unwrap();
+
+        // Both step-root and step-scoped have no parent_scope_id
+        assert_eq!(steps.len(), 2);
+        let step_ids: Vec<_> = steps.iter().map(|s| s.step_id.as_str()).collect();
+        assert!(step_ids.contains(&"step-root"));
+        assert!(step_ids.contains(&"step-scoped"));
+
+        // Filter by scope: the start/end pairing joins on
+        // `COALESCE(scope_id,'')`, so a scoped step must still resolve to
+        // 'completed' rather than dangling as 'running'.
+        let filter = ListStepSummariesFilter {
+            scope_id: Some("sc_main".to_string()),
+            ..step_summary_filter(StepSummarySortOrder::Desc)
+        };
+
+        let steps = persistence
+            .list_step_summaries(&instance_id, &filter, 100, 0)
+            .await
+            .unwrap();
+
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].step_id, "step-scoped");
+        assert_eq!(steps[0].scope_id, Some("sc_main".to_string()));
+        assert_eq!(steps[0].status, StepSummaryStatus::Completed);
+
+        // Filter by parent scope
+        let filter = ListStepSummariesFilter {
+            parent_scope_id: Some("sc_main".to_string()),
+            ..step_summary_filter(StepSummarySortOrder::Desc)
+        };
+
+        let steps = persistence
+            .list_step_summaries(&instance_id, &filter, 100, 0)
+            .await
+            .unwrap();
+
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].step_id, "step-nested");
+
+        cleanup_step_summary_instance(&pool, &instance_id).await;
     }
 }
