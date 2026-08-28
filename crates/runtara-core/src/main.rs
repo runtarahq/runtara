@@ -15,11 +15,10 @@ use std::time::Duration;
 
 use anyhow::Result;
 use sqlx::postgres::PgPoolOptions;
-use sqlx::sqlite::SqlitePoolOptions;
 use tracing::{error, info, warn};
 
 use runtara_core::config::Config;
-use runtara_core::persistence::{Persistence, PostgresPersistence, SqlitePersistence};
+use runtara_core::persistence::{Persistence, PostgresPersistence};
 use runtara_core::runtime::CoreRuntime;
 
 #[tokio::main]
@@ -112,7 +111,9 @@ async fn main() -> Result<()> {
 
 /// Connect to the configured database, verify it, and run migrations.
 ///
-/// Postgres or SQLite is chosen from the URL scheme.
+/// Postgres only. Any other scheme is rejected here rather than handed to
+/// sqlx, so an operator who still has a `sqlite://` URL in their environment
+/// gets told what changed instead of a URL-parse error.
 async fn connect_persistence(config: &Config) -> Result<Arc<dyn Persistence>> {
     info!("Connecting to database...");
 
@@ -136,18 +137,11 @@ async fn connect_persistence(config: &Config) -> Result<Arc<dyn Persistence>> {
 
         Ok(Arc::new(PostgresPersistence::new(pool)))
     } else {
-        let pool = SqlitePoolOptions::new()
-            .max_connections(10)
-            .connect(&config.database_url)
-            .await?;
-
-        info!("Database connection established (SQLite)");
-
-        info!("Running database migrations...");
-        runtara_core::migrations::run_sqlite(&pool).await?;
-        info!("Migrations completed");
-
-        Ok(Arc::new(SqlitePersistence::new(pool)))
+        Err(anyhow::anyhow!(
+            "RUNTARA_DATABASE_URL must be a PostgreSQL connection string \
+             (postgres:// or postgresql://); got a URL with an unsupported \
+             scheme. SQLite is no longer supported."
+        ))
     }
 }
 

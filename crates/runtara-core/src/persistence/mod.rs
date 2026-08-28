@@ -5,10 +5,8 @@
 pub mod common;
 pub mod dialect;
 pub mod postgres;
-pub mod sqlite;
 
 pub use self::postgres::PostgresPersistence;
-pub use self::sqlite::SqlitePersistence;
 
 use crate::error::CoreError;
 

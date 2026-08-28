@@ -2,25 +2,19 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! SQL dialect abstraction for the persistence layer.
 //!
-//! A [`Dialect`] supplies the SQL fragments and whole-SQL strings that differ
-//! between Postgres and SQLite (placeholders, enum casts, JSON access, `LIKE`
-//! vs `ILIKE`, `NOW()` vs `datetime('now')`, `ANY` vs dynamic `IN`-list,
-//! `EXTRACT` vs `julianday`). Shared query code composes these fragments so
-//! the Rust-side logic lives in one place while each backend owns only its
-//! dialect.
+//! A [`Dialect`] supplies the SQL fragments and whole-SQL strings that the
+//! shared operation macros in [`super::common::ops`] compose into queries, so
+//! the Rust-side logic lives in one place.
 //!
-//! Phase 1 (SYN-394): types only. Callers in [`super::postgres`] and
-//! [`super::sqlite`] still inline SQL directly. Subsequent phases migrate
-//! operations family-by-family to compose through this trait.
+//! [`PostgresDialect`] is now the only implementation. The trait is kept
+//! because the `ops` macros are written against it; collapsing it into
+//! inherent methods on the backend is a separate, larger cleanup.
 
 pub mod postgres;
-pub mod sqlite;
 
 pub use self::postgres::PostgresDialect;
-pub use self::sqlite::SqliteDialect;
 
-/// Categories of enum-typed columns that Postgres casts with `::name` and
-/// SQLite stores as plain `TEXT`.
+/// Categories of enum-typed columns that Postgres casts with `::name`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnumKind {
     /// `instances.status` — pending/running/suspended/completed/failed/cancelled.

@@ -1,13 +1,14 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Cross-backend parity harness.
+//! Conformance harness for the persistence backend.
 //!
-//! Runs a scripted sequence of [`Persistence`] operations against any
-//! implementation and asserts invariants on the observable state between
-//! steps. Phase 1 (SYN-394) seeds the harness and exercises it against an
-//! in-memory SQLite backend; as Phase 2+ migrate operations into the
-//! shared layer, the same script will also be pointed at a Postgres
-//! backend via testcontainers to catch SQL-generation drift.
+//! Runs a scripted sequence of [`Persistence`] operations and asserts
+//! invariants on the observable state between steps. It began as a parity
+//! harness comparing two backends; with one backend left it is the only
+//! unit-level coverage in this crate for the sleep lifecycle
+//! (`set_instance_sleep`, `get_sleeping_instances_due`,
+//! `claim_sleeping_instance`, `clear_instance_sleep`) and for
+//! `get_terminal_instances_older_than` / `delete_instances_batch`.
 
 use chrono::{Duration, Utc};
 use uuid::Uuid;
@@ -17,14 +18,13 @@ use crate::persistence::{
     StepStatus,
 };
 
-/// Run the full parity sequence against `backend`.
+/// Run the full conformance sequence against `backend`.
 ///
-/// The sequence is intentionally linear (no test-specific branches) so the
-/// assertions line up 1:1 across backends. Each step documents the
-/// invariant it's checking so a failure points at a specific behavior gap.
-pub async fn run_parity_sequence<P: Persistence>(backend: &P) {
+/// Intentionally linear, with no test-specific branches: each step documents
+/// the invariant it checks so a failure points at a specific behaviour.
+pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     let instance_id = Uuid::new_v4().to_string();
-    let tenant_id = "parity-tenant";
+    let tenant_id = "conformance-tenant";
 
     // --- register + get -----------------------------------------------------
     backend
@@ -197,10 +197,10 @@ pub async fn run_parity_sequence<P: Persistence>(backend: &P) {
         .acknowledge_signal(&instance_id)
         .await
         .expect("acknowledge_signal failed");
-    // The ack consumes the signal on both backends: a second read must come
-    // back empty. Re-reading is the whole point — a guest acknowledges on read,
-    // and a redelivered cancel would re-suspend a relaunched instance on a
-    // signal it already handled.
+    // The ack consumes the signal: a second read must come back empty.
+    // Re-reading is the whole point — a guest acknowledges on read, and a
+    // redelivered cancel would re-suspend a relaunched instance on a signal it
+    // already handled.
     assert!(
         backend
             .get_pending_signal(&instance_id)
@@ -247,14 +247,25 @@ pub async fn run_parity_sequence<P: Persistence>(backend: &P) {
     assert_eq!(taken_again.checkpoint_id, checkpoint_id);
     assert_eq!(taken_again.payload, taken.payload);
 
-    // --- step summaries (empty is fine; invariant is that it compiles/runs) -
+    // --- step summaries -----------------------------------------------------
+    // This harness emits no step_debug_start events, so the summary query must
+    // come back empty rather than surfacing this instance's other events.
+    // Content-level coverage of the summary CTE lives in the backend's own
+    // tests (`test_list_step_summaries_*` in `persistence::postgres`).
     let step_filter = ListStepSummariesFilter::default();
     let step_summaries = backend
         .list_step_summaries(&instance_id, &step_filter, 50, 0)
         .await
         .expect("list_step_summaries failed");
-    // No step_debug_start events emitted by this harness — expect none.
     assert!(step_summaries.is_empty());
+    assert_eq!(
+        backend
+            .count_step_summaries(&instance_id, &step_filter)
+            .await
+            .expect("count_step_summaries failed"),
+        0,
+        "the count must agree with the (empty) listing"
+    );
     // Bind the variant so the match remains type-checked when we add status-filtered cases.
     let _ = StepStatus::Running;
 
@@ -415,24 +426,16 @@ pub async fn run_parity_sequence<P: Persistence>(backend: &P) {
     );
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "db-integration-tests"))]
 mod tests {
     use super::*;
-    #[cfg(feature = "db-integration-tests")]
     use sqlx::PgPool;
-    use sqlx::sqlite::SqlitePoolOptions;
-    #[cfg(feature = "db-integration-tests")]
     use testcontainers::ContainerAsync;
-    #[cfg(feature = "db-integration-tests")]
     use testcontainers::ImageExt;
-    #[cfg(feature = "db-integration-tests")]
     use testcontainers::runners::AsyncRunner;
-    #[cfg(feature = "db-integration-tests")]
     use testcontainers_modules::postgres::Postgres;
 
-    #[cfg(feature = "db-integration-tests")]
     use crate::persistence::PostgresPersistence;
-    use crate::persistence::SqlitePersistence;
 
     /// Image tag for the fallback Postgres container.
     ///
@@ -440,51 +443,27 @@ mod tests {
     /// refuses `ALTER TYPE ... ADD VALUE` inside a transaction block, which the
     /// core migrations rely on. Pin a modern tag matching the version CI runs
     /// against so the container route exercises the same schema as CI.
-    #[cfg(feature = "db-integration-tests")]
     const POSTGRES_TEST_IMAGE_TAG: &str = "16-alpine";
 
     #[tokio::test]
-    async fn sqlite_backend_passes_parity_sequence() {
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await
-            .expect("create in-memory SQLite pool");
-        crate::migrations::SQLITE
-            .run(&pool)
-            .await
-            .expect("run SQLite migrations");
-
-        let backend = SqlitePersistence::new(pool);
-        run_parity_sequence(&backend).await;
-    }
-
-    /// Run the same parity sequence against Postgres. Uses
-    /// `TEST_RUNTARA_DATABASE_URL` if set; otherwise spins up a
-    /// Postgres container via testcontainers. The explicit feature fails
-    /// closed when neither route works.
-    #[cfg(feature = "db-integration-tests")]
-    #[tokio::test]
-    async fn postgres_backend_passes_parity_sequence() {
+    async fn postgres_backend_passes_conformance_sequence() {
         let (pool, _container) = postgres_test_pool().await;
         let backend = PostgresPersistence::new(pool);
-        run_parity_sequence(&backend).await;
+        run_conformance_sequence(&backend).await;
     }
 
-    /// Obtain a Postgres pool for the parity test. Prefers
-    /// `TEST_RUNTARA_DATABASE_URL` (for CI / local developer setups
-    /// that already have a database running), then falls back to a
-    /// fresh testcontainers-managed container. Infrastructure failures are
-    /// test failures, never successful early returns.
+    /// Obtain a Postgres pool. Prefers `TEST_RUNTARA_DATABASE_URL` (for CI and
+    /// local setups that already have a database running), then falls back to a
+    /// fresh testcontainers-managed container. Infrastructure failures are test
+    /// failures, never successful early returns.
     ///
-    /// When a container is returned, keeping its handle alive keeps
-    /// the container running; callers hold it in a `_container` bind.
-    #[cfg(feature = "db-integration-tests")]
+    /// When a container is returned, keeping its handle alive keeps the
+    /// container running; callers hold it in a `_container` bind.
     async fn postgres_test_pool() -> (PgPool, Option<ContainerAsync<Postgres>>) {
         if let Ok(url) = std::env::var("TEST_RUNTARA_DATABASE_URL") {
             let pool = PgPool::connect(&url)
                 .await
-                .expect("required core parity database must accept connections");
+                .expect("required core conformance database must accept connections");
             // Ensure pgcrypto for `gen_random_uuid()` used by migrations.
             sqlx::query("CREATE EXTENSION IF NOT EXISTS pgcrypto")
                 .execute(&pool)

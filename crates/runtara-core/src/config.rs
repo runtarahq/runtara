@@ -15,7 +15,7 @@ const DEFAULT_MAX_CONCURRENT_INSTANCES: u32 = 32;
 /// Runtara Core configuration
 #[derive(Debug, Clone)]
 pub struct Config {
-    /// PostgreSQL or SQLite connection URL
+    /// PostgreSQL connection URL
     pub database_url: String,
     /// HTTP server address for instance communication
     pub http_addr: SocketAddr,
@@ -29,7 +29,7 @@ impl Config {
     /// Load configuration from environment variables.
     ///
     /// Required:
-    /// - `RUNTARA_DATABASE_URL`: PostgreSQL or SQLite connection string
+    /// - `RUNTARA_DATABASE_URL`: PostgreSQL connection string
     ///
     /// Optional (with defaults):
     /// - `RUNTARA_HTTP_PORT`: HTTP server port (default: 8001)
@@ -237,13 +237,13 @@ mod tests {
         let _lock = ENV_MUTEX.lock().unwrap();
         let mut guard = EnvGuard::new();
 
-        guard.set("RUNTARA_DATABASE_URL", "sqlite:test.db");
+        guard.set("RUNTARA_DATABASE_URL", "postgres://localhost/test");
         guard.set("RUNTARA_HTTP_PORT", "9999");
         guard.remove("RUNTARA_MAX_CONCURRENT_INSTANCES");
 
         let config = Config::from_env().unwrap();
 
-        assert_eq!(config.database_url, "sqlite:test.db");
+        assert_eq!(config.database_url, "postgres://localhost/test");
         assert_eq!(config.http_addr.port(), 9999);
         assert_eq!(config.max_concurrent_instances, 32);
     }

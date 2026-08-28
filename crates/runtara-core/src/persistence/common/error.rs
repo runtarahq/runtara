@@ -67,12 +67,6 @@ impl RowsAffected for sqlx::postgres::PgQueryResult {
     }
 }
 
-impl RowsAffected for sqlx::sqlite::SqliteQueryResult {
-    fn rows_affected_generic(&self) -> u64 {
-        self.rows_affected()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

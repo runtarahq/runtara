@@ -1,6 +1,6 @@
 # runtara-core
 
-Durable execution engine for Runtara: checkpoints, signals, durable sleep, and instance events backed by PostgreSQL or SQLite.
+Durable execution engine for Runtara: checkpoints, signals, durable sleep, and instance events backed by PostgreSQL.
 
 [![crates.io](https://img.shields.io/crates/v/runtara-core.svg)](https://crates.io/crates/runtara-core)
 [![docs.rs](https://docs.rs/runtara-core/badge.svg)](https://docs.rs/runtara-core)
@@ -8,7 +8,7 @@ Durable execution engine for Runtara: checkpoints, signals, durable sleep, and i
 
 ## What it is
 
-`runtara-core` is the host-side execution engine that workflow instances talk to in order to persist state and progress durably. The `persistence` module defines the `Persistence` trait (with `PostgresPersistence` and `SqlitePersistence` impls) covering instances, checkpoints, events, and signals. The `instance_handlers` and `server` modules expose the instance protocol over HTTP (register, checkpoint, sleep, events, signal poll/ack), and `runtime::CoreRuntime` bundles it into an embeddable service. The `migrations` module ships SQL migrations so embedders can set up the schema.
+`runtara-core` is the host-side execution engine that workflow instances talk to in order to persist state and progress durably. The `persistence` module defines the `Persistence` trait (implemented by `PostgresPersistence`) covering instances, checkpoints, events, and signals. The `instance_handlers` and `server` modules expose the instance protocol over HTTP (register, checkpoint, sleep, events, signal poll/ack), and `runtime::CoreRuntime` bundles it into an embeddable service. The `migrations` module ships SQL migrations so embedders can set up the schema.
 
 ## Using it standalone
 
@@ -47,13 +47,13 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
-Requires a reachable PostgreSQL or SQLite database via `RUNTARA_DATABASE_URL`. Disable the default `server` feature if you only need the persistence/migrations library surface.
+Requires a reachable PostgreSQL database via `RUNTARA_DATABASE_URL`. Disable the default `server` feature if you only need the persistence/migrations library surface.
 
 ## Inside Runtara
 
 - Consumed by `runtara-server` (binary that links core with `server` feature) and `runtara-environment` (shares the `Persistence` trait directly, not over HTTP).
 - `runtara-sdk` uses it via the optional `embedded` feature for in-process tests that skip the HTTP hop.
-- Depends on `sqlx` (Postgres + SQLite), `tokio`, and `axum` for the instance HTTP server on port 8001.
+- Depends on `sqlx` (Postgres), `tokio`, and `axum` for the instance HTTP server on port 8001.
 - Primary integration point is the `Persistence` trait — environment and SDK both program against it.
 - Runs in: native host (Tokio + sqlx). Ships as both a library and an optional binary (`[[bin]] runtara-core`, gated on the `server` feature).
 

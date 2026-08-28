@@ -20,21 +20,10 @@ use sqlx::migrate::MigrateError;
 /// PostgreSQL migrator with all core migrations embedded.
 pub static POSTGRES: sqlx::migrate::Migrator = sqlx::migrate!("./migrations/postgresql");
 
-/// SQLite migrator with all core migrations embedded.
-pub static SQLITE: sqlx::migrate::Migrator = sqlx::migrate!("./migrations/sqlite");
-
 /// Run PostgreSQL migrations.
 ///
 /// Applies all pending migrations to the database. Safe to call multiple times;
 /// already-applied migrations are skipped.
 pub async fn run_postgres(pool: &sqlx::PgPool) -> Result<(), MigrateError> {
     POSTGRES.run(pool).await
-}
-
-/// Run SQLite migrations.
-///
-/// Applies all pending migrations to the database. Safe to call multiple times;
-/// already-applied migrations are skipped.
-pub async fn run_sqlite(pool: &sqlx::SqlitePool) -> Result<(), MigrateError> {
-    SQLITE.run(pool).await
 }

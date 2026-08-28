@@ -46,7 +46,7 @@ use crate::types::{CheckpointResult, Signal, SignalType, StatusResponse};
 /// use runtara_sdk::RuntaraSdk;
 /// use std::sync::Arc;
 ///
-/// // Create persistence layer (e.g., SQLite or PostgreSQL)
+/// // Create persistence layer (PostgreSQL)
 /// let persistence: Arc<dyn Persistence> = create_persistence()?;
 ///
 /// let mut sdk = RuntaraSdk::embedded(persistence, "my-instance", "my-tenant");

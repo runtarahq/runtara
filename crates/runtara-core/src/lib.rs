@@ -31,7 +31,7 @@
 //!           │
 //!           ▼
 //! ┌───────────────────────┐
-//! │  PostgreSQL / SQLite  │
+//! │      PostgreSQL       │
 //! │  (Durable Storage)    │
 //! └───────────────────────┘
 //! ```
@@ -130,7 +130,7 @@
 //!
 //! | Variable | Required | Default | Description |
 //! |----------|----------|---------|-------------|
-//! | `RUNTARA_DATABASE_URL` | Yes | - | PostgreSQL or SQLite connection string |
+//! | `RUNTARA_DATABASE_URL` | Yes | - | PostgreSQL connection string |
 //! | `RUNTARA_HTTP_PORT` | No | `8001` | Instance HTTP server port |
 //! | `RUNTARA_MAX_CONCURRENT_INSTANCES` | No | `32` standalone, none embedded | Max instances in `running` at once. Enforced at `register_instance`; fresh registrations past the cap receive `429 Too Many Requests`. Neither resumes nor `suspended` instances count against it, so work parked in a durable sleep or a signal-wait never holds the cap closed. Set to `0` to disable. The default applies to the `runtara-core` binary only — a host embedding the runtime is left uncapped unless this is set, so an upgrade cannot start rejecting launches that used to succeed. |
 //! | `RUNTARA_CORE_SHUTDOWN_GRACE_MS` | No | `5000` | How long [`runtime::CoreRuntime::shutdown`] waits for in-flight instance-protocol requests before it stops waiting. This crate's own knob — not to be confused with the two rows below, which belong to the host processes. |

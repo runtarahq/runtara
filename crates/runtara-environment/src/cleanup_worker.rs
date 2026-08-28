@@ -184,11 +184,6 @@ impl CleanupWorker {
                 continue;
             }
 
-            // Skip files (like .db files)
-            if tenant_name_str.ends_with(".db") {
-                continue;
-            }
-
             // Check for runs subdirectory
             let runs_dir = tenant_path.join("runs");
             if !runs_dir.exists() {

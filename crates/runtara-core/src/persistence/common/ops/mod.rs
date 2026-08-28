@@ -1,6 +1,6 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Shared operation implementations used by both backends.
+//! Operation implementations for the persistence backend.
 //!
 //! Each submodule hosts a family of operations (instances, checkpoints,
 //! events, signals, sleep, step summaries, retention) and exposes a
@@ -10,11 +10,9 @@
 //! routes errors/rows through [`crate::persistence::common::error`] and
 //! [`crate::persistence::common::row`].
 //!
-//! Phase 1 (SYN-394) creates the module structure; subsequent phases
-//! migrate operations family-by-family (see the SYN-394 plan for ordering).
-//! Until each family is migrated, the existing inline implementations in
-//! [`crate::persistence::postgres`] and [`crate::persistence::sqlite`]
-//! remain authoritative.
+//! The macro indirection dates from when there were two backends. With one
+//! left it buys nothing; expanding it into plain `impl` blocks is a separate
+//! cleanup.
 
 pub mod checkpoints;
 pub mod events;
@@ -32,5 +30,5 @@ pub(crate) use signals::impl_signal_ops;
 pub(crate) use sleep::impl_sleep_ops;
 pub(crate) use step_summaries::impl_step_summary_ops;
 
-#[cfg(test)]
-pub mod parity_harness;
+#[cfg(all(test, feature = "db-integration-tests"))]
+pub mod postgres_conformance;
