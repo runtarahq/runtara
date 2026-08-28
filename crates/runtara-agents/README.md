@@ -28,7 +28,7 @@ let out = execute_capability(
 )?;
 ```
 
-Pick one platform feature: `native` (default) for servers and CLIs, `wasi` for `wasm32-wasip2` guests, or `wasm-js` for browser/Node. The `generate_dsl_spec` binary emits the capability catalog as JSON for tooling.
+Pick one platform feature: `native` (default) for servers and CLIs, `wasi` for `wasm32-wasip2` guests, or `wasm-js` for browser/Node. The `emit-meta` binary (`runtara-agent-bundle-emit`) emits the capability catalog as per-agent `meta.json` for tooling.
 
 ## Inside Runtara
 

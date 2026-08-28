@@ -94,10 +94,10 @@ cargo run -p runtara-core
 
 # Run runtara-environment (in another terminal)
 cargo run -p runtara-environment
-
-# Run examples (standalone, no server needed)
-cargo run -p durable-example --bin basic_example
 ```
+
+Example workflows live in `examples/` as DSL JSON — see `examples/README.md` for
+how to load them.
 
 ## Coding Standards
 
