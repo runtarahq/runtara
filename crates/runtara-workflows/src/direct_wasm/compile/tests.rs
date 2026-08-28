@@ -10337,7 +10337,18 @@ fn direct_compile_composes_finish_with_shared_components_when_available() {
             .map(|file| file.sha256.as_str()),
         Some(result.wasm_checksum.as_str())
     );
-    assert_eq!(result.artifact_metadata.shared_components.len(), 2);
+    // HostImport default: only the stdlib is a compose-time dependency — the
+    // runtime interface is left unbound and satisfied by the host at run time,
+    // so it is never composed in (see `RuntimeBinding::HostImport`).
+    assert_eq!(
+        result
+            .artifact_metadata
+            .shared_components
+            .iter()
+            .map(|component| component.package.as_str())
+            .collect::<Vec<_>>(),
+        vec!["runtara:workflow-stdlib"]
+    );
     for component in &result.artifact_metadata.shared_components {
         let wasm = component.wasm.as_ref().expect("resolved shared component");
         let actual =
