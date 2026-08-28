@@ -109,8 +109,11 @@ impl Dialect for SqliteDialect {
         // treats checkpoints as a result cache, so re-saving the same
         // `(instance_id, checkpoint_id)` is the ordinary path on a resume,
         // not a conflict. `excluded.created_at` is this statement's own
-        // CURRENT_TIMESTAMP, so the refreshed row still sorts newest-first
-        // under `sql_list_checkpoints`.
+        // CURRENT_TIMESTAMP rather than the stored row's, so a re-save
+        // advances the timestamp the way Postgres's `NOW()` does. Note it is
+        // only second-resolution here and `sql_list_checkpoints` orders on it
+        // with no tiebreaker, so rows written within the same second have no
+        // defined order between them.
         "INSERT INTO checkpoints (instance_id, checkpoint_id, state, created_at) \
          VALUES (?1, ?2, ?3, CURRENT_TIMESTAMP) \
          ON CONFLICT(instance_id, checkpoint_id) DO UPDATE SET \
