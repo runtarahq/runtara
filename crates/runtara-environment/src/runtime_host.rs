@@ -736,13 +736,12 @@ mod tests {
             host.is_cancelled().await.unwrap(),
             "pending cancel detected"
         );
-        // Server-side ack ran: status transitioned. (No pending-row assertion:
-        // SQLite's get_pending_signal returns acknowledged rows — the
-        // documented legacy divergence in ops/signals.rs; Postgres filters.)
+        // Server-side ack ran: status transitioned, and the signal is consumed.
         assert_eq!(
             p.get_instance(INSTANCE).await.unwrap().unwrap().status,
             "cancelled"
         );
+        assert!(p.get_pending_signal(INSTANCE).await.unwrap().is_none());
         // Local latch short-circuits without any new signal.
         assert!(host.is_cancelled().await.unwrap());
     }
@@ -755,8 +754,7 @@ mod tests {
         assert!(host.check_signals().await.unwrap(), "pause handled");
         let inst = p.get_instance(INSTANCE).await.unwrap().unwrap();
         assert_eq!(inst.status, "suspended");
-        // (No pending-row assertion — SQLite returns acknowledged rows; see
-        // the legacy divergence note in ops/signals.rs.)
+        assert!(p.get_pending_signal(INSTANCE).await.unwrap().is_none());
         // A pause is not a cancel.
         assert!(!host.is_cancelled().await.unwrap());
     }
@@ -1042,16 +1040,9 @@ mod tests {
         );
 
         // The signal is acknowledged, so nothing is left for the escalation to
-        // act on as the guest winds down through further host calls. (Checked
-        // via `acknowledged_at`, not row absence: SQLite returns acknowledged
-        // rows from `get_pending_signal` where Postgres filters them.)
-        let signal = p
-            .get_pending_signal(INSTANCE)
-            .await
-            .unwrap()
-            .expect("sqlite keeps the row after acknowledgement");
+        // act on as the guest winds down through further host calls.
         assert!(
-            signal.acknowledged_at.is_some(),
+            p.get_pending_signal(INSTANCE).await.unwrap().is_none(),
             "the guest's poll must have acknowledged the cancel"
         );
         host.heartbeat().await.unwrap();

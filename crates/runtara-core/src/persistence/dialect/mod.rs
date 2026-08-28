@@ -151,8 +151,11 @@ pub trait Dialect: Send + Sync + 'static {
     fn sql_count_checkpoints() -> &'static str;
 
     /// SQL for selecting the pending signal for an instance (bind:
-    /// instance_id). Postgres returns only unacknowledged signals;
-    /// SQLite returns any signal row (legacy behavior preserved).
+    /// instance_id). Both backends filter `acknowledged_at IS NULL`, so an
+    /// acknowledged signal is never handed back: the guest acknowledges on
+    /// read precisely so the signal is consumed once, and a redelivered
+    /// cancel/shutdown would re-suspend a relaunched instance on a signal it
+    /// already handled.
     fn sql_get_pending_signal() -> &'static str;
 
     /// SQL for acknowledging a pending signal (bind: instance_id).
