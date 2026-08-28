@@ -18,19 +18,21 @@
 //! inline in each backend and gains the same `wrap_checkpoint_save`
 //! treatment as a surgical fix, but its Rust plumbing isn't shared.
 //!
-//! Not migrated here either: `save_checkpoint`'s *SQL shape* differs —
-//! Postgres uses `ON CONFLICT ... DO UPDATE` (idempotent upsert);
-//! SQLite uses a plain `INSERT` that fails on a duplicate key. Both
-//! legacy behaviors are preserved via
-//! `Dialect::sql_save_checkpoint()`. Unifying the conflict semantics
-//! is out of scope for this refactor.
+//! `save_checkpoint` keeps a per-backend statement behind
+//! `Dialect::sql_save_checkpoint()` because the placeholder style and
+//! the current-time function differ, but the two now agree on
+//! semantics: both upsert on `(instance_id, checkpoint_id)`. A resumed
+//! instance re-saves checkpoints it already wrote, so the save has to
+//! be idempotent on every backend.
 
 macro_rules! impl_checkpoint_ops {
     ($Backend:ty, $Pool:ty, $Dialect:ty) => {
         impl $Backend {
-            /// INSERT (or UPSERT on Postgres) a checkpoint row. Wraps any
-            /// sqlx error into `CoreError::CheckpointSaveFailed` with the
-            /// instance ID attached.
+            /// Upsert a checkpoint row: a repeat save of the same
+            /// `(instance_id, checkpoint_id)` refreshes it instead of
+            /// failing. Wraps any sqlx error into
+            /// `CoreError::CheckpointSaveFailed` with the instance ID
+            /// attached.
             pub(crate) async fn op_save_checkpoint(
                 pool: &$Pool,
                 instance_id: &str,
