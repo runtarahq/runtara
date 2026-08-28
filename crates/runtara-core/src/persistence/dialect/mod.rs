@@ -131,14 +131,15 @@ pub trait Dialect: Send + Sync + 'static {
     /// Binds (in order): instance_id, checkpoint_id.
     fn sql_take_pending_custom_signal() -> &'static str;
 
-    /// SQL for inserting/upserting a checkpoint row.
+    /// SQL for upserting a checkpoint row.
     ///
     /// Binds (in order): instance_id, checkpoint_id, state.
     ///
-    /// - Postgres: `INSERT ... ON CONFLICT DO UPDATE` (idempotent upsert).
-    /// - SQLite: plain `INSERT` — a duplicate `(instance_id, checkpoint_id)`
-    ///   causes a UNIQUE-constraint violation. Preserves legacy behavior;
-    ///   unifying to upsert is a separate decision (not Phase 3 scope).
+    /// Both backends use `INSERT ... ON CONFLICT DO UPDATE` on
+    /// `(instance_id, checkpoint_id)`, refreshing `state` and `created_at`.
+    /// The save is idempotent by design: the engine replays from the start
+    /// and reads checkpoints as a result cache, so a resumed instance
+    /// re-saves keys it already wrote.
     fn sql_save_checkpoint() -> &'static str;
 
     /// SQL for `list_checkpoints` (binds: instance_id, checkpoint_id_filter,

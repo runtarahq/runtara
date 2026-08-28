@@ -102,6 +102,42 @@ pub async fn run_parity_sequence<P: Persistence>(backend: &P) {
         .expect("count_checkpoints with filter failed");
     assert!(filtered_count >= 1);
 
+    // Re-save the same key. The engine replays from the start and reads
+    // checkpoints as a result cache, so this is the ordinary path on a
+    // resume — every backend must accept it, refresh the state, and leave
+    // exactly one row behind. A backend that inserts without an upsert
+    // fails here on the save itself.
+    let refreshed_state = b"opaque-state-v2".to_vec();
+    backend
+        .save_checkpoint(&instance_id, checkpoint_id, &refreshed_state)
+        .await
+        .expect("re-saving an existing checkpoint key must succeed");
+    let reloaded = backend
+        .load_checkpoint(&instance_id, checkpoint_id)
+        .await
+        .expect("load_checkpoint after re-save failed")
+        .expect("checkpoint must still exist after re-save");
+    assert_eq!(
+        reloaded.state, refreshed_state,
+        "re-save must refresh the stored state, not keep the original"
+    );
+    let count_after_resave = backend
+        .count_checkpoints(&instance_id, Some(checkpoint_id), None, None)
+        .await
+        .expect("count_checkpoints after re-save failed");
+    assert_eq!(
+        count_after_resave, 1,
+        "re-save must replace the row, not add a second one"
+    );
+    let total_after_resave = backend
+        .count_checkpoints(&instance_id, None, None, None)
+        .await
+        .expect("unfiltered count_checkpoints after re-save failed");
+    assert_eq!(
+        total_after_resave, 1,
+        "only one checkpoint has been saved for this instance"
+    );
+
     // --- update instance checkpoint pointer --------------------------------
     backend
         .update_instance_checkpoint(&instance_id, checkpoint_id)

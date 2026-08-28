@@ -105,11 +105,17 @@ impl Dialect for SqliteDialect {
     }
 
     fn sql_save_checkpoint() -> &'static str {
-        // Plain INSERT (no ON CONFLICT) — preserves legacy SQLite semantics
-        // where a duplicate `(instance_id, checkpoint_id)` raises a UNIQUE
-        // violation. Unifying to upsert is a separate decision.
+        // Upsert, matching Postgres: the engine replays from the start and
+        // treats checkpoints as a result cache, so re-saving the same
+        // `(instance_id, checkpoint_id)` is the ordinary path on a resume,
+        // not a conflict. `excluded.created_at` is this statement's own
+        // CURRENT_TIMESTAMP, so the refreshed row still sorts newest-first
+        // under `sql_list_checkpoints`.
         "INSERT INTO checkpoints (instance_id, checkpoint_id, state, created_at) \
-         VALUES (?1, ?2, ?3, CURRENT_TIMESTAMP)"
+         VALUES (?1, ?2, ?3, CURRENT_TIMESTAMP) \
+         ON CONFLICT(instance_id, checkpoint_id) DO UPDATE SET \
+             state = excluded.state, \
+             created_at = excluded.created_at"
     }
 
     fn sql_list_checkpoints() -> &'static str {
