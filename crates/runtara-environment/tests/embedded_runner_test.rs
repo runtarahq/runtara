@@ -2,20 +2,30 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! EmbeddedWasmRunner integration tests.
 //!
-//! Hermetic: components are authored in WAT (no SDK, no HTTP), persistence is
-//! a real SQLite store in a temp dir. What the SDK would normally report to
-//! runtara-core is pre-seeded so `run()`'s output/error mapping is exercised
-//! end to end without a server stack.
+//! Components are authored in WAT (no SDK, no HTTP) and persistence is the real
+//! database. What the SDK would normally report to runtara-core is pre-seeded so
+//! `run()`'s output/error mapping is exercised end to end without a server
+//! stack.
+//!
+//! Feature-gated on `db-integration-tests` via `required-features` in
+//! Cargo.toml. These are `multi_thread` and not serialised, so every instance id
+//! is minted fresh — the database is shared with the rest of the suite.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use runtara_core::persistence::{CompleteInstanceParams, Persistence, SqlitePersistence};
+use runtara_core::persistence::{CompleteInstanceParams, Persistence, PostgresPersistence};
 use runtara_environment::runner::{
     EmbeddedWasmRunner, LaunchOptions, Runner, RunnerError, WorkflowRunnerConfig,
 };
+use uuid::Uuid;
+
+/// An instance id no concurrently-running test can also be using.
+fn unique(prefix: &str) -> String {
+    format!("{prefix}-{}", Uuid::new_v4())
+}
 
 /// `wasi:cli/run` returning ok — the embedded analogue of exit code 0.
 const RUN_OK_WAT: &str = r#"
@@ -60,25 +70,33 @@ const RUN_SPIN_WAT: &str = r#"
 
 struct Harness {
     runner: EmbeddedWasmRunner,
-    persistence: Arc<SqlitePersistence>,
+    persistence: Arc<dyn Persistence>,
     dir: tempfile::TempDir,
 }
 
 async fn harness() -> Harness {
     let dir = tempfile::tempdir().expect("tempdir");
-    let persistence = Arc::new(
-        SqlitePersistence::from_path(dir.path().join("core.sqlite"))
-            .await
-            .expect("sqlite persistence"),
-    );
+    let database_url = std::env::var("TEST_ENVIRONMENT_DATABASE_URL")
+        .or_else(|_| std::env::var("RUNTARA_ENVIRONMENT_DATABASE_URL"))
+        .expect(
+            "db-integration-tests requires TEST_ENVIRONMENT_DATABASE_URL \
+             or RUNTARA_ENVIRONMENT_DATABASE_URL",
+        );
+    let pool = sqlx::PgPool::connect(&database_url)
+        .await
+        .expect("required environment test database must accept connections");
+    runtara_environment::migrations::run(&pool)
+        .await
+        .expect("required combined core/environment migrations must succeed");
+    let persistence: Arc<dyn Persistence> = Arc::new(PostgresPersistence::new(pool));
     let config = WorkflowRunnerConfig {
         data_dir: dir.path().join("data"),
         default_timeout: Duration::from_secs(30),
         skip_cert_verification: false,
         connection_service_url: None,
     };
-    let runner = EmbeddedWasmRunner::new(config, persistence.clone() as Arc<dyn Persistence>)
-        .expect("embedded runner");
+    let runner =
+        EmbeddedWasmRunner::new(config, Arc::clone(&persistence)).expect("embedded runner");
     Harness {
         runner,
         persistence,
@@ -109,23 +127,25 @@ fn options(instance_id: &str, wasm_path: &Path) -> LaunchOptions {
 #[tokio::test(flavor = "multi_thread")]
 async fn run_maps_completed_guest_to_persisted_output() {
     let h = harness().await;
+    let inst_id = unique("inst-ok");
     let wasm = write_component(h.dir.path(), "ok.wasm", RUN_OK_WAT);
 
     // Seed what the SDK would have reported during execution.
     h.persistence
-        .register_instance("inst-ok", "embedded-test")
+        .register_instance(inst_id.as_str(), "embedded-test")
         .await
         .expect("register");
     h.persistence
         .complete_instance(
-            CompleteInstanceParams::new("inst-ok", "completed").with_output(br#"{"answer":42}"#),
+            CompleteInstanceParams::new(inst_id.as_str(), "completed")
+                .with_output(br#"{"answer":42}"#),
         )
         .await
         .expect("complete");
 
     let result = h
         .runner
-        .run(&options("inst-ok", &wasm), None)
+        .run(&options(inst_id.as_str(), &wasm), None)
         .await
         .expect("run");
     assert!(result.success, "error: {:?}", result.error);
@@ -136,22 +156,23 @@ async fn run_maps_completed_guest_to_persisted_output() {
 #[tokio::test(flavor = "multi_thread")]
 async fn run_maps_guest_error_to_persisted_error_message() {
     let h = harness().await;
+    let inst_id = unique("inst-err");
     let wasm = write_component(h.dir.path(), "err.wasm", RUN_ERR_WAT);
 
     h.persistence
-        .register_instance("inst-err", "embedded-test")
+        .register_instance(inst_id.as_str(), "embedded-test")
         .await
         .expect("register");
     h.persistence
         .complete_instance(
-            CompleteInstanceParams::new("inst-err", "failed").with_error("boom from sdk"),
+            CompleteInstanceParams::new(inst_id.as_str(), "failed").with_error("boom from sdk"),
         )
         .await
         .expect("complete");
 
     let result = h
         .runner
-        .run(&options("inst-err", &wasm), None)
+        .run(&options(inst_id.as_str(), &wasm), None)
         .await
         .expect("run");
     assert!(!result.success);
@@ -161,11 +182,12 @@ async fn run_maps_guest_error_to_persisted_error_message() {
 #[tokio::test(flavor = "multi_thread")]
 async fn launch_detached_completes_and_clears_registry() {
     let h = harness().await;
+    let inst_id = unique("inst-detached");
     let wasm = write_component(h.dir.path(), "ok.wasm", RUN_OK_WAT);
 
     let handle = h
         .runner
-        .launch_detached(&options("inst-detached", &wasm))
+        .launch_detached(&options(inst_id.as_str(), &wasm))
         .await
         .expect("launch");
 
@@ -184,11 +206,12 @@ async fn launch_detached_completes_and_clears_registry() {
 #[tokio::test(flavor = "multi_thread")]
 async fn stop_cancels_spinning_instance() {
     let h = harness().await;
+    let inst_id = unique("inst-spin");
     let wasm = write_component(h.dir.path(), "spin.wasm", RUN_SPIN_WAT);
 
     let handle = h
         .runner
-        .launch_detached(&options("inst-spin", &wasm))
+        .launch_detached(&options(inst_id.as_str(), &wasm))
         .await
         .expect("launch");
 
@@ -212,10 +235,11 @@ async fn stop_cancels_spinning_instance() {
 #[tokio::test(flavor = "multi_thread")]
 async fn missing_component_is_binary_not_found() {
     let h = harness().await;
+    let inst_id = unique("inst-missing");
     let missing = h.dir.path().join("nope.wasm");
     let err = h
         .runner
-        .launch_detached(&options("inst-missing", &missing))
+        .launch_detached(&options(inst_id.as_str(), &missing))
         .await
         .expect_err("must fail");
     assert!(matches!(err, RunnerError::BinaryNotFound(_)));

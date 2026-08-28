@@ -20,6 +20,12 @@ db-integration-tests = []
 name = "runtara-environment"
 path = "src/main.rs"
 
+# Needs the real database: it pre-seeds what the SDK would have reported so
+# run()'s output/error mapping can be exercised against real persistence.
+[[test]]
+name = "embedded_runner_test"
+required-features = ["db-integration-tests"]
+
 [dependencies]
 # Async runtime
 tokio = { version = "1", features = ["full"] }

@@ -2094,7 +2094,11 @@ mod tests {
     use super::*;
     use runtara_core::error::CoreError;
 
-    use runtara_core::persistence::{CompleteInstanceParams, Persistence, SqlitePersistence};
+    #[cfg(feature = "db-integration-tests")]
+    use crate::test_support;
+    #[cfg(feature = "db-integration-tests")]
+    use runtara_core::persistence::{CompleteInstanceParams, Persistence};
+    #[cfg(feature = "db-integration-tests")]
     use std::sync::Arc;
 
     fn owned(values: &[&str]) -> Option<Vec<String>> {
@@ -2143,24 +2147,9 @@ mod tests {
     }
 
     /// A suspended instance with the given `termination_reason` marker.
-    async fn suspended_instance(
-        marker: Option<&str>,
-    ) -> (Arc<dyn Persistence>, String, tempfile::TempDir) {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let persistence: Arc<dyn Persistence> = Arc::new(
-            SqlitePersistence::from_path(dir.path().join("waker.db"))
-                .await
-                .expect("sqlite persistence"),
-        );
-        let instance_id = "waker-inst".to_string();
-        persistence
-            .register_instance(&instance_id, "waker-tenant")
-            .await
-            .expect("register");
-        persistence
-            .update_instance_status(&instance_id, "running", None)
-            .await
-            .expect("mark running");
+    #[cfg(feature = "db-integration-tests")]
+    async fn suspended_instance(marker: Option<&str>) -> (Arc<dyn Persistence>, String) {
+        let (persistence, instance_id) = test_support::running_instance("waker").await;
         let mut params = CompleteInstanceParams::new(&instance_id, "suspended").if_running();
         if let Some(marker) = marker {
             params = params.with_termination(marker, None);
@@ -2169,15 +2158,16 @@ mod tests {
             .complete_instance(params)
             .await
             .expect("suspend");
-        (persistence, instance_id, dir)
+        (persistence, instance_id)
     }
 
+    #[cfg(feature = "db-integration-tests")]
     #[tokio::test]
     async fn waker_ignores_a_pause_shaped_suspend() {
         // A pause/breakpoint ack parks `suspended` with NO wake marker and its
         // pause signal already consumed — a custom signal must NOT relaunch it
         // (the replay would run straight past the pause).
-        let (persistence, instance_id, _dir) = suspended_instance(None).await;
+        let (persistence, instance_id) = suspended_instance(None).await;
         wake_suspended_on_signal(persistence.as_ref(), &instance_id).await;
 
         let inst = persistence
@@ -2192,9 +2182,10 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "db-integration-tests")]
     #[tokio::test]
     async fn waker_stamps_sleep_for_an_on_signal_park() {
-        let (persistence, instance_id, _dir) =
+        let (persistence, instance_id) =
             suspended_instance(Some(crate::runner::embedded::WAITING_SIGNAL_TERMINATION)).await;
         wake_suspended_on_signal(persistence.as_ref(), &instance_id).await;
 
@@ -2210,11 +2201,12 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "db-integration-tests")]
     #[tokio::test]
     async fn waker_ignores_a_timed_sleep_park() {
         // A store-freeing durable Delay parks with the `sleeping` marker and a
         // deadline; a custom signal must not fast-forward it.
-        let (persistence, instance_id, _dir) = suspended_instance(Some("sleeping")).await;
+        let (persistence, instance_id) = suspended_instance(Some("sleeping")).await;
         wake_suspended_on_signal(persistence.as_ref(), &instance_id).await;
 
         let inst = persistence

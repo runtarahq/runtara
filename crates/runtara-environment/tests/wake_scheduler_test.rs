@@ -405,13 +405,17 @@ async fn test_list_instances() {
     let instances = db::list_instances(&pool, &options).await.unwrap();
     assert_eq!(instances.len(), 2);
 
-    // List with offset
+    // List with offset. Scoped to this test's own tenant: unscoped, both pages
+    // saturate at `limit` as soon as the shared database holds more than 100
+    // instances, and the assertion silently compares 100 against 100 - 1.
     let all_options = db::ListInstancesOptions {
+        tenant_id: Some("list-test-tenant-a".to_string()),
         limit: 100,
         ..Default::default()
     };
     let all = db::list_instances(&pool, &all_options).await.unwrap();
     let offset_options = db::ListInstancesOptions {
+        tenant_id: Some("list-test-tenant-a".to_string()),
         limit: 100,
         offset: 1,
         ..Default::default()

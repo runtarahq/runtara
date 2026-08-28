@@ -209,5 +209,9 @@ pub mod runtime_host;
 #[cfg(test)]
 pub(crate) mod test_env;
 
+/// Shared Postgres fixtures for this crate's database-backed unit tests.
+#[cfg(all(test, feature = "db-integration-tests"))]
+pub(crate) mod test_support;
+
 pub use config::Config;
 pub use error::Error;

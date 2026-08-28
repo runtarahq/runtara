@@ -782,8 +782,9 @@ impl Runner for EmbeddedWasmRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "db-integration-tests")]
+    use crate::test_support;
     use runtara_component_host::lifecycle::{SignalWait, WorkflowWake};
-    use runtara_core::persistence::SqlitePersistence;
 
     #[test]
     fn earliest_wake_deadline_is_the_min_timed_wake() {
@@ -811,28 +812,15 @@ mod tests {
         assert_eq!(earliest_wake_deadline_ms(&wakes), None);
     }
 
-    async fn running_instance() -> (Arc<dyn Persistence>, String, tempfile::TempDir) {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let persistence: Arc<dyn Persistence> = Arc::new(
-            SqlitePersistence::from_path(dir.path().join("park.db"))
-                .await
-                .expect("sqlite persistence"),
-        );
-        let instance_id = "park-inst".to_string();
-        persistence
-            .register_instance(&instance_id, "park-tenant")
-            .await
-            .expect("register");
-        persistence
-            .update_instance_status(&instance_id, "running", None)
-            .await
-            .expect("mark running");
-        (persistence, instance_id, dir)
+    #[cfg(feature = "db-integration-tests")]
+    async fn running_instance() -> (Arc<dyn Persistence>, String) {
+        test_support::running_instance("park").await
     }
 
+    #[cfg(feature = "db-integration-tests")]
     #[tokio::test]
     async fn park_stamps_suspended_and_sleep_until_for_a_timed_wake() {
-        let (persistence, instance_id, _dir) = running_instance().await;
+        let (persistence, instance_id) = running_instance().await;
         let deadline_ms = 1_900_000_000_000u64; // a fixed absolute epoch-ms
         park_invoke_suspend(
             persistence.as_ref(),
@@ -859,11 +847,12 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "db-integration-tests")]
     #[tokio::test]
     async fn park_leaves_a_deadline_less_suspend_untouched() {
         // on-resume (breakpoint/drain pause) already recorded suspended via its
         // ack; park must NOT stamp a premature sleep_until that would wake it.
-        let (persistence, instance_id, _dir) = running_instance().await;
+        let (persistence, instance_id) = running_instance().await;
         park_invoke_suspend(
             persistence.as_ref(),
             &instance_id,
@@ -883,11 +872,12 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "db-integration-tests")]
     #[tokio::test]
     async fn park_marks_deadline_less_on_signal_suspended_without_sleep() {
         // A no-timeout wait: parked suspended so the custom-signal waker can
         // find it, but with NO sleep_until (the waker stamps it on arrival).
-        let (persistence, instance_id, _dir) = running_instance().await;
+        let (persistence, instance_id) = running_instance().await;
         park_invoke_suspend(
             persistence.as_ref(),
             &instance_id,
@@ -915,13 +905,14 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "db-integration-tests")]
     #[tokio::test]
     async fn park_never_overwrites_a_terminal_status() {
         // A malformed guest that reported terminal complete and THEN returned
         // outcome::suspended must not be resurrected (and must not be
         // scheduled for a wake) — the same if_running guard the event path's
         // suspend uses.
-        let (persistence, instance_id, _dir) = running_instance().await;
+        let (persistence, instance_id) = running_instance().await;
         persistence
             .complete_instance(
                 runtara_core::persistence::CompleteInstanceParams::new(&instance_id, "completed")
@@ -952,9 +943,10 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "db-integration-tests")]
     #[tokio::test]
     async fn park_stamps_on_signal_timeout_deadline_as_the_fallback() {
-        let (persistence, instance_id, _dir) = running_instance().await;
+        let (persistence, instance_id) = running_instance().await;
         let deadline_ms = 1_950_000_000_000u64;
         park_invoke_suspend(
             persistence.as_ref(),
@@ -979,49 +971,37 @@ mod tests {
         );
     }
 
-    /// Build a running instance on real SQLite persistence.
-    async fn backstop_fixture() -> (Arc<dyn Persistence>, tempfile::TempDir) {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let persistence: Arc<dyn Persistence> = Arc::new(
-            SqlitePersistence::from_path(dir.path().join("backstop.db"))
-                .await
-                .expect("sqlite persistence"),
-        );
-        persistence
-            .register_instance("inst-1", "tenant-1")
-            .await
-            .unwrap();
-        persistence
-            .update_instance_status("inst-1", "running", None)
-            .await
-            .unwrap();
-        (persistence, dir)
+    /// A running instance on the real database.
+    #[cfg(feature = "db-integration-tests")]
+    async fn backstop_fixture() -> (Arc<dyn Persistence>, String) {
+        test_support::running_instance("backstop").await
     }
 
     /// The floor under the host-side escalation: a guest that reported success
     /// while a cancel sat unacknowledged must still land on `cancelled`. This is
     /// what a workflow artifact with no poll site does, and it is the silent
     /// success the backstop exists to prevent.
+    #[cfg(feature = "db-integration-tests")]
     #[tokio::test]
     async fn unacked_cancel_overrides_a_reported_completion() {
-        let (persistence, _dir) = backstop_fixture().await;
+        let (persistence, instance_id) = backstop_fixture().await;
         persistence
-            .insert_signal("inst-1", "cancel", b"")
+            .insert_signal(instance_id.as_str(), "cancel", b"")
             .await
             .unwrap();
         persistence
             .complete_instance(runtara_core::persistence::CompleteInstanceParams::new(
-                "inst-1",
+                instance_id.as_str(),
                 "completed",
             ))
             .await
             .unwrap();
 
-        enforce_unacked_cancel(&persistence, "inst-1").await;
+        enforce_unacked_cancel(&persistence, instance_id.as_str()).await;
 
         assert_eq!(
             persistence
-                .get_instance("inst-1")
+                .get_instance(instance_id.as_str())
                 .await
                 .unwrap()
                 .unwrap()
@@ -1035,27 +1015,31 @@ mod tests {
     /// guest handled the signal correctly and then finished. Pins both halves of
     /// the defence: the query filters acknowledged rows, and the caller checks
     /// `acknowledged_at` anyway.
+    #[cfg(feature = "db-integration-tests")]
     #[tokio::test]
     async fn an_acknowledged_cancel_does_not_re_cancel_a_finished_run() {
-        let (persistence, _dir) = backstop_fixture().await;
+        let (persistence, instance_id) = backstop_fixture().await;
         persistence
-            .insert_signal("inst-1", "cancel", b"")
+            .insert_signal(instance_id.as_str(), "cancel", b"")
             .await
             .unwrap();
-        persistence.acknowledge_signal("inst-1").await.unwrap();
+        persistence
+            .acknowledge_signal(instance_id.as_str())
+            .await
+            .unwrap();
         persistence
             .complete_instance(runtara_core::persistence::CompleteInstanceParams::new(
-                "inst-1",
+                instance_id.as_str(),
                 "completed",
             ))
             .await
             .unwrap();
 
-        enforce_unacked_cancel(&persistence, "inst-1").await;
+        enforce_unacked_cancel(&persistence, instance_id.as_str()).await;
 
         assert_eq!(
             persistence
-                .get_instance("inst-1")
+                .get_instance(instance_id.as_str())
                 .await
                 .unwrap()
                 .unwrap()
@@ -1066,22 +1050,23 @@ mod tests {
     }
 
     /// A run nobody stopped is left entirely alone.
+    #[cfg(feature = "db-integration-tests")]
     #[tokio::test]
     async fn a_run_with_no_cancel_is_untouched() {
-        let (persistence, _dir) = backstop_fixture().await;
+        let (persistence, instance_id) = backstop_fixture().await;
         persistence
             .complete_instance(runtara_core::persistence::CompleteInstanceParams::new(
-                "inst-1",
+                instance_id.as_str(),
                 "completed",
             ))
             .await
             .unwrap();
 
-        enforce_unacked_cancel(&persistence, "inst-1").await;
+        enforce_unacked_cancel(&persistence, instance_id.as_str()).await;
 
         assert_eq!(
             persistence
-                .get_instance("inst-1")
+                .get_instance(instance_id.as_str())
                 .await
                 .unwrap()
                 .unwrap()

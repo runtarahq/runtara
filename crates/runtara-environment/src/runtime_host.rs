@@ -26,7 +26,7 @@
 //!   math is deliberately NOT ported — the guest's HTTP backend never had it,
 //!   and differential parity with the composed artifact is the acceptance gate
 //!   (absolute-deadline wake supersedes this in a later phase).
-//! - A local cancelled flag mirrors `runtara_sdk::INSTANCE_CANCELLED` so
+//! - A local cancelled flag mirrors `runtara_sdk::inst_id.as_str()_CANCELLED` so
 //!   `is_cancelled` short-circuits after a consumed cancel/shutdown, exactly
 //!   like `runtara_sdk::is_cancelled()`.
 
@@ -57,7 +57,7 @@ pub struct PersistenceRuntimeHost {
     state: Arc<InstanceHandlerState>,
     instance_id: String,
     debug_mode: bool,
-    /// Mirrors `runtara_sdk::INSTANCE_CANCELLED` (per-run, not process-global).
+    /// Mirrors `runtara_sdk::inst_id.as_str()_CANCELLED` (per-run, not process-global).
     cancelled: AtomicBool,
     /// Signal-poll rate limiter state (mirrors the SDK's `last_signal_poll`).
     last_signal_poll: std::sync::Mutex<Option<Instant>>,
@@ -573,60 +573,42 @@ impl RuntimeHost for PersistenceRuntimeHost {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "db-integration-tests"))]
 mod tests {
     use super::*;
-    use runtara_core::persistence::SqlitePersistence;
+    use crate::test_support;
 
-    const INSTANCE: &str = "rt-host-inst";
-    const TENANT: &str = "rt-host-tenant";
     const INPUT: &[u8] = br#"{"data":{"value":"in"},"variables":{}}"#;
 
-    /// Real SQLite persistence + a running instance with stored input — the
-    /// same starting state the environment establishes before a launch.
-    async fn setup() -> (
-        Arc<dyn Persistence>,
-        PersistenceRuntimeHost,
-        tempfile::TempDir,
-    ) {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let persistence: Arc<dyn Persistence> = Arc::new(
-            SqlitePersistence::from_path(dir.path().join("runtime-host.db"))
-                .await
-                .expect("sqlite persistence"),
-        );
+    /// A running instance with stored input on the real database — the same
+    /// starting state the environment establishes before a launch. The instance
+    /// id is fresh per test: the database is shared across the run.
+    async fn setup() -> (Arc<dyn Persistence>, PersistenceRuntimeHost, String) {
+        let (persistence, instance_id) = test_support::running_instance("rt-host").await;
         persistence
-            .register_instance(INSTANCE, TENANT)
-            .await
-            .expect("register instance");
-        persistence
-            .update_instance_status(INSTANCE, "running", None)
-            .await
-            .expect("mark running");
-        persistence
-            .store_instance_input(INSTANCE, INPUT)
+            .store_instance_input(&instance_id, INPUT)
             .await
             .expect("store input");
         let host = PersistenceRuntimeHost::from_persistence(
             Arc::clone(&persistence),
-            INSTANCE.to_string(),
+            instance_id.clone(),
             false,
         )
         .with_signal_poll_interval(Duration::ZERO);
-        (persistence, host, dir)
+        (persistence, host, instance_id)
     }
 
     #[tokio::test]
     async fn load_input_returns_stored_enriched_bytes() {
-        let (_p, host, _dir) = setup().await;
+        let (_p, host, inst_id) = setup().await;
         assert_eq!(host.load_input().await.unwrap(), Some(INPUT.to_vec()));
-        assert_eq!(host.instance_id().unwrap(), INSTANCE);
+        assert_eq!(host.instance_id().unwrap(), inst_id.as_str());
         assert!(!host.debug_mode_enabled().unwrap());
     }
 
     #[tokio::test]
     async fn checkpoint_miss_saves_then_hit_returns_state() {
-        let (_p, host, _dir) = setup().await;
+        let (_p, host, _inst_id) = setup().await;
         let first = host
             .checkpoint("cp-1".into(), b"state-1".to_vec())
             .await
@@ -650,7 +632,7 @@ mod tests {
 
     #[tokio::test]
     async fn empty_state_checkpoint_is_a_read_only_probe() {
-        let (_p, host, _dir) = setup().await;
+        let (_p, host, _inst_id) = setup().await;
         let probe = host
             .checkpoint("cp-probe".into(), Vec::new())
             .await
@@ -670,9 +652,9 @@ mod tests {
 
     #[tokio::test]
     async fn custom_signal_poll_is_idempotent_rereads() {
-        let (p, host, _dir) = setup().await;
+        let (p, host, inst_id) = setup().await;
         assert_eq!(host.poll_custom_signal("sig-1".into()).await.unwrap(), None);
-        p.insert_custom_signal(INSTANCE, "sig-1", b"payload-1")
+        p.insert_custom_signal(inst_id.as_str(), "sig-1", b"payload-1")
             .await
             .unwrap();
         // Non-destructive read (wait-replay fix): both polls see the payload.
@@ -689,31 +671,31 @@ mod tests {
 
     #[tokio::test]
     async fn complete_persists_output_and_terminal_status() {
-        let (p, host, _dir) = setup().await;
+        let (p, host, inst_id) = setup().await;
         host.complete(b"{\"result\":1}".to_vec()).await.unwrap();
-        let inst = p.get_instance(INSTANCE).await.unwrap().unwrap();
+        let inst = p.get_instance(inst_id.as_str()).await.unwrap().unwrap();
         assert_eq!(inst.status, "completed");
         assert_eq!(inst.output.as_deref(), Some(b"{\"result\":1}".as_slice()));
     }
 
     #[tokio::test]
     async fn fail_persists_error_and_terminal_status() {
-        let (p, host, _dir) = setup().await;
+        let (p, host, inst_id) = setup().await;
         host.fail(b"boom".to_vec()).await.unwrap();
-        let inst = p.get_instance(INSTANCE).await.unwrap().unwrap();
+        let inst = p.get_instance(inst_id.as_str()).await.unwrap().unwrap();
         assert_eq!(inst.status, "failed");
     }
 
     #[tokio::test]
     async fn events_heartbeat_and_custom_are_recorded() {
-        let (p, host, _dir) = setup().await;
+        let (p, host, inst_id) = setup().await;
         host.heartbeat().await.unwrap();
         host.custom_event("step-debug-start".into(), b"{\"step\":\"s1\"}".to_vec())
             .await
             .unwrap();
         let events = p
             .list_events(
-                INSTANCE,
+                inst_id.as_str(),
                 &runtara_core::persistence::ListEventsFilter::default(),
                 100,
                 0,
@@ -729,57 +711,87 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_signal_is_consumed_acked_and_latched() {
-        let (p, host, _dir) = setup().await;
+        let (p, host, inst_id) = setup().await;
         assert!(!host.is_cancelled().await.unwrap());
-        p.insert_signal(INSTANCE, "cancel", b"").await.unwrap();
+        p.insert_signal(inst_id.as_str(), "cancel", b"")
+            .await
+            .unwrap();
         assert!(
             host.is_cancelled().await.unwrap(),
             "pending cancel detected"
         );
         // Server-side ack ran: status transitioned, and the signal is consumed.
         assert_eq!(
-            p.get_instance(INSTANCE).await.unwrap().unwrap().status,
+            p.get_instance(inst_id.as_str())
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
             "cancelled"
         );
-        assert!(p.get_pending_signal(INSTANCE).await.unwrap().is_none());
+        assert!(
+            p.get_pending_signal(inst_id.as_str())
+                .await
+                .unwrap()
+                .is_none(),
+            "the acknowledged cancel must no longer be pending"
+        );
         // Local latch short-circuits without any new signal.
         assert!(host.is_cancelled().await.unwrap());
     }
 
     #[tokio::test]
     async fn pause_signal_suspends_via_check_signals() {
-        let (p, host, _dir) = setup().await;
+        let (p, host, inst_id) = setup().await;
         assert!(!host.check_signals().await.unwrap());
-        p.insert_signal(INSTANCE, "pause", b"").await.unwrap();
+        p.insert_signal(inst_id.as_str(), "pause", b"")
+            .await
+            .unwrap();
         assert!(host.check_signals().await.unwrap(), "pause handled");
-        let inst = p.get_instance(INSTANCE).await.unwrap().unwrap();
+        let inst = p.get_instance(inst_id.as_str()).await.unwrap().unwrap();
         assert_eq!(inst.status, "suspended");
-        assert!(p.get_pending_signal(INSTANCE).await.unwrap().is_none());
+        assert!(
+            p.get_pending_signal(inst_id.as_str())
+                .await
+                .unwrap()
+                .is_none(),
+            "the acknowledged pause must no longer be pending"
+        );
         // A pause is not a cancel.
         assert!(!host.is_cancelled().await.unwrap());
     }
 
     #[tokio::test]
     async fn shutdown_signal_suspends_with_reason_and_wake() {
-        let (p, host, _dir) = setup().await;
-        p.insert_signal(INSTANCE, "shutdown", b"").await.unwrap();
+        let (p, host, inst_id) = setup().await;
+        p.insert_signal(inst_id.as_str(), "shutdown", b"")
+            .await
+            .unwrap();
         assert!(host.check_signals().await.unwrap(), "shutdown handled");
-        let inst = p.get_instance(INSTANCE).await.unwrap().unwrap();
+        let inst = p.get_instance(inst_id.as_str()).await.unwrap().unwrap();
         assert_eq!(inst.status, "suspended");
-        // termination_reason='shutdown_requested' + sleep_until are asserted
-        // on Postgres only: SQLite's termination_reason CHECK constraint is
-        // frozen at migration 008 (sqlite/009 is a deliberate no-op), so the
-        // ack's complete_instance fails there and — guest-parity — the ack
-        // error is swallowed with a warn while the suspend proceeds. The
-        // schema gap is tracked as a separate fix.
+        // The ack's complete_instance records why it parked and when to wake.
+        // Both went unasserted while this test ran on SQLite, whose
+        // termination_reason CHECK was frozen at migration 008, so the ack
+        // failed there and the error was swallowed with a warn.
+        assert_eq!(
+            inst.termination_reason.as_deref(),
+            Some("shutdown_requested")
+        );
+        assert!(
+            inst.sleep_until.is_some(),
+            "a shutdown park must record when to wake"
+        );
         // Shutdown latches the local cancel flag (cooperative exit).
         assert!(host.is_cancelled().await.unwrap());
     }
 
     #[tokio::test]
     async fn checkpoint_reports_pending_signal_and_handle_reacts() {
-        let (p, host, _dir) = setup().await;
-        p.insert_signal(INSTANCE, "pause", b"").await.unwrap();
+        let (p, host, inst_id) = setup().await;
+        p.insert_signal(inst_id.as_str(), "pause", b"")
+            .await
+            .unwrap();
         let result = host
             .checkpoint("cp-sig".into(), b"s".to_vec())
             .await
@@ -792,7 +804,7 @@ mod tests {
                 .await
                 .unwrap()
         );
-        let inst = p.get_instance(INSTANCE).await.unwrap().unwrap();
+        let inst = p.get_instance(inst_id.as_str()).await.unwrap().unwrap();
         assert_eq!(inst.status, "suspended");
 
         // Unknown types are ignored (guest parity).
@@ -807,7 +819,7 @@ mod tests {
 
     #[tokio::test]
     async fn durable_sleep_checkpoint_persists_then_sleeps_full_duration() {
-        let (p, host, _dir) = setup().await;
+        let (p, host, inst_id) = setup().await;
         let started = std::time::Instant::now();
         host.durable_sleep_checkpoint("cp-sleep".into(), b"wake-state".to_vec(), 60)
             .await
@@ -820,13 +832,13 @@ mod tests {
             host.get_checkpoint("cp-sleep".into()).await.unwrap(),
             Some(b"wake-state".to_vec())
         );
-        let inst = p.get_instance(INSTANCE).await.unwrap().unwrap();
+        let inst = p.get_instance(inst_id.as_str()).await.unwrap().unwrap();
         assert_eq!(inst.checkpoint_id.as_deref(), Some("cp-sleep"));
     }
 
     #[tokio::test]
     async fn record_retry_attempt_writes_audit_row() {
-        let (_p, host, _dir) = setup().await;
+        let (_p, host, _inst_id) = setup().await;
         host.record_retry_attempt("cp-agent".into(), 2, Some("try again".into()))
             .await
             .unwrap();
@@ -840,11 +852,12 @@ mod tests {
     /// would be answered `None` and the cancel would slip a whole Delay step.
     #[tokio::test]
     async fn sleep_interrupted_by_cancel_is_visible_to_the_next_check_signals() {
-        let (p, _host, _dir) = setup().await;
-        let host =
-            PersistenceRuntimeHost::from_persistence(Arc::clone(&p), INSTANCE.to_string(), false)
-                .with_signal_poll_interval(Duration::from_secs(60));
-        p.insert_signal(INSTANCE, "cancel", b"").await.unwrap();
+        let (p, _host, inst_id) = setup().await;
+        let host = PersistenceRuntimeHost::from_persistence(Arc::clone(&p), inst_id.clone(), false)
+            .with_signal_poll_interval(Duration::from_secs(60));
+        p.insert_signal(inst_id.as_str(), "cancel", b"")
+            .await
+            .unwrap();
 
         // A long sleep that the pending cancel must cut short.
         let started = std::time::Instant::now();
@@ -861,7 +874,7 @@ mod tests {
             host.check_signals().await.unwrap(),
             "the cancel must be observable right after the interrupted sleep"
         );
-        let inst = p.get_instance(INSTANCE).await.unwrap().unwrap();
+        let inst = p.get_instance(inst_id.as_str()).await.unwrap().unwrap();
         assert_eq!(
             inst.status, "cancelled",
             "observing the cancel must drive the instance to cancelled"
@@ -874,19 +887,24 @@ mod tests {
     /// cancels the run rather than letting it report success.
     #[tokio::test]
     async fn stale_artifact_that_ignores_an_interrupted_sleep_is_cancelled_host_side() {
-        let (p, _host, _dir) = setup().await;
+        let (p, _host, inst_id) = setup().await;
         let cancel: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
-        let host =
-            PersistenceRuntimeHost::from_persistence(Arc::clone(&p), INSTANCE.to_string(), false)
-                .with_cancel_token(Arc::clone(&cancel));
-        p.insert_signal(INSTANCE, "cancel", b"").await.unwrap();
+        let host = PersistenceRuntimeHost::from_persistence(Arc::clone(&p), inst_id.clone(), false)
+            .with_cancel_token(Arc::clone(&cancel));
+        p.insert_signal(inst_id.as_str(), "cancel", b"")
+            .await
+            .unwrap();
 
         // First Delay: the sleep is cut short by the pending cancel.
         host.durable_sleep_checkpoint("delay-1".into(), b"s".to_vec(), 30_000)
             .await
             .unwrap();
         assert_eq!(
-            p.get_instance(INSTANCE).await.unwrap().unwrap().status,
+            p.get_instance(inst_id.as_str())
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
             "running",
             "the interrupted sleep alone must not decide the run's fate"
         );
@@ -898,7 +916,11 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            p.get_instance(INSTANCE).await.unwrap().unwrap().status,
+            p.get_instance(inst_id.as_str())
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
             "cancelled"
         );
         assert!(
@@ -916,7 +938,7 @@ mod tests {
     /// and yields.
     #[tokio::test]
     async fn escalation_interrupts_the_guest_and_only_after_the_flag_is_set() {
-        let (p, _host, _dir) = setup().await;
+        let (p, _host, inst_id) = setup().await;
         let cancel: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
         // Records what the cancel flag looked like at the moment of interrupt.
         let flag_at_interrupt: Arc<std::sync::Mutex<Vec<bool>>> =
@@ -924,13 +946,15 @@ mod tests {
         let host = {
             let cancel = Arc::clone(&cancel);
             let seen = Arc::clone(&flag_at_interrupt);
-            PersistenceRuntimeHost::from_persistence(Arc::clone(&p), INSTANCE.to_string(), false)
+            PersistenceRuntimeHost::from_persistence(Arc::clone(&p), inst_id.clone(), false)
                 .with_cancel_token(Arc::clone(&cancel))
                 .with_guest_interrupt(Arc::new(move || {
                     seen.lock().unwrap().push(cancel.load(Ordering::SeqCst));
                 }))
         };
-        p.insert_signal(INSTANCE, "cancel", b"").await.unwrap();
+        p.insert_signal(inst_id.as_str(), "cancel", b"")
+            .await
+            .unwrap();
 
         host.durable_sleep_checkpoint("delay".into(), b"s".to_vec(), 30_000)
             .await
@@ -955,7 +979,11 @@ mod tests {
              forward, or the epoch callback sees no cancel and yields"
         );
         assert_eq!(
-            p.get_instance(INSTANCE).await.unwrap().unwrap().status,
+            p.get_instance(inst_id.as_str())
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
             "cancelled",
             "the terminal status must be durable before the guest is stopped"
         );
@@ -964,15 +992,17 @@ mod tests {
     /// A cooperative guest is never interrupted — it suspends itself.
     #[tokio::test]
     async fn a_guest_that_polls_is_not_interrupted() {
-        let (p, _host, _dir) = setup().await;
+        let (p, _host, inst_id) = setup().await;
         let interrupts: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
         let host = {
             let fired = Arc::clone(&interrupts);
-            PersistenceRuntimeHost::from_persistence(Arc::clone(&p), INSTANCE.to_string(), false)
+            PersistenceRuntimeHost::from_persistence(Arc::clone(&p), inst_id.clone(), false)
                 .with_cancel_token(Arc::new(AtomicBool::new(false)))
                 .with_guest_interrupt(Arc::new(move || fired.store(true, Ordering::SeqCst)))
         };
-        p.insert_signal(INSTANCE, "cancel", b"").await.unwrap();
+        p.insert_signal(inst_id.as_str(), "cancel", b"")
+            .await
+            .unwrap();
 
         host.durable_sleep_checkpoint("delay".into(), b"s".to_vec(), 30_000)
             .await
@@ -991,12 +1021,13 @@ mod tests {
     /// allowed to report success for a cancelled run.
     #[tokio::test]
     async fn single_delay_into_finish_is_cancelled_not_completed() {
-        let (p, _host, _dir) = setup().await;
+        let (p, _host, inst_id) = setup().await;
         let cancel: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
-        let host =
-            PersistenceRuntimeHost::from_persistence(Arc::clone(&p), INSTANCE.to_string(), false)
-                .with_cancel_token(Arc::clone(&cancel));
-        p.insert_signal(INSTANCE, "cancel", b"").await.unwrap();
+        let host = PersistenceRuntimeHost::from_persistence(Arc::clone(&p), inst_id.clone(), false)
+            .with_cancel_token(Arc::clone(&cancel));
+        p.insert_signal(inst_id.as_str(), "cancel", b"")
+            .await
+            .unwrap();
 
         host.durable_sleep_checkpoint("delay".into(), b"s".to_vec(), 1_800_000)
             .await
@@ -1004,7 +1035,7 @@ mod tests {
         // Stale guest proceeds to Finish and reports completion.
         host.complete(br#"{"done":true}"#.to_vec()).await.unwrap();
 
-        let inst = p.get_instance(INSTANCE).await.unwrap().unwrap();
+        let inst = p.get_instance(inst_id.as_str()).await.unwrap().unwrap();
         assert_eq!(
             inst.status, "cancelled",
             "a stopped run must not report success; got {}",
@@ -1018,12 +1049,13 @@ mod tests {
     /// of the way — one ack, one terminal transition, no double handling.
     #[tokio::test]
     async fn fresh_artifact_polls_and_the_host_does_not_also_escalate() {
-        let (p, _host, _dir) = setup().await;
+        let (p, _host, inst_id) = setup().await;
         let cancel: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
-        let host =
-            PersistenceRuntimeHost::from_persistence(Arc::clone(&p), INSTANCE.to_string(), false)
-                .with_cancel_token(Arc::clone(&cancel));
-        p.insert_signal(INSTANCE, "cancel", b"").await.unwrap();
+        let host = PersistenceRuntimeHost::from_persistence(Arc::clone(&p), inst_id.clone(), false)
+            .with_cancel_token(Arc::clone(&cancel));
+        p.insert_signal(inst_id.as_str(), "cancel", b"")
+            .await
+            .unwrap();
 
         host.durable_sleep_checkpoint("delay".into(), b"s".to_vec(), 30_000)
             .await
@@ -1031,7 +1063,11 @@ mod tests {
         // The emitted poll site: the guest asks, acts, and suspends itself.
         assert!(host.check_signals().await.unwrap());
         assert_eq!(
-            p.get_instance(INSTANCE).await.unwrap().unwrap().status,
+            p.get_instance(inst_id.as_str())
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
             "cancelled"
         );
         assert!(
@@ -1040,14 +1076,24 @@ mod tests {
         );
 
         // The signal is acknowledged, so nothing is left for the escalation to
-        // act on as the guest winds down through further host calls.
+        // act on as the guest winds down through further host calls. The
+        // terminal status asserted just above is the positive evidence that the
+        // poll ran: absence alone could not tell an ack from a signal that was
+        // never inserted.
         assert!(
-            p.get_pending_signal(INSTANCE).await.unwrap().is_none(),
+            p.get_pending_signal(inst_id.as_str())
+                .await
+                .unwrap()
+                .is_none(),
             "the guest's poll must have acknowledged the cancel"
         );
         host.heartbeat().await.unwrap();
         assert_eq!(
-            p.get_instance(INSTANCE).await.unwrap().unwrap().status,
+            p.get_instance(inst_id.as_str())
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
             "cancelled"
         );
     }
@@ -1056,11 +1102,10 @@ mod tests {
     /// sleep followed by ordinary work is untouched.
     #[tokio::test]
     async fn uncancelled_run_is_never_escalated() {
-        let (p, _host, _dir) = setup().await;
+        let (p, _host, inst_id) = setup().await;
         let cancel: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
-        let host =
-            PersistenceRuntimeHost::from_persistence(Arc::clone(&p), INSTANCE.to_string(), false)
-                .with_cancel_token(Arc::clone(&cancel));
+        let host = PersistenceRuntimeHost::from_persistence(Arc::clone(&p), inst_id.clone(), false)
+            .with_cancel_token(Arc::clone(&cancel));
 
         host.durable_sleep_checkpoint("delay-1".into(), b"s".to_vec(), 10)
             .await
@@ -1072,23 +1117,33 @@ mod tests {
 
         assert!(!cancel.load(Ordering::SeqCst));
         assert_eq!(
-            p.get_instance(INSTANCE).await.unwrap().unwrap().status,
+            p.get_instance(inst_id.as_str())
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
             "completed"
         );
     }
 
     #[tokio::test]
     async fn signal_poll_rate_limiter_suppresses_back_to_back_polls() {
-        let (p, _host, _dir) = setup().await;
-        let host =
-            PersistenceRuntimeHost::from_persistence(Arc::clone(&p), INSTANCE.to_string(), false)
-                .with_signal_poll_interval(Duration::from_secs(60));
+        let (p, _host, inst_id) = setup().await;
+        let host = PersistenceRuntimeHost::from_persistence(Arc::clone(&p), inst_id.clone(), false)
+            .with_signal_poll_interval(Duration::from_secs(60));
         // First poll consumes the rate budget (no signal pending).
         assert!(!host.is_cancelled().await.unwrap());
-        p.insert_signal(INSTANCE, "cancel", b"").await.unwrap();
+        p.insert_signal(inst_id.as_str(), "cancel", b"")
+            .await
+            .unwrap();
         // Within the interval the poll is suppressed — parity with the SDK's
         // limiter; the signal stays pending and undetected for now.
         assert!(!host.is_cancelled().await.unwrap());
-        assert!(p.get_pending_signal(INSTANCE).await.unwrap().is_some());
+        assert!(
+            p.get_pending_signal(inst_id.as_str())
+                .await
+                .unwrap()
+                .is_some()
+        );
     }
 }
