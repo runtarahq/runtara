@@ -15,6 +15,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use runtara_core::config::RuntimeOverrides;
 use runtara_core::persistence::Persistence;
 use runtara_core::persistence::postgres::PostgresPersistence;
 use runtara_core::runtime::CoreRuntime;
@@ -44,6 +45,10 @@ pub struct EmbeddedRuntaraConfig {
     /// Optional bind address for runtara-environment's HTTP management API.
     /// When set, an HTTP server is started alongside QUIC for the management protocol.
     pub env_http_bind_addr: Option<SocketAddr>,
+    /// runtara-core's own environment configuration (concurrency cap, shutdown
+    /// grace). Nothing else here carries it, so without this the embedded core
+    /// runs on builder defaults no matter how the deployment is configured.
+    pub core_overrides: RuntimeOverrides,
 }
 
 /// Handle to the running embedded Runtara servers.
@@ -77,6 +82,7 @@ impl EmbeddedRuntara {
         let core = CoreRuntime::builder()
             .persistence(persistence.clone())
             .bind_addr(core_http_addr)
+            .apply_overrides(config.core_overrides)
             .build()?
             .start()
             .await?;
@@ -213,6 +219,12 @@ pub async fn create_runtara_pool()
 /// - `RUNTARA_CORE_PORT` (default: 8001) - Port for instance connections
 /// - `RUNTARA_ENVIRONMENT_PORT` (default: 8002) - Port for management protocol
 /// - `DATA_DIR` (default: .data) - Directory for images and instance I/O
+///
+/// runtara-core's own variables (`RUNTARA_MAX_CONCURRENT_INSTANCES`,
+/// `RUNTARA_CORE_SHUTDOWN_GRACE_MS`) are read here too and applied to the
+/// embedded core. Neither has a default of its own in this host: unset leaves
+/// the runtime's builder default, so the cap stays disabled unless a
+/// deployment asks for one.
 pub async fn maybe_start_embedded()
 -> Result<Option<EmbeddedRuntara>, Box<dyn std::error::Error + Send + Sync>> {
     let embedded_enabled = std::env::var("RUNTARA_EMBEDDED")
@@ -295,6 +307,7 @@ pub async fn maybe_start_embedded()
                 Some(SocketAddr::from(([127, 0, 0, 1], port)))
             }
         },
+        core_overrides: RuntimeOverrides::from_env()?,
     };
 
     let runtara = EmbeddedRuntara::start(config).await?;
