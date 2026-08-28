@@ -204,8 +204,11 @@ impl EnvironmentRuntimeBuilder {
     /// expects. Set this to configure the embedded core from code instead —
     /// tests do, so an ambient variable cannot change what they assert.
     ///
-    /// Ignored when no [`core_bind_addr`](Self::core_bind_addr) is set: there
-    /// is no embedded core to configure.
+    /// The resulting configuration is unused when no
+    /// [`core_bind_addr`](Self::core_bind_addr) is set — there is no embedded
+    /// core to configure — but [`build`](Self::build) still reads and validates
+    /// the environment in that case, so a malformed value fails the build
+    /// wherever it appears rather than only where it would have been applied.
     pub fn core_overrides(mut self, overrides: RuntimeOverrides) -> Self {
         self.core_overrides = Some(overrides);
         self
@@ -957,6 +960,7 @@ async fn recover_orphaned_containers(pool: &PgPool, persistence: &dyn Persistenc
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_env::EnvGuard;
 
     #[test]
     fn test_builder_default_values() {
@@ -1057,9 +1061,6 @@ mod tests {
         assert_eq!(builder.core_overrides, Some(overrides));
     }
 
-    /// Serializes the tests below, which mutate process-wide environment state.
-    static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     /// A builder with the three required fields filled in, so `build` can run.
     /// The pool is lazy: nothing here connects to a database.
     fn buildable() -> EnvironmentRuntimeBuilder {
@@ -1074,54 +1075,39 @@ mod tests {
             ))
     }
 
-    // A lazy pool spawns a maintenance task, so these need a reactor.
+    // A lazy pool spawns a maintenance task, so these need a reactor. The
+    // guard restores the environment even when an assertion panics, so an
+    // ambient value survives the suite either way.
     #[tokio::test]
     async fn test_build_resolves_core_overrides_from_env() {
-        // A failing test poisons the mutex; the rest still need serializing.
-        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        // SAFETY: env mutation is serialized by ENV_MUTEX, and the variable is
-        // restored below.
-        unsafe { std::env::set_var("RUNTARA_MAX_CONCURRENT_INSTANCES", "11") };
+        let mut guard = EnvGuard::new();
+        guard.set("RUNTARA_MAX_CONCURRENT_INSTANCES", "11");
 
         let config = buildable().build().expect("build");
-
-        // SAFETY: as above.
-        unsafe { std::env::remove_var("RUNTARA_MAX_CONCURRENT_INSTANCES") };
 
         assert_eq!(config.core_overrides.max_concurrent_instances, Some(11));
     }
 
-    // A lazy pool spawns a maintenance task, so these need a reactor.
     #[tokio::test]
     async fn test_build_rejects_malformed_core_config() {
-        // A failing test poisons the mutex; the rest still need serializing.
-        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        // SAFETY: env mutation is serialized by ENV_MUTEX, and the variable is
-        // restored below.
-        unsafe { std::env::set_var("RUNTARA_MAX_CONCURRENT_INSTANCES", "unlimited") };
+        let mut guard = EnvGuard::new();
+        guard.set("RUNTARA_MAX_CONCURRENT_INSTANCES", "unlimited");
 
-        let result = buildable().build();
-
-        // SAFETY: as above.
-        unsafe { std::env::remove_var("RUNTARA_MAX_CONCURRENT_INSTANCES") };
-
-        let err = result
+        let err = buildable()
+            .build()
             .err()
             .expect("malformed core config must fail startup");
+
         assert!(
             err.to_string().contains("RUNTARA_MAX_CONCURRENT_INSTANCES"),
             "unexpected error: {err}"
         );
     }
 
-    // A lazy pool spawns a maintenance task, so these need a reactor.
     #[tokio::test]
     async fn test_build_explicit_core_overrides_ignore_env() {
-        // A failing test poisons the mutex; the rest still need serializing.
-        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        // SAFETY: env mutation is serialized by ENV_MUTEX, and the variable is
-        // restored below.
-        unsafe { std::env::set_var("RUNTARA_MAX_CONCURRENT_INSTANCES", "11") };
+        let mut guard = EnvGuard::new();
+        guard.set("RUNTARA_MAX_CONCURRENT_INSTANCES", "11");
 
         let config = buildable()
             .core_overrides(RuntimeOverrides {
@@ -1130,9 +1116,6 @@ mod tests {
             })
             .build()
             .expect("build");
-
-        // SAFETY: as above.
-        unsafe { std::env::remove_var("RUNTARA_MAX_CONCURRENT_INSTANCES") };
 
         assert_eq!(config.core_overrides.max_concurrent_instances, Some(2));
         assert!(config.core_overrides.shutdown_grace.is_none());

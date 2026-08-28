@@ -236,6 +236,12 @@ pub async fn maybe_start_embedded()
         return Ok(None);
     }
 
+    // Read core's own configuration before opening the pool, so a malformed
+    // value is caught before migrations run rather than after. It aborts the
+    // embedded start, which the caller reports and survives without workflow
+    // execution — the same treatment every other failure here gets.
+    let core_overrides = RuntimeOverrides::from_env()?;
+
     // Create Runtara database pool
     let pool = match create_runtara_pool().await? {
         Some(pool) => pool,
@@ -307,7 +313,7 @@ pub async fn maybe_start_embedded()
                 Some(SocketAddr::from(([127, 0, 0, 1], port)))
             }
         },
-        core_overrides: RuntimeOverrides::from_env()?,
+        core_overrides,
     };
 
     let runtara = EmbeddedRuntara::start(config).await?;

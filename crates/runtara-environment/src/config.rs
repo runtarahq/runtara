@@ -94,54 +94,10 @@ pub(crate) fn parse_bool_lenient(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::env;
-    use std::sync::Mutex;
-
-    // Mutex to serialize tests that modify environment variables
-    static ENV_MUTEX: Mutex<()> = Mutex::new(());
-
-    /// Helper to set env vars for a test and restore them after
-    struct EnvGuard {
-        vars: Vec<(String, Option<String>)>,
-    }
-
-    impl EnvGuard {
-        fn new() -> Self {
-            Self { vars: Vec::new() }
-        }
-
-        fn set(&mut self, key: &str, value: &str) {
-            let old = env::var(key).ok();
-            self.vars.push((key.to_string(), old));
-            // SAFETY: Tests are serialized via ENV_MUTEX, so no concurrent access
-            unsafe { env::set_var(key, value) };
-        }
-
-        fn remove(&mut self, key: &str) {
-            let old = env::var(key).ok();
-            self.vars.push((key.to_string(), old));
-            // SAFETY: Tests are serialized via ENV_MUTEX, so no concurrent access
-            unsafe { env::remove_var(key) };
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            for (key, value) in self.vars.drain(..).rev() {
-                // SAFETY: Tests are serialized via ENV_MUTEX, so no concurrent access
-                unsafe {
-                    match value {
-                        Some(v) => env::set_var(&key, v),
-                        None => env::remove_var(&key),
-                    }
-                }
-            }
-        }
-    }
+    use crate::test_env::EnvGuard;
 
     #[test]
     fn test_config_from_env_with_defaults() {
-        let _lock = ENV_MUTEX.lock().unwrap();
         let mut guard = EnvGuard::new();
 
         guard.set("RUNTARA_DATABASE_URL", "postgres://localhost/test");
@@ -161,7 +117,6 @@ mod tests {
 
     #[test]
     fn test_config_from_env_with_custom_port() {
-        let _lock = ENV_MUTEX.lock().unwrap();
         let mut guard = EnvGuard::new();
 
         guard.set("RUNTARA_DATABASE_URL", "postgres://localhost/test");
@@ -174,7 +129,6 @@ mod tests {
 
     #[test]
     fn test_config_from_env_with_custom_core_addr() {
-        let _lock = ENV_MUTEX.lock().unwrap();
         let mut guard = EnvGuard::new();
 
         guard.set("RUNTARA_DATABASE_URL", "postgres://localhost/test");
@@ -187,7 +141,6 @@ mod tests {
 
     #[test]
     fn test_config_from_env_with_custom_data_dir() {
-        let _lock = ENV_MUTEX.lock().unwrap();
         let mut guard = EnvGuard::new();
 
         guard.set("RUNTARA_DATABASE_URL", "postgres://localhost/test");
@@ -200,7 +153,6 @@ mod tests {
 
     #[test]
     fn test_config_from_env_skip_cert_verification_true() {
-        let _lock = ENV_MUTEX.lock().unwrap();
         let mut guard = EnvGuard::new();
 
         guard.set("RUNTARA_DATABASE_URL", "postgres://localhost/test");
@@ -213,7 +165,6 @@ mod tests {
 
     #[test]
     fn test_config_from_env_skip_cert_verification_one() {
-        let _lock = ENV_MUTEX.lock().unwrap();
         let mut guard = EnvGuard::new();
 
         guard.set("RUNTARA_DATABASE_URL", "postgres://localhost/test");
@@ -226,7 +177,6 @@ mod tests {
 
     #[test]
     fn test_config_from_env_skip_cert_verification_false() {
-        let _lock = ENV_MUTEX.lock().unwrap();
         let mut guard = EnvGuard::new();
 
         guard.set("RUNTARA_DATABASE_URL", "postgres://localhost/test");
@@ -239,7 +189,6 @@ mod tests {
 
     #[test]
     fn test_config_from_env_all_custom() {
-        let _lock = ENV_MUTEX.lock().unwrap();
         let mut guard = EnvGuard::new();
 
         guard.set("RUNTARA_DATABASE_URL", "postgres://user:pass@db:5432/prod");
@@ -259,7 +208,6 @@ mod tests {
 
     #[test]
     fn test_config_missing_database_url() {
-        let _lock = ENV_MUTEX.lock().unwrap();
         let mut guard = EnvGuard::new();
 
         guard.remove("RUNTARA_DATABASE_URL");
@@ -277,7 +225,6 @@ mod tests {
 
     #[test]
     fn test_config_invalid_port() {
-        let _lock = ENV_MUTEX.lock().unwrap();
         let mut guard = EnvGuard::new();
 
         guard.set("RUNTARA_DATABASE_URL", "postgres://localhost/test");
@@ -292,7 +239,6 @@ mod tests {
 
     #[test]
     fn test_config_port_out_of_range() {
-        let _lock = ENV_MUTEX.lock().unwrap();
         let mut guard = EnvGuard::new();
 
         guard.set("RUNTARA_DATABASE_URL", "postgres://localhost/test");
@@ -316,7 +262,6 @@ mod tests {
 
     #[test]
     fn test_config_debug() {
-        let _lock = ENV_MUTEX.lock().unwrap();
         let mut guard = EnvGuard::new();
 
         guard.set("RUNTARA_DATABASE_URL", "postgres://localhost/test");
@@ -333,7 +278,6 @@ mod tests {
 
     #[test]
     fn test_config_clone() {
-        let _lock = ENV_MUTEX.lock().unwrap();
         let mut guard = EnvGuard::new();
 
         guard.set("RUNTARA_DATABASE_URL", "postgres://localhost/test");

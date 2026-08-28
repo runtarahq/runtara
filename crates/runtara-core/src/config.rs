@@ -92,8 +92,11 @@ impl RuntimeOverrides {
     /// Read both variables from the environment.
     ///
     /// An unset variable is not an error — it yields `None`. A malformed one
-    /// is, so a typo in a deployment's configuration fails startup instead of
-    /// being silently ignored.
+    /// is, so a typo in a deployment's configuration surfaces at startup
+    /// instead of being silently ignored. What a host does with that error is
+    /// its own call: the `runtara-core` and `runtara-environment` binaries
+    /// exit, while `runtara-server` reports it and carries on without an
+    /// embedded runtime.
     pub fn from_env() -> Result<Self, ConfigError> {
         Ok(Self {
             max_concurrent_instances: max_concurrent_instances_from_env()?,

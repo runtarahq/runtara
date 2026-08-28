@@ -205,5 +205,9 @@ pub mod runtime;
 /// the native replacement for the composed guest runtime's HTTP loopback.
 pub mod runtime_host;
 
+/// Shared environment-variable guard for this crate's tests.
+#[cfg(test)]
+pub(crate) mod test_env;
+
 pub use config::Config;
 pub use error::Error;
