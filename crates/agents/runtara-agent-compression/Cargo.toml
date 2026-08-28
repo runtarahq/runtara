@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Compression agent — thin wrapper that proxies to the host's native zip handler"
+description = "Compression agent — ZIP archive operations as a WebAssembly Component"
 keywords = ["wasm", "component", "agent", "compression"]
 categories = ["wasm"]
 
@@ -16,11 +16,14 @@ crate-type = ["cdylib", "rlib"]
 wit-bindgen = "0.58"
 serde = { workspace = true }
 serde_json = { workspace = true }
-# runtara-http compiles host-side (ureq) and wasm-side (wasi); the wasm build
-# uses `.call()` (direct, no proxy) to POST the forwarded request to the host's
-# internal native-agent endpoint at
-# `$RUNTARA_AGENT_SERVICE_URL/<module>/<capability>` (e.g.
-# `http://127.0.0.1:7002/api/internal/agents/compression/create-archive`).
+base64 = { workspace = true }
+# ZIP with the pure-Rust deflate backend only. `default-features = false` drops
+# the optional bzip2 / zstd / lzma backends, which are the crate's only C
+# dependencies and are unreachable from these capabilities — the agent
+# constructs `CompressionMethod::Stored` and `::Deflated` and nothing else.
+# What remains (flate2 -> miniz_oxide) compiles to wasm32-wasip2, which is why
+# this agent no longer forwards to a native host handler.
+zip = { version = "2.4", default-features = false, features = ["deflate"] }
 # Capability metadata stays beside the code: `#[capability_input]`,
 # `#[capability_output]`, `#[capability]` emit `&'static CapabilityMeta` /
 # `&'static InputTypeMeta` / `&'static OutputTypeMeta` items, and the host-only
@@ -30,11 +33,3 @@ serde_json = { workspace = true }
 runtara-agent-macro = { path = "../../runtara-agent-macro" }
 runtara-dsl = { path = "../../runtara-dsl", default-features = false }
 strum = { version = "0.26", features = ["derive"] }
-
-
-
-[target.'cfg(not(target_family = "wasm"))'.dependencies]
-runtara-http = { path = "../../runtara-http", default-features = false, features = ["native"] }
-
-[target.'cfg(target_family = "wasm")'.dependencies]
-runtara-http = { path = "../../runtara-http", default-features = false, features = ["wasi"] }

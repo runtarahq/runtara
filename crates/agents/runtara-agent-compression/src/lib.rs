@@ -1,29 +1,29 @@
-//! Compression agent — WebAssembly component (native-wrapper).
+//! Compression agent — WebAssembly component.
 //!
-//! Zip/unzip operations rely on native libraries that don't compile to
-//! wasm32-wasip2 cleanly, so this component is a thin forwarder: every
-//! capability serializes its input to JSON, POSTs it to the host's internal
-//! native-agent endpoint at
-//! `$RUNTARA_AGENT_SERVICE_URL/<module>/<capability>` (i.e.
-//! `http://127.0.0.1:7002/api/internal/agents/compression/<capability_id>` in
-//! local dev), then deserializes the response back into the typed output
-//! struct. The host runs the actual zip work.
+//! ZIP archive create / extract / list, executed entirely inside the wasm
+//! sandbox. This agent used to be a thin forwarder to a native host handler at
+//! `$RUNTARA_AGENT_SERVICE_URL/compression/<capability>`; that hop is gone.
+//! The `zip` crate's C-backed compression backends (bzip2, zstd, lzma) were the
+//! only thing blocking a wasm32-wasip2 build, they are optional features, and
+//! these capabilities never used them — only `Stored` and `Deflated`. With
+//! `default-features = false, features = ["deflate"]` the dependency tree is
+//! pure Rust (flate2 -> miniz_oxide) and builds for wasip2 directly.
 //!
-//! Capability metadata still travels through the same `#[capability_input]` /
+//! Capability metadata travels through the same `#[capability_input]` /
 //! `#[capability]` / `#[capability_output]` annotations used by every other
-//! migrated agent — `runtara-agent-bundle-emit` walks the macro-emitted
+//! component agent — `runtara-agent-bundle-emit` walks the macro-emitted
 //! `&'static` statics on the host architecture and writes
 //! `runtara_agent_compression.meta.json` next to the `.wasm`.
-//!
-//! See the sibling agent crates for the wrapper pattern.
 #![allow(clippy::result_large_err)]
 
+use base64::{Engine as _, engine::general_purpose};
 use runtara_agent_macro::{CapabilityInput, CapabilityOutput, capability};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::time::Duration;
+use std::io::{Cursor, Read, Write};
 use strum::{Display, EnumString};
+use zip::{CompressionMethod, ZipArchive, ZipWriter, write::SimpleFileOptions};
 
 #[cfg(target_arch = "wasm32")]
 #[allow(warnings)]
@@ -168,6 +168,30 @@ pub struct FileData {
     pub mime_type: Option<String>,
 }
 
+impl FileData {
+    /// Decode the base64 `content` into raw bytes.
+    pub fn decode(&self) -> Result<Vec<u8>, AgentError> {
+        general_purpose::STANDARD
+            .decode(&self.content)
+            .map_err(|e| {
+                AgentError::permanent(
+                    "FILE_BASE64_DECODE_ERROR",
+                    format!("Failed to decode base64 file content: {}", e),
+                )
+                .with_attr("decode_error", e.to_string())
+            })
+    }
+
+    /// Build a `FileData` from raw bytes, base64-encoding the content.
+    pub fn from_bytes(data: Vec<u8>, filename: Option<String>, mime_type: Option<String>) -> Self {
+        Self {
+            content: general_purpose::STANDARD.encode(&data),
+            filename,
+            mime_type,
+        }
+    }
+}
+
 /// Supported archive formats. Only ZIP today; placeholder for tar/gzip/etc.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, Display, EnumString, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -184,6 +208,20 @@ pub enum ArchiveFormat {
 pub enum ArchiveDataInput {
     FileData(FileData),
     Base64String(String),
+}
+
+impl ArchiveDataInput {
+    /// Normalize either accepted shape into a `FileData` for uniform handling.
+    pub fn into_file_data(self) -> FileData {
+        match self {
+            ArchiveDataInput::FileData(fd) => fd,
+            ArchiveDataInput::Base64String(s) => FileData {
+                content: s,
+                filename: None,
+                mime_type: None,
+            },
+        }
+    }
 }
 
 /// A file entry to be added to an archive. Matches the legacy
@@ -262,9 +300,9 @@ fn default_compression_level() -> u8 {
 #[capability(
     module = "compression",
     display_name = "Create Archive",
-    description = "Create an archive from one or more files. Runs on the host via the native agent service.",
+    description = "Create an archive from one or more files.",
     module_display_name = "Compression",
-    module_description = "ZIP archive create/extract/list operations. Runs on the host via the native agent service.",
+    module_description = "ZIP archive create/extract/list operations.",
     module_has_side_effects = false,
     module_supports_connections = false,
     errors(
@@ -277,9 +315,20 @@ fn default_compression_level() -> u8 {
     )
 )]
 pub fn create_archive(input: CreateArchiveInput) -> Result<FileData, AgentError> {
-    let value = serde_json::to_value(&input)?;
-    forward_to_native("create-archive", &value)
-        .and_then(|v| deserialize_output("create-archive", v))
+    if input.files.is_empty() {
+        return Err(AgentError::permanent(
+            "ARCHIVE_NO_FILES",
+            "At least one file is required to create an archive",
+        ));
+    }
+
+    let compression_level = input.compression_level.min(9);
+
+    match input.format {
+        ArchiveFormat::Zip => {
+            create_zip_archive(&input.files, compression_level, input.archive_name)
+        }
+    }
 }
 
 // ============================================================================
@@ -354,16 +403,22 @@ pub struct ExtractArchiveOutput {
 #[capability(
     module = "compression",
     display_name = "Extract Archive",
-    description = "Extract all files from an archive. Runs on the host via the native agent service.",
+    description = "Extract all files from an archive.",
     errors(
         permanent("ARCHIVE_DECODE_ERROR", "Failed to decode archive data"),
         permanent("ARCHIVE_READ_ERROR", "Failed to read archive or archive entry"),
     )
 )]
 pub fn extract_archive(input: ExtractArchiveInput) -> Result<ExtractArchiveOutput, AgentError> {
-    let value = serde_json::to_value(&input)?;
-    forward_to_native("extract-archive", &value)
-        .and_then(|v| deserialize_output("extract-archive", v))
+    let file_data = input.archive.into_file_data();
+    let bytes = file_data
+        .decode()
+        .map_err(|e| AgentError::permanent("ARCHIVE_DECODE_ERROR", e.message))?;
+
+    // Only ZIP is supported today; the format field is a forward-compat hook.
+    let _format = input.format.unwrap_or(ArchiveFormat::Zip);
+
+    extract_zip_archive(&bytes)
 }
 
 // ============================================================================
@@ -403,7 +458,7 @@ pub struct ExtractFileInput {
 #[capability(
     module = "compression",
     display_name = "Extract File",
-    description = "Extract a single file from an archive by its path. Runs on the host via the native agent service.",
+    description = "Extract a single file from an archive by its path.",
     errors(
         permanent("ARCHIVE_DECODE_ERROR", "Failed to decode archive data"),
         permanent("ARCHIVE_READ_ERROR", "Failed to read archive"),
@@ -412,8 +467,14 @@ pub struct ExtractFileInput {
     )
 )]
 pub fn extract_file(input: ExtractFileInput) -> Result<FileData, AgentError> {
-    let value = serde_json::to_value(&input)?;
-    forward_to_native("extract-file", &value).and_then(|v| deserialize_output("extract-file", v))
+    let file_data = input.archive.into_file_data();
+    let bytes = file_data
+        .decode()
+        .map_err(|e| AgentError::permanent("ARCHIVE_DECODE_ERROR", e.message))?;
+
+    let _format = input.format.unwrap_or(ArchiveFormat::Zip);
+
+    extract_file_from_zip(&bytes, &input.file_path)
 }
 
 // ============================================================================
@@ -500,142 +561,310 @@ pub struct ListArchiveOutput {
 #[capability(
     module = "compression",
     display_name = "List Archive",
-    description = "List all files and directories in an archive without extracting. Runs on the host via the native agent service.",
+    description = "List all files and directories in an archive without extracting.",
     errors(
         permanent("ARCHIVE_DECODE_ERROR", "Failed to decode archive data"),
         permanent("ARCHIVE_READ_ERROR", "Failed to read archive or archive entry"),
     )
 )]
 pub fn list_archive(input: ListArchiveInput) -> Result<ListArchiveOutput, AgentError> {
-    let value = serde_json::to_value(&input)?;
-    forward_to_native("list-archive", &value).and_then(|v| deserialize_output("list-archive", v))
+    let file_data = input.archive.into_file_data();
+    let bytes = file_data
+        .decode()
+        .map_err(|e| AgentError::permanent("ARCHIVE_DECODE_ERROR", e.message))?;
+
+    let format = input.format.unwrap_or(ArchiveFormat::Zip);
+
+    list_zip_archive(&bytes, format)
 }
 
 // ============================================================================
-// Native-stub forwarder
+// ZIP implementation
 // ============================================================================
+//
+// Ported verbatim from the former host-side `runtara_agents::compression`.
+// `zip` is built with `default-features = false, features = ["deflate"]`, which
+// keeps the deflate backend on pure-Rust `miniz_oxide` and leaves out the
+// optional bzip2 / zstd / lzma backends (all C, none of them reachable from
+// these capabilities — only `Stored` and `Deflated` are ever constructed).
 
-/// POST the input JSON to `$RUNTARA_AGENT_SERVICE_URL/compression/<capability_id>`
-/// — the host's internal native-agent endpoint owns the actual zip work and
-/// returns the JSON-encoded output.
-///
-/// Matches the request shape of `runtara-agent-sftp` and the original
-/// `runtara-agent-compression` wrapper: `Content-Type: application/json`,
-/// `X-Org-Id` from `RUNTARA_TENANT_ID`, 120s timeout.
-fn forward_to_native(capability_id: &str, input_value: &Value) -> Result<Value, AgentError> {
-    let base = std::env::var("RUNTARA_AGENT_SERVICE_URL").map_err(|_| {
+fn create_zip_archive(
+    files: &[ArchiveFileEntry],
+    compression_level: u8,
+    archive_name: Option<String>,
+) -> Result<FileData, AgentError> {
+    let mut buffer = Cursor::new(Vec::new());
+
+    {
+        let mut zip = ZipWriter::new(&mut buffer);
+
+        // Level 0 means "store, don't compress". `Stored` accepts no level at
+        // all — passing one makes zip reject the entry with "Unsupported
+        // compression level", so level 0 (which the input schema documents as
+        // valid: "0 (none) to 9 (maximum)") failed outright. The host
+        // implementation this was ported from has the same defect; it is fixed
+        // here rather than carried over, and disappears with that copy.
+        let options = if compression_level == 0 {
+            SimpleFileOptions::default().compression_method(CompressionMethod::Stored)
+        } else {
+            SimpleFileOptions::default()
+                .compression_method(CompressionMethod::Deflated)
+                .compression_level(Some(compression_level as i64))
+        };
+
+        for entry in files {
+            let file_data = entry.file.clone().into_file_data();
+            let bytes = file_data.decode()?;
+
+            let path = entry
+                .path
+                .clone()
+                .or_else(|| file_data.filename.clone())
+                .unwrap_or_else(|| "file".to_string());
+
+            zip.start_file(&path, options).map_err(|e| {
+                AgentError::permanent(
+                    "ARCHIVE_WRITE_ERROR",
+                    format!("Failed to add file '{}' to archive: {}", path, e),
+                )
+                .with_attr("path", &path)
+            })?;
+
+            zip.write_all(&bytes).map_err(|e| {
+                AgentError::permanent(
+                    "ARCHIVE_WRITE_ERROR",
+                    format!("Failed to write file '{}' content: {}", path, e),
+                )
+                .with_attr("path", &path)
+            })?;
+        }
+
+        zip.finish().map_err(|e| {
+            AgentError::permanent(
+                "ARCHIVE_WRITE_ERROR",
+                format!("Failed to finalize archive: {}", e),
+            )
+        })?;
+    }
+
+    let archive_bytes = buffer.into_inner();
+    let filename = archive_name.unwrap_or_else(|| "archive.zip".to_string());
+
+    Ok(FileData::from_bytes(
+        archive_bytes,
+        Some(filename),
+        Some("application/zip".to_string()),
+    ))
+}
+
+fn extract_zip_archive(bytes: &[u8]) -> Result<ExtractArchiveOutput, AgentError> {
+    let cursor = Cursor::new(bytes);
+    let mut archive = ZipArchive::new(cursor).map_err(|e| {
         AgentError::permanent(
-            "AGENT_SERVICE_URL_MISSING",
-            "RUNTARA_AGENT_SERVICE_URL not set; native wrapper cannot forward",
+            "ARCHIVE_READ_ERROR",
+            format!("Failed to read archive: {}", e),
         )
     })?;
-    let url = format!("{}/compression/{capability_id}", base.trim_end_matches('/'));
 
-    let body = serde_json::to_vec(input_value)
-        .map_err(|e| AgentError::permanent("INPUT_SERIALIZATION_ERROR", e.to_string()))?;
+    let mut files = Vec::new();
 
-    let tenant_id = std::env::var("RUNTARA_TENANT_ID").unwrap_or_default();
-
-    let client = runtara_http::HttpClient::with_timeout(Duration::from_secs(120));
-    let response = client
-        .request("POST", &url)
-        .header("Content-Type", "application/json")
-        .header("X-Org-Id", &tenant_id)
-        .body_bytes(&body)
-        .call()
-        .map_err(|e| {
-            AgentError::transient("NETWORK_ERROR", format!("native agent call failed: {e}"))
+    for i in 0..archive.len() {
+        let mut file = archive.by_index(i).map_err(|e| {
+            AgentError::permanent(
+                "ARCHIVE_READ_ERROR",
+                format!("Failed to read archive entry {}: {}", i, e),
+            )
+            .with_attr("entry_index", i.to_string())
         })?;
 
-    let status = response.status;
-    let body_text = String::from_utf8_lossy(&response.body).to_string();
-    if !(200..300).contains(&status) {
-        return Err(AgentError::permanent(
-            format!("NATIVE_AGENT_HTTP_{status}"),
-            format!("native agent compression/{capability_id} returned {status}: {body_text}"),
-        ));
+        let path = file.name().to_string();
+        let is_directory = file.is_dir();
+        let size = file.size();
+
+        if is_directory {
+            files.push(ExtractedFile {
+                file: FileData {
+                    content: String::new(),
+                    filename: Some(filename_from_path(&path)),
+                    mime_type: None,
+                },
+                path,
+                size: 0,
+                is_directory: true,
+            });
+        } else {
+            let mut contents = Vec::new();
+            file.read_to_end(&mut contents).map_err(|e| {
+                AgentError::permanent(
+                    "ARCHIVE_READ_ERROR",
+                    format!("Failed to read file '{}': {}", path, e),
+                )
+                .with_attr("path", &path)
+            })?;
+
+            let filename = filename_from_path(&path);
+            let mime_type = infer_mime_type(&path);
+
+            files.push(ExtractedFile {
+                file: FileData::from_bytes(contents, Some(filename), mime_type),
+                path,
+                size,
+                is_directory: false,
+            });
+        }
     }
 
-    parse_native_envelope(capability_id, &body_text)
+    let count = files.len();
+
+    Ok(ExtractArchiveOutput { files, count })
 }
 
-/// Unwrap the `{ success, output | error }` envelope the internal native-agent
-/// endpoint wraps every response in (see `internal_agents::run_agent`).
-///
-/// On `success: true` we return the inner `output` payload — the caller then
-/// deserializes THAT into the typed output struct. Returning the whole envelope
-/// (the previous behaviour) made every capability fail with a misleading
-/// `missing field 'content'`, because the envelope has no `content` key — only
-/// `success` and `output`. The sibling sftp wrapper already unwraps identically.
-///
-/// On `success: false` the `error` field is a JSON-encoded `AgentError`; we
-/// parse it back so the workflow sees the real native error code (e.g.
-/// `ARCHIVE_FILE_NOT_FOUND`) and retry category instead of an opaque wrapper.
-///
-/// Pure (no I/O) so the envelope contract is unit-tested without a live host.
-fn parse_native_envelope(capability_id: &str, body_text: &str) -> Result<Value, AgentError> {
-    let envelope: Value = serde_json::from_str(body_text).map_err(|e| {
+fn extract_file_from_zip(bytes: &[u8], file_path: &str) -> Result<FileData, AgentError> {
+    let cursor = Cursor::new(bytes);
+    let mut archive = ZipArchive::new(cursor).map_err(|e| {
         AgentError::permanent(
-            "COMPRESSION_OUTPUT_PARSE_ERROR",
-            format!(
-                "invalid JSON envelope from native compression/{capability_id}: {e}: {body_text}"
-            ),
+            "ARCHIVE_READ_ERROR",
+            format!("Failed to read archive: {}", e),
         )
     })?;
 
-    if envelope
-        .get("success")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
-    {
-        Ok(envelope.get("output").cloned().unwrap_or(Value::Null))
-    } else {
-        Err(native_error_to_agent_error(envelope.get("error")))
-    }
-}
+    // Try a few path spellings before giving up — callers hand us Windows
+    // separators and leading slashes more often than not.
+    let paths_to_try = [
+        file_path.to_string(),
+        file_path.replace('\\', "/"),
+        file_path.trim_start_matches('/').to_string(),
+    ];
 
-/// Reconstruct an `AgentError` from the envelope's `error` field. The native
-/// side serializes a full `AgentError` to a JSON string, so we parse it to
-/// preserve `code`/`message`/`category`; anything unparseable falls back to a
-/// generic permanent error carrying the raw text.
-fn native_error_to_agent_error(error: Option<&Value>) -> AgentError {
-    let raw = match error {
-        Some(Value::String(s)) => s.clone(),
-        Some(other) => other.to_string(),
-        None => "unknown native agent error".to_string(),
-    };
-
-    if let Ok(Value::Object(map)) = serde_json::from_str::<Value>(&raw) {
-        let code = map
-            .get("code")
-            .and_then(|v| v.as_str())
-            .unwrap_or("COMPRESSION_NATIVE_AGENT_ERROR")
-            .to_string();
-        let message = map
-            .get("message")
-            .and_then(|v| v.as_str())
-            .unwrap_or(&raw)
-            .to_string();
-        if map.get("category").and_then(|v| v.as_str()) == Some("transient") {
-            AgentError::transient(code, message)
-        } else {
-            AgentError::permanent(code, message)
+    let mut found_file = None;
+    for path in &paths_to_try {
+        if let Ok(file) = archive.by_name(path)
+            && !file.is_dir()
+        {
+            found_file = Some(path.clone());
+            break;
         }
-    } else {
-        AgentError::permanent("COMPRESSION_NATIVE_AGENT_ERROR", raw)
     }
+
+    let actual_path = found_file.ok_or_else(|| {
+        AgentError::permanent(
+            "ARCHIVE_FILE_NOT_FOUND",
+            format!("File '{}' not found in archive", file_path),
+        )
+        .with_attr("file_path", file_path)
+    })?;
+
+    // Re-open: `by_name` borrows the archive mutably for the entry's lifetime.
+    let cursor = Cursor::new(bytes);
+    let mut archive = ZipArchive::new(cursor).map_err(|e| {
+        AgentError::permanent(
+            "ARCHIVE_READ_ERROR",
+            format!("Failed to read archive: {}", e),
+        )
+    })?;
+
+    let mut file = archive.by_name(&actual_path).map_err(|_| {
+        AgentError::permanent(
+            "ARCHIVE_FILE_NOT_FOUND",
+            format!("File '{}' not found in archive", file_path),
+        )
+        .with_attr("file_path", file_path)
+    })?;
+
+    if file.is_dir() {
+        return Err(AgentError::permanent(
+            "ARCHIVE_IS_DIRECTORY",
+            format!("'{}' is a directory, not a file", file_path),
+        )
+        .with_attr("file_path", file_path));
+    }
+
+    let mut contents = Vec::new();
+    file.read_to_end(&mut contents).map_err(|e| {
+        AgentError::permanent(
+            "ARCHIVE_READ_ERROR",
+            format!("Failed to read file '{}': {}", file_path, e),
+        )
+        .with_attr("file_path", file_path)
+    })?;
+
+    let filename = filename_from_path(file_path);
+    let mime_type = infer_mime_type(file_path);
+
+    Ok(FileData::from_bytes(contents, Some(filename), mime_type))
 }
 
-fn deserialize_output<T: for<'de> Deserialize<'de>>(
-    capability_id: &str,
-    value: Value,
-) -> Result<T, AgentError> {
-    serde_json::from_value(value).map_err(|e| {
+fn list_zip_archive(bytes: &[u8], format: ArchiveFormat) -> Result<ListArchiveOutput, AgentError> {
+    let cursor = Cursor::new(bytes);
+    let mut archive = ZipArchive::new(cursor).map_err(|e| {
         AgentError::permanent(
-            "COMPRESSION_OUTPUT_DESERIALIZATION_ERROR",
-            format!("failed to deserialize {capability_id} output: {e}"),
+            "ARCHIVE_READ_ERROR",
+            format!("Failed to read archive: {}", e),
         )
+    })?;
+
+    let mut entries = Vec::new();
+    let mut total_size: u64 = 0;
+
+    for i in 0..archive.len() {
+        let file = archive.by_index_raw(i).map_err(|e| {
+            AgentError::permanent(
+                "ARCHIVE_READ_ERROR",
+                format!("Failed to read archive entry {}: {}", i, e),
+            )
+            .with_attr("entry_index", i.to_string())
+        })?;
+
+        let path = file.name().to_string();
+        let size = file.size();
+        let compressed_size = file.compressed_size();
+        let is_directory = file.is_dir();
+
+        if !is_directory {
+            total_size += size;
+        }
+
+        entries.push(ArchiveEntryInfo {
+            path,
+            size,
+            compressed_size,
+            is_directory,
+        });
+    }
+
+    let total_count = entries.len();
+
+    Ok(ListArchiveOutput {
+        entries,
+        total_count,
+        total_size,
+        format,
     })
+}
+
+fn infer_mime_type(path: &str) -> Option<String> {
+    let ext = path.rsplit('.').next()?.to_lowercase();
+    let mime = match ext.as_str() {
+        "csv" => "text/csv",
+        "json" => "application/json",
+        "xml" => "application/xml",
+        "txt" => "text/plain",
+        "html" | "htm" => "text/html",
+        "pdf" => "application/pdf",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "zip" => "application/zip",
+        "gz" | "gzip" => "application/gzip",
+        "tar" => "application/x-tar",
+        _ => "application/octet-stream",
+    };
+    Some(mime.to_string())
+}
+
+/// Extract the filename component from an archive path.
+fn filename_from_path(path: &str) -> String {
+    path.rsplit(['/', '\\']).next().unwrap_or(path).to_string()
 }
 
 // ============================================================================
@@ -703,7 +932,7 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
     AgentInfo {
         id: "compression".into(),
         name: "Compression".into(),
-        description: "ZIP archive create/extract/list operations. Runs on the host via the native agent service.".into(),
+        description: "ZIP archive create/extract/list operations.".into(),
         has_side_effects: false,
         supports_connections: false,
         integration_ids: vec![],
@@ -823,59 +1052,151 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    // ---- Bug #1: the native envelope must be unwrapped ---------------------
+    // ---- Real zip round-trips (no host, no network) -----------------------
 
-    #[test]
-    fn success_envelope_unwraps_to_output() {
-        // The internal endpoint wraps output in `{ success, output }`. We must
-        // return the inner `output` so the caller can deserialize FileData —
-        // returning the whole envelope caused the reported `missing field
-        // 'content'` (the envelope has no `content`, only `success`/`output`).
-        let body = json!({
-            "success": true,
-            "output": { "content": "d29ybGQ=", "filename": "hello.txt", "mimeType": "text/plain" }
+    fn entry(name: &str, body: &str) -> ArchiveFileEntry {
+        ArchiveFileEntry {
+            file: ArchiveDataInput::FileData(FileData::from_bytes(
+                body.as_bytes().to_vec(),
+                Some(name.to_string()),
+                Some("text/plain".to_string()),
+            )),
+            path: None,
+        }
+    }
+
+    fn archive_of(entries: Vec<ArchiveFileEntry>) -> FileData {
+        create_archive(CreateArchiveInput {
+            files: entries,
+            format: ArchiveFormat::Zip,
+            compression_level: 6,
+            archive_name: Some("bundle.zip".to_string()),
+            _connection: None,
         })
-        .to_string();
-
-        let output = parse_native_envelope("extract-file", &body).expect("envelope unwraps");
-        // The unwrapped output deserializes cleanly into the typed FileData.
-        let file: FileData = deserialize_output("extract-file", output).expect("deserializes");
-        assert_eq!(file.content, "d29ybGQ=");
-        assert_eq!(file.filename.as_deref(), Some("hello.txt"));
-        assert_eq!(file.mime_type.as_deref(), Some("text/plain"));
+        .expect("archive is created")
     }
 
     #[test]
-    fn failure_envelope_preserves_native_error_code() {
-        // `error` is a JSON-encoded AgentError; the real code/category must
-        // survive so workflow onError branches can switch on it.
-        let inner = json!({
-            "code": "ARCHIVE_FILE_NOT_FOUND",
-            "message": "File 'x' not found in archive",
-            "category": "permanent",
-            "severity": "error"
-        })
-        .to_string();
-        let body = json!({ "success": false, "error": inner }).to_string();
+    fn create_then_extract_round_trips_content() {
+        let archive = archive_of(vec![entry("a.txt", "hello"), entry("b.csv", "x,y")]);
+        assert_eq!(archive.mime_type.as_deref(), Some("application/zip"));
+        assert_eq!(archive.filename.as_deref(), Some("bundle.zip"));
 
-        let err = parse_native_envelope("extract-file", &body).expect_err("surfaces error");
+        let out = extract_archive(ExtractArchiveInput {
+            archive: ArchiveDataInput::FileData(archive),
+            format: None,
+            _connection: None,
+        })
+        .expect("archive extracts");
+
+        assert_eq!(out.count, 2);
+        let a = out.files.iter().find(|f| f.path == "a.txt").expect("a.txt");
+        assert_eq!(a.file.decode().expect("decodes"), b"hello");
+        let b = out.files.iter().find(|f| f.path == "b.csv").expect("b.csv");
+        assert_eq!(b.file.decode().expect("decodes"), b"x,y");
+        assert_eq!(b.file.mime_type.as_deref(), Some("text/csv"));
+    }
+
+    #[test]
+    fn stored_and_deflated_both_round_trip() {
+        // level 0 selects CompressionMethod::Stored, anything else Deflated.
+        for level in [0u8, 9u8] {
+            let archive = create_archive(CreateArchiveInput {
+                files: vec![entry("payload.txt", "the quick brown fox jumps")],
+                format: ArchiveFormat::Zip,
+                compression_level: level,
+                archive_name: None,
+                _connection: None,
+            })
+            .expect("archive is created");
+
+            let out = extract_archive(ExtractArchiveInput {
+                archive: ArchiveDataInput::FileData(archive),
+                format: None,
+                _connection: None,
+            })
+            .expect("archive extracts");
+
+            assert_eq!(
+                out.files[0].file.decode().expect("decodes"),
+                b"the quick brown fox jumps",
+                "level {level} did not round-trip"
+            );
+        }
+    }
+
+    #[test]
+    fn extract_file_pulls_one_entry_by_path() {
+        let archive = archive_of(vec![entry("a.txt", "hello"), entry("b.txt", "world")]);
+
+        let file = extract_file(ExtractFileInput {
+            archive: ArchiveDataInput::FileData(archive),
+            file_path: "b.txt".to_string(),
+            format: None,
+            _connection: None,
+        })
+        .expect("file extracts");
+
+        assert_eq!(file.decode().expect("decodes"), b"world");
+        assert_eq!(file.filename.as_deref(), Some("b.txt"));
+    }
+
+    #[test]
+    fn extract_file_reports_missing_path_as_not_found() {
+        let archive = archive_of(vec![entry("a.txt", "hello")]);
+
+        let err = extract_file(ExtractFileInput {
+            archive: ArchiveDataInput::FileData(archive),
+            file_path: "nope.txt".to_string(),
+            format: None,
+            _connection: None,
+        })
+        .expect_err("missing entry errors");
+
         assert_eq!(err.code, "ARCHIVE_FILE_NOT_FOUND");
         assert_eq!(err.category, "permanent");
-        assert!(err.message.contains("not found"));
     }
 
     #[test]
-    fn malformed_envelope_is_a_parse_error_not_missing_content() {
-        let err = parse_native_envelope("extract-file", "not json").expect_err("parse fails");
-        assert_eq!(err.code, "COMPRESSION_OUTPUT_PARSE_ERROR");
+    fn list_archive_reports_entries_and_total_size() {
+        let archive = archive_of(vec![entry("a.txt", "hello"), entry("b.txt", "worldly")]);
+
+        let out = list_archive(ListArchiveInput {
+            archive: ArchiveDataInput::FileData(archive),
+            format: None,
+            _connection: None,
+        })
+        .expect("archive lists");
+
+        assert_eq!(out.total_count, 2);
+        assert_eq!(out.total_size, 12); // 5 + 7 uncompressed
+        assert!(out.entries.iter().all(|e| !e.is_directory));
     }
 
     #[test]
-    fn plain_string_error_falls_back_gracefully() {
-        let body = json!({ "success": false, "error": "boom" }).to_string();
-        let err = parse_native_envelope("list-archive", &body).expect_err("surfaces error");
-        assert_eq!(err.code, "COMPRESSION_NATIVE_AGENT_ERROR");
-        assert_eq!(err.message, "boom");
+    fn create_archive_rejects_an_empty_file_list() {
+        let err = create_archive(CreateArchiveInput {
+            files: vec![],
+            format: ArchiveFormat::Zip,
+            compression_level: 6,
+            archive_name: None,
+            _connection: None,
+        })
+        .expect_err("empty input errors");
+
+        assert_eq!(err.code, "ARCHIVE_NO_FILES");
+    }
+
+    #[test]
+    fn undecodable_archive_surfaces_a_decode_error() {
+        let err = list_archive(ListArchiveInput {
+            archive: ArchiveDataInput::Base64String("!!not base64!!".to_string()),
+            format: None,
+            _connection: None,
+        })
+        .expect_err("bad base64 errors");
+
+        assert_eq!(err.code, "ARCHIVE_DECODE_ERROR");
     }
 
     // ---- Bug #2: input field names are snake_case on the wire --------------

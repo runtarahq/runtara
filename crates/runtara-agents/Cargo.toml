@@ -17,7 +17,11 @@ crate-type = ["rlib"]
 [features]
 default = ["native"]
 
-# Native platform - full agent support including C-dependent agents (SFTP, XLSX, Compression)
+# Native platform — the one remaining C-dependent agent (SFTP via libssh2).
+#
+# XLSX and Compression used to live here too; both are WASM components now
+# (`crates/agents/runtara-agent-{xlsx,compression}`), which took `calamine` and
+# `zip` out of this crate entirely.
 #
 # `ssh2` links libssh2, which needs OpenSSL. By default that resolves against
 # the *system* OpenSSL (libssl-dev on Linux, `brew install openssl@3` on macOS).
@@ -26,8 +30,6 @@ default = ["native"]
 # so it is opt-in via `vendored-openssl` rather than implied here.
 native = [
     "dep:ssh2",
-    "dep:calamine",
-    "dep:zip",
     "runtara-http/native",
 ]
 
@@ -60,10 +62,6 @@ ssh2 = { version = "0.9", optional = true }
 # crate's source — its sole job is to make openssl-sys build OpenSSL from source
 # for ssh2/libssh2-sys instead of linking the system library.
 openssl = { workspace = true, optional = true }
-# ZIP archive support (compression agent)
-zip = { version = "2.2", optional = true }
-# Spreadsheet parsing (XLSX, XLS, XLSB, ODS) (xlsx agent)
-calamine = { version = "0.26", optional = true }
 
 [dev-dependencies]
 tempfile = "3"

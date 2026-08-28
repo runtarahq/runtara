@@ -11726,3 +11726,143 @@ fn direct_wasm_execute_delay_observes_cancel_and_suspends() {
         "a cancel is a suspend, not a failure"
     );
 }
+
+// ============================================================================
+// Native-free agents: compression + xlsx run inside the composed workflow.wasm
+// ============================================================================
+//
+// Both agents used to forward every capability call to a native handler in the
+// server process over `$RUNTARA_AGENT_SERVICE_URL`. They now do the work in
+// the sandbox, so these two runs prove the real implementations survive
+// composition into a workflow component — not just standalone invocation.
+// Nothing here stands up an agent service; a surviving forwarder would fail.
+
+const COMPRESSION_ROUND_TRIP: &str = r#"{
+  "durable": false,
+  "steps": {
+    "create": {
+      "stepType": "Agent",
+      "id": "create",
+      "name": "Create Archive",
+      "agentId": "compression",
+      "capabilityId": "create-archive",
+      "maxRetries": 0,
+      "inputMapping": {
+        "files": { "valueType": "reference", "value": "data.files" },
+        "archive_name": { "valueType": "immediate", "value": "bundle.zip" }
+      }
+    },
+    "list": {
+      "stepType": "Agent",
+      "id": "list",
+      "name": "List Archive",
+      "agentId": "compression",
+      "capabilityId": "list-archive",
+      "maxRetries": 0,
+      "inputMapping": {
+        "archive": { "valueType": "reference", "value": "steps.create.outputs" }
+      }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "archive_name": { "valueType": "reference", "value": "steps.create.outputs.filename" },
+        "entries": { "valueType": "reference", "value": "steps.list.outputs.total_count" },
+        "bytes": { "valueType": "reference", "value": "steps.list.outputs.total_size" }
+      }
+    }
+  },
+  "entryPoint": "create",
+  "executionPlan": [
+    { "fromStep": "create", "toStep": "list" },
+    { "fromStep": "list", "toStep": "finish" }
+  ],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}"#;
+
+const XLSX_PARSE_WORKFLOW: &str = r#"{
+  "durable": false,
+  "steps": {
+    "parse": {
+      "stepType": "Agent",
+      "id": "parse",
+      "name": "Parse Spreadsheet",
+      "agentId": "xlsx",
+      "capabilityId": "from-xlsx",
+      "maxRetries": 0,
+      "inputMapping": {
+        "data": { "valueType": "reference", "value": "data.workbook" },
+        "has_headers": { "valueType": "immediate", "value": true }
+      }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "rows": { "valueType": "reference", "value": "steps.parse.outputs" }
+      }
+    }
+  },
+  "entryPoint": "parse",
+  "executionPlan": [
+    { "fromStep": "parse", "toStep": "finish" }
+  ],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}"#;
+
+#[test]
+fn direct_wasm_execute_compression_round_trips_in_guest() {
+    let components_dir = direct_e2e_components_dir();
+
+    // base64("hello") and base64("x,y")
+    let input = br#"{"data":{"files":[
+        {"file":{"content":"aGVsbG8=","filename":"a.txt"}},
+        {"file":{"content":"eCx5","filename":"b.csv"}}
+    ]},"variables":{}}"#;
+
+    let output = run_direct_workflow(
+        &components_dir,
+        "direct-wasm-execute-compression-round-trip",
+        COMPRESSION_ROUND_TRIP,
+        input,
+    );
+
+    assert_eq!(
+        output,
+        serde_json::json!({
+            "archive_name": "bundle.zip",
+            "entries": 2,
+            "bytes": 8, // "hello" (5) + "x,y" (3), uncompressed
+        })
+    );
+}
+
+#[test]
+fn direct_wasm_execute_xlsx_parses_in_guest() {
+    let components_dir = direct_e2e_components_dir();
+
+    let workbook = include_str!("fixtures/orders_xlsx.b64").trim();
+    let input = format!(r#"{{"data":{{"workbook":"{workbook}"}},"variables":{{}}}}"#);
+
+    let output = run_direct_workflow(
+        &components_dir,
+        "direct-wasm-execute-xlsx-parse",
+        XLSX_PARSE_WORKFLOW,
+        input.as_bytes(),
+    );
+
+    assert_eq!(
+        output,
+        serde_json::json!({
+            "rows": [
+                { "sku": "ABC-1", "qty": 4, "price": 9.5 },
+                { "sku": "XYZ-9", "qty": 11, "price": 0.25 }
+            ]
+        })
+    );
+}
