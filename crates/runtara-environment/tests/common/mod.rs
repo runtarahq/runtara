@@ -16,6 +16,7 @@ use std::time::Duration;
 use runtara_core::persistence::PostgresPersistence;
 use sqlx::PgPool;
 use testcontainers::ContainerAsync;
+use testcontainers::ImageExt;
 use testcontainers::runners::AsyncRunner;
 use testcontainers_modules::postgres::Postgres;
 use uuid::Uuid;
@@ -249,6 +250,9 @@ impl TestContext {
     }
 }
 
+/// Image tag for the fallback Postgres container.
+const POSTGRES_TEST_IMAGE_TAG: &str = "16-alpine";
+
 /// Get database URL - either from environment or by starting a testcontainer.
 async fn get_database_url() -> Result<(String, Option<ContainerAsync<Postgres>>), String> {
     // First, check if TEST_RUNTARA_DATABASE_URL is set
@@ -256,8 +260,12 @@ async fn get_database_url() -> Result<(String, Option<ContainerAsync<Postgres>>)
         return Ok((url, None));
     }
 
-    // Otherwise, start a PostgreSQL container
+    // Otherwise, start a PostgreSQL container. `Postgres::default()` ships
+    // `postgres:11-alpine`, and PostgreSQL 11 refuses `ALTER TYPE ... ADD VALUE`
+    // inside a transaction block, which the core migrations rely on. Pin a
+    // modern tag matching the version CI runs against.
     let container = Postgres::default()
+        .with_tag(POSTGRES_TEST_IMAGE_TAG)
         .start()
         .await
         .map_err(|e| format!("Failed to start PostgreSQL container: {}", e))?;
