@@ -399,6 +399,8 @@ mod tests {
     #[cfg(feature = "db-integration-tests")]
     use testcontainers::ContainerAsync;
     #[cfg(feature = "db-integration-tests")]
+    use testcontainers::ImageExt;
+    #[cfg(feature = "db-integration-tests")]
     use testcontainers::runners::AsyncRunner;
     #[cfg(feature = "db-integration-tests")]
     use testcontainers_modules::postgres::Postgres;
@@ -406,6 +408,15 @@ mod tests {
     #[cfg(feature = "db-integration-tests")]
     use crate::persistence::PostgresPersistence;
     use crate::persistence::SqlitePersistence;
+
+    /// Image tag for the fallback Postgres container.
+    ///
+    /// `Postgres::default()` ships `postgres:11-alpine`, and PostgreSQL 11
+    /// refuses `ALTER TYPE ... ADD VALUE` inside a transaction block, which the
+    /// core migrations rely on. Pin a modern tag matching the version CI runs
+    /// against so the container route exercises the same schema as CI.
+    #[cfg(feature = "db-integration-tests")]
+    const POSTGRES_TEST_IMAGE_TAG: &str = "16-alpine";
 
     #[tokio::test]
     async fn sqlite_backend_passes_parity_sequence() {
@@ -462,6 +473,7 @@ mod tests {
         }
 
         let container = Postgres::default()
+            .with_tag(POSTGRES_TEST_IMAGE_TAG)
             .start()
             .await
             .expect("required Postgres test container must start");
