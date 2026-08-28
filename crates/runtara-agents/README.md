@@ -1,42 +1,49 @@
 # runtara-agents
 
-[![Crates.io](https://img.shields.io/crates/v/runtara-agents.svg)](https://crates.io/crates/runtara-agents)
-[![Documentation](https://docs.rs/runtara-agents/badge.svg)](https://docs.rs/runtara-agents)
-[![License](https://img.shields.io/crates/l/runtara-agents.svg)](LICENSE)
-
-Pre-compiled agent implementations — HTTP, CSV/XML, SFTP, XLSX, crypto, transforms, and platform integrations — that runtara workflows link against.
+Host-side pieces that don't fit in a WASM component: the SFTP worker, the
+connection-type registry, and an S3 client.
 
 ## What it is
 
-A library of reusable "agent" capabilities that back the steps in a runtara workflow. Each agent module (e.g. `http`, `csv`, `transform`, `sftp`, `integrations::shopify`) exposes executors emitted by the `#[capability]` macro from `runtara-agent-macro` and dispatched through an explicit static registry. Consumers call `runtara_agents::registry::execute_capability(agent_id, capability_id, inputs)` — the library itself has no runtime loop, just synchronous capability functions plus shared `types` (e.g. `FileData`, `AgentError`) and `connections` scaffolding. Feature flags gate platform support: `native` pulls in C-dependent agents (SFTP via `ssh2`, XLSX via `calamine`, ZIP), while `wasi` and `wasm-js` swap in WASM-compatible transport; `integrations` enables SaaS connectors (Shopify, OpenAI, Bedrock, Stripe, HubSpot, Slack, Mailgun, S3).
+Agents normally ship as standalone WebAssembly components under
+`crates/agents/runtara-agent-*`, and that is where nearly all of them live. This
+crate holds what is left over:
 
-## Using it standalone
+- **`sftp`** — the only agent still executed natively. libssh2 is a C library
+  with no `wasm32-wasip2` target, so the SFTP component is a thin shell that
+  forwards each call to the server's `/api/internal/agents/sftp/{capability}`
+  route, which dispatches here. Gated behind the `native` feature.
+- **`extractors`** — connection-type descriptors and the `HttpConnectionExtractor`
+  trait, consumed by `runtara-connections` to build connection forms and turn
+  stored parameters into HTTP auth.
+- **`types` / `connections`** — shared `AgentError`, `FileData`, `RawConnection`.
+- **`s3_client`** — a standalone S3-compatible client used by the server's
+  file-storage service (default file storage, attachments). Not a workflow
+  agent; the S3 *capabilities* live in `runtara-agent-s3-storage`.
+- **`registry` / `static_registry`** — an explicit static list, the dispatch and
+  metadata source for the above. The production agent catalog does not come from
+  here: it is built by the component dispatcher from the `meta.json` sidecars
+  next to each `.wasm`.
 
-```toml
-[dependencies]
-runtara-agents = { version = "4.0", default-features = false, features = ["integrations"] }
-```
-
-```rust
-use runtara_agents::registry::execute_capability;
-use serde_json::json;
-
-let out = execute_capability(
-    "utils",
-    "random-double",
-    json!({ "min": 0.0, "max": 1.0 }),
-)?;
-```
-
-Pick one platform feature: `native` (default) for servers and CLIs, `wasi` for `wasm32-wasip2` guests, or `wasm-js` for browser/Node. The `emit-meta` binary (`runtara-agent-bundle-emit`) emits the capability catalog as per-agent `meta.json` for tooling.
+Compression and XLSX used to be native workers here too. They aren't: `zip`'s
+C-backed backends (bzip2, zstd, lzma) are optional features those capabilities
+never used, and `calamine` is pure Rust, so both build for `wasm32-wasip2` and
+now run entirely in the sandbox. `tests/native_registry_scope.rs` pins that
+boundary — adding a native worker back is a deliberate decision, not a routine
+change.
 
 ## Inside Runtara
 
-- Consumed by `runtara-workflows`, `runtara-workflow-stdlib`, `runtara-server`, and `runtara-environment` — the stdlib re-exports feature flags so downstream workflow binaries pick the right target.
-- Built on `runtara-dsl` (capability metadata, error model) and `runtara-agent-macro` (the `#[capability]` / `CapabilityOutput` derives that emit named metadata and executor statics).
-- Key integration point: `runtara_agents::registry`, which owns the explicit static registry used for metadata and execution dispatch.
-- Runs in both native and WASM guests: the `wasi` and `wasm-js` features gate `ssh2`, `openssl`, `calamine`, and `zip` out so the crate compiles cleanly for `wasm32-wasip2` and browser targets.
-- HTTP goes through the workspace `runtara-http` abstraction so the same agent code works across transports.
+- Consumed by `runtara-server` (SFTP dispatch, file storage, catalog
+  augmentation) and `runtara-connections` (connection types, with
+  `default-features = false`, so `ssh2`/OpenSSL stay out of its closure).
+- Built on `runtara-dsl` (capability metadata, error model) and
+  `runtara-agent-macro` (the `#[capability]` / `CapabilityOutput` derives that
+  emit named metadata and executor statics).
+- Key integration point: `runtara_agents::registry`.
+- Platform features: `native` (default, servers and CLIs) pulls in `ssh2`;
+  `wasi` and `wasm-js` swap the HTTP transport and leave SFTP out, so the
+  metadata half of the crate compiles for wasm targets.
 
 ## License
 

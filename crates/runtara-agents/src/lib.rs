@@ -8,23 +8,20 @@
 //! This file is compiled once at startup into `libagents.rlib` and then
 //! reused across all workflow compilations.
 
-// Re-export all agent modules from agents/ subdirectory
-// Only agents that genuinely cannot run as WASM components live here now — the
-// native workers for the C-dependent agents (the WASM shells call back to the
-// host via /api/internal/agents). Every pure/dual-target agent (transform,
-// crypto, csv, datetime, text, xml, utils, http) has been removed; it ships as
-// a standalone WASM component under crates/agents/runtara-agent-*.
-#[cfg(feature = "native")]
-#[path = "agents/compression.rs"]
-pub mod compression;
+// Re-export all agent modules from agents/ subdirectory.
+//
+// Only SFTP is left: libssh2 is a C library with no wasm32-wasip2 target, so
+// its WASM shell still calls back to the host via /api/internal/agents. Every
+// other agent runs entirely in the sandbox as a standalone WASM component under
+// crates/agents/runtara-agent-*. Compression and XLSX were the last two to
+// move — their C dependencies turned out to be optional (`zip`'s bzip2/zstd/
+// lzma backends, which those capabilities never used) or absent (`calamine` is
+// pure Rust).
 #[path = "agents/extractors/mod.rs"]
 pub mod extractors;
 #[cfg(feature = "native")]
 #[path = "agents/sftp.rs"]
 pub mod sftp;
-#[cfg(feature = "native")]
-#[path = "agents/xlsx.rs"]
-pub mod xlsx;
 
 // Shared types
 pub mod types;

@@ -1,7 +1,9 @@
 //! Agent Capability Execution Handlers
 //!
-//! Internal endpoint for executing native-only agent capabilities (sftp, xlsx,
-//! compression) on behalf of workflow binaries:
+//! Internal endpoint for executing native-only agent capabilities on behalf of
+//! workflow binaries. SFTP is the only one left: libssh2 has no wasm32-wasip2
+//! target, so its component forwards here. XLSX and compression used to as
+//! well; both now run entirely in the sandbox and no longer call this route.
 //!
 //! 1. **Internal** (`/api/internal/agents/{module}/{capability_id}`) —
 //!    No authentication, localhost only.

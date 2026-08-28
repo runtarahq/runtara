@@ -23,34 +23,6 @@ pub struct CapabilityRegistration {
 pub static CAPABILITY_REGISTRATIONS: &[CapabilityRegistration] = &[
     #[cfg(feature = "native")]
     CapabilityRegistration {
-        meta: &crate::compression::__CAPABILITY_META_CREATE_ARCHIVE,
-        input_type: &crate::compression::__INPUT_META_CreateArchiveInput,
-        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
-        executor: &crate::compression::__CAPABILITY_EXECUTOR_CREATE_ARCHIVE,
-    },
-    #[cfg(feature = "native")]
-    CapabilityRegistration {
-        meta: &crate::compression::__CAPABILITY_META_EXTRACT_ARCHIVE,
-        input_type: &crate::compression::__INPUT_META_ExtractArchiveInput,
-        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
-        executor: &crate::compression::__CAPABILITY_EXECUTOR_EXTRACT_ARCHIVE,
-    },
-    #[cfg(feature = "native")]
-    CapabilityRegistration {
-        meta: &crate::compression::__CAPABILITY_META_EXTRACT_FILE,
-        input_type: &crate::compression::__INPUT_META_ExtractFileInput,
-        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
-        executor: &crate::compression::__CAPABILITY_EXECUTOR_EXTRACT_FILE,
-    },
-    #[cfg(feature = "native")]
-    CapabilityRegistration {
-        meta: &crate::compression::__CAPABILITY_META_LIST_ARCHIVE,
-        input_type: &crate::compression::__INPUT_META_ListArchiveInput,
-        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
-        executor: &crate::compression::__CAPABILITY_EXECUTOR_LIST_ARCHIVE,
-    },
-    #[cfg(feature = "native")]
-    CapabilityRegistration {
         meta: &crate::sftp::__CAPABILITY_META_SFTP_LIST_FILES,
         input_type: &crate::sftp::__INPUT_META_SftpListFilesInput,
         #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
@@ -77,33 +49,9 @@ pub static CAPABILITY_REGISTRATIONS: &[CapabilityRegistration] = &[
         #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
         executor: &crate::sftp::__CAPABILITY_EXECUTOR_SFTP_DELETE_FILE,
     },
-    #[cfg(feature = "native")]
-    CapabilityRegistration {
-        meta: &crate::xlsx::__CAPABILITY_META_FROM_XLSX,
-        input_type: &crate::xlsx::__INPUT_META_FromXlsxInput,
-        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
-        executor: &crate::xlsx::__CAPABILITY_EXECUTOR_FROM_XLSX,
-    },
-    #[cfg(feature = "native")]
-    CapabilityRegistration {
-        meta: &crate::xlsx::__CAPABILITY_META_GET_SHEETS,
-        input_type: &crate::xlsx::__INPUT_META_GetSheetsInput,
-        #[cfg(not(all(target_family = "wasm", not(target_os = "wasi"))))]
-        executor: &crate::xlsx::__CAPABILITY_EXECUTOR_GET_SHEETS,
-    },
 ];
 
 pub static INPUT_TYPES: &[&InputTypeMeta] = &[
-    #[cfg(feature = "native")]
-    &crate::compression::__INPUT_META_ArchiveFileEntry,
-    #[cfg(feature = "native")]
-    &crate::compression::__INPUT_META_CreateArchiveInput,
-    #[cfg(feature = "native")]
-    &crate::compression::__INPUT_META_ExtractArchiveInput,
-    #[cfg(feature = "native")]
-    &crate::compression::__INPUT_META_ExtractFileInput,
-    #[cfg(feature = "native")]
-    &crate::compression::__INPUT_META_ListArchiveInput,
     #[cfg(feature = "native")]
     &crate::sftp::__INPUT_META_SftpListFilesInput,
     #[cfg(feature = "native")]
@@ -112,29 +60,15 @@ pub static INPUT_TYPES: &[&InputTypeMeta] = &[
     &crate::sftp::__INPUT_META_SftpUploadFileInput,
     #[cfg(feature = "native")]
     &crate::sftp::__INPUT_META_SftpDeleteFileInput,
-    #[cfg(feature = "native")]
-    &crate::xlsx::__INPUT_META_FromXlsxInput,
-    #[cfg(feature = "native")]
-    &crate::xlsx::__INPUT_META_GetSheetsInput,
 ];
 
 pub static OUTPUT_TYPES: &[&OutputTypeMeta] = &[
     &crate::types::__OUTPUT_META_FileData,
-    #[cfg(feature = "native")]
-    &crate::compression::__OUTPUT_META_ExtractedFile,
-    #[cfg(feature = "native")]
-    &crate::compression::__OUTPUT_META_ExtractArchiveOutput,
-    #[cfg(feature = "native")]
-    &crate::compression::__OUTPUT_META_ArchiveEntryInfo,
-    #[cfg(feature = "native")]
-    &crate::compression::__OUTPUT_META_ListArchiveOutput,
     &crate::types::__OUTPUT_META_LlmUsage,
     #[cfg(feature = "native")]
     &crate::sftp::__OUTPUT_META_FileInfo,
     #[cfg(feature = "native")]
     &crate::sftp::__OUTPUT_META_DeleteFileResponse,
-    #[cfg(feature = "native")]
-    &crate::xlsx::__OUTPUT_META_SheetInfo,
 ];
 
 pub static CONNECTION_TYPES: &[&ConnectionTypeMeta] = &[
@@ -162,18 +96,11 @@ pub static CONNECTION_TYPES: &[&ConnectionTypeMeta] = &[
     &crate::extractors::connection_types::__CONNECTION_META_McpConnectionParams,
 ];
 
-#[cfg(feature = "native")]
-const XLSX_AGENT_MODULE: AgentModuleConfig = AgentModuleConfig {
-    id: "xlsx",
-    name: "Spreadsheet",
-    description: "Parse Excel and OpenDocument spreadsheets (XLSX, XLS, XLSB, ODS)",
-    has_side_effects: false,
-    supports_connections: false,
-    integration_ids: &[],
-    secure: false,
-};
-
-pub static EXTRA_AGENT_MODULES: &[&AgentModuleConfig] = &[
-    #[cfg(feature = "native")]
-    &XLSX_AGENT_MODULE,
-];
+/// Agent modules that exist beyond `runtara_dsl`'s `BUILTIN_AGENT_MODULES`.
+///
+/// Empty since compression and XLSX became WASM components: a component agent
+/// carries its own module config in the `meta.json` sidecar emitted from
+/// `agent_info()`, which the component dispatcher loads at boot. Kept as the
+/// extension point rather than deleted — `get_all_agent_modules` still folds it
+/// in, so a future host-only module has somewhere to register.
+pub static EXTRA_AGENT_MODULES: &[&AgentModuleConfig] = &[];

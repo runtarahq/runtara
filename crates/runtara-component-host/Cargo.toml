@@ -28,6 +28,11 @@ path = "tests/dispatcher.rs"
 required-features = ["component-integration-tests"]
 
 [[test]]
+name = "native_free_agents"
+path = "tests/native_free_agents.rs"
+required-features = ["component-integration-tests"]
+
+[[test]]
 name = "sqs_agent"
 path = "tests/sqs_agent.rs"
 required-features = ["component-integration-tests"]
@@ -95,3 +100,8 @@ wasmtime = { version = "46", default-features = false, features = ["wat"] }
 # calling each agent crate's host-only `agent_info()` and serializing the
 # resulting `AgentInfo` to JSON next to the freshly-built `.wasm`.
 runtara-agent-crypto = { path = "../agents/runtara-agent-crypto" }
+# Native-free agents that used to forward to a host handler; the wasm-execution
+# suite runs their real implementations inside wasmtime.
+runtara-agent-compression = { path = "../agents/runtara-agent-compression" }
+runtara-agent-xlsx = { path = "../agents/runtara-agent-xlsx" }
+base64 = { workspace = true }
