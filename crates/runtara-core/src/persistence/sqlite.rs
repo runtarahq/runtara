@@ -908,13 +908,26 @@ mod tests {
             .await
             .expect("Failed to acknowledge signal");
 
+        // An acknowledged signal is consumed: it must not be handed back, or a
+        // relaunched instance would re-suspend on a cancel it already handled.
+        let signal = persistence.get_pending_signal(&instance_id).await.unwrap();
+        assert!(signal.is_none(), "acknowledged signal must not be pending");
+
+        // A genuinely new signal for the same instance is still delivered —
+        // `insert_signal` resets `acknowledged_at` on conflict.
+        persistence
+            .insert_signal(&instance_id, "shutdown", b"drain")
+            .await
+            .unwrap();
+
         let signal = persistence
             .get_pending_signal(&instance_id)
             .await
             .unwrap()
-            .unwrap();
-
-        assert!(signal.acknowledged_at.is_some());
+            .expect("a freshly inserted signal must be pending again");
+        assert_eq!(signal.signal_type, "shutdown");
+        assert_eq!(signal.payload, Some(b"drain".to_vec()));
+        assert!(signal.acknowledged_at.is_none());
     }
 
     #[tokio::test]

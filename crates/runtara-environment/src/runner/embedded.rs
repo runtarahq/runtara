@@ -285,10 +285,9 @@ fn has_on_signal_wake(wakes: &[runtara_component_host::lifecycle::WorkflowWake])
 /// was requested and demonstrably not honoured, and reporting clean success for
 /// it is the failure mode this exists to prevent.
 async fn enforce_unacked_cancel(persistence: &Arc<dyn Persistence>, instance_id: &str) {
-    // `acknowledged_at` must be checked explicitly: SQLite's `get_pending_signal`
-    // returns acknowledged rows too (Postgres filters them), so the row's mere
-    // presence would otherwise re-cancel a run whose guest handled the signal
-    // properly.
+    // Both backends already filter acknowledged rows, so this re-checks what the
+    // query guarantees: this backstop overwrites a terminal status, so a
+    // regression there must not re-cancel a run whose guest handled the signal.
     match persistence.get_pending_signal(instance_id).await {
         Ok(Some(signal)) if signal.signal_type == "cancel" && signal.acknowledged_at.is_none() => {
             warn!(
@@ -1032,10 +1031,10 @@ mod tests {
         );
     }
 
-    /// The regression the SQLite dialect invites. `get_pending_signal` returns
-    /// ALREADY-ACKNOWLEDGED rows there (Postgres filters them), so a backstop
-    /// keyed on the row's presence would re-cancel a run whose guest handled the
-    /// signal correctly and then finished.
+    /// A backstop keyed on the row's mere presence would re-cancel a run whose
+    /// guest handled the signal correctly and then finished. Pins both halves of
+    /// the defence: the query filters acknowledged rows, and the caller checks
+    /// `acknowledged_at` anyway.
     #[tokio::test]
     async fn an_acknowledged_cancel_does_not_re_cancel_a_finished_run() {
         let (persistence, _dir) = backstop_fixture().await;

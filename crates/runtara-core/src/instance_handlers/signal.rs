@@ -81,8 +81,10 @@ pub async fn handle_poll_signals(
 
 /// Handle signal acknowledgement (fire-and-forget).
 ///
-/// Marks a signal as acknowledged by the instance.
-/// If acknowledging a cancel signal, also updates instance status to cancelled.
+/// Applies the signal's status transition — a cancel ack also moves the
+/// instance to `cancelled` — and only then marks the signal acknowledged, so a
+/// transition that fails leaves the signal pending to be retried rather than
+/// consumed.
 #[instrument(skip(state, ack), fields(
     instance_id = %ack.instance_id,
     signal_type = ?ack.signal_type(),
@@ -95,12 +97,6 @@ pub async fn handle_signal_ack(state: &InstanceHandlerState, ack: SignalAck) -> 
     );
 
     if ack.acknowledged {
-        // Mark signal as acknowledged
-        state
-            .persistence
-            .acknowledge_signal(&ack.instance_id)
-            .await?;
-
         // Handle signal-specific side effects
         match ack.signal_type() {
             SignalType::SignalCancel => {
@@ -147,6 +143,19 @@ pub async fn handle_signal_ack(state: &InstanceHandlerState, ack: SignalAck) -> 
                 info!("Instance suspended for shutdown");
             }
         }
+
+        // Acknowledge last, once the status transition above has landed.
+        // Acknowledging first consumes the signal whether or not the
+        // transition succeeded, and callers log-and-continue on the error, so
+        // a transient database failure would leave an instance that was told
+        // to cancel recorded as a clean success: the guest's next poll would
+        // no longer see the signal, and the end-of-run cancel backstop would
+        // find nothing to enforce. Acking here instead leaves an unhandled
+        // signal pending, which is what both of those retry paths key on.
+        state
+            .persistence
+            .acknowledge_signal(&ack.instance_id)
+            .await?;
     } else {
         warn!("Signal was not acknowledged by instance");
     }
@@ -223,6 +232,38 @@ mod tests {
                 .await
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    /// A failed status transition must leave the signal pending. Consuming it
+    /// regardless would strand the instance: callers of this handler log the
+    /// error and continue, so nothing else would ever retry the cancel, and the
+    /// run would record as a clean success despite having been cancelled.
+    #[tokio::test]
+    async fn test_signal_ack_leaves_signal_pending_when_the_transition_fails() {
+        // No instance registered, so `complete_instance` fails with
+        // InstanceNotFound — the transition never lands.
+        let persistence =
+            Arc::new(MockPersistence::new().with_signal(make_signal("inst-1", "cancel")));
+        let state = InstanceHandlerState::new(persistence.clone());
+
+        let ack = SignalAck {
+            instance_id: "inst-1".to_string(),
+            signal_type: SignalType::SignalCancel as i32,
+            acknowledged: true,
+        };
+
+        handle_signal_ack(&state, ack)
+            .await
+            .expect_err("a failed status transition must surface as an error");
+
+        assert!(
+            persistence
+                .get_pending_signal("inst-1")
+                .await
+                .unwrap()
+                .is_some(),
+            "the signal must stay pending so the next poll and the cancel backstop can retry it"
         );
     }
 

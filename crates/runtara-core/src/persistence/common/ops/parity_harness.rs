@@ -197,6 +197,31 @@ pub async fn run_parity_sequence<P: Persistence>(backend: &P) {
         .acknowledge_signal(&instance_id)
         .await
         .expect("acknowledge_signal failed");
+    // The ack consumes the signal on both backends: a second read must come
+    // back empty. Re-reading is the whole point — a guest acknowledges on read,
+    // and a redelivered cancel would re-suspend a relaunched instance on a
+    // signal it already handled.
+    assert!(
+        backend
+            .get_pending_signal(&instance_id)
+            .await
+            .expect("get_pending_signal after ack failed")
+            .is_none(),
+        "an acknowledged signal must not be delivered again"
+    );
+    // A genuinely new signal for the same instance is still delivered: the
+    // insert resets the acknowledgement.
+    backend
+        .insert_signal(&instance_id, "shutdown", b"drain")
+        .await
+        .expect("insert_signal after ack failed");
+    let reinserted = backend
+        .get_pending_signal(&instance_id)
+        .await
+        .expect("get_pending_signal after re-insert failed")
+        .expect("a freshly inserted signal must be pending again");
+    assert_eq!(reinserted.signal_type, "shutdown");
+    assert!(reinserted.acknowledged_at.is_none());
 
     // --- custom checkpoint signals -----------------------------------------
     let custom_payload = br#"{"wait-key":"payment"}"#.to_vec();

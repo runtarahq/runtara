@@ -12,12 +12,6 @@
 //!   cross-backend normalization beyond the three approved in the
 //!   SYN-394 plan, so the insert paths remain per-backend for now.
 //!
-//! Preserved divergence (documented on the Dialect SQL strings):
-//! - `get_pending_signal` on Postgres filters `acknowledged_at IS NULL`;
-//!   SQLite returns any row for the instance, including acknowledged
-//!   ones. This is a legacy SQLite bug that's explicitly out of scope
-//!   for this refactor; see `SqliteDialect::sql_get_pending_signal`.
-//!
 //! `take_pending_custom_signal` is a **non-destructive** read via
 //! `Dialect::sql_take_pending_custom_signal` (a plain SELECT on both
 //! backends). The row is retained so replay-from-start re-reads the same
@@ -26,8 +20,9 @@
 macro_rules! impl_signal_ops {
     ($Backend:ty, $Pool:ty, $Dialect:ty) => {
         impl $Backend {
-            /// SELECT the pending signal for an instance. Postgres filters
-            /// out acknowledged rows; SQLite does not (legacy divergence).
+            /// SELECT the pending signal for an instance. Both backends
+            /// filter out acknowledged rows, so a signal a guest already
+            /// consumed is not handed back on the next read.
             pub(crate) async fn op_get_pending_signal(
                 pool: &$Pool,
                 instance_id: &str,

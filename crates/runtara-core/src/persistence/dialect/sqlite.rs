@@ -142,12 +142,9 @@ impl Dialect for SqliteDialect {
     }
 
     fn sql_get_pending_signal() -> &'static str {
-        // Legacy SQLite behavior: returns any row for the instance, including
-        // already-acknowledged ones. Postgres filters `acknowledged_at IS NULL`.
-        // Divergence preserved here and documented on the trait method.
         "SELECT instance_id, signal_type, payload, created_at, acknowledged_at \
          FROM pending_signals \
-         WHERE instance_id = ?1"
+         WHERE instance_id = ?1 AND acknowledged_at IS NULL"
     }
 
     fn sql_acknowledge_signal() -> &'static str {
