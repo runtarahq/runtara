@@ -17,8 +17,8 @@
 #   * and those 4xx answers are logged at WARN, not ERROR. That is the other
 #     half of the fix: a drain race should stop paging whoever reads the logs.
 #
-# Self-contained: needs cargo, curl and SQLite only. No docker, no Postgres, no
-# ./start.sh.
+# Needs cargo, curl and a reachable Postgres; it creates and drops its own
+# throwaway database. No docker, no ./start.sh.
 
 set -uo pipefail
 
@@ -31,6 +31,24 @@ print_success() { echo -e "${GREEN}[SUCCESS]${NC} $1"; }
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
+POSTGRES_HOST="${POSTGRES_HOST:-localhost}"
+POSTGRES_PORT="${POSTGRES_PORT:-5432}"
+POSTGRES_USER="${POSTGRES_USER:-smo_worker}"
+POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-GueUkDKea0CjKP4Rn5Bk0FDV}"
+
+# A throwaway database per run, so a stray instance row from another test
+# cannot change what these status-code assertions see. `$$` keeps two
+# concurrent runs apart.
+TEST_DB="runtara_e2e_core_status_$$"
+
+psql_quiet() {
+    PGPASSWORD="${POSTGRES_PASSWORD}" psql \
+        -U "${POSTGRES_USER}" -h "${POSTGRES_HOST}" -p "${POSTGRES_PORT}" \
+        -v ON_ERROR_STOP=1 -tA "$@"
+}
+
+DB_CREATED=0
+
 WORK_DIR="$(mktemp -d)"
 LOG_FILE="${WORK_DIR}/core.log"
 CORE_PID=""
@@ -39,6 +57,13 @@ cleanup() {
     if [ -n "${CORE_PID}" ] && kill -0 "${CORE_PID}" 2>/dev/null; then
         kill -KILL "${CORE_PID}" 2>/dev/null
         wait "${CORE_PID}" 2>/dev/null
+    fi
+    if [ "${DB_CREATED}" = "1" ]; then
+        # WITH (FORCE) is required, not tidiness: every fail() path SIGKILLs the
+        # core, and a plain DROP loses to "database is being accessed by other
+        # users", leaking one database per aborted run.
+        psql_quiet -d postgres \
+            -c "DROP DATABASE IF EXISTS \"${TEST_DB}\" WITH (FORCE);" >/dev/null 2>&1
     fi
     rm -rf "${WORK_DIR}"
 }
@@ -63,6 +88,13 @@ s.close()
 PY
 }
 
+print_step "Checking Postgres at ${POSTGRES_HOST}:${POSTGRES_PORT}"
+# Before the build, not after: a missing database should cost a second, not a
+# full debug compile of runtara-core.
+if ! psql_quiet -d postgres -c 'SELECT 1;' >/dev/null 2>&1; then
+    fail "cannot reach Postgres as ${POSTGRES_USER}@${POSTGRES_HOST}:${POSTGRES_PORT} (set POSTGRES_HOST/PORT/USER/PASSWORD)"
+fi
+
 print_step "Building runtara-core"
 
 # Build from the repo root, not the caller's cwd: rustup resolves
@@ -81,14 +113,27 @@ TARGET_DIR="$(cd "${PROJECT_ROOT}" && cargo metadata --format-version 1 --no-dep
 CORE_BIN="${TARGET_DIR}/debug/runtara-core"
 [ -x "${CORE_BIN}" ] || fail "runtara-core binary not found at ${CORE_BIN}"
 
-PORT="$(pick_port)"
-print_step "Starting runtara-core on 127.0.0.1:${PORT} (SQLite)"
+print_step "Creating throwaway database ${TEST_DB}"
+psql_quiet -d postgres -c "DROP DATABASE IF EXISTS \"${TEST_DB}\" WITH (FORCE);" >/dev/null 2>&1
+psql_quiet -d postgres -c "CREATE DATABASE \"${TEST_DB}\";" >/dev/null || fail "could not create ${TEST_DB}"
+DB_CREATED=1
+# The core migrations use gen_random_uuid() (built in since PG13), but the
+# crate's own parity harness provisions pgcrypto before running the same
+# migrator; mirror it so the two provisioning paths cannot disagree.
+psql_quiet -d "${TEST_DB}" -c 'CREATE EXTENSION IF NOT EXISTS pgcrypto;' >/dev/null \
+    || fail "could not create pgcrypto extension in ${TEST_DB}"
 
-# `dotenvy` walks up to the repo root, so run from the temp dir to keep a
-# developer's own .env out of this test's configuration.
+PORT="$(pick_port)"
+print_step "Starting runtara-core on 127.0.0.1:${PORT} (Postgres)"
+
+# Run from the temp dir so `dotenvy`, which walks up to the repo root, cannot
+# apply the developer's .env. RUNTARA_DATABASE_URL is passed explicitly and
+# dotenvy does not override the environment, so the database is never at risk;
+# what this guards is RUST_LOG and the OTEL exporter settings, which would
+# otherwise replace the log filter the assertions below read.
 (
     cd "${WORK_DIR}" || exit 1
-    RUNTARA_DATABASE_URL="sqlite://${WORK_DIR}/core.db?mode=rwc" \
+    RUNTARA_DATABASE_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${TEST_DB}" \
     RUNTARA_HTTP_PORT="${PORT}" \
     RUST_LOG="runtara_core=info" \
     exec "${CORE_BIN}"
@@ -97,7 +142,7 @@ CORE_PID=$!
 
 print_step "Waiting for /health"
 READY=0
-for _ in $(seq 1 100); do
+for _ in $(seq 1 200); do
     if ! kill -0 "${CORE_PID}" 2>/dev/null; then
         fail "runtara-core exited during startup"
     fi
