@@ -42,6 +42,7 @@ use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
+use crate::config::RuntimeOverrides;
 use crate::instance_handlers::InstanceHandlerState;
 use crate::persistence::Persistence;
 use crate::server::InstanceServerState;
@@ -129,6 +130,22 @@ impl CoreRuntimeBuilder {
     /// flight.
     pub fn shutdown_grace(mut self, grace: Duration) -> Self {
         self.shutdown_grace = grace;
+        self
+    }
+
+    /// Apply the environment-derived [`RuntimeOverrides`], leaving any knob the
+    /// deployment did not set at its current value.
+    ///
+    /// Hosts that embed the runtime should prefer this to the individual
+    /// setters: it is one call for the whole set, so a call site cannot wire
+    /// half of core's configuration and silently drop the rest.
+    pub fn apply_overrides(mut self, overrides: RuntimeOverrides) -> Self {
+        if let Some(limit) = overrides.max_concurrent_instances {
+            self.max_concurrent_instances = limit;
+        }
+        if let Some(grace) = overrides.shutdown_grace {
+            self.shutdown_grace = grace;
+        }
         self
     }
 
@@ -780,6 +797,51 @@ mod tests {
         assert!(result.is_ok());
         let config = result.unwrap();
         assert_eq!(config.bind_addr.port(), 9002);
+    }
+
+    #[test]
+    fn test_builder_apply_overrides_sets_both_knobs() {
+        let builder = CoreRuntimeBuilder::new().apply_overrides(RuntimeOverrides {
+            max_concurrent_instances: Some(4),
+            shutdown_grace: Some(Duration::from_millis(250)),
+        });
+
+        assert_eq!(builder.max_concurrent_instances, 4);
+        assert_eq!(builder.shutdown_grace, Duration::from_millis(250));
+    }
+
+    #[test]
+    fn test_builder_apply_overrides_leaves_unset_knobs_alone() {
+        // A deployment that configures only the grace must not acquire a
+        // concurrency cap as a side effect, and vice versa.
+        let grace_only = CoreRuntimeBuilder::new()
+            .max_concurrent_instances(9)
+            .apply_overrides(RuntimeOverrides {
+                max_concurrent_instances: None,
+                shutdown_grace: Some(Duration::from_millis(750)),
+            });
+        assert_eq!(grace_only.max_concurrent_instances, 9);
+        assert_eq!(grace_only.shutdown_grace, Duration::from_millis(750));
+
+        let empty = CoreRuntimeBuilder::new().apply_overrides(RuntimeOverrides::default());
+        assert_eq!(empty.max_concurrent_instances, 0);
+        assert_eq!(empty.shutdown_grace, DEFAULT_SHUTDOWN_GRACE);
+    }
+
+    #[test]
+    fn test_build_carries_overrides_into_config() {
+        let persistence = Arc::new(MockPersistence::new());
+        let config = CoreRuntimeBuilder::new()
+            .persistence(persistence)
+            .apply_overrides(RuntimeOverrides {
+                max_concurrent_instances: Some(3),
+                shutdown_grace: Some(Duration::from_millis(100)),
+            })
+            .build()
+            .unwrap();
+
+        assert_eq!(config.max_concurrent_instances, 3);
+        assert_eq!(config.shutdown_grace, Duration::from_millis(100));
     }
 
     #[test]

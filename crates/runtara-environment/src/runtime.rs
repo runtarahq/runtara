@@ -77,6 +77,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
+use runtara_core::config::RuntimeOverrides;
 use runtara_core::persistence::{CompleteInstanceParams, Persistence};
 use runtara_core::runtime::CoreRuntime;
 use sqlx::PgPool;
@@ -101,6 +102,7 @@ pub struct EnvironmentRuntimeBuilder {
     bind_addr: SocketAddr,
     core_addr: String,
     core_bind_addr: Option<SocketAddr>,
+    core_overrides: Option<RuntimeOverrides>,
     data_dir: PathBuf,
     wake_poll_interval: Duration,
     wake_batch_size: i64,
@@ -122,6 +124,7 @@ impl Default for EnvironmentRuntimeBuilder {
             bind_addr: "0.0.0.0:8002".parse().unwrap(),
             core_addr: "127.0.0.1:8001".to_string(),
             core_bind_addr: None,
+            core_overrides: None,
             data_dir: PathBuf::from(".data"),
             wake_poll_interval: Duration::from_secs(5),
             wake_batch_size: 10,
@@ -191,6 +194,23 @@ impl EnvironmentRuntimeBuilder {
     /// Default: `None` (no embedded Core)
     pub fn core_bind_addr(mut self, addr: SocketAddr) -> Self {
         self.core_bind_addr = Some(addr);
+        self
+    }
+
+    /// Set runtara-core's configuration for the embedded `CoreRuntime`.
+    ///
+    /// Default: read from the environment during [`build`](Self::build), which
+    /// is what a deployment configuring core through `RUNTARA_*` variables
+    /// expects. Set this to configure the embedded core from code instead —
+    /// tests do, so an ambient variable cannot change what they assert.
+    ///
+    /// The resulting configuration is unused when no
+    /// [`core_bind_addr`](Self::core_bind_addr) is set — there is no embedded
+    /// core to configure — but [`build`](Self::build) still reads and validates
+    /// the environment in that case, so a malformed value fails the build
+    /// wherever it appears rather than only where it would have been applied.
+    pub fn core_overrides(mut self, overrides: RuntimeOverrides) -> Self {
+        self.core_overrides = Some(overrides);
         self
     }
 
@@ -287,6 +307,13 @@ impl EnvironmentRuntimeBuilder {
         let persistence = self
             .core_persistence
             .ok_or_else(|| anyhow::anyhow!("core_persistence is required"))?;
+        // Fall back to the environment rather than to bare builder defaults:
+        // this crate's binary embeds core, so a deployment's core settings have
+        // nowhere else to enter from.
+        let core_overrides = match self.core_overrides {
+            Some(overrides) => overrides,
+            None => RuntimeOverrides::from_env()?,
+        };
 
         Ok(EnvironmentRuntimeConfig {
             pool,
@@ -295,6 +322,7 @@ impl EnvironmentRuntimeBuilder {
             bind_addr: self.bind_addr,
             core_addr: self.core_addr,
             core_bind_addr: self.core_bind_addr,
+            core_overrides,
             data_dir: self.data_dir,
             wake_poll_interval: self.wake_poll_interval,
             wake_batch_size: self.wake_batch_size,
@@ -317,6 +345,7 @@ pub struct EnvironmentRuntimeConfig {
     bind_addr: SocketAddr,
     core_addr: String,
     core_bind_addr: Option<SocketAddr>,
+    core_overrides: RuntimeOverrides,
     data_dir: PathBuf,
     wake_poll_interval: Duration,
     wake_batch_size: i64,
@@ -342,6 +371,7 @@ impl EnvironmentRuntimeConfig {
             let core = CoreRuntime::builder()
                 .persistence(self.persistence.clone())
                 .bind_addr(core_bind_addr)
+                .apply_overrides(self.core_overrides)
                 .build()?
                 .start()
                 .await?;
@@ -930,6 +960,7 @@ async fn recover_orphaned_containers(pool: &PgPool, persistence: &dyn Persistenc
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_env::EnvGuard;
 
     #[test]
     fn test_builder_default_values() {
@@ -1007,6 +1038,87 @@ mod tests {
         let builder = EnvironmentRuntimeBuilder::new();
 
         assert!(builder.core_bind_addr.is_none());
+    }
+
+    #[test]
+    fn test_builder_core_overrides_default_is_env() {
+        // `None` means "resolve from the environment in `build`" — the default
+        // has to stay that way for a deployment's core settings to reach the
+        // embedded runtime at all.
+        let builder = EnvironmentRuntimeBuilder::new();
+
+        assert!(builder.core_overrides.is_none());
+    }
+
+    #[test]
+    fn test_builder_core_overrides_explicit_wins() {
+        let overrides = RuntimeOverrides {
+            max_concurrent_instances: Some(5),
+            shutdown_grace: Some(Duration::from_millis(400)),
+        };
+        let builder = EnvironmentRuntimeBuilder::new().core_overrides(overrides);
+
+        assert_eq!(builder.core_overrides, Some(overrides));
+    }
+
+    /// A builder with the three required fields filled in, so `build` can run.
+    /// The pool is lazy: nothing here connects to a database.
+    fn buildable() -> EnvironmentRuntimeBuilder {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://runtara:runtara@127.0.0.1/runtara")
+            .expect("lazy pool");
+        EnvironmentRuntimeBuilder::new()
+            .pool(pool.clone())
+            .runner(Arc::new(crate::runner::MockRunner::new()))
+            .core_persistence(Arc::new(
+                runtara_core::persistence::postgres::PostgresPersistence::new(pool),
+            ))
+    }
+
+    // A lazy pool spawns a maintenance task, so these need a reactor. The
+    // guard restores the environment even when an assertion panics, so an
+    // ambient value survives the suite either way.
+    #[tokio::test]
+    async fn test_build_resolves_core_overrides_from_env() {
+        let mut guard = EnvGuard::new();
+        guard.set("RUNTARA_MAX_CONCURRENT_INSTANCES", "11");
+
+        let config = buildable().build().expect("build");
+
+        assert_eq!(config.core_overrides.max_concurrent_instances, Some(11));
+    }
+
+    #[tokio::test]
+    async fn test_build_rejects_malformed_core_config() {
+        let mut guard = EnvGuard::new();
+        guard.set("RUNTARA_MAX_CONCURRENT_INSTANCES", "unlimited");
+
+        let err = buildable()
+            .build()
+            .err()
+            .expect("malformed core config must fail startup");
+
+        assert!(
+            err.to_string().contains("RUNTARA_MAX_CONCURRENT_INSTANCES"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_build_explicit_core_overrides_ignore_env() {
+        let mut guard = EnvGuard::new();
+        guard.set("RUNTARA_MAX_CONCURRENT_INSTANCES", "11");
+
+        let config = buildable()
+            .core_overrides(RuntimeOverrides {
+                max_concurrent_instances: Some(2),
+                shutdown_grace: None,
+            })
+            .build()
+            .expect("build");
+
+        assert_eq!(config.core_overrides.max_concurrent_instances, Some(2));
+        assert!(config.core_overrides.shutdown_grace.is_none());
     }
 
     #[test]
