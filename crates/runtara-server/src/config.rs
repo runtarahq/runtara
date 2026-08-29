@@ -51,8 +51,6 @@ pub struct Config {
     pub object_model_pool_cache_ttl_secs: u64,
     /// Internal HTTP port (used to derive default service URLs).
     pub internal_port: u16,
-    /// Name of the stdlib crate compiled into workflows.
-    pub stdlib_name: String,
     /// HTTP proxy URL forwarded to workflow processes for outbound HTTP.
     pub http_proxy_url: String,
     /// Object-model internal API URL forwarded to workflow processes.
@@ -188,9 +186,6 @@ impl Config {
             .parse()
             .map_err(|_| ConfigError::Invalid("INTERNAL_PORT", "must be a valid port number"))?;
 
-        let stdlib_name = std::env::var("RUNTARA_STDLIB_NAME")
-            .unwrap_or_else(|_| "runtara_workflow_stdlib".to_string());
-
         let http_proxy_url = std::env::var("RUNTARA_HTTP_PROXY_URL")
             .unwrap_or_else(|_| format!("http://127.0.0.1:{}/api/internal/proxy", internal_port));
 
@@ -278,7 +273,6 @@ impl Config {
             object_model_pool_cache_max,
             object_model_pool_cache_ttl_secs,
             internal_port,
-            stdlib_name,
             http_proxy_url,
             object_model_url,
             agent_service_url,

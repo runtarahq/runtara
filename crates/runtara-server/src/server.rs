@@ -769,17 +769,6 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     // Load all env-derived configuration up front; fails fast on missing/invalid.
     let server_config = config::Config::from_env()?;
 
-    // Expose stdlib name to workflow compilation, which reads it from the process
-    // environment at codegen time (runtara_workflows::agents_library and
-    // runtara_workflows::codegen). This is the only env::set_var the server
-    // performs; all other workflow-side values are passed through
-    // LaunchOptions.env at runner launch time.
-    // SAFETY: called early in start() before any threads are spawned.
-    unsafe {
-        std::env::set_var("RUNTARA_STDLIB_NAME", &server_config.stdlib_name);
-    }
-    println!("✓ Runtara stdlib: {}", server_config.stdlib_name);
-
     // Initialize OpenTelemetry with Datadog integration
     // Must be called BEFORE any tracing macros are used
     observability::init_telemetry()?;
