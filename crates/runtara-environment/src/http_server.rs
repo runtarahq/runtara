@@ -13,20 +13,19 @@ use axum::{
     Router,
     extract::{Multipart, Path, Query, State},
     http::StatusCode,
-    response::{IntoResponse, Json},
+    response::{IntoResponse, Json, Response},
     routing::{get, post},
 };
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 use crate::db;
 use crate::handlers::{
     self, EnvironmentHandlerState, GetCapabilityRequest, RegisterImageRequest,
     ResumeInstanceRequest, StartInstanceRequest, StopInstanceRequest,
 };
-use crate::image_registry::ImageRegistry;
 
 /// Maximum body size for image uploads (64 MB).
 const MAX_BODY_SIZE: usize = 64 * 1024 * 1024;
@@ -56,19 +55,6 @@ struct RegisterImageJsonResponse {
     image_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
-}
-
-/// Image summary (used in list/get responses).
-#[derive(Debug, Serialize)]
-struct ImageSummaryJson {
-    image_id: String,
-    tenant_id: String,
-    name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    description: Option<String>,
-    created_at_ms: i64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    metadata: Option<Value>,
 }
 
 /// List images query parameters.
@@ -135,51 +121,6 @@ struct SimpleSuccessResponse {
     error: Option<String>,
 }
 
-/// Instance status response.
-#[derive(Debug, Serialize)]
-struct InstanceStatusJsonResponse {
-    found: bool,
-    instance_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    status: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tenant_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    image_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    image_name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    checkpoint_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    created_at_ms: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    started_at_ms: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    finished_at_ms: Option<i64>,
-    /// Base64-encoded output.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    output: Option<String>,
-    /// Base64-encoded input.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    input: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    stderr: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    retry_count: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    max_retries: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    memory_peak_bytes: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    cpu_usage_usec: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    termination_reason: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    exit_code: Option<i32>,
-}
-
 /// List instances query parameters.
 #[derive(Debug, Deserialize)]
 struct ListInstancesQuery {
@@ -232,22 +173,6 @@ fn resolve_status_filter(statuses: Option<&str>, status: Option<&str>) -> Option
     (!resolved.is_empty()).then_some(resolved)
 }
 
-/// Instance summary for list responses.
-#[derive(Debug, Serialize)]
-struct InstanceSummaryJson {
-    instance_id: String,
-    tenant_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    image_id: Option<String>,
-    status: String,
-    created_at_ms: i64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    started_at_ms: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    finished_at_ms: Option<i64>,
-    has_error: bool,
-}
-
 /// Send signal request (JSON body).
 #[derive(Debug, Deserialize)]
 struct SendSignalJsonRequest {
@@ -279,27 +204,6 @@ struct ListCheckpointsQuery {
     created_before_ms: Option<i64>,
 }
 
-/// Checkpoint summary.
-#[derive(Debug, Serialize)]
-struct CheckpointSummaryJson {
-    checkpoint_id: String,
-    instance_id: String,
-    created_at_ms: i64,
-    data_size_bytes: u64,
-}
-
-/// Full checkpoint response.
-#[derive(Debug, Serialize)]
-struct CheckpointDetailJson {
-    found: bool,
-    checkpoint_id: String,
-    instance_id: String,
-    created_at_ms: i64,
-    /// Base64-encoded checkpoint data.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    data: Option<String>,
-}
-
 /// List events query parameters.
 #[derive(Debug, Deserialize)]
 struct ListEventsQuery {
@@ -327,22 +231,6 @@ struct ListEventsQuery {
     sort_order: Option<String>,
 }
 
-/// Event summary.
-#[derive(Debug, Serialize)]
-struct EventSummaryJson {
-    id: i64,
-    instance_id: String,
-    event_type: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    checkpoint_id: Option<String>,
-    /// Base64-encoded payload.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    payload: Option<String>,
-    created_at_ms: i64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    subtype: Option<String>,
-}
-
 /// List step summaries query parameters.
 #[derive(Debug, Deserialize)]
 struct ListStepSummariesQuery {
@@ -367,53 +255,6 @@ struct ListStepSummariesQuery {
     offset: Option<u32>,
 }
 
-/// Step summary.
-#[derive(Debug, Serialize)]
-struct StepSummaryJson {
-    step_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    step_name: Option<String>,
-    step_type: String,
-    status: String,
-    started_at_ms: i64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    completed_at_ms: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    duration_ms: Option<i64>,
-    /// Real launch/settle wall-clock (epoch ms) of a parallel branch's async
-    /// work — present only for concurrent steps, so the timeline/replay render
-    /// the true overlapping interval instead of the sequential assemble cascade.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    launched_at_ms: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    settled_at_ms: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    inputs: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    outputs: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    scope_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    parent_scope_id: Option<String>,
-}
-
-/// Scope info for ancestor response.
-#[derive(Debug, Serialize)]
-struct ScopeInfoJson {
-    scope_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    parent_scope_id: Option<String>,
-    step_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    step_name: Option<String>,
-    step_type: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    index: Option<u32>,
-    created_at_ms: i64,
-}
-
 /// Tenant metrics query parameters.
 #[derive(Debug, Deserialize)]
 struct TenantMetricsQuery {
@@ -425,43 +266,9 @@ struct TenantMetricsQuery {
     granularity: Option<String>,
 }
 
-/// Metrics bucket.
-#[derive(Debug, Serialize)]
-struct MetricsBucketJson {
-    bucket_time_ms: i64,
-    invocation_count: i64,
-    success_count: i64,
-    failure_count: i64,
-    cancelled_count: i64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    avg_duration_ms: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    min_duration_ms: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    max_duration_ms: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    avg_memory_bytes: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    max_memory_bytes: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    success_rate_percent: Option<f64>,
-}
-
 // ============================================================================
 // Helper functions
 // ============================================================================
-
-fn instance_status_to_string(status: &str) -> &str {
-    match status {
-        "pending" => "pending",
-        "running" => "running",
-        "suspended" | "sleeping" => "suspended",
-        "completed" => "completed",
-        "failed" => "failed",
-        "cancelled" => "cancelled",
-        _ => "unknown",
-    }
-}
 
 fn error_response(code: &str, message: &str, status: StatusCode) -> (StatusCode, Json<Value>) {
     build_error_response(code, message, status, ErrorDetail::default())
@@ -483,6 +290,27 @@ fn error_response_from<E: Into<crate::error::Error>>(
     let err: crate::error::Error = err.into();
     let detail = detail_from_error(&err);
     build_error_response(code, &err.to_string(), status, detail)
+}
+
+/// Render an error that may be the caller's fault.
+///
+/// `Error::InvalidRequest` carries a message written for the caller, so it is
+/// rendered verbatim as a 400 — wrapping it in the `Display` prefix would change
+/// what clients read. Anything else is ours: log it, then 500. `log` runs only
+/// on that second path, matching where these handlers logged before the
+/// business logic moved out of them.
+fn invalid_request_or(err: &crate::error::Error, code: &str, log: impl FnOnce()) -> Response {
+    if let crate::error::Error::InvalidRequest(message) = err {
+        return error_response("INVALID_REQUEST", message, StatusCode::BAD_REQUEST).into_response();
+    }
+    log();
+    build_error_response(
+        code,
+        &err.to_string(),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        detail_from_error(err),
+    )
+    .into_response()
 }
 
 fn build_error_response(
@@ -627,7 +455,6 @@ async fn handle_register_image_upload(
     mut multipart: Multipart,
 ) -> impl IntoResponse {
     use sha2::{Digest, Sha256};
-    use std::io::Write;
 
     let mut tenant_id = String::new();
     let mut name = String::new();
@@ -723,87 +550,34 @@ async fn handle_register_image_upload(
         }
     }
 
-    // Now create the image using the same logic as handle_register_image_stream in server.rs
-    let image_registry = ImageRegistry::new(state.pool.clone());
-    let existing_image = match image_registry.get_by_name(&tenant_id, &name).await {
-        Ok(image) => image,
-        Err(e) => {
-            return error_response(
-                "REGISTER_IMAGE_ERROR",
-                &format!("Failed to look up existing image: {}", e),
-                StatusCode::INTERNAL_SERVER_ERROR,
-            )
-            .into_response();
-        }
+    let params = handlers::StoreImageParams {
+        tenant_id,
+        name,
+        description,
+        metadata,
     };
-    let replacing_existing = existing_image.is_some();
-    let image_id = existing_image
-        .map(|image| image.image_id)
-        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let images_dir = state.data_dir.join("images").join(&image_id);
-    let binary_path = images_dir.join("binary");
 
-    if let Err(e) = std::fs::create_dir_all(&images_dir) {
-        error!(error = %e, "Failed to create image directory");
-        return error_response(
-            "IO_ERROR",
-            &format!("Failed to create image directory: {}", e),
-            StatusCode::INTERNAL_SERVER_ERROR,
+    match handlers::handle_store_image(&state, params, &binary).await {
+        Ok(image_id) => (
+            StatusCode::CREATED,
+            Json(RegisterImageJsonResponse {
+                success: true,
+                image_id: Some(image_id),
+                error: None,
+            }),
         )
-        .into_response();
-    }
-
-    if let Err(e) = std::fs::File::create(&binary_path).and_then(|mut f| f.write_all(&binary)) {
-        error!(error = %e, "Failed to write binary");
-        if !replacing_existing {
-            let _ = std::fs::remove_dir_all(&images_dir);
+            .into_response(),
+        Err(handlers::StoreImageError::Io(message)) => {
+            error_response("IO_ERROR", &message, StatusCode::INTERNAL_SERVER_ERROR).into_response()
         }
-        return error_response(
-            "IO_ERROR",
-            &format!("Failed to write binary: {}", e),
-            StatusCode::INTERNAL_SERVER_ERROR,
-        )
-        .into_response();
-    }
-
-    // Build image
-    let mut builder =
-        crate::image_registry::ImageBuilder::new(&tenant_id, &name, binary_path.to_string_lossy());
-
-    if let Some(desc) = &description {
-        builder = builder.description(desc);
-    }
-    if let Some(meta) = metadata {
-        builder = builder.metadata(meta);
-    }
-
-    let mut image = builder.build();
-    image.image_id = image_id.clone();
-
-    // Register in database
-    if let Err(e) = image_registry.register(&image).await {
-        if !replacing_existing {
-            let _ = std::fs::remove_dir_all(&images_dir);
-        }
-        return error_response(
+        Err(handlers::StoreImageError::Lookup(message))
+        | Err(handlers::StoreImageError::Register(message)) => error_response(
             "REGISTER_IMAGE_ERROR",
-            &format!("Failed to register image: {}", e),
+            &message,
             StatusCode::INTERNAL_SERVER_ERROR,
         )
-        .into_response();
+        .into_response(),
     }
-
-    info!(image_id = %image_id, bytes = binary.len(), "Streaming image registration complete (HTTP)");
-
-    (
-        StatusCode::CREATED,
-        Json(RegisterImageJsonResponse {
-            success: true,
-            image_id: Some(image_id),
-            error: None,
-        }),
-    )
-        .into_response()
 }
 
 /// GET /api/v1/images — list images
@@ -811,47 +585,19 @@ async fn handle_list_images(
     State(state): State<Arc<EnvironmentHandlerState>>,
     Query(query): Query<ListImagesQuery>,
 ) -> impl IntoResponse {
-    let image_registry = ImageRegistry::new(state.pool.clone());
-
-    let limit = query.limit.unwrap_or(100) as i64;
-    let offset = query.offset.unwrap_or(0) as i64;
-
-    let images_result = if let Some(ref tenant_id) = query.tenant_id {
-        if let Some(ref name) = query.name {
-            // Filter by tenant and name
-            match image_registry.get_by_name(tenant_id, name).await {
-                Ok(Some(img)) => Ok(vec![img]),
-                Ok(None) => Ok(vec![]),
-                Err(e) => Err(e),
-            }
-        } else {
-            image_registry
-                .list_by_tenant(tenant_id, limit, offset)
-                .await
-        }
-    } else {
-        image_registry.list_all(limit, offset).await
+    let params = handlers::ListImagesParams {
+        tenant_id: query.tenant_id,
+        name: query.name,
+        limit: query.limit.unwrap_or(100) as i64,
+        offset: query.offset.unwrap_or(0) as i64,
     };
 
-    match images_result {
-        Ok(images) => {
-            let summaries: Vec<ImageSummaryJson> = images
-                .into_iter()
-                .map(|img| ImageSummaryJson {
-                    image_id: img.image_id,
-                    tenant_id: img.tenant_id,
-                    name: img.name,
-                    description: img.description,
-                    created_at_ms: img.created_at.timestamp_millis(),
-                    metadata: img.metadata,
-                })
-                .collect();
-            Json(json!({
-                "images": summaries,
-                "total_count": summaries.len(),
-            }))
-            .into_response()
-        }
+    match handlers::handle_list_images(&state, &params).await {
+        Ok(images) => Json(json!({
+            "total_count": images.len(),
+            "images": images,
+        }))
+        .into_response(),
         Err(e) => {
             error!("List images error: {}", e);
             error_response_from("LIST_IMAGES_ERROR", e, StatusCode::INTERNAL_SERVER_ERROR)
@@ -866,45 +612,12 @@ async fn handle_get_image(
     Path(image_id): Path<String>,
     Query(query): Query<ImageTenantQuery>,
 ) -> impl IntoResponse {
-    let image_registry = ImageRegistry::new(state.pool.clone());
-
-    if image_id.is_empty() {
-        return error_response(
-            "INVALID_REQUEST",
-            "image_id is required",
-            StatusCode::BAD_REQUEST,
-        )
-        .into_response();
-    }
-
-    match image_registry.get(&image_id).await {
-        Ok(Some(img)) => {
-            // Tenant isolation
-            if let Some(ref tenant_id) = query.tenant_id
-                && img.tenant_id != *tenant_id
-            {
-                return Json(json!({ "found": false })).into_response();
-            }
-
-            Json(json!({
-                "found": true,
-                "image": ImageSummaryJson {
-                    image_id: img.image_id,
-                    tenant_id: img.tenant_id,
-                    name: img.name,
-                    description: img.description,
-                    created_at_ms: img.created_at.timestamp_millis(),
-                    metadata: img.metadata,
-                }
-            }))
-            .into_response()
-        }
+    match handlers::handle_get_image(&state, &image_id, query.tenant_id.as_deref()).await {
+        Ok(Some(image)) => Json(json!({ "found": true, "image": image })).into_response(),
         Ok(None) => Json(json!({ "found": false })).into_response(),
-        Err(e) => {
+        Err(e) => invalid_request_or(&e, "GET_IMAGE_ERROR", || {
             error!("Get image error: {}", e);
-            error_response_from("GET_IMAGE_ERROR", e, StatusCode::INTERNAL_SERVER_ERROR)
-                .into_response()
-        }
+        }),
     }
 }
 
@@ -914,49 +627,9 @@ async fn handle_delete_image(
     Path(image_id): Path<String>,
     Query(query): Query<ImageTenantQuery>,
 ) -> impl IntoResponse {
-    let image_registry = ImageRegistry::new(state.pool.clone());
-
-    if image_id.is_empty() {
-        return error_response(
-            "INVALID_REQUEST",
-            "image_id is required",
-            StatusCode::BAD_REQUEST,
-        )
-        .into_response();
-    }
-
-    match image_registry.get(&image_id).await {
-        Ok(Some(img)) => {
-            // Tenant isolation
-            if let Some(ref tenant_id) = query.tenant_id
-                && img.tenant_id != *tenant_id
-            {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(json!({
-                        "success": false,
-                        "error": format!("Image '{}' not found", image_id)
-                    })),
-                )
-                    .into_response();
-            }
-
-            if let Err(e) = image_registry.delete(&image_id).await {
-                return error_response_from(
-                    "DELETE_IMAGE_ERROR",
-                    e,
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                )
-                .into_response();
-            }
-
-            // Delete files
-            let images_dir = state.data_dir.join("images").join(&image_id);
-            let _ = std::fs::remove_dir_all(&images_dir);
-
-            Json(json!({ "success": true })).into_response()
-        }
-        Ok(None) => (
+    match handlers::handle_delete_image(&state, &image_id, query.tenant_id.as_deref()).await {
+        Ok(true) => Json(json!({ "success": true })).into_response(),
+        Ok(false) => (
             StatusCode::NOT_FOUND,
             Json(json!({
                 "success": false,
@@ -964,11 +637,9 @@ async fn handle_delete_image(
             })),
         )
             .into_response(),
-        Err(e) => {
+        Err(e) => invalid_request_or(&e, "DELETE_IMAGE_ERROR", || {
             error!("Delete image error: {}", e);
-            error_response_from("DELETE_IMAGE_ERROR", e, StatusCode::INTERNAL_SERVER_ERROR)
-                .into_response()
-        }
+        }),
     }
 }
 
@@ -1084,61 +755,8 @@ async fn handle_get_instance_status(
     State(state): State<Arc<EnvironmentHandlerState>>,
     Path(instance_id): Path<String>,
 ) -> impl IntoResponse {
-    match db::get_instance_full(&state.pool, &instance_id).await {
-        Ok(Some(inst)) => {
-            let status_str = instance_status_to_string(&inst.status);
-
-            Json(InstanceStatusJsonResponse {
-                found: true,
-                instance_id: inst.instance_id,
-                status: Some(status_str.to_string()),
-                tenant_id: Some(inst.tenant_id),
-                image_id: inst.image_id,
-                image_name: inst.image_name,
-                checkpoint_id: inst.checkpoint_id,
-                created_at_ms: Some(inst.created_at.timestamp_millis()),
-                started_at_ms: inst.started_at.map(|t| t.timestamp_millis()),
-                finished_at_ms: inst.finished_at.map(|t| t.timestamp_millis()),
-                output: inst
-                    .output
-                    .map(|o| base64::engine::general_purpose::STANDARD.encode(&o)),
-                input: inst
-                    .input
-                    .map(|i| base64::engine::general_purpose::STANDARD.encode(&i)),
-                error: inst.error,
-                stderr: inst.stderr,
-                retry_count: Some(inst.attempt as u32),
-                max_retries: Some(inst.max_attempts as u32),
-                memory_peak_bytes: inst.memory_peak_bytes.map(|v| v as u64),
-                cpu_usage_usec: inst.cpu_usage_usec.map(|v| v as u64),
-                termination_reason: inst.termination_reason,
-                exit_code: inst.exit_code,
-            })
-            .into_response()
-        }
-        Ok(None) => Json(InstanceStatusJsonResponse {
-            found: false,
-            instance_id,
-            status: None,
-            tenant_id: None,
-            image_id: None,
-            image_name: None,
-            checkpoint_id: None,
-            created_at_ms: None,
-            started_at_ms: None,
-            finished_at_ms: None,
-            output: None,
-            input: None,
-            error: None,
-            stderr: None,
-            retry_count: None,
-            max_retries: None,
-            memory_peak_bytes: None,
-            cpu_usage_usec: None,
-            termination_reason: None,
-            exit_code: None,
-        })
-        .into_response(),
+    match handlers::handle_get_instance_status(&state, &instance_id).await {
+        Ok(resp) => Json(resp).into_response(),
         Err(e) => {
             error!("Get instance status error: {}", e);
             error_response_from(
@@ -1158,79 +776,34 @@ async fn handle_list_instances(
 ) -> impl IntoResponse {
     use chrono::TimeZone;
 
-    let limit = query.limit.unwrap_or(100) as i64;
-    let offset = query.offset.unwrap_or(0) as i64;
-
-    let statuses = resolve_status_filter(query.statuses.as_deref(), query.status.as_deref());
-
-    // Convert milliseconds to DateTime
-    let created_after = query
-        .created_after_ms
-        .and_then(|ms| chrono::Utc.timestamp_millis_opt(ms).single());
-    let created_before = query
-        .created_before_ms
-        .and_then(|ms| chrono::Utc.timestamp_millis_opt(ms).single());
-    let finished_after = query
-        .finished_after_ms
-        .and_then(|ms| chrono::Utc.timestamp_millis_opt(ms).single());
-    let finished_before = query
-        .finished_before_ms
-        .and_then(|ms| chrono::Utc.timestamp_millis_opt(ms).single());
+    let to_time = |ms: Option<i64>| ms.and_then(|ms| chrono::Utc.timestamp_millis_opt(ms).single());
 
     let options = db::ListInstancesOptions {
         tenant_id: query.tenant_id,
-        statuses,
+        statuses: resolve_status_filter(query.statuses.as_deref(), query.status.as_deref()),
         image_id: query.image_id,
         image_name_prefix: query.image_name_prefix,
-        created_after,
-        created_before,
-        finished_after,
-        finished_before,
+        created_after: to_time(query.created_after_ms),
+        created_before: to_time(query.created_before_ms),
+        finished_after: to_time(query.finished_after_ms),
+        finished_before: to_time(query.finished_before_ms),
         order_by: query.order_by,
-        limit,
-        offset,
+        limit: query.limit.unwrap_or(100) as i64,
+        offset: query.offset.unwrap_or(0) as i64,
     };
 
-    let instances = match db::list_instances(&state.pool, &options).await {
-        Ok(v) => v,
+    match handlers::handle_list_instances(&state, &options).await {
+        Ok(result) => Json(json!({
+            "instances": result.instances,
+            "total_count": result.total_count,
+        }))
+        .into_response(),
         Err(e) => {
             error!("List instances error: {}", e);
-            return error_response_from(
-                "LIST_INSTANCES_ERROR",
-                e,
-                StatusCode::INTERNAL_SERVER_ERROR,
-            )
-            .into_response();
+            error_response_from("LIST_INSTANCES_ERROR", e, StatusCode::INTERNAL_SERVER_ERROR)
+                .into_response()
         }
-    };
-
-    let total_count = match db::count_instances(&state.pool, &options).await {
-        Ok(c) => c,
-        Err(e) => {
-            warn!("Count instances error: {}", e);
-            0
-        }
-    };
-
-    let summaries: Vec<InstanceSummaryJson> = instances
-        .into_iter()
-        .map(|inst| InstanceSummaryJson {
-            instance_id: inst.instance_id,
-            tenant_id: inst.tenant_id,
-            image_id: inst.image_id,
-            status: instance_status_to_string(&inst.status).to_string(),
-            created_at_ms: inst.created_at.timestamp_millis(),
-            started_at_ms: inst.started_at.map(|t| t.timestamp_millis()),
-            finished_at_ms: inst.finished_at.map(|t| t.timestamp_millis()),
-            has_error: inst.error.is_some(),
-        })
-        .collect();
-
-    Json(json!({
-        "instances": summaries,
-        "total_count": total_count,
-    }))
-    .into_response()
+    }
 }
 
 /// POST /api/v1/instances/{instance_id}/signals — send signal
@@ -1239,67 +812,39 @@ async fn handle_send_signal(
     Path(instance_id): Path<String>,
     Json(body): Json<SendSignalJsonRequest>,
 ) -> impl IntoResponse {
-    // Validate instance exists
-    let instance = match state.persistence.get_instance(&instance_id).await {
-        Ok(Some(inst)) => inst,
-        Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({
-                    "success": false,
-                    "error": format!("Instance '{}' not found", instance_id)
-                })),
-            )
-                .into_response();
-        }
-        Err(e) => {
-            return error_response_from("SEND_SIGNAL_ERROR", e, StatusCode::INTERNAL_SERVER_ERROR)
-                .into_response();
-        }
-    };
+    use handlers::SendSignalOutcome;
 
-    // Check terminal state
-    if !matches!(
-        instance.status.as_str(),
-        "running" | "suspended" | "pending"
-    ) {
-        return (
+    match handlers::handle_send_signal(
+        &state,
+        &instance_id,
+        &body.signal_type,
+        body.payload.as_deref(),
+    )
+    .await
+    {
+        Ok(SendSignalOutcome::Delivered) => Json(json!({ "success": true })).into_response(),
+        Ok(SendSignalOutcome::InstanceNotFound) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "success": false,
+                "error": format!("Instance '{}' not found", instance_id)
+            })),
+        )
+            .into_response(),
+        Ok(SendSignalOutcome::NotSignalable { status }) => (
             StatusCode::CONFLICT,
             Json(json!({
                 "success": false,
-                "error": format!("Cannot send signal to instance in '{}' state", instance.status)
+                "error": format!("Cannot send signal to instance in '{}' state", status)
             })),
         )
-            .into_response();
-    }
-
-    // Map signal type
-    let signal_type = match body.signal_type.as_str() {
-        "cancel" => "cancel",
-        "pause" => "pause",
-        "resume" => "resume",
-        _ => {
-            return error_response(
-                "INVALID_SIGNAL_TYPE",
-                &format!("Unknown signal type: {}", body.signal_type),
-                StatusCode::BAD_REQUEST,
-            )
-            .into_response();
-        }
-    };
-
-    let payload = body
-        .payload
-        .as_deref()
-        .map(|p| p.as_bytes().to_vec())
-        .unwrap_or_default();
-
-    match state
-        .persistence
-        .insert_signal(&instance_id, signal_type, &payload)
-        .await
-    {
-        Ok(()) => Json(json!({ "success": true })).into_response(),
+            .into_response(),
+        Ok(SendSignalOutcome::UnknownSignalType { signal_type }) => error_response(
+            "INVALID_SIGNAL_TYPE",
+            &format!("Unknown signal type: {}", signal_type),
+            StatusCode::BAD_REQUEST,
+        )
+        .into_response(),
         Err(e) => {
             error!("Send signal error: {}", e);
             error_response_from("SEND_SIGNAL_ERROR", e, StatusCode::INTERNAL_SERVER_ERROR)
@@ -1314,103 +859,28 @@ async fn handle_send_custom_signal(
     Path(instance_id): Path<String>,
     Json(body): Json<SendCustomSignalJsonRequest>,
 ) -> impl IntoResponse {
-    // Validate instance
-    let instance = match state.persistence.get_instance(&instance_id).await {
-        Ok(Some(inst)) => inst,
-        Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({
-                    "success": false,
-                    "error": format!("Instance '{}' not found", instance_id)
-                })),
-            )
-                .into_response();
-        }
-        Err(e) => {
-            return error_response_from(
-                "SEND_CUSTOM_SIGNAL_ERROR",
-                e,
-                StatusCode::INTERNAL_SERVER_ERROR,
-            )
-            .into_response();
-        }
-    };
+    use handlers::SendCustomSignalOutcome;
 
-    let _ = instance; // Validate existence
-
-    if body.checkpoint_id.is_empty() {
-        return error_response(
-            "INVALID_REQUEST",
-            "checkpoint_id is required",
-            StatusCode::BAD_REQUEST,
-        )
-        .into_response();
-    }
-
-    let payload = body
-        .payload
-        .as_deref()
-        .map(|p| p.as_bytes().to_vec())
-        .unwrap_or_default();
-
-    match state
-        .persistence
-        .insert_custom_signal(&instance_id, &body.checkpoint_id, &payload)
-        .await
+    match handlers::handle_send_custom_signal(
+        &state,
+        &instance_id,
+        &body.checkpoint_id,
+        body.payload.as_deref(),
+    )
+    .await
     {
-        Ok(()) => {
-            wake_suspended_on_signal(state.persistence.as_ref(), &instance_id).await;
-            Json(json!({ "success": true })).into_response()
-        }
-        Err(e) => {
+        Ok(SendCustomSignalOutcome::Delivered) => Json(json!({ "success": true })).into_response(),
+        Ok(SendCustomSignalOutcome::InstanceNotFound) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "success": false,
+                "error": format!("Instance '{}' not found", instance_id)
+            })),
+        )
+            .into_response(),
+        Err(e) => invalid_request_or(&e, "SEND_CUSTOM_SIGNAL_ERROR", || {
             error!("Send custom signal error: {}", e);
-            error_response_from(
-                "SEND_CUSTOM_SIGNAL_ERROR",
-                e,
-                StatusCode::INTERNAL_SERVER_ERROR,
-            )
-            .into_response()
-        }
-    }
-}
-
-/// On-signal waker (store-freeing Wait): a Wait compiled with the store-freeing
-/// gate parks as `status='suspended'` with `sleep_until` = its timeout deadline
-/// (or NULL when the wait has no timeout). The wake scheduler only relaunches on
-/// a due `sleep_until`, so a custom signal for such an instance must stamp
-/// `sleep_until=now` to relaunch it BEFORE the timeout (or at all, when there is
-/// no timeout). The instance replays, re-polls the now-present signal
-/// (non-destructive read), and proceeds.
-///
-/// No-op unless the instance is currently `suspended` AND was parked by an
-/// on-signal wait (`termination_reason = 'waiting_signal'`, stamped by
-/// `park_invoke_suspend`). `status='suspended'` alone is NOT sufficient: in
-/// the default (blocking) configuration every suspended row is a
-/// pause/breakpoint/shutdown ack whose pause signal was already consumed —
-/// stamping `sleep_until` on those would relaunch a replay that runs PAST the
-/// pause, silently auto-resuming a paused instance on any custom signal.
-async fn wake_suspended_on_signal(
-    persistence: &dyn runtara_core::persistence::Persistence,
-    instance_id: &str,
-) {
-    match persistence.get_instance(instance_id).await {
-        Ok(Some(inst))
-            if inst.status == "suspended"
-                && inst.termination_reason.as_deref()
-                    == Some(crate::runner::embedded::WAITING_SIGNAL_TERMINATION) =>
-        {
-            if let Err(e) = persistence
-                .set_instance_sleep(instance_id, chrono::Utc::now())
-                .await
-            {
-                warn!(instance_id, error = %e, "Failed to wake suspended instance after custom signal");
-            } else {
-                info!(instance_id, "Woke suspended instance for a custom signal");
-            }
-        }
-        Ok(_) => {}
-        Err(e) => warn!(instance_id, error = %e, "Waker could not read instance status"),
+        }),
     }
 }
 
@@ -1420,68 +890,36 @@ async fn handle_list_checkpoints(
     Path(instance_id): Path<String>,
     Query(query): Query<ListCheckpointsQuery>,
 ) -> impl IntoResponse {
-    let created_after = query
-        .created_after_ms
-        .and_then(chrono::DateTime::from_timestamp_millis);
-    let created_before = query
-        .created_before_ms
-        .and_then(chrono::DateTime::from_timestamp_millis);
+    let params = handlers::ListCheckpointsParams {
+        checkpoint_id: query.checkpoint_id,
+        created_after: query
+            .created_after_ms
+            .and_then(chrono::DateTime::from_timestamp_millis),
+        created_before: query
+            .created_before_ms
+            .and_then(chrono::DateTime::from_timestamp_millis),
+        limit: query.limit.unwrap_or(100) as i64,
+        offset: query.offset.unwrap_or(0) as i64,
+    };
 
-    let limit = query.limit.unwrap_or(100) as i64;
-    let offset = query.offset.unwrap_or(0) as i64;
-
-    let checkpoints = match state
-        .persistence
-        .list_checkpoints(
-            &instance_id,
-            query.checkpoint_id.as_deref(),
-            limit,
-            offset,
-            created_after,
-            created_before,
-        )
-        .await
-    {
-        Ok(v) => v,
+    match handlers::handle_list_checkpoints(&state, &instance_id, &params).await {
+        Ok(result) => Json(json!({
+            "checkpoints": result.checkpoints,
+            "total_count": result.total_count,
+            "limit": params.limit,
+            "offset": params.offset,
+        }))
+        .into_response(),
         Err(e) => {
             error!("List checkpoints error: {}", e);
-            return error_response_from(
+            error_response_from(
                 "LIST_CHECKPOINTS_ERROR",
                 e,
                 StatusCode::INTERNAL_SERVER_ERROR,
             )
-            .into_response();
+            .into_response()
         }
-    };
-
-    let total_count = state
-        .persistence
-        .count_checkpoints(
-            &instance_id,
-            query.checkpoint_id.as_deref(),
-            created_after,
-            created_before,
-        )
-        .await
-        .unwrap_or(0);
-
-    let summaries: Vec<CheckpointSummaryJson> = checkpoints
-        .into_iter()
-        .map(|cp| CheckpointSummaryJson {
-            checkpoint_id: cp.checkpoint_id,
-            instance_id: cp.instance_id,
-            created_at_ms: cp.created_at.timestamp_millis(),
-            data_size_bytes: cp.state.len() as u64,
-        })
-        .collect();
-
-    Json(json!({
-        "checkpoints": summaries,
-        "total_count": total_count,
-        "limit": limit,
-        "offset": offset,
-    }))
-    .into_response()
+    }
 }
 
 /// GET /api/v1/instances/{instance_id}/checkpoints/{checkpoint_id} — get checkpoint
@@ -1494,27 +932,8 @@ async fn handle_get_checkpoint(
         .decode_utf8_lossy()
         .to_string();
 
-    match state
-        .persistence
-        .load_checkpoint(&instance_id, &checkpoint_id)
-        .await
-    {
-        Ok(Some(cp)) => Json(CheckpointDetailJson {
-            found: true,
-            checkpoint_id: cp.checkpoint_id,
-            instance_id: cp.instance_id,
-            created_at_ms: cp.created_at.timestamp_millis(),
-            data: Some(base64::engine::general_purpose::STANDARD.encode(&cp.state)),
-        })
-        .into_response(),
-        Ok(None) => Json(CheckpointDetailJson {
-            found: false,
-            checkpoint_id,
-            instance_id,
-            created_at_ms: 0,
-            data: None,
-        })
-        .into_response(),
+    match handlers::handle_get_checkpoint(&state, &instance_id, &checkpoint_id).await {
+        Ok(detail) => Json(detail).into_response(),
         Err(e) => {
             error!("Get checkpoint error: {}", e);
             error_response_from("GET_CHECKPOINT_ERROR", e, StatusCode::INTERNAL_SERVER_ERROR)
@@ -1531,74 +950,42 @@ async fn handle_list_events(
 ) -> impl IntoResponse {
     use runtara_core::persistence::{EventSortOrder, ListEventsFilter};
 
-    let created_after = query
-        .created_after_ms
-        .and_then(chrono::DateTime::from_timestamp_millis);
-    let created_before = query
-        .created_before_ms
-        .and_then(chrono::DateTime::from_timestamp_millis);
-
     let limit = query.limit.unwrap_or(100) as i64;
     let offset = query.offset.unwrap_or(0) as i64;
-
-    let sort_order = match query.sort_order.as_deref() {
-        Some("asc") => EventSortOrder::Asc,
-        _ => EventSortOrder::Desc,
-    };
 
     let filter = ListEventsFilter {
         event_type: query.event_type,
         subtype: query.subtype,
-        created_after,
-        created_before,
+        created_after: query
+            .created_after_ms
+            .and_then(chrono::DateTime::from_timestamp_millis),
+        created_before: query
+            .created_before_ms
+            .and_then(chrono::DateTime::from_timestamp_millis),
         payload_contains: query.payload_contains,
         scope_id: query.scope_id,
         parent_scope_id: query.parent_scope_id,
         root_scopes_only: query.root_scopes_only.unwrap_or(false),
-        sort_order,
+        sort_order: match query.sort_order.as_deref() {
+            Some("asc") => EventSortOrder::Asc,
+            _ => EventSortOrder::Desc,
+        },
     };
 
-    let events = match state
-        .persistence
-        .list_events(&instance_id, &filter, limit, offset)
-        .await
-    {
-        Ok(v) => v,
+    match handlers::handle_list_events(&state, &instance_id, &filter, limit, offset).await {
+        Ok(result) => Json(json!({
+            "events": result.events,
+            "total_count": result.total_count,
+            "limit": limit,
+            "offset": offset,
+        }))
+        .into_response(),
         Err(e) => {
             error!("List events error: {}", e);
-            return error_response_from("LIST_EVENTS_ERROR", e, StatusCode::INTERNAL_SERVER_ERROR)
-                .into_response();
+            error_response_from("LIST_EVENTS_ERROR", e, StatusCode::INTERNAL_SERVER_ERROR)
+                .into_response()
         }
-    };
-
-    let total_count = state
-        .persistence
-        .count_events(&instance_id, &filter)
-        .await
-        .unwrap_or(0);
-
-    let summaries: Vec<EventSummaryJson> = events
-        .into_iter()
-        .map(|ev| EventSummaryJson {
-            id: ev.id.unwrap_or(0),
-            instance_id: ev.instance_id,
-            event_type: ev.event_type,
-            checkpoint_id: ev.checkpoint_id,
-            payload: ev
-                .payload
-                .map(|p| base64::engine::general_purpose::STANDARD.encode(&p)),
-            created_at_ms: ev.created_at.timestamp_millis(),
-            subtype: ev.subtype,
-        })
-        .collect();
-
-    Json(json!({
-        "events": summaries,
-        "total_count": total_count,
-        "limit": limit,
-        "offset": offset,
-    }))
-    .into_response()
+    }
 }
 
 /// GET /api/v1/instances/{instance_id}/steps — list step summaries
@@ -1609,109 +996,48 @@ async fn handle_list_step_summaries(
 ) -> impl IntoResponse {
     use runtara_core::persistence::{EventSortOrder, ListStepSummariesFilter, StepStatus};
 
-    if instance_id.is_empty() {
-        return error_response(
-            "INVALID_REQUEST",
-            "instance_id is required",
-            StatusCode::BAD_REQUEST,
-        )
-        .into_response();
-    }
-
     let limit = query.limit.unwrap_or(100) as i64;
     let offset = query.offset.unwrap_or(0) as i64;
 
-    let sort_order = match query.sort_order.as_deref() {
-        Some("asc") => EventSortOrder::Asc,
-        _ => EventSortOrder::Desc,
-    };
-
-    let status = match query.status.as_deref() {
-        Some("running") => Some(StepStatus::Running),
-        Some("completed") => Some(StepStatus::Completed),
-        Some("failed") => Some(StepStatus::Failed),
-        _ => None,
-    };
-
-    let step_ids = query
-        .step_ids
-        .map(|ids| {
-            ids.split(',')
-                .map(str::trim)
-                .filter(|id| !id.is_empty())
-                .map(str::to_string)
-                .collect::<Vec<_>>()
-        })
-        .filter(|ids| !ids.is_empty());
-
     let filter = ListStepSummariesFilter {
-        sort_order,
-        status,
+        sort_order: match query.sort_order.as_deref() {
+            Some("asc") => EventSortOrder::Asc,
+            _ => EventSortOrder::Desc,
+        },
+        status: match query.status.as_deref() {
+            Some("running") => Some(StepStatus::Running),
+            Some("completed") => Some(StepStatus::Completed),
+            Some("failed") => Some(StepStatus::Failed),
+            _ => None,
+        },
         step_type: query.step_type,
         scope_id: query.scope_id,
         parent_scope_id: query.parent_scope_id,
         root_scopes_only: query.root_scopes_only.unwrap_or(false),
-        step_ids,
+        step_ids: query
+            .step_ids
+            .map(|ids| {
+                ids.split(',')
+                    .map(str::trim)
+                    .filter(|id| !id.is_empty())
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .filter(|ids| !ids.is_empty()),
     };
 
-    let steps = match state
-        .persistence
-        .list_step_summaries(&instance_id, &filter, limit, offset)
-        .await
-    {
-        Ok(v) => v,
-        Err(e) => {
+    match handlers::handle_list_step_summaries(&state, &instance_id, &filter, limit, offset).await {
+        Ok(result) => Json(json!({
+            "steps": result.steps,
+            "total_count": result.total_count,
+            "limit": limit,
+            "offset": offset,
+        }))
+        .into_response(),
+        Err(e) => invalid_request_or(&e, "LIST_STEP_SUMMARIES_ERROR", || {
             error!("List step summaries error: {}", e);
-            return error_response_from(
-                "LIST_STEP_SUMMARIES_ERROR",
-                e,
-                StatusCode::INTERNAL_SERVER_ERROR,
-            )
-            .into_response();
-        }
-    };
-
-    let total_count = state
-        .persistence
-        .count_step_summaries(&instance_id, &filter)
-        .await
-        .unwrap_or(0);
-
-    let summaries: Vec<StepSummaryJson> = steps
-        .into_iter()
-        .map(|step| {
-            let status_str = match step.status {
-                StepStatus::Running => "running",
-                StepStatus::Completed => "completed",
-                StepStatus::Failed => "failed",
-            };
-
-            StepSummaryJson {
-                step_id: step.step_id,
-                step_name: step.step_name,
-                step_type: step.step_type,
-                status: status_str.to_string(),
-                started_at_ms: step.started_at.timestamp_millis(),
-                completed_at_ms: step.completed_at.map(|t| t.timestamp_millis()),
-                duration_ms: step.duration_ms,
-                launched_at_ms: step.launched_at_ms,
-                settled_at_ms: step.settled_at_ms,
-                inputs: step.inputs,
-                outputs: step.outputs,
-                error: step.error,
-                scope_id: step.scope_id,
-                parent_scope_id: step.parent_scope_id,
-            }
-        })
-        .collect();
-
-    Json(json!({
-        "steps": summaries,
-        "total_count": total_count,
-        "limit": limit,
-        "offset": offset,
-    }))
-    .into_response()
+        }),
+    }
 }
 
 /// GET /api/v1/instances/{instance_id}/scopes/{scope_id}/ancestors — get scope ancestors
@@ -1719,113 +1045,12 @@ async fn handle_get_scope_ancestors(
     State(state): State<Arc<EnvironmentHandlerState>>,
     Path((instance_id, scope_id)): Path<(String, String)>,
 ) -> impl IntoResponse {
-    use runtara_core::persistence::{EventSortOrder, ListEventsFilter};
-
-    if instance_id.is_empty() || scope_id.is_empty() {
-        return error_response(
-            "INVALID_REQUEST",
-            "instance_id and scope_id are required",
-            StatusCode::BAD_REQUEST,
-        )
-        .into_response();
-    }
-
-    // Fetch all scope_enter events
-    let filter = ListEventsFilter {
-        event_type: Some("scope_enter".to_string()),
-        subtype: None,
-        created_after: None,
-        created_before: None,
-        payload_contains: None,
-        scope_id: None,
-        parent_scope_id: None,
-        root_scopes_only: false,
-        sort_order: EventSortOrder::Asc,
-    };
-
-    let events = match state
-        .persistence
-        .list_events(&instance_id, &filter, 10000, 0)
-        .await
-    {
-        Ok(v) => v,
-        Err(e) => {
+    match handlers::handle_get_scope_ancestors(&state, &instance_id, &scope_id).await {
+        Ok(ancestors) => Json(json!({ "ancestors": ancestors })).into_response(),
+        Err(e) => invalid_request_or(&e, "GET_SCOPE_ANCESTORS_ERROR", || {
             error!("Get scope ancestors error: {}", e);
-            return error_response_from(
-                "GET_SCOPE_ANCESTORS_ERROR",
-                e,
-                StatusCode::INTERNAL_SERVER_ERROR,
-            )
-            .into_response();
-        }
-    };
-
-    // Build scope map
-    let mut scope_map: std::collections::HashMap<String, ScopeInfoJson> =
-        std::collections::HashMap::new();
-
-    for event in events {
-        let Some(payload) = &event.payload else {
-            continue;
-        };
-        let Ok(payload_json) = serde_json::from_slice::<Value>(payload) else {
-            continue;
-        };
-        let Some(sid) = payload_json.get("scope_id").and_then(|v| v.as_str()) else {
-            continue;
-        };
-
-        let parent_scope_id = payload_json
-            .get("parent_scope_id")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-        let step_id = payload_json
-            .get("step_id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let step_name = payload_json
-            .get("step_name")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-        let step_type = payload_json
-            .get("step_type")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let index = payload_json
-            .get("index")
-            .and_then(|v| v.as_u64())
-            .map(|i| i as u32);
-
-        scope_map.insert(
-            sid.to_string(),
-            ScopeInfoJson {
-                scope_id: sid.to_string(),
-                parent_scope_id,
-                step_id,
-                step_name,
-                step_type,
-                index,
-                created_at_ms: event.created_at.timestamp_millis(),
-            },
-        );
+        }),
     }
-
-    // Walk up the hierarchy
-    let mut ancestors = Vec::new();
-    let mut current = Some(scope_id);
-
-    while let Some(sid) = current {
-        if let Some(info) = scope_map.remove(&sid) {
-            current = info.parent_scope_id.clone();
-            ancestors.push(info);
-        } else {
-            break;
-        }
-    }
-
-    Json(json!({ "ancestors": ancestors })).into_response()
 }
 
 /// GET /api/v1/tenants/{tenant_id}/metrics — get tenant metrics
@@ -1834,15 +1059,6 @@ async fn handle_get_tenant_metrics(
     Path(tenant_id): Path<String>,
     Query(query): Query<TenantMetricsQuery>,
 ) -> impl IntoResponse {
-    if tenant_id.is_empty() {
-        return error_response(
-            "INVALID_REQUEST",
-            "tenant_id is required",
-            StatusCode::BAD_REQUEST,
-        )
-        .into_response();
-    }
-
     let now = chrono::Utc::now();
     let end_time = query
         .end_time_ms
@@ -1865,58 +1081,22 @@ async fn handle_get_tenant_metrics(
         granularity,
     };
 
-    let bucket_rows = match db::get_tenant_metrics(&state.pool, &options).await {
-        Ok(v) => v,
-        Err(e) => {
+    match handlers::handle_get_tenant_metrics(&state, &options).await {
+        Ok(buckets) => Json(json!({
+            "tenant_id": tenant_id,
+            "start_time_ms": start_time.timestamp_millis(),
+            "end_time_ms": end_time.timestamp_millis(),
+            "granularity": match granularity {
+                db::MetricsGranularity::Hourly => "hourly",
+                db::MetricsGranularity::Daily => "daily",
+            },
+            "buckets": buckets,
+        }))
+        .into_response(),
+        Err(e) => invalid_request_or(&e, "GET_TENANT_METRICS_ERROR", || {
             error!("Get tenant metrics error: {}", e);
-            return error_response_from(
-                "GET_TENANT_METRICS_ERROR",
-                e,
-                StatusCode::INTERNAL_SERVER_ERROR,
-            )
-            .into_response();
-        }
-    };
-
-    let buckets: Vec<MetricsBucketJson> = bucket_rows
-        .into_iter()
-        .map(|row| {
-            let terminal_count = row.success_count + row.failure_count + row.cancelled_count;
-            let success_rate = if terminal_count > 0 {
-                Some((row.success_count as f64 / terminal_count as f64) * 100.0)
-            } else {
-                None
-            };
-
-            MetricsBucketJson {
-                bucket_time_ms: row.bucket_time.timestamp_millis(),
-                invocation_count: row.invocation_count,
-                success_count: row.success_count,
-                failure_count: row.failure_count,
-                cancelled_count: row.cancelled_count,
-                avg_duration_ms: row.avg_duration_ms,
-                min_duration_ms: row.min_duration_ms,
-                max_duration_ms: row.max_duration_ms,
-                avg_memory_bytes: row.avg_memory_bytes.map(|v| v as i64),
-                max_memory_bytes: row.max_memory_bytes,
-                success_rate_percent: success_rate,
-            }
-        })
-        .collect();
-
-    let granularity_str = match granularity {
-        db::MetricsGranularity::Hourly => "hourly",
-        db::MetricsGranularity::Daily => "daily",
-    };
-
-    Json(json!({
-        "tenant_id": tenant_id,
-        "start_time_ms": start_time.timestamp_millis(),
-        "end_time_ms": end_time.timestamp_millis(),
-        "granularity": granularity_str,
-        "buckets": buckets,
-    }))
-    .into_response()
+        }),
+    }
 }
 
 /// GET /api/v1/agents — list agents
@@ -2094,13 +1274,6 @@ mod tests {
     use super::*;
     use runtara_core::error::CoreError;
 
-    #[cfg(feature = "db-integration-tests")]
-    use crate::test_support;
-    #[cfg(feature = "db-integration-tests")]
-    use runtara_core::persistence::{CompleteInstanceParams, Persistence};
-    #[cfg(feature = "db-integration-tests")]
-    use std::sync::Arc;
-
     fn owned(values: &[&str]) -> Option<Vec<String>> {
         Some(values.iter().map(|s| s.to_string()).collect())
     }
@@ -2144,80 +1317,6 @@ mod tests {
         assert_eq!(resolve_status_filter(Some(" , "), None), None);
         assert_eq!(resolve_status_filter(Some(""), None), None);
         assert_eq!(resolve_status_filter(None, None), None);
-    }
-
-    /// A suspended instance with the given `termination_reason` marker.
-    #[cfg(feature = "db-integration-tests")]
-    async fn suspended_instance(marker: Option<&str>) -> (Arc<dyn Persistence>, String) {
-        let (persistence, instance_id) = test_support::running_instance("waker").await;
-        let mut params = CompleteInstanceParams::new(&instance_id, "suspended").if_running();
-        if let Some(marker) = marker {
-            params = params.with_termination(marker, None);
-        }
-        persistence
-            .complete_instance(params)
-            .await
-            .expect("suspend");
-        (persistence, instance_id)
-    }
-
-    #[cfg(feature = "db-integration-tests")]
-    #[tokio::test]
-    async fn waker_ignores_a_pause_shaped_suspend() {
-        // A pause/breakpoint ack parks `suspended` with NO wake marker and its
-        // pause signal already consumed — a custom signal must NOT relaunch it
-        // (the replay would run straight past the pause).
-        let (persistence, instance_id) = suspended_instance(None).await;
-        wake_suspended_on_signal(persistence.as_ref(), &instance_id).await;
-
-        let inst = persistence
-            .get_instance(&instance_id)
-            .await
-            .expect("get")
-            .expect("instance exists");
-        assert_eq!(inst.status, "suspended");
-        assert!(
-            inst.sleep_until.is_none(),
-            "a custom signal must never schedule a wake for a paused instance"
-        );
-    }
-
-    #[cfg(feature = "db-integration-tests")]
-    #[tokio::test]
-    async fn waker_stamps_sleep_for_an_on_signal_park() {
-        let (persistence, instance_id) =
-            suspended_instance(Some(crate::runner::embedded::WAITING_SIGNAL_TERMINATION)).await;
-        wake_suspended_on_signal(persistence.as_ref(), &instance_id).await;
-
-        let inst = persistence
-            .get_instance(&instance_id)
-            .await
-            .expect("get")
-            .expect("instance exists");
-        assert_eq!(inst.status, "suspended");
-        assert!(
-            inst.sleep_until.is_some(),
-            "an on-signal park must be scheduled for relaunch when its signal arrives"
-        );
-    }
-
-    #[cfg(feature = "db-integration-tests")]
-    #[tokio::test]
-    async fn waker_ignores_a_timed_sleep_park() {
-        // A store-freeing durable Delay parks with the `sleeping` marker and a
-        // deadline; a custom signal must not fast-forward it.
-        let (persistence, instance_id) = suspended_instance(Some("sleeping")).await;
-        wake_suspended_on_signal(persistence.as_ref(), &instance_id).await;
-
-        let inst = persistence
-            .get_instance(&instance_id)
-            .await
-            .expect("get")
-            .expect("instance exists");
-        assert!(
-            inst.sleep_until.is_none(),
-            "a timed sleep is scheduler-woken at its deadline, not signal-woken"
-        );
     }
 
     fn body_of(resp: (StatusCode, Json<Value>)) -> Value {

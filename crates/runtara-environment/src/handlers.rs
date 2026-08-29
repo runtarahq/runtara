@@ -4,6 +4,8 @@
 //!
 //! Handles requests from Management SDK and proxies to Core when needed.
 
+use serde::Serialize;
+use serde_json::Value;
 use sqlx::PgPool;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -1462,8 +1464,1180 @@ pub async fn handle_get_capability(
     ))
 }
 
+// ============================================================================
+// Reads and signals
+//
+// These used to live inside `http_server.rs`, each one implemented directly in
+// its axum route. That left the transport owning real behaviour — database
+// queries, tenant isolation, the on-signal waker — and made every one of them
+// reachable only over a socket. They are plain async functions here for the
+// same reason the lifecycle handlers above are: the HTTP layer should decode,
+// call, and map, and nothing more.
+//
+// The response types are wire-shaped on purpose (`*_ms` timestamps, base64
+// bodies): they are what the management protocol already promises, and keeping
+// them identical is what makes this a move rather than a rewrite.
+// ============================================================================
+
+/// Normalize a raw instance status for the wire.
+///
+/// Unknown values pass through untouched rather than being coerced, so a status
+/// added to the database but not yet to this list is visible instead of silently
+/// becoming something else.
+pub fn instance_status_to_string(status: &str) -> &str {
+    status
+}
+
+/// Image summary as the management protocol reports it.
+#[derive(Debug, Serialize)]
+pub struct ImageSummary {
+    /// Image id.
+    pub image_id: String,
+    /// Owning tenant.
+    pub tenant_id: String,
+    /// Image name.
+    pub name: String,
+    /// Optional description.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Creation time, epoch milliseconds.
+    pub created_at_ms: i64,
+    /// Free-form metadata recorded at registration.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<Value>,
+}
+
+/// Filters for [`handle_list_images`].
+#[derive(Debug, Default)]
+pub struct ListImagesParams {
+    /// Restrict to one tenant.
+    pub tenant_id: Option<String>,
+    /// Exact name match; only meaningful together with `tenant_id`.
+    pub name: Option<String>,
+    /// Page size.
+    pub limit: i64,
+    /// Page offset.
+    pub offset: i64,
+}
+
+/// List images, optionally scoped to a tenant and an exact name.
+///
+/// A `name` without a `tenant_id` is ignored rather than applied globally —
+/// image names are unique per tenant, so a cross-tenant name lookup has no
+/// well-defined answer.
+pub async fn handle_list_images(
+    state: &EnvironmentHandlerState,
+    params: &ListImagesParams,
+) -> Result<Vec<ImageSummary>> {
+    let image_registry = ImageRegistry::new(state.pool.clone());
+
+    let images = match (&params.tenant_id, &params.name) {
+        (Some(tenant_id), Some(name)) => match image_registry.get_by_name(tenant_id, name).await? {
+            Some(img) => vec![img],
+            None => vec![],
+        },
+        (Some(tenant_id), None) => {
+            image_registry
+                .list_by_tenant(tenant_id, params.limit, params.offset)
+                .await?
+        }
+        (None, _) => image_registry.list_all(params.limit, params.offset).await?,
+    };
+
+    Ok(images.into_iter().map(image_summary).collect())
+}
+
+/// Look up one image, enforcing tenant isolation when a tenant is supplied.
+///
+/// A hit that belongs to another tenant reads as `None`, not as a rejection:
+/// telling a caller "this exists but is not yours" would leak the existence of
+/// another tenant's image.
+pub async fn handle_get_image(
+    state: &EnvironmentHandlerState,
+    image_id: &str,
+    tenant_id: Option<&str>,
+) -> Result<Option<ImageSummary>> {
+    if image_id.is_empty() {
+        return Err(crate::error::Error::InvalidRequest(
+            "image_id is required".to_string(),
+        ));
+    }
+
+    let image_registry = ImageRegistry::new(state.pool.clone());
+    let Some(img) = image_registry.get(image_id).await? else {
+        return Ok(None);
+    };
+
+    if let Some(tenant_id) = tenant_id
+        && img.tenant_id != tenant_id
+    {
+        return Ok(None);
+    }
+
+    Ok(Some(image_summary(img)))
+}
+
+/// Delete an image and its on-disk artifacts.
+///
+/// Returns `false` when the image does not exist, or exists under a different
+/// tenant — the same conflation as [`handle_get_image`], for the same reason.
+pub async fn handle_delete_image(
+    state: &EnvironmentHandlerState,
+    image_id: &str,
+    tenant_id: Option<&str>,
+) -> Result<bool> {
+    if image_id.is_empty() {
+        return Err(crate::error::Error::InvalidRequest(
+            "image_id is required".to_string(),
+        ));
+    }
+
+    let image_registry = ImageRegistry::new(state.pool.clone());
+    let Some(img) = image_registry.get(image_id).await? else {
+        return Ok(false);
+    };
+
+    if let Some(tenant_id) = tenant_id
+        && img.tenant_id != tenant_id
+    {
+        return Ok(false);
+    }
+
+    image_registry.delete(image_id).await?;
+
+    // Best-effort: the row is already gone, and leaving a directory behind is
+    // recoverable where failing the call after the delete committed is not.
+    let images_dir = state.data_dir.join("images").join(image_id);
+    let _ = std::fs::remove_dir_all(&images_dir);
+
+    Ok(true)
+}
+
+fn image_summary(img: crate::image_registry::Image) -> ImageSummary {
+    ImageSummary {
+        image_id: img.image_id,
+        tenant_id: img.tenant_id,
+        name: img.name,
+        description: img.description,
+        created_at_ms: img.created_at.timestamp_millis(),
+        metadata: img.metadata,
+    }
+}
+
+/// Full instance state as the management protocol reports it.
+#[derive(Debug, Serialize)]
+pub struct InstanceStatusResponse {
+    /// Whether the instance exists.
+    pub found: bool,
+    /// Instance id (echoed even when not found).
+    pub instance_id: String,
+    /// Lifecycle status.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    /// Owning tenant.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tenant_id: Option<String>,
+    /// Image the instance was launched from.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_id: Option<String>,
+    /// Image name, resolved at read time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_name: Option<String>,
+    /// Most recent checkpoint.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checkpoint_id: Option<String>,
+    /// Creation time, epoch milliseconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_at_ms: Option<i64>,
+    /// First-run start time, epoch milliseconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_at_ms: Option<i64>,
+    /// Terminal time, epoch milliseconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finished_at_ms: Option<i64>,
+    /// Base64-encoded output.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
+    /// Base64-encoded input.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input: Option<String>,
+    /// Failure message, when the instance failed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// Captured guest stderr.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stderr: Option<String>,
+    /// Attempts used so far.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry_count: Option<u32>,
+    /// Attempt ceiling.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_retries: Option<u32>,
+    /// Peak guest linear memory.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_peak_bytes: Option<u64>,
+    /// CPU time consumed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpu_usage_usec: Option<u64>,
+    /// Why the instance stopped.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub termination_reason: Option<String>,
+    /// Guest exit code.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+}
+
+impl InstanceStatusResponse {
+    /// The "no such instance" answer, which is a 200 with `found: false` rather
+    /// than an error: absence is a normal reply to a status poll.
+    fn not_found(instance_id: String) -> Self {
+        Self {
+            found: false,
+            instance_id,
+            status: None,
+            tenant_id: None,
+            image_id: None,
+            image_name: None,
+            checkpoint_id: None,
+            created_at_ms: None,
+            started_at_ms: None,
+            finished_at_ms: None,
+            output: None,
+            input: None,
+            error: None,
+            stderr: None,
+            retry_count: None,
+            max_retries: None,
+            memory_peak_bytes: None,
+            cpu_usage_usec: None,
+            termination_reason: None,
+            exit_code: None,
+        }
+    }
+}
+
+/// Read one instance's full state.
+pub async fn handle_get_instance_status(
+    state: &EnvironmentHandlerState,
+    instance_id: &str,
+) -> Result<InstanceStatusResponse> {
+    use base64::Engine;
+
+    let Some(inst) = db::get_instance_full(&state.pool, instance_id).await? else {
+        return Ok(InstanceStatusResponse::not_found(instance_id.to_string()));
+    };
+
+    Ok(InstanceStatusResponse {
+        found: true,
+        status: Some(instance_status_to_string(&inst.status).to_string()),
+        tenant_id: Some(inst.tenant_id),
+        instance_id: inst.instance_id,
+        image_id: inst.image_id,
+        image_name: inst.image_name,
+        checkpoint_id: inst.checkpoint_id,
+        created_at_ms: Some(inst.created_at.timestamp_millis()),
+        started_at_ms: inst.started_at.map(|t| t.timestamp_millis()),
+        finished_at_ms: inst.finished_at.map(|t| t.timestamp_millis()),
+        output: inst
+            .output
+            .map(|o| base64::engine::general_purpose::STANDARD.encode(&o)),
+        input: inst
+            .input
+            .map(|i| base64::engine::general_purpose::STANDARD.encode(&i)),
+        error: inst.error,
+        stderr: inst.stderr,
+        retry_count: Some(inst.attempt as u32),
+        max_retries: Some(inst.max_attempts as u32),
+        memory_peak_bytes: inst.memory_peak_bytes.map(|v| v as u64),
+        cpu_usage_usec: inst.cpu_usage_usec.map(|v| v as u64),
+        termination_reason: inst.termination_reason,
+        exit_code: inst.exit_code,
+    })
+}
+
+/// Instance summary for list responses.
+#[derive(Debug, Serialize)]
+pub struct InstanceSummary {
+    /// Instance id.
+    pub instance_id: String,
+    /// Owning tenant.
+    pub tenant_id: String,
+    /// Image the instance was launched from.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_id: Option<String>,
+    /// Lifecycle status.
+    pub status: String,
+    /// Creation time, epoch milliseconds.
+    pub created_at_ms: i64,
+    /// First-run start time, epoch milliseconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_at_ms: Option<i64>,
+    /// Terminal time, epoch milliseconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finished_at_ms: Option<i64>,
+    /// Whether a failure message is recorded.
+    pub has_error: bool,
+}
+
+/// A page of instances plus the unpaged total.
+#[derive(Debug)]
+pub struct ListInstancesResult {
+    /// The page.
+    pub instances: Vec<InstanceSummary>,
+    /// Total matching the filter, ignoring limit/offset.
+    pub total_count: i64,
+}
+
+/// List instances matching `options`.
+///
+/// A failing count degrades to `0` rather than failing the call: the page is
+/// the answer the caller asked for, and losing it because a second query
+/// stumbled would be the worse outcome.
+pub async fn handle_list_instances(
+    state: &EnvironmentHandlerState,
+    options: &db::ListInstancesOptions,
+) -> Result<ListInstancesResult> {
+    let instances = db::list_instances(&state.pool, options).await?;
+
+    let total_count = match db::count_instances(&state.pool, options).await {
+        Ok(c) => c,
+        Err(e) => {
+            warn!("Count instances error: {}", e);
+            0
+        }
+    };
+
+    Ok(ListInstancesResult {
+        instances: instances
+            .into_iter()
+            .map(|inst| InstanceSummary {
+                instance_id: inst.instance_id,
+                tenant_id: inst.tenant_id,
+                image_id: inst.image_id,
+                status: instance_status_to_string(&inst.status).to_string(),
+                created_at_ms: inst.created_at.timestamp_millis(),
+                started_at_ms: inst.started_at.map(|t| t.timestamp_millis()),
+                finished_at_ms: inst.finished_at.map(|t| t.timestamp_millis()),
+                has_error: inst.error.is_some(),
+            })
+            .collect(),
+        total_count,
+    })
+}
+
+/// What happened to a lifecycle signal.
+///
+/// The refusals are outcomes rather than errors because each maps to a distinct
+/// answer the caller can act on, and only the transport knows how to say so.
+#[derive(Debug, PartialEq, Eq)]
+pub enum SendSignalOutcome {
+    /// The signal was stored for the instance to pick up.
+    Delivered,
+    /// No such instance.
+    InstanceNotFound,
+    /// The instance is past the point of accepting signals.
+    NotSignalable {
+        /// The status that refused it.
+        status: String,
+    },
+    /// The signal type is not one of `cancel`, `pause`, `resume`.
+    UnknownSignalType {
+        /// What the caller asked for.
+        signal_type: String,
+    },
+}
+
+/// Send a lifecycle signal (`cancel`, `pause`, `resume`) to an instance.
+pub async fn handle_send_signal(
+    state: &EnvironmentHandlerState,
+    instance_id: &str,
+    signal_type: &str,
+    payload: Option<&str>,
+) -> Result<SendSignalOutcome> {
+    let Some(instance) = state.persistence.get_instance(instance_id).await? else {
+        return Ok(SendSignalOutcome::InstanceNotFound);
+    };
+
+    if !matches!(
+        instance.status.as_str(),
+        "running" | "suspended" | "pending"
+    ) {
+        return Ok(SendSignalOutcome::NotSignalable {
+            status: instance.status,
+        });
+    }
+
+    if !matches!(signal_type, "cancel" | "pause" | "resume") {
+        return Ok(SendSignalOutcome::UnknownSignalType {
+            signal_type: signal_type.to_string(),
+        });
+    }
+
+    let payload = payload.map(|p| p.as_bytes().to_vec()).unwrap_or_default();
+    state
+        .persistence
+        .insert_signal(instance_id, signal_type, &payload)
+        .await?;
+
+    Ok(SendSignalOutcome::Delivered)
+}
+
+/// What happened to a custom signal.
+#[derive(Debug, PartialEq, Eq)]
+pub enum SendCustomSignalOutcome {
+    /// The signal was stored, and a parked instance woken if one was waiting.
+    Delivered,
+    /// No such instance.
+    InstanceNotFound,
+}
+
+/// Send a custom (workflow-defined) signal addressed to one checkpoint.
+pub async fn handle_send_custom_signal(
+    state: &EnvironmentHandlerState,
+    instance_id: &str,
+    checkpoint_id: &str,
+    payload: Option<&str>,
+) -> Result<SendCustomSignalOutcome> {
+    if state.persistence.get_instance(instance_id).await?.is_none() {
+        return Ok(SendCustomSignalOutcome::InstanceNotFound);
+    }
+
+    if checkpoint_id.is_empty() {
+        return Err(crate::error::Error::InvalidRequest(
+            "checkpoint_id is required".to_string(),
+        ));
+    }
+
+    let payload = payload.map(|p| p.as_bytes().to_vec()).unwrap_or_default();
+    state
+        .persistence
+        .insert_custom_signal(instance_id, checkpoint_id, &payload)
+        .await?;
+
+    wake_suspended_on_signal(state.persistence.as_ref(), instance_id).await;
+    Ok(SendCustomSignalOutcome::Delivered)
+}
+
+/// On-signal waker (store-freeing Wait): a Wait compiled with the store-freeing
+/// gate parks as `status='suspended'` with `sleep_until` = its timeout deadline
+/// (or NULL when the wait has no timeout). The wake scheduler only relaunches on
+/// a due `sleep_until`, so a custom signal for such an instance must stamp
+/// `sleep_until=now` to relaunch it BEFORE the timeout (or at all, when there is
+/// no timeout). The instance replays, re-polls the now-present signal
+/// (non-destructive read), and proceeds.
+///
+/// No-op unless the instance is currently `suspended` AND was parked by an
+/// on-signal wait (`termination_reason = 'waiting_signal'`, stamped by
+/// `park_invoke_suspend`). `status='suspended'` alone is NOT sufficient: in
+/// the default (blocking) configuration every suspended row is a
+/// pause/breakpoint/shutdown ack whose pause signal was already consumed —
+/// stamping `sleep_until` on those would relaunch a replay that runs PAST the
+/// pause, silently auto-resuming a paused instance on any custom signal.
+pub async fn wake_suspended_on_signal(persistence: &dyn Persistence, instance_id: &str) {
+    match persistence.get_instance(instance_id).await {
+        Ok(Some(inst))
+            if inst.status == "suspended"
+                && inst.termination_reason.as_deref()
+                    == Some(crate::runner::embedded::WAITING_SIGNAL_TERMINATION) =>
+        {
+            if let Err(e) = persistence
+                .set_instance_sleep(instance_id, chrono::Utc::now())
+                .await
+            {
+                warn!(instance_id, error = %e, "Failed to wake suspended instance after custom signal");
+            } else {
+                info!(instance_id, "Woke suspended instance for a custom signal");
+            }
+        }
+        Ok(_) => {}
+        Err(e) => warn!(instance_id, error = %e, "Waker could not read instance status"),
+    }
+}
+
+/// Checkpoint summary.
+#[derive(Debug, Serialize)]
+pub struct CheckpointSummary {
+    /// Checkpoint id.
+    pub checkpoint_id: String,
+    /// Owning instance.
+    pub instance_id: String,
+    /// Creation time, epoch milliseconds.
+    pub created_at_ms: i64,
+    /// Size of the stored state.
+    pub data_size_bytes: u64,
+}
+
+/// Filters for [`handle_list_checkpoints`].
+#[derive(Debug, Default)]
+pub struct ListCheckpointsParams {
+    /// Restrict to one checkpoint id.
+    pub checkpoint_id: Option<String>,
+    /// Lower bound on creation time.
+    pub created_after: Option<chrono::DateTime<chrono::Utc>>,
+    /// Upper bound on creation time.
+    pub created_before: Option<chrono::DateTime<chrono::Utc>>,
+    /// Page size.
+    pub limit: i64,
+    /// Page offset.
+    pub offset: i64,
+}
+
+/// A page of checkpoints plus the unpaged total.
+#[derive(Debug)]
+pub struct ListCheckpointsResult {
+    /// The page.
+    pub checkpoints: Vec<CheckpointSummary>,
+    /// Total matching the filter.
+    pub total_count: i64,
+}
+
+/// List an instance's checkpoints.
+pub async fn handle_list_checkpoints(
+    state: &EnvironmentHandlerState,
+    instance_id: &str,
+    params: &ListCheckpointsParams,
+) -> Result<ListCheckpointsResult> {
+    let checkpoints = state
+        .persistence
+        .list_checkpoints(
+            instance_id,
+            params.checkpoint_id.as_deref(),
+            params.limit,
+            params.offset,
+            params.created_after,
+            params.created_before,
+        )
+        .await?;
+
+    let total_count = state
+        .persistence
+        .count_checkpoints(
+            instance_id,
+            params.checkpoint_id.as_deref(),
+            params.created_after,
+            params.created_before,
+        )
+        .await
+        .unwrap_or(0);
+
+    Ok(ListCheckpointsResult {
+        checkpoints: checkpoints
+            .into_iter()
+            .map(|cp| CheckpointSummary {
+                checkpoint_id: cp.checkpoint_id,
+                instance_id: cp.instance_id,
+                created_at_ms: cp.created_at.timestamp_millis(),
+                data_size_bytes: cp.state.len() as u64,
+            })
+            .collect(),
+        total_count,
+    })
+}
+
+/// Full checkpoint, state included.
+#[derive(Debug, Serialize)]
+pub struct CheckpointDetail {
+    /// Whether the checkpoint exists.
+    pub found: bool,
+    /// Checkpoint id.
+    pub checkpoint_id: String,
+    /// Owning instance.
+    pub instance_id: String,
+    /// Creation time, epoch milliseconds; `0` when not found.
+    pub created_at_ms: i64,
+    /// Base64-encoded checkpoint state.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<String>,
+}
+
+/// Load one checkpoint's stored state.
+pub async fn handle_get_checkpoint(
+    state: &EnvironmentHandlerState,
+    instance_id: &str,
+    checkpoint_id: &str,
+) -> Result<CheckpointDetail> {
+    use base64::Engine;
+
+    let Some(cp) = state
+        .persistence
+        .load_checkpoint(instance_id, checkpoint_id)
+        .await?
+    else {
+        return Ok(CheckpointDetail {
+            found: false,
+            checkpoint_id: checkpoint_id.to_string(),
+            instance_id: instance_id.to_string(),
+            created_at_ms: 0,
+            data: None,
+        });
+    };
+
+    Ok(CheckpointDetail {
+        found: true,
+        created_at_ms: cp.created_at.timestamp_millis(),
+        data: Some(base64::engine::general_purpose::STANDARD.encode(&cp.state)),
+        checkpoint_id: cp.checkpoint_id,
+        instance_id: cp.instance_id,
+    })
+}
+
+/// Event summary.
+#[derive(Debug, Serialize)]
+pub struct EventSummary {
+    /// Row id.
+    pub id: i64,
+    /// Owning instance.
+    pub instance_id: String,
+    /// Event type.
+    pub event_type: String,
+    /// Checkpoint the event belongs to, when it has one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checkpoint_id: Option<String>,
+    /// Base64-encoded payload.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payload: Option<String>,
+    /// Creation time, epoch milliseconds.
+    pub created_at_ms: i64,
+    /// Event subtype.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subtype: Option<String>,
+}
+
+/// A page of events plus the unpaged total.
+#[derive(Debug)]
+pub struct ListEventsResult {
+    /// The page.
+    pub events: Vec<EventSummary>,
+    /// Total matching the filter.
+    pub total_count: i64,
+}
+
+/// List an instance's events.
+pub async fn handle_list_events(
+    state: &EnvironmentHandlerState,
+    instance_id: &str,
+    filter: &runtara_core::persistence::ListEventsFilter,
+    limit: i64,
+    offset: i64,
+) -> Result<ListEventsResult> {
+    use base64::Engine;
+
+    let events = state
+        .persistence
+        .list_events(instance_id, filter, limit, offset)
+        .await?;
+
+    let total_count = state
+        .persistence
+        .count_events(instance_id, filter)
+        .await
+        .unwrap_or(0);
+
+    Ok(ListEventsResult {
+        events: events
+            .into_iter()
+            .map(|ev| EventSummary {
+                id: ev.id.unwrap_or(0),
+                instance_id: ev.instance_id,
+                event_type: ev.event_type,
+                checkpoint_id: ev.checkpoint_id,
+                payload: ev
+                    .payload
+                    .map(|p| base64::engine::general_purpose::STANDARD.encode(&p)),
+                created_at_ms: ev.created_at.timestamp_millis(),
+                subtype: ev.subtype,
+            })
+            .collect(),
+        total_count,
+    })
+}
+
+/// Step summary.
+#[derive(Debug, Serialize)]
+pub struct StepSummary {
+    /// Step id.
+    pub step_id: String,
+    /// Human-readable step name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub step_name: Option<String>,
+    /// Step type.
+    pub step_type: String,
+    /// `running`, `completed` or `failed`.
+    pub status: String,
+    /// Start time, epoch milliseconds.
+    pub started_at_ms: i64,
+    /// Completion time, epoch milliseconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completed_at_ms: Option<i64>,
+    /// Wall-clock duration.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<i64>,
+    /// Real launch/settle wall-clock (epoch ms) of a parallel branch's async
+    /// work — present only for concurrent steps, so the timeline/replay render
+    /// the true overlapping interval instead of the sequential assemble cascade.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub launched_at_ms: Option<i64>,
+    /// See [`Self::launched_at_ms`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub settled_at_ms: Option<i64>,
+    /// Resolved step inputs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inputs: Option<Value>,
+    /// Step outputs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outputs: Option<Value>,
+    /// Failure detail.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<Value>,
+    /// Scope this step ran in.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope_id: Option<String>,
+    /// Enclosing scope.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_scope_id: Option<String>,
+}
+
+/// A page of step summaries plus the unpaged total.
+#[derive(Debug)]
+pub struct ListStepSummariesResult {
+    /// The page.
+    pub steps: Vec<StepSummary>,
+    /// Total matching the filter.
+    pub total_count: i64,
+}
+
+/// List an instance's per-step summaries.
+pub async fn handle_list_step_summaries(
+    state: &EnvironmentHandlerState,
+    instance_id: &str,
+    filter: &runtara_core::persistence::ListStepSummariesFilter,
+    limit: i64,
+    offset: i64,
+) -> Result<ListStepSummariesResult> {
+    use runtara_core::persistence::StepStatus;
+
+    if instance_id.is_empty() {
+        return Err(crate::error::Error::InvalidRequest(
+            "instance_id is required".to_string(),
+        ));
+    }
+
+    let steps = state
+        .persistence
+        .list_step_summaries(instance_id, filter, limit, offset)
+        .await?;
+
+    let total_count = state
+        .persistence
+        .count_step_summaries(instance_id, filter)
+        .await
+        .unwrap_or(0);
+
+    Ok(ListStepSummariesResult {
+        steps: steps
+            .into_iter()
+            .map(|step| StepSummary {
+                status: match step.status {
+                    StepStatus::Running => "running",
+                    StepStatus::Completed => "completed",
+                    StepStatus::Failed => "failed",
+                }
+                .to_string(),
+                step_id: step.step_id,
+                step_name: step.step_name,
+                step_type: step.step_type,
+                started_at_ms: step.started_at.timestamp_millis(),
+                completed_at_ms: step.completed_at.map(|t| t.timestamp_millis()),
+                duration_ms: step.duration_ms,
+                launched_at_ms: step.launched_at_ms,
+                settled_at_ms: step.settled_at_ms,
+                inputs: step.inputs,
+                outputs: step.outputs,
+                error: step.error,
+                scope_id: step.scope_id,
+                parent_scope_id: step.parent_scope_id,
+            })
+            .collect(),
+        total_count,
+    })
+}
+
+/// One scope in an ancestry chain.
+#[derive(Debug, Serialize)]
+pub struct ScopeInfo {
+    /// Scope id.
+    pub scope_id: String,
+    /// Enclosing scope, absent at the root.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_scope_id: Option<String>,
+    /// Step that opened the scope.
+    pub step_id: String,
+    /// Human-readable step name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub step_name: Option<String>,
+    /// Step type.
+    pub step_type: String,
+    /// Iteration index, for scopes opened per-iteration.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub index: Option<u32>,
+    /// Creation time, epoch milliseconds.
+    pub created_at_ms: i64,
+}
+
+/// Walk a scope's ancestry, innermost first.
+///
+/// Reconstructed from `scope_enter` events rather than stored directly. A scope
+/// whose enter event is missing ends the walk instead of failing it — a partial
+/// chain is more useful than none, and a truncated ancestry is what the caller
+/// would have to handle anyway for an instance still running.
+pub async fn handle_get_scope_ancestors(
+    state: &EnvironmentHandlerState,
+    instance_id: &str,
+    scope_id: &str,
+) -> Result<Vec<ScopeInfo>> {
+    use runtara_core::persistence::{EventSortOrder, ListEventsFilter};
+
+    if instance_id.is_empty() || scope_id.is_empty() {
+        return Err(crate::error::Error::InvalidRequest(
+            "instance_id and scope_id are required".to_string(),
+        ));
+    }
+
+    let filter = ListEventsFilter {
+        event_type: Some("scope_enter".to_string()),
+        subtype: None,
+        created_after: None,
+        created_before: None,
+        payload_contains: None,
+        scope_id: None,
+        parent_scope_id: None,
+        root_scopes_only: false,
+        sort_order: EventSortOrder::Asc,
+    };
+
+    let events = state
+        .persistence
+        .list_events(instance_id, &filter, 10000, 0)
+        .await?;
+
+    let mut scope_map: std::collections::HashMap<String, ScopeInfo> =
+        std::collections::HashMap::new();
+
+    for event in events {
+        let Some(payload) = &event.payload else {
+            continue;
+        };
+        let Ok(payload_json) = serde_json::from_slice::<Value>(payload) else {
+            continue;
+        };
+        let Some(sid) = payload_json.get("scope_id").and_then(|v| v.as_str()) else {
+            continue;
+        };
+
+        scope_map.insert(
+            sid.to_string(),
+            ScopeInfo {
+                scope_id: sid.to_string(),
+                parent_scope_id: payload_json
+                    .get("parent_scope_id")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                step_id: payload_json
+                    .get("step_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                step_name: payload_json
+                    .get("step_name")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                step_type: payload_json
+                    .get("step_type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                index: payload_json
+                    .get("index")
+                    .and_then(|v| v.as_u64())
+                    .map(|i| i as u32),
+                created_at_ms: event.created_at.timestamp_millis(),
+            },
+        );
+    }
+
+    let mut ancestors = Vec::new();
+    let mut current = Some(scope_id.to_string());
+
+    while let Some(sid) = current {
+        // `remove` rather than `get`: a payload that names itself (or a cycle
+        // through several scopes) would otherwise loop forever.
+        if let Some(info) = scope_map.remove(&sid) {
+            current = info.parent_scope_id.clone();
+            ancestors.push(info);
+        } else {
+            break;
+        }
+    }
+
+    Ok(ancestors)
+}
+
+/// One bucket of tenant execution metrics.
+#[derive(Debug, Serialize)]
+pub struct MetricsBucket {
+    /// Bucket start, epoch milliseconds.
+    pub bucket_time_ms: i64,
+    /// Invocations started in the bucket.
+    pub invocation_count: i64,
+    /// Invocations that completed successfully.
+    pub success_count: i64,
+    /// Invocations that failed.
+    pub failure_count: i64,
+    /// Invocations that were cancelled.
+    pub cancelled_count: i64,
+    /// Mean duration.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avg_duration_ms: Option<f64>,
+    /// Fastest duration.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_duration_ms: Option<f64>,
+    /// Slowest duration.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_duration_ms: Option<f64>,
+    /// Mean peak memory.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avg_memory_bytes: Option<i64>,
+    /// Highest peak memory.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_memory_bytes: Option<i64>,
+    /// Successes as a percentage of terminal invocations.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub success_rate_percent: Option<f64>,
+}
+
+/// Read a tenant's execution metrics, bucketed.
+///
+/// The success rate is computed over *terminal* invocations only, so runs still
+/// in flight neither count against it nor inflate it; a bucket with nothing
+/// terminal yet reports `None` rather than 0%.
+pub async fn handle_get_tenant_metrics(
+    state: &EnvironmentHandlerState,
+    options: &db::TenantMetricsOptions,
+) -> Result<Vec<MetricsBucket>> {
+    if options.tenant_id.is_empty() {
+        return Err(crate::error::Error::InvalidRequest(
+            "tenant_id is required".to_string(),
+        ));
+    }
+
+    let bucket_rows = db::get_tenant_metrics(&state.pool, options).await?;
+
+    Ok(bucket_rows
+        .into_iter()
+        .map(|row| {
+            let terminal_count = row.success_count + row.failure_count + row.cancelled_count;
+            MetricsBucket {
+                bucket_time_ms: row.bucket_time.timestamp_millis(),
+                invocation_count: row.invocation_count,
+                success_count: row.success_count,
+                failure_count: row.failure_count,
+                cancelled_count: row.cancelled_count,
+                avg_duration_ms: row.avg_duration_ms,
+                min_duration_ms: row.min_duration_ms,
+                max_duration_ms: row.max_duration_ms,
+                avg_memory_bytes: row.avg_memory_bytes.map(|v| v as i64),
+                max_memory_bytes: row.max_memory_bytes,
+                success_rate_percent: (terminal_count > 0)
+                    .then(|| (row.success_count as f64 / terminal_count as f64) * 100.0),
+            }
+        })
+        .collect())
+}
+
+/// Identity and metadata for an uploaded image.
+#[derive(Debug)]
+pub struct StoreImageParams {
+    /// Owning tenant.
+    pub tenant_id: String,
+    /// Image name; unique per tenant, and re-uploading the same name replaces
+    /// the artifact in place rather than creating a second row.
+    pub name: String,
+    /// Optional description.
+    pub description: Option<String>,
+    /// Free-form metadata.
+    pub metadata: Option<Value>,
+}
+
+/// Why an image upload could not be stored.
+///
+/// Split by stage rather than collapsed into one error because the caller is
+/// told something different by each: a lookup or register failure is the
+/// registry's, an I/O failure is the volume's.
+#[derive(Debug)]
+pub enum StoreImageError {
+    /// Looking up an existing image with the same name failed.
+    Lookup(String),
+    /// Creating the image directory or writing the artifact failed.
+    Io(String),
+    /// Writing the image row failed.
+    Register(String),
+}
+
+/// Write an uploaded image artifact to disk and register (or replace) its row.
+///
+/// On any failure after the directory is created, a *new* image's directory is
+/// removed again — but a replacement's is left alone, because deleting it would
+/// destroy the artifact the existing row still points at.
+pub async fn handle_store_image(
+    state: &EnvironmentHandlerState,
+    params: StoreImageParams,
+    binary: &[u8],
+) -> std::result::Result<String, StoreImageError> {
+    use std::io::Write;
+
+    let image_registry = ImageRegistry::new(state.pool.clone());
+    let existing_image = image_registry
+        .get_by_name(&params.tenant_id, &params.name)
+        .await
+        .map_err(|e| StoreImageError::Lookup(format!("Failed to look up existing image: {}", e)))?;
+
+    let replacing_existing = existing_image.is_some();
+    let image_id = existing_image
+        .map(|image| image.image_id)
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
+    let images_dir = state.data_dir.join("images").join(&image_id);
+    let binary_path = images_dir.join("binary");
+
+    if let Err(e) = std::fs::create_dir_all(&images_dir) {
+        error!(error = %e, "Failed to create image directory");
+        return Err(StoreImageError::Io(format!(
+            "Failed to create image directory: {}",
+            e
+        )));
+    }
+
+    let cleanup = || {
+        if !replacing_existing {
+            let _ = std::fs::remove_dir_all(&images_dir);
+        }
+    };
+
+    if let Err(e) = std::fs::File::create(&binary_path).and_then(|mut f| f.write_all(binary)) {
+        error!(error = %e, "Failed to write binary");
+        cleanup();
+        return Err(StoreImageError::Io(format!(
+            "Failed to write binary: {}",
+            e
+        )));
+    }
+
+    let mut builder = ImageBuilder::new(
+        &params.tenant_id,
+        &params.name,
+        binary_path.to_string_lossy(),
+    );
+    if let Some(desc) = &params.description {
+        builder = builder.description(desc);
+    }
+    if let Some(meta) = params.metadata {
+        builder = builder.metadata(meta);
+    }
+
+    let mut image = builder.build();
+    image.image_id = image_id.clone();
+
+    if let Err(e) = image_registry.register(&image).await {
+        cleanup();
+        return Err(StoreImageError::Register(format!(
+            "Failed to register image: {}",
+            e
+        )));
+    }
+
+    info!(image_id = %image_id, bytes = binary.len(), "Streaming image registration complete");
+    Ok(image_id)
+}
+
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "db-integration-tests")]
+    use crate::test_support;
+
+    /// A suspended instance with the given `termination_reason` marker.
+    #[cfg(feature = "db-integration-tests")]
+    async fn suspended_instance(marker: Option<&str>) -> (Arc<dyn Persistence>, String) {
+        let (persistence, instance_id) = test_support::running_instance("waker").await;
+        let mut params = CompleteInstanceParams::new(&instance_id, "suspended").if_running();
+        if let Some(marker) = marker {
+            params = params.with_termination(marker, None);
+        }
+        persistence
+            .complete_instance(params)
+            .await
+            .expect("suspend");
+        (persistence, instance_id)
+    }
+
+    #[cfg(feature = "db-integration-tests")]
+    #[tokio::test]
+    async fn waker_ignores_a_pause_shaped_suspend() {
+        // A pause/breakpoint ack parks `suspended` with NO wake marker and its
+        // pause signal already consumed — a custom signal must NOT relaunch it
+        // (the replay would run straight past the pause).
+        let (persistence, instance_id) = suspended_instance(None).await;
+        wake_suspended_on_signal(persistence.as_ref(), &instance_id).await;
+
+        let inst = persistence
+            .get_instance(&instance_id)
+            .await
+            .expect("get")
+            .expect("instance exists");
+        assert_eq!(inst.status, "suspended");
+        assert!(
+            inst.sleep_until.is_none(),
+            "a custom signal must never schedule a wake for a paused instance"
+        );
+    }
+
+    #[cfg(feature = "db-integration-tests")]
+    #[tokio::test]
+    async fn waker_stamps_sleep_for_an_on_signal_park() {
+        let (persistence, instance_id) =
+            suspended_instance(Some(crate::runner::embedded::WAITING_SIGNAL_TERMINATION)).await;
+        wake_suspended_on_signal(persistence.as_ref(), &instance_id).await;
+
+        let inst = persistence
+            .get_instance(&instance_id)
+            .await
+            .expect("get")
+            .expect("instance exists");
+        assert_eq!(inst.status, "suspended");
+        assert!(
+            inst.sleep_until.is_some(),
+            "an on-signal park must be scheduled for relaunch when its signal arrives"
+        );
+    }
+
+    #[cfg(feature = "db-integration-tests")]
+    #[tokio::test]
+    async fn waker_ignores_a_timed_sleep_park() {
+        // A store-freeing durable Delay parks with the `sleeping` marker and a
+        // deadline; a custom signal must not fast-forward it.
+        let (persistence, instance_id) = suspended_instance(Some("sleeping")).await;
+        wake_suspended_on_signal(persistence.as_ref(), &instance_id).await;
+
+        let inst = persistence
+            .get_instance(&instance_id)
+            .await
+            .expect("get")
+            .expect("instance exists");
+        assert!(
+            inst.sleep_until.is_none(),
+            "a timed sleep is scheduler-woken at its deadline, not signal-woken"
+        );
+    }
+
     use super::*;
     use crate::image_registry::Image;
     use chrono::Utc;
