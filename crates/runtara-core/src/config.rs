@@ -1,85 +1,23 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Configuration loading from environment variables.
+//!
+//! Core is a library, so it reads nothing on its own and owns no defaults for
+//! the process it runs in — no database URL, no listen address. What it does
+//! own is the pair of knobs that govern the handlers themselves, and
+//! [`RuntimeOverrides`] hands those to a host in the only shape that keeps the
+//! host in charge: `None` where the deployment said nothing.
 
-use std::net::SocketAddr;
 use std::time::Duration;
 
-use crate::runtime::DEFAULT_SHUTDOWN_GRACE;
-
-/// Cap the standalone binary applies when `RUNTARA_MAX_CONCURRENT_INSTANCES`
-/// is unset. A host that embeds the runtime does not inherit this: see
-/// [`RuntimeOverrides`].
-const DEFAULT_MAX_CONCURRENT_INSTANCES: u32 = 32;
-
-/// Runtara Core configuration
-#[derive(Debug, Clone)]
-pub struct Config {
-    /// PostgreSQL connection URL
-    pub database_url: String,
-    /// HTTP server address for instance communication
-    pub http_addr: SocketAddr,
-    /// Maximum instances in `running` at once; `0` disables the cap
-    pub max_concurrent_instances: u32,
-    /// How long shutdown waits for in-flight requests before aborting them
-    pub shutdown_grace_ms: u64,
-}
-
-impl Config {
-    /// Load configuration from environment variables.
-    ///
-    /// Required:
-    /// - `RUNTARA_DATABASE_URL`: PostgreSQL connection string
-    ///
-    /// Optional (with defaults):
-    /// - `RUNTARA_HTTP_PORT`: HTTP server port (default: 8001)
-    /// - `RUNTARA_MAX_CONCURRENT_INSTANCES`: Max concurrent instances (default: 32)
-    /// - `RUNTARA_CORE_SHUTDOWN_GRACE_MS`: How long shutdown waits for in-flight
-    ///   instance-protocol requests to finish before it stops waiting (default:
-    ///   [`DEFAULT_SHUTDOWN_GRACE`]). Distinct from runtara-server's
-    ///   `RUNTARA_SHUTDOWN_GRACE_MS`, which bounds a different phase — the two
-    ///   share a process in the embedded server, and their waits are additive.
-    pub fn from_env() -> Result<Self, ConfigError> {
-        let database_url = std::env::var("RUNTARA_DATABASE_URL")
-            .map_err(|_| ConfigError::Missing("RUNTARA_DATABASE_URL"))?;
-
-        let http_port: u16 = std::env::var("RUNTARA_HTTP_PORT")
-            .unwrap_or_else(|_| "8001".to_string())
-            .parse()
-            .map_err(|_| {
-                ConfigError::Invalid("RUNTARA_HTTP_PORT", "must be a valid port number")
-            })?;
-
-        let max_concurrent_instances =
-            max_concurrent_instances_from_env()?.unwrap_or(DEFAULT_MAX_CONCURRENT_INSTANCES);
-
-        let shutdown_grace_ms = shutdown_grace_from_env()?
-            // Read the runtime's own constant rather than repeating the number,
-            // so the documented default cannot drift from the applied one.
-            .unwrap_or(DEFAULT_SHUTDOWN_GRACE)
-            .as_millis() as u64;
-
-        Ok(Self {
-            database_url,
-            http_addr: SocketAddr::from(([0, 0, 0, 0], http_port)),
-            max_concurrent_instances,
-            shutdown_grace_ms,
-        })
-    }
-}
-
-/// The [`CoreRuntime`](crate::runtime::CoreRuntime) knobs a host that *embeds*
-/// the runtime can take from the environment, each `None` when its variable is
-/// unset.
+/// The core knobs a host can take from the environment, each `None` when its
+/// variable is unset.
 ///
-/// [`Config`] is for a process that *is* runtara-core: it owns the database URL
-/// and the listen port, and it substitutes its own default for anything unset.
-/// An embedding host supplies persistence and bind address itself and wants
-/// only the rest — and must not have a concurrency cap it never asked for
-/// switched on underneath it by an upgrade. Optional fields are what separate
-/// "unset" from "set to the same value as the default", so
-/// [`apply_overrides`](crate::runtime::CoreRuntimeBuilder::apply_overrides) can
-/// leave the builder's own default in place.
+/// A host supplies persistence and its own transport, and must not have a
+/// concurrency cap it never asked for switched on underneath it by an upgrade.
+/// Optional fields are what separate "unset" from "set to the same value as
+/// the default", so a host can apply these over its own defaults and leave
+/// untouched whatever the deployment did not mention.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RuntimeOverrides {
     /// `RUNTARA_MAX_CONCURRENT_INSTANCES`, when set.
@@ -94,9 +32,8 @@ impl RuntimeOverrides {
     /// An unset variable is not an error — it yields `None`. A malformed one
     /// is, so a typo in a deployment's configuration surfaces at startup
     /// instead of being silently ignored. What a host does with that error is
-    /// its own call: the `runtara-core` and `runtara-environment` binaries
-    /// exit, while `runtara-server` reports it and carries on without an
-    /// embedded runtime.
+    /// its own call: `runtara-environment` exits, while `runtara-server`
+    /// reports it and carries on without an embedded runtime.
     pub fn from_env() -> Result<Self, ConfigError> {
         Ok(Self {
             max_concurrent_instances: max_concurrent_instances_from_env()?,
@@ -138,10 +75,6 @@ fn shutdown_grace_from_env() -> Result<Option<Duration>, ConfigError> {
 /// Configuration errors
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
-    /// A required environment variable is missing.
-    #[error("missing required environment variable: {0}")]
-    Missing(&'static str),
-
     /// An environment variable has an invalid value.
     #[error("invalid value for {0}: {1}")]
     Invalid(&'static str, &'static str),
@@ -217,143 +150,6 @@ mod tests {
     }
 
     #[test]
-    fn test_config_from_env_with_defaults() {
-        let _lock = ENV_MUTEX.lock().unwrap();
-        let mut guard = EnvGuard::new();
-
-        guard.set("RUNTARA_DATABASE_URL", "postgres://localhost/test");
-        guard.remove("RUNTARA_HTTP_PORT");
-        guard.remove("RUNTARA_MAX_CONCURRENT_INSTANCES");
-
-        let config = Config::from_env().unwrap();
-
-        assert_eq!(config.database_url, "postgres://localhost/test");
-        assert_eq!(config.http_addr.port(), 8001);
-        assert_eq!(config.max_concurrent_instances, 32);
-    }
-
-    #[test]
-    fn test_config_from_env_with_custom_port() {
-        let _lock = ENV_MUTEX.lock().unwrap();
-        let mut guard = EnvGuard::new();
-
-        guard.set("RUNTARA_DATABASE_URL", "postgres://localhost/test");
-        guard.set("RUNTARA_HTTP_PORT", "9999");
-        guard.remove("RUNTARA_MAX_CONCURRENT_INSTANCES");
-
-        let config = Config::from_env().unwrap();
-
-        assert_eq!(config.database_url, "postgres://localhost/test");
-        assert_eq!(config.http_addr.port(), 9999);
-        assert_eq!(config.max_concurrent_instances, 32);
-    }
-
-    #[test]
-    fn test_config_from_env_with_custom_max_instances() {
-        let _lock = ENV_MUTEX.lock().unwrap();
-        let mut guard = EnvGuard::new();
-
-        guard.set("RUNTARA_DATABASE_URL", "postgres://localhost/test");
-        guard.remove("RUNTARA_HTTP_PORT");
-        guard.set("RUNTARA_MAX_CONCURRENT_INSTANCES", "100");
-
-        let config = Config::from_env().unwrap();
-
-        assert_eq!(config.max_concurrent_instances, 100);
-    }
-
-    #[test]
-    fn test_config_from_env_all_custom() {
-        let _lock = ENV_MUTEX.lock().unwrap();
-        let mut guard = EnvGuard::new();
-
-        guard.set("RUNTARA_DATABASE_URL", "postgres://user:pass@db:5432/prod");
-        guard.set("RUNTARA_HTTP_PORT", "8080");
-        guard.set("RUNTARA_MAX_CONCURRENT_INSTANCES", "256");
-
-        let config = Config::from_env().unwrap();
-
-        assert_eq!(config.database_url, "postgres://user:pass@db:5432/prod");
-        assert_eq!(config.http_addr.port(), 8080);
-        assert_eq!(config.max_concurrent_instances, 256);
-    }
-
-    #[test]
-    fn test_config_missing_database_url() {
-        let _lock = ENV_MUTEX.lock().unwrap();
-        let mut guard = EnvGuard::new();
-
-        guard.remove("RUNTARA_DATABASE_URL");
-
-        let result = Config::from_env();
-        assert!(result.is_err());
-
-        let err = result.unwrap_err();
-        assert!(matches!(err, ConfigError::Missing("RUNTARA_DATABASE_URL")));
-        assert!(err.to_string().contains("RUNTARA_DATABASE_URL"));
-    }
-
-    #[test]
-    fn test_config_invalid_http_port() {
-        let _lock = ENV_MUTEX.lock().unwrap();
-        let mut guard = EnvGuard::new();
-
-        guard.set("RUNTARA_DATABASE_URL", "postgres://localhost/test");
-        guard.set("RUNTARA_HTTP_PORT", "not_a_number");
-
-        let result = Config::from_env();
-        assert!(result.is_err());
-
-        let err = result.unwrap_err();
-        assert!(matches!(err, ConfigError::Invalid("RUNTARA_HTTP_PORT", _)));
-    }
-
-    #[test]
-    fn test_config_invalid_http_port_out_of_range() {
-        let _lock = ENV_MUTEX.lock().unwrap();
-        let mut guard = EnvGuard::new();
-
-        guard.set("RUNTARA_DATABASE_URL", "postgres://localhost/test");
-        guard.set("RUNTARA_HTTP_PORT", "99999"); // > 65535
-
-        let result = Config::from_env();
-        assert!(result.is_err());
-
-        let err = result.unwrap_err();
-        assert!(matches!(err, ConfigError::Invalid("RUNTARA_HTTP_PORT", _)));
-    }
-
-    #[test]
-    fn test_config_invalid_max_concurrent_instances() {
-        let _lock = ENV_MUTEX.lock().unwrap();
-        let mut guard = EnvGuard::new();
-
-        guard.set("RUNTARA_DATABASE_URL", "postgres://localhost/test");
-        guard.set("RUNTARA_MAX_CONCURRENT_INSTANCES", "abc");
-
-        let result = Config::from_env();
-        assert!(result.is_err());
-
-        let err = result.unwrap_err();
-        assert!(matches!(
-            err,
-            ConfigError::Invalid("RUNTARA_MAX_CONCURRENT_INSTANCES", _)
-        ));
-    }
-
-    #[test]
-    fn test_config_negative_max_concurrent_instances() {
-        let _lock = ENV_MUTEX.lock().unwrap();
-        let mut guard = EnvGuard::new();
-
-        guard.set("RUNTARA_DATABASE_URL", "postgres://localhost/test");
-        guard.set("RUNTARA_MAX_CONCURRENT_INSTANCES", "-5");
-
-        let result = Config::from_env();
-        assert!(result.is_err());
-    }
-
-    #[test]
     fn test_runtime_overrides_unset_are_none() {
         let _lock = ENV_MUTEX.lock().unwrap();
         let mut guard = EnvGuard::new();
@@ -422,81 +218,11 @@ mod tests {
     }
 
     #[test]
-    fn test_config_defaults_where_overrides_are_none() {
-        let _lock = ENV_MUTEX.lock().unwrap();
-        let mut guard = EnvGuard::new();
-
-        guard.set("RUNTARA_DATABASE_URL", "postgres://localhost/test");
-        guard.remove("RUNTARA_MAX_CONCURRENT_INSTANCES");
-        guard.remove("RUNTARA_CORE_SHUTDOWN_GRACE_MS");
-
-        let config = Config::from_env().unwrap();
-
-        assert!(
-            RuntimeOverrides::from_env()
-                .unwrap()
-                .shutdown_grace
-                .is_none()
-        );
-        assert_eq!(
-            config.max_concurrent_instances,
-            DEFAULT_MAX_CONCURRENT_INSTANCES
-        );
-        assert_eq!(
-            config.shutdown_grace_ms,
-            DEFAULT_SHUTDOWN_GRACE.as_millis() as u64
-        );
-    }
-
-    #[test]
     fn test_config_error_display() {
-        let missing = ConfigError::Missing("MY_VAR");
-        assert_eq!(
-            missing.to_string(),
-            "missing required environment variable: MY_VAR"
-        );
-
         let invalid = ConfigError::Invalid("MY_VAR", "must be a number");
         assert_eq!(
             invalid.to_string(),
             "invalid value for MY_VAR: must be a number"
-        );
-    }
-
-    #[test]
-    fn test_config_debug() {
-        let _lock = ENV_MUTEX.lock().unwrap();
-        let mut guard = EnvGuard::new();
-
-        guard.set("RUNTARA_DATABASE_URL", "postgres://localhost/test");
-        guard.remove("RUNTARA_HTTP_PORT");
-        guard.remove("RUNTARA_MAX_CONCURRENT_INSTANCES");
-
-        let config = Config::from_env().unwrap();
-        let debug_str = format!("{:?}", config);
-
-        assert!(debug_str.contains("Config"));
-        assert!(debug_str.contains("database_url"));
-        assert!(debug_str.contains("http_addr"));
-    }
-
-    #[test]
-    fn test_config_clone() {
-        let _lock = ENV_MUTEX.lock().unwrap();
-        let mut guard = EnvGuard::new();
-
-        guard.set("RUNTARA_DATABASE_URL", "postgres://localhost/test");
-        guard.remove("RUNTARA_HTTP_PORT");
-        guard.remove("RUNTARA_MAX_CONCURRENT_INSTANCES");
-
-        let config = Config::from_env().unwrap();
-        let cloned = config.clone();
-
-        assert_eq!(config.database_url, cloned.database_url);
-        assert_eq!(config.http_addr, cloned.http_addr);
-        assert_eq!(
-            config.max_concurrent_instances,
-            cloned.max_concurrent_instances
         );
     }
 

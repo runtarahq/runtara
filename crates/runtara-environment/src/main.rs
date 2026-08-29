@@ -8,6 +8,12 @@
 //! - Wake queue (schedule and execute durable sleep wakes)
 //! - Workflow execution on the embedded wasmtime runner. The compile
 //!   pipeline only emits `workflow.wasm`, so that is the only shape it runs.
+//!
+//! It does not serve runtara-core's instance protocol. Workflows composed
+//! against `runtara:workflow-runtime/runtime` as a host import — the default —
+//! reach core in-process through [`runtara_environment::runtime_host`]. Guests
+//! that need the protocol over HTTP want `runtara-server`, which owns that
+//! listener.
 
 use std::sync::Arc;
 use tracing::{info, warn};
@@ -69,11 +75,7 @@ async fn main() -> anyhow::Result<()> {
     let runner = build_runner(persistence.clone());
     info!(runner_type = runner.runner_type(), "Runner initialized");
 
-    // Parse core bind address if provided
-    let core_bind_addr: Option<std::net::SocketAddr> = config.core_addr.parse().ok();
-
-    // Start the runtime with embedded Core
-    let mut builder = EnvironmentRuntime::builder()
+    let runtime = EnvironmentRuntime::builder()
         .pool(pool)
         .runner(runner)
         .core_persistence(persistence)
@@ -82,20 +84,15 @@ async fn main() -> anyhow::Result<()> {
         .data_dir(&config.data_dir)
         .request_timeout(std::time::Duration::from_millis(
             config.db_request_timeout_ms,
-        ));
-
-    // Enable embedded Core server
-    if let Some(addr) = core_bind_addr {
-        info!(core_addr = %addr, "Embedding runtara-core server");
-        builder = builder.core_bind_addr(addr);
-    }
-
-    let runtime = builder.build()?.start().await?;
+        ))
+        .build()?
+        .start()
+        .await?;
 
     info!(
         env_addr = %config.http_addr,
         core_addr = %config.core_addr,
-        "Runtara server ready (Environment + embedded Core)"
+        "Runtara Environment ready"
     );
 
     // Wait for shutdown signal (SIGINT or SIGTERM)

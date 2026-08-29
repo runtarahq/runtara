@@ -8,54 +8,49 @@ Durable execution engine for Runtara: checkpoints, signals, durable sleep, and i
 
 ## What it is
 
-`runtara-core` is the host-side execution engine that workflow instances talk to in order to persist state and progress durably. The `persistence` module defines the `Persistence` trait (implemented by `PostgresPersistence`) covering instances, checkpoints, events, and signals. The `instance_handlers` and `server` modules expose the instance protocol over HTTP (register, checkpoint, sleep, events, signal poll/ack), and `runtime::CoreRuntime` bundles it into an embeddable service. The `migrations` module ships SQL migrations so embedders can set up the schema.
+`runtara-core` is the host-side execution engine that workflow instances talk to in order to persist state and progress durably. The `persistence` module defines the `Persistence` trait (implemented by `PostgresPersistence`) covering instances, checkpoints, events, and signals. The `instance_handlers` module implements the instance protocol (register, checkpoint, sleep, events, signal poll/ack) as plain async functions over that trait. The `migrations` module ships SQL migrations so embedders can set up the schema.
 
-## Using it standalone
+It is a library, not a service: no HTTP, no sockets, no binary. A host picks the transport. `runtara-server` serves these handlers over HTTP on the instance port for guests using the SDK's HTTP backend; `runtara-environment` calls them in-process for guests composed against the runtime as a host import, which is the default.
+
+## Using it
 
 ```toml
 [dependencies]
-runtara-core = "4.0"
+runtara-core = "8.7"
 sqlx = { version = "0.8", features = ["runtime-tokio", "postgres"] }
 tokio = { version = "1", features = ["full"] }
 ```
 
 ```rust
 use std::sync::Arc;
-use runtara_core::config::Config;
+use runtara_core::instance_handlers::{InstanceHandlerState, handle_checkpoint};
 use runtara_core::persistence::{Persistence, PostgresPersistence};
-use runtara_core::runtime::CoreRuntime;
 use sqlx::postgres::PgPoolOptions;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let config = Config::from_env()?;
-    let pool = PgPoolOptions::new().connect(&config.database_url).await?;
+    let pool = PgPoolOptions::new().connect(&std::env::var("RUNTARA_DATABASE_URL")?).await?;
     runtara_core::migrations::run_postgres(&pool).await?;
     let persistence: Arc<dyn Persistence> = Arc::new(PostgresPersistence::new(pool));
 
-    let runtime = CoreRuntime::builder()
-        .persistence(persistence)
-        .bind_addr(config.http_addr)
-        .max_concurrent_instances(config.max_concurrent_instances)
-        .build()?
-        .start()
-        .await?;
-
-    tokio::signal::ctrl_c().await?;
-    runtime.shutdown().await?;
+    let state = Arc::new(InstanceHandlerState::new(persistence));
+    // Call the handlers directly, or wrap `state` in a transport of your own.
+    let _ = &state;
     Ok(())
 }
 ```
 
-Requires a reachable PostgreSQL database via `RUNTARA_DATABASE_URL`. Disable the default `server` feature if you only need the persistence/migrations library surface.
+Requires a reachable PostgreSQL database.
 
 ## Inside Runtara
 
-- Consumed by `runtara-server` (binary that links core with `server` feature) and `runtara-environment` (shares the `Persistence` trait directly, not over HTTP).
+- `runtara-server` owns the instance HTTP API (`core_runtime` module), including the drain that lets an instance mid-checkpoint finish writing.
+- `runtara-environment` shares the `Persistence` trait and calls `instance_handlers` directly, never over HTTP.
 - `runtara-sdk` uses it via the optional `embedded` feature for in-process tests that skip the HTTP hop.
-- Depends on `sqlx` (Postgres), `tokio`, and `axum` for the instance HTTP server on port 8001.
+- Depends on `sqlx` (Postgres) and `tokio`. No web framework.
+- The `test-support` feature exposes the in-memory `Persistence` mock for downstream handler tests.
 - Primary integration point is the `Persistence` trait — environment and SDK both program against it.
-- Runs in: native host (Tokio + sqlx). Ships as both a library and an optional binary (`[[bin]] runtara-core`, gated on the `server` feature).
+- Runs in: native host (Tokio + sqlx).
 
 ## License
 

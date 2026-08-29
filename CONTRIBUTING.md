@@ -85,15 +85,21 @@ cargo test -p runtara-environment
 
 ### Running Locally
 
+`runtara-core` is a library and has no binary of its own; `runtara-server`
+embeds it along with `runtara-environment` and serves its instance protocol.
+
 ```bash
-# Set environment variables
+# The launcher sets everything up and starts runtara-server
+./start.sh
+
+# Or run the server directly
+export TENANT_ID=local
+export AUTH_PROVIDER=local
+export RUNTARA_SERVER_DATABASE_URL=postgres://user:pass@localhost/runtara_server
 export RUNTARA_DATABASE_URL=postgres://user:pass@localhost/runtara
-
-# Run runtara-core
-cargo run -p runtara-core
-
-# Run runtara-environment (in another terminal)
-cargo run -p runtara-environment
+export OBJECT_MODEL_DATABASE_URL=postgres://user:pass@localhost/runtara_objects
+export VALKEY_HOST=localhost
+cargo run -p runtara-server
 ```
 
 Example workflows live in `examples/` as DSL JSON — see `examples/README.md` for

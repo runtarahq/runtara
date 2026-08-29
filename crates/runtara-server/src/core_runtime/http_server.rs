@@ -2,9 +2,15 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! HTTP server for the instance protocol.
 //!
-//! Provides instance protocol operations over HTTP/JSON.
-//! This enables workflows (native or WASM) using the HTTP SDK backend
-//! to communicate with runtara-core.
+//! Provides runtara-core's instance protocol operations over HTTP/JSON. This
+//! enables workflows (native or WASM) using the SDK's HTTP backend to reach
+//! core over a socket; workflows composed against the runtime as a host import
+//! reach the same handlers in-process instead, through
+//! `runtara_environment::runtime_host`.
+//!
+//! Every handler here is wire plumbing — decode, delegate to
+//! [`runtara_core::instance_handlers`], map the error to a status. Core owns
+//! the semantics and knows nothing about HTTP.
 
 use std::future::Future;
 use std::net::SocketAddr;
@@ -23,8 +29,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracing::{error, info, warn};
 
-use crate::error::CoreError;
-use crate::instance_handlers::{
+use runtara_core::error::{CoreError, CoreErrorClass};
+use runtara_core::instance_handlers::{
     self, CheckpointRequest as HandlerCheckpointRequest,
     GetInstanceStatusRequest as HandlerGetStatusRequest, InstanceEvent as HandlerInstanceEvent,
     InstanceEventType as HandlerEventType, InstanceHandlerState, InstanceStatus,
@@ -196,25 +202,16 @@ fn event_type_from_string(s: &str) -> i32 {
 /// on an instance that already finished — indistinguishable from the database
 /// being down.
 ///
-/// The match is exhaustive on purpose: a new variant then fails to compile until
-/// someone decides what it means on the wire, rather than silently defaulting
-/// back to 500.
+/// The classification comes from core, which matches its own variants
+/// exhaustively in [`CoreError::classify`] — so a new variant fails to compile
+/// until someone decides what it means, rather than silently defaulting back to
+/// 500 here. This function only translates that verdict into HTTP.
 fn status_for_core(err: &CoreError) -> StatusCode {
-    match err {
-        // The caller named something that is not there.
-        CoreError::InstanceNotFound { .. } | CoreError::CheckpointNotFound { .. } => {
-            StatusCode::NOT_FOUND
-        }
-        // The thing exists but is not in a state that accepts this request.
-        CoreError::InvalidInstanceState { .. } | CoreError::InstanceAlreadyExists { .. } => {
-            StatusCode::CONFLICT
-        }
-        // The request itself is malformed.
-        CoreError::ValidationError { .. } => StatusCode::BAD_REQUEST,
-        // The server could not do its job. Retrying may work.
-        CoreError::DatabaseError { .. }
-        | CoreError::CheckpointSaveFailed { .. }
-        | CoreError::SignalDeliveryFailed { .. } => StatusCode::SERVICE_UNAVAILABLE,
+    match err.classify() {
+        CoreErrorClass::Missing => StatusCode::NOT_FOUND,
+        CoreErrorClass::Conflict => StatusCode::CONFLICT,
+        CoreErrorClass::Invalid => StatusCode::BAD_REQUEST,
+        CoreErrorClass::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
     }
 }
 
@@ -897,7 +894,7 @@ pub async fn run_http_server(
 /// for the requests already being served to finish before returning. Instances
 /// mid-checkpoint therefore get to finish writing rather than being cut off —
 /// which is the whole point of the drain sequence in
-/// [`CoreRuntime`](crate::runtime::CoreRuntime).
+/// [`CoreRuntime`](super::CoreRuntime).
 ///
 /// Nothing here bounds that wait: a caller that needs shutdown to be bounded
 /// applies its own deadline, as `CoreRuntime::shutdown` does.
@@ -923,9 +920,9 @@ pub async fn run_http_server_with_shutdown(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::instance_handlers::mock_persistence::{MockPersistence, make_instance};
     use axum::body::Body;
     use axum::http::Request;
+    use runtara_core::instance_handlers::mock_persistence::{MockPersistence, make_instance};
     use tower::ServiceExt;
 
     fn router_over(persistence: MockPersistence) -> Router {

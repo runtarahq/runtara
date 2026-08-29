@@ -1,16 +1,23 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Embeddable runtime for runtara-core.
+//! The instance protocol served over HTTP.
 //!
-//! This module provides [`CoreRuntime`] which allows embedding runtara-core
-//! into an existing tokio application instead of running it as a standalone server.
+//! runtara-core is a library: it exposes the instance protocol as async
+//! functions over an `Arc<dyn Persistence>` and owns no transport. This module
+//! is the transport — [`http_server`] wraps those functions in an axum router,
+//! and [`CoreRuntime`] owns the listener's lifecycle, including the drain
+//! sequence that lets an instance mid-checkpoint finish writing.
+//!
+//! Only guests using the SDK's HTTP backend come through here. The default
+//! composition binds `runtara:workflow-runtime/runtime` as a host import, and
+//! those calls reach the same core handlers in-process without a socket.
 //!
 //! # Example
 //!
 //! ```rust,ignore
 //! use std::sync::Arc;
-//! use runtara_core::runtime::CoreRuntime;
 //! use runtara_core::persistence::PostgresPersistence;
+//! use runtara_server::core_runtime::CoreRuntime;
 //!
 //! #[tokio::main]
 //! async fn main() -> anyhow::Result<()> {
@@ -32,6 +39,10 @@
 //! }
 //! ```
 
+pub mod http_server;
+
+pub use http_server::instance_http_router;
+
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -42,10 +53,9 @@ use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
-use crate::config::RuntimeOverrides;
-use crate::instance_handlers::InstanceHandlerState;
-use crate::persistence::Persistence;
-use crate::server::InstanceServerState;
+use runtara_core::config::RuntimeOverrides;
+use runtara_core::instance_handlers::InstanceHandlerState;
+use runtara_core::persistence::Persistence;
 
 /// How long [`CoreRuntime::shutdown`] waits for in-flight requests to finish
 /// before it stops waiting and aborts the server task.
@@ -199,11 +209,9 @@ impl CoreRuntimeConfig {
         let shutdown_signal = Arc::new(Notify::new());
         let server_shutdown = Arc::clone(&shutdown_signal);
         let server_handle = tokio::spawn(async move {
-            crate::server::http_server::run_http_server_with_shutdown(
-                bind_addr,
-                server_state,
-                async move { server_shutdown.notified().await },
-            )
+            http_server::run_http_server_with_shutdown(bind_addr, server_state, async move {
+                server_shutdown.notified().await
+            })
             .await
         });
 
@@ -228,7 +236,7 @@ impl CoreRuntimeConfig {
 /// Call [`shutdown`](Self::shutdown) for graceful termination.
 pub struct CoreRuntime {
     server_handle: JoinHandle<anyhow::Result<()>>,
-    state: Arc<InstanceServerState>,
+    state: Arc<InstanceHandlerState>,
     bind_addr: SocketAddr,
     draining: Arc<AtomicBool>,
     shutdown_signal: Arc<Notify>,
@@ -249,7 +257,7 @@ impl CoreRuntime {
     /// Get a reference to the shared instance handler state.
     ///
     /// This can be used for direct access to persistence or other shared resources.
-    pub fn state(&self) -> &Arc<InstanceServerState> {
+    pub fn state(&self) -> &Arc<InstanceHandlerState> {
         &self.state
     }
 
@@ -349,13 +357,13 @@ impl CoreRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::error::CoreError;
-    use crate::persistence::{
+    use async_trait::async_trait;
+    use chrono::{DateTime, Utc};
+    use runtara_core::error::CoreError;
+    use runtara_core::persistence::{
         CheckpointRecord, CompleteInstanceParams, CustomSignalRecord, EventRecord, InstanceRecord,
         ListEventsFilter, ListStepSummariesFilter, Persistence, SignalRecord, StepSummaryRecord,
     };
-    use async_trait::async_trait;
-    use chrono::{DateTime, Utc};
     use std::time::Instant;
 
     /// Mock persistence for testing the runtime without a database.

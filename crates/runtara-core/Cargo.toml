@@ -13,17 +13,13 @@ categories = ["asynchronous", "development-tools"]
 name = "runtara_core"
 path = "src/lib.rs"
 
-[[bin]]
-name = "runtara-core"
-path = "src/main.rs"
-required-features = ["server"]
-
 [features]
-default = ["server"]
 db-integration-tests = []
 
-# Full server mode with HTTP transport (for running runtara-core as a service)
-server = ["dep:dotenvy", "dep:axum"]
+# Exposes the in-memory `Persistence` mock so downstream crates — chiefly the
+# instance HTTP API, which now lives in runtara-server — can test handler
+# wiring without a database.
+test-support = []
 
 [dependencies]
 # Async runtime
@@ -32,12 +28,6 @@ tokio = { version = "1", features = ["full"] }
 # Database
 sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls-ring-webpki", "postgres", "uuid", "chrono", "macros", "migrate"] }
 
-
-# Configuration (optional, for server mode)
-dotenvy = { version = "0.15", optional = true }
-
-# HTTP server (optional, for server mode)
-axum = { version = "0.8", optional = true }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -64,9 +54,6 @@ async-trait = "0.1"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util", "macros", "rt-multi-thread"] }
-# Drives the real axum router in the HTTP-layer tests (ServiceExt::oneshot),
-# so they cover routing and extraction rather than the handlers alone.
-tower = { version = "0.5", features = ["util"] }
 # Testcontainers for automatic PostgreSQL setup in tests
 testcontainers = "0.27"
 testcontainers-modules = { version = "0.15", features = ["postgres"] }

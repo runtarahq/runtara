@@ -8,7 +8,7 @@
 #   ./measure_latency.sh [--image IMAGE_ID] [--tenant TENANT_ID] [--runs N]
 #
 # Prerequisites:
-#   - runtara-core and runtara-environment must be running
+#   - runtara-server must be running
 #   - jq must be installed
 
 set -e

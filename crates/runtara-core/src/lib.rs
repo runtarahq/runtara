@@ -5,6 +5,22 @@
 //! This crate provides the execution engine for durable workflows. It manages checkpoints,
 //! signals, and instance events, persisting all state to the database for crash resilience.
 //!
+//! # A library, not a service
+//!
+//! Core is transport-free. It exposes the instance protocol as plain async
+//! functions over an [`Arc<dyn Persistence>`](persistence::Persistence) — no
+//! HTTP, no sockets, no binary. Hosts embed it two ways:
+//!
+//! - **In-process**: call the [`instance_handlers`] functions directly. This is
+//!   what `runtara-environment` does for workflows composed against
+//!   `runtara:workflow-runtime/runtime` as a host import, which is the default.
+//! - **Over HTTP**: `runtara-server` wraps the same functions in an axum router
+//!   (`runtara_server::core_runtime`) and serves them on the instance port for
+//!   guests that reach core through the SDK's HTTP backend.
+//!
+//! Whichever a host picks, the semantics below are the handlers', not the
+//! transport's.
+//!
 //! # Architecture
 //!
 //! ```text
@@ -25,8 +41,8 @@
 //! ┌───────────────────────┐                    ┌─────────────────────────────┐
 //! │    runtara-core       │◄───────────────────│     Workflow Instances      │
 //! │  (This Crate)         │  Instance Protocol │   (using runtara-sdk)       │
-//! │  Checkpoints/Signals  │                    │                             │
-//! │  Port 8001            │                    └─────────────────────────────┘
+//! │  Checkpoints/Signals  │  (in-process, or   │                             │
+//! │  (library only)       │   HTTP via server) └─────────────────────────────┘
 //! └───────────────────────┘
 //!           │
 //!           ▼
@@ -36,20 +52,13 @@
 //! └───────────────────────┘
 //! ```
 //!
-//! # HTTP Server
-//!
-//! Core exposes one HTTP server:
-//!
-//! | Server | Port | Purpose |
-//! |--------|------|---------|
-//! | Instance Server | 8001 | Workflow instances connect here via runtara-sdk |
-//!
-//! Environment uses the shared `Persistence` trait directly instead of HTTP.
-//!
-//! # Instance Protocol (Port 8001)
+//! # Instance Protocol
 //!
 //! The instance protocol handles all communication between workflow instances and Core.
 //! Instances use [`runtara-sdk`] which wraps this protocol.
+//!
+//! `runtara-server` exposes it over HTTP on the instance port (8001 by
+//! default); environment's in-process runner calls the same handlers directly.
 //!
 //! ## Operations
 //!
@@ -126,29 +135,21 @@
 //!
 //! # Configuration
 //!
-//! Configuration is loaded from environment variables:
+//! Core owns two knobs, both read by the host through
+//! [`config::RuntimeOverrides::from_env`] and applied to whatever it builds
+//! around the handlers. Unset means "leave the host's own default alone":
 //!
-//! | Variable | Required | Default | Description |
-//! |----------|----------|---------|-------------|
-//! | `RUNTARA_DATABASE_URL` | Yes | - | PostgreSQL connection string |
-//! | `RUNTARA_HTTP_PORT` | No | `8001` | Instance HTTP server port |
-//! | `RUNTARA_MAX_CONCURRENT_INSTANCES` | No | `32` standalone, none embedded | Max instances in `running` at once. Enforced at `register_instance`; fresh registrations past the cap receive `429 Too Many Requests`. Neither resumes nor `suspended` instances count against it, so work parked in a durable sleep or a signal-wait never holds the cap closed. Set to `0` to disable. The default applies to the `runtara-core` binary only — a host embedding the runtime is left uncapped unless this is set, so an upgrade cannot start rejecting launches that used to succeed. |
-//! | `RUNTARA_CORE_SHUTDOWN_GRACE_MS` | No | `5000` | How long [`runtime::CoreRuntime::shutdown`] waits for in-flight instance-protocol requests before it stops waiting. This crate's own knob — not to be confused with the two rows below, which belong to the host processes. |
-//! | `RUNTARA_SHUTDOWN_GRACE_MS` | No | `60000` | On SIGTERM/SIGINT, how long to wait for running instances to reach a checkpoint before force-stopping. |
-//! | `RUNTARA_SHUTDOWN_INTAKE_GRACE_MS` | No | `5000` | On SIGTERM/SIGINT, how long to wait for intake workers to finish their current unit of work. |
-//!
-//! Both of core's own variables reach the runtime wherever it runs: the
-//! `runtara-core` binary reads them via [`config::Config`], and a host that
-//! embeds the runtime reads them via [`config::RuntimeOverrides`] and applies
-//! them with [`runtime::CoreRuntimeBuilder::apply_overrides`].
+//! | Variable | Default | Description |
+//! |----------|---------|-------------|
+//! | `RUNTARA_MAX_CONCURRENT_INSTANCES` | uncapped | Max instances in `running` at once. Enforced at `register_instance`; fresh registrations past the cap are refused (`429 Too Many Requests` over HTTP). Neither resumes nor `suspended` instances count against it, so work parked in a durable sleep or a signal-wait never holds the cap closed. Set to `0` to disable. |
+//! | `RUNTARA_CORE_SHUTDOWN_GRACE_MS` | `5000` | How long the host waits for in-flight instance-protocol requests before it stops waiting. Not to be confused with `RUNTARA_SHUTDOWN_GRACE_MS` and `RUNTARA_SHUTDOWN_INTAKE_GRACE_MS`, which belong to the host processes and bound the execution drain that precedes it. |
 //!
 //! # Modules
 //!
-//! - [`config`]: Server configuration from environment variables
+//! - [`config`]: Runtime knobs read from environment variables
 //! - [`persistence`]: Database persistence layer for instances, checkpoints, events, signals
 //! - [`error`]: Error types with RPC error code mapping
 //! - [`instance_handlers`]: Instance protocol request handlers
-//! - [`server`]: HTTP server implementation
 
 #![deny(missing_docs)]
 
@@ -173,19 +174,8 @@ pub mod observability;
 /// Error types for Core operations with RPC error code mapping.
 pub mod error;
 
-// Server-mode modules (require HTTP transport)
-#[cfg(feature = "server")]
-/// Server configuration loaded from environment variables.
+/// Runtime knobs loaded from environment variables.
 pub mod config;
 
-#[cfg(feature = "server")]
 /// Instance protocol handlers (registration, checkpoints, events, signals).
 pub mod instance_handlers;
-
-#[cfg(feature = "server")]
-/// HTTP server implementation for the instance protocol.
-pub mod server;
-
-#[cfg(feature = "server")]
-/// Embeddable runtime for runtara-core.
-pub mod runtime;

@@ -2,9 +2,12 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! In-memory `Persistence` mock used by the handler unit tests.
 //!
-//! This module is compiled only under `#[cfg(test)]`, so it carries zero cost
-//! in release builds. Each handler submodule's `mod tests` imports the mock
-//! via `crate::instance_handlers::mock_persistence::*`.
+//! Compiled under `#[cfg(test)]` or the `test-support` feature, so it carries
+//! zero cost in an ordinary release build. Each handler submodule's `mod tests`
+//! imports the mock via `crate::instance_handlers::mock_persistence::*`;
+//! `runtara-server` reaches it as
+//! `runtara_core::instance_handlers::mock_persistence` to drive the instance
+//! HTTP router.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -20,7 +23,7 @@ use crate::persistence::{
 };
 
 /// Mock persistence for handler unit tests.
-pub(crate) struct MockPersistence {
+pub struct MockPersistence {
     instances: Mutex<HashMap<String, InstanceRecord>>,
     checkpoints: Mutex<HashMap<(String, String), CheckpointRecord>>,
     signals: Mutex<HashMap<String, SignalRecord>>,
@@ -31,8 +34,15 @@ pub(crate) struct MockPersistence {
     active_instance_count: Mutex<Option<i64>>,
 }
 
+impl Default for MockPersistence {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MockPersistence {
-    pub(crate) fn new() -> Self {
+    /// An empty store: no instances, checkpoints, signals or events.
+    pub fn new() -> Self {
         Self {
             instances: Mutex::new(HashMap::new()),
             checkpoints: Mutex::new(HashMap::new()),
@@ -46,12 +56,13 @@ impl MockPersistence {
     }
 
     /// Override the value returned by `count_active_instances` (default: 0).
-    pub(crate) fn with_active_count(self, count: i64) -> Self {
+    pub fn with_active_count(self, count: i64) -> Self {
         *self.active_instance_count.lock().unwrap() = Some(count);
         self
     }
 
-    pub(crate) fn with_instance(self, instance: InstanceRecord) -> Self {
+    /// Seed one instance, keyed by its `instance_id`.
+    pub fn with_instance(self, instance: InstanceRecord) -> Self {
         self.instances
             .lock()
             .unwrap()
@@ -59,7 +70,8 @@ impl MockPersistence {
         self
     }
 
-    pub(crate) fn with_checkpoint(self, checkpoint: CheckpointRecord) -> Self {
+    /// Seed one checkpoint, keyed by `(instance_id, checkpoint_id)`.
+    pub fn with_checkpoint(self, checkpoint: CheckpointRecord) -> Self {
         self.checkpoints.lock().unwrap().insert(
             (
                 checkpoint.instance_id.clone(),
@@ -70,7 +82,8 @@ impl MockPersistence {
         self
     }
 
-    pub(crate) fn with_signal(self, signal: SignalRecord) -> Self {
+    /// Seed one pending lifecycle signal for an instance.
+    pub fn with_signal(self, signal: SignalRecord) -> Self {
         self.signals
             .lock()
             .unwrap()
@@ -78,7 +91,8 @@ impl MockPersistence {
         self
     }
 
-    pub(crate) fn with_custom_signal(self, signal: CustomSignalRecord) -> Self {
+    /// Seed one pending custom signal, keyed by `(instance_id, checkpoint_id)`.
+    pub fn with_custom_signal(self, signal: CustomSignalRecord) -> Self {
         self.custom_signals.lock().unwrap().insert(
             (signal.instance_id.clone(), signal.checkpoint_id.clone()),
             signal,
@@ -86,22 +100,27 @@ impl MockPersistence {
         self
     }
 
+    /// Make every subsequent `register_instance` fail.
     #[allow(dead_code)]
-    pub(crate) fn set_fail_register(&self) {
+    pub fn set_fail_register(&self) {
         *self.fail_register.lock().unwrap() = true;
     }
 
+    /// Make every subsequent `update_instance_status` fail.
     #[allow(dead_code)]
-    pub(crate) fn set_fail_status_update(&self) {
+    pub fn set_fail_status_update(&self) {
         *self.fail_status_update.lock().unwrap() = true;
     }
 
-    pub(crate) fn get_events(&self) -> Vec<EventRecord> {
+    /// Every event recorded so far, in insertion order.
+    pub fn get_events(&self) -> Vec<EventRecord> {
         self.events.lock().unwrap().clone()
     }
 }
 
-pub(crate) fn make_instance(instance_id: &str, tenant_id: &str, status: &str) -> InstanceRecord {
+/// Build an `InstanceRecord` with plausible defaults for everything the
+/// caller does not care about.
+pub fn make_instance(instance_id: &str, tenant_id: &str, status: &str) -> InstanceRecord {
     InstanceRecord {
         instance_id: instance_id.to_string(),
         tenant_id: tenant_id.to_string(),
@@ -124,11 +143,8 @@ pub(crate) fn make_instance(instance_id: &str, tenant_id: &str, status: &str) ->
     }
 }
 
-pub(crate) fn make_checkpoint(
-    instance_id: &str,
-    checkpoint_id: &str,
-    state: &[u8],
-) -> CheckpointRecord {
+/// Build a `CheckpointRecord` holding `state`.
+pub fn make_checkpoint(instance_id: &str, checkpoint_id: &str, state: &[u8]) -> CheckpointRecord {
     CheckpointRecord {
         id: 1,
         instance_id: instance_id.to_string(),
@@ -138,7 +154,8 @@ pub(crate) fn make_checkpoint(
     }
 }
 
-pub(crate) fn make_signal(instance_id: &str, signal_type: &str) -> SignalRecord {
+/// Build an unacknowledged `SignalRecord` with no payload.
+pub fn make_signal(instance_id: &str, signal_type: &str) -> SignalRecord {
     SignalRecord {
         instance_id: instance_id.to_string(),
         signal_type: signal_type.to_string(),

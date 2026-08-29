@@ -23,8 +23,15 @@ mod state;
 mod status;
 mod types;
 
-#[cfg(test)]
-pub(crate) mod mock_persistence;
+/// In-memory [`Persistence`](crate::persistence::Persistence) mock for handler
+/// tests.
+///
+/// Compiled for this crate's own tests, and for downstream crates that enable
+/// the `test-support` feature — chiefly `runtara-server`, whose instance HTTP
+/// router drives these same handlers and needs to test that wiring without a
+/// database.
+#[cfg(any(test, feature = "test-support"))]
+pub mod mock_persistence;
 
 pub use self::checkpoint::{handle_checkpoint, handle_get_checkpoint, handle_sleep};
 pub use self::event::{handle_instance_event, handle_retry_attempt};

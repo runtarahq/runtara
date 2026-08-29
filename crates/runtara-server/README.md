@@ -75,8 +75,9 @@ from invalidating every cargo build. Assets from a disk source are served
 
 ## Inside Runtara
 
-- Depends on `runtara-workflows`, `runtara-core` (with the `server` feature),
-  and `runtara-environment` for execution, persistence, and the object model.
+- Depends on `runtara-workflows`, `runtara-core`, and `runtara-environment` for
+  execution, persistence, and the object model. Core is transport-free, so this
+  crate owns the instance protocol's HTTP surface in `core_runtime`.
 - Links `runtara-agents` with `integrations` + `native` features and
   re-exports `runtara_agents::integrations` so the static agent registry keeps
   integration modules reachable.

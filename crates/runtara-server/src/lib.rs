@@ -7,6 +7,7 @@ pub mod channels;
 pub mod compiler;
 pub mod config;
 pub mod conn_limit;
+pub mod core_runtime;
 pub mod dsl;
 pub mod egress_client;
 pub mod embedded_runtara;

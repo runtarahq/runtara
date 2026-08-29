@@ -43,6 +43,11 @@ path = "tests/authz_ownership.rs"
 required-features = ["db-integration-tests"]
 
 [[test]]
+name = "core_instance_api"
+path = "tests/core_instance_api.rs"
+required-features = ["db-integration-tests"]
+
+[[test]]
 name = "compilation_failure_terminality"
 path = "tests/compilation_failure_terminality.rs"
 required-features = ["db-integration-tests"]
@@ -88,7 +93,7 @@ runtara-workflows = { path = "../runtara-workflows" }
 runtara-management-sdk = { path = "../runtara-management-sdk" }
 runtara-dsl = { path = "../runtara-dsl", features = ["utoipa"] }
 runtara-agents = { path = "../runtara-agents", default-features = false, features = ["native"] }
-runtara-core = { path = "../runtara-core", features = ["server"] }
+runtara-core = { path = "../runtara-core" }
 runtara-environment = { path = "../runtara-environment" }
 runtara-object-store = { path = "../runtara-object-store" }
 runtara-text-parser = { path = "../runtara-text-parser" }
@@ -212,6 +217,9 @@ runtara-dsl = { path = "../runtara-dsl" }
 serde_json = "1.0"
 
 [dev-dependencies]
+# The instance HTTP router in `core_runtime` drives runtara-core's handlers, so
+# its tests need core's in-memory Persistence mock.
+runtara-core = { path = "../runtara-core", features = ["test-support"] }
 wiremock = "0.6"
 tempfile = "3"
 tokio = { version = "1", features = ["full", "test-util"] }

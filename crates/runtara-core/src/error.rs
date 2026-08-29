@@ -354,7 +354,50 @@ pub enum CoreError {
     },
 }
 
+/// What kind of failure a [`CoreError`] is, independent of any transport.
+///
+/// Core does not know about HTTP, but it is the only place that can say what a
+/// given variant *means* — whether the caller asked for something absent, sent
+/// something malformed, or hit a server that is temporarily unwell. A transport
+/// turns that into its own vocabulary: `runtara-server`'s instance API maps
+/// these to 404 / 409 / 400 / 503.
+///
+/// The point of naming the classification here is that
+/// [`CoreError::classify`] matches exhaustively, so a new variant fails to
+/// compile until someone decides what it means — a guarantee that would be lost
+/// if each transport classified the variants itself behind a `_` arm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoreErrorClass {
+    /// The caller named something that is not there.
+    Missing,
+    /// The thing exists but is not in a state that accepts this request.
+    Conflict,
+    /// The request itself is malformed.
+    Invalid,
+    /// The server could not do its job. Retrying may work.
+    Unavailable,
+}
+
 impl CoreError {
+    /// Classify this error for a transport to render.
+    ///
+    /// See [`CoreErrorClass`] for why this lives in core rather than in the
+    /// layer that maps it onto status codes.
+    pub fn classify(&self) -> CoreErrorClass {
+        match self {
+            Self::InstanceNotFound { .. } | Self::CheckpointNotFound { .. } => {
+                CoreErrorClass::Missing
+            }
+            Self::InvalidInstanceState { .. } | Self::InstanceAlreadyExists { .. } => {
+                CoreErrorClass::Conflict
+            }
+            Self::ValidationError { .. } => CoreErrorClass::Invalid,
+            Self::DatabaseError { .. }
+            | Self::CheckpointSaveFailed { .. }
+            | Self::SignalDeliveryFailed { .. } => CoreErrorClass::Unavailable,
+        }
+    }
+
     /// Get the error code string for this error type.
     pub fn error_code(&self) -> &'static str {
         match self {

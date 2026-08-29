@@ -18,11 +18,12 @@ use std::sync::Arc;
 use runtara_core::config::RuntimeOverrides;
 use runtara_core::persistence::Persistence;
 use runtara_core::persistence::postgres::PostgresPersistence;
-use runtara_core::runtime::CoreRuntime;
 use runtara_environment::runtime::EnvironmentRuntime;
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 use tracing::{error, info};
+
+use crate::core_runtime::CoreRuntime;
 
 /// Configuration for embedded Runtara servers.
 pub struct EmbeddedRuntaraConfig {
@@ -141,14 +142,21 @@ impl EmbeddedRuntara {
         self.core.is_running() && self.environment.is_running()
     }
 
-    /// Checkpoint-aware drain of active runners. Flips the environment's
-    /// drain flag, signals each in-flight instance to suspend at the next
-    /// checkpoint, and force-stops any that don't reach one within `grace`.
-    /// Safe to call before [`Self::shutdown`].
+    /// Checkpoint-aware drain of active runners. Flips the drain flags,
+    /// signals each in-flight instance to suspend at the next checkpoint, and
+    /// force-stops any that don't reach one within `grace`. Safe to call
+    /// before [`Self::shutdown`].
+    ///
+    /// Core's flag goes first, and the ordering is the point: it refuses new
+    /// registrations while the instance server is *still serving*, so the
+    /// instances already running can reach a checkpoint and suspend instead of
+    /// being severed. Draining first and refusing afterwards would let a fresh
+    /// instance register into a runtime that is on its way down.
     pub async fn drain(
         &self,
         grace: std::time::Duration,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.core.set_draining();
         self.environment
             .drain(grace)
             .await

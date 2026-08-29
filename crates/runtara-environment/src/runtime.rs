@@ -35,41 +35,6 @@
 //! }
 //! ```
 //!
-//! # Embedded Core Example
-//!
-//! To run both Environment and Core in a single process, provide `core_persistence`
-//! and `core_bind_addr`:
-//!
-//! ```rust,ignore
-//! use std::sync::Arc;
-//! use runtara_core::persistence::PostgresPersistence;
-//! use runtara_environment::runtime::EnvironmentRuntime;
-//! use runtara_environment::runner::build_runner;
-//!
-//! #[tokio::main]
-//! async fn main() -> anyhow::Result<()> {
-//!     let pool = sqlx::PgPool::connect("postgres://...").await?;
-//!     let persistence = Arc::new(PostgresPersistence::new(pool.clone()));
-//!     let runner = build_runner(persistence.clone())?;
-//!
-//!     let runtime = EnvironmentRuntime::builder()
-//!         .pool(pool)
-//!         .runner(runner)
-//!         .core_persistence(persistence)               // Share persistence with Core
-//!         .core_bind_addr("0.0.0.0:8001".parse()?)     // Start embedded Core on this address
-//!         .core_addr("127.0.0.1:8001")                 // Address instances use to connect
-//!         .bind_addr("0.0.0.0:8002".parse()?)
-//!         .build()?
-//!         .start()
-//!         .await?;
-//!
-//!     // Both Environment HTTP server (8002) and Core HTTP server (8001) are now running
-//!     // in this single process, sharing the same persistence layer.
-//!
-//!     runtime.shutdown().await?;  // Shuts down both Environment and embedded Core
-//!     Ok(())
-//! }
-//! ```
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -77,9 +42,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use runtara_core::config::RuntimeOverrides;
 use runtara_core::persistence::{CompleteInstanceParams, Persistence};
-use runtara_core::runtime::CoreRuntime;
 use sqlx::PgPool;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
@@ -101,8 +64,6 @@ pub struct EnvironmentRuntimeBuilder {
     runner: Option<Arc<dyn Runner>>,
     bind_addr: SocketAddr,
     core_addr: String,
-    core_bind_addr: Option<SocketAddr>,
-    core_overrides: Option<RuntimeOverrides>,
     data_dir: PathBuf,
     wake_poll_interval: Duration,
     wake_batch_size: i64,
@@ -123,8 +84,6 @@ impl Default for EnvironmentRuntimeBuilder {
             runner: None,
             bind_addr: "0.0.0.0:8002".parse().unwrap(),
             core_addr: "127.0.0.1:8001".to_string(),
-            core_bind_addr: None,
-            core_overrides: None,
             data_dir: PathBuf::from(".data"),
             wake_poll_interval: Duration::from_secs(5),
             wake_batch_size: 10,
@@ -179,38 +138,6 @@ impl EnvironmentRuntimeBuilder {
     /// Default: `127.0.0.1:8001`
     pub fn core_addr(mut self, addr: impl Into<String>) -> Self {
         self.core_addr = addr.into();
-        self
-    }
-
-    /// Set the bind address for the embedded runtara-core HTTP server.
-    ///
-    /// When set along with [`core_persistence`](Self::core_persistence), an embedded
-    /// `CoreRuntime` will be started that listens on this address for instance connections.
-    /// This allows running both Environment and Core in a single process.
-    ///
-    /// If not set, no embedded Core is started and instances must connect to an external
-    /// runtara-core server at `core_addr`.
-    ///
-    /// Default: `None` (no embedded Core)
-    pub fn core_bind_addr(mut self, addr: SocketAddr) -> Self {
-        self.core_bind_addr = Some(addr);
-        self
-    }
-
-    /// Set runtara-core's configuration for the embedded `CoreRuntime`.
-    ///
-    /// Default: read from the environment during [`build`](Self::build), which
-    /// is what a deployment configuring core through `RUNTARA_*` variables
-    /// expects. Set this to configure the embedded core from code instead —
-    /// tests do, so an ambient variable cannot change what they assert.
-    ///
-    /// The resulting configuration is unused when no
-    /// [`core_bind_addr`](Self::core_bind_addr) is set — there is no embedded
-    /// core to configure — but [`build`](Self::build) still reads and validates
-    /// the environment in that case, so a malformed value fails the build
-    /// wherever it appears rather than only where it would have been applied.
-    pub fn core_overrides(mut self, overrides: RuntimeOverrides) -> Self {
-        self.core_overrides = Some(overrides);
         self
     }
 
@@ -307,22 +234,12 @@ impl EnvironmentRuntimeBuilder {
         let persistence = self
             .core_persistence
             .ok_or_else(|| anyhow::anyhow!("core_persistence is required"))?;
-        // Fall back to the environment rather than to bare builder defaults:
-        // this crate's binary embeds core, so a deployment's core settings have
-        // nowhere else to enter from.
-        let core_overrides = match self.core_overrides {
-            Some(overrides) => overrides,
-            None => RuntimeOverrides::from_env()?,
-        };
-
         Ok(EnvironmentRuntimeConfig {
             pool,
             persistence,
             runner,
             bind_addr: self.bind_addr,
             core_addr: self.core_addr,
-            core_bind_addr: self.core_bind_addr,
-            core_overrides,
             data_dir: self.data_dir,
             wake_poll_interval: self.wake_poll_interval,
             wake_batch_size: self.wake_batch_size,
@@ -344,8 +261,6 @@ pub struct EnvironmentRuntimeConfig {
     runner: Arc<dyn Runner>,
     bind_addr: SocketAddr,
     core_addr: String,
-    core_bind_addr: Option<SocketAddr>,
-    core_overrides: RuntimeOverrides,
     data_dir: PathBuf,
     wake_poll_interval: Duration,
     wake_batch_size: i64,
@@ -361,30 +276,6 @@ pub struct EnvironmentRuntimeConfig {
 impl EnvironmentRuntimeConfig {
     /// Start the runtime, spawning the HTTP server and wake scheduler tasks.
     pub async fn start(self) -> Result<EnvironmentRuntime> {
-        // Start embedded CoreRuntime if core_bind_addr is configured
-        let core_runtime = if let Some(core_bind_addr) = self.core_bind_addr {
-            info!(
-                bind_addr = %core_bind_addr,
-                "Starting embedded CoreRuntime"
-            );
-
-            let core = CoreRuntime::builder()
-                .persistence(self.persistence.clone())
-                .bind_addr(core_bind_addr)
-                .apply_overrides(self.core_overrides)
-                .build()?
-                .start()
-                .await?;
-
-            Some(core)
-        } else {
-            debug!(
-                core_addr = %self.core_addr,
-                "core_bind_addr not configured; instances will connect to external Core"
-            );
-            None
-        };
-
         // Create shared drain controller so workers and the container monitor
         // all observe the same state.
         let drain = DrainController::new();
@@ -496,7 +387,6 @@ impl EnvironmentRuntimeConfig {
         info!(
             bind_addr = %bind_addr,
             core_addr = %self.core_addr,
-            embedded_core = core_runtime.is_some(),
             "EnvironmentRuntime started"
         );
 
@@ -506,7 +396,6 @@ impl EnvironmentRuntimeConfig {
             cleanup_handle,
             heartbeat_handle,
             db_cleanup_handle,
-            core_runtime,
             wake_shutdown,
             cleanup_shutdown,
             heartbeat_shutdown,
@@ -529,7 +418,6 @@ impl EnvironmentRuntimeConfig {
 /// - Database cleanup worker for removing old database records
 /// - Image cleanup worker for removing unused images
 /// - Heartbeat monitor for detecting and failing stale instances
-/// - Embedded runtara-core (optional, when `core_bind_addr` is configured)
 ///
 /// Call [`shutdown`](Self::shutdown) for graceful termination.
 pub struct EnvironmentRuntime {
@@ -538,7 +426,6 @@ pub struct EnvironmentRuntime {
     cleanup_handle: JoinHandle<()>,
     heartbeat_handle: JoinHandle<()>,
     db_cleanup_handle: JoinHandle<()>,
-    core_runtime: Option<CoreRuntime>,
     wake_shutdown: Arc<Notify>,
     cleanup_shutdown: Arc<Notify>,
     heartbeat_shutdown: Arc<Notify>,
@@ -588,10 +475,6 @@ impl EnvironmentRuntime {
     pub async fn drain(&self, grace: Duration) -> Result<()> {
         self.drain.set();
         info!(grace_secs = grace.as_secs(), "EnvironmentRuntime draining");
-
-        if let Some(core) = self.core_runtime.as_ref() {
-            core.set_draining();
-        }
 
         let container_registry = ContainerRegistry::new(self.state.pool.clone());
         let active = match container_registry.list_all_registered().await {
@@ -750,8 +633,8 @@ impl EnvironmentRuntime {
     /// Gracefully shut down the runtime.
     ///
     /// This signals the HTTP server, wake scheduler, cleanup worker, database
-    /// cleanup worker, heartbeat monitor, and embedded CoreRuntime (if present)
-    /// to stop, then waits for them to complete.
+    /// cleanup worker and heartbeat monitor to stop, then waits for them to
+    /// complete.
     pub async fn shutdown(self) -> Result<()> {
         info!("EnvironmentRuntime shutting down...");
 
@@ -798,13 +681,6 @@ impl EnvironmentRuntime {
             error!("Image cleanup worker task panicked: {}", e);
         }
 
-        // Shutdown embedded CoreRuntime (if running)
-        if let Some(core) = self.core_runtime
-            && let Err(e) = core.shutdown().await
-        {
-            error!("Embedded CoreRuntime error during shutdown: {}", e);
-        }
-
         // Wait for HTTP server
         match self.server_handle.await {
             Ok(Ok(())) => {
@@ -828,20 +704,12 @@ impl EnvironmentRuntime {
 
     /// Check if the runtime is still running.
     pub fn is_running(&self) -> bool {
-        let core_running = self.core_runtime.as_ref().is_none_or(|c| c.is_running());
-
         !self.server_handle.is_finished()
             && !self.wake_handle.is_finished()
             && !self.cleanup_handle.is_finished()
             && !self.heartbeat_handle.is_finished()
             && !self.db_cleanup_handle.is_finished()
             && !self.image_cleanup_handle.is_finished()
-            && core_running
-    }
-
-    /// Get a reference to the embedded CoreRuntime, if running.
-    pub fn core_runtime(&self) -> Option<&CoreRuntime> {
-        self.core_runtime.as_ref()
     }
 }
 
@@ -960,7 +828,6 @@ async fn recover_orphaned_containers(pool: &PgPool, persistence: &dyn Persistenc
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_env::EnvGuard;
 
     #[test]
     fn test_builder_default_values() {
@@ -974,7 +841,6 @@ mod tests {
             "0.0.0.0:8002".parse::<SocketAddr>().unwrap()
         );
         assert_eq!(builder.core_addr, "127.0.0.1:8001");
-        assert!(builder.core_bind_addr.is_none());
         assert_eq!(builder.data_dir, PathBuf::from(".data"));
         assert_eq!(builder.wake_poll_interval, Duration::from_secs(5));
         assert_eq!(builder.wake_batch_size, 10);
@@ -987,7 +853,6 @@ mod tests {
 
         assert_eq!(builder_new.bind_addr, builder_default.bind_addr);
         assert_eq!(builder_new.core_addr, builder_default.core_addr);
-        assert_eq!(builder_new.core_bind_addr, builder_default.core_bind_addr);
         assert_eq!(builder_new.data_dir, builder_default.data_dir);
         assert_eq!(
             builder_new.wake_poll_interval,
@@ -1020,105 +885,6 @@ mod tests {
         let builder = EnvironmentRuntimeBuilder::new().core_addr(addr);
 
         assert_eq!(builder.core_addr, "custom-host:8001");
-    }
-
-    #[test]
-    fn test_builder_core_bind_addr() {
-        let builder =
-            EnvironmentRuntimeBuilder::new().core_bind_addr("0.0.0.0:8001".parse().unwrap());
-
-        assert_eq!(
-            builder.core_bind_addr,
-            Some("0.0.0.0:8001".parse::<SocketAddr>().unwrap())
-        );
-    }
-
-    #[test]
-    fn test_builder_core_bind_addr_default_none() {
-        let builder = EnvironmentRuntimeBuilder::new();
-
-        assert!(builder.core_bind_addr.is_none());
-    }
-
-    #[test]
-    fn test_builder_core_overrides_default_is_env() {
-        // `None` means "resolve from the environment in `build`" — the default
-        // has to stay that way for a deployment's core settings to reach the
-        // embedded runtime at all.
-        let builder = EnvironmentRuntimeBuilder::new();
-
-        assert!(builder.core_overrides.is_none());
-    }
-
-    #[test]
-    fn test_builder_core_overrides_explicit_wins() {
-        let overrides = RuntimeOverrides {
-            max_concurrent_instances: Some(5),
-            shutdown_grace: Some(Duration::from_millis(400)),
-        };
-        let builder = EnvironmentRuntimeBuilder::new().core_overrides(overrides);
-
-        assert_eq!(builder.core_overrides, Some(overrides));
-    }
-
-    /// A builder with the three required fields filled in, so `build` can run.
-    /// The pool is lazy: nothing here connects to a database.
-    fn buildable() -> EnvironmentRuntimeBuilder {
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .connect_lazy("postgres://runtara:runtara@127.0.0.1/runtara")
-            .expect("lazy pool");
-        EnvironmentRuntimeBuilder::new()
-            .pool(pool.clone())
-            .runner(Arc::new(crate::runner::MockRunner::new()))
-            .core_persistence(Arc::new(
-                runtara_core::persistence::postgres::PostgresPersistence::new(pool),
-            ))
-    }
-
-    // A lazy pool spawns a maintenance task, so these need a reactor. The
-    // guard restores the environment even when an assertion panics, so an
-    // ambient value survives the suite either way.
-    #[tokio::test]
-    async fn test_build_resolves_core_overrides_from_env() {
-        let mut guard = EnvGuard::new();
-        guard.set("RUNTARA_MAX_CONCURRENT_INSTANCES", "11");
-
-        let config = buildable().build().expect("build");
-
-        assert_eq!(config.core_overrides.max_concurrent_instances, Some(11));
-    }
-
-    #[tokio::test]
-    async fn test_build_rejects_malformed_core_config() {
-        let mut guard = EnvGuard::new();
-        guard.set("RUNTARA_MAX_CONCURRENT_INSTANCES", "unlimited");
-
-        let err = buildable()
-            .build()
-            .err()
-            .expect("malformed core config must fail startup");
-
-        assert!(
-            err.to_string().contains("RUNTARA_MAX_CONCURRENT_INSTANCES"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_build_explicit_core_overrides_ignore_env() {
-        let mut guard = EnvGuard::new();
-        guard.set("RUNTARA_MAX_CONCURRENT_INSTANCES", "11");
-
-        let config = buildable()
-            .core_overrides(RuntimeOverrides {
-                max_concurrent_instances: Some(2),
-                shutdown_grace: None,
-            })
-            .build()
-            .expect("build");
-
-        assert_eq!(config.core_overrides.max_concurrent_instances, Some(2));
-        assert!(config.core_overrides.shutdown_grace.is_none());
     }
 
     #[test]

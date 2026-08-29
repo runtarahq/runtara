@@ -105,7 +105,7 @@ This repository contains the Rust implementation of the Runtara platform:
 
 - `crates/runtara-server`: application HTTP API, auth, workflows, connections, channels, MCP integration, file storage, object model, and background workers.
 - `crates/runtara-environment`: image registry, instance lifecycle, runners, and wake scheduling.
-- `crates/runtara-core`: durable runtime persistence for checkpoints, signals, events, and sleep.
+- `crates/runtara-core`: durable runtime persistence for checkpoints, signals, events, and sleep. A library — its instance protocol is served over HTTP by `runtara-server` and called in-process by `runtara-environment`.
 - `crates/runtara-sdk`: instance-side SDK used by compiled workflows.
 - `crates/runtara-workflows`: workflow compiler and validation pipeline.
 - `crates/runtara-dsl`: workflow and agent metadata types.
@@ -139,7 +139,7 @@ For local development, use the included launcher:
 ./start.sh
 ```
 
-`start.sh` runs `runtara-environment` with embedded `runtara-core`. See `./start.sh help` for supported environment variables.
+`start.sh` runs `runtara-server`, which embeds `runtara-environment` and `runtara-core`. See `./start.sh help` for supported environment variables.
 
 To run the full application server directly:
 
@@ -162,7 +162,7 @@ Default local ports:
 | `runtara-server` public API | `7001` |
 | `runtara-server` internal API | `7002` |
 | `runtara-environment` API | `8002` |
-| `runtara-core` instance API | `8001` |
+| `runtara-core` instance API (served by `runtara-server`) | `8001` |
 
 ### Run With Docker
 

@@ -2,7 +2,7 @@
 # Run all E2E tests
 #
 # Prerequisites:
-# - runtara-core and runtara-environment must be running (use ./start.sh)
+# - runtara-server must be running (use ./start.sh)
 # - Binaries must be built (cargo build --release)
 
 set -e
@@ -81,14 +81,13 @@ run_test "Channel session re-flush provenance guard" "${SCRIPT_DIR}/test_channel
 # docker + python3 + jq. Nothing egresses — every case fail-closes at the proxy.
 run_test "Connection named endpoints (QuickBooks Online)" "${SCRIPT_DIR}/test_connection_named_endpoint.sh"
 
-# runtara-core shutdown. Self-contained: it builds and drives the standalone
-# core binary on a throwaway Postgres database and a free port, so it needs
-# cargo, curl, python3 and Postgres — no docker, no ./start.sh.
-run_test "runtara-core SIGTERM drain + concurrency cap (regression)" "${SCRIPT_DIR}/test_core_sigterm_drain.sh"
-
-# Instance-protocol status codes. Self-contained on the same terms as the
-# SIGTERM test above — its own core binary, throwaway database and free port.
-run_test "runtara-core instance protocol HTTP status codes (regression)" "${SCRIPT_DIR}/test_core_http_status_codes.sh"
+# The instance protocol used to be covered here by two scripts driving the
+# standalone runtara-core binary. Core is a library now — runtara-server owns
+# that listener — so the coverage moved into Rust: the status-code mapping into
+# the router tests in `runtara-server/src/core_runtime/http_server.rs`, and the
+# drain + concurrency-cap behaviour into
+# `runtara-server/tests/core_instance_api.rs`, which runs under the CI gate
+# these scripts never ran in.
 
 # Summary
 echo "=========================================="

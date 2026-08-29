@@ -4651,10 +4651,8 @@ version = "8.7.8"
 dependencies = [
  "anyhow",
  "async-trait",
- "axum",
  "base64",
  "chrono",
- "dotenvy",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
@@ -4665,7 +4663,6 @@ dependencies = [
  "testcontainers-modules",
  "thiserror 2.0.18",
  "tokio",
- "tower",
  "tracing",
  "tracing-subscriber",
  "uuid",

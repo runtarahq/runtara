@@ -1,6 +1,6 @@
 #!/bin/bash
 # Runtara Development Launcher
-# Starts runtara-environment with embedded runtara-core
+# Starts runtara-server, which embeds runtara-environment and runtara-core.
 
 set -e
 
@@ -20,9 +20,20 @@ NC='\033[0m' # No Color
 
 # Default configuration
 DATA_DIR="${DATA_DIR:-.data}"
+TENANT_ID="${TENANT_ID:-local}"
+
+# Runtara keeps three databases: the server's own, the durable-runtime one
+# shared by core and environment, and the tenant object model.
+SERVER_DATABASE_URL="${RUNTARA_SERVER_DATABASE_URL:-postgres://localhost/runtara_server}"
 DATABASE_URL="${RUNTARA_DATABASE_URL:-postgres://localhost/runtara}"
+OBJECT_MODEL_DATABASE_URL="${OBJECT_MODEL_DATABASE_URL:-postgres://localhost/runtara_objects}"
+
+# Valkey backs checkpoint storage; the server refuses to boot without it.
+VALKEY_HOST="${VALKEY_HOST:-127.0.0.1}"
+VALKEY_PORT="${VALKEY_PORT:-6379}"
 
 # Port configuration
+SERVER_PORT="${SERVER_PORT:-7001}"            # API + UI
 CORE_PORT="${RUNTARA_CORE_PORT:-8001}"        # Core: instances connect here (SDK)
 ENV_PORT="${RUNTARA_ENV_PORT:-8002}"          # Environment: Management SDK connects here
 
@@ -74,24 +85,27 @@ setup_directories() {
 }
 
 check_database() {
-    print_status "Checking database connection..."
-    if command -v psql &> /dev/null; then
-        if psql "${DATABASE_URL}" -c "SELECT 1" &> /dev/null; then
-            print_status "Database connection OK"
+    print_status "Checking database connections..."
+    if ! command -v psql &> /dev/null; then
+        return
+    fi
+    for url in "${SERVER_DATABASE_URL}" "${DATABASE_URL}" "${OBJECT_MODEL_DATABASE_URL}"; do
+        if psql "${url}" -c "SELECT 1" &> /dev/null; then
+            print_status "Database connection OK: ${url}"
         else
-            print_warning "Cannot connect to database at ${DATABASE_URL}"
+            print_warning "Cannot connect to database at ${url}"
             print_warning "Make sure PostgreSQL is running and the database exists"
             echo ""
-            echo "  To create the database:"
-            echo "    createdb runtara"
+            echo "  To create the databases:"
+            echo "    createdb runtara_server && createdb runtara && createdb runtara_objects"
             echo ""
         fi
-    fi
+    done
 }
 
 build_services() {
-    print_status "Building runtara-environment (with embedded core)..."
-    cargo build -p runtara-environment --release 2>&1 | tail -5
+    print_status "Building runtara-server..."
+    cargo build -p runtara-server --release 2>&1 | tail -5
     print_status "Build complete"
 }
 
@@ -113,16 +127,24 @@ stop_services() {
 }
 
 start_server() {
-    print_status "Starting runtara-environment with embedded core..."
+    print_status "Starting runtara-server..."
+    print_status "  API + UI port:    ${SERVER_PORT}"
     print_status "  Environment port: ${ENV_PORT} (Management SDK)"
-    print_status "  Core port: ${CORE_PORT} (Instance SDK)"
+    print_status "  Core port:        ${CORE_PORT} (Instance SDK)"
 
+    TENANT_ID="${TENANT_ID}" \
+    AUTH_PROVIDER="${AUTH_PROVIDER:-local}" \
+    SERVER_PORT="${SERVER_PORT}" \
+    RUNTARA_SERVER_DATABASE_URL="${SERVER_DATABASE_URL}" \
     RUNTARA_DATABASE_URL="${DATABASE_URL}" \
+    OBJECT_MODEL_DATABASE_URL="${OBJECT_MODEL_DATABASE_URL}" \
+    VALKEY_HOST="${VALKEY_HOST}" \
+    VALKEY_PORT="${VALKEY_PORT}" \
     RUNTARA_ENV_HTTP_PORT="${ENV_PORT}" \
-    RUNTARA_CORE_ADDR="127.0.0.1:${CORE_PORT}" \
+    RUNTARA_CORE_HTTP_PORT="${CORE_PORT}" \
     DATA_DIR="${DATA_DIR}" \
-    RUST_LOG="${RUST_LOG:-runtara_environment=info,runtara_core=info}" \
-        cargo run -p runtara-environment --release > "${LOG_FILE}" 2>&1 &
+    RUST_LOG="${RUST_LOG:-runtara_server=info,runtara_environment=info,runtara_core=info}" \
+        cargo run -p runtara-server --release > "${LOG_FILE}" 2>&1 &
 
     PID=$!
     echo $PID > "${PID_FILE}"
@@ -146,6 +168,7 @@ show_status() {
     echo -e "${GREEN}════════════════════════════════════════════════════════════${NC}"
     echo ""
     echo "  Endpoints:"
+    echo "    - API + UI:                     http://127.0.0.1:${SERVER_PORT}"
     echo "    - Environment (Management SDK): 127.0.0.1:${ENV_PORT}"
     echo "    - Core (Instance SDK):          127.0.0.1:${CORE_PORT}"
     echo ""
@@ -184,11 +207,17 @@ usage() {
     echo "  help      Show this help message"
     echo ""
     echo "Environment Variables:"
-    echo "  RUNTARA_DATABASE_URL    PostgreSQL connection string (default: postgres://localhost/runtara)"
-    echo "  DATA_DIR                Data directory (default: .data)"
-    echo "  RUNTARA_CORE_PORT       Core instance HTTP port (default: 8001)"
-    echo "  RUNTARA_ENV_PORT        Environment HTTP port (default: 8002)"
-    echo "  RUST_LOG                Log level (default: runtara_*=info)"
+    echo "  TENANT_ID                    Tenant identifier (default: local)"
+    echo "  AUTH_PROVIDER                Auth mode (default: local)"
+    echo "  SERVER_PORT                  API + UI port (default: 7001)"
+    echo "  RUNTARA_SERVER_DATABASE_URL  Server database (default: postgres://localhost/runtara_server)"
+    echo "  RUNTARA_DATABASE_URL         Durable-runtime database (default: postgres://localhost/runtara)"
+    echo "  OBJECT_MODEL_DATABASE_URL    Object model database (default: postgres://localhost/runtara_objects)"
+    echo "  VALKEY_HOST / VALKEY_PORT    Valkey for checkpoint storage (default: 127.0.0.1:6379)"
+    echo "  DATA_DIR                     Data directory (default: .data)"
+    echo "  RUNTARA_CORE_PORT            Core instance HTTP port (default: 8001)"
+    echo "  RUNTARA_ENV_PORT             Environment HTTP port (default: 8002)"
+    echo "  RUST_LOG                     Log level (default: runtara_*=info)"
     echo ""
 }
 
