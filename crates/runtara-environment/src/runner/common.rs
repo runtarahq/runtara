@@ -68,11 +68,16 @@ impl WorkflowRunnerConfig {
 }
 
 /// Build the environment variables every workflow instance receives.
+///
+/// Nothing here points a guest at runtara-core over HTTP. A composed artifact
+/// imports `runtara:workflow-runtime/runtime` as a host import, satisfied
+/// in-process by [`crate::runtime_host`], and carries no `wasi:http` import at
+/// all — so the address of core's instance API is not something a guest can
+/// use, and used to be injected on every run for nobody.
 pub(crate) fn build_env(
     config: &WorkflowRunnerConfig,
     instance_id: &str,
     tenant_id: &str,
-    runtara_core_addr: &str,
     checkpoint_id: Option<&str>,
 ) -> HashMap<String, String> {
     let mut env = HashMap::new();
@@ -80,15 +85,6 @@ pub(crate) fn build_env(
     env.insert("RUNTARA_TENANT_ID".to_string(), tenant_id.to_string());
     // Suppress verbose tracing in WASM workflows to reduce stderr output.
     env.insert("RUST_LOG".to_string(), "warn".to_string());
-    env.insert(
-        "RUNTARA_HTTP_URL".to_string(),
-        format!("http://{}", runtara_core_addr),
-    );
-    env.insert(
-        "RUNTARA_SERVER_ADDR".to_string(),
-        runtara_core_addr.to_string(),
-    );
-
     if config.skip_cert_verification {
         env.insert(
             "RUNTARA_SKIP_CERT_VERIFICATION".to_string(),
@@ -102,15 +98,9 @@ pub(crate) fn build_env(
         env.insert("CONNECTION_SERVICE_URL".to_string(), url.clone());
     }
 
-    // Forward SDK backend selection and HTTP URL if set in host environment.
+    // Forward SDK backend selection if set in the host environment.
     if let Ok(backend) = std::env::var("RUNTARA_SDK_BACKEND") {
         env.insert("RUNTARA_SDK_BACKEND".to_string(), backend);
-    }
-    if let Ok(url) = std::env::var("RUNTARA_HTTP_URL") {
-        env.insert("RUNTARA_HTTP_URL".to_string(), url);
-    }
-    if let Ok(port) = std::env::var("RUNTARA_CORE_HTTP_PORT") {
-        env.insert("RUNTARA_CORE_HTTP_PORT".to_string(), port);
     }
 
     // RUNTARA_HTTP_PROXY_URL, RUNTARA_OBJECT_MODEL_URL,

@@ -74,8 +74,6 @@ pub struct LaunchOptions {
     pub input: Value,
     /// Execution timeout
     pub timeout: Duration,
-    /// Address of runtara-core for instance to connect back
-    pub runtara_core_addr: String,
     /// Checkpoint ID to resume from (for wakes/resumes)
     pub checkpoint_id: Option<String>,
     /// Custom environment variables (applied after system vars, can override)

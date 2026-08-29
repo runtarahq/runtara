@@ -224,7 +224,7 @@ pub async fn create_runtara_pool()
 /// Environment variables:
 /// - `RUNTARA_DATABASE_URL` (required) - PostgreSQL connection string for Runtara database
 /// - `RUNTARA_EMBEDDED` (default: true) - Enable embedded server
-/// - `RUNTARA_CORE_PORT` (default: 8001) - Port for instance connections
+/// - `RUNTARA_CORE_HTTP_PORT` (default: 8003) - Port for core's instance API
 /// - `RUNTARA_ENVIRONMENT_PORT` (default: 8002) - Port for management protocol
 /// - `DATA_DIR` (default: .data) - Directory for images and instance I/O
 ///
@@ -260,25 +260,16 @@ pub async fn maybe_start_embedded()
     run_migrations(&pool).await?;
 
     // Build configuration
-    let core_port: u16 = std::env::var("RUNTARA_CORE_PORT")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(8001);
-
     let environment_port: u16 = std::env::var("RUNTARA_ENVIRONMENT_PORT")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(8002);
 
-    // HTTP port for runtara-core instance API (optional, default: 8003)
-    // Set RUNTARA_CORE_HTTP_PORT=0 to disable
-    let core_http_port: Option<u16> = {
-        let port = std::env::var("RUNTARA_CORE_HTTP_PORT")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(8003u16);
-        if port == 0 { None } else { Some(port) }
-    };
+    // HTTP port for runtara-core's instance API (default: 8003).
+    let core_http_port: u16 = std::env::var("RUNTARA_CORE_HTTP_PORT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(8003);
 
     // Get data_dir from environment and convert to absolute path
     // This is critical: paths stored in the DB must be absolute for the runner
@@ -301,7 +292,7 @@ pub async fn maybe_start_embedded()
     // Workflow guests run in-process, so no IP transformation is needed —
     // 127.0.0.1 reaches runtara-core directly.
     // Core HTTP port is used for both binding and client connections (QUIC is gone)
-    let core_http_addr = core_http_port.unwrap_or(core_port);
+    let core_http_addr = core_http_port;
     let config = EmbeddedRuntaraConfig {
         pool,
         data_dir,

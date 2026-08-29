@@ -685,7 +685,6 @@ pub async fn handle_start_instance(
         wasm_path,
         input,
         timeout,
-        runtara_core_addr: state.core_addr.clone(),
         checkpoint_id: None,
         env: request.env,
     };
@@ -1006,7 +1005,6 @@ pub async fn handle_resume_instance(
         wasm_path,
         input: serde_json::json!({}), // Input was consumed on first run
         timeout,
-        runtara_core_addr: state.core_addr.clone(),
         checkpoint_id: checkpoint_id.clone(),
         env: stored_env, // Restore env from initial launch
     };

@@ -1244,7 +1244,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     // =========================================================================
     // Handles durable workflow execution using a dedicated database (RUNTARA_DATABASE_URL):
     // - Management protocol (images, instances) on port 8002 (RUNTARA_ENVIRONMENT_PORT)
-    // - Core functionality (checkpoints, signals) on port 8001 (RUNTARA_CORE_PORT)
+    // - Core functionality (checkpoints, signals) on port 8003 (RUNTARA_CORE_HTTP_PORT)
     // Migrations are run automatically via runtara_environment::migrations::run()
 
     // Start embedded Runtara servers (using dedicated database)

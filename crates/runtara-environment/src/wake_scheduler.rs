@@ -261,7 +261,6 @@ impl WakeScheduler {
             wasm_path,
             input: serde_json::json!({}), // Input was already consumed on first run
             timeout,
-            runtara_core_addr: self.config.core_addr.clone(),
             checkpoint_id,
             env: stored_env, // Restore env from initial launch
         };

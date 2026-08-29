@@ -88,7 +88,6 @@ impl EmbeddedWasmRunner {
             &self.config,
             &options.instance_id,
             &options.tenant_id,
-            &options.runtara_core_addr,
             options.checkpoint_id.as_deref(),
         );
         env.extend(options.env.clone());

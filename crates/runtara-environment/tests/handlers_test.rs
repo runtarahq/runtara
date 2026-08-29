@@ -1195,7 +1195,6 @@ async fn test_spawn_container_monitor_timeout_enforcement() {
             wasm_path: PathBuf::from("/test/workflow.wasm"),
             input: serde_json::json!({}),
             timeout: Duration::from_millis(100),
-            runtara_core_addr: "127.0.0.1:8001".to_string(),
             checkpoint_id: None,
             env: std::collections::HashMap::new(),
         })
@@ -1297,7 +1296,6 @@ async fn test_spawn_container_monitor_no_timeout_on_quick_completion() {
             wasm_path: PathBuf::from("/test/workflow.wasm"),
             input: serde_json::json!({}),
             timeout: Duration::from_secs(10), // Long timeout
-            runtara_core_addr: "127.0.0.1:8001".to_string(),
             checkpoint_id: None,
             env: std::collections::HashMap::new(),
         })
@@ -1384,7 +1382,6 @@ async fn test_spawn_container_monitor_timeout_race_condition() {
             wasm_path: PathBuf::from("/test/workflow.wasm"),
             input: serde_json::json!({}),
             timeout: Duration::from_millis(200),
-            runtara_core_addr: "127.0.0.1:8001".to_string(),
             checkpoint_id: None,
             env: std::collections::HashMap::new(),
         })
@@ -1508,7 +1505,6 @@ async fn test_wait_for_exit_default_impl_returns_on_not_running() {
             wasm_path: PathBuf::from("/test/workflow.wasm"),
             input: serde_json::json!({}),
             timeout: Duration::from_secs(10),
-            runtara_core_addr: "127.0.0.1:8001".to_string(),
             checkpoint_id: None,
             env: std::collections::HashMap::new(),
         })
