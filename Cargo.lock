@@ -4911,8 +4911,6 @@ name = "runtara-workflow-stdlib"
 version = "8.7.8"
 dependencies = [
  "minijinja",
- "runtara-http",
- "runtara-sdk",
  "serde",
  "serde_json",
  "wit-bindgen 0.58.0",

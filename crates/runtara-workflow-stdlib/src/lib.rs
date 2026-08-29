@@ -2,26 +2,26 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Runtara Workflow Standard Library
 //!
-//! Unified library for workflow binaries. Combines agents and runtime
-//! into a single crate that workflows link against.
+//! The manifest evaluator behind `runtara:workflow-stdlib/json@0.1.0`. A
+//! direct-emitted workflow carries its graph as a JSON manifest and calls
+//! into this component for every pure decision it has to make: resolving a
+//! reference path, applying an input mapping, rendering a template,
+//! evaluating a condition, deriving Split/While iteration state, and
+//! validating step inputs.
 //!
-//! This library integrates with runtara-core via runtara-sdk for:
-//! - Instance registration and lifecycle management
-//! - Checkpointing for crash recovery
-//! - Signal handling (pause, cancel, resume)
-//! - Heartbeat/tick for liveness monitoring
+//! Everything here is pure: JSON in, JSON out, plus an interning value
+//! store. Durability (registration, checkpointing, signals, heartbeats)
+//! lives in `runtara-workflow-runtime`, and agent calls go out over each
+//! agent's own WIT interface (`runtara:agent-<id>/capabilities@0.3.0`),
+//! bound at `wac compose` time. This crate therefore has no HTTP client,
+//! no SDK dependency, and no target-specific backends.
 //!
-//! Usage in generated workflow code:
-//! ```rust
-//! extern crate runtara_workflow_stdlib;
-//! use runtara_workflow_stdlib::prelude::*;
-//! ```
-//!
-//! Agent implementations are no longer linked into workflow binaries.
-//! Workflows dispatch to each agent through its own per-agent WIT
-//! interface (`runtara:agent-<id>/capabilities@0.3.0`), bound at
-//! `wac compose` time. The stdlib is now ~thin runtime: condition
-//! evaluators, SDK protocol wrapper, template rendering, validators.
+//! Built two ways:
+//! - `--features direct-component` for `wasm32-wasip2`, the component that
+//!   ships in the bundle and is composed into every workflow.
+//! - as a plain rlib (no features) for `runtara-workflows`, whose
+//!   authoring-time validator shares [`reference_path`] so it tokenizes
+//!   paths exactly the way the runtime does.
 
 #[cfg(all(target_arch = "wasm32", feature = "direct-component"))]
 #[allow(warnings)]
@@ -35,92 +35,39 @@ mod bindings {
     });
 }
 
-// Runtime module (wraps runtara-sdk)
-#[cfg(feature = "sdk-runtime")]
-pub mod runtime;
-
-// Condition helpers for generated conditional steps
+// Condition evaluation for Conditional / While steps.
 pub mod conditions;
 
-// Switch step helpers for generated switch steps
+// Case selection and output shaping for Switch steps.
 pub mod switch_helpers;
 
-// Connection envelope types for generated workflow code.
-pub mod connections;
-
-// Re-export serde at top level
+// Re-exported so consumers can name the serde types this crate's public
+// signatures use without adding their own serde dependency.
 pub use serde;
 pub use serde_json;
 
-// Note: tokio and futures are no longer re-exported — generated workflows are synchronous.
-
-// Re-export runtara-sdk for direct use
-#[cfg(feature = "sdk-runtime")]
-pub use runtara_sdk;
-
-// Template rendering for MappingValue::Template
+// Template rendering for MappingValue::Template.
 pub mod template;
 
-// JSON helpers for direct-emitted workflow components
+// The manifest itself: parsing, the value store, and every guest
+// function exported over the WIT interface.
 pub mod direct_json;
 
 // Reference-path tokenization, shared with the authoring-time validator so both
 // agree on what a path's segments are.
 pub mod reference_path;
 
-// Child workflow input validation (runtime)
+// EmbedWorkflow child input validation.
 pub mod child_input_validation;
 
-// Agent capability input validation (runtime)
+// Agent capability input validation.
 pub mod agent_input_validation;
 
-// Prelude for convenient imports
-pub mod prelude {
-    // Runtime types
-    #[cfg(feature = "sdk-runtime")]
-    pub use crate::runtime::{Error, Result};
-
-    // SDK types for durability
-    #[cfg(feature = "native")]
-    pub use crate::runtime::HttpSdkConfig;
-    #[cfg(feature = "sdk-runtime")]
-    pub use crate::runtime::{RuntaraSdk, register_sdk, resilient, sdk};
-
-    // Condition helpers for generated conditional steps
-    pub use crate::conditions::{is_truthy, to_number, values_equal};
-
-    // Switch step output processing for generated switch steps
-    pub use crate::switch_helpers::process_switch_output;
-
-    // Connection envelope types (codegen builds these as stubs; credentials
-    // are injected server-side via the runtara-http proxy, not in-workflow).
-    pub use crate::connections::{ConnectionResponse, RateLimitState};
-
-    // Serde types
-    pub use serde::{Deserialize, Serialize};
-    pub use serde_json;
-
-    // Child input validation for EmbedWorkflow steps
-    pub use crate::child_input_validation::{
-        ChildInputSchema, ChildInputValidationError, RequiredField, validate_child_inputs,
-    };
-
-    // Agent input validation for Agent steps
-    pub use crate::agent_input_validation::{
-        AgentInputValidationError, RequiredAgentInput, validate_agent_inputs,
-    };
-}
-
-// Direct access to commonly used modules
-#[cfg(feature = "sdk-runtime")]
-pub use runtime::{Error, Result};
-
-// Re-export child input validation for generated code
+// Re-export input validation at the crate root.
 pub use child_input_validation::{
     ChildInputSchema, ChildInputValidationError, RequiredField, validate_child_inputs,
 };
 
-// Re-export agent input validation for generated code
 pub use agent_input_validation::{
     AgentInputValidationError, RequiredAgentInput, validate_agent_inputs,
 };

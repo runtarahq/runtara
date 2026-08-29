@@ -5,8 +5,8 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Standard library for runtara workflow binaries - combines agents and runtime"
-keywords = ["durable", "workflow", "stdlib", "agents"]
+description = "Manifest evaluator component for direct-emitted runtara workflow Wasm"
+keywords = ["durable", "workflow", "stdlib", "wasm"]
 categories = ["development-tools"]
 
 [lib]
@@ -15,43 +15,19 @@ path = "src/lib.rs"
 crate-type = ["cdylib", "rlib"]
 
 [features]
-default = ["native"]
-sdk-runtime = ["dep:runtara-http", "dep:runtara-sdk"]
+# No target backends: this crate is pure JSON evaluation, so the same code
+# builds for every target. `direct-component` adds the wit-bindgen export
+# glue for the wasm32-wasip2 component build; without it the crate is a
+# plain rlib for `runtara-workflows`.
+default = []
 direct-component = ["dep:wit-bindgen"]
 
-# Native platform — uses the native SDK backend (blocking ureq HTTP).
-# Also forwards tracing to runtara-sdk so native consumers (runtara-server)
-# see the full structured logs.
-native = [
-    "sdk-runtime",
-    "runtara-sdk/native",
-    "runtara-sdk/tracing",
-    "runtara-http/native",
-]
-
-# WASI target (wasm32-wasip1/wasip2) — wasi-http transport.
-wasi = ["sdk-runtime", "runtara-sdk/wasi", "runtara-http/wasi"]
-
-# Browser/Node.js target — JS HTTP interop.
-wasm-js = ["sdk-runtime", "runtara-sdk/wasm-js", "runtara-http/wasm-js"]
-
 [dependencies]
+# Export glue for the wasm32-wasip2 component build.
 wit-bindgen = { version = "0.58", optional = true }
 
-# Core dependency: the SDK protocol wrapper. Agent dispatch happens via
-# per-agent WIT bindings injected by `wac compose`, not by linking the
-# `runtara-agents` crate into the workflow.
-runtara-sdk = { path = "../runtara-sdk", version = "8.7", default-features = false, features = ["http"], optional = true }
-
-
-# Re-exported for workflows
 serde = { workspace = true }
 serde_json = { workspace = true }
-
-# HTTP client for connection fetching. Backend is selected via this crate's
-# `native` / `wasi` / `wasm-js` features, which forward to runtara-http.
-# default-features = false keeps the consumer in charge of the backend.
-runtara-http = { workspace = true, default-features = false, optional = true }
 
 # Template rendering for MappingValue::Template.
 # `json` enables the `tojson` filter (default features stay on).

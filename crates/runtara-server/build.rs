@@ -234,6 +234,10 @@ fn validation_wasm_inputs(workspace_root: &Path) -> Vec<PathBuf> {
         "crates/runtara-validation-wasm/src",
         "crates/runtara-workflows/Cargo.toml",
         "crates/runtara-workflows/src",
+        // The validator shares `reference_path` with the workflow stdlib, so a
+        // stdlib edit changes what the browser WASM accepts.
+        "crates/runtara-workflow-stdlib/Cargo.toml",
+        "crates/runtara-workflow-stdlib/src",
         "crates/runtara-dsl/Cargo.toml",
         "crates/runtara-dsl/src",
         "crates/runtara-agents/Cargo.toml",

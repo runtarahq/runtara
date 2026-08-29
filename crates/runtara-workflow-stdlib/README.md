@@ -4,39 +4,37 @@
 [![Documentation](https://docs.rs/runtara-workflow-stdlib/badge.svg)](https://docs.rs/runtara-workflow-stdlib)
 [![License](https://img.shields.io/crates/l/runtara-workflow-stdlib.svg)](LICENSE)
 
-The single crate that every generated runtara workflow binary links against.
+The manifest evaluator every direct-emitted runtara workflow composes against.
 
 ## What it is
 
-`runtara-workflow-stdlib` is a thin umbrella crate that bundles everything a compiled workflow binary needs at runtime: agents (`runtara-agents`), the durable execution SDK (`runtara-sdk`), AI helpers (`runtara-ai`), plus a few pieces of glue that only make sense for generated code — condition helpers, switch-step output processing, Jinja-style template rendering, child workflow input validation, a capability dispatch table, and a connection-fetching client. Its public shape is a `prelude` module that re-exports the types codegen emits (`RuntaraSdk`, `resilient`, `register_sdk`, `fetch_connection`, `validate_child_inputs`, etc.) and top-level re-exports of `runtara_agents`, `runtara_ai`, `runtara_sdk`, `serde`, `serde_json`, and `tracing`. Feature flags (`native`, `wasi`, `wasm-js`, `telemetry`) pick the target: workflows compile to WASI components in production, native for tests.
+A direct-emitted workflow carries its graph as a JSON manifest and calls into this crate for every pure decision it has to make: resolving a reference path, applying an input mapping, rendering a `minijinja` template, evaluating a condition, processing Switch output, deriving Split/While iteration state and results, and validating agent and child-workflow inputs. `init_manifest` loads the graph once; the rest of the interface is JSON in, JSON out, over an interning value store that keeps large scope values out of the guest's bump allocator.
+
+Everything here is pure. Durability — registration, checkpointing, signals, heartbeats — lives in `runtara-workflow-runtime`, and agent calls go out over each agent's own WIT interface, bound at `wac compose` time. So this crate has no HTTP client, no SDK dependency, and no target-specific backends: `serde`, `serde_json`, and `minijinja` are the whole dependency set, and the same code builds for every target.
 
 ## Using it standalone
 
-Not really intended for hand-written code — the API surface is shaped by what `runtara-workflows` codegen emits. If you want to experiment, pick a target and pull the prelude in:
+Not intended for hand-written workflows — author DSL and let `runtara-workflows` emit the manifest. The one module worth depending on directly is `reference_path`, which is what keeps authoring-time validation and runtime resolution agreeing on how a path splits into segments:
 
 ```toml
 [dependencies]
-runtara-workflow-stdlib = { version = "4.0", default-features = false, features = ["wasi"] }
+runtara-workflow-stdlib = { version = "8.7", default-features = false }
 ```
 
 ```rust
-use runtara_workflow_stdlib::prelude::*;
+use runtara_workflow_stdlib::reference_path::reference_segments;
 
-let sdk = RuntaraSdk::new(/* transport */)?;
-register_sdk(sdk);
-durable("step-1", || Ok(serde_json::json!({"ok": true})))?;
+let segments = reference_segments("steps.fetch.outputs.items[0].id");
+assert_eq!(segments, ["steps", "fetch", "outputs", "items", "0", "id"]);
 ```
-
-For real workflows, author DSL and let `runtara-workflows` generate the Rust.
 
 ## Inside Runtara
 
-- Consumed by `runtara-workflows` codegen — every generated workflow `main.rs` starts with `use runtara_workflow_stdlib::prelude::*;` (the crate name is overridable via `RUNTARA_STDLIB_NAME`).
-- Linked into `runtara-test-harness` (embedded test runner) and `runtara-server` (workflow compilation at the edge).
-- Core deps: `runtara-agents` (integration library), `runtara-sdk` (durable execution protocol), `runtara-ai` (AI Agent steps); optional OpenTelemetry stack behind the `telemetry` feature.
-- `connections` module exposes only the `ConnectionResponse` envelope used by codegen stubs; credentials are injected server-side via the `runtara-http` proxy and never enter the workflow `.wasm`.
-- Runs primarily as a WASI guest (`wasm32-wasip2`) inside the runtara environment; the `native` feature exists for local testing and for agents with C deps (xlsx, sftp, compression).
-- `dispatch` module is designed for static capability tables so product stdlibs can override agent dispatch without dynamic registration.
+- Built two ways. `--features direct-component` for `wasm32-wasip2` produces `runtara_workflow_stdlib.wasm`, which ships in the bundle's `agents/` directory and exports `runtara:workflow-stdlib/json@0.1.0` (see `scripts/build-agent-components.sh`). With no features it is a plain rlib for `runtara-workflows`.
+- `direct-component` is the only feature. The crate compiles identically on native, `wasm32-wasip2`, and `wasm32-unknown-unknown` — the last of which matters because `runtara-validation-wasm` pulls it in transitively for the browser validator.
+- `runtara-workflows` shares `reference_path` with its authoring-time validator, and `runtara-dsl`'s `step_output_shape` treats `direct_json` as ground truth for per-step output shapes.
+- The WIT world it exports lives in `runtara-workflow-wit` (`wit/stdlib/runtara-workflow-stdlib.wit`); adding a guest function means editing that WIT and the `component` module in `src/lib.rs` together.
+- `direct_json` is large and load-bearing: its unit tests are the contract between the emitter in `runtara-workflows` and what a running workflow actually does, so changes there need `cargo test -p runtara-workflows` as well as this crate's own tests.
 
 ## License
 

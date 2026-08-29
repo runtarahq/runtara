@@ -151,28 +151,6 @@ build_server() {
         cargo build --release -p runtara-server --features embed-ui
 }
 
-# ─── Build workflow stdlib ───────────────────────────────────────────────────
-
-build_stdlib() {
-    if [ "$SKIP_BUILD" = "1" ]; then
-        info "Skipping stdlib build (--skip-build)"
-        return
-    fi
-
-    step "Building workflow stdlib (wasm32-wasip2 rlibs)"
-    # Clean stale artifacts to prevent duplicate rlibs (different RUSTFLAGS produce
-    # different hashes; cargo doesn't remove the old ones)
-    rm -rf "${TARGET_DIR}"/wasm32-wasip2/release/deps/*.rlib "${TARGET_DIR}"/wasm32-wasip2/release/*.rlib 2>/dev/null || true
-
-    # embed-bitcode=yes is required so that workflow compilation can use LTO
-    # for cross-crate dead code elimination (see compile.rs)
-    RUSTFLAGS="-C embed-bitcode=yes" \
-        cargo build -p runtara-workflow-stdlib --release --target wasm32-wasip2 --no-default-features
-
-    step "Building workflow stdlib (host proc-macros)"
-    cargo build -p runtara-workflow-stdlib --release
-}
-
 # ─── Build agent components ─────────────────────────────────────────────────
 #
 # Produces target/wasm32-wasip2/release/runtara_agent_<x>.wasm plus the
@@ -330,7 +308,6 @@ main() {
     resolve_versions
     build_frontend
     build_server
-    build_stdlib
     build_agent_components
     assemble_bundle
     create_tarball

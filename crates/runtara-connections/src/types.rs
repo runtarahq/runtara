@@ -963,7 +963,6 @@ pub struct ConnectionTypeResponse {
 // ============================================================================
 
 /// Rate limit state for runtara-workflows runtime
-/// This matches the format expected by runtara-workflow-stdlib
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
@@ -982,7 +981,6 @@ pub struct RuntimeRateLimitState {
 }
 
 /// Connection response for runtara-workflows runtime
-/// This is the format expected by runtara-workflow-stdlib when fetching connection credentials
 ///
 /// SECURITY NOTE: This response INCLUDES connection_parameters (credentials).
 /// This endpoint should only be called by runtara-workflows internally, not exposed to clients.
