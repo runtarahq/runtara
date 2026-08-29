@@ -41,6 +41,35 @@ use super::traits::{
     RunnerHandle,
 };
 
+/// Mark a run `running`, clearing what a previous stop left behind.
+///
+/// Supplying a `started_at` is what makes the persistence layer also clear
+/// `finished_at` and `termination_reason` — the remnants a drain stamps on a row
+/// it force-stopped. Without it a relaunched instance executes as `running`
+/// while still advertising the moment it stopped, so every duration derived from
+/// that pair is wrong, and turns negative once anything moves `started_at` past
+/// the stale finish.
+///
+/// The existing `started_at` is re-used rather than restamped, so a run that
+/// suspends and wakes still reports when it first began.
+async fn mark_running(persistence: &dyn Persistence, instance_id: &str) {
+    let started_at = match persistence.get_instance(instance_id).await {
+        Ok(Some(instance)) => instance.started_at.unwrap_or_else(chrono::Utc::now),
+        Ok(None) => chrono::Utc::now(),
+        Err(e) => {
+            warn!(instance_id, error = %e, "Could not read instance before marking it running");
+            chrono::Utc::now()
+        }
+    };
+
+    if let Err(e) = persistence
+        .update_instance_status(instance_id, "running", Some(started_at))
+        .await
+    {
+        warn!(instance_id, error = %e, "Failed to mark invoke instance running");
+    }
+}
+
 /// Per-instance bookkeeping for detached runs.
 struct InstanceTask {
     cancel: CancelToken,
@@ -429,13 +458,7 @@ impl Runner for EmbeddedWasmRunner {
             let input = self.persisted_input(&options.instance_id).await?;
             // Run as `running` (see the detached path for why relaunches need
             // this) — no-op on the first-run path, which is already running.
-            if let Err(e) = self
-                .persistence
-                .update_instance_status(&options.instance_id, "running", None)
-                .await
-            {
-                warn!(instance_id = %options.instance_id, error = %e, "Failed to mark invoke instance running");
-            }
+            mark_running(self.persistence.as_ref(), &options.instance_id).await;
             let run = self
                 .executor
                 .execute_invoke(
@@ -606,12 +629,7 @@ impl Runner for EmbeddedWasmRunner {
                         // `suspended` would have its `if_running`-guarded
                         // terminal event silently dropped. Set it here so BOTH
                         // paths run as `running` before the guest starts.
-                        if let Err(e) = persistence
-                            .update_instance_status(&instance_id, "running", None)
-                            .await
-                        {
-                            warn!(instance_id = %instance_id, error = %e, "Failed to mark invoke instance running");
-                        }
+                        mark_running(persistence.as_ref(), &instance_id).await;
                         let run = executor.execute_invoke(&instance_pre, spec, input).await;
                         {
                             let mut guard = metrics_for_task.lock().await;

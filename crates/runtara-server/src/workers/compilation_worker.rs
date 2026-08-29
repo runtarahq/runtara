@@ -49,7 +49,11 @@ impl std::fmt::Debug for CompilationWorkerConfig {
 
 impl CompilationWorkerConfig {
     pub fn from_env(redis_url: String) -> Self {
-        let connection_service_url = std::env::var("CONNECTION_SERVICE_URL").ok();
+        // `try_get` because the worker config is also built in unit tests that
+        // never boot a server; a missing global there means "no override".
+        let connection_service_url = crate::config::try_get()
+            .map(|config| config.connection_service_url.clone())
+            .or_else(|| std::env::var("CONNECTION_SERVICE_URL").ok());
 
         Self {
             redis_url,

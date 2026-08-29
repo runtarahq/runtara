@@ -128,7 +128,7 @@ async fn run_agent(
     // parameters, so anything the guest placed in `_connection.parameters` is
     // discarded — a buggy or hostile component cannot influence credentials.
     if let Some(conn_id) = connection_id_from_input(&input) {
-        let connection_service_url = std::env::var("CONNECTION_SERVICE_URL").unwrap_or_default();
+        let connection_service_url = crate::config::get().connection_service_url.clone();
 
         if connection_service_url.is_empty() {
             // The guest handed us a connection id but the host has no service to

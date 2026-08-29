@@ -31,7 +31,7 @@ load_dotenv_value() {
 }
 
 for name in RUNTARA_SERVER_DATABASE_URL RUNTARA_DATABASE_URL TENANT_ID SERVER_PORT \
-    RUNTARA_ENV_HTTP_PORT VALKEY_HOST VALKEY_PORT VALKEY_TRIGGER_STREAM_PREFIX \
+    VALKEY_HOST VALKEY_PORT VALKEY_TRIGGER_STREAM_PREFIX \
     VALKEY_TRIGGER_CONSUMER_GROUP; do
     load_dotenv_value "${name}"
 done
@@ -42,7 +42,6 @@ done
 
 API_BASE="${API_BASE:-http://127.0.0.1:${SERVER_PORT:-7001}}"
 API="${API_BASE}/api/runtime"
-ENVIRONMENT_API="${RUNTARA_ENVIRONMENT_API:-http://127.0.0.1:${RUNTARA_ENV_HTTP_PORT:-8004}}"
 VALKEY_HOST="${VALKEY_HOST:-127.0.0.1}"
 VALKEY_PORT="${VALKEY_PORT:-6379}"
 STREAM="${VALKEY_TRIGGER_STREAM_PREFIX:-runtara:triggers}:${TENANT_ID}"
@@ -104,8 +103,9 @@ SQL
     fi
 
     if [ -n "${IMAGE_ID}" ]; then
-        curl -sS -X DELETE \
-            "${ENVIRONMENT_API}/api/v1/images/${IMAGE_ID}?tenant_id=${TENANT_ID}" >/dev/null
+        psql "${RUNTARA_DATABASE_URL}" -v ON_ERROR_STOP=1 -q >/dev/null <<SQL || true
+DELETE FROM images WHERE image_id = '${IMAGE_ID}';
+SQL
     fi
     if [ -n "${WORKFLOW_ID}" ]; then
         curl -sS -X POST "${API}/workflows/${WORKFLOW_ID}/delete" \
@@ -212,20 +212,14 @@ wait_for_group_read "${READS_BEFORE}" || { echo "trigger group did not consume f
     exit 1
 }
 
-echo "4. Verifying Environment and trigger-worker replay deduplication"
-REPLAY_BODY=$(jq -nc \
-    --arg image_id "${IMAGE_ID}" --arg tenant_id "${TENANT_ID}" --arg instance_id "${INSTANCE_ID}" \
-    '{image_id:$image_id,tenant_id:$tenant_id,instance_id:$instance_id,input:{e2e:true},env:{}}')
-REPLAY_RESPONSE_FILE=$(mktemp -t runtara-trigger-replay-response.XXXXXX)
-REPLAY_STATUS=$(curl -sS -o "${REPLAY_RESPONSE_FILE}" -w '%{http_code}' -X POST \
-    "${ENVIRONMENT_API}/api/v1/instances" -H 'Content-Type: application/json' -d "${REPLAY_BODY}")
-REPLAY_RESPONSE=$(cat "${REPLAY_RESPONSE_FILE}")
-rm -f "${REPLAY_RESPONSE_FILE}"
-[ "${REPLAY_STATUS}" = "200" ] && [ "$(jq -r '.deduplicated // false' <<<"${REPLAY_RESPONSE}")" = "true" ] || {
-    echo "Environment did not return a deduplicated 200 response: ${REPLAY_STATUS} ${REPLAY_RESPONSE}"
-    exit 1
-}
-
+# The direct "post the same instance id twice" probe used to go to the
+# environment management API. That API is gone — runtara-environment is a
+# library the server calls in-process — and the assertion it made lives in
+# runtara-environment's `test_start_instance_replay_is_deduplicated_without_second_launch`,
+# which additionally proves no second process was launched. What is left here is
+# the part only an end-to-end run can show: a replayed trigger event is consumed,
+# acknowledged, and adds no second instance row.
+echo "4. Verifying trigger-worker replay deduplication"
 READS_BEFORE=$(group_entries_read)
 REPLAY_ENTRY_ID=$(redis XADD "${STREAM}" '*' \
     event_type trigger trigger_type http_api instance_id "${INSTANCE_ID}" \

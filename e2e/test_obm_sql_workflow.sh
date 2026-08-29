@@ -112,6 +112,8 @@ start_server() {
     RUNTARA_CORE_HTTP_PORT="${TEST_CORE_HTTP_PORT}" \
     RUNTARA_ENV_HTTP_PORT="${TEST_ENV_HTTP_PORT}" \
     RUNTARA_AGENT_COMPONENTS_DIR="${COMPONENTS_DIR}" \
+    CONNECTION_SERVICE_URL="http://127.0.0.1:${TEST_PORT_INTERNAL}/api/connections" \
+    RUNTARA_CONNECTION_SERVICE_URL="http://127.0.0.1:${TEST_PORT_INTERNAL}/api/connections" \
     DATA_DIR="${TEST_DATA_DIR}" \
     RUST_LOG="warn,runtara_server=info,runtara_object_store=warn" \
     AUTH_PROVIDER=local \

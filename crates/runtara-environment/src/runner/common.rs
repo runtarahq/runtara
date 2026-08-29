@@ -62,7 +62,13 @@ impl WorkflowRunnerConfig {
                 .ok()
                 .map(|v| crate::config::parse_bool_lenient(&v))
                 .unwrap_or(false),
-            connection_service_url: std::env::var("RUNTARA_CONNECTION_SERVICE_URL").ok(),
+            // `RUNTARA_CONNECTION_SERVICE_URL` is the runner's own setting and
+            // wins; `CONNECTION_SERVICE_URL` is the general name the rest of the
+            // stack uses, accepted as a fallback so a deployment that sets only
+            // that one still points guests at the right host.
+            connection_service_url: std::env::var("RUNTARA_CONNECTION_SERVICE_URL")
+                .or_else(|_| std::env::var("CONNECTION_SERVICE_URL"))
+                .ok(),
         }
     }
 }
