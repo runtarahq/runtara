@@ -22,7 +22,7 @@ use tokio::sync::Mutex;
 use tracing::{debug, info, instrument, warn};
 use uuid::Uuid;
 
-use runtara_management_sdk::{InstanceStatus, ListInstancesOptions, ListInstancesOrder};
+use crate::runtime_types::{InstanceStatus, ListInstancesOptions, ListInstancesOrder};
 
 use crate::api::dto::executions::ExecutionFilters;
 use crate::api::dto::trigger_event::TriggerEvent;

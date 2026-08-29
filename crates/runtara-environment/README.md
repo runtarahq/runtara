@@ -8,17 +8,17 @@ Control-plane library for Runtara — image registry, instance lifecycle, workfl
 
 It persists images, instances, and the wake queue in PostgreSQL, sharing the pool with `runtara-core` so its migrations layer cleanly on top of the core schema. A set of background workers (cleanup, image GC, heartbeat monitoring, DB cleanup) run as tokio tasks inside the runtime.
 
-It is a library, not a service: no HTTP, no sockets, no binary. The protocol is a set of async functions in `handlers` over a shared `EnvironmentHandlerState`, and `runtime::EnvironmentRuntime` owns the workers. `runtara-server` serves the management API over HTTP (`runtara_server::environment_api`, default port 8002) and owns that listener's lifecycle.
+It is a library, not a service: no HTTP, no sockets, no binary. The protocol is a set of async functions in `handlers` over a shared `EnvironmentHandlerState`, and `runtime::EnvironmentRuntime` owns the workers.
 
 ## Using it
 
-Build a runtime with `EnvironmentRuntime::builder()`, supplying the pool, a `runner::Runner`, core persistence and a data directory, then call `migrations::run()` before starting it. Call the `handlers` functions directly for in-process access, or let `runtara-server` expose them over the wire.
+Build a runtime with `EnvironmentRuntime::builder()`, supplying the pool, a `runner::Runner`, core persistence and a data directory, then call `migrations::run()` before starting it. Drive it by calling the `handlers` functions.
 
-Clients don't call the handlers directly — they go through `runtara-management-sdk`, which speaks the Environment protocol on behalf of CLIs and tooling.
+`runtara-server` is the only consumer: it calls these handlers directly through its `environment_client` module, in the same process. There is no management wire protocol any more.
 
 ## Inside Runtara
 
-- **Consumers:** `runtara-server` (embeds `EnvironmentRuntime` in-process and serves its HTTP API) and `runtara-management-sdk` (client to that API).
+- **Consumers:** `runtara-server`, which embeds `EnvironmentRuntime` in-process and calls the `handlers` functions directly.
 - **Key workspace deps:** `runtara-core` (shared `Persistence` trait, PostgreSQL pool, signal storage) and `runtara-dsl` (agent metadata types used by `list_agents` / `get_capability` handlers).
 - **Integration point:** Environment orchestrates the workflow instance lifecycle on top of `runtara-core`'s persistence — it launches workflow runs via the `runner::Runner` trait and proxies cancel/pause/resume signals to core, which stores them for the running instance to consume at its next checkpoint.
 - **Runner backend:** `EmbeddedWasmRunner` — an in-process wasmtime engine — is the only backend. `MockRunner` exists for tests. The `runner::Runner` trait keeps that seam.

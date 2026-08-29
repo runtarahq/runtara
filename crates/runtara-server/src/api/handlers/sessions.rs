@@ -1,3 +1,4 @@
+use crate::runtime_types::ListEventsOptions;
 use axum::{
     Json,
     extract::{Path, State},
@@ -9,7 +10,6 @@ use axum::{
 };
 use futures::stream::Stream;
 use redis::aio::ConnectionManager;
-use runtara_management_sdk::ListEventsOptions;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sqlx::PgPool;
@@ -363,7 +363,7 @@ pub async fn session_pending_input(
         .with_limit(100)
         .with_event_type("custom")
         .with_subtype("external_input_requested")
-        .with_sort_order(runtara_management_sdk::EventSortOrder::Asc);
+        .with_sort_order(crate::runtime_types::EventSortOrder::Asc);
 
     let input_events = match client.list_events(&instance_id, Some(input_options)).await {
         Ok(result) => result.events,
@@ -512,7 +512,7 @@ async fn find_pending_signal_id(client: &Arc<RuntimeClient>, instance_id: &str) 
         .with_limit(10)
         .with_event_type("custom")
         .with_subtype("external_input_requested")
-        .with_sort_order(runtara_management_sdk::EventSortOrder::Desc);
+        .with_sort_order(crate::runtime_types::EventSortOrder::Desc);
 
     let result = client.list_events(instance_id, Some(options)).await.ok()?;
     result
@@ -653,7 +653,7 @@ fn build_session_event_stream(
                             // Flush remaining events
                             if let Ok(result) = client.list_events(&current_instance_id, Some(ListEventsOptions {
                                 event_type: Some("custom".to_string()),
-                                sort_order: Some(runtara_management_sdk::EventSortOrder::Asc),
+                                sort_order: Some(crate::runtime_types::EventSortOrder::Asc),
                                 limit: Some(100),
                                 offset: Some(event_offset),
                                 ..Default::default()
@@ -673,7 +673,7 @@ fn build_session_event_stream(
                             }
 
                             match info.status {
-                                runtara_management_sdk::InstanceStatus::Completed => {
+                                crate::runtime_types::InstanceStatus::Completed => {
                                     let duration = match (info.started_at, info.finished_at) {
                                         (Some(s), Some(f)) => Some((f - s).num_milliseconds() as f64 / 1000.0),
                                         _ => None,
@@ -692,7 +692,7 @@ fn build_session_event_stream(
                                         duration_seconds: duration,
                                     }));
                                 }
-                                runtara_management_sdk::InstanceStatus::Failed => {
+                                crate::runtime_types::InstanceStatus::Failed => {
                                     let error_msg = info.error
                                         .or(info.stderr)
                                         .unwrap_or_else(|| "Execution failed".to_string());
@@ -732,7 +732,7 @@ fn build_session_event_stream(
                 // Fetch new events
                 let options = ListEventsOptions {
                     event_type: Some("custom".to_string()),
-                    sort_order: Some(runtara_management_sdk::EventSortOrder::Asc),
+                    sort_order: Some(crate::runtime_types::EventSortOrder::Asc),
                     limit: Some(100),
                     offset: Some(event_offset),
                     ..Default::default()

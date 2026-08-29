@@ -1,23 +1,27 @@
 //! Runtime Client
 //!
-//! Provides a client abstraction for executing workflows via the Runtara Management SDK.
-//! This module bridges runtara-server with the runtara-environment execution server.
+//! The server's view of workflow execution: start, stop, signal, and read back
+//! instances, events and step summaries.
+//!
+//! runtara-environment runs in this process, so every call below reaches it
+//! through [`EnvironmentClient`] as a direct function call. There is no socket
+//! and nothing to connect to — a `RuntimeClient` exists exactly when the
+//! embedded runtime does.
 
 use std::sync::Arc;
 
-use runtara_management_sdk::{
-    ListInstancesOptions, ManagementSdk, SdkConfig, StartInstanceOptions,
-};
+use crate::environment_client::{EnvironmentClient, EnvironmentError};
+use crate::runtime_types::{ListInstancesOptions, StartInstanceOptions};
+use runtara_environment::handlers::EnvironmentHandlerState;
 use serde_json::Value;
 
 // Re-export types from the SDK for use by other modules
-pub use runtara_management_sdk::{
+pub use crate::runtime_types::{
     GetTenantMetricsOptions, InstanceInfo, InstanceStatus, InstanceSummary, ListInstancesResult,
     MetricsBucket, MetricsGranularity, TenantMetricsResult, TerminationReason,
 };
 
 use thiserror::Error;
-use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
 use crate::observability::trace_context;
@@ -98,119 +102,36 @@ pub struct RuntimeClientConfig {
 }
 
 impl RuntimeClientConfig {
-    /// Create configuration from environment variables
+    /// Create configuration from environment variables.
     ///
-    /// Returns Some if RUNTARA_ENVIRONMENT_ADDR is set (required by the SDK).
-    /// The SDK will read its own configuration via SdkConfig::from_env().
-    pub fn from_env() -> Option<Self> {
-        // Check if the environment is configured for runtara-environment
-        // The actual address is read by SdkConfig::from_env() in connect()
-        std::env::var("RUNTARA_ENVIRONMENT_ADDR").ok()?;
-
+    /// There is no address to read any more: the client talks to the embedded
+    /// environment directly, so whether a runtime exists is decided by whether
+    /// the embedded runtime started, not by a variable.
+    pub fn from_env() -> Self {
         let default_timeout_secs = std::env::var("RUNTARA_REQUEST_TIMEOUT_MS")
             .ok()
             .and_then(|s| s.parse::<u32>().ok())
             .map(|ms| ms / 1000)
             .unwrap_or(300);
 
-        Some(Self {
+        Self {
             default_timeout_secs,
-        })
+        }
     }
 }
 
-/// Client for executing workflows via the Runtara Management SDK
+/// Client for executing workflows on the embedded runtara-environment.
 pub struct RuntimeClient {
-    sdk: Arc<RwLock<Option<ManagementSdk>>>,
+    client: EnvironmentClient,
     config: RuntimeClientConfig,
 }
 
 impl RuntimeClient {
-    /// Create a new runtime client with the given configuration
-    pub fn new(config: RuntimeClientConfig) -> Self {
+    /// Create a client over the embedded environment's shared handler state.
+    pub fn new(state: Arc<EnvironmentHandlerState>, config: RuntimeClientConfig) -> Self {
         Self {
-            sdk: Arc::new(RwLock::new(None)),
+            client: EnvironmentClient::new(state),
             config,
-        }
-    }
-
-    /// Create a runtime client for a specific server address
-    ///
-    /// This sets the RUNTARA_ENVIRONMENT_ADDR environment variable before creating
-    /// the client, which is used by SdkConfig::from_env() during connect().
-    pub fn with_address(addr: &str) -> Self {
-        // SAFETY: This is called during initialization before any threads that
-        // might read RUNTARA_ENVIRONMENT_ADDR are spawned.
-        unsafe {
-            std::env::set_var("RUNTARA_ENVIRONMENT_ADDR", addr);
-        }
-
-        Self::new(RuntimeClientConfig {
-            default_timeout_secs: std::env::var("RUNTARA_REQUEST_TIMEOUT_MS")
-                .ok()
-                .and_then(|s| s.parse::<u32>().ok())
-                .map(|ms| ms / 1000)
-                .unwrap_or(300),
-        })
-    }
-
-    /// Create a runtime client from environment variables
-    pub fn from_env() -> Option<Self> {
-        RuntimeClientConfig::from_env().map(Self::new)
-    }
-
-    /// Connect to the runtara-environment server
-    pub async fn connect(&self) -> Result<(), RuntimeError> {
-        let sdk_config =
-            SdkConfig::from_env().map_err(|e| RuntimeError::ConnectionFailed(e.to_string()))?;
-
-        let sdk = ManagementSdk::new(sdk_config)
-            .map_err(|e| RuntimeError::ConnectionFailed(e.to_string()))?;
-
-        sdk.connect()
-            .await
-            .map_err(|e| RuntimeError::ConnectionFailed(e.to_string()))?;
-
-        *self.sdk.write().await = Some(sdk);
-
-        info!("Connected to runtara-environment server");
-        Ok(())
-    }
-
-    /// Ensure we're connected, connecting if necessary
-    ///
-    /// This provides lazy initialization - if the SDK hasn't been created yet,
-    /// it will be created and connected. This allows operations to proceed even
-    /// if the initial background connect hasn't completed yet.
-    async fn ensure_connected(&self) -> Result<(), RuntimeError> {
-        // Fast path: already connected
-        let lock_start = std::time::Instant::now();
-        debug!("RuntimeClient: acquiring read lock for connection check");
-        let guard = self.sdk.read().await;
-        let lock_duration = lock_start.elapsed();
-        if lock_duration.as_millis() > 100 {
-            warn!(
-                lock_wait_ms = lock_duration.as_millis(),
-                "RuntimeClient: slow read lock acquisition in ensure_connected"
-            );
-        }
-        if guard.is_some() {
-            drop(guard);
-            return Ok(());
-        }
-        drop(guard);
-
-        // Slow path: need to connect
-        info!("SDK not connected, attempting to connect...");
-        self.connect().await
-    }
-
-    /// Check if connected to the server
-    pub async fn is_connected(&self) -> bool {
-        if let Some(sdk) = self.sdk.read().await.as_ref() {
-            sdk.is_connected().await
-        } else {
-            false
         }
     }
 
@@ -237,11 +158,7 @@ impl RuntimeClient {
         timeout_secs: Option<u32>,
         debug: bool,
     ) -> Result<StartInstanceOutcome, RuntimeError> {
-        self.ensure_connected().await?;
-        let sdk_guard = self.sdk.read().await;
-        let sdk = sdk_guard
-            .as_ref()
-            .ok_or_else(|| RuntimeError::ConnectionFailed("Not connected".to_string()))?;
+        let sdk = &self.client;
 
         let mut options = StartInstanceOptions::new(image_id, tenant_id);
 
@@ -314,9 +231,7 @@ impl RuntimeClient {
         }
 
         let result = sdk.start_instance(options).await.map_err(|e| match e {
-            runtara_management_sdk::SdkError::ImageNotFound(message) => {
-                RuntimeError::ImageNotFound(message)
-            }
+            EnvironmentError::ImageNotFound(message) => RuntimeError::ImageNotFound(message),
             other => RuntimeError::StartFailed(other.to_string()),
         })?;
 
@@ -346,11 +261,7 @@ impl RuntimeClient {
         &self,
         instance_id: &str,
     ) -> Result<InstanceStatus, RuntimeError> {
-        self.ensure_connected().await?;
-        let sdk_guard = self.sdk.read().await;
-        let sdk = sdk_guard
-            .as_ref()
-            .ok_or_else(|| RuntimeError::ConnectionFailed("Not connected".to_string()))?;
+        let sdk = &self.client;
 
         let info = sdk
             .get_instance_status(instance_id)
@@ -372,11 +283,7 @@ impl RuntimeClient {
         poll_interval_ms: Option<u64>,
         timeout_secs: Option<u32>,
     ) -> Result<ExecutionOutput, RuntimeError> {
-        self.ensure_connected().await?;
-        let sdk_guard = self.sdk.read().await;
-        let sdk = sdk_guard
-            .as_ref()
-            .ok_or_else(|| RuntimeError::ConnectionFailed("Not connected".to_string()))?;
+        let sdk = &self.client;
 
         let poll_interval = std::time::Duration::from_millis(poll_interval_ms.unwrap_or(10));
         let timeout = std::time::Duration::from_secs(
@@ -443,9 +350,6 @@ impl RuntimeClient {
             }
 
             if start_time.elapsed() > timeout {
-                // Drop the SDK guard before cancelling to avoid lock issues
-                drop(sdk_guard);
-
                 // Attempt to cancel the running instance
                 warn!(
                     instance_id = %instance_id,
@@ -582,13 +486,9 @@ impl RuntimeClient {
 
     /// Stop a running workflow instance
     pub async fn stop_instance(&self, instance_id: &str) -> Result<(), RuntimeError> {
-        self.ensure_connected().await?;
-        let sdk_guard = self.sdk.read().await;
-        let sdk = sdk_guard
-            .as_ref()
-            .ok_or_else(|| RuntimeError::ConnectionFailed("Not connected".to_string()))?;
+        let sdk = &self.client;
 
-        let options = runtara_management_sdk::StopInstanceOptions::new(instance_id)
+        let options = crate::runtime_types::StopInstanceOptions::new(instance_id)
             .with_grace_period(5)
             .with_reason("Stopped by runtara-server");
 
@@ -612,11 +512,7 @@ impl RuntimeClient {
         status_filter: Option<InstanceStatus>,
         limit: u32,
     ) -> Result<Vec<InstanceSummary>, RuntimeError> {
-        self.ensure_connected().await?;
-        let sdk_guard = self.sdk.read().await;
-        let sdk = sdk_guard
-            .as_ref()
-            .ok_or_else(|| RuntimeError::ConnectionFailed("Not connected".to_string()))?;
+        let sdk = &self.client;
 
         let mut options = ListInstancesOptions::new()
             .with_tenant_id(tenant_id)
@@ -641,11 +537,7 @@ impl RuntimeClient {
         &self,
         options: ListInstancesOptions,
     ) -> Result<ListInstancesResult, RuntimeError> {
-        self.ensure_connected().await?;
-        let sdk_guard = self.sdk.read().await;
-        let sdk = sdk_guard
-            .as_ref()
-            .ok_or_else(|| RuntimeError::ConnectionFailed("Not connected".to_string()))?;
+        let sdk = &self.client;
 
         sdk.list_instances(options)
             .await
@@ -654,11 +546,7 @@ impl RuntimeClient {
 
     /// Get detailed instance info including output and error
     pub async fn get_instance_info(&self, instance_id: &str) -> Result<InstanceInfo, RuntimeError> {
-        self.ensure_connected().await?;
-        let sdk_guard = self.sdk.read().await;
-        let sdk = sdk_guard
-            .as_ref()
-            .ok_or_else(|| RuntimeError::ConnectionFailed("Not connected".to_string()))?;
+        let sdk = &self.client;
 
         sdk.get_instance_status(instance_id)
             .await
@@ -667,19 +555,11 @@ impl RuntimeClient {
 
     /// Cancel a running workflow instance
     pub async fn cancel_instance(&self, instance_id: &str) -> Result<(), RuntimeError> {
-        self.ensure_connected().await?;
-        let sdk_guard = self.sdk.read().await;
-        let sdk = sdk_guard
-            .as_ref()
-            .ok_or_else(|| RuntimeError::ConnectionFailed("Not connected".to_string()))?;
+        let sdk = &self.client;
 
-        sdk.send_signal(
-            instance_id,
-            runtara_management_sdk::SignalType::Cancel,
-            None,
-        )
-        .await
-        .map_err(|e| RuntimeError::SdkError(e.to_string()))?;
+        sdk.send_signal(instance_id, crate::runtime_types::SignalType::Cancel, None)
+            .await
+            .map_err(|e| RuntimeError::SdkError(e.to_string()))?;
 
         debug!(instance_id = %instance_id, "Sent cancel signal to workflow instance");
         Ok(())
@@ -691,15 +571,11 @@ impl RuntimeClient {
     ///
     /// Accepts any identifier (UUID or string) — the management SDK speaks strings.
     pub async fn signal_shutdown(&self, execution_id: uuid::Uuid) -> Result<(), RuntimeError> {
-        self.ensure_connected().await?;
-        let sdk_guard = self.sdk.read().await;
-        let sdk = sdk_guard
-            .as_ref()
-            .ok_or_else(|| RuntimeError::ConnectionFailed("Not connected".to_string()))?;
+        let sdk = &self.client;
 
         sdk.send_signal(
             &execution_id.to_string(),
-            runtara_management_sdk::SignalType::Shutdown,
+            crate::runtime_types::SignalType::Shutdown,
             None,
         )
         .await
@@ -714,13 +590,9 @@ impl RuntimeClient {
     /// Sends a pause signal to the instance. The instance will checkpoint its state
     /// and suspend execution until resumed.
     pub async fn pause_instance(&self, instance_id: &str) -> Result<(), RuntimeError> {
-        self.ensure_connected().await?;
-        let sdk_guard = self.sdk.read().await;
-        let sdk = sdk_guard
-            .as_ref()
-            .ok_or_else(|| RuntimeError::ConnectionFailed("Not connected".to_string()))?;
+        let sdk = &self.client;
 
-        sdk.send_signal(instance_id, runtara_management_sdk::SignalType::Pause, None)
+        sdk.send_signal(instance_id, crate::runtime_types::SignalType::Pause, None)
             .await
             .map_err(|e| RuntimeError::SdkError(e.to_string()))?;
 
@@ -733,11 +605,7 @@ impl RuntimeClient {
     /// Triggers the instance to resume execution from its last checkpoint.
     /// This uses the ResumeInstance request which relaunches the workflow process.
     pub async fn resume_instance(&self, instance_id: &str) -> Result<(), RuntimeError> {
-        self.ensure_connected().await?;
-        let sdk_guard = self.sdk.read().await;
-        let sdk = sdk_guard
-            .as_ref()
-            .ok_or_else(|| RuntimeError::ConnectionFailed("Not connected".to_string()))?;
+        let sdk = &self.client;
 
         // Use resume_instance() which sends ResumeInstance request to relaunch the workflow
         // Note: send_signal(Resume) only stores a signal which won't work since the process exited
@@ -760,11 +628,7 @@ impl RuntimeClient {
         signal_id: &str,
         payload: Option<&[u8]>,
     ) -> Result<(), RuntimeError> {
-        self.ensure_connected().await?;
-        let sdk_guard = self.sdk.read().await;
-        let sdk = sdk_guard
-            .as_ref()
-            .ok_or_else(|| RuntimeError::ConnectionFailed("Not connected".to_string()))?;
+        let sdk = &self.client;
 
         sdk.send_custom_signal(instance_id, signal_id, payload)
             .await
@@ -774,14 +638,6 @@ impl RuntimeClient {
         Ok(())
     }
 
-    /// Close the connection
-    pub async fn close(&self) {
-        let mut sdk_guard = self.sdk.write().await;
-        if let Some(sdk) = sdk_guard.take() {
-            sdk.close().await;
-        }
-    }
-
     /// Get image info by image ID
     ///
     /// Returns image details including the human-readable name (format: workflow_id:version).
@@ -789,12 +645,8 @@ impl RuntimeClient {
         &self,
         image_id: &str,
         tenant_id: &str,
-    ) -> Result<Option<runtara_management_sdk::ImageSummary>, RuntimeError> {
-        self.ensure_connected().await?;
-        let sdk_guard = self.sdk.read().await;
-        let sdk = sdk_guard
-            .as_ref()
-            .ok_or_else(|| RuntimeError::ConnectionFailed("Not connected".to_string()))?;
+    ) -> Result<Option<crate::runtime_types::ImageSummary>, RuntimeError> {
+        let sdk = &self.client;
 
         sdk.get_image(image_id, tenant_id)
             .await
@@ -808,14 +660,10 @@ impl RuntimeClient {
         &self,
         tenant_id: &str,
         limit: u32,
-    ) -> Result<runtara_management_sdk::ListImagesResult, RuntimeError> {
-        self.ensure_connected().await?;
-        let sdk_guard = self.sdk.read().await;
-        let sdk = sdk_guard
-            .as_ref()
-            .ok_or_else(|| RuntimeError::ConnectionFailed("Not connected".to_string()))?;
+    ) -> Result<crate::runtime_types::ListImagesResult, RuntimeError> {
+        let sdk = &self.client;
 
-        let options = runtara_management_sdk::ListImagesOptions::new()
+        let options = crate::runtime_types::ListImagesOptions::new()
             .with_tenant_id(tenant_id)
             .with_limit(limit);
 
@@ -843,7 +691,7 @@ impl RuntimeClient {
         &self,
         tenant_id: &str,
         name: &str,
-    ) -> Result<Option<runtara_management_sdk::ImageSummary>, RuntimeError> {
+    ) -> Result<Option<crate::runtime_types::ImageSummary>, RuntimeError> {
         // List all images and find by name
         // Note: This could be optimized with server-side filtering if the SDK supports it
         let result = self.list_images(tenant_id, 1000).await?;
@@ -863,26 +711,13 @@ impl RuntimeClient {
     /// to hold the entire binary in memory.
     pub async fn register_image_stream<R: tokio::io::AsyncRead + Unpin>(
         &self,
-        options: runtara_management_sdk::RegisterImageStreamOptions,
+        options: crate::runtime_types::RegisterImageStreamOptions,
         reader: R,
-    ) -> Result<runtara_management_sdk::RegisterImageResult, RuntimeError> {
+    ) -> Result<crate::runtime_types::RegisterImageResult, RuntimeError> {
         let total_start = std::time::Instant::now();
         info!("RuntimeClient: register_image_stream starting");
 
-        self.ensure_connected().await?;
-
-        let lock_start = std::time::Instant::now();
-        info!("RuntimeClient: register_image_stream acquiring read lock for streaming upload");
-        let sdk_guard = self.sdk.read().await;
-        let lock_duration = lock_start.elapsed();
-        info!(
-            lock_wait_ms = lock_duration.as_millis(),
-            "RuntimeClient: register_image_stream read lock acquired, starting upload"
-        );
-
-        let sdk = sdk_guard
-            .as_ref()
-            .ok_or_else(|| RuntimeError::ConnectionFailed("Not connected".to_string()))?;
+        let sdk = &self.client;
 
         let upload_start = std::time::Instant::now();
         let result = sdk
@@ -897,7 +732,6 @@ impl RuntimeClient {
             Ok(r) => info!(
                 upload_ms = upload_duration.as_millis(),
                 total_ms = total_duration.as_millis(),
-                lock_held_ms = (total_duration - lock_duration).as_millis(),
                 image_id = %r.image_id,
                 "RuntimeClient: register_image_stream completed successfully"
             ),
@@ -909,10 +743,6 @@ impl RuntimeClient {
             ),
         }
 
-        // Explicitly drop the lock guard and log
-        drop(sdk_guard);
-        debug!("RuntimeClient: register_image_stream read lock released");
-
         result
     }
 
@@ -923,14 +753,10 @@ impl RuntimeClient {
         &self,
         instance_id: &str,
         limit: Option<u32>,
-    ) -> Result<runtara_management_sdk::ListCheckpointsResult, RuntimeError> {
-        self.ensure_connected().await?;
-        let sdk_guard = self.sdk.read().await;
-        let sdk = sdk_guard
-            .as_ref()
-            .ok_or_else(|| RuntimeError::ConnectionFailed("Not connected".to_string()))?;
+    ) -> Result<crate::runtime_types::ListCheckpointsResult, RuntimeError> {
+        let sdk = &self.client;
 
-        let mut options = runtara_management_sdk::ListCheckpointsOptions::new();
+        let mut options = crate::runtime_types::ListCheckpointsOptions::new();
         if let Some(l) = limit {
             options = options.with_limit(l);
         }
@@ -951,13 +777,9 @@ impl RuntimeClient {
     pub async fn list_events(
         &self,
         instance_id: &str,
-        options: Option<runtara_management_sdk::ListEventsOptions>,
-    ) -> Result<runtara_management_sdk::ListEventsResult, RuntimeError> {
-        self.ensure_connected().await?;
-        let sdk_guard = self.sdk.read().await;
-        let sdk = sdk_guard
-            .as_ref()
-            .ok_or_else(|| RuntimeError::ConnectionFailed("Not connected".to_string()))?;
+        options: Option<crate::runtime_types::ListEventsOptions>,
+    ) -> Result<crate::runtime_types::ListEventsResult, RuntimeError> {
+        let sdk = &self.client;
 
         let opts = options.unwrap_or_default();
 
@@ -977,13 +799,9 @@ impl RuntimeClient {
     pub async fn list_step_summaries(
         &self,
         instance_id: &str,
-        options: Option<runtara_management_sdk::ListStepSummariesOptions>,
-    ) -> Result<runtara_management_sdk::ListStepSummariesResult, RuntimeError> {
-        self.ensure_connected().await?;
-        let sdk_guard = self.sdk.read().await;
-        let sdk = sdk_guard
-            .as_ref()
-            .ok_or_else(|| RuntimeError::ConnectionFailed("Not connected".to_string()))?;
+        options: Option<crate::runtime_types::ListStepSummariesOptions>,
+    ) -> Result<crate::runtime_types::ListStepSummariesResult, RuntimeError> {
+        let sdk = &self.client;
 
         let opts = options.unwrap_or_default();
 
@@ -1001,12 +819,8 @@ impl RuntimeClient {
         &self,
         instance_id: &str,
         scope_id: &str,
-    ) -> Result<Vec<runtara_management_sdk::ScopeInfo>, RuntimeError> {
-        self.ensure_connected().await?;
-        let sdk_guard = self.sdk.read().await;
-        let sdk = sdk_guard
-            .as_ref()
-            .ok_or_else(|| RuntimeError::ConnectionFailed("Not connected".to_string()))?;
+    ) -> Result<Vec<crate::runtime_types::ScopeInfo>, RuntimeError> {
+        let sdk = &self.client;
 
         sdk.get_scope_ancestors(instance_id, scope_id)
             .await
@@ -1024,11 +838,7 @@ impl RuntimeClient {
         &self,
         options: GetTenantMetricsOptions,
     ) -> Result<TenantMetricsResult, RuntimeError> {
-        self.ensure_connected().await?;
-        let sdk_guard = self.sdk.read().await;
-        let sdk = sdk_guard
-            .as_ref()
-            .ok_or_else(|| RuntimeError::ConnectionFailed("Not connected".to_string()))?;
+        let sdk = &self.client;
 
         sdk.get_tenant_metrics(options)
             .await

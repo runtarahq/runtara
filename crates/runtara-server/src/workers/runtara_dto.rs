@@ -8,9 +8,9 @@
 //! shared `ExecutionEngine` can use them without pulling in the legacy
 //! service.
 
+use crate::runtime_types::{InstanceInfo, InstanceStatus as RuntaraInstanceStatus};
 use chrono::{DateTime, Utc};
 use futures::StreamExt;
-use runtara_management_sdk::{InstanceInfo, InstanceStatus as RuntaraInstanceStatus};
 use serde_json::Value;
 
 use crate::api::dto::workflows::{InstanceInputs, WorkflowInstanceDto};
@@ -150,7 +150,7 @@ pub async fn enrich_pending_input(instances: &mut [WorkflowInstanceDto], client:
 /// Convert Runtara `InstanceSummary` to `WorkflowInstanceDto` with workflow
 /// info from a database lookup.
 pub fn runtara_instance_to_dto_with_info(
-    inst: runtara_management_sdk::InstanceSummary,
+    inst: crate::runtime_types::InstanceSummary,
     workflow_id: String,
     version: i32,
     workflow_name: Option<String>,

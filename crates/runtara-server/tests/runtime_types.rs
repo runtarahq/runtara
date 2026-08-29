@@ -1,8 +1,13 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Type conversion and serialization tests for runtara-management-sdk.
+//! Type conversion and serialization tests for the runtime types.
+//!
+//! These moved here with the types themselves when runtara-management-sdk was
+//! retired: the SDK was an HTTP client for a service that now runs in-process,
+//! but its typed view of instances, images and signals is what the server API
+//! still speaks.
 
-use runtara_management_sdk::{
+use runtara_server::runtime_types::{
     HealthStatus, InstanceStatus, ListImagesOptions, ListInstancesOptions, RegisterImageOptions,
     RegisterImageResult, RegisterImageStreamOptions, SignalType, StartInstanceOptions,
     StartInstanceResult, StopInstanceOptions,

@@ -35,7 +35,6 @@ VALKEY_PORT="${VALKEY_PORT:-6379}"
 # Port configuration
 SERVER_PORT="${SERVER_PORT:-7001}"            # API + UI
 CORE_PORT="${RUNTARA_CORE_HTTP_PORT:-8003}"   # Core: instance API (see RUNTARA_CORE_HTTP_PORT)
-ENV_PORT="${RUNTARA_ENV_PORT:-8002}"          # Environment: Management SDK connects here
 
 # PID file locations
 PID_DIR="${DATA_DIR}/pids"
@@ -129,7 +128,6 @@ stop_services() {
 start_server() {
     print_status "Starting runtara-server..."
     print_status "  API + UI port:    ${SERVER_PORT}"
-    print_status "  Environment port: ${ENV_PORT} (Management SDK)"
     print_status "  Core port:        ${CORE_PORT} (Instance SDK)"
 
     TENANT_ID="${TENANT_ID}" \
@@ -140,7 +138,6 @@ start_server() {
     OBJECT_MODEL_DATABASE_URL="${OBJECT_MODEL_DATABASE_URL}" \
     VALKEY_HOST="${VALKEY_HOST}" \
     VALKEY_PORT="${VALKEY_PORT}" \
-    RUNTARA_ENV_HTTP_PORT="${ENV_PORT}" \
     RUNTARA_CORE_HTTP_PORT="${CORE_PORT}" \
     DATA_DIR="${DATA_DIR}" \
     RUST_LOG="${RUST_LOG:-runtara_server=info,runtara_environment=info,runtara_core=info}" \
@@ -169,12 +166,7 @@ show_status() {
     echo ""
     echo "  Endpoints:"
     echo "    - API + UI:                     http://127.0.0.1:${SERVER_PORT}"
-    echo "    - Environment (Management SDK): 127.0.0.1:${ENV_PORT}"
     echo "    - Core (Instance SDK):          127.0.0.1:${CORE_PORT}"
-    echo ""
-    echo "  Environment Variables for Management SDK:"
-    echo "    export RUNTARA_ENVIRONMENT_ADDR=127.0.0.1:${ENV_PORT}"
-    echo "    export RUNTARA_SKIP_CERT_VERIFICATION=true"
     echo ""
     echo "  Logs:"
     echo "    tail -f ${LOG_FILE}"
@@ -212,7 +204,6 @@ usage() {
     echo "  VALKEY_HOST / VALKEY_PORT    Valkey for checkpoint storage (default: 127.0.0.1:6379)"
     echo "  DATA_DIR                     Data directory (default: .data)"
     echo "  RUNTARA_CORE_HTTP_PORT       Core instance API port (default: 8003)"
-    echo "  RUNTARA_ENV_PORT             Environment HTTP port (default: 8002)"
     echo "  RUST_LOG                     Log level (default: runtara_*=info)"
     echo ""
 }

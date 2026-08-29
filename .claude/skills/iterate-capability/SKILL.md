@@ -61,32 +61,35 @@ EOF
 
 (Adjust the input/output shape to your capability's actual `CapabilityInput`/`CapabilityOutput`. See [e2e/workflows/](../../../e2e/workflows/) for real examples.)
 
-### 4. Compile + register + run + dump
+### 4. Compile + run + dump
 
-One-shot script:
+Everything goes through the server's runtime API on :7001. There is no
+`runtara-compile`, no image upload, and no `runtara-ctl` — the server compiles,
+registers and launches, and runtara-environment is a library it calls in-process.
 
 ```bash
-RUNTARA_LTO=off target/debug/runtara-compile \
-  --workflow /tmp/runtara-iter/probe.json \
-  --tenant iter --workflow probe \
-  --output /tmp/runtara-iter/probe.bin
+API=http://127.0.0.1:7001/api/runtime
 
-IMAGE_ID=$(curl -s -X POST "http://127.0.0.1:8004/api/v1/images/upload" \
-  -F "binary=@/tmp/runtara-iter/probe.bin" \
-  -F "tenant_id=iter" -F "name=probe" -F "description=iter" -F "runner_type=wasm" \
-  | python3 -c "import sys,json; print(json.load(sys.stdin)['image_id'])")
+WF_ID=$(curl -s -X POST "$API/workflows/create" -H 'Content-Type: application/json' \
+  -d '{"name":"probe","description":"iter"}' | jq -r '.data.id')
 
-INSTANCE_ID=$(RUNTARA_ENVIRONMENT_ADDR="127.0.0.1:8004" RUNTARA_SKIP_CERT_VERIFICATION=true \
-  target/debug/runtara-ctl start \
-    --image "$IMAGE_ID" --tenant iter \
-    --input '{"data":{"input":{"field":"hello"}}}')
+curl -s -X POST "$API/workflows/$WF_ID/update" -H 'Content-Type: application/json' \
+  -d "{\"executionGraph\": $(cat /tmp/runtara-iter/probe.json)}" | jq -r '.success'
 
-RUNTARA_ENVIRONMENT_ADDR="127.0.0.1:8004" RUNTARA_SKIP_CERT_VERIFICATION=true \
-  target/debug/runtara-ctl wait "$INSTANCE_ID" --poll 200
+VERSION=$(curl -s "$API/workflows/$WF_ID/versions" \
+  | jq -r '[.data[]?.version // .data[]?.versionNumber // empty] | max // 1')
+curl -s --max-time 900 -X POST "$API/workflows/$WF_ID/versions/$VERSION/compile" \
+  -H 'Content-Type: application/json' -d '{}' | jq -r '.success'
 
-# Get the output via runtime API (need workflow_id — pull from the start response or list endpoint)
-WORKFLOW_ID=$(curl -s "http://127.0.0.1:7001/api/runtime/workflows?search=probe" | jq -r '.items[0].id')
-curl -s "http://127.0.0.1:7001/api/runtime/workflows/$WORKFLOW_ID/instances/$INSTANCE_ID" | jq '{status, output, error}'
+INSTANCE_ID=$(curl -s -X POST "$API/workflows/$WF_ID/execute" -H 'Content-Type: application/json' \
+  -d '{"inputs":{"data":{"input":{"field":"hello"}}}}' | jq -r '.data.instanceId')
+
+for i in $(seq 1 45); do
+  RESP=$(curl -s "$API/workflows/instances/$INSTANCE_ID")
+  case "$(echo "$RESP" | jq -r '.data.status')" in completed|failed|crashed|stopped) break ;; esac
+  sleep 1
+done
+echo "$RESP" | jq '{status: .data.status, outputs: .data.outputs, error: .data.error}'
 ```
 
 Save this as a shell function or `~/bin/iter` so you don't retype it.

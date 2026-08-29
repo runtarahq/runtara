@@ -400,7 +400,7 @@ jobs:
   # tests, 0 failures on a bare machine), so it is the cheap gate that covers
   # the whole workspace — including the 14 crates that the other, -p-enumerated
   # jobs never named and therefore never tested: runtara-dsl (253 test fns),
-  # runtara-workflow-stdlib (190), runtara-management-sdk, runtara-report-dsl,
+  # runtara-workflow-stdlib (190), runtara-report-dsl,
   # runtara-text-parser, runtara-sdk-macros, runtara-ai, runtara-validation-wasm,
   # runtara-http, runtara-agent-encoding, runtara-workflow-runtime,
   # runtara-workflow-wit and both partially-skipped crates.
@@ -448,7 +448,6 @@ jobs:
           cargo test --tests \
             -p runtara-agent-macro \
             -p runtara-agents \
-            -p runtara-management-sdk \
             -p runtara-agent-mcp
 
   # runtara-connections owns 12 integration tests and had no CI job at all.

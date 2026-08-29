@@ -1243,7 +1243,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     // Embedded Runtara Environment Server
     // =========================================================================
     // Handles durable workflow execution using a dedicated database (RUNTARA_DATABASE_URL):
-    // - Management protocol (images, instances) on port 8002 (RUNTARA_ENVIRONMENT_PORT)
+    // - Management protocol (images, instances) in-process, via runtara-environment's library
     // - Core functionality (checkpoints, signals) on port 8003 (RUNTARA_CORE_HTTP_PORT)
     // Migrations are run automatically via runtara_environment::migrations::run()
 
@@ -1251,10 +1251,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     let embedded_runtara = match embedded_runtara::maybe_start_embedded().await {
         Ok(Some(runtara)) => {
             println!("✓ Embedded runtara-core started on {}", runtara.core_addr());
-            println!(
-                "✓ Embedded runtara-environment started on {}",
-                runtara.environment_addr()
-            );
+            println!("✓ Embedded runtara-environment started (in-process)");
             Some(runtara)
         }
         Ok(None) => {
@@ -1273,43 +1270,19 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     // Initialize the runtime client for workflow execution via Management SDK
     // If embedded servers are running, connect to localhost; otherwise use env config
     println!("Initializing runtime client...");
-    let runtime_client: Option<Arc<RuntimeClient>> = if let Some(ref runtara) = embedded_runtara {
-        // Connect to embedded environment server
-        let env_addr = runtara.environment_addr().to_string();
-        let client = Arc::new(RuntimeClient::with_address(&env_addr));
-        let connect_client = client.clone();
-        tokio::spawn(async move {
-            match connect_client.connect().await {
-                Ok(()) => println!("✓ Connected to embedded runtara-environment"),
-                Err(e) => {
-                    eprintln!("⚠ Failed to connect to embedded runtara-environment: {}", e);
-                    eprintln!("  (runtime client will retry on first request)");
-                }
-            }
-        });
-        Some(client)
-    } else {
-        // Fall back to external environment server from env config
-        match RuntimeClient::from_env() {
-            Some(client) => {
-                let client = Arc::new(client);
-                let connect_client = client.clone();
-                tokio::spawn(async move {
-                    match connect_client.connect().await {
-                        Ok(()) => println!("✓ Connected to external runtara-environment server"),
-                        Err(e) => {
-                            eprintln!("⚠ Failed to connect to runtara-environment: {}", e);
-                            eprintln!("  (runtime client will retry on first request)");
-                        }
-                    }
-                });
-                Some(client)
-            }
-            None => {
-                println!("⚠ RUNTARA_ENVIRONMENT_ADDR not set - runtime client disabled");
-                println!("  (workflow execution will not be available)");
-                None
-            }
+    // The runtime client is a direct handle on the embedded environment — there
+    // is no address to dial and nothing to connect to, so it exists exactly when
+    // the embedded runtime does.
+    println!("Initializing runtime client...");
+    let runtime_client: Option<Arc<RuntimeClient>> = match embedded_runtara.as_ref() {
+        Some(runtara) => Some(Arc::new(RuntimeClient::new(
+            runtara.environment_state(),
+            runtime_client::RuntimeClientConfig::from_env(),
+        ))),
+        None => {
+            println!("⚠ Embedded Runtara disabled - runtime client disabled");
+            println!("  (workflow execution will not be available)");
+            None
         }
     };
     println!("✓ Runtime client initialized");

@@ -1,3 +1,4 @@
+use crate::runtime_types::ListEventsOptions;
 use axum::{
     Json,
     extract::{Path, State},
@@ -8,7 +9,6 @@ use axum::{
     },
 };
 use futures::stream::Stream;
-use runtara_management_sdk::ListEventsOptions;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::PgPool;
@@ -344,11 +344,11 @@ pub(crate) fn build_event_stream(
                     let status_str = format!("{:?}", info.status);
                     if info.status.is_terminal() {
                         match info.status {
-                            runtara_management_sdk::InstanceStatus::Completed => {
+                            crate::runtime_types::InstanceStatus::Completed => {
                                 // Fetch remaining events before sending done
                                 if let Ok(result) = client.list_events(&instance_id, Some(ListEventsOptions {
                                     event_type: Some("custom".to_string()),
-                                    sort_order: Some(runtara_management_sdk::EventSortOrder::Asc),
+                                    sort_order: Some(crate::runtime_types::EventSortOrder::Asc),
                                     limit: Some(100),
                                     offset: Some(event_offset),
                                     ..Default::default()
@@ -390,7 +390,7 @@ pub(crate) fn build_event_stream(
                                 completed = true;
                                 continue;
                             }
-                            runtara_management_sdk::InstanceStatus::Failed => {
+                            crate::runtime_types::InstanceStatus::Failed => {
                                 let error_msg = info.error
                                     .or(info.stderr)
                                     .unwrap_or_else(|| "Execution failed".to_string());
@@ -430,7 +430,7 @@ pub(crate) fn build_event_stream(
             // Fetch new events
             let options = ListEventsOptions {
                 event_type: Some("custom".to_string()),
-                sort_order: Some(runtara_management_sdk::EventSortOrder::Asc),
+                sort_order: Some(crate::runtime_types::EventSortOrder::Asc),
                 limit: Some(100),
                 offset: Some(event_offset),
                 ..Default::default()

@@ -3951,7 +3951,6 @@ dependencies = [
  "js-sys",
  "log",
  "mime",
- "mime_guess",
  "native-tls",
  "percent-encoding",
  "pin-project-lite",
@@ -4719,21 +4718,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "runtara-management-sdk"
-version = "8.7.8"
-dependencies = [
- "base64",
- "chrono",
- "percent-encoding",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "runtara-object-store"
 version = "8.7.8"
 dependencies = [
@@ -4830,7 +4814,6 @@ dependencies = [
  "opentelemetry-otlp",
  "opentelemetry-semantic-conventions",
  "opentelemetry_sdk",
- "percent-encoding",
  "proptest",
  "rand 0.8.6",
  "redis",
@@ -4845,7 +4828,6 @@ dependencies = [
  "runtara-core",
  "runtara-dsl",
  "runtara-environment",
- "runtara-management-sdk",
  "runtara-object-store",
  "runtara-report-dsl",
  "runtara-text-parser",

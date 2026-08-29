@@ -43,6 +43,10 @@ path = "tests/authz_ownership.rs"
 required-features = ["db-integration-tests"]
 
 [[test]]
+name = "runtime_types"
+path = "tests/runtime_types.rs"
+
+[[test]]
 name = "core_instance_api"
 path = "tests/core_instance_api.rs"
 required-features = ["db-integration-tests"]
@@ -90,7 +94,6 @@ required-features = ["valkey-tls-integration-tests"]
 [dependencies]
 # Runtara crates
 runtara-workflows = { path = "../runtara-workflows" }
-runtara-management-sdk = { path = "../runtara-management-sdk" }
 runtara-dsl = { path = "../runtara-dsl", features = ["utoipa"] }
 runtara-agents = { path = "../runtara-agents", default-features = false, features = ["native"] }
 runtara-core = { path = "../runtara-core" }
@@ -121,8 +124,6 @@ tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 http-body-util = "0.1"
 bytes = "1"
-# The environment management API decodes checkpoint ids out of the request path.
-percent-encoding = "2"
 utoipa = { version = "5", features = ["axum_extras", "chrono", "uuid"] }
 
 # Optional: embedded UI assets (`embed-ui` feature)

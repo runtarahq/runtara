@@ -23,14 +23,6 @@ echo ""
 
 # Build binaries if needed
 echo "Checking binaries..."
-if [ ! -f "${PROJECT_ROOT}/target/release/runtara-ctl" ]; then
-    echo "Building required binaries..."
-    cargo build -p runtara-management-sdk --bin runtara-ctl --release
-fi
-echo ""
-
-# Set environment for local testing
-export RUNTARA_ENVIRONMENT_ADDR="${RUNTARA_ENVIRONMENT_ADDR:-127.0.0.1:8002}"
 export RUNTARA_SKIP_CERT_VERIFICATION="${RUNTARA_SKIP_CERT_VERIFICATION:-true}"
 
 TESTS_PASSED=0

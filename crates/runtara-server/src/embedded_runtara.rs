@@ -35,17 +35,9 @@ pub struct EmbeddedRuntaraConfig {
     pub core_bind_addr: SocketAddr,
     /// Address workflow guests use to reach runtara-core.
     pub core_client_addr: SocketAddr,
-    /// Bind address for runtara-environment QUIC server.
-    pub environment_bind_addr: SocketAddr,
-    /// Address for clients to connect to (e.g., 127.0.0.1:8002).
-    /// Different from bind_addr when binding to 0.0.0.0.
-    pub environment_client_addr: SocketAddr,
     /// Optional bind address for runtara-core's HTTP instance API.
     /// When set, an HTTP server is started alongside QUIC for the instance protocol.
     pub core_http_bind_addr: Option<SocketAddr>,
-    /// Optional bind address for runtara-environment's HTTP management API.
-    /// When set, an HTTP server is started alongside QUIC for the management protocol.
-    pub env_http_bind_addr: Option<SocketAddr>,
     /// runtara-core's own environment configuration (concurrency cap, shutdown
     /// grace). Nothing else here carries it, so without this the embedded core
     /// runs on builder defaults no matter how the deployment is configured.
@@ -56,11 +48,6 @@ pub struct EmbeddedRuntaraConfig {
 pub struct EmbeddedRuntara {
     core: CoreRuntime,
     environment: EnvironmentRuntime,
-    /// The management API listener. runtara-environment is transport-free, so
-    /// this crate owns the socket its protocol is served on — the same split
-    /// that already applies to runtara-core.
-    environment_server: tokio::task::JoinHandle<anyhow::Result<()>>,
-    environment_addr: SocketAddr,
     #[allow(dead_code)]
     persistence: Arc<dyn Persistence>,
 }
@@ -108,10 +95,7 @@ impl EmbeddedRuntara {
         // Note: core_client_addr is what workflow guests use to reach runtara-core.
         // Guests run in-process, so this is always the host's own loopback.
         // Start Environment (management protocol via HTTP)
-        let env_http_addr = config
-            .env_http_bind_addr
-            .unwrap_or(config.environment_bind_addr);
-        info!(addr = %env_http_addr, "Starting runtara-environment...");
+        info!("Starting runtara-environment...");
         info!(core_client_addr = %config.core_client_addr, "Containers will connect to runtara-core at this address");
         let environment = EnvironmentRuntime::builder()
             .pool(config.pool)
@@ -123,24 +107,19 @@ impl EmbeddedRuntara {
             .start()
             .await?;
 
-        let environment_state = Arc::clone(environment.state());
-        let environment_server = tokio::spawn(async move {
-            crate::environment_api::run_http_server(env_http_addr, environment_state).await
-        });
-        info!("✓ runtara-environment started on {}", env_http_addr);
+        info!("✓ runtara-environment started (in-process)");
 
         Ok(Self {
             core,
             environment,
-            environment_server,
-            environment_addr: env_http_addr,
             persistence,
         })
     }
 
-    /// Get the address for clients to connect to runtara-environment.
-    pub fn environment_addr(&self) -> SocketAddr {
-        self.environment_addr
+    /// The environment's shared handler state, for callers that drive it
+    /// directly rather than over a socket.
+    pub fn environment_state(&self) -> Arc<runtara_environment::handlers::EnvironmentHandlerState> {
+        Arc::clone(self.environment.state())
     }
 
     /// Get the address where runtara-core is listening.
@@ -150,9 +129,7 @@ impl EmbeddedRuntara {
 
     /// Check if both servers are still running.
     pub fn is_running(&self) -> bool {
-        self.core.is_running()
-            && self.environment.is_running()
-            && !self.environment_server.is_finished()
+        self.core.is_running() && self.environment.is_running()
     }
 
     /// Checkpoint-aware drain of active runners. Flips the drain flags,
@@ -181,9 +158,7 @@ impl EmbeddedRuntara {
     pub async fn shutdown(self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         info!("Shutting down embedded Runtara servers...");
 
-        // Stop accepting management requests, then shut the workers down.
-        // Environment goes first either way: it depends on core.
-        self.environment_server.abort();
+        // Shutdown environment first (it depends on core)
         if let Err(e) = self.environment.shutdown().await {
             error!("Error shutting down runtara-environment: {}", e);
         }
@@ -240,7 +215,6 @@ pub async fn create_runtara_pool()
 /// - `RUNTARA_DATABASE_URL` (required) - PostgreSQL connection string for Runtara database
 /// - `RUNTARA_EMBEDDED` (default: true) - Enable embedded server
 /// - `RUNTARA_CORE_HTTP_PORT` (default: 8003) - Port for core's instance API
-/// - `RUNTARA_ENVIRONMENT_PORT` (default: 8002) - Port for management protocol
 /// - `DATA_DIR` (default: .data) - Directory for images and instance I/O
 ///
 /// runtara-core's own variables (`RUNTARA_MAX_CONCURRENT_INSTANCES`,
@@ -275,11 +249,6 @@ pub async fn maybe_start_embedded()
     run_migrations(&pool).await?;
 
     // Build configuration
-    let environment_port: u16 = std::env::var("RUNTARA_ENVIRONMENT_PORT")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(8002);
-
     // HTTP port for runtara-core's instance API (default: 8003).
     let core_http_port: u16 = std::env::var("RUNTARA_CORE_HTTP_PORT")
         .ok()
@@ -313,20 +282,7 @@ pub async fn maybe_start_embedded()
         data_dir,
         core_bind_addr: SocketAddr::from(([127, 0, 0, 1], core_http_addr)),
         core_client_addr: SocketAddr::from(([127, 0, 0, 1], core_http_addr)),
-        environment_bind_addr: SocketAddr::from(([127, 0, 0, 1], environment_port)),
-        environment_client_addr: SocketAddr::from(([127, 0, 0, 1], environment_port)),
         core_http_bind_addr: Some(SocketAddr::from(([127, 0, 0, 1], core_http_addr))),
-        env_http_bind_addr: {
-            let port: u16 = std::env::var("RUNTARA_ENV_HTTP_PORT")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(8004);
-            if port == 0 {
-                None
-            } else {
-                Some(SocketAddr::from(([127, 0, 0, 1], port)))
-            }
-        },
         core_overrides,
     };
 

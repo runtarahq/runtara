@@ -14,7 +14,7 @@
 
 use std::collections::HashSet;
 
-use runtara_management_sdk::{EventSortOrder, EventSummary, ListEventsOptions};
+use crate::runtime_types::{EventSortOrder, EventSummary, ListEventsOptions};
 use serde_json::Value;
 
 use crate::runtime_client::RuntimeClient;

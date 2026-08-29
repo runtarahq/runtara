@@ -19,7 +19,7 @@ The runtime, compiler, stdlib, and agents only prove they work together when a r
 
 Per the `always-e2e-verify` rule, **finish the loop**: define → compile → execute → assert observable behavior. Don't stop at "the server started".
 
-> **Compilation is in-process.** The standalone `runtara-compile` binary is gone. The server byte-emits the workflow-logic module (direct emitter) and composes the final `workflow.wasm` via `wac-graph`, then registers the image itself. Everything goes through the server HTTP API — no compile-to-file step, no manual image upload, no `runtara-ctl`.
+> **Compilation is in-process.** The standalone `runtara-compile` binary is gone. The server byte-emits the workflow-logic module (direct emitter) and composes the final `workflow.wasm` via `wac-graph`, then registers the image itself. Everything goes through the server HTTP API — no compile-to-file step, no manual image upload. `runtara-management-sdk` and its `runtara-ctl` CLI are gone too: runtara-environment is a library the server calls in-process.
 
 ## Prerequisites
 
@@ -44,7 +44,6 @@ Never `pkill runtara-server` — that takes down the dev server too.
 
 ```bash
 cargo build -p runtara-server --bin runtara-server
-cargo build -p runtara-management-sdk --bin runtara-ctl
 ```
 
 There is no standalone `runtara-compile` binary anymore — the compile→register→execute path lives inside the in-process cargo suites (step 4).

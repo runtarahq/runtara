@@ -10,11 +10,11 @@ use crate::api::repositories::workflows::{
 };
 use crate::compiler::child_workflows::load_child_workflows;
 use crate::runtime_client::RuntimeClient;
+use crate::runtime_types::{ImageSummary, RegisterImageStreamOptions};
 use crate::valkey::compilation_progress::{CompilationStage, ProgressReporter};
 use opentelemetry::KeyValue;
 use redis::aio::ConnectionManager;
 use runtara_dsl::parse_execution_graph;
-use runtara_management_sdk::{ImageSummary, RegisterImageStreamOptions};
 use runtara_workflows::compile::ProgressCallback;
 use runtara_workflows::direct_wasm::{
     DIRECT_WORKFLOW_ARTIFACT_METADATA_FILENAME, DirectArtifactMetadata,

@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
+use crate::runtime_types::ListEventsOptions;
 use dashmap::DashMap;
 use redis::aio::ConnectionManager;
-use runtara_management_sdk::ListEventsOptions;
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use tokio::sync::mpsc;
@@ -584,7 +584,7 @@ async fn session_loop(
                                     &mut event_offset, &mut user_rx,
                                 ).await;
 
-                                if let runtara_management_sdk::InstanceStatus::Failed = info.status {
+                                if let crate::runtime_types::InstanceStatus::Failed = info.status {
                                     let msg = info.error.or(info.stderr)
                                         .unwrap_or_else(|| "Execution failed".to_string());
                                     warn!(conv_id = %conv_id, error = %msg, "Instance failed");
@@ -614,7 +614,7 @@ async fn session_loop(
 
                     let options = ListEventsOptions {
                         event_type: Some("custom".to_string()),
-                        sort_order: Some(runtara_management_sdk::EventSortOrder::Asc),
+                        sort_order: Some(crate::runtime_types::EventSortOrder::Asc),
                         limit: Some(100),
                         offset: Some(event_offset),
                         ..Default::default()
@@ -837,7 +837,7 @@ async fn flush_events(
 ) {
     let options = ListEventsOptions {
         event_type: Some("custom".to_string()),
-        sort_order: Some(runtara_management_sdk::EventSortOrder::Asc),
+        sort_order: Some(crate::runtime_types::EventSortOrder::Asc),
         limit: Some(100),
         offset: Some(*event_offset),
         ..Default::default()
@@ -954,7 +954,7 @@ async fn find_pending_signal_id(client: &Arc<RuntimeClient>, instance_id: &str) 
         .with_limit(10)
         .with_event_type("custom")
         .with_subtype("external_input_requested")
-        .with_sort_order(runtara_management_sdk::EventSortOrder::Desc);
+        .with_sort_order(crate::runtime_types::EventSortOrder::Desc);
 
     let result = client.list_events(instance_id, Some(options)).await.ok()?;
     result

@@ -1,10 +1,10 @@
+use crate::runtime_types::{ListStepSummariesOptions, StepSortOrder, StepStatus};
 use axum::{
     Json,
     extract::{Path, Query, State},
     http::StatusCode,
 };
 use chrono::{DateTime, Utc};
-use runtara_management_sdk::{ListStepSummariesOptions, StepSortOrder, StepStatus};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -265,7 +265,7 @@ pub async fn get_step_summaries(
             // Fetch instance info to check if instance is in terminal state
             let instance_terminal_state = match client.get_instance_info(&instance_id).await {
                 Ok(info) => {
-                    use runtara_management_sdk::InstanceStatus;
+                    use crate::runtime_types::InstanceStatus;
                     match info.status {
                         InstanceStatus::Failed => Some("failed"),
                         InstanceStatus::Cancelled => Some("cancelled"),
