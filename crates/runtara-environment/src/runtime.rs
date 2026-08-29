@@ -23,7 +23,6 @@
 //!         .pool(pool)
 //!         .runner(runner)
 //!         .core_addr("127.0.0.1:8001")  // External Core server
-//!         .bind_addr("0.0.0.0:8002".parse()?)
 //!         .build()?
 //!         .start()
 //!         .await?;
@@ -36,7 +35,6 @@
 //! ```
 //!
 
-use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -62,7 +60,6 @@ pub struct EnvironmentRuntimeBuilder {
     pool: Option<PgPool>,
     core_persistence: Option<Arc<dyn Persistence>>,
     runner: Option<Arc<dyn Runner>>,
-    bind_addr: SocketAddr,
     core_addr: String,
     data_dir: PathBuf,
     wake_poll_interval: Duration,
@@ -82,7 +79,6 @@ impl Default for EnvironmentRuntimeBuilder {
             pool: None,
             core_persistence: None,
             runner: None,
-            bind_addr: "0.0.0.0:8002".parse().unwrap(),
             core_addr: "127.0.0.1:8001".to_string(),
             data_dir: PathBuf::from(".data"),
             wake_poll_interval: Duration::from_secs(5),
@@ -122,14 +118,6 @@ impl EnvironmentRuntimeBuilder {
     /// Set the container runner (required).
     pub fn runner(mut self, runner: Arc<dyn Runner>) -> Self {
         self.runner = Some(runner);
-        self
-    }
-
-    /// Set the bind address for the HTTP server.
-    ///
-    /// Default: `0.0.0.0:8002`
-    pub fn bind_addr(mut self, addr: SocketAddr) -> Self {
-        self.bind_addr = addr;
         self
     }
 
@@ -238,7 +226,6 @@ impl EnvironmentRuntimeBuilder {
             pool,
             persistence,
             runner,
-            bind_addr: self.bind_addr,
             core_addr: self.core_addr,
             data_dir: self.data_dir,
             wake_poll_interval: self.wake_poll_interval,
@@ -259,7 +246,6 @@ pub struct EnvironmentRuntimeConfig {
     pool: PgPool,
     persistence: Arc<dyn Persistence>,
     runner: Arc<dyn Runner>,
-    bind_addr: SocketAddr,
     core_addr: String,
     data_dir: PathBuf,
     wake_poll_interval: Duration,
@@ -376,22 +362,12 @@ impl EnvironmentRuntimeConfig {
             image_cleanup_worker.run().await;
         });
 
-        // Start HTTP server task
-        let bind_addr = self.bind_addr;
-        let server_state = state.clone();
-
-        let server_handle = tokio::spawn(async move {
-            crate::http_server::run_http_server(bind_addr, server_state).await
-        });
-
         info!(
-            bind_addr = %bind_addr,
             core_addr = %self.core_addr,
             "EnvironmentRuntime started"
         );
 
         Ok(EnvironmentRuntime {
-            server_handle,
             wake_handle,
             cleanup_handle,
             heartbeat_handle,
@@ -403,7 +379,6 @@ impl EnvironmentRuntimeConfig {
             image_cleanup_handle,
             image_cleanup_shutdown,
             state,
-            bind_addr,
             drain,
         })
     }
@@ -421,7 +396,6 @@ impl EnvironmentRuntimeConfig {
 ///
 /// Call [`shutdown`](Self::shutdown) for graceful termination.
 pub struct EnvironmentRuntime {
-    server_handle: JoinHandle<Result<()>>,
     wake_handle: JoinHandle<()>,
     cleanup_handle: JoinHandle<()>,
     heartbeat_handle: JoinHandle<()>,
@@ -433,7 +407,6 @@ pub struct EnvironmentRuntime {
     image_cleanup_handle: JoinHandle<()>,
     image_cleanup_shutdown: Arc<Notify>,
     state: Arc<EnvironmentHandlerState>,
-    bind_addr: SocketAddr,
     drain: DrainController,
 }
 
@@ -441,11 +414,6 @@ impl EnvironmentRuntime {
     /// Create a new builder for configuring the runtime.
     pub fn builder() -> EnvironmentRuntimeBuilder {
         EnvironmentRuntimeBuilder::new()
-    }
-
-    /// Get the bind address of the HTTP server.
-    pub fn bind_addr(&self) -> SocketAddr {
-        self.bind_addr
     }
 
     /// Get a reference to the shared handler state.
@@ -632,14 +600,13 @@ impl EnvironmentRuntime {
 
     /// Gracefully shut down the runtime.
     ///
-    /// This signals the HTTP server, wake scheduler, cleanup worker, database
-    /// cleanup worker and heartbeat monitor to stop, then waits for them to
-    /// complete.
+    /// This signals the wake scheduler, cleanup worker, database cleanup
+    /// worker and heartbeat monitor to stop, then waits for them to complete.
+    ///
+    /// The management HTTP listener is not among them: it belongs to whichever
+    /// host serves it, and that host stops it around this call.
     pub async fn shutdown(self) -> Result<()> {
         info!("EnvironmentRuntime shutting down...");
-
-        // Abort the HTTP server
-        self.server_handle.abort();
 
         // Signal wake scheduler shutdown
         self.wake_shutdown.notify_one();
@@ -681,31 +648,13 @@ impl EnvironmentRuntime {
             error!("Image cleanup worker task panicked: {}", e);
         }
 
-        // Wait for HTTP server
-        match self.server_handle.await {
-            Ok(Ok(())) => {
-                info!("EnvironmentRuntime shutdown complete");
-                Ok(())
-            }
-            Ok(Err(e)) => {
-                error!("EnvironmentRuntime server error during shutdown: {}", e);
-                Err(e)
-            }
-            Err(e) if e.is_cancelled() => {
-                info!("EnvironmentRuntime shutdown complete");
-                Ok(())
-            }
-            Err(e) => {
-                error!("EnvironmentRuntime server task panicked: {}", e);
-                Err(anyhow::anyhow!("server task panicked: {}", e))
-            }
-        }
+        info!("EnvironmentRuntime shutdown complete");
+        Ok(())
     }
 
     /// Check if the runtime is still running.
     pub fn is_running(&self) -> bool {
-        !self.server_handle.is_finished()
-            && !self.wake_handle.is_finished()
+        !self.wake_handle.is_finished()
             && !self.cleanup_handle.is_finished()
             && !self.heartbeat_handle.is_finished()
             && !self.db_cleanup_handle.is_finished()
@@ -836,10 +785,6 @@ mod tests {
         assert!(builder.pool.is_none());
         assert!(builder.core_persistence.is_none());
         assert!(builder.runner.is_none());
-        assert_eq!(
-            builder.bind_addr,
-            "0.0.0.0:8002".parse::<SocketAddr>().unwrap()
-        );
         assert_eq!(builder.core_addr, "127.0.0.1:8001");
         assert_eq!(builder.data_dir, PathBuf::from(".data"));
         assert_eq!(builder.wake_poll_interval, Duration::from_secs(5));
@@ -851,7 +796,6 @@ mod tests {
         let builder_new = EnvironmentRuntimeBuilder::new();
         let builder_default = EnvironmentRuntimeBuilder::default();
 
-        assert_eq!(builder_new.bind_addr, builder_default.bind_addr);
         assert_eq!(builder_new.core_addr, builder_default.core_addr);
         assert_eq!(builder_new.data_dir, builder_default.data_dir);
         assert_eq!(
@@ -859,17 +803,6 @@ mod tests {
             builder_default.wake_poll_interval
         );
         assert_eq!(builder_new.wake_batch_size, builder_default.wake_batch_size);
-    }
-
-    #[test]
-    fn test_builder_bind_addr() {
-        let builder =
-            EnvironmentRuntimeBuilder::new().bind_addr("192.168.1.1:9000".parse().unwrap());
-
-        assert_eq!(
-            builder.bind_addr,
-            "192.168.1.1:9000".parse::<SocketAddr>().unwrap()
-        );
     }
 
     #[test]
@@ -919,16 +852,11 @@ mod tests {
     #[test]
     fn test_builder_chaining() {
         let builder = EnvironmentRuntimeBuilder::new()
-            .bind_addr("0.0.0.0:9000".parse().unwrap())
             .core_addr("core.local:8001")
             .data_dir("/data")
             .wake_poll_interval(Duration::from_secs(10))
             .wake_batch_size(25);
 
-        assert_eq!(
-            builder.bind_addr,
-            "0.0.0.0:9000".parse::<SocketAddr>().unwrap()
-        );
         assert_eq!(builder.core_addr, "core.local:8001");
         assert_eq!(builder.data_dir, PathBuf::from("/data"));
         assert_eq!(builder.wake_poll_interval, Duration::from_secs(10));
@@ -952,10 +880,6 @@ mod tests {
         let builder = EnvironmentRuntime::builder();
 
         // Should have default values
-        assert_eq!(
-            builder.bind_addr,
-            "0.0.0.0:8002".parse::<SocketAddr>().unwrap()
-        );
         assert_eq!(builder.core_addr, "127.0.0.1:8001");
     }
 
@@ -987,29 +911,6 @@ mod tests {
         let builder = EnvironmentRuntimeBuilder::new().wake_batch_size(1000);
 
         assert_eq!(builder.wake_batch_size, 1000);
-    }
-
-    #[test]
-    fn test_builder_ipv6_bind_addr() {
-        let builder = EnvironmentRuntimeBuilder::new().bind_addr("[::]:8002".parse().unwrap());
-
-        assert_eq!(
-            builder.bind_addr,
-            "[::]:8002".parse::<SocketAddr>().unwrap()
-        );
-    }
-
-    #[test]
-    fn test_builder_overwrite_values() {
-        let builder = EnvironmentRuntimeBuilder::new()
-            .bind_addr("0.0.0.0:9000".parse().unwrap())
-            .bind_addr("0.0.0.0:9001".parse().unwrap());
-
-        // Last value should win
-        assert_eq!(
-            builder.bind_addr,
-            "0.0.0.0:9001".parse::<SocketAddr>().unwrap()
-        );
     }
 
     #[test]

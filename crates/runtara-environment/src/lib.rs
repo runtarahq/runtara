@@ -6,6 +6,18 @@
 //! It handles image registration, instance lifecycle, workflow execution,
 //! and wake scheduling for durable sleeps.
 //!
+//! # A library, not a service
+//!
+//! Environment is transport-free. Its protocol is a set of async functions in
+//! [`handlers`] over a shared [`handlers::EnvironmentHandlerState`], and
+//! [`runtime::EnvironmentRuntime`] owns the background workers — the wake
+//! scheduler, heartbeat monitor and the cleanup trio — and nothing else.
+//!
+//! The management API is served over HTTP by `runtara-server`
+//! (`runtara_server::environment_api`), which owns that listener and its
+//! lifecycle. A host that wants the protocol without a socket calls the
+//! [`handlers`] functions directly.
+//!
 //! # Architecture
 //!
 //! ```text
@@ -114,20 +126,15 @@
 //!
 //! # Configuration
 //!
-//! Configuration is loaded from environment variables:
-//!
-//! | Variable | Required | Default | Description |
-//! |----------|----------|---------|-------------|
-//! | `RUNTARA_ENVIRONMENT_DATABASE_URL` | Yes* | - | PostgreSQL connection string |
-//! | `RUNTARA_DATABASE_URL` | Yes* | - | Fallback if above not set |
-//! | `RUNTARA_ENV_HTTP_PORT` | No | `8002` | HTTP server port |
-//! | `RUNTARA_CORE_ADDR` | No | `127.0.0.1:8001` | runtara-core address |
-//! | `DATA_DIR` | No | `.data` | Data directory for images and instance I/O |
-//! | `RUNTARA_SKIP_CERT_VERIFICATION` | No | `false` | Skip TLS verification |
+//! Environment reads nothing from the environment on its own: a host supplies
+//! the pool, the runner, the data directory and the rest through
+//! [`runtime::EnvironmentRuntimeBuilder`]. Two variables are still consulted
+//! deeper in the crate — `RUNTARA_SKIP_CERT_VERIFICATION`, forwarded to guests,
+//! and the `*_CLEANUP_ENABLED` opt-outs read by the background workers.
 //!
 //! # Modules
 //!
-//! - [`config`]: Server configuration from environment variables
+//! - [`config`]: Shared configuration parsing helpers
 //! - [`db`]: PostgreSQL persistence for images, instances, and wake queue
 //! - [`error`]: Error types for Environment operations
 //! - [`handlers`]: Environment protocol request handlers
@@ -135,7 +142,6 @@
 //! - [`container_registry`]: Running container tracking
 //! - [`instance_output`]: Instance output types (legacy, used by SDK)
 //! - [`runner`]: Container/process execution backends
-//! - [`http_server`]: HTTP server implementation
 //! - [`wake_scheduler`]: Durable sleep wake scheduling
 
 #![deny(missing_docs)]
@@ -177,9 +183,6 @@ pub mod instance_output;
 /// In-process WASM execution backend.
 pub mod runner;
 
-/// HTTP server for the Environment protocol.
-pub mod http_server;
-
 /// Durable sleep wake scheduling.
 pub mod wake_scheduler;
 
@@ -205,13 +208,8 @@ pub mod runtime;
 /// the native replacement for the composed guest runtime's HTTP loopback.
 pub mod runtime_host;
 
-/// Shared environment-variable guard for this crate's tests.
-#[cfg(test)]
-pub(crate) mod test_env;
-
 /// Shared Postgres fixtures for this crate's database-backed unit tests.
 #[cfg(all(test, feature = "db-integration-tests"))]
 pub(crate) mod test_support;
 
-pub use config::Config;
 pub use error::Error;

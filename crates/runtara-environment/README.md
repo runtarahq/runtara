@@ -1,29 +1,30 @@
 # runtara-environment
 
-Control-plane server for Runtara — image registry, instance lifecycle, workflow execution, and durable-sleep wake scheduling.
+Control-plane library for Runtara — image registry, instance lifecycle, workflow execution, and durable-sleep wake scheduling.
 
 ## What it is
 
 `runtara-environment` is the management-plane service for a Runtara deployment. It owns the image registry (upload, list, delete workflow binaries), drives the instance lifecycle (start, stop, resume, signal), executes workflows on an in-process wasmtime engine, and runs the wake scheduler that resumes suspended instances when durable sleeps expire.
 
-It persists images, instances, and the wake queue in PostgreSQL, sharing the pool with `runtara-core` so its migrations layer cleanly on top of the core schema. A set of background workers (cleanup, image GC, heartbeat monitoring, DB cleanup) run alongside the HTTP server.
+It persists images, instances, and the wake queue in PostgreSQL, sharing the pool with `runtara-core` so its migrations layer cleanly on top of the core schema. A set of background workers (cleanup, image GC, heartbeat monitoring, DB cleanup) run as tokio tasks inside the runtime.
 
-The crate ships both a binary (`runtara-environment`, default port 8002, serving the Environment HTTP protocol) and a library. The library exposes a `runtime::EnvironmentRuntime` builder plus module-level building blocks (`config`, `runner`, `image_registry`, `wake_scheduler`, `migrations`) for embedding Environment inside another process.
+It is a library, not a service: no HTTP, no sockets, no binary. The protocol is a set of async functions in `handlers` over a shared `EnvironmentHandlerState`, and `runtime::EnvironmentRuntime` owns the workers. `runtara-server` serves the management API over HTTP (`runtara_server::environment_api`, default port 8002) and owns that listener's lifecycle.
 
-## Using it standalone
+## Using it
 
-**Variant B (server binary / internal):** This is a service component of a Runtara deployment, not a general-purpose library. Operators run it as the `runtara-environment` binary against a PostgreSQL database reachable by `runtara-core`; it boots via `Config::from_env()` and applies `migrations::run()` before starting its HTTP listener.
+Build a runtime with `EnvironmentRuntime::builder()`, supplying the pool, a `runner::Runner`, core persistence and a data directory, then call `migrations::run()` before starting it. Call the `handlers` functions directly for in-process access, or let `runtara-server` expose them over the wire.
 
-Clients don't call it directly — they go through `runtara-management-sdk`, which speaks the Environment protocol on behalf of CLIs and tooling. For an all-in-one deployment, the `runtara-server` crate embeds Environment in-process via `EnvironmentRuntime::builder()`, so most users never run this binary on its own. Deployment details (environment variables, data-directory layout) live in the operator documentation rather than here.
+Clients don't call the handlers directly — they go through `runtara-management-sdk`, which speaks the Environment protocol on behalf of CLIs and tooling.
 
 ## Inside Runtara
 
-- **Consumers:** `runtara-server` (embeds `EnvironmentRuntime` in-process for the single-binary deployment) and `runtara-management-sdk` (client to the Environment HTTP protocol).
+- **Consumers:** `runtara-server` (embeds `EnvironmentRuntime` in-process and serves its HTTP API) and `runtara-management-sdk` (client to that API).
 - **Key workspace deps:** `runtara-core` (shared `Persistence` trait, PostgreSQL pool, signal storage) and `runtara-dsl` (agent metadata types used by `list_agents` / `get_capability` handlers).
 - **Integration point:** Environment orchestrates the workflow instance lifecycle on top of `runtara-core`'s persistence — it launches workflow runs via the `runner::Runner` trait and proxies cancel/pause/resume signals to core, which stores them for the running instance to consume at its next checkpoint.
 - **Runner backend:** `EmbeddedWasmRunner` — an in-process wasmtime engine — is the only backend. `MockRunner` exists for tests. The `runner::Runner` trait keeps that seam.
 - **Background workers:** `cleanup_worker`, `db_cleanup_worker`, `image_cleanup_worker`, and `heartbeat_monitor` run as tokio tasks inside the runtime, reclaiming disk, pruning stale rows, and failing instances whose heartbeat stops.
-- **Runs in:** native host binary; workflow guests run in-process as WASM components, so there is no container runtime to install.
+- **No web dependencies:** the crate pulls in no HTTP framework — that belongs to whichever host serves it.
+- **Runs in:** the host process that embeds it; workflow guests run in-process as WASM components, so there is no container runtime to install.
 
 ## License
 

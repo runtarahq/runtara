@@ -104,7 +104,7 @@ At a high level, the Rust workspace is organized into three layers:
 This repository contains the Rust implementation of the Runtara platform:
 
 - `crates/runtara-server`: application HTTP API, auth, workflows, connections, channels, MCP integration, file storage, object model, and background workers.
-- `crates/runtara-environment`: image registry, instance lifecycle, runners, and wake scheduling.
+- `crates/runtara-environment`: image registry, instance lifecycle, runners, and wake scheduling. A library — its management API is served over HTTP by `runtara-server`.
 - `crates/runtara-core`: durable runtime persistence for checkpoints, signals, events, and sleep. A library — its instance protocol is served over HTTP by `runtara-server` and called in-process by `runtara-environment`.
 - `crates/runtara-sdk`: instance-side SDK used by compiled workflows.
 - `crates/runtara-workflows`: workflow compiler and validation pipeline.
@@ -161,7 +161,7 @@ Default local ports:
 | --- | --- |
 | `runtara-server` public API | `7001` |
 | `runtara-server` internal API | `7002` |
-| `runtara-environment` API | `8002` |
+| `runtara-environment` API (served by `runtara-server`) | `8002` |
 | `runtara-core` instance API (served by `runtara-server`) | `8001` |
 
 ### Run With Docker

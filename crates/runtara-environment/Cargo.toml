@@ -16,10 +16,6 @@ path = "src/lib.rs"
 [features]
 db-integration-tests = []
 
-[[bin]]
-name = "runtara-environment"
-path = "src/main.rs"
-
 # Needs the real database: it pre-seeds what the SDK would have reported so
 # run()'s output/error mapping can be exercised against real persistence.
 [[test]]
@@ -39,9 +35,6 @@ runtara-core = { path = "../runtara-core", version = "8.7" }
 # Embedded wasmtime workflow execution (EmbeddedWasmRunner)
 runtara-component-host = { path = "../runtara-component-host", version = "8.7" }
 
-# Configuration
-dotenvy = "0.15"
-
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -57,12 +50,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Utilities
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
-sha2.workspace = true
 
-# HTTP server
-axum = { version = "0.8", features = ["multipart"] }
+# Base64 for the wire-shaped payloads the management protocol reports.
 base64 = "0.22"
-percent-encoding = "2"
 
 # Async trait
 async-trait = "0.1"

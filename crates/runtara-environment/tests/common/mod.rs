@@ -2,18 +2,14 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Common test infrastructure for runtara-environment E2E tests.
 //!
-//! Provides TestContext for setting up database, server, and HTTP client.
+//! Provides TestContext for setting up an isolated database and data directory.
 //! Automatically spins up a PostgreSQL container using testcontainers when
 //! TEST_RUNTARA_DATABASE_URL is not set.
 
 #![allow(dead_code)]
 
-use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::Duration;
 
-use runtara_core::persistence::PostgresPersistence;
 use sqlx::PgPool;
 use testcontainers::ContainerAsync;
 use testcontainers::ImageExt;
@@ -21,16 +17,9 @@ use testcontainers::runners::AsyncRunner;
 use testcontainers_modules::postgres::Postgres;
 use uuid::Uuid;
 
-use runtara_environment::handlers::EnvironmentHandlerState;
-use runtara_environment::runner::MockRunner;
-use runtara_environment::runner::Runner;
-
 /// Test context that manages database, server, and HTTP client for E2E tests.
 pub struct TestContext {
     pub pool: PgPool,
-    /// Base URL for HTTP requests (e.g., "http://127.0.0.1:12345").
-    pub base_url: String,
-    pub server_addr: SocketAddr,
     pub data_dir: PathBuf,
     _temp_dir: tempfile::TempDir,
     /// Tenant IDs used by this test context (for isolated cleanup).
@@ -67,49 +56,8 @@ impl TestContext {
             tempfile::TempDir::new().map_err(|e| format!("Failed to create temp dir: {}", e))?;
         let data_dir = temp_dir.path().to_path_buf();
 
-        // Find available port
-        let listener = std::net::TcpListener::bind("127.0.0.1:0")
-            .map_err(|e| format!("Failed to bind listener: {}", e))?;
-        let server_addr = listener
-            .local_addr()
-            .map_err(|e| format!("Failed to get local addr: {}", e))?;
-        drop(listener);
-
-        // Create mock runner
-        let runner: Arc<dyn Runner> = Arc::new(MockRunner::new());
-
-        // Create persistence layer
-        let persistence = Arc::new(PostgresPersistence::new(pool.clone()));
-
-        // Create handler state
-        let state = Arc::new(EnvironmentHandlerState::new(
-            pool.clone(),
-            persistence,
-            runner,
-            "127.0.0.1:8001".to_string(), // Mock core address
-            data_dir.clone(),
-        ));
-
-        // Start HTTP server in background
-        let server_state = state.clone();
-        let bind_addr = server_addr;
-        tokio::spawn(async move {
-            if let Err(e) =
-                runtara_environment::http_server::run_http_server(bind_addr, server_state).await
-            {
-                eprintln!("Test environment server error: {}", e);
-            }
-        });
-
-        // Wait for server to start
-        tokio::time::sleep(Duration::from_millis(100)).await;
-
-        let base_url = format!("http://{}", server_addr);
-
         Ok(Self {
             pool,
-            base_url,
-            server_addr,
             data_dir,
             _temp_dir: temp_dir,
             tenant_ids: std::sync::Mutex::new(Vec::new()),

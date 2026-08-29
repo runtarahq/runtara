@@ -1,9 +1,18 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! HTTP server for the environment protocol.
+//! The environment management protocol served over HTTP.
 //!
-//! Provides all environment management operations over HTTP/JSON.
-//! Management SDK clients communicate with runtara-environment through this server.
+//! `runtara-environment` is a library: image registry, instance lifecycle, wake
+//! scheduling and the workers are plain async functions and tasks over a shared
+//! `EnvironmentHandlerState`, and it owns no transport. This module is the
+//! transport — every route here decodes a request, calls
+//! [`runtara_environment::handlers`], and maps the result back onto HTTP.
+//!
+//! Clients of these routes are the management SDK (`runtara-management-sdk`,
+//! which `runtara-server` uses internally and `runtara-ctl` uses from outside)
+//! and anything else speaking the management protocol directly.
+//!
+//! All routes are prefixed with `/api/v1`.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -21,8 +30,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracing::{error, info};
 
-use crate::db;
-use crate::handlers::{
+use runtara_environment::db;
+use runtara_environment::handlers::{
     self, EnvironmentHandlerState, GetCapabilityRequest, RegisterImageRequest,
     ResumeInstanceRequest, StartInstanceRequest, StopInstanceRequest,
 };
@@ -275,19 +284,19 @@ fn error_response(code: &str, message: &str, status: StatusCode) -> (StatusCode,
 }
 
 /// Emit an error response derived from an error value. Accepts anything
-/// that converts into `crate::error::Error` (so callers can pass sqlx,
+/// that converts into `runtara_environment::error::Error` (so callers can pass sqlx,
 /// io, or core errors directly). Preserves the legacy `{error, code}`
 /// shape and additively attaches structured fields (`category`,
 /// `severity`, `retry_hint`, `retry_after_ms`, `attributes`) when the
 /// underlying error carries them (e.g. `CoreError` → `StructuredError`).
 /// Existing clients that read only `error` / `code` keep working
 /// unchanged; new fields are purely additive.
-fn error_response_from<E: Into<crate::error::Error>>(
+fn error_response_from<E: Into<runtara_environment::error::Error>>(
     code: &str,
     err: E,
     status: StatusCode,
 ) -> (StatusCode, Json<Value>) {
-    let err: crate::error::Error = err.into();
+    let err: runtara_environment::error::Error = err.into();
     let detail = detail_from_error(&err);
     build_error_response(code, &err.to_string(), status, detail)
 }
@@ -299,8 +308,12 @@ fn error_response_from<E: Into<crate::error::Error>>(
 /// what clients read. Anything else is ours: log it, then 500. `log` runs only
 /// on that second path, matching where these handlers logged before the
 /// business logic moved out of them.
-fn invalid_request_or(err: &crate::error::Error, code: &str, log: impl FnOnce()) -> Response {
-    if let crate::error::Error::InvalidRequest(message) = err {
+fn invalid_request_or(
+    err: &runtara_environment::error::Error,
+    code: &str,
+    log: impl FnOnce(),
+) -> Response {
+    if let runtara_environment::error::Error::InvalidRequest(message) = err {
         return error_response("INVALID_REQUEST", message, StatusCode::BAD_REQUEST).into_response();
     }
     log();
@@ -349,9 +362,9 @@ struct ErrorDetail {
     attributes: Option<Value>,
 }
 
-fn detail_from_error(err: &crate::error::Error) -> ErrorDetail {
+fn detail_from_error(err: &runtara_environment::error::Error) -> ErrorDetail {
     use runtara_core::error::StructuredError;
-    if let crate::error::Error::Core(core) = err {
+    if let runtara_environment::error::Error::Core(core) = err {
         let s: StructuredError = core.clone().into();
         ErrorDetail {
             category: Some(s.category.as_str()),
@@ -1341,7 +1354,7 @@ mod tests {
 
     #[test]
     fn error_response_from_attaches_structured_fields_for_core_errors() {
-        let err = crate::error::Error::from(CoreError::InstanceNotFound {
+        let err = runtara_environment::error::Error::from(CoreError::InstanceNotFound {
             instance_id: "inst-42".to_string(),
         });
         let body = body_of(error_response_from(
@@ -1360,7 +1373,7 @@ mod tests {
 
     #[test]
     fn error_response_from_transient_db_error_hints_retry() {
-        let err = crate::error::Error::from(CoreError::CheckpointSaveFailed {
+        let err = runtara_environment::error::Error::from(CoreError::CheckpointSaveFailed {
             instance_id: "inst-1".to_string(),
             reason: "timeout".to_string(),
         });
@@ -1375,9 +1388,9 @@ mod tests {
 
     #[test]
     fn error_response_from_non_core_error_stays_legacy() {
-        // sqlx errors wrap into crate::error::Error::Database, not Core —
+        // sqlx errors wrap into runtara_environment::error::Error::Database, not Core —
         // so no structured fields are attached, only legacy error/code.
-        let err = crate::error::Error::Other("unexpected state".to_string());
+        let err = runtara_environment::error::Error::Other("unexpected state".to_string());
         let body = body_of(error_response_from(
             "OTHER_ERROR",
             err,

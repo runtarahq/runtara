@@ -13,6 +13,7 @@ pub mod egress_client;
 pub mod embedded_runtara;
 pub mod entitlement_error;
 pub mod entitlements;
+pub mod environment_api;
 pub mod mcp;
 pub mod metrics;
 pub mod middleware;

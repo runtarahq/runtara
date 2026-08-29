@@ -56,6 +56,11 @@ pub struct EmbeddedRuntaraConfig {
 pub struct EmbeddedRuntara {
     core: CoreRuntime,
     environment: EnvironmentRuntime,
+    /// The management API listener. runtara-environment is transport-free, so
+    /// this crate owns the socket its protocol is served on — the same split
+    /// that already applies to runtara-core.
+    environment_server: tokio::task::JoinHandle<anyhow::Result<()>>,
+    environment_addr: SocketAddr,
     #[allow(dead_code)]
     persistence: Arc<dyn Persistence>,
 }
@@ -113,23 +118,29 @@ impl EmbeddedRuntara {
             .runner(runner)
             .core_persistence(persistence.clone())
             .core_addr(config.core_client_addr.to_string())
-            .bind_addr(env_http_addr)
             .data_dir(config.data_dir)
             .build()?
             .start()
             .await?;
+
+        let environment_state = Arc::clone(environment.state());
+        let environment_server = tokio::spawn(async move {
+            crate::environment_api::run_http_server(env_http_addr, environment_state).await
+        });
         info!("✓ runtara-environment started on {}", env_http_addr);
 
         Ok(Self {
             core,
             environment,
+            environment_server,
+            environment_addr: env_http_addr,
             persistence,
         })
     }
 
     /// Get the address for clients to connect to runtara-environment.
     pub fn environment_addr(&self) -> SocketAddr {
-        self.environment.bind_addr()
+        self.environment_addr
     }
 
     /// Get the address where runtara-core is listening.
@@ -139,7 +150,9 @@ impl EmbeddedRuntara {
 
     /// Check if both servers are still running.
     pub fn is_running(&self) -> bool {
-        self.core.is_running() && self.environment.is_running()
+        self.core.is_running()
+            && self.environment.is_running()
+            && !self.environment_server.is_finished()
     }
 
     /// Checkpoint-aware drain of active runners. Flips the drain flags,
@@ -168,7 +181,9 @@ impl EmbeddedRuntara {
     pub async fn shutdown(self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         info!("Shutting down embedded Runtara servers...");
 
-        // Shutdown environment first (it depends on core)
+        // Stop accepting management requests, then shut the workers down.
+        // Environment goes first either way: it depends on core.
+        self.environment_server.abort();
         if let Err(e) = self.environment.shutdown().await {
             error!("Error shutting down runtara-environment: {}", e);
         }
