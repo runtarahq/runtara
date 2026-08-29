@@ -112,8 +112,8 @@ async fn main() -> Result<()> {
 /// Connect to the configured database, verify it, and run migrations.
 ///
 /// Postgres only. Any other scheme is rejected here rather than handed to
-/// sqlx, so an operator who still has a `sqlite://` URL in their environment
-/// gets told what changed instead of a URL-parse error.
+/// sqlx, so the operator gets a message naming the variable and the scheme it
+/// needs instead of a URL-parse error from a layer down.
 async fn connect_persistence(config: &Config) -> Result<Arc<dyn Persistence>> {
     info!("Connecting to database...");
 
@@ -139,8 +139,7 @@ async fn connect_persistence(config: &Config) -> Result<Arc<dyn Persistence>> {
     } else {
         Err(anyhow::anyhow!(
             "RUNTARA_DATABASE_URL must be a PostgreSQL connection string \
-             (postgres:// or postgresql://); got a URL with an unsupported \
-             scheme. SQLite is no longer supported."
+             (postgres:// or postgresql://)"
         ))
     }
 }
