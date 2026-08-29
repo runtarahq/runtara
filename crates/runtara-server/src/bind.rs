@@ -39,7 +39,7 @@ pub fn enforce_loopback_for_unauthenticated(
          (127.0.0.1, ::1, or localhost); got '{}'. \
          Unauthenticated modes must not accept non-local connections — bind RUNTARA \
          to loopback and put a reverse proxy in front of it. \
-         See docs/deployment/auth-modes.md and docs/reference/proxy/.",
+         See docs/deployment/auth-modes.md.",
         kind.as_str(),
         host,
     ))
@@ -76,7 +76,7 @@ pub fn enforce_internal_listener_safe(
          header drive credentialed egress and SSRF. Bind INTERNAL_HOST to a \
          loopback address (127.0.0.1, ::1, localhost), or set \
          RUNTARA_INTERNAL_SHARED_SECRET and front the internal port with mTLS. \
-         See docs/reference/proxy/."
+         See docs/deployment/auth-modes.md."
     ))
 }
 

@@ -436,7 +436,7 @@ AUTHEOF
             auth_lines=$(cat <<AUTHEOF
 AUTH_PROVIDER=trust_proxy
 # Configure a reverse proxy (nginx / Caddy) to terminate auth and forward the
-# end-user identity. See docs/reference/proxy/ for reference configs.
+# end-user identity. See docs/deployment/auth-modes.md for the mode reference.
 # TRUST_PROXY_USER_HEADER defaults to x-forwarded-user.
 # TRUST_PROXY_USER_HEADER=x-forwarded-user
 AUTHEOF
@@ -480,7 +480,7 @@ CONFEOF
     chmod 640 "$conf_file"
     info "Wrote ${conf_file}"
     if [ "$auth_provider" != "oidc" ]; then
-        info "AUTH_PROVIDER=${auth_provider}: see docs/reference/proxy/ for nginx/Caddy reference configs"
+        info "AUTH_PROVIDER=${auth_provider}: see docs/deployment/auth-modes.md"
     fi
 }
 

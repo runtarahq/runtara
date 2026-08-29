@@ -81,19 +81,28 @@ below.
 
 | Claim | Required | Source | Used by runtara for |
 |---|---|---|---|
-| `sub` | yes | Auth0 | User identity; key for `member:{sub}` lookup. |
+| `sub` | yes² | Auth0 | User identity; key for `member:{sub}` lookup. |
 | `org_id` | yes | Auth0 Organization id | Tenant id. Must equal the request's `TENANT_ID`; mismatch → `403`. |
 | `jti` | yes¹ | Auth0 Action | Token identity; key for `token:revoked:{jti}` lookup. |
-| `email` | no | Auth0 | Structured logging; `/me` response. |
-| `name` | no | Auth0 | Structured logging; `/me` response. |
-| `tenant_slug` | no | smo-management → Auth0 org metadata | Human-readable log field; `/me` response. **Not** used for routing — `org_id` is the tenant key everywhere internally. |
+| `email` | no | Auth0 | `/me` response only. |
+| `name` | no | Auth0 | `/me` response only. |
+| `tenant_slug` | no | smo-management → Auth0 org metadata | `/me` response only. **Not** used for routing — `org_id` is the tenant key everywhere internally. |
 | `iss` | yes | Auth0 | Validated against `OAUTH2_ISSUER`. |
-| `aud` | conditional | Auth0 | Validated against `OAUTH2_AUDIENCE` when configured. |
+| `aud` | conditional | Auth0 | Validated against `OAUTH2_AUDIENCE` when configured. The MCP provider has its own `OAUTH2_MCP_AUDIENCE`; setting `RUNTARA_MCP_REQUIRE_AUDIENCE` additionally rejects tokens that omit `aud` entirely. |
 | `exp` | yes | Auth0 | Standard expiry validation. |
 
 ¹ `jti` becomes mandatory for `oidc` mode once the Auth0 Action is live. During
-rollout it is gated by `RUNTARA_AUTH_REQUIRE_JTI` (default `false` in Stage 0,
-`true` from Stage 1). See the rollout plan in the implementation plan.
+rollout it is gated by `RUNTARA_AUTH_REQUIRE_JTI`, which defaults to `false`.
+
+² Required by this contract, but **not** enforced by JWT validation: the
+validator checks only `org_id` (and `jti` when `RUNTARA_AUTH_REQUIRE_JTI` is
+set). A token without `sub` authenticates with an empty `user_id` and is
+rejected only once the membership policy is `logging`/`required` (§7), which
+denies it as `MISSING_SUBJECT`.
+
+The structured auth span carries `tenant_id`, `user_id`, `auth_method`, `role`
+and `jti` — **not** `email`, `name` or `tenant_slug`, which reach nothing but
+the `/me` body.
 
 **`roles` is intentionally NOT in the token.** runtara reads the live role from
 `member:{sub}` in Valkey on every request, so demotions and removals take effect
@@ -150,8 +159,9 @@ runtara reads it on every authenticated request (two `GET`s, sub-millisecond).
 
 - **TTL = remaining token lifetime.** The denylist entry only needs to outlive
   the token it blocks; once the token would have expired anyway, the entry
-  self-cleans. For API keys with no expiry, choose a long TTL or rely on the
-  key's local `is_revoked` DB flag as the permanent record.
+  self-cleans. For an API key with no expiry runtara writes a **non-expiring**
+  denylist entry, with the key's local `is_revoked` DB flag as the durable
+  record.
 - Presence of the key means *revoked*. runtara may use `EXISTS`/`GET`; the body
   is advisory (diagnostics only).
 
@@ -181,6 +191,14 @@ Ownership enforcement is live: the route gate lets `Own` through, and the handle
 then compares the resource's `created_by` against the caller
 (`ownership_decision_for` / `require_ownership` in
 `crates/runtara-server/src/middleware/authorization.rs`).
+
+> **Known deviation — `report:update` via `/edit`.** `POST /reports/{id}/edit`
+> maps to `ReportUpdate` and so clears the route gate under `Own`, but its
+> handler (`api/handlers/reports.rs:603`) never calls `require_ownership` — the
+> way `update_report` and `delete_report` do. Under `required`, a Member can
+> edit any report in the tenant through that route and through the MCP
+> `edit_report` tool. The contract below is the intended behavior; the code is
+> wrong and needs fixing.
 
 **Legacy ownership.** Rows created before per-user ownership was captured carry a
 placeholder `created_by` — either `NULL` or the literal `"jwt-user"` (the old
@@ -265,8 +283,12 @@ Notes:
   "User Management" link in the runtara SPA that points at the smo-management control plane.
   No runtara route enforces it — it appears in `GET /api/runtime/me` purely so the SPA knows
   whether to show the link. The actual user-management actions are enforced by smo-management.
-  In self-hosted modes (`local` / `trust_proxy`) the caller acts as Owner but `/me` **omits**
-  this capability: there is no control plane to link to, so the SPA hides the entry.
+  In self-hosted modes (`local` / `trust_proxy`) the caller acts as Owner, and `/me` omits
+  this capability for *unauthenticated* callers — there is no control plane to link to, so
+  the SPA hides the entry. An API-key caller in those modes authenticates as `ApiKey` rather
+  than `Unauthenticated`, so it is **not** treated as self-hosted and the capability is
+  advertised. Harmless (the link is inert without a control plane), but it is a deviation
+  from the stated rule.
 - **Agent capability execution** (`/agents/{name}/capabilities/{id}/execute` and
   `/test`) is gated as `workflow:execute` — it runs host-mediated I/O, possibly with a
   connection's stored credentials, so Viewers are denied.
@@ -394,19 +416,36 @@ Indexes (both tables):
 The system fails **closed**. A request that cannot be positively authorized is
 rejected.
 
-| Failure | Behavior | Error code |
-|---|---|---|
-| Bad JWT signature / expired / wrong issuer or audience | `401 Unauthorized` | — |
-| Missing required claim (`org_id`, or `jti` once required) | `401 Unauthorized` | — |
-| `org_id` ≠ request `TENANT_ID` | `403 Forbidden` | — |
-| `member:{sub}` missing in Valkey (not a member) | `403 Forbidden` | — |
-| Unknown/unparseable `role` value | `403 Forbidden` | — |
-| `token:revoked:{jti}` present | `401 Unauthorized` | — |
-| Valkey unreachable | fail-closed; loud alert | `AUTH_MEMBERSHIP_UNAVAILABLE` |
-| Tenant not in `ready` provisioning state | `503 Service Unavailable` | `TENANT_NOT_READY` |
+### Membership enforcement is opt-in
 
-Distinct codes let operators tell infrastructure failure
-(`AUTH_MEMBERSHIP_UNAVAILABLE`, `TENANT_NOT_READY`) apart from bad credentials.
+The membership half of this table is gated by
+`RUNTARA_AUTH_MEMBERSHIP_POLICY` (`disabled` | `logging` | `required`), and the
+default is **`disabled` in every mode, regardless of Valkey availability**.
+Under the default the middleware returns before any Valkey read: no membership
+lookup, no revocation check, and the role gate is inert. `logging` performs the
+lookup and warns on would-be denials without blocking; only `required`
+enforces. Enable it per tenant — a config-free deployment does **not** enforce
+membership. See [`deployment/auth-modes.md`](../deployment/auth-modes.md).
+
+The rows below are marked with the lowest policy at which each takes effect.
+
+| Failure | Behavior | Error code | Policy |
+|---|---|---|---|
+| Bad JWT signature / expired / wrong issuer or audience | `401 Unauthorized` | — | any |
+| Missing `org_id` (or `jti` when `RUNTARA_AUTH_REQUIRE_JTI`) | `401 Unauthorized` | — | any |
+| `org_id` ≠ request `TENANT_ID` | `403 Forbidden` | — | any |
+| API-key scope excludes the permission | `403 Forbidden` | `API_KEY_SCOPE_DENIED` | any |
+| Role denies the permission | `403 Forbidden` | `PERMISSION_DENIED` | `required` |
+| `sub` missing from the token | `401 Unauthorized` | `MISSING_SUBJECT` | `required` |
+| `jti` missing from the token | `401 Unauthorized` | `MISSING_JTI` | `required` |
+| `token:revoked:{jti}` present | `401 Unauthorized` | `TOKEN_REVOKED` | `required` |
+| `member:{sub}` missing in Valkey (not a member) | `403 Forbidden` | `NOT_A_MEMBER` | `required` |
+| Unknown/unparseable `role` value | `403 Forbidden` | `MALFORMED_MEMBER_RECORD` | `required` |
+| Valkey unreachable | `503 Service Unavailable`; loud alert | `AUTH_MEMBERSHIP_UNAVAILABLE` | `required` |
+
+Every code above is stable and appears in both the response body and the denial
+metric. The distinct `AUTH_MEMBERSHIP_UNAVAILABLE` (503) is what lets operators
+tell an infrastructure failure apart from a bad credential.
 
 ---
 

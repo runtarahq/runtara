@@ -26,8 +26,8 @@ default = ["native"]
 # `ssh2` links libssh2, which needs OpenSSL. By default that resolves against
 # the *system* OpenSSL (libssl-dev on Linux, `brew install openssl@3` on macOS).
 # Building OpenSSL from source instead is a 2-minute serial C compile that lands
-# on the critical path of every cold build — see docs/crates-structure.md §1.2 —
-# so it is opt-in via `vendored-openssl` rather than implied here.
+# on the critical path of every cold build, so it is opt-in via
+# `vendored-openssl` rather than implied here.
 native = [
     "dep:ssh2",
     "runtara-http/native",

@@ -27,5 +27,3 @@ To make any of them live, copy it to `/.github/workflows/`, add
 to every step that runs npm, and set
 `cache-dependency-path: crates/runtara-server/frontend/package-lock.json` on
 `actions/setup-node`.
-
-See `docs/crates-structure.md` (finding D3) for how this was found.

@@ -1,6 +1,5 @@
 #!/bin/bash
-# E2E Test: channel-session re-flush provenance guard
-# (docs/channel-session-reflush-provenance-plan.md).
+# E2E Test: channel-session re-flush provenance guard.
 #
 # Proves the fix: a DUPLICATE session that lands on a foreign-owned instance
 # (a redelivered activity whose Valkey dedup key was lost) does NOT re-dispatch

@@ -45,8 +45,15 @@ The messaging-endpoint URL embeds the runtara **connectionId**, so create the co
 Back in Azure Bot → **Settings → Configuration** → **Messaging endpoint** field, enter:
 
 ```
-https://<your-public-host>/api/runtime/events/webhook/teams/<connectionId>
+{WEBHOOK_BASE_URL}/api/events/{tenantId}/webhook/teams/{connectionId}
 ```
+
+Use the URL Runtara advertises on the trigger (see
+[`teams-setup.md`](teams-setup.md) §3) — that tenant-scoped path is what the
+public gateway rewrites. The server's own served route is
+`https://<host>/api/runtime/events/webhook/teams/<connectionId>`; use that form
+only when you are hitting the server directly, with no gateway in front (a local
+tunnel, for instance).
 
 → **Apply** (there is no separate Save). The endpoint must be a public **HTTPS** URL with a valid, publicly-trusted cert; keep **TLS 1.2** enabled (do not lock to TLS 1.3-only). Only one messaging endpoint is allowed per bot. [manage-settings](https://learn.microsoft.com/en-us/azure/bot-service/bot-service-manage-settings?view=azure-bot-service-4.0)
 
@@ -54,7 +61,10 @@ If you must set the endpoint before the connection exists, enter a placeholder a
 
 ### 5. Enable the Microsoft Teams channel
 
-Azure Bot → **Settings → Channels** → select **Microsoft Teams** → **agree to the Terms of Service** → on the **Messaging** tab pick the cloud environment (**Microsoft Teams Commercial** for standard M365; the Government option only for GCC/GCC-High/DoD) → **Apply**.
+Azure Bot → **Settings → Channels** → select **Microsoft Teams** → **agree to the Terms of Service** → on the **Messaging** tab pick the cloud environment (**Microsoft Teams Commercial** for standard M365; the Government option only for GCC/GCC-High/DoD) → **Apply**. Runtara supports
+the public Microsoft cloud only: a connection whose `authority_host` is anything
+other than `login.microsoftonline.com` (or a loopback host, for local mocks) is
+rejected at save.
 
 The **Publish** tab is informational — you do not publish there for the bot to work. Don't casually delete/re-add the channel: re-enabling regenerates keys and invalidates stored `29:`/`a:` IDs. [channel-connect-teams](https://learn.microsoft.com/en-us/azure/bot-service/channel-connect-teams?view=azure-bot-service-4.0)
 
@@ -62,7 +72,9 @@ The **Publish** tab is informational — you do not publish there for the bot to
 
 Enabling the channel is necessary but **not sufficient** — users need an installable app package. Easiest route: [Teams Developer Portal](https://dev.teams.microsoft.com/) → **Apps** → create app → **Configure** → fill **Basic information**, add **Color icon** (192×192 PNG) + **Outline icon** (32×32 transparent PNG) under **Branding**, then **App features → Bot** and paste your **existing** Microsoft App ID as the botId (do not create a new bot). Download via **Publish → Publish to Store → Download app package**. [Developer Portal](https://learn.microsoft.com/en-us/microsoftteams/platform/concepts/build-and-test/manage-your-apps-in-developer-portal)
 
-The zip holds `manifest.json` + both PNGs flat at the root. Minimal `bots` block: `botId` = your App ID, `scopes` include `personal`/`team`/`groupChat` as needed. Target `manifestVersion` 1.19+ (avoid `devPreview`); author Adaptive Cards at v1.2 for mobile. [apps-package](https://learn.microsoft.com/en-us/microsoftteams/platform/concepts/build-and-test/apps-package) · [schema](https://learn.microsoft.com/en-us/microsoft-365/extensibility/schema/)
+The zip holds `manifest.json` + both PNGs flat at the root. Minimal `bots` block: `botId` = your App ID, `scopes` include `personal`/`team`/`groupChat` as needed. Target a stable `manifestVersion` and avoid `devPreview`; the shipped
+[example manifest](teams-app-manifest.example.json) is on 1.16, and newer
+versions (1.19+) work equally well. Author Adaptive Cards at v1.2 for mobile. [apps-package](https://learn.microsoft.com/en-us/microsoftteams/platform/concepts/build-and-test/apps-package) · [schema](https://learn.microsoft.com/en-us/microsoft-365/extensibility/schema/)
 
 ### 7. Allow custom app upload (Teams admin center)
 
@@ -76,12 +88,18 @@ Test: in personal chat the bot receives every message. In a channel/group chat y
 
 ## Values → connection fields
 
-| Azure artifact | Our field | Value |
+`app_id` / `app_password` / `azure_tenant_id` / `app_type` / `authority_host`
+are the connection's wire field names. The last column gives the equivalent Bot
+Framework `appsettings` key, for cross-referencing Microsoft's docs — it is a key
+name, not a value to paste.
+
+| Azure artifact | Our field | Bot Framework appsettings key |
 |---|---|---|
 | Configuration → **Microsoft App ID** (= Entra Application (client) ID) | `app_id` | `MicrosoftAppId` |
-| Certificates & secrets → Client secret **Value** column | `app_password` | `MicrosoftAppPassword` (not the Secret ID) |
+| Certificates & secrets → Client secret **Value** column | `app_password` | `MicrosoftAppPassword` (paste the Value, not the Secret ID) |
 | Configuration → **App Tenant ID** (= Directory (tenant) ID) | `azure_tenant_id` | `MicrosoftAppTenantId` |
-| — (fixed) | `app_type` | `single_tenant` |
+| — (fixed) | `app_type` | — |
+| — (optional, defaults to `https://login.microsoftonline.com`) | `authority_host` | — |
 
 ## Gotchas
 
@@ -90,4 +108,4 @@ Test: in personal chat the bot receives every message. In a channel/group chat y
 - **@mention required in channels/group chats.** Bots receive channel/group messages only when directly @mentioned, unless you declare RSC `ChannelMessage.Read.Group` (consented by a team owner at install). Parse the `mention` entity in `entities[]`, not raw `text`.
 - **Custom-app-upload org policy.** If user sideload is blocked, a Global/Teams admin uploads the zip directly via **Manage apps → Upload new app** (available org-wide after a few hours).
 - **Error meanings.** **401** = auth failure (wrong authority, expired secret, Secret ID used as password, or your inbound validator rejecting the token). **403 errorCode 209 (MessageWritesBlocked)** = bot uninstalled/blocked or not in the conversation roster — install precedes any send. **403 InvalidBotApiHost** = commercial-vs-Government cloud mismatch (only set Gov authorities for GCC-High/DoD).
-- **Verify the inbound issuer empirically.** Microsoft documents the inbound Teams token as `iss = https://api.botframework.com`, `aud = <app_id>`, signed via `https://login.botframework.com/v1/.well-known/keys` — identical for single- and multi-tenant. Threads mentioning `sts.windows.net/{tid}` describe the *outbound* or *Emulator* path. Log the first real inbound Activity's `iss`/`aud`/`serviceUrl` in staging before hard-coding validator rules. [connector-auth](https://learn.microsoft.com/en-us/bot-framework/rest-api/bot-framework-rest-connector-authentication)
+- **Verify the inbound issuer empirically.** Microsoft documents the inbound Teams token as `iss = https://api.botframework.com`, `aud = <app_id>`, signed via `https://login.botframework.com/v1/.well-known/keys` — identical for single- and multi-tenant. Threads mentioning `sts.windows.net/{tid}` are **not** purely an outbound/Emulator artifact: for a connection with `azure_tenant_id` set, Runtara's inbound validator also accepts `https://sts.windows.net/{tenant}/` and `https://login.microsoftonline.com/{tenant}/v2.0` alongside `https://api.botframework.com`. Log the first real inbound Activity's `iss`/`aud`/`serviceUrl` in staging before hard-coding validator rules. [connector-auth](https://learn.microsoft.com/en-us/bot-framework/rest-api/bot-framework-rest-connector-authentication)

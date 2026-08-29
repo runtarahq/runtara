@@ -25,7 +25,7 @@ INFO  entitlement snapshot resolved
 
 | Var | Required | Notes |
 |---|---|---|
-| `RUNTARA_PRICING_TIER` | no | Selects a built-in baseline. One of `default`, `starter`, `premium`, `enterprise`. Unset → `default`. Tier definitions are currently placeholders pending product input. |
+| `RUNTARA_PRICING_TIER` | no | Selects a built-in baseline. One of `starter`, `premium`, `enterprise`. **Leave it unset for the `default` tier — the literal string `default` is not an accepted value and fails startup.** Tier definitions are otherwise placeholders pending product input, but `starter` is not inert: it hard-codes `agents: ["http","csv"]`, so it refuses to boot unless both components are deployed. |
 | `RUNTARA_ENTITLEMENTS_JSON` | no | Per-tenant overrides on top of the tier baseline. Partial; missing keys inherit the baseline. |
 | `RUNTARA_ENTITLEMENT_OVERRIDES_JSON` | no | A second, higher-precedence override layer. Same shape as above. Useful for environment-specific tweaks layered on top of a tenant-stable config. |
 | `TENANT_ID` | yes | Already required by `AUTH_PROVIDER`; the entitlement system uses the same value to stamp the snapshot. |
@@ -39,6 +39,14 @@ Lower-numbered layers are applied first, then overridden by higher-numbered ones
 3. `RUNTARA_ENTITLEMENT_OVERRIDES_JSON`.
 
 `null` in a JSON layer means **inherit from below**, not "uncap". To remove a cap a lower layer imposes, restate it as a large explicit value.
+
+Two numeric limits have a fourth, independent layer: `MAX_CONCURRENT_EXECUTIONS` and `OBJECT_MODEL_BULK_REQUEST_LIMIT` are infrastructure caps set by their own env vars, and the effective value is `min(infra cap, entitlement limit)`. A tenant limit raised above the infra cap therefore appears not to apply.
+
+### What the `api` and `mcp` keys actually gate
+
+`api: false` is broader than its name suggests: it rejects **every API-key-authenticated request on every tenant route**, not a distinct "API route group". JWT and proxy-header callers on the same routes are unaffected.
+
+Because MCP requests authenticate as API-key callers, `{"api": false, "mcp": true}` is an invalid combination — it boots, but every MCP request fails with `ENTITLEMENT_REQUIRED(feature=api)` before the `mcp` gate runs. The server emits a startup `WARN` when it sees this pairing.
 
 ### JSON shape
 
@@ -67,9 +75,17 @@ All three of `features`, `agents`, and `limits` are optional inside a JSON layer
 
 - **Omitted** → all known agent modules are enabled (preserves the default).
 - **Present, including `[]`** → exact allowlist. `[]` disables every agent.
-- Each ID is validated against the dispatcher's registered agent modules at startup. Unknown IDs fail with `ConfigError::Invalid`.
+- Each ID is validated against the dispatcher's registered agent modules at startup. Unknown IDs fail with `ConfigError::InvalidValue`.
 
-To discover which agent modules are registered in your build, start the server once with the default config and read the `agents_allowlist_size` field in the startup log — the materialised list of every module is what the implicit-all default expands to.
+The registered set is derived purely from the `runtara_agent_*.wasm` filenames in `RUNTARA_AGENT_COMPONENTS_DIR`. To list it, start the server with the default config and call:
+
+```bash
+curl -s http://localhost:7001/api/runtime/entitlements | jq .agents
+```
+
+The startup log's `agents_allowlist_size` is a **count**, not a list — useful as a sanity check, not for discovery.
+
+> **Ordering trap.** Entitlement parsing runs *before* the components-directory check. With `RUNTARA_AGENT_COMPONENTS_DIR` unset, any `agents` list fails with a misleading `unknown agent module 'http'` instead of the real "components dir missing" error. Confirm that var first.
 
 ## Worked example: disable Reports for this tenant
 
@@ -78,11 +94,12 @@ Goal: ship a server where the Reports UI is hidden, the report REST routes retur
 Start the server with:
 
 ```bash
-RUNTARA_ENTITLEMENTS_JSON='{"features":{"reports":false}}' \
+AUTH_PROVIDER=local SERVER_HOST=127.0.0.1 \
+  RUNTARA_ENTITLEMENTS_JSON='{"features":{"reports":false}}' \
   cargo run -p runtara-server --features embed-ui
 ```
 
-(Or via your dev wrapper of choice. The point is the env var on the process.)
+(Or via your dev wrapper of choice. The point is the env var on the process. `AUTH_PROVIDER=local` matters here: the default `oidc` mode needs `OAUTH2_JWKS_URI`/`OAUTH2_ISSUER` and will not boot without them.)
 
 ### Verify the startup log
 
@@ -103,7 +120,7 @@ Public API on `:7001`:
 curl -i -X GET http://localhost:7001/api/runtime/reports
 ```
 
-Expected:
+Expected (in `local` mode — auth is mounted *outside* the entitlement gate, so an unauthenticated caller in any other mode gets a `401` before the gate is ever reached):
 
 ```
 HTTP/1.1 403 Forbidden
@@ -121,7 +138,7 @@ WARN  entitlement denial
 
 ### Verify the SPA
 
-Open the UI. The Reports menu item is hidden. Direct navigation to `/ui/<tenant>/reports` shows the "Feature not enabled" page rather than the report list.
+Open the UI. The Reports menu item is hidden. Direct navigation to `/ui/reports` shows the "Feature not enabled" page rather than the report list.
 
 ## Public vs. internal API
 
@@ -140,7 +157,7 @@ Internal routes are bound to `127.0.0.1` by default (`INTERNAL_HOST`). Do not ex
 
 ### Server refuses to start
 
-Most likely `ConfigError::Invalid` from a malformed env. Expected output looks like:
+Most likely `ConfigError::InvalidValue` from a malformed env. Expected output looks like:
 
 ```
 ❌ Configuration error: Invalid value for RUNTARA_ENTITLEMENTS_JSON: ...
@@ -149,7 +166,7 @@ Most likely `ConfigError::Invalid` from a malformed env. Expected output looks l
 Common shapes:
 
 - **Unknown feature key.** `{"features": {"workflows": false}}` — `workflows` isn't a feature key. Use one of `reports`, `database`, `api`, `mcp`.
-- **Unknown agent module.** `{"agents": ["does-not-exist"]}` — the value is validated against the dispatcher's registered modules at startup. Check `sample.json` for the full list, or read the log line at startup that reports the materialised allowlist size.
+- **Unknown agent module.** `{"agents": ["does-not-exist"]}` — the value is validated against the dispatcher's registered modules at startup. Get the full list from `GET /api/runtime/entitlements` (the `agents` array).
 - **Non-boolean feature value.** `{"features": {"reports": "yes"}}` — features are strict booleans.
 - **Negative limit.** `{"limits": {"maxApiKeys": -1}}` — caps must be non-negative.
 - **Plain bad JSON.** Missing commas, unquoted keys, etc. Run your value through `jq` first.

@@ -101,7 +101,7 @@ chardetng = "1.0"
 # Vendored OpenSSL, enabled only via runtara-agents' opt-in `vendored-openssl`
 # feature (for a fully static/musl link). Building OpenSSL from source is a
 # ~2-minute serial C compile on the cold-build critical path, so no default
-# build path enables this — see docs/crates-structure.md §1.2.
+# build path enables this.
 openssl = { version = "0.10", features = ["vendored"] }
 
 # Size-tuned profile for `wasm-pack build --release` outputs (Phase 2 of the

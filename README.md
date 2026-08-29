@@ -250,6 +250,7 @@ Useful references:
 - Management plane: `crates/runtara-environment`
 - Workflow compiler: `crates/runtara-workflows`
 - Local development stack: `dev/README.md`
+- Install & update from a release bundle: `docs/install.md`
 - Deployment notes: `docs/deployment/`
 
 ## License

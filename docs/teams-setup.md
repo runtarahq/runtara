@@ -25,18 +25,30 @@ Create a connection of type **Microsoft Teams Bot** (`teams_bot`):
 - **Tenant ID** — the Microsoft Entra tenant ID (required for single-tenant).
 - **App Type** — `Single Tenant` (default). Use `Multi Tenant` only for a legacy
   multi-tenant registration.
+- **Authority Host** — optional, defaults to `https://login.microsoftonline.com`.
+  Leave it alone unless you are pointing at a local mock authority.
+
+Tenant ID is not marked required in the form, but the server rejects a
+single-tenant connection saved without it — you get a `400` on save rather than
+client-side validation.
 
 No serviceUrl is configured: it is per-conversation and captured automatically
 from authenticated inbound activities.
 
 ## 3. Wire the webhook
 
-Create a **Channel** trigger and select the Teams connection. Runtara shows the
-webhook URL. The externally advertised form is:
+Set `WEBHOOK_BASE_URL` on the server **before** creating the trigger, then create
+a **Channel** trigger and select the Teams connection. Runtara advertises:
 
 ```
 {WEBHOOK_BASE_URL}/api/events/{tenant_id}/webhook/teams/{connection_id}
 ```
+
+> **`WEBHOOK_BASE_URL` is effectively required here.** With it unset the server
+> advertises no URL, and the trigger grid falls back to a client-side guess
+> hardcoded to the `telegram` platform segment — so it shows a
+> `.../webhook/telegram/...` URL for a Teams trigger. Do not paste that into
+> Azure. This is a known bug in the grid, not a naming quirk.
 
 The public gateway rewrites `/api/events/{tenant}/webhook/{platform}/{id}` to the
 served `/api/runtime/events/webhook/{platform}/{id}` via a single `{platform}`
@@ -70,11 +82,14 @@ receipt is not part of this release).
   the credential proxy verifies it (tenant + connection match, exact
   conversation path segment) and pins egress to that serviceUrl. A ref is only
   minted for a serviceUrl on a public Bot Connector host, and the connection's
-  `authority_host` must be exactly the public Microsoft cloud — both close
-  credential-exfiltration paths.
+  `authority_host` must be exactly `login.microsoftonline.com` over `https`
+  (loopback hosts are also accepted, over either scheme, for local mock
+  authorities) — both close credential-exfiltration paths.
 
 ## Environment
 
+- `WEBHOOK_BASE_URL` — public base URL the server advertises for channel
+  webhooks. See §3: without it the UI shows a wrong (telegram) URL.
 - `RUNTARA_ENDPOINT_REF_SECRET` — HMAC key that signs conversation targets.
   Required for the `teams.send-message` workflow path (server-side session
   replies work without it). Rotate by moving the old value to
