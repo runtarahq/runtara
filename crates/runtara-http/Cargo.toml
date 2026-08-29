@@ -22,9 +22,6 @@ native = ["dep:ureq"]
 # WASI HTTP via wasi:http/outgoing-handler (wasm32-wasip1/wasip2).
 wasi = ["dep:wasi", "dep:wit-bindgen"]
 
-# Browser/Node JS placeholder backend — link-only, calls fail at runtime.
-wasm-js = []
-
 [dependencies]
 base64 = { workspace = true }
 # host-io transport bindings (route (b)).

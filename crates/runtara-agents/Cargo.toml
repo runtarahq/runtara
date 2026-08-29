@@ -43,9 +43,6 @@ vendored-openssl = ["dep:openssl"]
 # WASI target (wasm32-wasip2) - HTTP via wasi-http, no SFTP
 wasi = ["runtara-http/wasi"]
 
-# Browser/Node.js target - HTTP via fetch, no SFTP
-wasm-js = ["runtara-http/wasm-js"]
-
 [dependencies]
 runtara-dsl = { path = "../runtara-dsl", version = "8.7" }
 runtara-agent-macro = { path = "../runtara-agent-macro", version = "8.7" }

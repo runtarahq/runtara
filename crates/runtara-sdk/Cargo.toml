@@ -19,7 +19,7 @@ embedded = ["dep:runtara-core", "dep:tokio"]
 # HTTP-based communication with runtara-core
 # Uses runtara-http for HTTP calls. For WASM transition and simpler deployments.
 # Note: `http` only gates the dep presence — a backend feature
-# (`native` / `wasi` / `wasm-js`) must also be enabled to pick a transport.
+# (`native` or `wasi`) must also be enabled to pick a transport.
 http = ["dep:runtara-http", "dep:percent-encoding"]
 
 # Native backend forwarded to runtara-http. The `?` means "only enable on
@@ -30,10 +30,6 @@ native = ["runtara-http?/native"]
 # WASI target - HTTP-based communication (wasm32-wasip2)
 # Uses wasi-http for checkpointing, blocking I/O for sequential workflows
 wasi = ["runtara-http?/wasi"]
-
-# Browser/Node.js target - JS interop via wasm-bindgen (wasm32-unknown-unknown)
-# Uses fetch API for HTTP, localStorage/IndexedDB for local state
-wasm-js = ["runtara-http?/wasm-js"]
 
 # Structured logging via the tracing ecosystem.
 # On by default for native consumers. WASI workflow builds disable this

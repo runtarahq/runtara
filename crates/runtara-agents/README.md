@@ -42,8 +42,8 @@ change.
   emit named metadata and executor statics).
 - Key integration point: `runtara_agents::registry`.
 - Platform features: `native` (default, servers and CLIs) pulls in `ssh2`;
-  `wasi` and `wasm-js` swap the HTTP transport and leave SFTP out, so the
-  metadata half of the crate compiles for wasm targets.
+  `wasi` swaps the HTTP transport and leaves SFTP out, so the metadata half
+  of the crate compiles for `wasm32-wasip2`.
 
 ## License
 

@@ -6,12 +6,11 @@
 //! and WASI (via wasi-http, future) targets.
 
 // Exactly one backend feature must be enabled by the consumer. `native`
-// pulls ureq + the Rust TLS stack; `wasi` pulls the wasi crate; `wasm-js`
-// is a link-only stub. The cfg gates below are written so multiple
-// backends cannot accidentally co-link.
-#[cfg(not(any(feature = "native", feature = "wasi", feature = "wasm-js")))]
+// pulls ureq + the Rust TLS stack; `wasi` pulls the wasi crate. The cfg
+// gates below are written so the two cannot accidentally co-link.
+#[cfg(not(any(feature = "native", feature = "wasi")))]
 compile_error!(
-    "runtara-http requires exactly one backend feature: `native`, `wasi`, or `wasm-js`. \
+    "runtara-http requires exactly one backend feature: `native` or `wasi`. \
      Native consumers should enable `native`; WASI workflows/agents should enable `wasi`."
 );
 
@@ -26,11 +25,6 @@ mod host_io;
 mod wasi_backend;
 #[cfg(all(feature = "wasi", not(feature = "native")))]
 pub use wasi_backend::WasiHttpClient as HttpClient;
-
-#[cfg(all(feature = "wasm-js", not(feature = "native"), not(feature = "wasi")))]
-mod wasm_js_backend;
-#[cfg(all(feature = "wasm-js", not(feature = "native"), not(feature = "wasi")))]
-pub use wasm_js_backend::WasmJsHttpClient as HttpClient;
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -160,8 +154,6 @@ impl RequestBuilder {
         return native::execute(self);
         #[cfg(all(feature = "wasi", not(feature = "native")))]
         return wasi_backend::execute(self);
-        #[cfg(all(feature = "wasm-js", not(feature = "native"), not(feature = "wasi")))]
-        return wasm_js_backend::execute(self);
     }
 
     /// Execute the request through the HTTP proxy (if configured).
@@ -290,8 +282,6 @@ impl RequestBuilder {
         let proxy_response = native::execute(proxy_request)?;
         #[cfg(all(feature = "wasi", not(feature = "native")))]
         let proxy_response = host_io::execute(proxy_request)?;
-        #[cfg(all(feature = "wasm-js", not(feature = "native"), not(feature = "wasi")))]
-        let proxy_response = wasm_js_backend::execute(proxy_request)?;
 
         // Parse proxy response
         let resp_json: serde_json::Value = serde_json::from_slice(&proxy_response.body)
@@ -435,8 +425,6 @@ pub fn presign(
     let response = native::execute(request)?;
     #[cfg(all(feature = "wasi", not(feature = "native")))]
     let response = wasi_backend::execute(request)?;
-    #[cfg(all(feature = "wasm-js", not(feature = "native"), not(feature = "wasi")))]
-    let response = wasm_js_backend::execute(request)?;
 
     if !(200..300).contains(&response.status) {
         let body = String::from_utf8_lossy(&response.body).to_string();

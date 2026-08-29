@@ -36,14 +36,14 @@ fn main() -> runtara_sdk::Result<()> {
 }
 ```
 
-Requires `RUNTARA_INSTANCE_ID` and `RUNTARA_TENANT_ID` in the environment, plus a reachable `runtara-core` HTTP endpoint (defaults to `http://127.0.0.1:8003`). Enable `embedded` for in-process persistence or `wasi` / `wasm-js` for WASM targets.
+Requires `RUNTARA_INSTANCE_ID` and `RUNTARA_TENANT_ID` in the environment, plus a reachable `runtara-core` HTTP endpoint (defaults to `http://127.0.0.1:8003`). Enable `embedded` for in-process persistence or `wasi` for WASM guests.
 
 ## Inside Runtara
 
 - Consumed by `runtara-workflow-runtime`, the durability component composed into every direct-emitted workflow `.wasm`.
 - Depends on `runtara-sdk-macros` (the `#[resilient]` proc-macro) and optionally on `runtara-core` (embedded mode) and `runtara-http` (HTTP mode).
 - Main integration point: the `HttpBackend` calls `runtara-core`'s instance HTTP API; the global registry in `registry.rs` mediates signal delivery so `#[resilient]` functions can observe cancellation mid-flight.
-- Runs in: WASM guest (primary) / native host. The `wasi` and `wasm-js` features target `wasm32-wasip2` and `wasm32-unknown-unknown`; native hosts use the default `http` + `embedded` build.
+- Runs in: WASM guest (primary) / native host. The `wasi` feature targets `wasm32-wasip2`; native hosts use the default `http` + `embedded` build.
 
 ## License
 
