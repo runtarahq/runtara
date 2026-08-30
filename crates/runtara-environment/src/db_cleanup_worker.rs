@@ -37,6 +37,9 @@ pub struct DbCleanupWorkerConfig {
     pub max_age: Duration,
     /// Maximum instances to delete per batch (prevents long transactions).
     pub batch_size: i64,
+    /// Maximum age for step-debug events before they are swept, independent of
+    /// instance retention. `None` disables the sweep.
+    pub debug_event_max_age: Option<Duration>,
 }
 
 impl Default for DbCleanupWorkerConfig {
@@ -47,6 +50,11 @@ impl Default for DbCleanupWorkerConfig {
             poll_interval: Duration::from_secs(3600), // 1 hour
             max_age: Duration::from_secs(3 * 24 * 3600), // 3 days
             batch_size: 100,
+            // Step-debug payloads are the bulk of instance_events and are read
+            // while a run is recent, so they age out well before the instance
+            // does. A burst that drains a large sleeping population would
+            // otherwise pin every debug row for the full instance window.
+            debug_event_max_age: Some(Duration::from_secs(24 * 3600)), // 1 day
         }
     }
 }
@@ -62,6 +70,10 @@ impl DbCleanupWorkerConfig {
     /// - `RUNTARA_DB_CLEANUP_POLL_INTERVAL_SECS`: seconds between cleanup runs (default: 3600)
     /// - `RUNTARA_DB_CLEANUP_MAX_AGE_DAYS`: days before terminal instances are deleted (default: 3)
     /// - `RUNTARA_DB_CLEANUP_BATCH_SIZE`: max instances per batch (default: 100)
+    /// - `RUNTARA_EVENT_DEBUG_RETENTION_HOURS`: hours before step-debug events
+    ///   are swept, independently of instance retention (default: 24). `0`
+    ///   disables the sweep, leaving debug events to age out with their
+    ///   instance as before.
     pub fn from_env() -> Self {
         let enabled = parse_enabled_env("RUNTARA_DB_CLEANUP_ENABLED");
 
@@ -80,11 +92,18 @@ impl DbCleanupWorkerConfig {
             .and_then(|v| v.parse().ok())
             .unwrap_or(100);
 
+        let debug_event_max_age = std::env::var("RUNTARA_EVENT_DEBUG_RETENTION_HOURS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .map_or(Some(24 * 3600), |hours| (hours > 0).then_some(hours * 3600))
+            .map(Duration::from_secs);
+
         Self {
             enabled,
             poll_interval: Duration::from_secs(poll_interval_secs),
             max_age: Duration::from_secs(max_age_days * 24 * 3600),
             batch_size,
+            debug_event_max_age,
         }
     }
 }
@@ -146,7 +165,7 @@ impl DbCleanupWorker {
                 return;
             }
 
-            res = self.cleanup_old_instances() => {
+            res = self.run_cleanup_pass() => {
                 if let Err(e) = res {
                     error!(error = %e, "Failed to cleanup old instances");
                 }
@@ -163,7 +182,7 @@ impl DbCleanupWorker {
                 }
 
                 _ = tokio::time::sleep(self.config.poll_interval) => {
-                    if let Err(e) = self.cleanup_old_instances().await {
+                    if let Err(e) = self.run_cleanup_pass().await {
                         error!(error = %e, "Failed to cleanup old instances");
                     }
                 }
@@ -171,6 +190,60 @@ impl DbCleanupWorker {
         }
 
         info!("Database cleanup worker stopped");
+    }
+
+    /// One retention pass: expired instances, then expired debug events.
+    ///
+    /// Instances first, so anything the instance sweep removes takes its debug
+    /// events with it via ON DELETE CASCADE and the event sweep only has to
+    /// deal with events belonging to instances that are still live.
+    async fn run_cleanup_pass(&self) -> Result<()> {
+        self.cleanup_old_instances().await?;
+        self.cleanup_old_debug_events().await
+    }
+
+    /// Sweep step-debug events past their own, shorter retention window.
+    ///
+    /// Separate from instance retention because these rows dominate
+    /// `instance_events` while being useful only while a run is recent. The
+    /// run's lifecycle events and its `instances` row are untouched, so history
+    /// and status survive for the full instance window; only step-level detail
+    /// ages out early. Instrumentation is unchanged — workflows still record
+    /// every step.
+    async fn cleanup_old_debug_events(&self) -> Result<()> {
+        let Some(max_age) = self.config.debug_event_max_age else {
+            return Ok(());
+        };
+
+        let cutoff = Utc::now()
+            - chrono::Duration::from_std(max_age)
+                .map_err(|e| crate::error::Error::Other(format!("Invalid duration: {}", e)))?;
+
+        let mut total_deleted = 0u64;
+        loop {
+            let deleted = self
+                .persistence
+                .delete_debug_events_older_than(cutoff, self.config.batch_size)
+                .await?;
+            total_deleted += deleted;
+
+            // Short of a full batch means the backlog is drained.
+            if deleted < self.config.batch_size as u64 {
+                break;
+            }
+        }
+
+        if total_deleted > 0 {
+            info!(
+                total_deleted = total_deleted,
+                cutoff = %cutoff,
+                "Step-debug event retention sweep completed"
+            );
+        } else {
+            debug!("Step-debug event retention sweep completed, nothing expired");
+        }
+
+        Ok(())
     }
 
     /// Cleanup old terminal instances.

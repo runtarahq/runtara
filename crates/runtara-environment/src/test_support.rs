@@ -27,7 +27,7 @@ use uuid::Uuid;
 /// Deliberately a *different* database from the one `tests/` uses, derived by
 /// suffixing the configured name. Several integration tests drive machinery that
 /// queries the whole database rather than one tenant — `WakeScheduler` claims
-/// every instance whose `sleep_until` is due, in batches of ten — and the unit
+/// every instance whose `sleep_until` is due, a batch at a time — and the unit
 /// tests here park instances that have no image row. Sharing one database lets
 /// those parked rows clog the scheduler's batch with launches that can never
 /// succeed, and the integration test fails for a reason that has nothing to do

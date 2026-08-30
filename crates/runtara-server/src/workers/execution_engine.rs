@@ -314,7 +314,18 @@ pub struct ExecutionEngine {
     starting_workflows: Arc<Mutex<HashSet<(String, String)>>>, // (tenant_id, workflow_id)
     /// Sink for product-analytics execution events.
     events: ProductEventSink,
+    /// Short-lived cache of the per-tenant in-flight count used by the
+    /// concurrency gate, so a burst of intake does not issue two status counts
+    /// per accepted execution.
+    concurrency_counts: Arc<DashMap<String, (Instant, u64)>>,
 }
+
+/// How long an in-flight execution count stays usable for the concurrency gate.
+///
+/// Short enough that the cap still tracks reality, long enough that a
+/// sustained intake burst collapses two counts per execution into two counts
+/// per tick.
+const CONCURRENCY_COUNT_TTL: Duration = Duration::from_millis(500);
 
 impl ExecutionEngine {
     /// Create a new execution engine.
@@ -335,6 +346,7 @@ impl ExecutionEngine {
             running_executions,
             starting_workflows: Arc::new(Mutex::new(HashSet::new())),
             events,
+            concurrency_counts: Arc::new(DashMap::new()),
         }
     }
 
@@ -347,6 +359,23 @@ impl ExecutionEngine {
     /// execution drops out of this count the instant it terminates, so the
     /// gate means "N concurrent", not "N started recently".
     async fn active_execution_count(&self, tenant_id: &str) -> Result<u64, ExecutionError> {
+        if let Some(entry) = self.concurrency_counts.get(tenant_id)
+            && entry.0.elapsed() < CONCURRENCY_COUNT_TTL
+        {
+            return Ok(entry.1);
+        }
+
+        let count = self.count_active_executions_uncached(tenant_id).await?;
+        self.concurrency_counts
+            .insert(tenant_id.to_string(), (Instant::now(), count));
+        Ok(count)
+    }
+
+    /// The uncached two-status count behind [`Self::active_execution_count`].
+    async fn count_active_executions_uncached(
+        &self,
+        tenant_id: &str,
+    ) -> Result<u64, ExecutionError> {
         let Some(client) = self.runtime_client.as_ref() else {
             // No runtime wired (e.g. trigger worker engine) — can't count.
             return Ok(0);
@@ -373,19 +402,35 @@ impl ExecutionEngine {
     /// `EntitlementDenial` to surface when the tenant's live active-instance
     /// count is at/over the effective cap; `Ok(())` otherwise.
     ///
-    /// Only queries the runtime when the tenant has an explicit
-    /// `maxConcurrentExecutions` entitlement — with no tenant cap there's
-    /// nothing to enforce (the infra default is effectively unlimited), so we
-    /// skip the round-trip entirely. Fails **open** if the count query errors:
-    /// a transient runtime/count failure should not wedge execution.
+    /// Applies whether or not the tenant carries a `maxConcurrentExecutions`
+    /// entitlement: with no tenant cap the infra bound
+    /// (`MAX_CONCURRENT_EXECUTIONS`) is still enforced, which is the only thing
+    /// standing between an untiered deployment and unbounded intake. Fails
+    /// **open** if the count query errors: a transient runtime/count failure
+    /// should not wedge execution.
+    ///
+    /// The count is cached for [`CONCURRENCY_COUNT_TTL`] so a high intake rate
+    /// does not issue two status counts per accepted execution. The cap is a
+    /// backstop against runaway intake, not a precise quota, and the runtime
+    /// count is itself a moment-in-time reading — a sub-second staleness window
+    /// cannot let intake exceed the cap by more than one TTL's worth of work.
     pub(crate) async fn check_concurrency_gate(
         &self,
         tenant_id: &str,
     ) -> Result<(), crate::entitlement_error::EntitlementDenial> {
         let snapshot = crate::config::entitlements();
-        if snapshot.limits.max_concurrent_executions.is_none() {
-            return Ok(());
-        }
+        // No early return when the tenant has no `maxConcurrentExecutions`:
+        // the infra cap (`MAX_CONCURRENT_EXECUTIONS`, default cores x 32) has
+        // to stand on its own, or an untiered deployment has no admission
+        // control at all — it will accept executions until it runs out of file
+        // descriptors or memory. `concurrent_executions_decision` already
+        // composes the two with `effective_limit`, so passing through with the
+        // entitlement unset simply applies the infra bound.
+        //
+        // Safe against large sleeping populations: `active_execution_count`
+        // counts only Running + Pending, so suspended instances (which are not
+        // terminal, but are also not consuming a slot) never count against the
+        // cap.
         let active = match self.active_execution_count(tenant_id).await {
             Ok(n) => n,
             Err(e) => {

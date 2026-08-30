@@ -7,7 +7,8 @@
 //! harness comparing two backends; with one backend left it is the only
 //! unit-level coverage in this crate for the sleep lifecycle
 //! (`set_instance_sleep`, `get_sleeping_instances_due`,
-//! `claim_sleeping_instance`, `clear_instance_sleep`) and for
+//! `claim_sleeping_instance`, `claim_sleeping_instances_due`,
+//! `clear_instance_sleep`) and for
 //! `get_terminal_instances_older_than` / `delete_instances_batch`.
 
 use chrono::{Duration, Utc};
@@ -350,6 +351,62 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
         .clear_instance_sleep(&instance_id)
         .await
         .expect("clear_instance_sleep failed");
+
+    // --- batch claim (select and claim in one step) -------------------------
+    // `claim_sleeping_instances_due` is what the wake scheduler uses once it
+    // polls back-to-back: selecting and claiming have to happen together, or
+    // overlapping polls keep re-selecting rows whose claim has not landed.
+    // Re-arm the instance, then assert the batch call both returns it and
+    // takes it out of the candidate set in one go.
+    backend
+        .set_instance_sleep(&instance_id, Utc::now() - Duration::seconds(60))
+        .await
+        .expect("set_instance_sleep failed (batch claim re-arm)");
+
+    let claimed_batch = backend
+        .claim_sleeping_instances_due(50)
+        .await
+        .expect("claim_sleeping_instances_due failed");
+    assert!(
+        claimed_batch.iter().any(|r| r.instance_id == instance_id),
+        "a due instance must be returned by the batch claim"
+    );
+
+    // Claimed means claimed: the row is gone from the due set, and a
+    // subsequent single claim must lose, exactly as if the per-row claim had
+    // run. This is the double-launch guarantee the scheduler relies on.
+    let due_after_batch = backend
+        .get_sleeping_instances_due(50)
+        .await
+        .expect("get_sleeping_instances_due failed (after batch claim)");
+    assert!(
+        due_after_batch.iter().all(|r| r.instance_id != instance_id),
+        "an instance claimed by the batch call must no longer be due to wake"
+    );
+    let claim_after_batch = backend
+        .claim_sleeping_instance(&instance_id)
+        .await
+        .expect("claim_sleeping_instance (after batch) failed");
+    assert!(
+        !claim_after_batch,
+        "the batch claim must already own the instance, so a later claim loses"
+    );
+
+    // A second batch call with nothing due must come back empty rather than
+    // re-returning an already-claimed row.
+    let empty_batch = backend
+        .claim_sleeping_instances_due(50)
+        .await
+        .expect("claim_sleeping_instances_due (drained) failed");
+    assert!(
+        empty_batch.iter().all(|r| r.instance_id != instance_id),
+        "an already-claimed instance must not be returned again"
+    );
+
+    backend
+        .clear_instance_sleep(&instance_id)
+        .await
+        .expect("clear_instance_sleep failed (after batch claim)");
 
     // --- listing ------------------------------------------------------------
     // The instance is `suspended` by this point, and a suspended instance

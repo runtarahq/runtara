@@ -578,6 +578,37 @@ pub trait Persistence: Send + Sync {
         limit: i64,
     ) -> Result<Vec<InstanceRecord>, CoreError>;
 
+    /// Select **and claim** up to `limit` due sleeping instances in one step.
+    ///
+    /// Every returned record is already claimed — the caller owns it and must
+    /// launch it, exactly as if [`Persistence::claim_sleeping_instance`] had
+    /// returned `true`. On a launch failure, re-stamp `sleep_until` via
+    /// [`Persistence::set_instance_sleep`] so the instance is retried.
+    ///
+    /// Separate from `get_sleeping_instances_due` + `claim_sleeping_instance`
+    /// because a scheduler that polls back-to-back (rather than sleeping a
+    /// fixed interval between batches) keeps re-selecting rows whose claim has
+    /// not landed yet. Folding the claim into the selecting statement removes
+    /// that window entirely, and costs one round trip per batch instead of one
+    /// per instance.
+    ///
+    /// The default implementation composes the two existing operations and is
+    /// correct but non-atomic — adequate for in-memory/mock backends. SQL
+    /// backends override it with a single claiming statement.
+    async fn claim_sleeping_instances_due(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<InstanceRecord>, CoreError> {
+        let due = self.get_sleeping_instances_due(limit).await?;
+        let mut claimed = Vec::with_capacity(due.len());
+        for record in due {
+            if self.claim_sleeping_instance(&record.instance_id).await? {
+                claimed.push(record);
+            }
+        }
+        Ok(claimed)
+    }
+
     /// List events for an instance with filtering and pagination.
     ///
     /// Events are returned in reverse chronological order (newest first).
@@ -647,6 +678,27 @@ pub trait Persistence: Send + Sync {
     /// Returns the count of deleted instances.
     async fn delete_instances_batch(&self, _instance_ids: &[String]) -> Result<u64, CoreError> {
         // Default: no-op (no deletion supported)
+        Ok(0)
+    }
+
+    /// Delete step-debug events older than `older_than`, up to `limit` rows.
+    ///
+    /// Step-debug payloads dominate `instance_events` — on a large run they are
+    /// the great majority of rows — but they are only read while a run is
+    /// recent. Ageing them out on their own, shorter window keeps the table
+    /// bounded during a burst without touching the lifecycle events
+    /// (`completed`, `failed`, `suspended`) that are the run's durable history,
+    /// and without reducing what workflows record in the first place.
+    ///
+    /// Callers should loop until this returns fewer than `limit`.
+    ///
+    /// Returns the count of deleted events.
+    async fn delete_debug_events_older_than(
+        &self,
+        _older_than: DateTime<Utc>,
+        _limit: i64,
+    ) -> Result<u64, CoreError> {
+        // Default: no-op (no retention supported)
         Ok(0)
     }
 }

@@ -674,6 +674,13 @@ impl Persistence for PostgresPersistence {
         Self::op_get_sleeping_instances_due(&self.pool, limit).await
     }
 
+    async fn claim_sleeping_instances_due(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<InstanceRecord>, CoreError> {
+        Self::op_claim_sleeping_instances_due(&self.pool, limit).await
+    }
+
     async fn list_events(
         &self,
         instance_id: &str,
@@ -749,6 +756,14 @@ impl Persistence for PostgresPersistence {
 
     async fn delete_instances_batch(&self, instance_ids: &[String]) -> Result<u64, CoreError> {
         Self::op_delete_instances_batch(&self.pool, instance_ids).await
+    }
+
+    async fn delete_debug_events_older_than(
+        &self,
+        older_than: DateTime<Utc>,
+        limit: i64,
+    ) -> Result<u64, CoreError> {
+        Self::op_delete_debug_events_older_than(&self.pool, older_than, limit).await
     }
 }
 

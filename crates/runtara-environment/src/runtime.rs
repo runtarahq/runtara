@@ -53,7 +53,42 @@ use crate::handlers::{DrainController, EnvironmentHandlerState};
 use crate::heartbeat_monitor::{HeartbeatMonitor, HeartbeatMonitorConfig};
 use crate::image_cleanup_worker::{ImageCleanupWorker, ImageCleanupWorkerConfig};
 use crate::runner::Runner;
-use crate::wake_scheduler::{WakeScheduler, WakeSchedulerConfig};
+use crate::wake_scheduler::{WakeScheduler, WakeSchedulerConfig, default_wake_concurrency};
+
+/// Idle poll interval for the wake scheduler, from
+/// `RUNTARA_WAKE_POLL_INTERVAL_MS` (default 5000).
+///
+/// This is only the wait after a poll that found nothing more to do — a poll
+/// that fills its batch is followed immediately by the next one — so it bounds
+/// wake *latency* for an idle system, not wake throughput.
+fn wake_poll_interval_from_env() -> Duration {
+    let ms = std::env::var("RUNTARA_WAKE_POLL_INTERVAL_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|ms| *ms > 0)
+        .unwrap_or(5_000);
+    Duration::from_millis(ms)
+}
+
+/// Instances claimed per wake poll, from `RUNTARA_WAKE_BATCH_SIZE`
+/// (default 200).
+fn wake_batch_size_from_env() -> i64 {
+    std::env::var("RUNTARA_WAKE_BATCH_SIZE")
+        .ok()
+        .and_then(|v| v.parse::<i64>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(200)
+}
+
+/// Concurrent relaunches within a wake batch, from `RUNTARA_WAKE_CONCURRENCY`
+/// (default: eight per core, see [`default_wake_concurrency`]).
+fn wake_concurrency_from_env() -> usize {
+    std::env::var("RUNTARA_WAKE_CONCURRENCY")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or_else(default_wake_concurrency)
+}
 
 /// Builder for creating an [`EnvironmentRuntime`].
 pub struct EnvironmentRuntimeBuilder {
@@ -64,6 +99,7 @@ pub struct EnvironmentRuntimeBuilder {
     data_dir: PathBuf,
     wake_poll_interval: Duration,
     wake_batch_size: i64,
+    wake_concurrency: usize,
     request_timeout: Duration,
     cleanup_poll_interval: Duration,
     cleanup_max_age: Duration,
@@ -81,8 +117,9 @@ impl Default for EnvironmentRuntimeBuilder {
             runner: None,
             core_addr: "127.0.0.1:8001".to_string(),
             data_dir: PathBuf::from(".data"),
-            wake_poll_interval: Duration::from_secs(5),
-            wake_batch_size: 10,
+            wake_poll_interval: wake_poll_interval_from_env(),
+            wake_batch_size: wake_batch_size_from_env(),
+            wake_concurrency: wake_concurrency_from_env(),
             request_timeout: Duration::from_secs(30),
             cleanup_poll_interval: Duration::from_secs(3600), // 1 hour
             cleanup_max_age: Duration::from_secs(3 * 24 * 3600), // 3 days
@@ -137,9 +174,12 @@ impl EnvironmentRuntimeBuilder {
         self
     }
 
-    /// Set the wake scheduler poll interval.
+    /// Set the wake scheduler **idle** poll interval.
     ///
-    /// Default: 5 seconds
+    /// Only applies when a poll did not fill its batch; a full batch is
+    /// followed immediately by the next one.
+    ///
+    /// Default: 5 seconds, or `RUNTARA_WAKE_POLL_INTERVAL_MS`.
     pub fn wake_poll_interval(mut self, interval: Duration) -> Self {
         self.wake_poll_interval = interval;
         self
@@ -147,9 +187,17 @@ impl EnvironmentRuntimeBuilder {
 
     /// Set the wake scheduler batch size.
     ///
-    /// Default: 10
+    /// Default: 200, or `RUNTARA_WAKE_BATCH_SIZE`.
     pub fn wake_batch_size(mut self, size: i64) -> Self {
         self.wake_batch_size = size;
+        self
+    }
+
+    /// Set how many instances a wake batch relaunches concurrently.
+    ///
+    /// Default: eight per core, or `RUNTARA_WAKE_CONCURRENCY`.
+    pub fn wake_concurrency(mut self, concurrency: usize) -> Self {
+        self.wake_concurrency = concurrency;
         self
     }
 
@@ -230,6 +278,7 @@ impl EnvironmentRuntimeBuilder {
             data_dir: self.data_dir,
             wake_poll_interval: self.wake_poll_interval,
             wake_batch_size: self.wake_batch_size,
+            wake_concurrency: self.wake_concurrency,
             request_timeout: self.request_timeout,
             cleanup_poll_interval: self.cleanup_poll_interval,
             cleanup_max_age: self.cleanup_max_age,
@@ -250,6 +299,7 @@ pub struct EnvironmentRuntimeConfig {
     data_dir: PathBuf,
     wake_poll_interval: Duration,
     wake_batch_size: i64,
+    wake_concurrency: usize,
     request_timeout: Duration,
     cleanup_poll_interval: Duration,
     cleanup_max_age: Duration,
@@ -289,6 +339,7 @@ impl EnvironmentRuntimeConfig {
         let wake_config = WakeSchedulerConfig {
             poll_interval: self.wake_poll_interval,
             batch_size: self.wake_batch_size,
+            concurrency: self.wake_concurrency,
             core_addr: self.core_addr.clone(),
             data_dir: self.data_dir.clone(),
         };
@@ -788,7 +839,24 @@ mod tests {
         assert_eq!(builder.core_addr, "127.0.0.1:8001");
         assert_eq!(builder.data_dir, PathBuf::from(".data"));
         assert_eq!(builder.wake_poll_interval, Duration::from_secs(5));
-        assert_eq!(builder.wake_batch_size, 10);
+        // Batch of 10 could not feed a concurrent waker; the interval is now
+        // only the idle wait, so a larger batch costs nothing when idle.
+        assert_eq!(builder.wake_batch_size, 200);
+        assert!(builder.wake_concurrency >= 1);
+    }
+
+    #[test]
+    fn wake_concurrency_default_is_bounded() {
+        // Eight per core, but never zero (which would deadlock the semaphore)
+        // and never an unbounded surge on a very large host.
+        let n = crate::wake_scheduler::default_wake_concurrency();
+        assert!((1..=512).contains(&n), "concurrency out of bounds: {n}");
+    }
+
+    #[test]
+    fn wake_concurrency_setter_overrides_default() {
+        let builder = EnvironmentRuntimeBuilder::new().wake_concurrency(3);
+        assert_eq!(builder.wake_concurrency, 3);
     }
 
     #[test]

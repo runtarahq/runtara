@@ -130,6 +130,56 @@ macro_rules! impl_sleep_ops {
                     .await?;
                 Ok(records)
             }
+
+            /// SELECT due instances and claim them in one statement.
+            ///
+            /// The inner SELECT is `op_get_sleeping_instances_due` plus
+            /// `FOR UPDATE SKIP LOCKED`, and the surrounding UPDATE clears
+            /// `sleep_until` on exactly the rows it locked — so every row this
+            /// returns is claimed by this caller and by nobody else. Two
+            /// concurrent pollers (or two Environments sharing this Core DB)
+            /// skip past each other's locked rows instead of contending for
+            /// them, which is the same guarantee
+            /// `op_claim_sleeping_instance` gives per row, obtained once per
+            /// batch.
+            ///
+            /// `sleep_until` comes back NULL in the returned records, which is
+            /// what it now is: the claim cleared it.
+            pub(crate) async fn op_claim_sleeping_instances_due(
+                pool: &$Pool,
+                limit: i64,
+            ) -> ::core::result::Result<
+                ::std::vec::Vec<$crate::persistence::InstanceRecord>,
+                $crate::error::CoreError,
+            > {
+                use $crate::persistence::dialect::Dialect;
+                let p1 = <$Dialect>::placeholder(1);
+                let status_col = <$Dialect>::select_status_col();
+                let termination_col = <$Dialect>::select_termination_col();
+                let now = <$Dialect>::NOW;
+                let lhs = <$Dialect>::normalize_timestamp("sleep_until");
+                let rhs = <$Dialect>::normalize_timestamp(now);
+                let sql = format!(
+                    "UPDATE instances SET sleep_until = NULL \
+                     WHERE instance_id IN ( \
+                         SELECT instance_id FROM instances \
+                         WHERE sleep_until IS NOT NULL \
+                           AND {lhs} <= {rhs} \
+                           AND status = 'suspended' \
+                         ORDER BY sleep_until ASC \
+                         LIMIT {p1} \
+                         FOR UPDATE SKIP LOCKED \
+                     ) \
+                     RETURNING instance_id, tenant_id, definition_version, \
+                               {status_col}, {termination_col}, checkpoint_id, attempt, max_attempts, \
+                               created_at, started_at, finished_at, output, error, sleep_until"
+                );
+                let records = ::sqlx::query_as::<_, $crate::persistence::InstanceRecord>(&sql)
+                    .bind(limit)
+                    .fetch_all(pool)
+                    .await?;
+                Ok(records)
+            }
         }
     };
 }
