@@ -242,11 +242,23 @@ impl HeartbeatMonitor {
                 (SELECT MAX(ie.created_at) FROM instance_events ie WHERE ie.instance_id = cr.instance_id) as last_activity
             FROM container_registry cr
             WHERE
-                -- Never received any event and container started before cutoff
-                (NOT EXISTS (SELECT 1 FROM instance_events ie WHERE ie.instance_id = cr.instance_id) AND cr.started_at < $1)
-                OR
-                -- Last event is older than cutoff
-                ((SELECT MAX(ie.created_at) FROM instance_events ie WHERE ie.instance_id = cr.instance_id) < $1)
+                -- Nothing that started within the timeout can be stale yet, whatever
+                -- its event history says. A woken sleeper is registered with a fresh
+                -- `started_at` while its newest event is the one it wrote before going
+                -- to sleep -- hours or days old -- so without this guard every wake
+                -- looks stale for the few milliseconds between registering the
+                -- container and the relaunched guest writing its first event. The
+                -- instance really is `running` in that window, so the `if_running`
+                -- guard on the failing write does not catch it either: a run that
+                -- goes on to succeed gets recorded as a heartbeat timeout.
+                cr.started_at < $1
+                AND (
+                    -- Never received any event
+                    NOT EXISTS (SELECT 1 FROM instance_events ie WHERE ie.instance_id = cr.instance_id)
+                    OR
+                    -- Last event is older than cutoff
+                    ((SELECT MAX(ie.created_at) FROM instance_events ie WHERE ie.instance_id = cr.instance_id) < $1)
+                )
             "#,
         )
         .bind(cutoff)

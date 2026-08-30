@@ -1229,3 +1229,127 @@ async fn test_multiple_events_uses_most_recent() {
     cleanup(&pool, &instance_id).await;
     cleanup_image(&pool, &image_id).await;
 }
+
+/// A just-woken sleeper must not be failed for the events it wrote before it slept.
+///
+/// Regression: the staleness predicate had two branches, and only the
+/// "no events at all" one required the container to have been running longer
+/// than the timeout. The "last event is old" branch looked at
+/// `MAX(instance_events.created_at)` alone — which for a woken sleeper is the
+/// event it wrote *before* going to sleep, arbitrarily long ago — so every wake
+/// looked stale between registering its container and the relaunched guest
+/// writing its first event. The instance genuinely is `running` in that window,
+/// so the `if_running` guard on the failing write does not save it, and a run
+/// that goes on to succeed is recorded as a heartbeat timeout instead.
+#[tokio::test]
+async fn test_freshly_woken_instance_is_not_stale_despite_old_events() {
+    skip_if_no_db!();
+    let pool = get_test_pool().await;
+
+    let tenant_id = format!("test-tenant-woken-{}", Uuid::new_v4());
+    let image_id = create_test_image(&pool, &tenant_id).await;
+    let instance_id = Uuid::new_v4().to_string();
+
+    create_env_instance(&pool, &instance_id, &tenant_id, &image_id, "running").await;
+
+    // The shape of a wake: the container was registered moments ago, but the
+    // newest event predates the sleep by hours.
+    let container_id = format!("runtara_{}", &instance_id[..8]);
+    sqlx::query(
+        r#"
+        INSERT INTO container_registry (container_id, instance_id, tenant_id, binary_path, started_at)
+        VALUES ($1, $2, $3, '/usr/bin/test', NOW())
+        "#,
+    )
+    .bind(&container_id)
+    .bind(&instance_id)
+    .bind(&tenant_id)
+    .execute(&pool)
+    .await
+    .expect("Failed to register container");
+
+    record_instance_event(&pool, &instance_id, &tenant_id, 6 * 60).await;
+
+    let persistence = Arc::new(MockPersistence::new());
+    let config = HeartbeatMonitorConfig {
+        poll_interval: Duration::from_millis(50),
+        heartbeat_timeout: Duration::from_secs(120),
+    };
+
+    let monitor = HeartbeatMonitor::new(
+        pool.clone(),
+        persistence.clone(),
+        Arc::new(MockRunner),
+        config,
+    );
+    let shutdown = monitor.shutdown_handle();
+    let handle = tokio::spawn(async move {
+        monitor.run().await;
+    });
+
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    shutdown.notify_one();
+    handle.await.ok();
+
+    let completed = persistence.get_completed_instances();
+    assert!(
+        !completed.iter().any(|(id, _, _)| id == &instance_id),
+        "an instance whose container started just now must not be failed for \
+         events written before it went to sleep"
+    );
+
+    cleanup(&pool, &instance_id).await;
+    cleanup_image(&pool, &image_id).await;
+}
+
+/// The fix must not stop the monitor catching a genuinely hung instance: old
+/// container, old events, nothing recent.
+#[tokio::test]
+async fn test_long_running_instance_with_old_events_is_still_stale() {
+    skip_if_no_db!();
+    let pool = get_test_pool().await;
+
+    let tenant_id = format!("test-tenant-hung-{}", Uuid::new_v4());
+    let image_id = create_test_image(&pool, &tenant_id).await;
+    let instance_id = Uuid::new_v4().to_string();
+
+    create_env_instance(&pool, &instance_id, &tenant_id, &image_id, "running").await;
+    // register_container backdates started_at by 30 minutes.
+    register_container(&pool, &instance_id, &tenant_id, &image_id).await;
+    record_instance_event(&pool, &instance_id, &tenant_id, 20).await;
+
+    let persistence = Arc::new(MockPersistence::new());
+    let config = HeartbeatMonitorConfig {
+        poll_interval: Duration::from_millis(50),
+        heartbeat_timeout: Duration::from_secs(120),
+    };
+
+    let monitor = HeartbeatMonitor::new(
+        pool.clone(),
+        persistence.clone(),
+        Arc::new(MockRunner),
+        config,
+    );
+    let shutdown = monitor.shutdown_handle();
+    let handle = tokio::spawn(async move {
+        monitor.run().await;
+    });
+
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    shutdown.notify_one();
+    handle.await.ok();
+
+    let completed = persistence.get_completed_instances();
+    assert!(
+        completed.iter().any(|(id, _, error)| {
+            id == &instance_id
+                && error
+                    .as_deref()
+                    .is_some_and(|e| e.contains("Instance stale"))
+        }),
+        "an instance running for 30 minutes with no activity for 20 must still be failed"
+    );
+
+    cleanup(&pool, &instance_id).await;
+    cleanup_image(&pool, &image_id).await;
+}
