@@ -1119,34 +1119,6 @@ pub async fn handle_resume_instance(
 // Container Monitor
 // ============================================================================
 
-/// True if this monitor's handle no longer owns the container registry
-/// entry for the instance.
-///
-/// When an instance is resumed, a NEW monitor is spawned for the new process
-/// and the registry is rewritten with that monitor's `handle_id`. The OLD
-/// monitor (still polling the previous PID) must NOT touch instance state
-/// when it observes its own process exit, otherwise it would clobber the
-/// fresh execution.
-///
-/// Semantics (preserved from the inline check that previously lived in
-/// `spawn_container_monitor`):
-/// - registry has a different `container_id` than this monitor's handle → stale
-/// - registry has no entry (e.g. cleared by resume before relaunch) → stale
-/// - registry lookup errors → assume fresh, since being conservative here
-///   would cause us to silently drop the crash-detection write on a transient
-///   DB blip
-pub async fn detect_stale_monitor(
-    registry: &ContainerRegistry,
-    instance_id: &str,
-    monitor_handle_id: &str,
-) -> bool {
-    match registry.get(instance_id).await {
-        Ok(Some(current)) => current.container_id != monitor_handle_id,
-        Ok(None) => true,
-        Err(_) => false,
-    }
-}
-
 /// Spawn a background task that monitors the container and processes output when done.
 ///
 /// This function should be called after launching an instance to monitor its lifecycle
@@ -1168,9 +1140,10 @@ pub async fn detect_stale_monitor(
 /// When the process exits, we:
 /// 1. Collect metrics and stderr (`runner.collect_result`).
 /// 2. Persist them best-effort.
-/// 3. Check whether this monitor still owns the instance (`detect_stale_monitor`)
-///    — a resumed instance gets a new monitor, and the old one must not write
-///    crash state for the previous PID.
+/// 3. Claim the registry row this monitor registered. The delete succeeds only
+///    while this monitor still owns the instance, so it doubles as the
+///    ownership check — a resumed instance gets a new monitor, and the old one
+///    must not write crash state for the previous PID.
 /// 4. If we're still the owning monitor, mirror Core's view: if the SDK already
 ///    wrote a terminal status we leave it alone, otherwise we mark the instance
 ///    failed/crashed (or suspended/shutdown_requested if draining).
@@ -1277,9 +1250,31 @@ pub fn spawn_container_monitor(
                 // interfere with the new execution. The check intentionally happens AFTER
                 // metrics/stderr writes so a stale monitor doesn't drop diagnostic data
                 // for the previous process.
-                let is_stale_monitor =
-                    detect_stale_monitor(&container_registry, &instance_id, &handle.handle_id)
-                        .await;
+                // Deleting the row this monitor registered answers both
+                // questions in one statement: it succeeds only while this
+                // monitor is still the owner, so a `false` IS the stale signal,
+                // and the cleanup the tail of this arm used to repeat is
+                // already done. That tail deleted by instance alone, which a
+                // stale monitor would have used to throw away the row of the
+                // run that replaced it.
+                let is_stale_monitor = match container_registry
+                    .cleanup_generation(&instance_id, &handle.handle_id)
+                    .await
+                {
+                    Ok(owned) => !owned,
+                    Err(e) => {
+                        // Unknown rather than stale. Being conservative here
+                        // would silently drop the crash-detection write on a
+                        // transient blip; the row is left to the cleanup
+                        // workers instead.
+                        warn!(
+                            instance_id = %instance_id,
+                            error = %e,
+                            "Could not claim the container registry row; assuming this monitor still owns it"
+                        );
+                        false
+                    }
+                };
 
                 if is_stale_monitor {
                     info!(
@@ -1393,8 +1388,6 @@ pub fn spawn_container_monitor(
                     }
                 }
 
-                // Clean up container registry
-                let _ = container_registry.cleanup(&instance_id).await;
             }
             _ = tokio::time::sleep_until(sleep_until) => {
                 warn!(
@@ -1421,8 +1414,11 @@ pub fn spawn_container_monitor(
                     );
                 }
 
-                // Clean up container registry
-                let _ = container_registry.cleanup(&instance_id).await;
+                // Clean up container registry, but only the row this monitor
+                // registered: a resume may have replaced it with a live run.
+                let _ = container_registry
+                    .cleanup_generation(&instance_id, &handle.handle_id)
+                    .await;
             }
         }
     });

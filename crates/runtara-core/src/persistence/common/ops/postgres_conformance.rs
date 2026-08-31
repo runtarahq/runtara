@@ -783,14 +783,24 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
         .expect("delete_instances_batch with empty slice failed");
     assert_eq!(empty_deleted, 0);
 
+    // The sweep returns the OLDEST terminal instances first, and this one was
+    // just completed, so it sorts last. A limit near the number of terminal
+    // rows already in the database would exclude it for reasons that have
+    // nothing to do with the sweep working — the lib tests share a database
+    // and it accumulates. Ask for more than it can plausibly hold instead, and
+    // say so if it is ever hit.
     let cutoff = Utc::now() + Duration::seconds(60);
+    let sweep_limit = 100_000;
     let terminal = backend
-        .get_terminal_instances_older_than(cutoff, 50)
+        .get_terminal_instances_older_than(cutoff, sweep_limit)
         .await
         .expect("get_terminal_instances_older_than failed");
     assert!(
         terminal.iter().any(|id| id == &instance_id),
-        "completed instance must appear in terminal sweep before cutoff"
+        "completed instance must appear in terminal sweep before cutoff \
+         (swept {} rows against a limit of {sweep_limit}; if those are equal \
+         the limit, not the sweep, is what excluded it)",
+        terminal.len()
     );
 
     let deleted = backend

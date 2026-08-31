@@ -880,15 +880,24 @@ async fn a_drain_mid_batch_releases_the_claims_it_will_not_launch() {
     shutdown.notify_one();
     let _ = handle.await;
 
+    // Which of the two the gate catches first is not fixed: both are parked at
+    // the same instant, so the claim order between them is arbitrary. What must
+    // hold is that exactly one got through and the other was released.
     let launched = launched.lock().expect("launch log poisoned").clone();
-    assert!(
-        !launched.contains(&second_id),
-        "a wake queued when the drain began must not launch: {launched:?}"
+    assert_eq!(
+        launched.len(),
+        1,
+        "exactly one wake should have launched before the drain: {launched:?}"
     );
+    let held_back = if launched.contains(&first_id) {
+        &second_id
+    } else {
+        &first_id
+    };
 
     // And its claim must be released, not left leased for the lease duration.
     let released = persistence
-        .get_instance(&second_id)
+        .get_instance(held_back)
         .await
         .unwrap()
         .expect("instance must exist");

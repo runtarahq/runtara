@@ -10,9 +10,9 @@ use runtara_environment::container_registry::{ContainerInfo, ContainerRegistry};
 use runtara_environment::db;
 use runtara_environment::handlers::{
     DrainController, EnvironmentHandlerState, GetCapabilityRequest, RegisterImageRequest,
-    ResumeInstanceRequest, StartInstanceRequest, StopInstanceRequest, detect_stale_monitor,
-    handle_get_capability, handle_health_check, handle_list_agents, handle_register_image,
-    handle_resume_instance, handle_start_instance, handle_stop_instance, spawn_container_monitor,
+    ResumeInstanceRequest, StartInstanceRequest, StopInstanceRequest, handle_get_capability,
+    handle_health_check, handle_list_agents, handle_register_image, handle_resume_instance,
+    handle_start_instance, handle_stop_instance, spawn_container_monitor,
 };
 use runtara_environment::image_registry::ImageRegistry;
 use runtara_environment::runner::MockRunner;
@@ -1650,6 +1650,72 @@ async fn test_spawn_container_monitor_timeout_race_condition() {
     cleanup(&pool, Some(&instance_id), None).await;
 }
 
+/// The container monitor's ownership check, which is now the guarded delete
+/// itself rather than a read followed by one.
+///
+/// Three branches, the same three the previous `detect_stale_monitor` covered:
+/// a registry row under a different container id means this monitor is stale,
+/// no row at all means stale, and a matching row means it still owns the
+/// instance — and claiming it removes it, so the monitor's tail no longer
+/// deletes by instance alone.
+#[tokio::test]
+async fn claiming_the_registry_row_is_the_monitors_ownership_check() {
+    skip_if_no_db!();
+    let pool = get_test_pool().await;
+    let tenant_id = "monitor-ownership-tenant";
+    let instance_id = format!("monitor-ownership-{}", Uuid::new_v4());
+    let registry = ContainerRegistry::new(pool.clone());
+
+    // No row at all: nothing to claim, so this monitor is stale.
+    assert!(
+        !registry
+            .cleanup_generation(&instance_id, "monitor-handle")
+            .await
+            .expect("cleanup_generation failed"),
+        "a monitor whose registry row is gone must read as stale"
+    );
+
+    // A row belonging to a newer run: not ours, and it must survive.
+    registry
+        .register(&make_container_info(&instance_id, tenant_id, "newer-run"))
+        .await
+        .expect("register failed");
+    assert!(
+        !registry
+            .cleanup_generation(&instance_id, "monitor-handle")
+            .await
+            .expect("cleanup_generation failed"),
+        "a monitor must not claim a row registered by the run that replaced it"
+    );
+    assert!(
+        registry
+            .get(&instance_id)
+            .await
+            .expect("registry read failed")
+            .is_some(),
+        "the newer run's row must survive a stale monitor"
+    );
+
+    // Our own row: claimed, and removed by the claim.
+    assert!(
+        registry
+            .cleanup_generation(&instance_id, "newer-run")
+            .await
+            .expect("cleanup_generation failed"),
+        "the owning monitor must claim its own row"
+    );
+    assert!(
+        registry
+            .get(&instance_id)
+            .await
+            .expect("registry read failed")
+            .is_none(),
+        "claiming the row must also remove it"
+    );
+
+    cleanup(&pool, Some(&instance_id), None).await;
+}
+
 /// Helper: build a `ContainerInfo` populated with the fields the registry stores.
 fn make_container_info(instance_id: &str, tenant_id: &str, container_id: &str) -> ContainerInfo {
     ContainerInfo {
@@ -1660,53 +1726,6 @@ fn make_container_info(instance_id: &str, tenant_id: &str, container_id: &str) -
         started_at: Utc::now(),
         timeout_seconds: Some(60),
     }
-}
-
-/// Verify `detect_stale_monitor`'s three branches: mismatched container_id is
-/// stale, missing entry is stale, matching entry is fresh.
-#[tokio::test]
-async fn test_detect_stale_monitor_registry_cleared() {
-    skip_if_no_db!();
-    let pool = get_test_pool().await;
-
-    let registry = ContainerRegistry::new(pool.clone());
-    let instance_id = Uuid::new_v4().to_string();
-    let tenant_id = "test-tenant-stale-monitor";
-
-    // 1. No registry entry → stale.
-    assert!(
-        detect_stale_monitor(&registry, &instance_id, "monitor-handle").await,
-        "Missing registry entry should be considered stale"
-    );
-
-    // 2. Registry entry whose container_id != monitor_handle_id → stale.
-    let other_handle = "other-handle-id";
-    registry
-        .register(&make_container_info(&instance_id, tenant_id, other_handle))
-        .await
-        .expect("Failed to register container");
-    assert!(
-        detect_stale_monitor(&registry, &instance_id, "monitor-handle").await,
-        "Mismatched container_id should be considered stale"
-    );
-
-    // 3. Registry entry whose container_id matches → fresh.
-    let monitor_handle = "monitor-handle";
-    registry
-        .register(&make_container_info(
-            &instance_id,
-            tenant_id,
-            monitor_handle,
-        ))
-        .await
-        .expect("Failed to update registered container");
-    assert!(
-        !detect_stale_monitor(&registry, &instance_id, monitor_handle).await,
-        "Matching container_id should be considered fresh"
-    );
-
-    // Cleanup
-    cleanup(&pool, Some(&instance_id), None).await;
 }
 
 /// Verify the default `Runner::wait_for_exit` impl returns once `is_running`
