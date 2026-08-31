@@ -11,6 +11,7 @@ use runtara_core::persistence::{
     CheckpointRecord, CompleteInstanceParams, CustomSignalRecord, EventRecord, InstanceRecord,
     ListEventsFilter, ListStepSummariesFilter, Persistence, SignalRecord, StepSummaryRecord,
 };
+use runtara_environment::container_registry::ContainerRegistry;
 use runtara_environment::heartbeat_monitor::{HeartbeatMonitor, HeartbeatMonitorConfig};
 use runtara_environment::runner::{
     CancelToken, ContainerMetrics, LaunchOptions, LaunchResult, Runner, RunnerHandle,
@@ -1296,6 +1297,88 @@ async fn test_freshly_woken_instance_is_not_stale_despite_old_events() {
         !completed.iter().any(|(id, _, _)| id == &instance_id),
         "an instance whose container started just now must not be failed for \
          events written before it went to sleep"
+    );
+
+    cleanup(&pool, &instance_id).await;
+    cleanup_image(&pool, &image_id).await;
+}
+
+/// The generation guard the stale-instance failure path depends on.
+///
+/// Anything that selects a container and acts on it later is racing a wake: the
+/// instance can be relaunched in between, replacing the registry row with a new
+/// `container_id`. Deleting by instance alone would throw away the live run's
+/// row, and `if_running` would then be satisfied by that live run, so the
+/// monitor would mark a healthy instance failed. The guarded delete is what
+/// makes the failure path notice.
+#[tokio::test]
+async fn cleanup_generation_refuses_to_remove_a_replacement_container() {
+    skip_if_no_db!();
+    let pool = get_test_pool().await;
+    let tenant_id = format!("test-tenant-generation-{}", Uuid::new_v4());
+    let image_id = create_test_image(&pool, &tenant_id).await;
+    let instance_id = Uuid::new_v4().to_string();
+    create_env_instance(&pool, &instance_id, &tenant_id, &image_id, "running").await;
+
+    let registry = ContainerRegistry::new(pool.clone());
+    let insert = |container_id: String| {
+        let pool = pool.clone();
+        let instance_id = instance_id.clone();
+        let tenant_id = tenant_id.clone();
+        async move {
+            sqlx::query(
+                r#"
+                INSERT INTO container_registry
+                    (container_id, instance_id, tenant_id, binary_path, started_at)
+                VALUES ($1, $2, $3, '/usr/bin/test', NOW())
+                "#,
+            )
+            .bind(container_id)
+            .bind(&instance_id)
+            .bind(&tenant_id)
+            .execute(&pool)
+            .await
+            .expect("Failed to register container");
+        }
+    };
+
+    // The generation a scan would have selected.
+    insert("gen-old".to_string()).await;
+
+    // The instance is woken and relaunched: the old row goes, a new one arrives.
+    registry
+        .cleanup(&instance_id)
+        .await
+        .expect("cleanup failed");
+    insert("gen-new".to_string()).await;
+
+    // The scan's stale processing now arrives, still holding the old id.
+    let removed = registry
+        .cleanup_generation(&instance_id, "gen-old")
+        .await
+        .expect("cleanup_generation failed");
+    assert!(
+        !removed,
+        "a stale scan must not claim an instance that has been relaunched"
+    );
+    assert_eq!(
+        registry
+            .get(&instance_id)
+            .await
+            .expect("registry read failed")
+            .expect("the replacement container must still be registered")
+            .container_id,
+        "gen-new",
+        "the live run's registry row must survive a stale scan"
+    );
+
+    // And the guard still lets the owning generation through.
+    assert!(
+        registry
+            .cleanup_generation(&instance_id, "gen-new")
+            .await
+            .expect("cleanup_generation failed"),
+        "the current generation must be able to claim its own row"
     );
 
     cleanup(&pool, &instance_id).await;

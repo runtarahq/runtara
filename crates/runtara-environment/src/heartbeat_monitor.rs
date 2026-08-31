@@ -333,7 +333,29 @@ impl HeartbeatMonitor {
             base_msg, container.container_id, runner_stopped
         );
 
-        // Step 3: Mark instance as failed in Core persistence with termination tracking
+        // Step 3: Claim the generation this scan selected. The instance may have
+        // been woken and relaunched since, which writes a fresh registry row
+        // under a new container id — and `if_running` would then be satisfied by
+        // that live run, so marking failed by instance alone would kill it and
+        // the unguarded cleanup would delete its row. Deleting the exact row we
+        // selected is both the guard and the claim: losing it means a newer run
+        // owns this instance and none of the rest applies.
+        if !self
+            .container_registry
+            .cleanup_generation(&container.instance_id, &container.container_id)
+            .await?
+        {
+            info!(
+                instance_id = %container.instance_id,
+                container_id = %container.container_id,
+                "Instance was relaunched since the stale scan; leaving the new run alone"
+            );
+            return Ok(());
+        }
+
+        // Step 4: Mark instance as failed in Core persistence with termination
+        // tracking. Ordered after the claim so this can only ever describe the
+        // run that was actually stale.
         self.core_persistence
             .complete_instance(
                 CompleteInstanceParams::new(&container.instance_id, "failed")
@@ -343,11 +365,6 @@ impl HeartbeatMonitor {
             )
             .await
             .map_err(|e| crate::error::Error::Other(format!("Core persistence error: {}", e)))?;
-
-        // Step 4: Clean up container registry entry
-        self.container_registry
-            .cleanup(&container.instance_id)
-            .await?;
 
         info!(
             instance_id = %container.instance_id,

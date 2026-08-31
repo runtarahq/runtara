@@ -98,6 +98,34 @@ impl ContainerRegistry {
 
     // ===== Cleanup =====
 
+    /// Remove a container only if the registry still holds this exact
+    /// `container_id`, reporting whether it did.
+    ///
+    /// A generation guard. Anything that selected a container and then acts on
+    /// it later is racing a wake: the instance can be relaunched in between,
+    /// which writes a fresh row with a new `container_id`. Deleting by instance
+    /// alone would throw away the live run's row, so this doubles as an
+    /// ownership claim — `false` means a newer run owns the instance and the
+    /// caller must leave it alone.
+    pub async fn cleanup_generation(&self, instance_id: &str, container_id: &str) -> Result<bool> {
+        let result = sqlx::query(
+            "DELETE FROM container_registry WHERE instance_id = $1 AND container_id = $2",
+        )
+        .bind(instance_id)
+        .bind(container_id)
+        .execute(&self.pool)
+        .await?;
+
+        let removed = result.rows_affected() == 1;
+        tracing::debug!(
+            instance_id = %instance_id,
+            container_id = %container_id,
+            removed = removed,
+            "Generation-guarded container cleanup"
+        );
+        Ok(removed)
+    }
+
     /// Drop a container's registry entry, once it has reached a terminal state.
     pub async fn cleanup(&self, instance_id: &str) -> Result<()> {
         sqlx::query("DELETE FROM container_registry WHERE instance_id = $1")
