@@ -463,6 +463,14 @@ impl Persistence for PostgresPersistence {
         Self::op_register_instance(&self.pool, instance_id, tenant_id).await
     }
 
+    async fn try_register_instance(
+        &self,
+        instance_id: &str,
+        tenant_id: &str,
+    ) -> Result<bool, CoreError> {
+        Self::op_try_register_instance(&self.pool, instance_id, tenant_id).await
+    }
+
     async fn get_instance(&self, instance_id: &str) -> Result<Option<InstanceRecord>, CoreError> {
         Self::op_get_instance(&self.pool, instance_id).await
     }

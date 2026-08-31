@@ -42,6 +42,45 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     assert_eq!(record.tenant_id, tenant_id);
     assert_eq!(record.status, "pending");
 
+    // --- try_register is a claim, not a second insert -----------------------
+    // The id is an idempotency key for an at-least-once trigger stream, so a
+    // replay has to report "already taken" rather than erroring or clobbering
+    // the row that is already mid-launch.
+    let claimed_again = backend
+        .try_register_instance(&instance_id, tenant_id)
+        .await
+        .expect("try_register_instance on an existing id should not error");
+    assert!(
+        !claimed_again,
+        "try_register_instance must report false for an id that already exists"
+    );
+    let unchanged = backend
+        .get_instance(&instance_id)
+        .await
+        .expect("get_instance failed")
+        .expect("instance should still exist after a losing claim");
+    assert_eq!(
+        unchanged.tenant_id, tenant_id,
+        "a losing claim must not overwrite the existing row"
+    );
+
+    let fresh_id = Uuid::new_v4().to_string();
+    assert!(
+        backend
+            .try_register_instance(&fresh_id, tenant_id)
+            .await
+            .expect("try_register_instance on a fresh id failed"),
+        "try_register_instance must report true when it creates the row"
+    );
+    assert!(
+        backend
+            .get_instance(&fresh_id)
+            .await
+            .expect("get_instance failed")
+            .is_some(),
+        "a winning claim must actually insert the row"
+    );
+
     // --- update status → running -------------------------------------------
     backend
         .update_instance_status(&instance_id, "running", Some(Utc::now()))

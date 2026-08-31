@@ -438,6 +438,77 @@ async fn test_start_instance_replay_is_deduplicated_without_second_launch() {
     cleanup(&pool, Some(&instance_id), Some(&image_id)).await;
 }
 
+/// A replay must stay deduplicated even if the artifact has since vanished.
+///
+/// The start was already accepted while the wasm was on disk, and the instance
+/// is running from a process that no longer needs the file. Letting the
+/// artifact check run first would turn an at-least-once retry into a spurious
+/// "artifact not found" for a launch that actually succeeded, so the dedup
+/// answer has to win over the artifact error on this path.
+#[tokio::test]
+async fn test_start_instance_replay_is_deduplicated_after_artifact_disappears() {
+    skip_if_no_db!();
+    let pool = get_test_pool().await;
+
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let runner = Arc::new(MockRunner::never_completing());
+    let persistence = Arc::new(PostgresPersistence::new(pool.clone()));
+    let state = EnvironmentHandlerState::new(
+        pool.clone(),
+        persistence,
+        runner.clone(),
+        "127.0.0.1:8001".to_string(),
+        temp_dir.path().to_path_buf(),
+    );
+
+    // A real artifact this test owns, so removing it cannot disturb anything else.
+    let artifact = temp_dir.path().join("vanishing.wasm");
+    std::fs::copy(test_artifact_path(), &artifact).unwrap();
+
+    let image_id = Uuid::new_v4().to_string();
+    let image_name = format!("test-image-vanishing-{image_id}");
+    sqlx::query(
+        r#"
+        INSERT INTO images (image_id, tenant_id, name, description, binary_path)
+        VALUES ($1, 'test-tenant', $2, 'desc', $3)
+        "#,
+    )
+    .bind(&image_id)
+    .bind(&image_name)
+    .bind(artifact.to_str().unwrap())
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let instance_id = format!("vanishing-{}", Uuid::new_v4());
+    let request = || StartInstanceRequest {
+        image_id: image_id.clone(),
+        tenant_id: "test-tenant".to_string(),
+        instance_id: Some(instance_id.clone()),
+        input: Some(serde_json::json!({"attempt": 1})),
+        timeout_seconds: Some(60),
+        env: std::collections::HashMap::new(),
+    };
+
+    let first = handle_start_instance(&state, request()).await.unwrap();
+    assert!(first.success, "first start failed: {:?}", first.error);
+    assert!(!first.deduplicated);
+
+    std::fs::remove_file(&artifact).unwrap();
+
+    let replay = handle_start_instance(&state, request()).await.unwrap();
+    assert!(
+        replay.success,
+        "replay after the artifact vanished must still be deduplicated, got: {:?}",
+        replay.error
+    );
+    assert!(replay.deduplicated);
+    assert_eq!(replay.instance_id, instance_id);
+    assert_eq!(runner.launch_count(), 1, "replay launched a second process");
+
+    cleanup(&pool, Some(&instance_id), Some(&image_id)).await;
+}
+
 #[tokio::test]
 async fn test_start_instance_missing_artifact_does_not_reserve_instance_id() {
     skip_if_no_db!();

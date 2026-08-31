@@ -350,6 +350,28 @@ impl<'a> CompleteInstanceParams<'a> {
 pub trait Persistence: Send + Sync {
     async fn register_instance(&self, instance_id: &str, tenant_id: &str) -> Result<(), CoreError>;
 
+    /// Register an instance, reporting whether this call created the row.
+    ///
+    /// `Ok(true)` means this caller inserted it; `Ok(false)` means the id was
+    /// already taken. Callers that treat the instance id as an idempotency key
+    /// can use this to claim the id and learn they lost the race in a single
+    /// statement, instead of a speculative `get_instance` before every insert.
+    ///
+    /// This default is the naive read-then-insert and is *not* atomic; it
+    /// exists so in-memory and test backends need no change. Backends that can
+    /// do it in one statement should override it.
+    async fn try_register_instance(
+        &self,
+        instance_id: &str,
+        tenant_id: &str,
+    ) -> Result<bool, CoreError> {
+        if self.get_instance(instance_id).await?.is_some() {
+            return Ok(false);
+        }
+        self.register_instance(instance_id, tenant_id).await?;
+        Ok(true)
+    }
+
     async fn get_instance(&self, instance_id: &str) -> Result<Option<InstanceRecord>, CoreError>;
 
     async fn update_instance_status(

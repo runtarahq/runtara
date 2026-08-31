@@ -579,17 +579,28 @@ pub async fn handle_start_instance(
 
     // The trigger stream is intentionally at-least-once. A worker can lose its
     // response or fail XACK after Environment has durably reserved the ID. The
-    // primary key is therefore an idempotency key, not a permanent start error.
-    if let Some(response) =
-        existing_start_response(state, &instance_id, &request.tenant_id, &request.image_id).await?
-    {
-        return Ok(response);
-    }
+    // primary key is therefore an idempotency key, not a permanent start error,
+    // so a replay is answered with the original response rather than an error.
+    //
+    // The claim itself is the INSERT below: it reports whether it won the id,
+    // which costs one statement instead of a SELECT that misses on every fresh
+    // launch. The only place a replay still has to be recognised *before* then
+    // is the artifact check, because an already-accepted start does not depend
+    // on the wasm still being on disk.
 
     // Validate the filesystem half of the image registration before writing
     // any instance state. Otherwise a stale image row creates a failed instance
     // and the trigger retry collides with that row after recompilation.
     if !wasm_path.is_file() {
+        // A replay of an already-accepted start is still answered from the
+        // existing row: it was accepted when the artifact was present, and
+        // losing the file afterwards must not turn a duplicate into an error.
+        if let Some(response) =
+            existing_start_response(state, &instance_id, &request.tenant_id, &request.image_id)
+                .await?
+        {
+            return Ok(response);
+        }
         warn!(
             image_id = %request.image_id,
             binary_path = %wasm_path.display(),
@@ -617,21 +628,29 @@ pub async fn handle_start_instance(
         Some(&request.env)
     };
 
-    // Create instance in Core's table via Persistence trait
-    if let Err(e) = state
+    // Create instance in Core's table via Persistence trait. This doubles as the
+    // idempotency claim: ON CONFLICT DO NOTHING means a replay, or a concurrent
+    // retry that got there first, comes back as `false` rather than an error.
+    let claimed = state
         .persistence
-        .register_instance(&instance_id, &request.tenant_id)
-        .await
-    {
-        // Close the check/insert race between concurrent retries. If another
-        // request reserved the same compatible ID, it owns the launch and this
-        // request is an idempotent replay.
+        .try_register_instance(&instance_id, &request.tenant_id)
+        .await;
+    if !matches!(claimed, Ok(true)) {
+        // Either the id was already taken or the insert failed outright. If
+        // another request reserved the same compatible ID, it owns the launch
+        // and this request is an idempotent replay.
         if let Some(response) =
             existing_start_response(state, &instance_id, &request.tenant_id, &request.image_id)
                 .await?
         {
             return Ok(response);
         }
+        let e = match claimed {
+            Err(e) => e.to_string(),
+            // Claim reported "already exists", but no usable instance backs it
+            // up - `existing_start_response` already logged why it was rejected.
+            Ok(_) => format!("Instance '{}' already exists", instance_id),
+        };
         error!(error = %e, "Failed to register instance via Persistence");
         return Ok(StartInstanceResponse {
             success: false,

@@ -58,6 +58,39 @@ macro_rules! impl_instance_ops {
                 Ok(())
             }
 
+            /// INSERT a new instance row, reporting whether this call created it.
+            ///
+            /// `ON CONFLICT DO NOTHING` on the `instance_id` primary key, so a
+            /// caller can claim an id and find out it lost the race in one
+            /// statement instead of a speculative SELECT followed by an INSERT.
+            /// Returns `true` when this caller inserted the row.
+            pub(crate) async fn op_try_register_instance(
+                pool: &$Pool,
+                instance_id: &str,
+                tenant_id: &str,
+            ) -> ::core::result::Result<bool, $crate::error::CoreError> {
+                use $crate::persistence::dialect::{Dialect, EnumKind};
+                let p1 = <$Dialect>::placeholder(1);
+                let p2 = <$Dialect>::placeholder(2);
+                let status_cast = <$Dialect>::enum_cast(EnumKind::InstanceStatus);
+                let now = <$Dialect>::NOW;
+                let sql = format!(
+                    "INSERT INTO instances (instance_id, tenant_id, definition_version, status, created_at) \
+                     VALUES ({p1}, {p2}, 1, 'pending'{status_cast}, {now}) \
+                     ON CONFLICT (instance_id) DO NOTHING"
+                );
+                let result = ::sqlx::query(&sql)
+                    .bind(instance_id)
+                    .bind(tenant_id)
+                    .execute(pool)
+                    .await
+                    .map_err(|e| $crate::error::CoreError::DatabaseError {
+                        operation: "try_register_instance".into(),
+                        details: e.to_string(),
+                    })?;
+                Ok(result.rows_affected() == 1)
+            }
+
             /// SELECT a single instance by id, including the `input` BLOB.
             pub(crate) async fn op_get_instance(
                 pool: &$Pool,
