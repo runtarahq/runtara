@@ -951,7 +951,8 @@ impl ExecutionEngine {
                     Ok(crate::runtime_client::TerminalOutcome::TimedOut(o)) => {
                         (EventType::ExecutionTimeout, o)
                     }
-                    Ok(crate::runtime_client::TerminalOutcome::GaveUp) => return,
+                    Ok(crate::runtime_client::TerminalOutcome::GaveUp)
+                    | Ok(crate::runtime_client::TerminalOutcome::Suspended) => return,
                     Err(e) => {
                         warn!(
                             instance_id = %instance_id,
