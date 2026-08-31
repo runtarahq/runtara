@@ -47,6 +47,10 @@ fn fast_policy() -> RetryPolicy {
         empty_retry_interval: Duration::from_secs(300),
         refresh_interval: Duration::from_secs(300),
         miss_cooldown: Duration::from_millis(50),
+        // Well above the deliberate response delays these tests use, so it never truncates a
+        // fetch they expect to complete — but far below the production 10s, so a test that
+        // does hit a hung endpoint fails fast instead of stalling the suite.
+        fetch_timeout: Duration::from_secs(2),
     }
 }
 
@@ -102,19 +106,32 @@ async fn startup_does_not_block_on_an_unreachable_endpoint() {
     )
     .await;
 
-    let started = std::time::Instant::now();
+    let policy = RetryPolicy {
+        // Startup's whole inline budget is one fetch bounded by `fetch_timeout`. At a tenth of
+        // a second there are two orders of magnitude between "handed off" and the 10s ceiling
+        // below, so no amount of CPU contention can blur the two — measured against the
+        // production 10s the margin was 1.5x, and a loaded machine ate it.
+        fetch_timeout: Duration::from_millis(100),
+        // Park the refresher. It is not what this test measures, and its first retry landing
+        // mid-assertion would show up as an extra request in the count below.
+        initial_backoff: Duration::from_secs(60),
+        ..fast_policy()
+    };
+
     let cache = tokio::time::timeout(
-        Duration::from_secs(20),
-        JwksCache::with_policy(uri(&server), fast_policy()),
+        Duration::from_secs(10),
+        JwksCache::with_policy(uri(&server), policy),
     )
     .await
-    .expect("startup must not block on the JWKS endpoint");
+    .expect("startup blocked on the JWKS endpoint instead of handing off to the refresher");
 
     assert!(!cache.is_ready().await, "cache is empty, so report unready");
-    assert!(
-        started.elapsed() < Duration::from_secs(15),
-        "startup took {:?} — it is retrying inline again",
-        started.elapsed()
+    // The property the wall clock used to stand in for. Retrying inline is what stalls the
+    // bind, and it shows up here as extra requests however loaded the machine is.
+    assert_eq!(
+        request_count(&server).await,
+        1,
+        "startup makes exactly one attempt; retrying is the refresher's job"
     );
 }
 
