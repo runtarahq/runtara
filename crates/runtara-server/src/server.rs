@@ -1381,15 +1381,23 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         // Compilation is handled by the compilation worker.
         // A trigger worker processes its batch one await at a time, so a single
         // one caps instance starts at whatever one sequential consumer can do —
-        // measured around 100/s, with the host less than a third busy. The
-        // stream is a consumer group and each worker claims a distinct
-        // consumer name, so running several of them is the intended way to
-        // scale intake: entries are distributed, never duplicated.
+        // measured around 100/s with the host less than a third busy. The
+        // stream is a consumer group and each worker claims a distinct consumer
+        // name, so more of them is the natural way to scale intake.
+        //
+        // Defaulting to one anyway: with several workers the pending-entry
+        // autoclaim in PHASE 1 keeps re-examining entries owned by the other
+        // consumers, and that showed up as a constant ~12.5 instance-list
+        // queries per second on a completely idle system — a two-join scan of
+        // the whole instances table whose cost grows with the table. One worker
+        // measured 0/s idle. Raise this once the autoclaim path is scoped to a
+        // worker's own pending entries; until then it trades a real background
+        // load for intake that is not the current bottleneck.
         let trigger_workers: usize = std::env::var("RUNTARA_TRIGGER_WORKERS")
             .ok()
             .and_then(|v| v.parse().ok())
             .filter(|n| *n > 0)
-            .unwrap_or_else(|| num_cpus::get().clamp(1, 16));
+            .unwrap_or(1);
         let trigger_batch_size: usize = std::env::var("TRIGGER_BATCH_SIZE")
             .ok()
             .and_then(|v| v.parse().ok())

@@ -318,6 +318,14 @@ pub struct ExecutionEngine {
     /// concurrency gate, so a burst of intake does not issue two status counts
     /// per accepted execution.
     concurrency_counts: Arc<DashMap<String, (Instant, u64)>>,
+    /// Short-lived cache of the compiled artifact for a workflow version.
+    ///
+    /// Resolving it reads the whole workflow definition out of Postgres and
+    /// hashes it to check the compilation is still current — per instance
+    /// start. The answer is the same for every instance of a version, so
+    /// caching it briefly removes a blob read and a hash from the hot path
+    /// without changing what the check means.
+    registered_images: Arc<RegisteredImageCache>,
 }
 
 /// How long an in-flight execution count stays usable for the concurrency gate.
@@ -326,6 +334,17 @@ pub struct ExecutionEngine {
 /// sustained intake burst collapses two counts per execution into two counts
 /// per tick.
 const CONCURRENCY_COUNT_TTL: Duration = Duration::from_millis(500);
+
+/// How long a resolved compiled-artifact id stays usable.
+///
+/// Short enough that a recompile of the same version is picked up promptly,
+/// long enough that a burst of starts resolves it once rather than once per
+/// instance — at a few hundred starts a second this is the difference between
+/// one definition read and hundreds.
+const REGISTERED_IMAGE_TTL: Duration = Duration::from_secs(5);
+
+/// `(tenant, workflow, version) -> (resolved at, compiled artifact id)`.
+type RegisteredImageCache = DashMap<(String, String, i32), (Instant, String)>;
 
 impl ExecutionEngine {
     /// Create a new execution engine.
@@ -347,6 +366,7 @@ impl ExecutionEngine {
             starting_workflows: Arc::new(Mutex::new(HashSet::new())),
             events,
             concurrency_counts: Arc::new(DashMap::new()),
+            registered_images: Arc::new(DashMap::new()),
         }
     }
 
@@ -1973,7 +1993,15 @@ impl ExecutionEngine {
         workflow_id: &str,
         version: i32,
     ) -> Result<String, ExecutionError> {
-        self.workflow_repo
+        let key = (tenant_id.to_string(), workflow_id.to_string(), version);
+        if let Some(hit) = self.registered_images.get(&key)
+            && hit.0.elapsed() < REGISTERED_IMAGE_TTL
+        {
+            return Ok(hit.1.clone());
+        }
+
+        let resolved = self
+            .workflow_repo
             .get_fresh_registered_image_id(tenant_id, workflow_id, version)
             .await
             .map_err(|e| {
@@ -1984,7 +2012,14 @@ impl ExecutionEngine {
                     "Workflow '{}' version {} not registered with runtara-environment. Recompile it.",
                     workflow_id, version
                 ))
-            })
+            })?;
+
+        // Only successful resolutions are cached: a miss means "not compiled
+        // yet", and that must be re-checked so a freshly compiled workflow
+        // starts running immediately rather than after the TTL.
+        self.registered_images
+            .insert(key, (Instant::now(), resolved.clone()));
+        Ok(resolved)
     }
 
     /// Ensure the workflow is compiled (non-blocking: queues compilation if
@@ -2256,6 +2291,27 @@ impl ExecutionEngine {
 
 #[cfg(test)]
 mod tests {
+
+    /// The TTLs on the hot path must actually collapse a burst, and must not
+    /// be so long that a recompile or a finished execution goes unnoticed for
+    /// an age. Pinned because both are the difference between one database
+    /// read per burst and one per instance.
+    #[test]
+    fn hot_path_caches_have_sane_windows() {
+        use super::{CONCURRENCY_COUNT_TTL, REGISTERED_IMAGE_TTL};
+        use std::time::Duration;
+
+        // Long enough to collapse a burst: at even 100 starts a second these
+        // turn hundreds of lookups into one.
+        assert!(CONCURRENCY_COUNT_TTL >= Duration::from_millis(100));
+        assert!(REGISTERED_IMAGE_TTL >= Duration::from_secs(1));
+
+        // Short enough to stay honest. The concurrency count is a backstop
+        // against runaway intake, not a quota, but it still has to track
+        // reality; a stale artifact id must not outlive a recompile by long.
+        assert!(CONCURRENCY_COUNT_TTL <= Duration::from_secs(2));
+        assert!(REGISTERED_IMAGE_TTL <= Duration::from_secs(30));
+    }
     use super::*;
     use serde_json::json;
 
