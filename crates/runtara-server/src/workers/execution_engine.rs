@@ -12,6 +12,7 @@
 
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use axum::http::StatusCode;
@@ -318,6 +319,15 @@ pub struct ExecutionEngine {
     /// concurrency gate, so a burst of intake does not issue two status counts
     /// per accepted execution.
     concurrency_counts: Arc<DashMap<String, (Instant, u64)>>,
+    /// Executions admitted by the gate that the cached count cannot see yet.
+    ///
+    /// The count is cached, and an accepted request does not appear in it until
+    /// the instance exists and the entry is refreshed. Without this, a cap of
+    /// one and a cached zero admits every request arriving inside the TTL —
+    /// the overshoot is bounded by arrival rate, not by the limit. Counting
+    /// admissions alongside the cached figure keeps the decision honest until
+    /// a fresh count subsumes them.
+    concurrency_reservations: Arc<DashMap<String, Arc<AtomicU64>>>,
     /// Short-lived cache of the compiled artifact for a workflow version.
     ///
     /// Resolving it reads the whole workflow definition out of Postgres and
@@ -346,6 +356,18 @@ const REGISTERED_IMAGE_TTL: Duration = Duration::from_secs(5);
 /// `(tenant, workflow, version) -> (resolved at, compiled artifact id)`.
 type RegisteredImageCache = DashMap<(String, String, i32), (Instant, String)>;
 
+/// Admissions still unaccounted for after a fresh count landed.
+///
+/// `subsumed` is the counter as it stood when the query was issued: those
+/// admissions have had time to become instances and are in the result, so they
+/// are forgiven. Anything admitted while the query was in flight is not in that
+/// result and has to stay counted, or a burst arriving during the query is
+/// admitted twice over — once against the stale figure and again against the
+/// fresh one.
+fn retained_reservations(subsumed: u64, current: u64) -> u64 {
+    current.saturating_sub(subsumed.min(current))
+}
+
 impl ExecutionEngine {
     /// Create a new execution engine.
     #[allow(clippy::too_many_arguments)]
@@ -366,6 +388,7 @@ impl ExecutionEngine {
             starting_workflows: Arc::new(Mutex::new(HashSet::new())),
             events,
             concurrency_counts: Arc::new(DashMap::new()),
+            concurrency_reservations: Arc::new(DashMap::new()),
             registered_images: Arc::new(DashMap::new()),
         }
     }
@@ -379,16 +402,33 @@ impl ExecutionEngine {
     /// execution drops out of this count the instant it terminates, so the
     /// gate means "N concurrent", not "N started recently".
     async fn active_execution_count(&self, tenant_id: &str) -> Result<u64, ExecutionError> {
+        let reserved = self.reservations_for(tenant_id);
         if let Some(entry) = self.concurrency_counts.get(tenant_id)
             && entry.0.elapsed() < CONCURRENCY_COUNT_TTL
         {
-            return Ok(entry.1);
+            return Ok(entry.1.saturating_add(reserved.load(Ordering::SeqCst)));
         }
 
+        // Snapshot before the query, not after: anything admitted while it is
+        // in flight is not in the result, so only the admissions this count
+        // subsumes may be forgiven.
+        let subsumed = reserved.load(Ordering::SeqCst);
         let count = self.count_active_executions_uncached(tenant_id).await?;
+        let retained = retained_reservations(subsumed, reserved.load(Ordering::SeqCst));
+        reserved.store(retained, Ordering::SeqCst);
         self.concurrency_counts
             .insert(tenant_id.to_string(), (Instant::now(), count));
-        Ok(count)
+        Ok(count.saturating_add(retained))
+    }
+
+    /// The admission counter for a tenant, created on first use.
+    fn reservations_for(&self, tenant_id: &str) -> Arc<AtomicU64> {
+        Arc::clone(
+            self.concurrency_reservations
+                .entry(tenant_id.to_string())
+                .or_insert_with(|| Arc::new(AtomicU64::new(0)))
+                .value(),
+        )
     }
 
     /// The uncached two-status count behind [`Self::active_execution_count`].
@@ -462,12 +502,20 @@ impl ExecutionEngine {
                 return Ok(());
             }
         };
-        crate::middleware::entitlement::concurrent_executions_decision(
+        let decision = crate::middleware::entitlement::concurrent_executions_decision(
             snapshot,
             active,
             crate::config::raw_max_concurrent_executions(),
         )
-        .inspect_err(|denial| denial.audit_log(tenant_id))
+        .inspect_err(|denial| denial.audit_log(tenant_id));
+
+        // Record the admission so the next caller sees it even though the
+        // cached count still cannot.
+        if decision.is_ok() {
+            self.reservations_for(tenant_id)
+                .fetch_add(1, Ordering::SeqCst);
+        }
+        decision
     }
 
     /// Check if the runtime client is available.
@@ -2310,6 +2358,30 @@ impl ExecutionEngine {
 
 #[cfg(test)]
 mod tests {
+
+    /// Admissions the gate has made but the cached count cannot see yet must
+    /// keep counting, or a burst inside one TTL is admitted against a figure
+    /// that predates all of it — with a cap of one and a cached zero, every
+    /// request arriving in that window gets in.
+    #[test]
+    fn a_refresh_only_forgives_the_admissions_it_could_see() {
+        use super::retained_reservations;
+
+        // Nothing admitted during the query: the fresh count covers them all.
+        assert_eq!(retained_reservations(3, 3), 0);
+        assert_eq!(retained_reservations(0, 0), 0);
+
+        // Two more arrived while the query was in flight. They are not in the
+        // result, so they must survive it — forgiving them would let the same
+        // burst be admitted twice, once per count.
+        assert_eq!(retained_reservations(3, 5), 2);
+        assert_eq!(retained_reservations(0, 4), 4);
+
+        // A concurrent refresh may already have cleared the counter; never
+        // underflow back into a huge number.
+        assert_eq!(retained_reservations(5, 2), 0);
+        assert_eq!(retained_reservations(u64::MAX, 1), 0);
+    }
 
     /// The TTLs on the hot path must actually collapse a burst, and must not
     /// be so long that a recompile or a finished execution goes unnoticed for
