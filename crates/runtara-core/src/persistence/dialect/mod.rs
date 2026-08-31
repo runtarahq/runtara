@@ -102,9 +102,13 @@ pub trait Dialect: Send + Sync + 'static {
     fn in_list(col: &str, count: usize, start_idx: usize) -> String;
 
     /// SQL expression returning milliseconds between two timestamp columns
-    /// (`a - b`): `EXTRACT(MILLISECONDS FROM ({a} - {b}))::bigint`. The
+    /// (`a - b`): `(EXTRACT(EPOCH FROM ({a} - {b})) * 1000)::bigint`. The
     /// `::bigint` cast is what makes the column decodable as `i64` —
     /// `EXTRACT` on its own yields `numeric`.
+    ///
+    /// Must measure the *whole* span: `EXTRACT(MILLISECONDS ...)` reads a
+    /// single interval field and therefore wraps every minute, so an
+    /// implementation may not use it.
     fn duration_ms(a: &str, b: &str) -> String;
 
     // --- Whole-SQL (for queries where fragment composition loses value) ----
