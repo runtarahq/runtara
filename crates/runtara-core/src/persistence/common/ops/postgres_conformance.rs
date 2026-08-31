@@ -151,14 +151,20 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     assert_eq!(record.checkpoint_id.as_deref(), Some(checkpoint_id));
 
     // --- events -------------------------------------------------------------
+    // Backdated deliberately. `created_at` is the emitter's observation time
+    // and must survive the round trip untouched; a backend that defaults the
+    // column to its own write time stamps this event five minutes late. An
+    // event created at `Utc::now()` would read back the same under either
+    // behaviour, so it could not tell them apart.
+    let emitted_at = Utc::now() - Duration::minutes(5);
     let event = EventRecord {
         id: None,
         instance_id: instance_id.clone(),
         event_type: "custom".to_string(),
         checkpoint_id: Some(checkpoint_id.to_string()),
         payload: Some(br#"{"note":"hello"}"#.to_vec()),
-        created_at: Utc::now(),
-        subtype: Some("parity-test".to_string()),
+        created_at: emitted_at,
+        subtype: Some("conformance-test".to_string()),
     };
     backend
         .insert_event(&event)
@@ -173,6 +179,19 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     assert!(
         !events.is_empty(),
         "list_events must return the inserted event"
+    );
+
+    let stored = events
+        .iter()
+        .find(|e| e.subtype.as_deref() == Some("conformance-test"))
+        .expect("the inserted event must come back from list_events");
+    let drift_ms = (stored.created_at - emitted_at).num_milliseconds().abs();
+    assert!(
+        drift_ms < 1_000,
+        "insert_event must persist the caller's created_at: emitted {emitted_at}, \
+         stored {}, drift {drift_ms}ms — a backend defaulting the column to its \
+         own write time drifts by the full backdate",
+        stored.created_at
     );
 
     let event_count = backend
