@@ -244,8 +244,8 @@ pub async fn capture_http_event(
         // Publish to trigger stream (reuses shared connection manager).
         match trigger_stream.publish(&tenant_id, &event).await {
             Ok(stream_id) => {
-                // Update trigger's last_run timestamp
-                let _ = update_trigger_last_run(&pool, &trigger_id).await;
+                // `last_run` is stamped by the worker that actually starts the
+                // run, folded into the lookup it already does for this trigger.
 
                 let response = json!({
                     "status": "queued",
@@ -391,17 +391,6 @@ fn build_inputs_from_http_parsed(
         },
         "variables": {}
     })
-}
-
-/// Update the last_run timestamp on a trigger
-async fn update_trigger_last_run(pool: &PgPool, trigger_id: &str) -> Result<(), sqlx::Error> {
-    sqlx::query!(
-        "UPDATE invocation_trigger SET last_run = NOW() WHERE id = $1",
-        trigger_id
-    )
-    .execute(pool)
-    .await?;
-    Ok(())
 }
 
 #[cfg(test)]

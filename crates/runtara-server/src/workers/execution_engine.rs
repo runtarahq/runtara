@@ -1133,11 +1133,16 @@ impl ExecutionEngine {
         &self,
         trigger_id: &str,
     ) -> Result<Option<bool>, ExecutionError> {
+        // Stamping `last_run` here rather than at webhook intake keeps it one
+        // statement instead of two, and makes it mean what it says: the row is
+        // touched when the run is actually being started, not when the event
+        // was queued.
         let result = sqlx::query!(
             r#"
-            SELECT single_instance
-            FROM invocation_trigger
+            UPDATE invocation_trigger
+            SET last_run = NOW()
             WHERE id = $1
+            RETURNING single_instance
             "#,
             trigger_id
         )
