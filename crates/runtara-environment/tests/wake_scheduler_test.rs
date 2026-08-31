@@ -639,3 +639,197 @@ async fn test_wake_cancels_pending_cancel_and_still_launches_the_rest() {
     cleanup(&pool, &healthy_id).await;
     cleanup_image(&pool, &image_id).await;
 }
+
+// ============================================================================
+// Claim-release and in-batch concurrency
+// ============================================================================
+
+/// A launch failure must put the instance back in the wake candidate set.
+///
+/// The batch claim clears `sleep_until` as it selects, so from that moment the
+/// wake scan can no longer see the instance. If the relaunch then fails and
+/// nothing restores the deadline, the instance is stranded `suspended` forever
+/// — it will never be picked up again. The scheduler re-stamps it instead.
+#[tokio::test]
+async fn a_failed_wake_returns_the_instance_to_the_candidate_set() {
+    skip_if_no_db!();
+    let pool = get_test_pool().await;
+    let tenant_id = "wake-failure-tenant";
+    let image_id = create_test_image(&pool, tenant_id).await;
+    let instance_id = park_due_instance(&pool, tenant_id, &image_id).await;
+
+    let persistence = Arc::new(PostgresPersistence::new(pool.clone()));
+    let scheduler = WakeScheduler::new(
+        pool.clone(),
+        persistence.clone(),
+        Arc::new(MockRunner::failing()),
+        WakeSchedulerConfig {
+            poll_interval: Duration::from_millis(50),
+            batch_size: 10,
+            concurrency: 4,
+            core_addr: "127.0.0.1:8001".to_string(),
+            data_dir: PathBuf::from(".data"),
+        },
+    );
+    let shutdown = scheduler.shutdown_handle();
+    let handle = tokio::spawn(scheduler.run());
+
+    // Give the scheduler time to claim, fail the launch, and restore.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut restored = false;
+    while std::time::Instant::now() < deadline {
+        let inst = persistence
+            .get_instance(&instance_id)
+            .await
+            .unwrap()
+            .expect("instance must exist");
+        if inst.status == "suspended" && inst.sleep_until.is_some() {
+            restored = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    shutdown.notify_one();
+    let _ = handle.await;
+
+    assert!(
+        restored,
+        "a wake whose launch failed must leave the instance suspended with a \
+         deadline, so a later poll retries it instead of stranding it"
+    );
+
+    cleanup(&pool, &instance_id).await;
+    cleanup_image(&pool, &image_id).await;
+}
+
+/// A runner that holds each launch open briefly and records how many were in
+/// flight at once, so the test can see whether the batch is actually spread
+/// across tasks or awaited one at a time.
+struct ConcurrencyProbeRunner {
+    in_flight: Arc<std::sync::atomic::AtomicUsize>,
+    peak: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl Runner for ConcurrencyProbeRunner {
+    fn runner_type(&self) -> &'static str {
+        "concurrency-probe"
+    }
+
+    async fn run(
+        &self,
+        _options: &runtara_environment::runner::LaunchOptions,
+        _cancel: Option<runtara_environment::runner::CancelToken>,
+    ) -> runtara_environment::runner::Result<runtara_environment::runner::LaunchResult> {
+        unimplemented!("the wake path uses launch_detached")
+    }
+
+    async fn launch_detached(
+        &self,
+        options: &runtara_environment::runner::LaunchOptions,
+    ) -> runtara_environment::runner::Result<runtara_environment::runner::RunnerHandle> {
+        use std::sync::atomic::Ordering;
+        let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+        self.peak.fetch_max(now, Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        self.in_flight.fetch_sub(1, Ordering::SeqCst);
+        Ok(runtara_environment::runner::RunnerHandle {
+            handle_id: format!("probe-{}", options.instance_id),
+            instance_id: options.instance_id.clone(),
+            tenant_id: options.tenant_id.clone(),
+            started_at: Utc::now(),
+            metrics: None,
+        })
+    }
+
+    async fn is_running(&self, _handle: &runtara_environment::runner::RunnerHandle) -> bool {
+        true
+    }
+
+    async fn stop(
+        &self,
+        _handle: &runtara_environment::runner::RunnerHandle,
+    ) -> runtara_environment::runner::Result<()> {
+        Ok(())
+    }
+
+    async fn collect_result(
+        &self,
+        _handle: &runtara_environment::runner::RunnerHandle,
+    ) -> (
+        Option<serde_json::Value>,
+        Option<String>,
+        runtara_environment::runner::ContainerMetrics,
+    ) {
+        (
+            None,
+            None,
+            runtara_environment::runner::ContainerMetrics::default(),
+        )
+    }
+}
+
+/// A batch must be relaunched concurrently, and never beyond the configured
+/// bound.
+///
+/// Waking one instance at a time is what held the scheduler to
+/// `batch_size / poll_interval` regardless of how idle the host was; spreading
+/// the batch is what lets a drain run at the speed of the box. The upper bound
+/// matters just as much — an unbounded fan-out would dump a whole backlog into
+/// the runner at once after an outage.
+#[tokio::test]
+async fn a_batch_is_woken_concurrently_and_stays_within_its_bound() {
+    skip_if_no_db!();
+    let pool = get_test_pool().await;
+    let tenant_id = "wake-concurrency-tenant";
+    let image_id = create_test_image(&pool, tenant_id).await;
+
+    let mut ids = Vec::new();
+    for _ in 0..24 {
+        ids.push(park_due_instance(&pool, tenant_id, &image_id).await);
+    }
+
+    let in_flight = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    const BOUND: usize = 6;
+
+    let persistence = Arc::new(PostgresPersistence::new(pool.clone()));
+    let scheduler = WakeScheduler::new(
+        pool.clone(),
+        persistence,
+        Arc::new(ConcurrencyProbeRunner {
+            in_flight: Arc::clone(&in_flight),
+            peak: Arc::clone(&peak),
+        }),
+        WakeSchedulerConfig {
+            poll_interval: Duration::from_millis(50),
+            batch_size: 24,
+            concurrency: BOUND,
+            core_addr: "127.0.0.1:8001".to_string(),
+            data_dir: PathBuf::from(".data"),
+        },
+    );
+    let shutdown = scheduler.shutdown_handle();
+    let handle = tokio::spawn(scheduler.run());
+
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    shutdown.notify_one();
+    let _ = handle.await;
+
+    let observed = peak.load(std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        observed > 1,
+        "the batch must be spread across tasks, not awaited one at a time \
+         (peak in-flight was {observed})"
+    );
+    assert!(
+        observed <= BOUND,
+        "in-batch concurrency must respect its bound: peak {observed} > {BOUND}"
+    );
+
+    for id in &ids {
+        cleanup(&pool, id).await;
+    }
+    cleanup_image(&pool, &image_id).await;
+}

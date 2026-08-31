@@ -61,6 +61,7 @@ run_test "Object-model raw SQL (query-sql / execute-sql)" "${SCRIPT_DIR}/test_ob
 run_test "Negative duration on suspend/relaunch (regression)" "${SCRIPT_DIR}/test_negative_duration_on_resume.sh"
 run_test "Stale artifact + trigger replay idempotency (regression)" "${SCRIPT_DIR}/test_trigger_replay_idempotency.sh"
 run_test "Pending input across concurrent branches (regression)" "${SCRIPT_DIR}/test_pending_input_concurrent_branches.sh"
+run_test "Wake scheduler drains a backlog in batches (regression)" "${SCRIPT_DIR}/test_wake_drain_throughput.sh"
 
 # Microsoft Teams. These boot their OWN isolated runtara-server + Valkey (docker)
 # on dedicated high ports and mock the Bot Framework, so they are self-contained

@@ -92,11 +92,11 @@ impl DbCleanupWorkerConfig {
             .and_then(|v| v.parse().ok())
             .unwrap_or(100);
 
-        let debug_event_max_age = std::env::var("RUNTARA_EVENT_DEBUG_RETENTION_HOURS")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-            .map_or(Some(24 * 3600), |hours| (hours > 0).then_some(hours * 3600))
-            .map(Duration::from_secs);
+        let debug_event_max_age = debug_event_max_age_from_raw(
+            std::env::var("RUNTARA_EVENT_DEBUG_RETENTION_HOURS")
+                .ok()
+                .as_deref(),
+        );
 
         Self {
             enabled,
@@ -105,6 +105,26 @@ impl DbCleanupWorkerConfig {
             batch_size,
             debug_event_max_age,
         }
+    }
+}
+
+/// Step-debug retention window from `RUNTARA_EVENT_DEBUG_RETENTION_HOURS`.
+///
+/// `None` disables the sweep, leaving debug events to age out with their
+/// instance as before. An explicit `0` means exactly that; an unset or
+/// unparseable value keeps the 24-hour default rather than silently turning
+/// retention off.
+///
+/// Split from the environment read so it can be tested without mutating
+/// process-global state shared by every test in the binary.
+fn debug_event_max_age_from_raw(raw: Option<&str>) -> Option<Duration> {
+    match raw.map(str::trim) {
+        None => Some(Duration::from_secs(24 * 3600)),
+        Some(v) => match v.parse::<u64>() {
+            Ok(0) => None,
+            Ok(hours) => Some(Duration::from_secs(hours * 3600)),
+            Err(_) => Some(Duration::from_secs(24 * 3600)),
+        },
     }
 }
 
@@ -371,6 +391,51 @@ mod tests {
         assert!(
             config.enabled,
             "Cleanup should be enabled by default; disable via RUNTARA_DB_CLEANUP_ENABLED=false"
+        );
+    }
+}
+
+#[cfg(test)]
+mod retention_window_tests {
+    use super::*;
+
+    #[test]
+    fn default_window_when_unset_or_malformed() {
+        let day = Duration::from_secs(24 * 3600);
+        assert_eq!(debug_event_max_age_from_raw(None), Some(day));
+        // A typo must not silently disable retention and let the table grow.
+        assert_eq!(debug_event_max_age_from_raw(Some("soon")), Some(day));
+        assert_eq!(debug_event_max_age_from_raw(Some("")), Some(day));
+    }
+
+    #[test]
+    fn explicit_zero_disables_the_sweep() {
+        assert_eq!(debug_event_max_age_from_raw(Some("0")), None);
+    }
+
+    #[test]
+    fn hours_are_honoured() {
+        assert_eq!(
+            debug_event_max_age_from_raw(Some("1")),
+            Some(Duration::from_secs(3600))
+        );
+        assert_eq!(
+            debug_event_max_age_from_raw(Some(" 72 ")),
+            Some(Duration::from_secs(72 * 3600))
+        );
+    }
+
+    #[test]
+    fn default_config_sweeps_debug_events_sooner_than_instances() {
+        let config = DbCleanupWorkerConfig::default();
+        let debug = config
+            .debug_event_max_age
+            .expect("the debug sweep is on by default");
+        assert!(
+            debug < config.max_age,
+            "debug payloads must age out before the instances that own them: \
+             {debug:?} vs {:?}",
+            config.max_age
         );
     }
 }

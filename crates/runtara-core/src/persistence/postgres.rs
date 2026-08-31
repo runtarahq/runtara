@@ -783,6 +783,202 @@ impl Persistence for PostgresPersistence {
 
 #[cfg(all(test, feature = "db-integration-tests"))]
 mod tests {
+    /// Concurrent claimers of the same due batch must never both get a row.
+    ///
+    /// This is the invariant the wake scheduler leans on once it polls back to
+    /// back and runs a batch concurrently: a duplicate claim means two guests
+    /// running the same in-flight step. Two things uphold it, and this test
+    /// pins the outcome rather than either mechanism. The subquery's
+    /// `sleep_until IS NOT NULL` predicate is the load-bearing half -- under
+    /// READ COMMITTED a claimer that blocks on a rival's row lock re-checks
+    /// that qual through EvalPlanQual, finds `sleep_until` already cleared, and
+    /// skips the row. `FOR UPDATE SKIP LOCKED` then keeps claimers from
+    /// blocking on each other at all, which is what makes the batch claim fast
+    /// rather than what makes it correct. (Verified: removing the locking
+    /// clause keeps this test green.)
+    ///
+    /// The candidate set is deliberately large and the claimers many so the
+    /// claims genuinely overlap; with a handful of rows each UPDATE finishes
+    /// before a rival's subquery even runs.
+    #[tokio::test]
+    async fn concurrent_batch_claims_never_hand_out_the_same_instance() {
+        let backend = std::sync::Arc::new(PostgresPersistence::new(test_pool().await));
+        let tenant = format!("skip-locked-{}", uuid::Uuid::new_v4());
+        let due_at = chrono::Utc::now() - chrono::Duration::seconds(60);
+
+        const ROWS: usize = 400;
+        const CLAIMERS: usize = 6;
+
+        let mut ids = Vec::with_capacity(ROWS);
+        for _ in 0..ROWS {
+            let id = uuid::Uuid::new_v4().to_string();
+            backend.register_instance(&id, &tenant).await.unwrap();
+            backend
+                .update_instance_status(&id, "suspended", None)
+                .await
+                .unwrap();
+            backend.set_instance_sleep(&id, due_at).await.unwrap();
+            ids.push(id);
+        }
+
+        let mut tasks = tokio::task::JoinSet::new();
+        for _ in 0..CLAIMERS {
+            let backend = std::sync::Arc::clone(&backend);
+            tasks.spawn(async move {
+                backend
+                    .claim_sleeping_instances_due(ROWS as i64)
+                    .await
+                    .expect("claim failed")
+            });
+        }
+
+        let mut seen = std::collections::HashSet::new();
+        let mut duplicates = Vec::new();
+        while let Some(joined) = tasks.join_next().await {
+            for record in joined.expect("claimer task panicked") {
+                if !seen.insert(record.instance_id.clone()) {
+                    duplicates.push(record.instance_id);
+                }
+            }
+        }
+        assert!(
+            duplicates.is_empty(),
+            "{} instance(s) were claimed by more than one claimer, e.g. {:?}",
+            duplicates.len(),
+            &duplicates[..duplicates.len().min(3)]
+        );
+
+        // A round need not drain everything: `SKIP LOCKED` means a claimer
+        // steps past rows a rival holds rather than waiting for them, so some
+        // rows fall to a later poll. That is the trade the clause makes, and
+        // the scheduler covers it by polling again immediately after a full
+        // batch. What must hold is that nothing is claimed twice (above) and
+        // nothing is stranded (below).
+        let ours: std::collections::HashSet<_> = ids.iter().cloned().collect();
+        assert!(
+            seen.intersection(&ours).count() > 0,
+            "the claimers must make progress"
+        );
+
+        // Keep polling, as the scheduler would, until none of our rows is due.
+        // Bounded rather than unbounded so a genuine strand fails the test
+        // instead of hanging it. This deliberately does not assert that *we*
+        // claimed every row: the lib tests share one database, so a rival test
+        // polling the same due set may take some of them -- which is fine, and
+        // is itself the shape the scheduler is built for.
+        for _ in 0..10 {
+            let batch = backend
+                .claim_sleeping_instances_due(ROWS as i64)
+                .await
+                .expect("follow-up claim failed");
+            for record in &batch {
+                assert!(
+                    seen.insert(record.instance_id.clone()),
+                    "the follow-up claim must not re-hand out {}",
+                    record.instance_id
+                );
+            }
+            if batch.is_empty() {
+                break;
+            }
+        }
+
+        let mut still_due = Vec::new();
+        for id in &ids {
+            let inst = backend.get_instance(id).await.unwrap().unwrap();
+            if inst.sleep_until.is_some() {
+                still_due.push(id.clone());
+            }
+        }
+        assert!(
+            still_due.is_empty(),
+            "{} row(s) were skipped and never became claimable again -- stranded, \
+             e.g. {:?}",
+            still_due.len(),
+            &still_due[..still_due.len().min(3)]
+        );
+
+        let _ = backend.delete_instances_batch(&ids).await;
+    }
+
+    /// The debug-event sweep must remove step-debug payloads past the window
+    /// and leave everything else — lifecycle events, and recent debug events —
+    /// alone. Losing a `completed` event would erase the run's history.
+    #[tokio::test]
+    async fn debug_event_sweep_spares_lifecycle_and_recent_events() {
+        use crate::persistence::EventRecord;
+        let backend = PostgresPersistence::new(test_pool().await);
+        let id = uuid::Uuid::new_v4().to_string();
+        backend
+            .register_instance(&id, "sweep-tenant")
+            .await
+            .unwrap();
+
+        let old = chrono::Utc::now() - chrono::Duration::hours(48);
+        let recent = chrono::Utc::now();
+        let event = |subtype: Option<&str>, event_type: &str, at| EventRecord {
+            id: None,
+            instance_id: id.clone(),
+            event_type: event_type.to_string(),
+            checkpoint_id: None,
+            payload: Some(b"{}".to_vec()),
+            created_at: at,
+            subtype: subtype.map(str::to_string),
+        };
+
+        backend
+            .insert_event(&event(Some("step_debug_start"), "custom", old))
+            .await
+            .unwrap();
+        backend
+            .insert_event(&event(Some("step_debug_end"), "custom", old))
+            .await
+            .unwrap();
+        backend
+            .insert_event(&event(Some("step_debug_start"), "custom", recent))
+            .await
+            .unwrap();
+        backend
+            .insert_event(&event(None, "completed", old))
+            .await
+            .unwrap();
+        backend
+            .insert_event(&event(Some("workflow_log"), "custom", old))
+            .await
+            .unwrap();
+
+        let cutoff = chrono::Utc::now() - chrono::Duration::hours(24);
+        let deleted = backend
+            .delete_debug_events_older_than(cutoff, 100)
+            .await
+            .expect("sweep failed");
+        assert_eq!(deleted, 2, "only the two aged step-debug events may go");
+
+        let filter = crate::persistence::ListEventsFilter::default();
+        let left = backend.list_events(&id, &filter, 50, 0).await.unwrap();
+        let subtypes: Vec<_> = left
+            .iter()
+            .map(|e| (e.event_type.as_str(), e.subtype.as_deref()))
+            .collect();
+        assert_eq!(left.len(), 3, "survivors: {subtypes:?}");
+        assert!(
+            subtypes.contains(&("completed", None)),
+            "the lifecycle event is the run's history and must survive: {subtypes:?}"
+        );
+        assert!(
+            subtypes.contains(&("custom", Some("workflow_log"))),
+            "non-debug custom events must survive: {subtypes:?}"
+        );
+        assert!(
+            subtypes.contains(&("custom", Some("step_debug_start"))),
+            "a debug event inside the window must survive: {subtypes:?}"
+        );
+
+        let _ = backend
+            .delete_instances_batch(std::slice::from_ref(&id))
+            .await;
+    }
+
     use super::*;
 
     use crate::migrations::POSTGRES as MIGRATOR;

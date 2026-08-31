@@ -82,6 +82,23 @@ pub(crate) fn default_wake_concurrency() -> usize {
         .clamp(1, 512)
 }
 
+/// Clamp in-batch concurrency to what the database pool can actually serve.
+///
+/// Every wake does several round trips — read the image, read the timeout,
+/// launch, register the container — so a wake in flight holds a pooled
+/// connection for most of its life. Running more wakes than the pool has
+/// connections does not go faster; it starves the scheduler's own claim query
+/// and surfaces as `pool timed out while waiting for an open connection`. A
+/// couple of connections are left over for the claim itself and for the other
+/// workers sharing this pool.
+///
+/// This matters most where the core count and the pool size disagree: eight
+/// per core is 128 on a sixteen-core host, against a pool of ten.
+pub(crate) fn concurrency_within_pool(requested: usize, pool_max_connections: usize) -> usize {
+    let usable = pool_max_connections.saturating_sub(2).max(1);
+    requested.min(usable).max(1)
+}
+
 /// Wake scheduler that runs as a background task.
 pub struct WakeScheduler {
     pool: PgPool,
@@ -106,6 +123,18 @@ impl WakeScheduler {
         config: WakeSchedulerConfig,
     ) -> Self {
         let image_registry = ImageRegistry::new(pool.clone());
+        let pool_max = pool.options().get_max_connections() as usize;
+        let mut config = config;
+        let bounded = concurrency_within_pool(config.concurrency, pool_max);
+        if bounded != config.concurrency {
+            info!(
+                requested = config.concurrency,
+                bounded,
+                pool_max_connections = pool_max,
+                "Wake concurrency clamped to the database pool"
+            );
+            config.concurrency = bounded;
+        }
         Self {
             pool,
             persistence,
@@ -496,6 +525,20 @@ mod tests {
         assert!(!should_poll_again(0, 0));
         assert!(!should_poll_again(5, 0));
         assert!(!should_poll_again(5, -1));
+    }
+
+    #[test]
+    fn concurrency_is_bounded_by_the_pool() {
+        // Eight per core on a sixteen-core host is 128, against the runtime
+        // pool's ten connections: the excess would starve the claim query.
+        assert_eq!(concurrency_within_pool(128, 10), 8);
+        // Headroom is left for the claim and the other workers on this pool.
+        assert_eq!(concurrency_within_pool(100, 32), 30);
+        // A request that already fits is untouched.
+        assert_eq!(concurrency_within_pool(4, 32), 4);
+        // Never zero, however small the pool: that would stall the scheduler.
+        assert_eq!(concurrency_within_pool(8, 1), 1);
+        assert_eq!(concurrency_within_pool(8, 2), 1);
     }
 
     #[test]

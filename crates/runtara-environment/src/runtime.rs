@@ -62,30 +62,47 @@ use crate::wake_scheduler::{WakeScheduler, WakeSchedulerConfig, default_wake_con
 /// that fills its batch is followed immediately by the next one — so it bounds
 /// wake *latency* for an idle system, not wake throughput.
 fn wake_poll_interval_from_env() -> Duration {
-    let ms = std::env::var("RUNTARA_WAKE_POLL_INTERVAL_MS")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .filter(|ms| *ms > 0)
-        .unwrap_or(5_000);
-    Duration::from_millis(ms)
+    wake_poll_interval_from_raw(
+        std::env::var("RUNTARA_WAKE_POLL_INTERVAL_MS")
+            .ok()
+            .as_deref(),
+    )
 }
 
 /// Instances claimed per wake poll, from `RUNTARA_WAKE_BATCH_SIZE`
 /// (default 200).
 fn wake_batch_size_from_env() -> i64 {
-    std::env::var("RUNTARA_WAKE_BATCH_SIZE")
-        .ok()
-        .and_then(|v| v.parse::<i64>().ok())
-        .filter(|n| *n > 0)
-        .unwrap_or(200)
+    wake_batch_size_from_raw(std::env::var("RUNTARA_WAKE_BATCH_SIZE").ok().as_deref())
 }
 
 /// Concurrent relaunches within a wake batch, from `RUNTARA_WAKE_CONCURRENCY`
 /// (default: eight per core, see [`default_wake_concurrency`]).
 fn wake_concurrency_from_env() -> usize {
-    std::env::var("RUNTARA_WAKE_CONCURRENCY")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
+    wake_concurrency_from_raw(std::env::var("RUNTARA_WAKE_CONCURRENCY").ok().as_deref())
+}
+
+// The parsing halves are split out so they can be tested without mutating
+// process-global environment state, which is shared by every test in the
+// binary. Each rejects a non-positive or unparseable value rather than
+// honouring it: a zero interval would busy-spin, and a zero batch or
+// concurrency would stop the scheduler entirely.
+
+fn wake_poll_interval_from_raw(raw: Option<&str>) -> Duration {
+    Duration::from_millis(
+        raw.and_then(|v| v.parse::<u64>().ok())
+            .filter(|ms| *ms > 0)
+            .unwrap_or(5_000),
+    )
+}
+
+fn wake_batch_size_from_raw(raw: Option<&str>) -> i64 {
+    raw.and_then(|v| v.parse::<i64>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(200)
+}
+
+fn wake_concurrency_from_raw(raw: Option<&str>) -> usize {
+    raw.and_then(|v| v.parse::<usize>().ok())
         .filter(|n| *n > 0)
         .unwrap_or_else(default_wake_concurrency)
 }
@@ -843,6 +860,53 @@ mod tests {
         // only the idle wait, so a larger batch costs nothing when idle.
         assert_eq!(builder.wake_batch_size, 200);
         assert!(builder.wake_concurrency >= 1);
+    }
+
+    #[test]
+    fn wake_poll_interval_parsing() {
+        assert_eq!(
+            wake_poll_interval_from_raw(None),
+            Duration::from_secs(5),
+            "unset falls back to the documented default"
+        );
+        assert_eq!(
+            wake_poll_interval_from_raw(Some("250")),
+            Duration::from_millis(250)
+        );
+        // A zero or malformed interval would turn the loop into a busy wait.
+        assert_eq!(
+            wake_poll_interval_from_raw(Some("0")),
+            Duration::from_secs(5)
+        );
+        assert_eq!(
+            wake_poll_interval_from_raw(Some("not-a-number")),
+            Duration::from_secs(5)
+        );
+    }
+
+    #[test]
+    fn wake_batch_size_parsing() {
+        assert_eq!(wake_batch_size_from_raw(None), 200);
+        assert_eq!(wake_batch_size_from_raw(Some("50")), 50);
+        // Zero or negative would claim nothing, stalling the scheduler.
+        assert_eq!(wake_batch_size_from_raw(Some("0")), 200);
+        assert_eq!(wake_batch_size_from_raw(Some("-5")), 200);
+        assert_eq!(wake_batch_size_from_raw(Some("")), 200);
+    }
+
+    #[test]
+    fn wake_concurrency_parsing() {
+        assert_eq!(wake_concurrency_from_raw(Some("7")), 7);
+        // Zero would deadlock the semaphore; fall back to the cored default.
+        assert_eq!(
+            wake_concurrency_from_raw(Some("0")),
+            default_wake_concurrency()
+        );
+        assert_eq!(
+            wake_concurrency_from_raw(Some("nope")),
+            default_wake_concurrency()
+        );
+        assert_eq!(wake_concurrency_from_raw(None), default_wake_concurrency());
     }
 
     #[test]
