@@ -733,34 +733,12 @@ pub async fn handle_start_instance(
                 warn!(error = %e, "Failed to register container (instance still running)");
             }
 
-            // Promote to `running` — but only while the run has not already
-            // moved on. `launch_detached` returns as soon as the run is
-            // spawned, so a workflow that parks immediately (a `Delay`, or a
-            // `WaitForSignal` with no timeout) can already be `suspended` by
-            // the time we get here. Writing `running` unconditionally would
-            // resurrect it with no live process behind it, and the container
-            // monitor spawned just below would fail it as a crash one poll
-            // later.
-            match state
-                .persistence
-                .mark_instance_started(&instance_id, chrono::Utc::now())
-                .await
-            {
-                Ok(true) => {}
-                Ok(false) => {
-                    debug!(
-                        instance_id = %instance_id,
-                        "Run already advanced past launch; leaving its status alone"
-                    );
-                }
-                Err(e) => {
-                    error!(
-                        error = %e,
-                        instance_id = %instance_id,
-                        "Failed to update instance status to running (instance launched but status may be incorrect)"
-                    );
-                }
-            }
+            // The runner promotes the instance to `running` from inside the run
+            // task, before the guest starts, on both the invoke and the legacy
+            // branch. Stamping it again here would be a second write of the
+            // same fact, and a racy one: `launch_detached` returns as soon as
+            // the run is spawned, so a workflow that parks immediately can
+            // already be `suspended` by the time this line is reached.
 
             // Spawn background task to monitor container and process output when done
             spawn_container_monitor(

@@ -712,6 +712,13 @@ impl Runner for EmbeddedWasmRunner {
                             .await
                         {
                             Ok(pre) => {
+                                // Same reason the invoke branch does it: the
+                                // guest must be `running` before it starts, or
+                                // a terminal event it reports is dropped by the
+                                // `if_running` guard. Doing it on both branches
+                                // is what lets the launching caller stop
+                                // stamping it a second time after the fact.
+                                mark_running(persistence.as_ref(), &instance_id).await;
                                 let run = executor.execute(&pre, spec).await;
                                 {
                                     let mut guard = metrics_for_task.lock().await;

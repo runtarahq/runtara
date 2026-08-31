@@ -535,21 +535,31 @@ impl Persistence for PostgresPersistence {
     ) -> Result<bool, CoreError> {
         let instance_id = params.instance_id.to_string();
         let target_status = params.status.to_string();
-        let previous_was_terminal = match fetch_instance_status(&self.pool, &instance_id).await {
-            Ok(Some(status)) => is_recorded_terminal_status(&status),
-            Ok(None) => false,
-            Err(error) => {
-                tracing::warn!(
-                    instance_id = %instance_id,
-                    error = %error,
-                    "Could not read previous instance status before OTLP metric recording"
-                );
-                false
+        // Only read the previous status when it can change the outcome. It exists
+        // to stop a completion metric being recorded twice, and that recording
+        // is gated on the TARGET status being one we record — so for every
+        // other transition, a park above all, the read was fetched and thrown
+        // away. A launch that parks pays for it once per instance.
+        let records_metric = is_recorded_terminal_status(&target_status);
+        let previous_was_terminal = if records_metric {
+            match fetch_instance_status(&self.pool, &instance_id).await {
+                Ok(Some(status)) => is_recorded_terminal_status(&status),
+                Ok(None) => false,
+                Err(error) => {
+                    tracing::warn!(
+                        instance_id = %instance_id,
+                        error = %error,
+                        "Could not read previous instance status before OTLP metric recording"
+                    );
+                    false
+                }
             }
+        } else {
+            false
         };
 
         let applied = Self::op_complete_instance_unified(&self.pool, params).await?;
-        if applied && is_recorded_terminal_status(&target_status) && !previous_was_terminal {
+        if applied && records_metric && !previous_was_terminal {
             record_completion_from_db(&self.pool, &instance_id).await;
         }
 

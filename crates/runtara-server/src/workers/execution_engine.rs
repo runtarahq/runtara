@@ -1085,22 +1085,15 @@ impl ExecutionEngine {
             ExecutionError::NotConnected("Runtime client not configured".to_string())
         })?;
 
-        // Resolve version if not specified
-        let version = match event.version {
-            Some(v) => v,
-            None => {
-                self.resolve_version(&event.tenant_id, &event.workflow_id, None)
-                    .await?
-            }
-        };
-
-        // Ensure workflow is compiled (non-blocking: returns NotCompiled for
-        // retry). The readiness check reads the definition, so the execution
-        // timeout comes back with it instead of costing a second fetch of the
-        // same row.
-        let execution_timeout_secs = self
-            .ensure_compiled(&event.tenant_id, &event.workflow_id, version)
-            .await?
+        // Resolve the version and check compilation together. Both live in the
+        // server database and hang off the same workflow, so an unversioned
+        // event costs one statement rather than a read of `workflows` followed
+        // by a read of its definition. The readiness check reads that
+        // definition anyway, so the execution timeout rides along too.
+        let (version, execution_timeout_secs) = self
+            .ensure_compiled(&event.tenant_id, &event.workflow_id, event.version)
+            .await?;
+        let execution_timeout_secs = execution_timeout_secs
             .map(|secs| secs as u32)
             .unwrap_or(3600); // Default 1 hour timeout
 
@@ -2113,22 +2106,27 @@ impl ExecutionEngine {
         &self,
         tenant_id: &str,
         workflow_id: &str,
-        version: i32,
-    ) -> Result<Option<i32>, ExecutionError> {
-        let status = self
+        version: Option<i32>,
+    ) -> Result<(i32, Option<i32>), ExecutionError> {
+        let (resolved, status) = self
             .workflow_repo
             .ensure_compilation_ready(tenant_id, workflow_id, version)
             .await
             .map_err(|e| {
                 ExecutionError::DatabaseError(format!("Failed to check compilation: {}", e))
             })?;
+        let version = resolved.or(version).ok_or_else(|| {
+            ExecutionError::WorkflowNotFound(format!(
+                "No runnable version for workflow '{workflow_id}'"
+            ))
+        })?;
 
         if let CompilationStatus::Ready {
             execution_timeout_seconds,
             ..
         } = status
         {
-            return Ok(execution_timeout_seconds);
+            return Ok((version, execution_timeout_seconds));
         }
 
         // A terminal failure will repeat for as long as the definition is
@@ -2243,8 +2241,9 @@ impl ExecutionEngine {
     ) -> Result<(), ExecutionError> {
         let status = self
             .workflow_repo
-            .ensure_compilation_ready(tenant_id, workflow_id, version)
+            .ensure_compilation_ready(tenant_id, workflow_id, Some(version))
             .await
+            .map(|(_, status)| status)
             .map_err(|e| {
                 ExecutionError::DatabaseError(format!("Failed to check compilation: {}", e))
             })?;
@@ -2355,8 +2354,9 @@ impl ExecutionEngine {
 
         let status_after = self
             .workflow_repo
-            .ensure_compilation_ready(tenant_id, workflow_id, version)
+            .ensure_compilation_ready(tenant_id, workflow_id, Some(version))
             .await
+            .map(|(_, status)| status)
             .map_err(|e| {
                 ExecutionError::DatabaseError(format!("Failed to check compilation: {}", e))
             })?;
