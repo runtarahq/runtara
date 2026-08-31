@@ -1919,15 +1919,7 @@ impl WorkflowRepository {
         .fetch_optional(&self.pool)
         .await?;
 
-        Ok(row.and_then(|r| {
-            r.definition
-                .get("executionTimeoutSeconds")
-                .and_then(|v| {
-                    v.as_i64()
-                        .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
-                })
-                .map(|v| v as i32)
-        }))
+        Ok(row.and_then(|r| execution_timeout_from_definition(&r.definition)))
     }
 
     /// Get workflow names for multiple workflow IDs in bulk
@@ -2086,6 +2078,7 @@ impl WorkflowRepository {
                     return Ok(CompilationStatus::Ready {
                         translated_path: translated_path.unwrap_or_default(),
                         registered_image_id: registered_image_id.unwrap_or_default(),
+                        execution_timeout_seconds: execution_timeout_from_definition(&definition),
                     });
                 }
 
@@ -2176,6 +2169,20 @@ pub fn is_workflow_authoring_error(error_message: &str) -> bool {
     }
 }
 
+/// Read `executionTimeoutSeconds` out of a stored workflow definition.
+///
+/// Shared by `get_execution_timeout` and the compilation check so the two
+/// cannot disagree about how the field is spelled or coerced.
+fn execution_timeout_from_definition(definition: &Value) -> Option<i32> {
+    definition
+        .get("executionTimeoutSeconds")
+        .and_then(|v| {
+            v.as_i64()
+                .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+        })
+        .map(|v| v as i32)
+}
+
 /// Compilation readiness status returned by
 /// [`WorkflowRepository::ensure_compilation_ready`].
 #[derive(Debug, Clone)]
@@ -2186,6 +2193,10 @@ pub enum CompilationStatus {
         translated_path: String,
         /// Image id registered in runtara-environment.
         registered_image_id: String,
+        /// `executionTimeoutSeconds` from the definition this check already
+        /// read, so a launch does not fetch the same definition again just to
+        /// look at one field. `None` when the graph does not set one.
+        execution_timeout_seconds: Option<i32>,
     },
     /// Previous compilation attempt recorded a failure.
     Failed {

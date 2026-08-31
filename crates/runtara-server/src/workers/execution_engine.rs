@@ -1015,20 +1015,15 @@ impl ExecutionEngine {
             }
         };
 
-        // Fetch execution timeout from executionGraph (if set)
+        // Ensure workflow is compiled (non-blocking: returns NotCompiled for
+        // retry). The readiness check reads the definition, so the execution
+        // timeout comes back with it instead of costing a second fetch of the
+        // same row.
         let execution_timeout_secs = self
-            .workflow_repo
-            .get_execution_timeout(&event.tenant_id, &event.workflow_id, version)
-            .await
-            .map_err(|e| {
-                ExecutionError::DatabaseError(format!("Failed to get execution timeout: {}", e))
-            })?
+            .ensure_compiled(&event.tenant_id, &event.workflow_id, version)
+            .await?
             .map(|secs| secs as u32)
             .unwrap_or(3600); // Default 1 hour timeout
-
-        // Ensure workflow is compiled (non-blocking: returns NotCompiled for retry)
-        self.ensure_compiled(&event.tenant_id, &event.workflow_id, version)
-            .await?;
 
         // Inputs are already in canonical format {"data": {...}, "variables": {...}}
         // from the API layer - inject _workflow_id for cache key isolation
@@ -2030,12 +2025,17 @@ impl ExecutionEngine {
 
     /// Ensure the workflow is compiled (non-blocking: queues compilation if
     /// needed and returns `NotCompiled` for the caller to retry).
+    ///
+    /// Returns the definition's `executionTimeoutSeconds` when it is ready:
+    /// the readiness check already reads that definition, so a caller that
+    /// needs the timeout should take it from here rather than fetching the
+    /// same row again.
     async fn ensure_compiled(
         &self,
         tenant_id: &str,
         workflow_id: &str,
         version: i32,
-    ) -> Result<(), ExecutionError> {
+    ) -> Result<Option<i32>, ExecutionError> {
         let status = self
             .workflow_repo
             .ensure_compilation_ready(tenant_id, workflow_id, version)
@@ -2044,8 +2044,12 @@ impl ExecutionEngine {
                 ExecutionError::DatabaseError(format!("Failed to check compilation: {}", e))
             })?;
 
-        if matches!(status, CompilationStatus::Ready { .. }) {
-            return Ok(());
+        if let CompilationStatus::Ready {
+            execution_timeout_seconds,
+            ..
+        } = status
+        {
+            return Ok(execution_timeout_seconds);
         }
 
         // A terminal failure will repeat for as long as the definition is
