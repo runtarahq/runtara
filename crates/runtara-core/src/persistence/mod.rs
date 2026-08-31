@@ -488,6 +488,15 @@ pub trait Persistence: Send + Sync {
         created_before: Option<DateTime<Utc>>,
     ) -> Result<i64, CoreError>;
 
+    /// Append an event to an instance's timeline.
+    ///
+    /// `event.created_at` is the time the emitter observed, and an
+    /// implementation must store it verbatim — never substituting its own
+    /// write time by defaulting the column. The debug views order events by
+    /// this column and derive every step duration from the delta between a
+    /// step's paired start and end events, so a receive-time stamp silently
+    /// reorders the timeline and rewrites every duration into the interval
+    /// between two writes.
     async fn insert_event(&self, event: &EventRecord) -> Result<(), CoreError>;
 
     async fn insert_signal(
