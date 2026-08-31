@@ -438,6 +438,152 @@ async fn test_start_instance_replay_is_deduplicated_without_second_launch() {
     cleanup(&pool, Some(&instance_id), Some(&image_id)).await;
 }
 
+/// A first start hands the runner the same bytes it just stored.
+///
+/// The stored envelope is *enriched* (image variable defaults merged, system
+/// variables stripped), so the guest must receive that, not the raw request
+/// input. Passing the bytes through instead of reading them straight back is
+/// only safe while those two are the same thing, which is what this pins.
+#[tokio::test]
+async fn test_start_instance_hands_runner_the_stored_input() {
+    skip_if_no_db!();
+    let pool = get_test_pool().await;
+
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let runner = Arc::new(MockRunner::never_completing());
+    let persistence = Arc::new(PostgresPersistence::new(pool.clone()));
+    let state = EnvironmentHandlerState::new(
+        pool.clone(),
+        persistence.clone(),
+        runner.clone(),
+        "127.0.0.1:8001".to_string(),
+        temp_dir.path().to_path_buf(),
+    );
+
+    let image_id = Uuid::new_v4().to_string();
+    let image_name = format!("test-image-input-passthrough-{image_id}");
+    sqlx::query(
+        r#"
+        INSERT INTO images (image_id, tenant_id, name, description, binary_path)
+        VALUES ($1, 'test-tenant', $2, 'desc', $3)
+        "#,
+    )
+    .bind(&image_id)
+    .bind(&image_name)
+    .bind(test_artifact_path())
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let instance_id = format!("input-passthrough-{}", Uuid::new_v4());
+    let response = handle_start_instance(
+        &state,
+        StartInstanceRequest {
+            image_id: image_id.clone(),
+            tenant_id: "test-tenant".to_string(),
+            instance_id: Some(instance_id.clone()),
+            // `_internal` must be stripped by enrichment, so a passthrough of
+            // the raw request input would be visibly wrong here.
+            input: Some(serde_json::json!({
+                "data": {"hello": "world"},
+                "variables": {"keep": 1, "_internal": "secret"}
+            })),
+            timeout_seconds: Some(60),
+            env: std::collections::HashMap::new(),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(response.success, "start failed: {:?}", response.error);
+
+    let stored = persistence
+        .get_instance(&instance_id)
+        .await
+        .unwrap()
+        .expect("instance row")
+        .input
+        .expect("input should have been stored");
+
+    let launched = runner
+        .last_launch()
+        .expect("runner should have been launched");
+    assert_eq!(
+        launched.prepersisted_input.as_deref(),
+        Some(stored.as_slice()),
+        "the runner must get exactly the bytes that were persisted"
+    );
+
+    let handed: serde_json::Value = serde_json::from_slice(&stored).unwrap();
+    assert!(
+        handed["variables"].get("_internal").is_none(),
+        "system variables must be stripped before the guest sees the input"
+    );
+    assert_eq!(handed["variables"]["keep"], serde_json::json!(1));
+
+    cleanup(&pool, Some(&instance_id), Some(&image_id)).await;
+}
+
+/// A resume must NOT carry prepersisted input.
+///
+/// Its request input is a relaunch placeholder, so the runner has to go back to
+/// the store for the instance's real envelope. Setting this field on the resume
+/// path would silently feed a woken workflow the placeholder instead.
+#[tokio::test]
+async fn test_resume_instance_does_not_prepersist_placeholder_input() {
+    skip_if_no_db!();
+    let pool = get_test_pool().await;
+
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let runner = Arc::new(MockRunner::never_completing());
+    let persistence = Arc::new(PostgresPersistence::new(pool.clone()));
+    let state = EnvironmentHandlerState::new(
+        pool.clone(),
+        persistence,
+        runner.clone(),
+        "127.0.0.1:8001".to_string(),
+        temp_dir.path().to_path_buf(),
+    );
+
+    let image_id = Uuid::new_v4().to_string();
+    let image_name = format!("test-image-resume-placeholder-{image_id}");
+    sqlx::query(
+        r#"
+        INSERT INTO images (image_id, tenant_id, name, description, binary_path)
+        VALUES ($1, 'test-tenant', $2, 'desc', $3)
+        "#,
+    )
+    .bind(&image_id)
+    .bind(&image_name)
+    .bind(test_artifact_path())
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let instance_id = format!("resume-placeholder-{}", Uuid::new_v4());
+    create_test_instance(&pool, &instance_id, "test-tenant", &image_id).await;
+    update_test_instance_status(&pool, &instance_id, "suspended", None).await;
+
+    let resumed = handle_resume_instance(
+        &state,
+        ResumeInstanceRequest {
+            instance_id: instance_id.clone(),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(resumed.success, "resume failed: {:?}", resumed.error);
+
+    let launched = runner
+        .last_launch()
+        .expect("runner should have been launched");
+    assert!(
+        launched.prepersisted_input.is_none(),
+        "a resume must re-read the stored envelope, not carry its placeholder input"
+    );
+
+    cleanup(&pool, Some(&instance_id), Some(&image_id)).await;
+}
+
 /// A replay must stay deduplicated even if the artifact has since vanished.
 ///
 /// The start was already accepted while the wasm was on disk, and the instance
@@ -1268,6 +1414,7 @@ async fn test_spawn_container_monitor_timeout_enforcement() {
             timeout: Duration::from_millis(100),
             checkpoint_id: None,
             env: std::collections::HashMap::new(),
+            prepersisted_input: None,
         })
         .await
         .expect("Failed to launch detached");
@@ -1369,6 +1516,7 @@ async fn test_spawn_container_monitor_no_timeout_on_quick_completion() {
             timeout: Duration::from_secs(10), // Long timeout
             checkpoint_id: None,
             env: std::collections::HashMap::new(),
+            prepersisted_input: None,
         })
         .await
         .expect("Failed to launch detached");
@@ -1455,6 +1603,7 @@ async fn test_spawn_container_monitor_timeout_race_condition() {
             timeout: Duration::from_millis(200),
             checkpoint_id: None,
             env: std::collections::HashMap::new(),
+            prepersisted_input: None,
         })
         .await
         .expect("Failed to launch detached");
@@ -1578,6 +1727,7 @@ async fn test_wait_for_exit_default_impl_returns_on_not_running() {
             timeout: Duration::from_secs(10),
             checkpoint_id: None,
             env: std::collections::HashMap::new(),
+            prepersisted_input: None,
         })
         .await
         .expect("Failed to launch detached");

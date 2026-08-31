@@ -419,6 +419,9 @@ impl WakeScheduler {
             input: serde_json::json!({}), // Input was already consumed on first run
             timeout,
             checkpoint_id,
+            // A wake must re-read the stored envelope: the input built here
+            // is a relaunch placeholder, not the instance's real input.
+            prepersisted_input: None,
             env: stored_env, // Restore env from initial launch
         };
 

@@ -91,6 +91,43 @@ macro_rules! impl_instance_ops {
                 Ok(result.rows_affected() == 1)
             }
 
+            /// SELECT a single instance by id, WITHOUT the `input` BLOB.
+            ///
+            /// Identical to [`Self::op_get_instance`] minus that one column, so
+            /// the returned record always has `input: None` (the field is
+            /// `#[sqlx(default)]`). Every other column is still selected, which
+            /// is deliberate: dropping one that has no default would leave a
+            /// caller silently reading a zero value instead of the stored one.
+            ///
+            /// For the callers that only want status/tenant/recovery state this
+            /// avoids dragging the whole launch payload, which for a big input
+            /// means a TOAST read on every call.
+            pub(crate) async fn op_get_instance_meta(
+                pool: &$Pool,
+                instance_id: &str,
+            ) -> ::core::result::Result<
+                ::core::option::Option<$crate::persistence::InstanceRecord>,
+                $crate::error::CoreError,
+            > {
+                use $crate::persistence::dialect::Dialect;
+                let p1 = <$Dialect>::placeholder(1);
+                let status_col = <$Dialect>::select_status_col();
+                let termination_col = <$Dialect>::select_termination_col();
+                let sql = format!(
+                    "SELECT instance_id, tenant_id, definition_version, \
+                            {status_col}, {termination_col}, checkpoint_id, attempt, max_attempts, \
+                            created_at, started_at, finished_at, output, error, sleep_until, \
+                            recovery_attempts, recovery_marker \
+                     FROM instances \
+                     WHERE instance_id = {p1}"
+                );
+                let record = ::sqlx::query_as::<_, $crate::persistence::InstanceRecord>(&sql)
+                    .bind(instance_id)
+                    .fetch_optional(pool)
+                    .await?;
+                Ok(record)
+            }
+
             /// SELECT a single instance by id, including the `input` BLOB.
             pub(crate) async fn op_get_instance(
                 pool: &$Pool,

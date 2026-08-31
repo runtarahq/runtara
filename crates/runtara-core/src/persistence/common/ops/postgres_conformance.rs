@@ -81,6 +81,63 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
         "a winning claim must actually insert the row"
     );
 
+    // --- get_instance_meta drops the input and nothing else -----------------
+    // The projection exists to keep status checks off the launch payload, so
+    // the contract is narrow: `input` comes back None, every other column comes
+    // back exactly as the full read gives it. A column quietly falling to its
+    // Default here would be a silent data bug at the call sites that swapped.
+    let payload = b"{\"data\":{\"conformance\":true}}".to_vec();
+    backend
+        .store_instance_input(&instance_id, &payload)
+        .await
+        .expect("store_instance_input failed");
+
+    let full = backend
+        .get_instance(&instance_id)
+        .await
+        .expect("get_instance failed")
+        .expect("instance should exist");
+    assert_eq!(
+        full.input.as_deref(),
+        Some(payload.as_slice()),
+        "the full read must still return the stored input"
+    );
+
+    let meta = backend
+        .get_instance_meta(&instance_id)
+        .await
+        .expect("get_instance_meta failed")
+        .expect("instance should exist");
+    assert!(
+        meta.input.is_none(),
+        "get_instance_meta must not return the input blob"
+    );
+    assert_eq!(meta.instance_id, full.instance_id);
+    assert_eq!(meta.tenant_id, full.tenant_id);
+    assert_eq!(meta.definition_version, full.definition_version);
+    assert_eq!(meta.status, full.status);
+    assert_eq!(meta.termination_reason, full.termination_reason);
+    assert_eq!(meta.checkpoint_id, full.checkpoint_id);
+    assert_eq!(meta.attempt, full.attempt);
+    assert_eq!(meta.max_attempts, full.max_attempts);
+    assert_eq!(meta.created_at, full.created_at);
+    assert_eq!(meta.started_at, full.started_at);
+    assert_eq!(meta.finished_at, full.finished_at);
+    assert_eq!(meta.output, full.output);
+    assert_eq!(meta.error, full.error);
+    assert_eq!(meta.sleep_until, full.sleep_until);
+    assert_eq!(meta.recovery_attempts, full.recovery_attempts);
+    assert_eq!(meta.recovery_marker, full.recovery_marker);
+
+    assert!(
+        backend
+            .get_instance_meta("no-such-instance-for-conformance")
+            .await
+            .expect("get_instance_meta on a missing id should not error")
+            .is_none(),
+        "get_instance_meta must report a missing instance as None"
+    );
+
     // --- update status → running -------------------------------------------
     backend
         .update_instance_status(&instance_id, "running", Some(Utc::now()))

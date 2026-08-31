@@ -23,7 +23,12 @@ pub async fn handle_get_instance_status(
 ) -> Result<GetInstanceStatusResponse> {
     debug!("Getting instance status");
 
-    let instance = state.persistence.get_instance(&request.instance_id).await?;
+    // Status never includes the launch input, so keep the blob out of a call
+    // the guest and the API both make often.
+    let instance = state
+        .persistence
+        .get_instance_meta(&request.instance_id)
+        .await?;
 
     match instance {
         Some(inst) => {

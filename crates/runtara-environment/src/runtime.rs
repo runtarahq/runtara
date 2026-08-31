@@ -635,7 +635,7 @@ impl EnvironmentRuntime {
     ) -> Vec<crate::container_registry::ContainerInfo> {
         let mut still_active = Vec::with_capacity(candidates.len());
         for info in candidates {
-            match persistence.get_instance(&info.instance_id).await {
+            match persistence.get_instance_meta(&info.instance_id).await {
                 Ok(Some(inst))
                     if matches!(
                         inst.status.as_str(),
@@ -765,7 +765,7 @@ async fn recover_orphaned_containers(pool: &PgPool, persistence: &dyn Persistenc
         let instance_id = &container.instance_id;
 
         // The guest died with the previous process — check Core status.
-        match persistence.get_instance(instance_id).await {
+        match persistence.get_instance_meta(instance_id).await {
             Ok(Some(inst)) => {
                 let status = inst.status.as_str();
                 if matches!(status, "completed" | "failed" | "cancelled" | "suspended") {

@@ -399,7 +399,7 @@ async fn existing_start_response(
     tenant_id: &str,
     image_id: &str,
 ) -> Result<Option<StartInstanceResponse>> {
-    let Some(existing) = state.persistence.get_instance(instance_id).await? else {
+    let Some(existing) = state.persistence.get_instance_meta(instance_id).await? else {
         return Ok(None);
     };
 
@@ -660,14 +660,20 @@ pub async fn handle_start_instance(
         });
     }
 
-    // Store input data via Persistence trait
-    if let Some(ref input_data) = input_bytes
-        && let Err(e) = state
+    // Store input data via Persistence trait. On success the bytes are handed
+    // straight to the runner as well, so the launch does not read back what it
+    // just wrote. Only on success: if the write failed the store is the source
+    // of truth for what this run should see, exactly as before.
+    let mut prepersisted_input = None;
+    if let Some(ref input_data) = input_bytes {
+        match state
             .persistence
             .store_instance_input(&instance_id, input_data)
             .await
-    {
-        warn!(error = %e, "Failed to store instance input (non-fatal)");
+        {
+            Ok(()) => prepersisted_input = Some(input_data.clone()),
+            Err(e) => warn!(error = %e, "Failed to store instance input (non-fatal)"),
+        }
     }
 
     // Resolve the effective execution timeout once, so the value persisted for
@@ -708,6 +714,7 @@ pub async fn handle_start_instance(
         timeout,
         checkpoint_id: None,
         env: request.env,
+        prepersisted_input,
     };
 
     // Launch via runner (detached)
@@ -1043,6 +1050,9 @@ pub async fn handle_resume_instance(
         input: serde_json::json!({}), // Input was consumed on first run
         timeout,
         checkpoint_id: checkpoint_id.clone(),
+        // A resume must re-read the stored envelope: the input on this
+        // request is a relaunch placeholder, not the instance's real input.
+        prepersisted_input: None,
         env: stored_env, // Restore env from initial launch
     };
 
@@ -1299,7 +1309,7 @@ pub fn spawn_container_monitor(
                     );
                 } else {
                     // Check Core status via the same persistence layer that the SDK writes to.
-                    let current_status = persistence.get_instance(&instance_id).await;
+                    let current_status = persistence.get_instance_meta(&instance_id).await;
                     match current_status {
                         Ok(Some(inst))
                             if matches!(
@@ -1889,7 +1899,7 @@ pub async fn handle_send_signal(
     signal_type: &str,
     payload: Option<&str>,
 ) -> Result<SendSignalOutcome> {
-    let Some(instance) = state.persistence.get_instance(instance_id).await? else {
+    let Some(instance) = state.persistence.get_instance_meta(instance_id).await? else {
         return Ok(SendSignalOutcome::InstanceNotFound);
     };
 
@@ -1933,7 +1943,12 @@ pub async fn handle_send_custom_signal(
     checkpoint_id: &str,
     payload: Option<&str>,
 ) -> Result<SendCustomSignalOutcome> {
-    if state.persistence.get_instance(instance_id).await?.is_none() {
+    if state
+        .persistence
+        .get_instance_meta(instance_id)
+        .await?
+        .is_none()
+    {
         return Ok(SendCustomSignalOutcome::InstanceNotFound);
     }
 
@@ -1969,7 +1984,7 @@ pub async fn handle_send_custom_signal(
 /// stamping `sleep_until` on those would relaunch a replay that runs PAST the
 /// pause, silently auto-resuming a paused instance on any custom signal.
 pub async fn wake_suspended_on_signal(persistence: &dyn Persistence, instance_id: &str) {
-    match persistence.get_instance(instance_id).await {
+    match persistence.get_instance_meta(instance_id).await {
         Ok(Some(inst))
             if inst.status == "suspended"
                 && inst.termination_reason.as_deref()

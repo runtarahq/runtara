@@ -29,6 +29,9 @@ struct MockInstance {
 pub struct MockRunner {
     instances: Arc<Mutex<HashMap<String, MockInstance>>>,
     launch_count: Arc<AtomicU64>,
+    /// Every `launch_detached` call's options, in order, so a test can assert
+    /// on what the handler actually handed the runner.
+    launches: Arc<std::sync::Mutex<Vec<LaunchOptions>>>,
     /// Optional delay to simulate execution time (in milliseconds)
     pub execution_delay_ms: u64,
     /// If true, instances will fail by default
@@ -50,6 +53,7 @@ impl MockRunner {
         Self {
             instances: Arc::new(Mutex::new(HashMap::new())),
             launch_count: Arc::new(AtomicU64::new(0)),
+            launches: Arc::new(std::sync::Mutex::new(Vec::new())),
             execution_delay_ms: 10,
             fail_by_default: false,
             never_complete: false,
@@ -61,6 +65,7 @@ impl MockRunner {
         Self {
             instances: Arc::new(Mutex::new(HashMap::new())),
             launch_count: Arc::new(AtomicU64::new(0)),
+            launches: Arc::new(std::sync::Mutex::new(Vec::new())),
             execution_delay_ms: 10,
             fail_by_default: true,
             never_complete: false,
@@ -74,6 +79,7 @@ impl MockRunner {
         Self {
             instances: Arc::new(Mutex::new(HashMap::new())),
             launch_count: Arc::new(AtomicU64::new(0)),
+            launches: Arc::new(std::sync::Mutex::new(Vec::new())),
             execution_delay_ms: 0,
             fail_by_default: false,
             never_complete: true,
@@ -83,6 +89,15 @@ impl MockRunner {
     /// Number of detached launches accepted by this mock.
     pub fn launch_count(&self) -> u64 {
         self.launch_count.load(Ordering::SeqCst)
+    }
+
+    /// The options passed to the most recent `launch_detached`.
+    pub fn last_launch(&self) -> Option<LaunchOptions> {
+        self.launches
+            .lock()
+            .expect("mock runner launch log poisoned")
+            .last()
+            .cloned()
     }
 
     /// Mark an instance as completed with output.
@@ -159,6 +174,10 @@ impl Runner for MockRunner {
 
     async fn launch_detached(&self, options: &LaunchOptions) -> Result<RunnerHandle> {
         self.launch_count.fetch_add(1, Ordering::SeqCst);
+        self.launches
+            .lock()
+            .expect("mock runner launch log poisoned")
+            .push(options.clone());
         let handle = RunnerHandle {
             handle_id: format!("mock_{}", &options.instance_id[..8]),
             instance_id: options.instance_id.clone(),
@@ -266,6 +285,7 @@ mod tests {
             timeout: std::time::Duration::from_secs(30),
             checkpoint_id: None,
             env: std::collections::HashMap::new(),
+            prepersisted_input: None,
         }
     }
 

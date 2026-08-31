@@ -374,6 +374,22 @@ pub trait Persistence: Send + Sync {
 
     async fn get_instance(&self, instance_id: &str) -> Result<Option<InstanceRecord>, CoreError>;
 
+    /// Like [`Self::get_instance`] but without the `input` blob, for callers
+    /// that only need status/tenant/recovery state.
+    ///
+    /// The returned record always has `input: None` — that is the point, not a
+    /// missing row. Never use this when the input is what you came for; the
+    /// launch payload can be large, and reading it back on every status check
+    /// is what this exists to avoid.
+    ///
+    /// Defaults to the full read so in-memory and test backends need no change.
+    async fn get_instance_meta(
+        &self,
+        instance_id: &str,
+    ) -> Result<Option<InstanceRecord>, CoreError> {
+        self.get_instance(instance_id).await
+    }
+
     async fn update_instance_status(
         &self,
         instance_id: &str,

@@ -475,6 +475,13 @@ impl Persistence for PostgresPersistence {
         Self::op_get_instance(&self.pool, instance_id).await
     }
 
+    async fn get_instance_meta(
+        &self,
+        instance_id: &str,
+    ) -> Result<Option<InstanceRecord>, CoreError> {
+        Self::op_get_instance_meta(&self.pool, instance_id).await
+    }
+
     async fn update_instance_status(
         &self,
         instance_id: &str,
