@@ -312,7 +312,14 @@ pub struct ExecutionEngine {
     #[allow(dead_code)] // Reserved for future in-memory cancellation tracking.
     running_executions: Option<Arc<DashMap<Uuid, CancellationHandle>>>,
     /// Tracks workflows currently starting (prevents single_instance races).
-    starting_workflows: Arc<Mutex<HashSet<(String, String)>>>, // (tenant_id, workflow_id)
+    /// Workflows this process is mid-launch on, shared by every engine in it.
+    ///
+    /// Process-wide on purpose: `single_instance` is decided by checking this
+    /// set and then the runtime, and each trigger worker builds its own engine.
+    /// A per-engine set let two workers both find nothing running, each reserve
+    /// only in its own copy, and launch a second instance of a workflow that
+    /// asked for exactly one.
+    starting_workflows: StartingWorkflows,
     /// Sink for product-analytics execution events.
     events: ProductEventSink,
     /// Short-lived cache of the per-tenant in-flight count used by the
@@ -356,6 +363,21 @@ const REGISTERED_IMAGE_TTL: Duration = Duration::from_secs(5);
 /// `(tenant, workflow, version) -> (resolved at, compiled artifact id)`.
 type RegisteredImageCache = DashMap<(String, String, i32), (Instant, String)>;
 
+/// Workflows currently being launched, keyed by `(tenant_id, workflow_id)`.
+type StartingWorkflows = Arc<Mutex<HashSet<(String, String)>>>;
+
+/// The reservation set shared by every [`ExecutionEngine`] in this process.
+///
+/// Scoped to the process rather than the database because a Runtara server owns
+/// its tenant: one process per tenant, so "this process" and "this tenant's
+/// runtime" are the same boundary. If several replicas were ever to share a
+/// tenant database, this would have to become a database-level lock — the set
+/// cannot see a reservation made in another process.
+fn starting_workflows() -> &'static StartingWorkflows {
+    static STARTING: std::sync::OnceLock<StartingWorkflows> = std::sync::OnceLock::new();
+    STARTING.get_or_init(|| Arc::new(Mutex::new(HashSet::new())))
+}
+
 /// Admissions still unaccounted for after a fresh count landed.
 ///
 /// `subsumed` is the counter as it stood when the query was issued: those
@@ -385,7 +407,7 @@ impl ExecutionEngine {
             runtime_client,
             trigger_stream,
             running_executions,
-            starting_workflows: Arc::new(Mutex::new(HashSet::new())),
+            starting_workflows: Arc::clone(starting_workflows()),
             events,
             concurrency_counts: Arc::new(DashMap::new()),
             concurrency_reservations: Arc::new(DashMap::new()),
@@ -2358,6 +2380,51 @@ impl ExecutionEngine {
 
 #[cfg(test)]
 mod tests {
+
+    /// Two engines in one process must share the single-instance reservation.
+    ///
+    /// Each trigger worker builds its own engine. With a set per engine, two
+    /// workers handling events for the same workflow both find nothing
+    /// running, each reserve in their own copy, and both launch — which is
+    /// precisely what `single_instance` is supposed to prevent.
+    #[tokio::test]
+    async fn engines_share_one_single_instance_reservation_set() {
+        // Lazy pools so this needs no database: nothing here touches one, and
+        // the point is what the constructor wires up, not what it queries.
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://unused/unused")
+            .expect("lazy pool");
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let engine = |pool: PgPool| {
+            ExecutionEngine::new(
+                pool.clone(),
+                Arc::new(WorkflowRepository::new(pool)),
+                None,
+                None,
+                None,
+                ProductEventSink::new(tx.clone()),
+            )
+        };
+
+        // Two engines, exactly as two trigger workers build them.
+        let first = engine(pool.clone());
+        let second = engine(pool);
+
+        let key = (
+            format!("tenant-{}", uuid::Uuid::new_v4()),
+            "workflow-a".to_string(),
+        );
+        first.starting_workflows.lock().await.insert(key.clone());
+
+        assert!(
+            second.starting_workflows.lock().await.contains(&key),
+            "a workflow reserved through one engine must be visible to another; \
+             a set per engine lets two workers each launch a single_instance \
+             workflow believing nothing is running"
+        );
+
+        first.starting_workflows.lock().await.remove(&key);
+    }
 
     /// Admissions the gate has made but the cached count cannot see yet must
     /// keep counting, or a burst inside one TTL is admitted against a figure
