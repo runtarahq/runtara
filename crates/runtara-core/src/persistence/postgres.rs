@@ -748,8 +748,9 @@ impl Persistence for PostgresPersistence {
     async fn claim_sleeping_instances_due(
         &self,
         limit: i64,
+        retry_at: DateTime<Utc>,
     ) -> Result<Vec<InstanceRecord>, CoreError> {
-        Self::op_claim_sleeping_instances_due(&self.pool, limit).await
+        Self::op_claim_sleeping_instances_due(&self.pool, limit, retry_at).await
     }
 
     async fn list_events(
@@ -889,7 +890,10 @@ mod tests {
             let backend = std::sync::Arc::clone(&backend);
             tasks.spawn(async move {
                 backend
-                    .claim_sleeping_instances_due(ROWS as i64)
+                    .claim_sleeping_instances_due(
+                        ROWS as i64,
+                        Utc::now() + chrono::Duration::seconds(120),
+                    )
                     .await
                     .expect("claim failed")
             });
@@ -931,7 +935,10 @@ mod tests {
         // is itself the shape the scheduler is built for.
         for _ in 0..10 {
             let batch = backend
-                .claim_sleeping_instances_due(ROWS as i64)
+                .claim_sleeping_instances_due(
+                    ROWS as i64,
+                    Utc::now() + chrono::Duration::seconds(120),
+                )
                 .await
                 .expect("follow-up claim failed");
             for record in &batch {
@@ -946,19 +953,27 @@ mod tests {
             }
         }
 
-        let mut still_due = Vec::new();
+        // A claim leases rather than clears, so "claimed" is no longer "has no
+        // deadline" — it is "has a deadline in the future". What must not exist
+        // is a row still overdue after the polling loop (nobody took it) or a
+        // row with no deadline at all, which is the unrecoverable state the
+        // lease exists to avoid.
+        let now = Utc::now();
+        let mut stranded = Vec::new();
         for id in &ids {
             let inst = backend.get_instance(id).await.unwrap().unwrap();
-            if inst.sleep_until.is_some() {
-                still_due.push(id.clone());
+            match inst.sleep_until {
+                None => stranded.push(format!("{id} (no deadline)")),
+                Some(due) if due <= now => stranded.push(format!("{id} (still overdue)")),
+                Some(_) => {}
             }
         }
         assert!(
-            still_due.is_empty(),
+            stranded.is_empty(),
             "{} row(s) were skipped and never became claimable again -- stranded, \
              e.g. {:?}",
-            still_due.len(),
-            &still_due[..still_due.len().min(3)]
+            stranded.len(),
+            &stranded[..stranded.len().min(3)]
         );
 
         let _ = backend.delete_instances_batch(&ids).await;

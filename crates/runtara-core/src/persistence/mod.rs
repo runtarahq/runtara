@@ -696,6 +696,13 @@ pub trait Persistence: Send + Sync {
         limit: i64,
     ) -> Result<Vec<InstanceRecord>, CoreError>;
 
+    /// Claim due sleeping instances for waking, leasing them until `retry_at`.
+    ///
+    /// The claim moves `sleep_until` forward rather than clearing it, so a
+    /// caller that dies between claiming and launching does not strand its
+    /// batch: the rows simply become due again when the lease expires. Clearing
+    /// leaves a row `suspended` with no deadline, which is exactly what a
+    /// signal waiter looks like, so no sweep can tell them apart.
     /// Select **and claim** up to `limit` due sleeping instances in one step.
     ///
     /// Every returned record is already claimed — the caller owns it and must
@@ -716,11 +723,14 @@ pub trait Persistence: Send + Sync {
     async fn claim_sleeping_instances_due(
         &self,
         limit: i64,
+        retry_at: DateTime<Utc>,
     ) -> Result<Vec<InstanceRecord>, CoreError> {
         let due = self.get_sleeping_instances_due(limit).await?;
         let mut claimed = Vec::with_capacity(due.len());
         for record in due {
             if self.claim_sleeping_instance(&record.instance_id).await? {
+                self.set_instance_sleep(&record.instance_id, retry_at)
+                    .await?;
                 claimed.push(record);
             }
         }

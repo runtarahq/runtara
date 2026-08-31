@@ -174,6 +174,72 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
         "get_instance_meta must report a missing instance as None"
     );
 
+    // --- claiming a sleeper leases it, it does not clear it -----------------
+    // A claim that cleared `sleep_until` would leave the row `suspended` with
+    // no deadline, which is exactly what a signal waiter looks like. Nothing
+    // could then tell them apart, so a process that died between claiming and
+    // launching would strand its whole batch permanently. Leasing keeps a
+    // deadline on the row so it simply becomes due again.
+    let sleeper = Uuid::new_v4().to_string();
+    backend
+        .register_instance(&sleeper, tenant_id)
+        .await
+        .expect("register sleeper failed");
+    backend
+        .update_instance_status(&sleeper, "suspended", None)
+        .await
+        .expect("suspend sleeper failed");
+    backend
+        .set_instance_sleep(&sleeper, Utc::now() - chrono::Duration::seconds(30))
+        .await
+        .expect("set_instance_sleep failed");
+
+    let lease_until = Utc::now() + chrono::Duration::seconds(120);
+    let claimed = backend
+        .claim_sleeping_instances_due(50, lease_until)
+        .await
+        .expect("claim_sleeping_instances_due failed");
+    assert!(
+        claimed.iter().any(|r| r.instance_id == sleeper),
+        "a due sleeper should be claimed"
+    );
+
+    let leased = backend
+        .get_instance(&sleeper)
+        .await
+        .expect("get_instance failed")
+        .expect("sleeper should exist");
+    assert!(
+        leased.sleep_until.is_some(),
+        "a claim must leave a recovery deadline, not clear it"
+    );
+
+    // Held: it is not offered again while the lease is live.
+    assert!(
+        !backend
+            .get_sleeping_instances_due(50)
+            .await
+            .expect("get_sleeping_instances_due failed")
+            .iter()
+            .any(|r| r.instance_id == sleeper),
+        "a leased claim must not be handed out again while the lease holds"
+    );
+
+    // Expired: the interrupted-wake recovery path. Nothing else runs here, so
+    // this stands in for the process that claimed it never coming back.
+    backend
+        .set_instance_sleep(&sleeper, Utc::now() - chrono::Duration::seconds(1))
+        .await
+        .expect("expire lease failed");
+    let reclaimed = backend
+        .claim_sleeping_instances_due(50, Utc::now() + chrono::Duration::seconds(120))
+        .await
+        .expect("reclaim failed");
+    assert!(
+        reclaimed.iter().any(|r| r.instance_id == sleeper),
+        "once the lease expires the sleeper must become claimable again"
+    );
+
     // --- mark_instance_running: relaunch promotion --------------------------
     // Wake and resume promote from `suspended`, which `mark_instance_started`
     // refuses on purpose, and the original `started_at` has to survive so a run
@@ -582,7 +648,7 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
         .expect("set_instance_sleep failed (batch claim re-arm)");
 
     let claimed_batch = backend
-        .claim_sleeping_instances_due(50)
+        .claim_sleeping_instances_due(50, Utc::now() + chrono::Duration::seconds(120))
         .await
         .expect("claim_sleeping_instances_due failed");
     assert!(
@@ -613,7 +679,7 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     // A second batch call with nothing due must come back empty rather than
     // re-returning an already-claimed row.
     let empty_batch = backend
-        .claim_sleeping_instances_due(50)
+        .claim_sleeping_instances_due(50, Utc::now() + chrono::Duration::seconds(120))
         .await
         .expect("claim_sleeping_instances_due (drained) failed");
     assert!(

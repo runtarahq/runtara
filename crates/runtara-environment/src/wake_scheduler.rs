@@ -40,6 +40,13 @@ pub struct WakeSchedulerConfig {
     pub batch_size: i64,
     /// Maximum wakes launched concurrently within a batch
     pub concurrency: usize,
+    /// How long a claimed instance stays hidden before it becomes due again.
+    ///
+    /// The claim leases rather than clears, so this is the worst-case delay
+    /// before a batch that was claimed by a process that then died gets picked
+    /// up by someone else. It has to comfortably exceed how long a launch
+    /// takes, or a slow launch would be claimed twice.
+    pub claim_lease: Duration,
     /// Core address to pass to instances
     pub core_addr: String,
     /// Data directory
@@ -52,6 +59,7 @@ impl Default for WakeSchedulerConfig {
             poll_interval: Duration::from_secs(5),
             batch_size: 200,
             concurrency: default_wake_concurrency(),
+            claim_lease: Duration::from_secs(300),
             core_addr: "127.0.0.1:8001".to_string(),
             data_dir: std::path::PathBuf::from(".data"),
         }
@@ -236,7 +244,12 @@ impl WakeScheduler {
         // Every record returned is already owned by this caller.
         let sleeping_instances = self
             .persistence
-            .claim_sleeping_instances_due(self.config.batch_size)
+            .claim_sleeping_instances_due(
+                self.config.batch_size,
+                chrono::Utc::now()
+                    + chrono::Duration::from_std(self.config.claim_lease)
+                        .unwrap_or_else(|_| chrono::Duration::seconds(300)),
+            )
             .await
             .map_err(|e| crate::error::Error::Other(format!("Core persistence error: {}", e)))?;
 

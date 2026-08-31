@@ -64,7 +64,12 @@ macro_rules! impl_sleep_ops {
             /// Atomically claim a due sleeping instance for waking.
             ///
             /// Conditional `UPDATE sleep_until = NULL WHERE instance_id = ?
-            /// AND sleep_until IS NOT NULL AND status = 'suspended'`. Returns
+            /// AND sleep_until IS NOT NULL AND sleep_until <= NOW()
+            /// AND status = 'suspended'`. The due check is what keeps this
+            /// exclusive against the batch claim, which leases a row by moving
+            /// its deadline into the future rather than clearing it: without
+            /// it, a non-null deadline reads as unclaimed and this would steal
+            /// a row another waker is already launching. Returns
             /// `true` when this caller won the row (exactly one row updated),
             /// `false` when another waker — or a second Environment sharing this
             /// Core DB — already claimed it (zero rows updated). Because the
@@ -79,10 +84,14 @@ macro_rules! impl_sleep_ops {
             ) -> ::core::result::Result<bool, $crate::error::CoreError> {
                 use $crate::persistence::dialect::Dialect;
                 let p1 = <$Dialect>::placeholder(1);
+                let now = <$Dialect>::NOW;
+                let lhs = <$Dialect>::normalize_timestamp("sleep_until");
+                let rhs = <$Dialect>::normalize_timestamp(now);
                 let sql = format!(
                     "UPDATE instances SET sleep_until = NULL \
                      WHERE instance_id = {p1} \
                        AND sleep_until IS NOT NULL \
+                       AND {lhs} <= {rhs} \
                        AND status = 'suspended'"
                 );
                 let result = ::sqlx::query(&sql)
@@ -143,11 +152,22 @@ macro_rules! impl_sleep_ops {
             /// `op_claim_sleeping_instance` gives per row, obtained once per
             /// batch.
             ///
-            /// `sleep_until` comes back NULL in the returned records, which is
-            /// what it now is: the claim cleared it.
+            /// The claim is a *lease*, not a clear: `sleep_until` moves forward
+            /// to `retry_at` rather than to NULL. A cleared claim is
+            /// unrecoverable — the row is left `suspended` with no deadline,
+            /// which is indistinguishable from a signal waiter, so nothing can
+            /// safely sweep it back and a process that dies between claiming
+            /// and launching strands its whole batch. Moving the deadline
+            /// forward hides the row for the length of the lease and then makes
+            /// it due again on its own.
+            ///
+            /// A successful launch leaves `suspended` behind, so the lease
+            /// never fires for a run that actually started; the scan only
+            /// considers suspended rows.
             pub(crate) async fn op_claim_sleeping_instances_due(
                 pool: &$Pool,
                 limit: i64,
+                retry_at: ::chrono::DateTime<::chrono::Utc>,
             ) -> ::core::result::Result<
                 ::std::vec::Vec<$crate::persistence::InstanceRecord>,
                 $crate::error::CoreError,
@@ -159,8 +179,9 @@ macro_rules! impl_sleep_ops {
                 let now = <$Dialect>::NOW;
                 let lhs = <$Dialect>::normalize_timestamp("sleep_until");
                 let rhs = <$Dialect>::normalize_timestamp(now);
+                let p2 = <$Dialect>::placeholder(2);
                 let sql = format!(
-                    "UPDATE instances SET sleep_until = NULL \
+                    "UPDATE instances SET sleep_until = {p2} \
                      WHERE instance_id IN ( \
                          SELECT instance_id FROM instances \
                          WHERE sleep_until IS NOT NULL \
@@ -176,6 +197,7 @@ macro_rules! impl_sleep_ops {
                 );
                 let records = ::sqlx::query_as::<_, $crate::persistence::InstanceRecord>(&sql)
                     .bind(limit)
+                    .bind(retry_at)
                     .fetch_all(pool)
                     .await?;
                 Ok(records)

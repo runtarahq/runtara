@@ -77,6 +77,18 @@ fn wake_batch_size_from_env() -> i64 {
 
 /// Concurrent relaunches within a wake batch, from `RUNTARA_WAKE_CONCURRENCY`
 /// (default: eight per core, see [`default_wake_concurrency`]).
+/// How long a wake claim is leased for, from `RUNTARA_WAKE_CLAIM_LEASE_SECS`
+/// (default: 300s). A batch claimed by a process that then dies becomes due
+/// again after this long, which is the recovery path for an interrupted wake.
+fn wake_claim_lease_from_env() -> Duration {
+    std::env::var("RUNTARA_WAKE_CLAIM_LEASE_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|secs| *secs > 0)
+        .map(Duration::from_secs)
+        .unwrap_or_else(|| Duration::from_secs(300))
+}
+
 fn wake_concurrency_from_env() -> usize {
     wake_concurrency_from_raw(std::env::var("RUNTARA_WAKE_CONCURRENCY").ok().as_deref())
 }
@@ -117,6 +129,7 @@ pub struct EnvironmentRuntimeBuilder {
     wake_poll_interval: Duration,
     wake_batch_size: i64,
     wake_concurrency: usize,
+    wake_claim_lease: Duration,
     request_timeout: Duration,
     cleanup_poll_interval: Duration,
     cleanup_max_age: Duration,
@@ -137,6 +150,7 @@ impl Default for EnvironmentRuntimeBuilder {
             wake_poll_interval: wake_poll_interval_from_env(),
             wake_batch_size: wake_batch_size_from_env(),
             wake_concurrency: wake_concurrency_from_env(),
+            wake_claim_lease: wake_claim_lease_from_env(),
             request_timeout: Duration::from_secs(30),
             cleanup_poll_interval: Duration::from_secs(3600), // 1 hour
             cleanup_max_age: Duration::from_secs(3 * 24 * 3600), // 3 days
@@ -296,6 +310,7 @@ impl EnvironmentRuntimeBuilder {
             wake_poll_interval: self.wake_poll_interval,
             wake_batch_size: self.wake_batch_size,
             wake_concurrency: self.wake_concurrency,
+            wake_claim_lease: self.wake_claim_lease,
             request_timeout: self.request_timeout,
             cleanup_poll_interval: self.cleanup_poll_interval,
             cleanup_max_age: self.cleanup_max_age,
@@ -317,6 +332,7 @@ pub struct EnvironmentRuntimeConfig {
     wake_poll_interval: Duration,
     wake_batch_size: i64,
     wake_concurrency: usize,
+    wake_claim_lease: Duration,
     request_timeout: Duration,
     cleanup_poll_interval: Duration,
     cleanup_max_age: Duration,
@@ -357,6 +373,7 @@ impl EnvironmentRuntimeConfig {
             poll_interval: self.wake_poll_interval,
             batch_size: self.wake_batch_size,
             concurrency: self.wake_concurrency,
+            claim_lease: self.wake_claim_lease,
             core_addr: self.core_addr.clone(),
             data_dir: self.data_dir.clone(),
         };
