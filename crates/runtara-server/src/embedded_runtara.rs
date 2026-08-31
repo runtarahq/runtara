@@ -197,9 +197,19 @@ pub async fn create_runtara_pool()
         }
     };
 
-    info!("Connecting to Runtara database...");
+    // Every instance launch and every wake does several round trips on this
+    // pool, so its size is a direct cap on how fast instances can be started
+    // and resumed — ten connections serialise the whole runtime. Configurable
+    // like the object-model pool already is, and defaulting to something that
+    // does not throttle a multi-core host.
+    let max_connections: u32 = std::env::var("RUNTARA_RUNTIME_MAX_CONNECTIONS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(32);
+    info!(max_connections, "Connecting to Runtara database...");
     let pool = PgPoolOptions::new()
-        .max_connections(10)
+        .max_connections(max_connections)
         .connect(&database_url)
         .await?;
     info!("✓ Connected to Runtara database");
