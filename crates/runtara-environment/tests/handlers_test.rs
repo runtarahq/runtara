@@ -1716,6 +1716,60 @@ async fn claiming_the_registry_row_is_the_monitors_ownership_check() {
     cleanup(&pool, Some(&instance_id), None).await;
 }
 
+/// A cached image read must not outlive a re-registration.
+///
+/// `register` upserts on `(tenant_id, name)`, so recompiling a workflow
+/// rewrites the row that a live image id already points at — a cache keyed by
+/// id would otherwise keep serving the old `binary_path` and the launch would
+/// run the previous artifact.
+#[tokio::test]
+async fn registering_an_image_invalidates_the_cached_read() {
+    skip_if_no_db!();
+    let pool = get_test_pool().await;
+    let registry = runtara_environment::image_registry::ImageRegistry::new(pool.clone());
+
+    let tenant_id = format!("image-cache-tenant-{}", Uuid::new_v4());
+    let image_id = Uuid::new_v4().to_string();
+    let name = format!("cache-probe-{}", Uuid::new_v4());
+    let image = |path: &str| runtara_environment::image_registry::Image {
+        image_id: image_id.clone(),
+        tenant_id: tenant_id.clone(),
+        name: name.clone(),
+        description: None,
+        binary_path: path.to_string(),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+        metadata: None,
+    };
+
+    registry
+        .register(&image("/first/workflow.wasm"))
+        .await
+        .unwrap();
+    assert_eq!(
+        registry.get(&image_id).await.unwrap().unwrap().binary_path,
+        "/first/workflow.wasm"
+    );
+
+    // Recompile: same tenant and name, new artifact. The read above is cached.
+    registry
+        .register(&image("/second/workflow.wasm"))
+        .await
+        .unwrap();
+    assert_eq!(
+        registry.get(&image_id).await.unwrap().unwrap().binary_path,
+        "/second/workflow.wasm",
+        "a re-registration must invalidate the cached row, or a launch runs the \
+         artifact it replaced"
+    );
+
+    sqlx::query("DELETE FROM images WHERE image_id = $1")
+        .bind(&image_id)
+        .execute(&pool)
+        .await
+        .ok();
+}
+
 /// Helper: build a `ContainerInfo` populated with the fields the registry stores.
 fn make_container_info(instance_id: &str, tenant_id: &str, container_id: &str) -> ContainerInfo {
     ContainerInfo {

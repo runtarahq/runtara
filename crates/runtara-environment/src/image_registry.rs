@@ -8,6 +8,8 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use crate::error::Result;
 
@@ -32,6 +34,47 @@ pub struct Image {
     pub metadata: Option<serde_json::Value>,
 }
 
+/// How long a read of the `images` row is reused.
+///
+/// A launch reads its image on the way in, and the same image backs every
+/// launch of that workflow version, so this is one read per burst instead of
+/// one per instance. Short rather than permanent because the row is not truly
+/// immutable: `register` upserts on `(tenant_id, name)`, so re-registering a
+/// workflow rewrites the row a live id already points at.
+const IMAGE_CACHE_TTL: Duration = Duration::from_secs(5);
+
+type ImageCache = std::sync::Mutex<HashMap<String, (Instant, Image)>>;
+
+fn image_cache() -> &'static ImageCache {
+    static CACHE: std::sync::OnceLock<ImageCache> = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+fn cached_image(image_id: &str) -> Option<Image> {
+    let cache = image_cache().lock().ok()?;
+    cache
+        .get(image_id)
+        .filter(|(at, _)| at.elapsed() < IMAGE_CACHE_TTL)
+        .map(|(_, image)| image.clone())
+}
+
+fn cache_image(image_id: &str, image: &Image) {
+    if let Ok(mut cache) = image_cache().lock() {
+        cache.insert(image_id.to_string(), (Instant::now(), image.clone()));
+    }
+}
+
+/// Drop every cached row.
+///
+/// Called on any write to `images`. Registration upserts by name, so the id
+/// whose row it rewrote is not known here — and registration is rare next to
+/// launching, so clearing everything is both correct and cheap.
+fn invalidate_image_cache() {
+    if let Ok(mut cache) = image_cache().lock() {
+        cache.clear();
+    }
+}
+
 /// Image registry - manages available images in the database.
 pub struct ImageRegistry {
     pool: PgPool,
@@ -45,6 +88,7 @@ impl ImageRegistry {
 
     /// Register a new image
     pub async fn register(&self, image: &Image) -> Result<()> {
+        invalidate_image_cache();
         sqlx::query(
             r#"
             INSERT INTO images (
@@ -80,6 +124,10 @@ impl ImageRegistry {
 
     /// Get an image by ID
     pub async fn get(&self, image_id: &str) -> Result<Option<Image>> {
+        if let Some(hit) = cached_image(image_id) {
+            return Ok(Some(hit));
+        }
+
         let row: Option<ImageRow> = sqlx::query_as(
             r#"
             SELECT image_id, tenant_id, name, description, binary_path,
@@ -92,7 +140,11 @@ impl ImageRegistry {
         .fetch_optional(&self.pool)
         .await?;
 
-        Ok(row.map(|r| r.into()))
+        let image: Option<Image> = row.map(|r| r.into());
+        if let Some(image) = &image {
+            cache_image(image_id, image);
+        }
+        Ok(image)
     }
 
     /// Get an image by name for a tenant
@@ -178,6 +230,7 @@ impl ImageRegistry {
 
     /// Delete an image
     pub async fn delete(&self, image_id: &str) -> Result<bool> {
+        invalidate_image_cache();
         let result = sqlx::query("DELETE FROM images WHERE image_id = $1")
             .bind(image_id)
             .execute(&self.pool)
