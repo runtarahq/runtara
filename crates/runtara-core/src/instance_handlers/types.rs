@@ -135,15 +135,6 @@ pub struct CustomSignal {
     pub payload: Vec<u8>,
 }
 
-/// Error info returned with checkpoint responses.
-#[derive(Debug, Clone)]
-pub struct CheckpointErrorInfo {
-    /// Machine-readable error code.
-    pub code: String,
-    /// Human-readable error message.
-    pub message: String,
-}
-
 /// Checkpoint response.
 pub struct CheckpointResponse {
     /// True if checkpoint already existed (resume case).
@@ -154,8 +145,6 @@ pub struct CheckpointResponse {
     pub pending_signal: Option<Signal>,
     /// Pending checkpoint-scoped custom signal.
     pub custom_signal: Option<CustomSignal>,
-    /// Last error from a previous checkpoint attempt.
-    pub last_error: Option<CheckpointErrorInfo>,
 }
 
 /// Get checkpoint request (read-only lookup).

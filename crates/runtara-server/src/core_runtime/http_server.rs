@@ -85,9 +85,6 @@ pub struct CheckpointResponse {
     /// Pending custom signal (WaitForSignal)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub custom_signal: Option<CustomSignalInfo>,
-    /// Last error from a previous checkpoint attempt
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub last_error: Option<ErrorInfo>,
 }
 
 /// Signal information
@@ -104,13 +101,6 @@ pub struct CustomSignalInfo {
     pub checkpoint_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub payload: Option<String>,
-}
-
-/// Error information
-#[derive(Debug, Serialize)]
-pub struct ErrorInfo {
-    pub code: String,
-    pub message: String,
 }
 
 /// Poll signals response
@@ -370,11 +360,6 @@ async fn checkpoint_handler(
                 },
             });
 
-            let last_error = resp.last_error.map(|e| ErrorInfo {
-                code: e.code,
-                message: e.message,
-            });
-
             Json(CheckpointResponse {
                 found: resp.found,
                 state: if resp.state.is_empty() {
@@ -384,7 +369,6 @@ async fn checkpoint_handler(
                 },
                 signal,
                 custom_signal,
-                last_error,
             })
             .into_response()
         }

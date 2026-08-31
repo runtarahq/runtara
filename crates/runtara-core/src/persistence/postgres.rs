@@ -4,8 +4,6 @@
 //!
 //! Provides all durable storage access functions for instances, checkpoints, events, and signals.
 
-#![allow(dead_code)] // Fields and functions used in tests and by handlers
-
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;

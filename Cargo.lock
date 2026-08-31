@@ -4650,7 +4650,6 @@ version = "8.7.8"
 dependencies = [
  "anyhow",
  "async-trait",
- "base64",
  "chrono",
  "opentelemetry",
  "opentelemetry-otlp",

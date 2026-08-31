@@ -68,9 +68,6 @@ pub async fn handle_checkpoint(
             state: existing.state,
             pending_signal,
             custom_signal,
-            // error_history was dropped in core migration 017 — it was created,
-            // indexed and never written. Nothing populates last_error today.
-            last_error: None,
         });
     }
 
@@ -86,7 +83,6 @@ pub async fn handle_checkpoint(
             pending_signal: get_pending_signal(state.persistence.as_ref(), &request.instance_id)
                 .await,
             custom_signal: None,
-            last_error: None,
         });
     }
 
@@ -127,7 +123,6 @@ pub async fn handle_checkpoint(
         state: Vec::new(),
         pending_signal,
         custom_signal,
-        last_error: None,
     })
 }
 

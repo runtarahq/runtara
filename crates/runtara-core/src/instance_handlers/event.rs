@@ -125,86 +125,33 @@ pub async fn handle_instance_event(
             }
         }
         InstanceEventType::EventSuspended => {
-            // Check if this is a suspended-with-sleep event (has sleep data in payload)
-            if let (false, Some(checkpoint_id)) = (event.payload.is_empty(), &event.checkpoint_id) {
-                if let Some(sleep_data) = parse_sleep_payload(&event.payload) {
-                    // Save checkpoint with state from payload
-                    state
-                        .persistence
-                        .save_checkpoint(&event.instance_id, checkpoint_id, &sleep_data.state)
-                        .await?;
+            // A suspend event carries no payload. This arm once sniffed a
+            // `{wake_at_ms, state}` sleep payload out of it, but that producer
+            // disappeared with the move to HTTP-only transport: durable sleep
+            // now goes through the dedicated sleep endpoint, which calls
+            // `set_instance_sleep` directly. Warn if a payload ever turns up so
+            // a stale out-of-tree client is loud rather than silently parking
+            // with no wake armed.
+            if !event.payload.is_empty() {
+                warn!(
+                    payload_len = event.payload.len(),
+                    checkpoint_id = ?event.checkpoint_id,
+                    "Suspend event carried a payload; ignoring it, no wake armed"
+                );
+            }
 
-                    // Update instance checkpoint reference
-                    state
-                        .persistence
-                        .update_instance_checkpoint(&event.instance_id, checkpoint_id)
-                        .await?;
-
-                    // Set sleep_until for wake scheduler
-                    if let Some(wake_at) = sleep_data.wake_at {
-                        state
-                            .persistence
-                            .set_instance_sleep(&event.instance_id, wake_at)
-                            .await?;
-                    }
-
-                    // Mark as suspended with termination_reason "sleeping".
-                    // Guard with `if_running()` to prevent race condition with
-                    // the PID monitor.
-                    let applied = state
-                        .persistence
-                        .complete_instance(
-                            CompleteInstanceParams::new(&event.instance_id, "suspended")
-                                .if_running()
-                                .with_termination("sleeping", None)
-                                .with_checkpoint(checkpoint_id),
-                        )
-                        .await?;
-
-                    if applied {
-                        info!(
-                            checkpoint_id = %checkpoint_id,
-                            wake_at = ?sleep_data.wake_at,
-                            "Instance sleeping until scheduled wake"
-                        );
-                    } else {
-                        warn!(
-                            checkpoint_id = %checkpoint_id,
-                            "Instance sleep event skipped (already in terminal state)"
-                        );
-                    }
-                } else {
-                    // Payload present but not valid sleep data — just suspend.
-                    // Guard with `if_running()` to prevent race condition with
-                    // the PID monitor.
-                    let applied = state
-                        .persistence
-                        .complete_instance(
-                            CompleteInstanceParams::new(&event.instance_id, "suspended")
-                                .if_running(),
-                        )
-                        .await?;
-                    if applied {
-                        info!("Instance suspended (with payload but no valid sleep data)");
-                    } else {
-                        warn!("Instance suspend event skipped (already in terminal state)");
-                    }
-                }
+            // Guard with `if_running()` to prevent race condition with the PID
+            // monitor.
+            let applied = state
+                .persistence
+                .complete_instance(
+                    CompleteInstanceParams::new(&event.instance_id, "suspended").if_running(),
+                )
+                .await?;
+            if applied {
+                info!("Instance suspended");
             } else {
-                // No payload or no checkpoint_id — simple suspend.
-                // Guard with `if_running()` to prevent race condition with the
-                // PID monitor.
-                let applied = state
-                    .persistence
-                    .complete_instance(
-                        CompleteInstanceParams::new(&event.instance_id, "suspended").if_running(),
-                    )
-                    .await?;
-                if applied {
-                    info!("Instance suspended");
-                } else {
-                    warn!("Instance suspend event skipped (already in terminal state)");
-                }
+                warn!("Instance suspend event skipped (already in terminal state)");
             }
         }
         InstanceEventType::EventCustom => {
@@ -264,36 +211,6 @@ pub async fn handle_retry_attempt(
     debug!("Retry attempt recorded");
 
     Ok(())
-}
-
-/// Parsed sleep data from a suspended event payload.
-struct SleepPayload {
-    wake_at: Option<DateTime<Utc>>,
-    state: Vec<u8>,
-}
-
-/// Parse sleep data from a suspended event payload.
-///
-/// The SDK sends JSON with:
-/// - `wake_at_ms`: Unix timestamp in milliseconds for when to wake
-/// - `state`: Base64-encoded checkpoint state
-fn parse_sleep_payload(payload: &[u8]) -> Option<SleepPayload> {
-    use base64::Engine;
-
-    // Try to parse as JSON
-    let json: serde_json::Value = serde_json::from_slice(payload).ok()?;
-
-    // Extract wake_at_ms
-    let wake_at_ms = json.get("wake_at_ms")?.as_i64()?;
-    let wake_at = DateTime::from_timestamp_millis(wake_at_ms);
-
-    // Extract and decode state
-    let state_b64 = json.get("state")?.as_str()?;
-    let state = base64::engine::general_purpose::STANDARD
-        .decode(state_b64)
-        .ok()?;
-
-    Some(SleepPayload { wake_at, state })
 }
 
 #[cfg(test)]
@@ -428,20 +345,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_handle_event_suspended_with_sleep() {
-        use base64::Engine;
-
+    async fn test_handle_event_suspended_with_payload_arms_no_sleep() {
         let persistence = Arc::new(
             MockPersistence::new().with_instance(make_instance("inst-1", "tenant-1", "running")),
         );
         let state = InstanceHandlerState::new(persistence.clone());
 
-        // Create sleep payload like SDK does
-        let wake_at = chrono::Utc::now() + chrono::Duration::hours(1);
-        let checkpoint_state = b"test checkpoint state";
+        // The shape a stale out-of-tree client would still send. Nothing in the
+        // repo produces it, and nothing consumes it any more.
         let payload = serde_json::json!({
-            "wake_at_ms": wake_at.timestamp_millis(),
-            "state": base64::engine::general_purpose::STANDARD.encode(checkpoint_state),
+            "wake_at_ms": (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp_millis(),
+            "state": "dGVzdCBjaGVja3BvaW50IHN0YXRl",
         });
 
         let event = InstanceEvent {
@@ -456,55 +370,18 @@ mod tests {
         let result = handle_instance_event(&state, event).await.unwrap();
         assert!(result.success);
 
-        // Verify instance was suspended with sleep data
+        // Plain suspend: no wake armed, no "sleeping" termination, no
+        // checkpoint written out of the payload.
         let inst = persistence.get_instance("inst-1").await.unwrap().unwrap();
         assert_eq!(inst.status, "suspended");
-        assert_eq!(inst.termination_reason.as_deref(), Some("sleeping"));
-        assert_eq!(inst.checkpoint_id.as_deref(), Some("sleep-cp-1"));
-        assert!(inst.sleep_until.is_some());
-
-        // Verify checkpoint was saved
-        let cp = persistence
-            .load_checkpoint("inst-1", "sleep-cp-1")
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(cp.state, checkpoint_state);
-    }
-
-    #[test]
-    fn test_parse_sleep_payload_valid() {
-        use base64::Engine;
-
-        let state = b"test state";
-        let wake_at_ms = 1750000000000i64; // Some future timestamp
-        let payload = serde_json::json!({
-            "wake_at_ms": wake_at_ms,
-            "state": base64::engine::general_purpose::STANDARD.encode(state),
-        });
-
-        let result = parse_sleep_payload(&payload.to_string().into_bytes());
-        assert!(result.is_some());
-
-        let sleep_data = result.unwrap();
-        assert_eq!(sleep_data.state, state);
-        assert!(sleep_data.wake_at.is_some());
-        assert_eq!(sleep_data.wake_at.unwrap().timestamp_millis(), wake_at_ms);
-    }
-
-    #[test]
-    fn test_parse_sleep_payload_invalid_json() {
-        let result = parse_sleep_payload(b"not json");
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn test_parse_sleep_payload_missing_fields() {
-        let payload = serde_json::json!({
-            "wake_at_ms": 1750000000000i64,
-            // missing "state"
-        });
-        let result = parse_sleep_payload(&payload.to_string().into_bytes());
-        assert!(result.is_none());
+        assert!(inst.sleep_until.is_none());
+        assert_ne!(inst.termination_reason.as_deref(), Some("sleeping"));
+        assert!(
+            persistence
+                .load_checkpoint("inst-1", "sleep-cp-1")
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 }

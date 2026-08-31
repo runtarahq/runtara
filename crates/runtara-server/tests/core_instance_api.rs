@@ -190,3 +190,75 @@ async fn draining_refuses_new_instances_but_keeps_serving() {
 
     runtime.shutdown().await.expect("shutdown");
 }
+
+/// A suspend event that carries a payload parks the instance without arming a
+/// wake, and says so in the log.
+///
+/// The generic `/events` endpoint takes an arbitrary base64 payload, so an
+/// out-of-tree client can still post the `{wake_at_ms, state}` shape that core
+/// used to sniff for sleep data. Nothing in this repo produces it — durable
+/// sleep goes through `/sleep` — and core no longer parses it. The risk that
+/// buys is silence: a client that believes it armed a wake would park forever.
+///
+/// This runs through the real router rather than calling the handler directly,
+/// because the payload only reaches core by way of the endpoint's base64
+/// decode, and that seam is the part a unit test cannot see.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_suspend_event_with_a_sleep_payload_arms_no_wake() {
+    use base64::Engine;
+
+    let pool = test_pool().await;
+    let persistence: Arc<dyn Persistence> = Arc::new(PostgresPersistence::new(pool));
+    let tenant = format!("payload-suspend-{}", Uuid::new_v4());
+    let instance = format!("{tenant}-1");
+    let checkpoint = "sleep-cp-1";
+
+    let (runtime, addr) = start(persistence.clone(), 8).await;
+    assert_eq!(register(addr, &instance, &tenant).await, 200, "register");
+
+    let sleep_shape = json!({
+        "wake_at_ms": (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp_millis(),
+        "state": base64::engine::general_purpose::STANDARD.encode(b"test checkpoint state"),
+    })
+    .to_string();
+
+    let status = reqwest::Client::new()
+        .post(format!("http://{addr}/api/v1/instances/{instance}/events"))
+        .json(&json!({
+            "event_type": "suspended",
+            "checkpoint_id": checkpoint,
+            "payload": base64::engine::general_purpose::STANDARD.encode(&sleep_shape),
+        }))
+        .send()
+        .await
+        .expect("events request")
+        .status()
+        .as_u16();
+    assert_eq!(status, 200, "a payload-bearing suspend is still accepted");
+
+    let record = persistence
+        .get_instance(&instance)
+        .await
+        .expect("get_instance")
+        .expect("instance must exist");
+    assert_eq!(record.status, "suspended", "the instance still parks");
+    assert!(
+        record.sleep_until.is_none(),
+        "no wake may be armed from a payload core no longer parses"
+    );
+    assert_ne!(
+        record.termination_reason.as_deref(),
+        Some("sleeping"),
+        "parking is a plain suspend, not a durable sleep"
+    );
+    assert!(
+        persistence
+            .load_checkpoint(&instance, checkpoint)
+            .await
+            .expect("load_checkpoint")
+            .is_none(),
+        "no checkpoint may be reconstructed out of the payload"
+    );
+
+    runtime.shutdown().await.expect("shutdown");
+}
