@@ -232,37 +232,6 @@ pub struct ListStepSummariesFilter {
     pub step_ids: Option<Vec<String>>,
 }
 
-/// Error history record for structured error tracking.
-#[derive(Debug, Clone, sqlx::FromRow)]
-pub struct ErrorHistoryRecord {
-    /// Database primary key.
-    pub id: i64,
-    /// Instance this error belongs to.
-    pub instance_id: String,
-    /// Checkpoint ID where error occurred (if applicable).
-    pub checkpoint_id: Option<String>,
-    /// Step ID where error occurred (if applicable).
-    pub step_id: Option<String>,
-    /// Machine-readable error code (e.g., "RATE_LIMITED").
-    pub error_code: String,
-    /// Human-readable error message.
-    pub error_message: String,
-    /// Error category (unknown, transient, permanent, business).
-    pub category: String,
-    /// Error severity (info, warning, error, critical).
-    pub severity: String,
-    /// Retry hint (unknown, retry_immediately, retry_with_backoff, retry_after, do_not_retry).
-    pub retry_hint: Option<String>,
-    /// Milliseconds for retry_after hint.
-    pub retry_after_ms: Option<i64>,
-    /// Additional context as JSON.
-    pub attributes: Option<serde_json::Value>,
-    /// Cause error ID for error chains.
-    pub cause_error_id: Option<i64>,
-    /// When the error was recorded.
-    pub created_at: DateTime<Utc>,
-}
-
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
@@ -640,52 +609,6 @@ pub trait Persistence: Send + Sync {
         instance_id: &str,
         filter: &ListStepSummariesFilter,
     ) -> Result<i64, CoreError>;
-
-    // ========================================================================
-    // Structured Error Tracking (optional - default implementations no-op)
-    // ========================================================================
-
-    /// Record a structured error in the error history table.
-    ///
-    /// Returns the error ID for chaining or reference.
-    #[allow(clippy::too_many_arguments)]
-    async fn record_error(
-        &self,
-        _instance_id: &str,
-        _checkpoint_id: Option<&str>,
-        _step_id: Option<&str>,
-        _error_code: &str,
-        _error_message: &str,
-        _category: &str,
-        _severity: &str,
-        _retry_hint: Option<&str>,
-        _retry_after_ms: Option<i64>,
-        _attributes: Option<&serde_json::Value>,
-        _cause_error_id: Option<i64>,
-    ) -> Result<i64, CoreError> {
-        // Default: no-op, return 0
-        Ok(0)
-    }
-
-    /// Get the most recent error for an instance.
-    async fn get_last_error(
-        &self,
-        _instance_id: &str,
-    ) -> Result<Option<ErrorHistoryRecord>, CoreError> {
-        // Default: no-op
-        Ok(None)
-    }
-
-    /// List errors for an instance.
-    async fn list_errors(
-        &self,
-        _instance_id: &str,
-        _limit: i64,
-        _offset: i64,
-    ) -> Result<Vec<ErrorHistoryRecord>, CoreError> {
-        // Default: empty list
-        Ok(vec![])
-    }
 
     // ========================================================================
     // Data Retention / Cleanup (optional - default implementations no-op)

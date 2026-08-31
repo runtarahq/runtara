@@ -5,8 +5,6 @@
 //! Provides a unified error type that maps to RPC error responses,
 //! including structured error types with category, severity, and retry hints.
 
-#![allow(dead_code)] // Variants and methods used in tests and for future expansion
-
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
