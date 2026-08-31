@@ -8,7 +8,7 @@
 //! `step_debug_end` events. Its SQL lives behind
 //! `Dialect::sql_list_step_summaries` / `sql_count_step_summaries` and
 //! leans on JSONB operators to reach into the payload blob plus
-//! `EXTRACT(MILLISECONDS ...)` for the paired duration.
+//! `Dialect::duration_ms` for the paired duration.
 //!
 //! The outer SELECT emits `inputs`, `outputs`, and `error` as TEXT via
 //! `(jsonb_expr)::text` rather than as JSONB, and the row-marshaling

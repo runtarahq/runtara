@@ -2437,10 +2437,10 @@ mod tests {
         assert_eq!(steps[0].status, StepSummaryStatus::Completed);
         assert!(steps[0].completed_at.is_some());
         assert!(steps[0].duration_ms.is_some());
-        // Stronger than a bare `is_some`: the duration is derived with
-        // `EXTRACT(MILLISECONDS FROM (completed_at - started_at))::bigint`, so
-        // assert it actually reflects the >= 20ms gap rather than merely being
-        // present.
+        // Stronger than a bare `is_some`: assert the value actually reflects
+        // the >= 20ms gap rather than merely being present. A sub-minute gap
+        // cannot distinguish a whole-span duration from a single-interval-field
+        // one — `test_list_step_summaries_duration_spans_minutes` covers that.
         assert!(steps[0].duration_ms.unwrap() >= 10);
         // The inputs come back through the JSONB -> TEXT round-trip in the
         // outer SELECT and must still parse to the value that was written.
@@ -2452,6 +2452,87 @@ mod tests {
         // A sequential step's end event carries no launch/settle pair.
         assert_eq!(steps[0].launched_at_ms, None);
         assert_eq!(steps[0].settled_at_ms, None);
+
+        cleanup_step_summary_instance(&pool, &instance_id).await;
+    }
+
+    /// A step longer than a minute must report its whole span.
+    ///
+    /// `EXTRACT(MILLISECONDS FROM interval)` returns only the interval's
+    /// seconds *field* scaled to milliseconds, so it wraps every 60 seconds: a
+    /// 90-second step reported 30000 and an exactly-N-minute step reported 0.
+    /// Sub-minute gaps — which is all the other tests in this family exercise —
+    /// pass under both the wrapping and the correct expression, so this test
+    /// needs a gap over a minute.
+    ///
+    /// `insert_event` persists the caller's `created_at` verbatim, so the gap
+    /// is constructed by backdating the start event rather than by sleeping.
+    #[tokio::test]
+    async fn test_list_step_summaries_duration_spans_minutes() {
+        let pool = test_pool().await;
+        let persistence = PostgresPersistence::new(pool.clone());
+
+        let instance_id = register_step_summary_instance(&persistence, "longdur").await;
+
+        let completed_at = Utc::now();
+        let started_at = completed_at - chrono::Duration::seconds(90);
+
+        persistence
+            .insert_event(&EventRecord {
+                id: None,
+                instance_id: instance_id.clone(),
+                event_type: "custom".to_string(),
+                checkpoint_id: None,
+                payload: Some(
+                    serde_json::to_vec(&serde_json::json!({
+                        "step_id": "slow-step",
+                        "step_type": "DurableSleep",
+                    }))
+                    .unwrap(),
+                ),
+                created_at: started_at,
+                subtype: Some("step_debug_start".to_string()),
+            })
+            .await
+            .unwrap();
+
+        persistence
+            .insert_event(&EventRecord {
+                id: None,
+                instance_id: instance_id.clone(),
+                event_type: "custom".to_string(),
+                checkpoint_id: None,
+                payload: Some(
+                    serde_json::to_vec(&serde_json::json!({
+                        "step_id": "slow-step",
+                        "outputs": {"slept": true},
+                    }))
+                    .unwrap(),
+                ),
+                created_at: completed_at,
+                subtype: Some("step_debug_end".to_string()),
+            })
+            .await
+            .unwrap();
+
+        let filter = step_summary_filter(StepSummarySortOrder::Desc);
+
+        let steps = persistence
+            .list_step_summaries(&instance_id, &filter, 100, 0)
+            .await
+            .unwrap();
+
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].status, StepSummaryStatus::Completed);
+
+        // 90_000, not the 30_000 the wrapping expression produced. The bound is
+        // loose only to absorb the microsecond truncation in the timestamp
+        // round-trip, not a minute-sized wrap.
+        let duration_ms = steps[0].duration_ms.unwrap();
+        assert!(
+            (89_999..=90_001).contains(&duration_ms),
+            "expected ~90000ms for a 90s step, got {duration_ms}"
+        );
 
         cleanup_step_summary_instance(&pool, &instance_id).await;
     }

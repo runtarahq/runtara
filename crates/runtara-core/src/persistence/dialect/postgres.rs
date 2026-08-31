@@ -1,7 +1,7 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Postgres dialect: `$N` placeholders, enum type casts, JSONB operators,
-//! `ILIKE`, `ANY($1)` for batch `IN`, `EXTRACT(MILLISECONDS FROM ...)`.
+//! `ILIKE`, `ANY($1)` for batch `IN`, `EXTRACT(EPOCH FROM ...)`.
 
 use crate::error::CoreError;
 
@@ -63,7 +63,12 @@ impl Dialect for PostgresDialect {
     }
 
     fn duration_ms(a: &str, b: &str) -> String {
-        format!("EXTRACT(MILLISECONDS FROM ({a} - {b}))::bigint")
+        // EPOCH, not MILLISECONDS: on an `interval`, `EXTRACT(MILLISECONDS
+        // ...)` yields only the seconds *field* scaled to ms, so it wraps at
+        // one minute (90s -> 30000, 120s -> 0). EPOCH yields the whole span in
+        // seconds, so scaling it by 1000 is the only form correct for
+        // intervals longer than a minute.
+        format!("(EXTRACT(EPOCH FROM ({a} - {b})) * 1000)::bigint")
     }
 
     fn select_status_col() -> &'static str {
@@ -211,6 +216,7 @@ impl Dialect for PostgresDialect {
         // `inputs`/`outputs`/`error` are emitted as TEXT so the shared row
         // mapper can parse them with `serde_json::from_str`; the JSONB->TEXT
         // round-trip produces an equal `serde_json::Value`.
+        let paired_duration_ms = Self::duration_ms("ee.completed_at", "se.started_at");
         format!(
             "WITH se AS MATERIALIZED ( \
                 SELECT \
@@ -261,7 +267,7 @@ impl Dialect for PostgresDialect {
                     END as status, \
                     CASE \
                         WHEN ee.completed_at IS NOT NULL \
-                        THEN EXTRACT(MILLISECONDS FROM (ee.completed_at - se.started_at))::bigint \
+                        THEN {paired_duration_ms} \
                         ELSE NULL \
                     END as duration_ms \
                 FROM se LEFT JOIN ee \
@@ -402,10 +408,23 @@ mod tests {
     }
 
     #[test]
-    fn duration_ms_uses_extract() {
+    fn duration_ms_uses_extract_epoch() {
         assert_eq!(
             PostgresDialect::duration_ms("e.created_at", "s.created_at"),
-            "EXTRACT(MILLISECONDS FROM (e.created_at - s.created_at))::bigint"
+            "(EXTRACT(EPOCH FROM (e.created_at - s.created_at)) * 1000)::bigint"
         );
+    }
+
+    /// The step-summary CTE must derive its `duration_ms` column from the
+    /// helper rather than re-inlining the expression, so the two cannot drift
+    /// apart again.
+    #[test]
+    fn step_summary_sql_derives_duration_from_helper() {
+        let sql = PostgresDialect::sql_list_step_summaries("ASC");
+        assert!(sql.contains(&PostgresDialect::duration_ms(
+            "ee.completed_at",
+            "se.started_at"
+        )));
+        assert!(!sql.contains("EXTRACT(MILLISECONDS"));
     }
 }
