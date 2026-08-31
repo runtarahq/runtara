@@ -162,8 +162,16 @@ async fn update_test_instance_result(
 #[test]
 fn test_wake_scheduler_config_default() {
     let config = WakeSchedulerConfig::default();
+    // `poll_interval` is the idle wait, not a rate limit: a poll that fills its
+    // batch is followed immediately by the next one.
     assert_eq!(config.poll_interval, Duration::from_secs(5));
-    assert_eq!(config.batch_size, 10);
+    // A batch of 10 could not feed a concurrent waker.
+    assert_eq!(config.batch_size, 200);
+    assert!(
+        (1..=512).contains(&config.concurrency),
+        "in-batch concurrency must be bounded and non-zero: {}",
+        config.concurrency
+    );
     assert_eq!(config.core_addr, "127.0.0.1:8001");
     assert_eq!(config.data_dir, PathBuf::from(".data"));
 }
@@ -173,6 +181,7 @@ fn test_wake_scheduler_config_custom() {
     let config = WakeSchedulerConfig {
         poll_interval: Duration::from_secs(10),
         batch_size: 50,
+        concurrency: 4,
         core_addr: "192.168.1.100:9000".to_string(),
         data_dir: PathBuf::from("/var/data"),
     };
@@ -188,6 +197,7 @@ fn test_wake_scheduler_config_clone() {
     let config = WakeSchedulerConfig {
         poll_interval: Duration::from_secs(15),
         batch_size: 25,
+        concurrency: 4,
         core_addr: "test:1234".to_string(),
         data_dir: PathBuf::from("/test"),
     };
@@ -514,6 +524,7 @@ fn test_wake_scheduler_config_custom_data_dir() {
     let config = WakeSchedulerConfig {
         poll_interval: Duration::from_secs(10),
         batch_size: 5,
+        concurrency: 4,
         core_addr: "127.0.0.1:8001".to_string(),
         data_dir: PathBuf::from("/custom/data/dir"),
     };
@@ -573,6 +584,7 @@ async fn test_wake_cancels_pending_cancel_and_still_launches_the_rest() {
         WakeSchedulerConfig {
             poll_interval: Duration::from_millis(100),
             batch_size: 10,
+            concurrency: 4,
             core_addr: "127.0.0.1:8001".to_string(),
             data_dir: PathBuf::from(".data"),
         },

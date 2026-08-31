@@ -1542,3 +1542,149 @@ async fn test_wait_for_exit_default_impl_returns_on_not_running() {
         "Runner should report not running after wait_for_exit returns"
     );
 }
+
+// ============================================================================
+// Regression: a run that parks before its launcher returns
+// ============================================================================
+
+/// A runner that parks the instance *inside* `launch_detached`, before it
+/// returns — the deterministic version of what a `Delay` or a no-timeout
+/// `WaitForSignal` does in production, where the spawned run reaches
+/// `suspended` in a millisecond or two while the launching caller is still
+/// doing its post-launch bookkeeping.
+struct ParksBeforeReturningRunner {
+    persistence: Arc<PostgresPersistence>,
+}
+
+#[async_trait::async_trait]
+impl Runner for ParksBeforeReturningRunner {
+    fn runner_type(&self) -> &'static str {
+        "parks-before-returning"
+    }
+
+    async fn run(
+        &self,
+        _options: &LaunchOptions,
+        _cancel_token: Option<runtara_environment::runner::CancelToken>,
+    ) -> runtara_environment::runner::Result<runtara_environment::runner::LaunchResult> {
+        unimplemented!("not used by this test")
+    }
+
+    async fn launch_detached(
+        &self,
+        options: &LaunchOptions,
+    ) -> runtara_environment::runner::Result<RunnerHandle> {
+        // The guest ran and parked on a signal wait before we returned.
+        self.persistence
+            .complete_instance(
+                CompleteInstanceParams::new(&options.instance_id, "suspended")
+                    .with_termination("waiting_signal", None),
+            )
+            .await
+            .expect("park write must succeed");
+        Ok(RunnerHandle {
+            handle_id: format!("handle-{}", options.instance_id),
+            instance_id: options.instance_id.clone(),
+            tenant_id: options.tenant_id.clone(),
+            started_at: Utc::now(),
+            metrics: None,
+        })
+    }
+
+    // Keep the monitor spawned by `handle_start_instance` from concluding
+    // anything during the test; the assertion is about the status write.
+    async fn is_running(&self, _handle: &RunnerHandle) -> bool {
+        true
+    }
+
+    async fn stop(&self, _handle: &RunnerHandle) -> runtara_environment::runner::Result<()> {
+        Ok(())
+    }
+
+    async fn collect_result(
+        &self,
+        _handle: &RunnerHandle,
+    ) -> (
+        Option<serde_json::Value>,
+        Option<String>,
+        runtara_environment::runner::ContainerMetrics,
+    ) {
+        (
+            None,
+            None,
+            runtara_environment::runner::ContainerMetrics::default(),
+        )
+    }
+}
+
+/// Launching must not resurrect a run that already parked.
+///
+/// Regression: `handle_start_instance` stamped `running` unconditionally after
+/// `launch_detached` returned. Because a detached launch returns as soon as the
+/// run is spawned, a workflow that parks immediately was already `suspended` —
+/// so the write flipped it back to `running` (clearing `termination_reason`
+/// along the way) with no process behind it, and the container monitor failed
+/// it as `crashed` one poll later. Measured at ~0.02% of parks under load.
+#[tokio::test]
+async fn test_launch_does_not_resurrect_a_run_that_already_parked() {
+    skip_if_no_db!();
+    let pool = get_test_pool().await;
+    let temp_dir = tempfile::tempdir().unwrap();
+
+    let persistence = Arc::new(PostgresPersistence::new(pool.clone()));
+    let state = EnvironmentHandlerState::new(
+        pool.clone(),
+        persistence.clone(),
+        Arc::new(ParksBeforeReturningRunner {
+            persistence: persistence.clone(),
+        }),
+        "127.0.0.1:8001".to_string(),
+        temp_dir.path().to_path_buf(),
+    );
+
+    let image_id = Uuid::new_v4().to_string();
+    sqlx::query(
+        r#"
+        INSERT INTO images (image_id, tenant_id, name, description, binary_path)
+        VALUES ($1, 'test-tenant', $2, 'desc', $3)
+        "#,
+    )
+    .bind(&image_id)
+    .bind(format!("park-race-image-{}", image_id))
+    .bind(test_artifact_path())
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let response = handle_start_instance(
+        &state,
+        StartInstanceRequest {
+            image_id: image_id.clone(),
+            tenant_id: "test-tenant".to_string(),
+            instance_id: None,
+            input: Some(serde_json::json!({})),
+            timeout_seconds: Some(60),
+            env: std::collections::HashMap::new(),
+        },
+    )
+    .await
+    .expect("start should succeed");
+    assert!(response.success, "error: {:?}", response.error);
+
+    let instance = persistence
+        .get_instance(&response.instance_id)
+        .await
+        .unwrap()
+        .expect("instance must exist");
+
+    assert_eq!(
+        instance.status, "suspended",
+        "a run that parked before launch returned must stay parked, not be \
+         flipped back to running"
+    );
+    assert_eq!(
+        instance.termination_reason.as_deref(),
+        Some("waiting_signal"),
+        "the park marker must survive launch bookkeeping"
+    );
+}

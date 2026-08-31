@@ -717,17 +717,33 @@ pub async fn handle_start_instance(
                 warn!(error = %e, "Failed to register container (instance still running)");
             }
 
-            // Update instance status to running via Persistence trait
-            if let Err(e) = state
+            // Promote to `running` — but only while the run has not already
+            // moved on. `launch_detached` returns as soon as the run is
+            // spawned, so a workflow that parks immediately (a `Delay`, or a
+            // `WaitForSignal` with no timeout) can already be `suspended` by
+            // the time we get here. Writing `running` unconditionally would
+            // resurrect it with no live process behind it, and the container
+            // monitor spawned just below would fail it as a crash one poll
+            // later.
+            match state
                 .persistence
-                .update_instance_status(&instance_id, "running", Some(chrono::Utc::now()))
+                .mark_instance_started(&instance_id, chrono::Utc::now())
                 .await
             {
-                error!(
-                    error = %e,
-                    instance_id = %instance_id,
-                    "Failed to update instance status to running (instance launched but status may be incorrect)"
-                );
+                Ok(true) => {}
+                Ok(false) => {
+                    debug!(
+                        instance_id = %instance_id,
+                        "Run already advanced past launch; leaving its status alone"
+                    );
+                }
+                Err(e) => {
+                    error!(
+                        error = %e,
+                        instance_id = %instance_id,
+                        "Failed to update instance status to running (instance launched but status may be incorrect)"
+                    );
+                }
             }
 
             // Spawn background task to monitor container and process output when done

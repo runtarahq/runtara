@@ -100,6 +100,49 @@ macro_rules! impl_instance_ops {
             /// cleared to restore the "running rows have no `finished_at`"
             /// invariant. Leaving them would make `finished_at < started_at`
             /// and render a negative duration for any resumed run.
+            /// Promote an instance to `running` **only while it has not already
+            /// moved on**, returning whether the update applied.
+            ///
+            /// A detached launch spawns the run and returns, so for a workflow
+            /// that parks immediately the run task can reach `suspended` before
+            /// the launching caller gets to stamp `running`. An unguarded write
+            /// then resurrects a parked instance as `running` with no live
+            /// process behind it, and the container monitor fails it as a crash
+            /// a poll later. Restricting the promotion to the pre-run states
+            /// makes that write a no-op once the run has advanced.
+            ///
+            /// `started_at` is only filled in when it is not already set, for
+            /// the same reason `mark_running` re-uses it: a run that suspends
+            /// and wakes should still report when it first began.
+            pub(crate) async fn op_mark_instance_started(
+                pool: &$Pool,
+                instance_id: &str,
+                started_at: ::chrono::DateTime<::chrono::Utc>,
+            ) -> ::core::result::Result<bool, $crate::error::CoreError> {
+                use $crate::persistence::dialect::{Dialect, EnumKind};
+                let p1 = <$Dialect>::placeholder(1);
+                let p2 = <$Dialect>::placeholder(2);
+                let status_cast = <$Dialect>::enum_cast(EnumKind::InstanceStatus);
+                let sql = format!(
+                    "UPDATE instances \
+                     SET status = 'running'{status_cast}, \
+                         started_at = COALESCE(started_at, {p2}), \
+                         finished_at = NULL, termination_reason = NULL \
+                     WHERE instance_id = {p1} \
+                       AND status IN ('pending'{status_cast}, 'running'{status_cast})"
+                );
+                let result = ::sqlx::query(&sql)
+                    .bind(instance_id)
+                    .bind(started_at)
+                    .execute(pool)
+                    .await
+                    .map_err(|e| $crate::error::CoreError::DatabaseError {
+                        operation: "mark_instance_started".into(),
+                        details: e.to_string(),
+                    })?;
+                Ok(result.rows_affected() == 1)
+            }
+
             pub(crate) async fn op_update_instance_status(
                 pool: &$Pool,
                 instance_id: &str,

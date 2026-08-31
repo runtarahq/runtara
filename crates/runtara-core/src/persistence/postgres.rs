@@ -650,6 +650,14 @@ impl Persistence for PostgresPersistence {
         Self::op_set_instance_sleep(&self.pool, instance_id, sleep_until).await
     }
 
+    async fn mark_instance_started(
+        &self,
+        instance_id: &str,
+        started_at: DateTime<Utc>,
+    ) -> Result<bool, CoreError> {
+        Self::op_mark_instance_started(&self.pool, instance_id, started_at).await
+    }
+
     async fn clear_instance_sleep(&self, instance_id: &str) -> Result<(), CoreError> {
         Self::op_clear_instance_sleep(&self.pool, instance_id).await
     }

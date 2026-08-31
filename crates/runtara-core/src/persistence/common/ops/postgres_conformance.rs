@@ -352,6 +352,53 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
         .await
         .expect("clear_instance_sleep failed");
 
+    // --- guarded start promotion -------------------------------------------
+    // `mark_instance_started` is what a detached launch uses to stamp `running`
+    // *after* spawning the run. It must promote a not-yet-started instance and
+    // refuse to touch one that already parked, or a workflow that suspends
+    // faster than its launcher returns gets resurrected as `running` with no
+    // process behind it — which the container monitor then fails as a crash.
+    backend
+        .update_instance_status(&instance_id, "suspended", None)
+        .await
+        .expect("update_instance_status suspended failed (start guard setup)");
+    let promoted_parked = backend
+        .mark_instance_started(&instance_id, Utc::now())
+        .await
+        .expect("mark_instance_started failed (suspended)");
+    assert!(
+        !promoted_parked,
+        "a suspended instance must not be promoted back to running"
+    );
+    let parked = backend
+        .get_instance(&instance_id)
+        .await
+        .expect("get_instance failed (start guard)")
+        .expect("instance must still exist");
+    assert_eq!(
+        parked.status, "suspended",
+        "the guarded promotion must leave a parked instance untouched"
+    );
+
+    backend
+        .update_instance_status(&instance_id, "running", Some(Utc::now()))
+        .await
+        .expect("update_instance_status running failed (start guard reset)");
+    let promoted_running = backend
+        .mark_instance_started(&instance_id, Utc::now())
+        .await
+        .expect("mark_instance_started failed (running)");
+    assert!(
+        promoted_running,
+        "an instance still in a pre-run state must be promoted"
+    );
+
+    // Hand the next section the `suspended` instance it expects.
+    backend
+        .update_instance_status(&instance_id, "suspended", None)
+        .await
+        .expect("update_instance_status suspended failed (start guard teardown)");
+
     // --- batch claim (select and claim in one step) -------------------------
     // `claim_sleeping_instances_due` is what the wake scheduler uses once it
     // polls back-to-back: selecting and claiming have to happen together, or

@@ -236,6 +236,9 @@ async fn test_cleanup_old_terminal_instances() {
         poll_interval: Duration::from_secs(1),
         max_age: Duration::from_secs(30 * 24 * 3600), // 30 days
         batch_size: 100,
+        // Instance retention is what these cases exercise; the debug-event
+        // sweep has its own window and is covered separately.
+        debug_event_max_age: None,
     };
     let worker = DbCleanupWorker::new(pool.clone(), persistence, config);
     let shutdown = worker.shutdown_handle();
@@ -312,6 +315,9 @@ async fn test_cleanup_disabled_by_default() {
         poll_interval: Duration::from_secs(1),
         max_age: Duration::from_secs(30 * 24 * 3600),
         batch_size: 100,
+        // Instance retention is what these cases exercise; the debug-event
+        // sweep has its own window and is covered separately.
+        debug_event_max_age: None,
     };
     let worker = DbCleanupWorker::new(pool.clone(), persistence, config);
     let shutdown = worker.shutdown_handle();
@@ -354,6 +360,9 @@ fn test_config_custom() {
         poll_interval: Duration::from_secs(7200),
         max_age: Duration::from_secs(7 * 24 * 3600),
         batch_size: 50,
+        // Instance retention is what these cases exercise; the debug-event
+        // sweep has its own window and is covered separately.
+        debug_event_max_age: None,
     };
 
     assert!(config.enabled);
@@ -473,6 +482,9 @@ async fn test_e2e_cascade_deletion_checkpoints_and_events() {
         poll_interval: Duration::from_secs(1),
         max_age: Duration::from_secs(30 * 24 * 3600),
         batch_size: 100,
+        // Instance retention is what these cases exercise; the debug-event
+        // sweep has its own window and is covered separately.
+        debug_event_max_age: None,
     };
     let worker = DbCleanupWorker::new(pool.clone(), persistence, config);
     let shutdown = worker.shutdown_handle();
@@ -548,6 +560,9 @@ async fn test_e2e_batch_processing() {
         poll_interval: Duration::from_secs(1),
         max_age: Duration::from_secs(30 * 24 * 3600),
         batch_size,
+        // Instance retention is what these cases exercise; the debug-event
+        // sweep has its own window and is covered separately.
+        debug_event_max_age: None,
     };
     let worker = DbCleanupWorker::new(pool.clone(), persistence, config);
     let shutdown = worker.shutdown_handle();
@@ -603,6 +618,9 @@ async fn test_e2e_cancelled_instances_deleted() {
         poll_interval: Duration::from_secs(1),
         max_age: Duration::from_secs(30 * 24 * 3600),
         batch_size: 100,
+        // Instance retention is what these cases exercise; the debug-event
+        // sweep has its own window and is covered separately.
+        debug_event_max_age: None,
     };
     let worker = DbCleanupWorker::new(pool.clone(), persistence, config);
     let shutdown = worker.shutdown_handle();
@@ -658,6 +676,9 @@ async fn test_e2e_suspended_instances_not_deleted() {
         poll_interval: Duration::from_secs(1),
         max_age: Duration::from_secs(30 * 24 * 3600),
         batch_size: 100,
+        // Instance retention is what these cases exercise; the debug-event
+        // sweep has its own window and is covered separately.
+        debug_event_max_age: None,
     };
     let worker = DbCleanupWorker::new(pool.clone(), persistence, config);
     let shutdown = worker.shutdown_handle();
@@ -713,6 +734,9 @@ async fn test_e2e_pending_instances_not_deleted() {
         poll_interval: Duration::from_secs(1),
         max_age: Duration::from_secs(30 * 24 * 3600),
         batch_size: 100,
+        // Instance retention is what these cases exercise; the debug-event
+        // sweep has its own window and is covered separately.
+        debug_event_max_age: None,
     };
     let worker = DbCleanupWorker::new(pool.clone(), persistence, config);
     let shutdown = worker.shutdown_handle();

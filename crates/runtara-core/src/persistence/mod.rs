@@ -515,6 +515,40 @@ pub trait Persistence: Send + Sync {
 
     async fn count_active_instances(&self) -> Result<i64, CoreError>;
 
+    /// Promote an instance to `running`, but only if it has not already moved
+    /// past the pre-run states. Returns whether the promotion applied.
+    ///
+    /// Exists because a detached launch returns as soon as the run is spawned:
+    /// a workflow that parks immediately (a `Delay` or a `WaitForSignal`) can
+    /// be `suspended` before the launching caller stamps `running`. Writing
+    /// `running` unconditionally at that point resurrects a parked instance
+    /// with no live process behind it, and the container monitor then fails it
+    /// as a crash. Callers stamping `running` *after* a launch must use this;
+    /// callers that stamp it *before* launching can use
+    /// [`Persistence::update_instance_status`] directly.
+    ///
+    /// The default implementation reads-then-writes and is adequate for
+    /// in-memory backends; SQL backends override it with a single guarded
+    /// UPDATE.
+    async fn mark_instance_started(
+        &self,
+        instance_id: &str,
+        started_at: DateTime<Utc>,
+    ) -> Result<bool, CoreError> {
+        match self.get_instance(instance_id).await? {
+            Some(inst) if matches!(inst.status.as_str(), "pending" | "running") => {
+                self.update_instance_status(
+                    instance_id,
+                    "running",
+                    Some(inst.started_at.unwrap_or(started_at)),
+                )
+                .await?;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
     /// Set the sleep_until timestamp for an instance.
     async fn set_instance_sleep(
         &self,
