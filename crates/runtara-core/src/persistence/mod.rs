@@ -357,6 +357,9 @@ pub trait Persistence: Send + Sync {
     /// can use this to claim the id and learn they lost the race in a single
     /// statement, instead of a speculative `get_instance` before every insert.
     ///
+    /// `input` is persisted by the same statement on the backends that can,
+    /// rather than by a follow-up `store_instance_input`.
+    ///
     /// This default is the naive read-then-insert and is *not* atomic; it
     /// exists so in-memory and test backends need no change. Backends that can
     /// do it in one statement should override it.
@@ -364,11 +367,15 @@ pub trait Persistence: Send + Sync {
         &self,
         instance_id: &str,
         tenant_id: &str,
+        input: Option<&[u8]>,
     ) -> Result<bool, CoreError> {
         if self.get_instance(instance_id).await?.is_some() {
             return Ok(false);
         }
         self.register_instance(instance_id, tenant_id).await?;
+        if let Some(input) = input {
+            self.store_instance_input(instance_id, input).await?;
+        }
         Ok(true)
     }
 
@@ -552,6 +559,45 @@ pub trait Persistence: Send + Sync {
     async fn health_check_db(&self) -> Result<bool, CoreError>;
 
     async fn count_active_instances(&self) -> Result<i64, CoreError>;
+
+    /// Record execution metrics and return the instance's current status and
+    /// termination reason, in one statement where the backend supports it.
+    ///
+    /// For the container monitor, which writes what it collected at termination
+    /// and then has to read the status the SDK reported. `None` means no such
+    /// instance. The default is the separate write-then-read this replaces.
+    async fn update_metrics_returning_status(
+        &self,
+        instance_id: &str,
+        memory_peak_bytes: Option<u64>,
+        cpu_usage_usec: Option<u64>,
+    ) -> Result<Option<(String, Option<String>)>, CoreError> {
+        self.update_instance_metrics(instance_id, memory_peak_bytes, cpu_usage_usec)
+            .await?;
+        Ok(self
+            .get_instance_meta(instance_id)
+            .await?
+            .map(|i| (i.status, i.termination_reason)))
+    }
+
+    /// Promote an instance to `running` on a relaunch, preserving its
+    /// original `started_at`.
+    ///
+    /// For wake and resume, which promote from `suspended` — a state
+    /// [`Self::mark_instance_started`] deliberately refuses. The default is the
+    /// read-then-write this replaces; SQL backends do it in one statement.
+    async fn mark_instance_running(
+        &self,
+        instance_id: &str,
+        started_at: DateTime<Utc>,
+    ) -> Result<(), CoreError> {
+        let started_at = match self.get_instance(instance_id).await {
+            Ok(Some(instance)) => instance.started_at.unwrap_or(started_at),
+            _ => started_at,
+        };
+        self.update_instance_status(instance_id, "running", Some(started_at))
+            .await
+    }
 
     /// Promote an instance to `running`, but only if it has not already moved
     /// past the pre-run states. Returns whether the promotion applied.

@@ -47,7 +47,7 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     // replay has to report "already taken" rather than erroring or clobbering
     // the row that is already mid-launch.
     let claimed_again = backend
-        .try_register_instance(&instance_id, tenant_id)
+        .try_register_instance(&instance_id, tenant_id, Some(b"{\"stolen\":true}"))
         .await
         .expect("try_register_instance on an existing id should not error");
     assert!(
@@ -64,21 +64,57 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
         "a losing claim must not overwrite the existing row"
     );
 
-    let fresh_id = Uuid::new_v4().to_string();
+    // A losing claim must not smuggle its own input onto the existing row.
     assert!(
         backend
-            .try_register_instance(&fresh_id, tenant_id)
+            .get_instance(&instance_id)
+            .await
+            .expect("get_instance failed")
+            .expect("instance should still exist")
+            .input
+            .is_none(),
+        "a losing claim must not write its input over the existing row"
+    );
+
+    // A winning claim persists the input in the same statement, so no separate
+    // store_instance_input is needed on the launch path.
+    let fresh_id = Uuid::new_v4().to_string();
+    let fresh_input = b"{\"data\":{\"claimed\":true}}".to_vec();
+    assert!(
+        backend
+            .try_register_instance(&fresh_id, tenant_id, Some(&fresh_input))
             .await
             .expect("try_register_instance on a fresh id failed"),
         "try_register_instance must report true when it creates the row"
     );
+    let created = backend
+        .get_instance(&fresh_id)
+        .await
+        .expect("get_instance failed")
+        .expect("a winning claim must actually insert the row");
+    assert_eq!(
+        created.input.as_deref(),
+        Some(fresh_input.as_slice()),
+        "the claim must persist the input it was given"
+    );
+    assert_eq!(created.status, "pending");
+
+    // And a claim with no input leaves the column null rather than erroring.
+    let no_input_id = Uuid::new_v4().to_string();
     assert!(
         backend
-            .get_instance(&fresh_id)
+            .try_register_instance(&no_input_id, tenant_id, None)
+            .await
+            .expect("try_register_instance without input failed")
+    );
+    assert!(
+        backend
+            .get_instance(&no_input_id)
             .await
             .expect("get_instance failed")
-            .is_some(),
-        "a winning claim must actually insert the row"
+            .expect("row should exist")
+            .input
+            .is_none()
     );
 
     // --- get_instance_meta drops the input and nothing else -----------------
@@ -137,6 +173,45 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
             .is_none(),
         "get_instance_meta must report a missing instance as None"
     );
+
+    // --- mark_instance_running: relaunch promotion --------------------------
+    // Wake and resume promote from `suspended`, which `mark_instance_started`
+    // refuses on purpose, and the original `started_at` has to survive so a run
+    // that suspends and wakes still reports when it first began.
+    let first_started = Utc::now() - chrono::Duration::seconds(120);
+    backend
+        .update_instance_status(&instance_id, "running", Some(first_started))
+        .await
+        .expect("seed running failed");
+    backend
+        .update_instance_status(&instance_id, "suspended", None)
+        .await
+        .expect("suspend failed");
+    let before = backend
+        .get_instance(&instance_id)
+        .await
+        .expect("get_instance failed")
+        .expect("instance should exist");
+    assert_eq!(before.status, "suspended");
+
+    backend
+        .mark_instance_running(&instance_id, Utc::now())
+        .await
+        .expect("mark_instance_running failed");
+    let promoted = backend
+        .get_instance(&instance_id)
+        .await
+        .expect("get_instance failed")
+        .expect("instance should exist");
+    assert_eq!(
+        promoted.status, "running",
+        "mark_instance_running must promote a suspended instance"
+    );
+    assert_eq!(
+        promoted.started_at, before.started_at,
+        "mark_instance_running must keep the original started_at"
+    );
+    assert!(promoted.finished_at.is_none());
 
     // --- update status → running -------------------------------------------
     backend

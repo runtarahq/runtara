@@ -631,9 +631,11 @@ pub async fn handle_start_instance(
     // Create instance in Core's table via Persistence trait. This doubles as the
     // idempotency claim: ON CONFLICT DO NOTHING means a replay, or a concurrent
     // retry that got there first, comes back as `false` rather than an error.
+    // The input rides along on that same statement rather than a follow-up
+    // UPDATE, so a launch writes the instance row exactly once.
     let claimed = state
         .persistence
-        .try_register_instance(&instance_id, &request.tenant_id)
+        .try_register_instance(&instance_id, &request.tenant_id, input_bytes.as_deref())
         .await;
     if !matches!(claimed, Ok(true)) {
         // Either the id was already taken or the insert failed outright. If
@@ -660,21 +662,9 @@ pub async fn handle_start_instance(
         });
     }
 
-    // Store input data via Persistence trait. On success the bytes are handed
-    // straight to the runner as well, so the launch does not read back what it
-    // just wrote. Only on success: if the write failed the store is the source
-    // of truth for what this run should see, exactly as before.
-    let mut prepersisted_input = None;
-    if let Some(ref input_data) = input_bytes {
-        match state
-            .persistence
-            .store_instance_input(&instance_id, input_data)
-            .await
-        {
-            Ok(()) => prepersisted_input = Some(input_data.clone()),
-            Err(e) => warn!(error = %e, "Failed to store instance input (non-fatal)"),
-        }
-    }
+    // The claim above persisted the input, so hand those same bytes to the
+    // runner rather than making the launch read back what it just wrote.
+    let prepersisted_input = input_bytes.clone();
 
     // Resolve the effective execution timeout once, so the value persisted for
     // wake/resume matches the one the monitor enforces on this first run.
@@ -1246,30 +1236,42 @@ pub fn spawn_container_monitor(
                 // Collect metrics and stderr from cgroup before container cleanup
                 let (_output, stderr, metrics) = runner.collect_result(&handle).await;
 
-                // Store metrics via Persistence trait
-                if metrics.memory_peak_bytes.is_some() || metrics.cpu_usage_usec.is_some() {
-                    if let Err(e) = persistence
-                        .update_instance_metrics(
-                            &instance_id,
-                            metrics.memory_peak_bytes,
-                            metrics.cpu_usage_usec,
-                        )
-                        .await
-                    {
-                        warn!(
-                            instance_id = %instance_id,
-                            error = %e,
-                            "Failed to store container metrics"
-                        );
-                    } else {
+                // Store metrics and pick up the status the SDK reported in the
+                // same statement: this monitor needs both, and they are the
+                // same row. Kept even when there are no metrics to write, so
+                // the crash check below always has a status to look at.
+                let observed_status = match persistence
+                    .update_metrics_returning_status(
+                        &instance_id,
+                        metrics.memory_peak_bytes,
+                        metrics.cpu_usage_usec,
+                    )
+                    .await
+                {
+                    Ok(observed) => {
                         debug!(
                             instance_id = %instance_id,
                             memory_peak_bytes = ?metrics.memory_peak_bytes,
                             cpu_usage_usec = ?metrics.cpu_usage_usec,
                             "Stored container metrics"
                         );
+                        Ok(observed)
                     }
-                }
+                    Err(e) => {
+                        warn!(
+                            instance_id = %instance_id,
+                            error = %e,
+                            "Failed to store container metrics"
+                        );
+                        // The status this carries decides crash vs normal exit
+                        // below, so a failed metrics write must not be read as a
+                        // crash. Fall back to a plain status read, as before.
+                        persistence
+                            .get_instance_meta(&instance_id)
+                            .await
+                            .map(|found| found.map(|i| (i.status, i.termination_reason)))
+                    }
+                };
 
                 // Store stderr via Persistence trait for debugging (even if instance succeeds via Core)
                 if let Some(ref stderr_content) = stderr {
@@ -1308,19 +1310,19 @@ pub fn spawn_container_monitor(
                         "Stale monitor detected — instance was resumed with a new process, skipping crash check"
                     );
                 } else {
-                    // Check Core status via the same persistence layer that the SDK writes to.
-                    let current_status = persistence.get_instance_meta(&instance_id).await;
-                    match current_status {
-                        Ok(Some(inst))
+                    // Status came back with the metrics write above, so this
+                    // no longer needs a read of its own.
+                    match &observed_status {
+                        Ok(Some((status, _)))
                             if matches!(
-                                inst.status.as_str(),
+                                status.as_str(),
                                 "completed" | "failed" | "cancelled" | "suspended"
                             ) =>
                         {
                             // SDK already reported terminal status — normal termination
                             info!(
                                 instance_id = %instance_id,
-                                status = %inst.status,
+                                status = %status,
                                 "Instance completed normally (SDK reported)"
                             );
                         }

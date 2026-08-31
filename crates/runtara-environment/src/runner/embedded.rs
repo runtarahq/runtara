@@ -53,17 +53,10 @@ use super::traits::{
 /// The existing `started_at` is re-used rather than restamped, so a run that
 /// suspends and wakes still reports when it first began.
 async fn mark_running(persistence: &dyn Persistence, instance_id: &str) {
-    let started_at = match persistence.get_instance(instance_id).await {
-        Ok(Some(instance)) => instance.started_at.unwrap_or_else(chrono::Utc::now),
-        Ok(None) => chrono::Utc::now(),
-        Err(e) => {
-            warn!(instance_id, error = %e, "Could not read instance before marking it running");
-            chrono::Utc::now()
-        }
-    };
-
+    // One statement: the COALESCE inside `mark_instance_running` carries the
+    // original `started_at` forward, which this used to read the row to do.
     if let Err(e) = persistence
-        .update_instance_status(instance_id, "running", Some(started_at))
+        .mark_instance_running(instance_id, chrono::Utc::now())
         .await
     {
         warn!(instance_id, error = %e, "Failed to mark invoke instance running");

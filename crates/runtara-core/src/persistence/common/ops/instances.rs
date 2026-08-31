@@ -64,24 +64,32 @@ macro_rules! impl_instance_ops {
             /// caller can claim an id and find out it lost the race in one
             /// statement instead of a speculative SELECT followed by an INSERT.
             /// Returns `true` when this caller inserted the row.
+            ///
+            /// `input` is written by the same statement rather than by a
+            /// follow-up UPDATE. On a lost claim nothing is written at all,
+            /// which is right: the row that already exists owns its input.
             pub(crate) async fn op_try_register_instance(
                 pool: &$Pool,
                 instance_id: &str,
                 tenant_id: &str,
+                input: ::core::option::Option<&[u8]>,
             ) -> ::core::result::Result<bool, $crate::error::CoreError> {
                 use $crate::persistence::dialect::{Dialect, EnumKind};
                 let p1 = <$Dialect>::placeholder(1);
                 let p2 = <$Dialect>::placeholder(2);
                 let status_cast = <$Dialect>::enum_cast(EnumKind::InstanceStatus);
                 let now = <$Dialect>::NOW;
+                let p3 = <$Dialect>::placeholder(3);
                 let sql = format!(
-                    "INSERT INTO instances (instance_id, tenant_id, definition_version, status, created_at) \
-                     VALUES ({p1}, {p2}, 1, 'pending'{status_cast}, {now}) \
+                    "INSERT INTO instances \
+                         (instance_id, tenant_id, definition_version, status, created_at, input) \
+                     VALUES ({p1}, {p2}, 1, 'pending'{status_cast}, {now}, {p3}) \
                      ON CONFLICT (instance_id) DO NOTHING"
                 );
                 let result = ::sqlx::query(&sql)
                     .bind(instance_id)
                     .bind(tenant_id)
+                    .bind(input)
                     .execute(pool)
                     .await
                     .map_err(|e| $crate::error::CoreError::DatabaseError {
@@ -183,6 +191,43 @@ macro_rules! impl_instance_ops {
             ///
             /// `started_at` is only filled in when it is not already set, for
             /// the same reason `mark_running` re-uses it: a run that suspends
+            /// Promote an instance to `running` on a relaunch, keeping the
+            /// original `started_at`.
+            ///
+            /// Deliberately unguarded, unlike
+            /// [`Self::op_mark_instance_started`]: a wake or resume promotes
+            /// from `suspended`, which that guard excludes on purpose. The
+            /// `COALESCE` is what lets this be one statement — the caller used
+            /// to read the row first purely to carry `started_at` forward, so a
+            /// run that suspends and wakes still reports when it first began.
+            pub(crate) async fn op_mark_instance_running(
+                pool: &$Pool,
+                instance_id: &str,
+                started_at: ::chrono::DateTime<::chrono::Utc>,
+            ) -> ::core::result::Result<(), $crate::error::CoreError> {
+                use $crate::persistence::dialect::{Dialect, EnumKind};
+                let p1 = <$Dialect>::placeholder(1);
+                let p2 = <$Dialect>::placeholder(2);
+                let status_cast = <$Dialect>::enum_cast(EnumKind::InstanceStatus);
+                let sql = format!(
+                    "UPDATE instances \
+                     SET status = 'running'{status_cast}, \
+                         started_at = COALESCE(started_at, {p2}), \
+                         finished_at = NULL, termination_reason = NULL \
+                     WHERE instance_id = {p1}"
+                );
+                ::sqlx::query(&sql)
+                    .bind(instance_id)
+                    .bind(started_at)
+                    .execute(pool)
+                    .await
+                    .map_err(|e| $crate::error::CoreError::DatabaseError {
+                        operation: "mark_instance_running".into(),
+                        details: e.to_string(),
+                    })?;
+                Ok(())
+            }
+
             /// and wakes should still report when it first began.
             pub(crate) async fn op_mark_instance_started(
                 pool: &$Pool,

@@ -210,6 +210,35 @@ pub async fn update_instance_metrics(
     Ok(())
 }
 
+/// Record metrics and return the instance's current status in one statement.
+///
+/// The container monitor writes the metrics it collected at termination and
+/// then has to look at the status the SDK reported, to tell a normal exit from
+/// a crash. Those were two round trips for the same row; `RETURNING` makes them
+/// one. `None` means no such instance.
+async fn update_metrics_returning_status(
+    pool: &PgPool,
+    instance_id: &str,
+    memory_peak_bytes: Option<u64>,
+    cpu_usage_usec: Option<u64>,
+) -> Result<Option<(String, Option<String>)>, CoreError> {
+    let row: Option<(String, Option<String>)> = sqlx::query_as(
+        r#"
+        UPDATE instances
+        SET memory_peak_bytes = COALESCE(memory_peak_bytes, $2),
+            cpu_usage_usec = COALESCE(cpu_usage_usec, $3)
+        WHERE instance_id = $1
+        RETURNING status::TEXT, termination_reason::TEXT
+        "#,
+    )
+    .bind(instance_id)
+    .bind(memory_peak_bytes.map(|v| v as i64))
+    .bind(cpu_usage_usec.map(|v| v as i64))
+    .fetch_optional(pool)
+    .await?;
+    Ok(row)
+}
+
 /// Update instance stderr (raw container stderr output).
 ///
 /// Stores stderr from container execution for debugging/logging purposes.
@@ -467,8 +496,9 @@ impl Persistence for PostgresPersistence {
         &self,
         instance_id: &str,
         tenant_id: &str,
+        input: Option<&[u8]>,
     ) -> Result<bool, CoreError> {
-        Self::op_try_register_instance(&self.pool, instance_id, tenant_id).await
+        Self::op_try_register_instance(&self.pool, instance_id, tenant_id, input).await
     }
 
     async fn get_instance(&self, instance_id: &str) -> Result<Option<InstanceRecord>, CoreError> {
@@ -663,6 +693,24 @@ impl Persistence for PostgresPersistence {
         sleep_until: DateTime<Utc>,
     ) -> Result<(), CoreError> {
         Self::op_set_instance_sleep(&self.pool, instance_id, sleep_until).await
+    }
+
+    async fn update_metrics_returning_status(
+        &self,
+        instance_id: &str,
+        memory_peak_bytes: Option<u64>,
+        cpu_usage_usec: Option<u64>,
+    ) -> Result<Option<(String, Option<String>)>, CoreError> {
+        update_metrics_returning_status(&self.pool, instance_id, memory_peak_bytes, cpu_usage_usec)
+            .await
+    }
+
+    async fn mark_instance_running(
+        &self,
+        instance_id: &str,
+        started_at: DateTime<Utc>,
+    ) -> Result<(), CoreError> {
+        Self::op_mark_instance_running(&self.pool, instance_id, started_at).await
     }
 
     async fn mark_instance_started(
