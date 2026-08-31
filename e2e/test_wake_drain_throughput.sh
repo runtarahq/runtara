@@ -39,9 +39,14 @@ print_success() { echo -e "${GREEN}[SUCCESS]${NC} $1"; }
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-INSTANCES="${INSTANCES:-40}"        # backlog size (> the legacy batch of 10)
+# The backlog has to span several batches, or a single poll drains it and the
+# idle interval between polls is never exercised — which is the whole of the
+# adaptive-polling behaviour this test exists to protect.
+WAKE_BATCH_SIZE="${WAKE_BATCH_SIZE:-10}"
+WAKE_POLL_INTERVAL_MS="${WAKE_POLL_INTERVAL_MS:-10000}"  # long enough that an idle sleep is unmistakable
+INSTANCES="${INSTANCES:-40}"        # 4 full batches at the pinned batch size
 DELAY_MS="${DELAY_MS:-3600000}"     # an hour: everything parks and stays parked
-DRAIN_BUDGET_S="${DRAIN_BUDGET_S:-120}"  # generous: a loaded dev Postgres is slow
+DRAIN_BUDGET_S="${DRAIN_BUDGET_S:-180}"  # generous: stragglers wait an idle interval, and dev Postgres is slow
 LAUNCH_PARALLEL="${LAUNCH_PARALLEL:-12}"  # debug builds do not enjoy 200 at once
 
 POSTGRES_HOST="${POSTGRES_HOST:-localhost}"
@@ -116,6 +121,8 @@ start_server() {
     RUNTARA_AGENT_COMPONENTS_DIR="${COMPONENTS_DIR}" \
     DATA_DIR="${TEST_DATA_DIR}" \
     RUNTARA_DEV_MODE=false \
+    RUNTARA_WAKE_BATCH_SIZE="${WAKE_BATCH_SIZE}" \
+    RUNTARA_WAKE_POLL_INTERVAL_MS="${WAKE_POLL_INTERVAL_MS}" \
     RUST_LOG="${RUST_LOG_OVERRIDE:-warn,runtara_server=warn,runtara_environment=info,runtara_core=warn}" \
     AUTH_PROVIDER=local \
     SESSION_TOKEN_SECRET=8efacf953eb244e07346edb64d1a8adca5bdf92049611737ce09e2c6388cb5f2 \
@@ -187,18 +194,24 @@ RESP=$(api_post "/workflows/${WF_ID}/versions/${VERSION}/compile" '{}' 900)
 
 print_step "Launching ${INSTANCES} instances (${LAUNCH_PARALLEL} at a time)..."
 LAUNCHED=0
+FAILED=0
 while [ "${LAUNCHED}" -lt "${INSTANCES}" ]; do
     BATCH=$(( INSTANCES - LAUNCHED ))
     [ "${BATCH}" -gt "${LAUNCH_PARALLEL}" ] && BATCH="${LAUNCH_PARALLEL}"
     PIDS=()
     for _ in $(seq 1 "${BATCH}"); do
-        api_post "/workflows/${WF_ID}/execute" '{"inputs": {"data": {}}}' >/dev/null &
+        # --fail so a rejected request is a non-zero exit rather than a body we
+        # throw away: counting the batch size regardless would report requests
+        # the server refused as launched instances.
+        curl -sS --fail --max-time 60 -X POST -H "Content-Type: application/json" \
+            -d '{"inputs": {"data": {}}}' "${API}/workflows/${WF_ID}/execute" >/dev/null &
         PIDS+=($!)
     done
     # Wait on the launches only: a bare `wait` would also wait on the server,
     # which is a background job of this shell and never exits.
-    for pid in "${PIDS[@]}"; do wait "${pid}"; done
-    LAUNCHED=$(( LAUNCHED + BATCH ))
+    for pid in "${PIDS[@]}"; do
+        if wait "${pid}"; then LAUNCHED=$(( LAUNCHED + 1 )); else FAILED=$(( FAILED + 1 )); fi
+    done
     echo "  launched ${LAUNCHED}/${INSTANCES}"
 done
 
@@ -236,23 +249,50 @@ ELAPSED=$(( $(date +%s) - START ))
 
 echo "  drained ${DONE}/${INSTANCES} in ${ELAPSED}s"
 
+if [ "${FAILED}" -gt 0 ]; then
+    print_error "${FAILED} launch request(s) were rejected — the backlog is not the size this test thinks it is"
+    exit 1
+fi
+if [ "${LAUNCHED}" -ne "${INSTANCES}" ]; then
+    print_error "launched ${LAUNCHED} but expected ${INSTANCES}"
+    exit 1
+fi
+
 FAILURES=0
 
-# The decisive check, and the one that does not care how fast the host is: a
-# single poll must claim far more than the legacy batch of ten. The old
-# scheduler physically could not — it took `batch_size` (10) and then slept its
-# whole poll interval, whatever the backlog looked like. Wall-clock throughput
-# is reported below but not asserted: on a loaded shared Postgres a debug build
-# can take seconds per wake, which says nothing about the scheduler.
-BIGGEST_BATCH=$(grep -oE "Processing sleeping instances count=[0-9]+" "${TEST_LOG}" \
-    | grep -oE "[0-9]+$" | sort -n | tail -1)
-BIGGEST_BATCH="${BIGGEST_BATCH:-0}"
-if [ "${BIGGEST_BATCH}" -le 10 ]; then
-    print_error "Largest wake batch was ${BIGGEST_BATCH}: the scheduler is still taking"
-    print_error "a legacy-sized batch and sleeping between polls."
+# The batch is pinned small and the backlog spans several of them, so draining
+# it REQUIRES consecutive full claims. That is what makes this an adaptive
+# polling test rather than a batch-size test: a scheduler that sleeps its whole
+# interval between polls cannot finish, no matter how fast the host is.
+FULL_BATCHES=$(grep -cE "Processing sleeping instances count=${WAKE_BATCH_SIZE}$" "${TEST_LOG}" || true)
+FULL_BATCHES="${FULL_BATCHES:-0}"
+EXPECTED_BATCHES=$(( INSTANCES / WAKE_BATCH_SIZE ))
+if [ "${FULL_BATCHES}" -lt $(( EXPECTED_BATCHES - 1 )) ]; then
+    print_error "Only ${FULL_BATCHES} full batch(es) of ${WAKE_BATCH_SIZE}; expected about ${EXPECTED_BATCHES}."
+    print_error "The backlog should have been claimed in consecutive full batches."
     FAILURES=$((FAILURES+1))
 else
-    print_success "A single poll claimed ${BIGGEST_BATCH} instances (legacy batch was 10)"
+    print_success "${FULL_BATCHES} consecutive full batches of ${WAKE_BATCH_SIZE} (backlog ${INSTANCES})"
+fi
+
+# Consecutive full batches must follow each other without the idle interval.
+# Asserted on the scheduler's own log timestamps rather than total wall clock:
+# the tail of a drain legitimately waits a poll interval for stragglers that
+# SKIP LOCKED stepped over, so overall elapsed time conflates the two. The span
+# between the first and last full batch isolates the behaviour under test.
+FULL_SPAN_MS=$(grep -E "Processing sleeping instances count=${WAKE_BATCH_SIZE}$" "${TEST_LOG}" \
+    | awk '{print $1}' \
+    | python3 -c "
+import sys, datetime
+ts = [datetime.datetime.fromisoformat(l.strip().replace('Z', '+00:00')) for l in sys.stdin if l.strip()]
+print(0 if len(ts) < 2 else int((max(ts) - min(ts)).total_seconds() * 1000))
+")
+if [ "${FULL_SPAN_MS}" -ge "${WAKE_POLL_INTERVAL_MS}" ]; then
+    print_error "Full batches were ${FULL_SPAN_MS}ms apart, at or past the ${WAKE_POLL_INTERVAL_MS}ms"
+    print_error "idle interval: the scheduler is sleeping between full batches."
+    FAILURES=$((FAILURES+1))
+else
+    print_success "Full batches spanned ${FULL_SPAN_MS}ms, well inside the ${WAKE_POLL_INTERVAL_MS}ms idle interval"
 fi
 
 if [ "${DONE}" -lt "${INSTANCES}" ]; then
@@ -272,11 +312,17 @@ else
     print_success "No duplicate completions"
 fi
 
-# Nothing stranded: the batch claim clears sleep_until as it selects, so a
-# failure that never restores it would leave an instance invisible forever.
+# Nothing stranded. The claim leases rather than clears, so a suspended row with
+# no deadline is the unrecoverable state: it is indistinguishable from a signal
+# waiter, and this workflow has none. A row still overdue after the drain was
+# claimed and never launched or restored.
 STRANDED=$(rt_count "status='suspended' AND sleep_until IS NULL")
+OVERDUE=$(rt_count "status='suspended' AND sleep_until IS NOT NULL AND sleep_until <= now()")
 if [ "${STRANDED}" != "0" ]; then
-    print_error "${STRANDED} instance(s) left suspended with no wake deadline — stranded."
+    print_error "${STRANDED} instance(s) left suspended with no wake deadline — unrecoverable."
+    FAILURES=$((FAILURES+1))
+elif [ "${OVERDUE}" != "0" ]; then
+    print_error "${OVERDUE} instance(s) still overdue after the drain — claimed but never launched."
     FAILURES=$((FAILURES+1))
 else
     print_success "No stranded instances"

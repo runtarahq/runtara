@@ -374,6 +374,7 @@ impl EnvironmentRuntimeConfig {
             batch_size: self.wake_batch_size,
             concurrency: self.wake_concurrency,
             claim_lease: self.wake_claim_lease,
+            failed_wake_retry_delay: Duration::from_secs(5),
             core_addr: self.core_addr.clone(),
             data_dir: self.data_dir.clone(),
         };

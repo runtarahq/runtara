@@ -40,6 +40,11 @@ pub struct WakeSchedulerConfig {
     pub batch_size: i64,
     /// Maximum wakes launched concurrently within a batch
     pub concurrency: usize,
+    /// How long to wait before offering a failed wake again.
+    ///
+    /// Restoring to now instead lets a batch that fails for a persistent reason
+    /// spin: released, immediately reclaimed, failed, released.
+    pub failed_wake_retry_delay: Duration,
     /// How long a claimed instance stays hidden before it becomes due again.
     ///
     /// The claim leases rather than clears, so this is the worst-case delay
@@ -60,6 +65,7 @@ impl Default for WakeSchedulerConfig {
             batch_size: 200,
             concurrency: default_wake_concurrency(),
             claim_lease: Duration::from_secs(300),
+            failed_wake_retry_delay: Duration::from_secs(5),
             core_addr: "127.0.0.1:8001".to_string(),
             data_dir: std::path::PathBuf::from(".data"),
         }
@@ -342,11 +348,27 @@ impl WakeScheduler {
     /// Wake an already-claimed instance, releasing the claim if it fails.
     ///
     /// The claim happened in `claim_sleeping_instances_due`, so `sleep_until`
-    /// is already NULL and the wake scan can no longer see this instance. Any
-    /// failure therefore has to put it back in the candidate set, or the
-    /// instance sleeps forever. That restore lives here rather than at each
-    /// error site so a new early return in the inner function cannot silently
-    /// strand a sleeper.
+    /// is already leased into the future and the wake scan can no longer see
+    /// this instance. Any failure therefore has to put it back in the candidate
+    /// set, or the instance sleeps until the lease expires. That restore lives
+    /// here rather than at each error site so a new early return in the inner
+    /// function cannot silently strand a sleeper.
+    ///
+    /// It restores to a short delay rather than to now: a batch whose launches
+    /// all fail for a persistent reason — a missing image, say — would
+    /// otherwise be reclaimed the instant it is released, and the scheduler
+    /// polls again immediately after a full batch, so the same rows spin
+    /// through claim, fail and restore as fast as Postgres will take them.
+    /// When a failed wake should be offered again.
+    ///
+    /// Short enough that a transient failure retries promptly, long enough that
+    /// a persistent one cannot spin: see `wake_instance`.
+    fn retry_deadline(&self) -> chrono::DateTime<chrono::Utc> {
+        chrono::Utc::now()
+            + chrono::Duration::from_std(self.config.failed_wake_retry_delay)
+                .unwrap_or_else(|_| chrono::Duration::seconds(5))
+    }
+
     async fn wake_instance(
         &self,
         instance: &runtara_core::persistence::InstanceRecord,
@@ -356,7 +378,7 @@ impl WakeScheduler {
         if result.is_err()
             && let Err(restore_err) = self
                 .persistence
-                .set_instance_sleep(&instance.instance_id, chrono::Utc::now())
+                .set_instance_sleep(&instance.instance_id, self.retry_deadline())
                 .await
         {
             warn!(

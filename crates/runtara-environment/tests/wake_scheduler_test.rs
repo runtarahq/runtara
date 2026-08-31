@@ -183,6 +183,7 @@ fn test_wake_scheduler_config_custom() {
         batch_size: 50,
         concurrency: 4,
         claim_lease: Duration::from_secs(300),
+        failed_wake_retry_delay: Duration::from_millis(200),
         core_addr: "192.168.1.100:9000".to_string(),
         data_dir: PathBuf::from("/var/data"),
     };
@@ -200,6 +201,7 @@ fn test_wake_scheduler_config_clone() {
         batch_size: 25,
         concurrency: 4,
         claim_lease: Duration::from_secs(300),
+        failed_wake_retry_delay: Duration::from_millis(200),
         core_addr: "test:1234".to_string(),
         data_dir: PathBuf::from("/test"),
     };
@@ -528,6 +530,7 @@ fn test_wake_scheduler_config_custom_data_dir() {
         batch_size: 5,
         concurrency: 4,
         claim_lease: Duration::from_secs(300),
+        failed_wake_retry_delay: Duration::from_millis(200),
         core_addr: "127.0.0.1:8001".to_string(),
         data_dir: PathBuf::from("/custom/data/dir"),
     };
@@ -589,6 +592,7 @@ async fn test_wake_cancels_pending_cancel_and_still_launches_the_rest() {
             batch_size: 10,
             concurrency: 4,
             claim_lease: Duration::from_secs(300),
+            failed_wake_retry_delay: Duration::from_millis(200),
             core_addr: "127.0.0.1:8001".to_string(),
             data_dir: PathBuf::from(".data"),
         },
@@ -662,6 +666,16 @@ async fn a_failed_wake_returns_the_instance_to_the_candidate_set() {
     let image_id = create_test_image(&pool, tenant_id).await;
     let instance_id = park_due_instance(&pool, tenant_id, &image_id).await;
 
+    // Make the relaunch genuinely fail. Without this the fixture is a perfectly
+    // launchable instance, the wake succeeds, and the failure path this test is
+    // named for never runs — which is how it used to pass while asserting only
+    // that a suspended instance has a deadline, its own starting state.
+    sqlx::query("DELETE FROM instance_images WHERE instance_id = $1")
+        .bind(&instance_id)
+        .execute(&pool)
+        .await
+        .expect("failed to drop the image association");
+
     let persistence = Arc::new(PostgresPersistence::new(pool.clone()));
     let scheduler = WakeScheduler::new(
         pool.clone(),
@@ -672,10 +686,24 @@ async fn a_failed_wake_returns_the_instance_to_the_candidate_set() {
             batch_size: 10,
             concurrency: 4,
             claim_lease: Duration::from_secs(300),
+            failed_wake_retry_delay: Duration::from_millis(200),
             core_addr: "127.0.0.1:8001".to_string(),
             data_dir: PathBuf::from(".data"),
         },
     );
+    // The deadline the instance was parked with. Asserting merely that it is
+    // suspended with *some* deadline would pass on the initial state, before
+    // the scheduler had done anything at all — the instance is seeded exactly
+    // that way to become due. A restore is only observable as a deadline the
+    // scheduler wrote, which is strictly later than the seeded one.
+    let seeded_due = persistence
+        .get_instance(&instance_id)
+        .await
+        .unwrap()
+        .expect("instance must exist")
+        .sleep_until
+        .expect("a due instance is parked with a deadline");
+
     let shutdown = scheduler.shutdown_handle();
     let handle = tokio::spawn(scheduler.run());
 
@@ -688,7 +716,18 @@ async fn a_failed_wake_returns_the_instance_to_the_candidate_set() {
             .await
             .unwrap()
             .expect("instance must exist");
-        if inst.status == "suspended" && inst.sleep_until.is_some() {
+        // Restored, not merely claimed. The claim also writes a later deadline
+        // — it leases the row into the future — so "later than seeded" alone is
+        // satisfied by the claim itself and would pass with the restore removed.
+        // A restore is the shorter of the two: the retry delay this config sets
+        // is well inside the claim lease, so a deadline nearer than the lease
+        // can only have come from the failure path.
+        let lease_floor = chrono::Utc::now() + chrono::Duration::seconds(60);
+        if inst.status == "suspended"
+            && inst
+                .sleep_until
+                .is_some_and(|due| due > seeded_due && due < lease_floor)
+        {
             restored = true;
             break;
         }
@@ -812,6 +851,7 @@ async fn a_batch_is_woken_concurrently_and_stays_within_its_bound() {
             batch_size: 24,
             concurrency: BOUND,
             claim_lease: Duration::from_secs(300),
+            failed_wake_retry_delay: Duration::from_millis(200),
             core_addr: "127.0.0.1:8001".to_string(),
             data_dir: PathBuf::from(".data"),
         },
