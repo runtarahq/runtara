@@ -116,7 +116,6 @@ start_server() {
     RUNTARA_AGENT_COMPONENTS_DIR="${COMPONENTS_DIR}" \
     DATA_DIR="${TEST_DATA_DIR}" \
     RUNTARA_DEV_MODE=false \
-    RUNTARA_DIRECT_STORE_FREEING_SLEEP=1 \
     RUST_LOG="${RUST_LOG_OVERRIDE:-warn,runtara_server=warn,runtara_environment=info,runtara_core=warn}" \
     AUTH_PROVIDER=local \
     SESSION_TOKEN_SECRET=8efacf953eb244e07346edb64d1a8adca5bdf92049611737ce09e2c6388cb5f2 \
@@ -214,8 +213,9 @@ if [ "${PARKED}" -lt "${INSTANCES}" ]; then
     print_error "Only ${PARKED}/${INSTANCES} parked; cannot measure a drain."
     echo "  status breakdown:"
     psql_quiet -d "${TEST_DB_RUNTIME}" -c "SELECT status::text, COALESCE(termination_reason::text,'-'), COUNT(*) FROM instances GROUP BY 1,2 ORDER BY 3 DESC" | sed 's/^/    /'
-    echo "  a Delay that does not park means the store-freeing lowering is off:"
-    echo "  the workflow must be COMPILED with RUNTARA_DIRECT_STORE_FREEING_SLEEP=1."
+    echo "  a Delay that does not park means the store-freeing lowering is off —"
+    echo "  it is the compile-time default, so check RUNTARA_DIRECT_STORE_FREEING_SLEEP"
+    echo "  has not been opted out of in this environment."
     tail -40 "${TEST_LOG}"; exit 1
 fi
 echo "  ${PARKED} parked"

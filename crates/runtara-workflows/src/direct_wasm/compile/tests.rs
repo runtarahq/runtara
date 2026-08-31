@@ -10817,3 +10817,44 @@ fn direct_compile_sequential_split_has_no_async_imports() {
         "sequential compile grew async lowers"
     );
 }
+
+// ── compile-time gate defaults ──────────────────────────────────────────────
+
+/// Store-freeing durable sleep is the default, and only an explicit opt-out
+/// turns it off.
+///
+/// This is load-bearing rather than cosmetic: with the legacy blocking
+/// lowering a sleeping instance is a live wasmtime store holding a file
+/// descriptor, which caps a host in the low thousands. If this default ever
+/// flips back, workflows silently stop parking and every downstream figure —
+/// drain rate, sleeper cost, the on-signal waker — stops being true.
+#[test]
+fn store_freeing_sleep_is_on_unless_opted_out() {
+    assert!(
+        super::enabled_unless_opted_out(None),
+        "unset must mean on: this is the shipped default"
+    );
+    for off in ["false", "0", "no", "off", "disabled", "FALSE", " Off "] {
+        assert!(
+            !super::enabled_unless_opted_out(Some(off)),
+            "{off:?} must opt out of the store-freeing lowering"
+        );
+    }
+    for on in ["1", "true", "yes", "on", ""] {
+        assert!(
+            super::enabled_unless_opted_out(Some(on)),
+            "{on:?} must leave the default in place"
+        );
+    }
+}
+
+/// The runtime-omit lever is a separate, still opt-in flag. It shared a parser
+/// with the sleep gate before that gate flipped; keep them distinct.
+#[test]
+fn runtime_omit_stays_opt_in() {
+    assert!(!super::enabled_only_if_opted_in(None));
+    assert!(!super::enabled_only_if_opted_in(Some("yes")));
+    assert!(!super::enabled_only_if_opted_in(Some("on")));
+    assert!(super::enabled_only_if_opted_in(Some("1")));
+    assert!(super::enabled_only_if_opted_in(Some("true")));
+}

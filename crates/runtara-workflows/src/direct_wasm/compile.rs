@@ -877,20 +877,45 @@ pub fn compile_direct_workflow(
 }
 
 /// Store-freeing durable-sleep gate for production compiles, from
-/// `RUNTARA_DIRECT_STORE_FREEING_SLEEP`. Default (unset or anything but a
-/// truthy value): OFF — durable Delay blocks in the host, byte-identical to the
-/// legacy path. Set to `1`/`true` to opt a compile into the exit-and-reschedule
-/// lowering (only takes effect under the invoke export). See
+/// `RUNTARA_DIRECT_STORE_FREEING_SLEEP`. **Default: ON.**
+///
+/// A durable wait compiled this way exits the guest and reschedules, so a
+/// sleeping instance is a checkpointed row rather than a live wasmtime store.
+/// The difference is not marginal: blocking in the host costs a file descriptor
+/// and ~10 GB of reserved address space per sleeper, which caps a host in the
+/// low thousands, while a parked instance costs about 2 KB of database and
+/// nothing resident. Everything downstream — the wake scheduler's batch claim,
+/// the drain rate, the on-signal waker — assumes instances actually park.
+///
+/// Set to `false`/`0`/`no`/`off`/`disabled` to compile the legacy blocking
+/// lowering instead, byte-identical to the old path. That opt-out spelling
+/// follows `runtara_core::config::parse_enabled_env`; the parser is duplicated
+/// here rather than depended on because this crate does not link runtara-core.
+///
+/// Only takes effect under the invoke export. See
 /// [`super::compile::core_imports::DirectCoreFunctionIndices::store_freeing_sleep`].
 fn store_freeing_sleep_from_env() -> bool {
-    store_freeing_sleep_from_raw(
+    enabled_unless_opted_out(
         std::env::var("RUNTARA_DIRECT_STORE_FREEING_SLEEP")
             .ok()
             .as_deref(),
     )
 }
 
-fn store_freeing_sleep_from_raw(raw: Option<&str>) -> bool {
+/// On unless explicitly turned off. A typo reads as "on", which is the safe
+/// direction for a default that everything else depends on.
+fn enabled_unless_opted_out(raw: Option<&str>) -> bool {
+    match raw {
+        None => true,
+        Some(v) => !matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "false" | "0" | "no" | "off" | "disabled"
+        ),
+    }
+}
+
+/// Off unless explicitly turned on.
+fn enabled_only_if_opted_in(raw: Option<&str>) -> bool {
     matches!(raw, Some("1") | Some("true"))
 }
 
@@ -901,7 +926,7 @@ fn store_freeing_sleep_from_raw(raw: Option<&str>) -> bool {
 /// to let eligible workflows compile agent-shaped (zero runtime imports). This
 /// is the compile lever behind workflow-as-agent.
 fn omit_runtime_from_env() -> bool {
-    store_freeing_sleep_from_raw(std::env::var("RUNTARA_DIRECT_OMIT_RUNTIME").ok().as_deref())
+    enabled_only_if_opted_in(std::env::var("RUNTARA_DIRECT_OMIT_RUNTIME").ok().as_deref())
 }
 
 /// Export shape for production compiles, from `RUNTARA_DIRECT_WORKFLOW_ABI` —
