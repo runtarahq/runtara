@@ -281,6 +281,35 @@ impl WakeScheduler {
                     .acquire_owned()
                     .await
                     .expect("wake semaphore closed");
+
+                // Re-check the drain after waiting for a permit. The check at
+                // the top of this function covers the whole batch, but a batch
+                // queues behind `concurrency` permits and drain snapshots the
+                // container registry the moment it sets its flag — so a launch
+                // that starts after that snapshot registers a container nobody
+                // is going to signal, and it survives into teardown. Release
+                // the claim instead so a restart picks it up promptly rather
+                // than after the lease expires.
+                if scheduler.drain.is_draining() {
+                    debug!(
+                        instance_id = %instance.instance_id,
+                        "Drain began while this wake was queued; releasing the claim"
+                    );
+                    if let Err(e) = scheduler
+                        .persistence
+                        .set_instance_sleep(&instance.instance_id, chrono::Utc::now())
+                        .await
+                    {
+                        warn!(
+                            instance_id = %instance.instance_id,
+                            error = %e,
+                            "Failed to release a wake claim abandoned to drain; \
+                             it will retry when the claim lease expires"
+                        );
+                    }
+                    return;
+                }
+
                 if let Err(e) = scheduler.wake_instance(&instance).await {
                     error!(
                         instance_id = %instance.instance_id,

@@ -530,6 +530,22 @@ impl EnvironmentRuntime {
         self.drain.set();
         info!(grace_secs = grace.as_secs(), "EnvironmentRuntime draining");
 
+        // Stop the wake scheduler before the snapshot below, and give it a
+        // moment to finish the batch it is on. The snapshot is what decides who
+        // gets a shutdown signal, so a wake that registers its container after
+        // it is taken is invisible to the drain: no signal, absent from the
+        // straggler list, and still running into teardown. The scheduler also
+        // re-checks the drain flag per launch, which covers the batch already
+        // in flight here; this just stops new ones being claimed at all.
+        self.wake_shutdown.notify_one();
+        let quiesce_deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !self.wake_handle.is_finished() && std::time::Instant::now() < quiesce_deadline {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        if !self.wake_handle.is_finished() {
+            warn!("Wake scheduler did not quiesce before the drain snapshot");
+        }
+
         let container_registry = ContainerRegistry::new(self.state.pool.clone());
         let active = match container_registry.list_all_registered().await {
             Ok(list) => list,

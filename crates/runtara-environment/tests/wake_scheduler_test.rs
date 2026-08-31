@@ -8,6 +8,7 @@ use chrono::Utc;
 use runtara_core::persistence::{CompleteInstanceParams, Persistence, PostgresPersistence};
 use runtara_environment::container_registry::ContainerRegistry;
 use runtara_environment::db::{self, Instance};
+use runtara_environment::handlers::DrainController;
 use runtara_environment::runner::{MockRunner, Runner};
 use runtara_environment::wake_scheduler::{WakeScheduler, WakeSchedulerConfig};
 use sqlx::PgPool;
@@ -744,6 +745,164 @@ async fn a_failed_wake_returns_the_instance_to_the_candidate_set() {
     );
 
     cleanup(&pool, &instance_id).await;
+    cleanup_image(&pool, &image_id).await;
+}
+
+/// A runner whose first launch blocks until the test releases it, recording
+/// every instance it was asked to launch.
+///
+/// Lets a test open a drain at a known point: with one permit, the second
+/// instance of a batch is guaranteed to be waiting when the flag is set.
+struct GatedRunner {
+    gate: Arc<tokio::sync::Notify>,
+    launched: Arc<std::sync::Mutex<Vec<String>>>,
+    first: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[async_trait::async_trait]
+impl Runner for GatedRunner {
+    fn runner_type(&self) -> &'static str {
+        "gated"
+    }
+    async fn run(
+        &self,
+        _options: &runtara_environment::runner::LaunchOptions,
+        _cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
+    ) -> runtara_environment::runner::Result<runtara_environment::runner::LaunchResult> {
+        unimplemented!("the wake path uses launch_detached")
+    }
+    async fn launch_detached(
+        &self,
+        options: &runtara_environment::runner::LaunchOptions,
+    ) -> runtara_environment::runner::Result<runtara_environment::runner::RunnerHandle> {
+        use std::sync::atomic::Ordering;
+        self.launched
+            .lock()
+            .expect("launch log poisoned")
+            .push(options.instance_id.clone());
+        if self.first.swap(false, Ordering::SeqCst) {
+            self.gate.notified().await;
+        }
+        Ok(runtara_environment::runner::RunnerHandle {
+            handle_id: format!("gated-{}", options.instance_id),
+            instance_id: options.instance_id.clone(),
+            tenant_id: options.tenant_id.clone(),
+            started_at: Utc::now(),
+            metrics: None,
+        })
+    }
+    async fn is_running(&self, _handle: &runtara_environment::runner::RunnerHandle) -> bool {
+        true
+    }
+
+    async fn stop(
+        &self,
+        _handle: &runtara_environment::runner::RunnerHandle,
+    ) -> runtara_environment::runner::Result<()> {
+        Ok(())
+    }
+
+    async fn collect_result(
+        &self,
+        _handle: &runtara_environment::runner::RunnerHandle,
+    ) -> (
+        Option<serde_json::Value>,
+        Option<String>,
+        runtara_environment::runner::ContainerMetrics,
+    ) {
+        (
+            None,
+            None,
+            runtara_environment::runner::ContainerMetrics::default(),
+        )
+    }
+}
+
+/// A drain that begins mid-batch must release the claims it will not launch.
+///
+/// The batch-level drain check happens once, before claiming. Everything queued
+/// behind a permit is therefore still holding a claim when a drain starts, and
+/// drain snapshots the container registry the moment it sets its flag — so a
+/// launch that lands after that snapshot is invisible to the drain and runs on
+/// into teardown. Released claims also have to be due again immediately, not
+/// left leased, or a restart waits out the lease before retrying them.
+#[tokio::test]
+async fn a_drain_mid_batch_releases_the_claims_it_will_not_launch() {
+    skip_if_no_db!();
+    let pool = get_test_pool().await;
+    let tenant_id = "wake-drain-race-tenant";
+    let image_id = create_test_image(&pool, tenant_id).await;
+    let first_id = park_due_instance(&pool, tenant_id, &image_id).await;
+    let second_id = park_due_instance(&pool, tenant_id, &image_id).await;
+
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let launched = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let runner = Arc::new(GatedRunner {
+        gate: Arc::clone(&gate),
+        launched: Arc::clone(&launched),
+        first: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+    });
+
+    let drain = DrainController::new();
+    let persistence = Arc::new(PostgresPersistence::new(pool.clone()));
+    let scheduler = WakeScheduler::new(
+        pool.clone(),
+        persistence.clone(),
+        Arc::clone(&runner) as Arc<dyn Runner>,
+        WakeSchedulerConfig {
+            poll_interval: Duration::from_millis(50),
+            batch_size: 10,
+            // One permit, so the second instance is certainly queued behind the
+            // first when the drain opens.
+            concurrency: 1,
+            claim_lease: Duration::from_secs(300),
+            failed_wake_retry_delay: Duration::from_millis(200),
+            core_addr: "127.0.0.1:8001".to_string(),
+            data_dir: PathBuf::from(".data"),
+        },
+    )
+    .with_drain(drain.clone());
+
+    let shutdown = scheduler.shutdown_handle();
+    let handle = tokio::spawn(scheduler.run());
+
+    // Wait until the first launch is actually in the gate, then drain.
+    for _ in 0..100 {
+        if !launched.lock().expect("launch log poisoned").is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    drain.set();
+    gate.notify_waiters();
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    shutdown.notify_one();
+    let _ = handle.await;
+
+    let launched = launched.lock().expect("launch log poisoned").clone();
+    assert!(
+        !launched.contains(&second_id),
+        "a wake queued when the drain began must not launch: {launched:?}"
+    );
+
+    // And its claim must be released, not left leased for the lease duration.
+    let released = persistence
+        .get_instance(&second_id)
+        .await
+        .unwrap()
+        .expect("instance must exist");
+    assert_eq!(released.status, "suspended");
+    assert!(
+        released
+            .sleep_until
+            .is_some_and(|due| due <= Utc::now() + chrono::Duration::seconds(30)),
+        "an abandoned claim must be due again promptly, not held for the lease: {:?}",
+        released.sleep_until
+    );
+
+    cleanup(&pool, &first_id).await;
+    cleanup(&pool, &second_id).await;
     cleanup_image(&pool, &image_id).await;
 }
 
