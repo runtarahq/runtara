@@ -46,7 +46,12 @@ WAKE_BATCH_SIZE="${WAKE_BATCH_SIZE:-10}"
 WAKE_POLL_INTERVAL_MS="${WAKE_POLL_INTERVAL_MS:-10000}"  # long enough that an idle sleep is unmistakable
 INSTANCES="${INSTANCES:-40}"        # 4 full batches at the pinned batch size
 DELAY_MS="${DELAY_MS:-3600000}"     # an hour: everything parks and stays parked
-DRAIN_BUDGET_S="${DRAIN_BUDGET_S:-180}"  # generous: stragglers wait an idle interval, and dev Postgres is slow
+# Very generous on purpose. This bounds "nothing was lost", not "it was fast" —
+# speed is asserted from the scheduler log below, which is insensitive to host
+# state. The first drain after a rebuild instantiates every component cold and
+# has been measured 36x slower than the same run warm (5s warm, past 180s
+# cold), so a tight budget here fails on machine state rather than on code.
+DRAIN_BUDGET_S="${DRAIN_BUDGET_S:-600}"
 LAUNCH_PARALLEL="${LAUNCH_PARALLEL:-12}"  # debug builds do not enjoy 200 at once
 
 POSTGRES_HOST="${POSTGRES_HOST:-localhost}"
@@ -297,6 +302,8 @@ fi
 
 if [ "${DONE}" -lt "${INSTANCES}" ]; then
     print_error "Backlog did not fully drain: ${DONE}/${INSTANCES} in ${ELAPSED}s."
+    print_error "The scheduler checks above pass or fail independently of host speed;"
+    print_error "if they passed, suspect the box rather than the wake path."
     FAILURES=$((FAILURES+1))
 else
     print_success "Backlog drained: ${INSTANCES} in ${ELAPSED}s"
