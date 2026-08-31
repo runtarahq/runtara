@@ -26,6 +26,8 @@ use crate::direct_wasm::{
     compile_direct_workflow, compose_direct_workflow_with_extra_dirs,
 };
 
+pub use crate::direct_wasm::compile::direct_lowering_tag;
+
 /// Major version of the workflow compiler. Stored in image metadata as
 /// `templateMajor` so the cache miss-fires when the major bumps. Patch and
 /// minor versions don't invalidate — they're assumed source-compatible.

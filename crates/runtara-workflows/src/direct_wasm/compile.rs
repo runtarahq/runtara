@@ -919,6 +919,25 @@ fn enabled_only_if_opted_in(raw: Option<&str>) -> bool {
     matches!(raw, Some("1") | Some("true"))
 }
 
+/// A stable tag for the lowering options the direct compiler is currently
+/// configured to use.
+///
+/// This is part of image cache identity. Two artifacts built from the same
+/// definition but different lowering are NOT interchangeable — store-freeing
+/// sleep changes how a `Delay` or `Wait` is emitted — so flipping a toggle has
+/// to miss the cache and force a rebuild. Without this, turning store-freeing
+/// sleep on by default silently leaves every already-compiled workflow on the
+/// blocking lowering, because nothing else in the key changed.
+///
+/// Older images have no tag at all, which reads as a miss and rebuilds once.
+pub fn direct_lowering_tag() -> String {
+    format!(
+        "store_freeing_sleep={},omit_runtime={}",
+        store_freeing_sleep_from_env(),
+        omit_runtime_from_env(),
+    )
+}
+
 /// Opt-in to dropping the `runtara:workflow-runtime/runtime` import for a PURE,
 /// non-durable, invoke-ABI workflow (see `WorkflowFeatureSummary::needs_runtime`
 /// and the omit path in the emitter). Default OFF — the runtime import is kept
