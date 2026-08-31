@@ -930,11 +930,20 @@ impl ExecutionEngine {
             let version = event.version;
             let instance_id = instance_id.clone();
             let trigger_id = event.trigger_id().map(|s| s.to_string());
+            const ANALYTICS_POLL_INTERVAL: Duration = Duration::from_secs(2);
             tokio::spawn(async move {
+                // Wait one interval before the first look. The run was started
+                // microseconds ago, so an immediate poll almost never sees a
+                // terminal state, and each poll is the two-join instance read.
+                // Skipping it takes a workflow that starts and parks from two
+                // of those reads down to one; anything that really did finish
+                // in under an interval is simply observed an interval later,
+                // which for an analytics event is not a meaningful delay.
+                tokio::time::sleep(ANALYTICS_POLL_INTERVAL).await;
                 let outcome = runtime_client
                     .poll_until_terminal(
                         &instance_id,
-                        Duration::from_secs(2),
+                        ANALYTICS_POLL_INTERVAL,
                         Duration::from_secs(24 * 3600),
                     )
                     .await;
