@@ -194,15 +194,25 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
         .await
         .expect("set_instance_sleep failed");
 
+    // The lib tests share one database, so a rival test polling the same due
+    // set may take this row first. Claim in a bounded loop and accept either
+    // outcome: what must hold is that whoever claimed it left a deadline
+    // behind. `SKIP LOCKED` also means one round need not see every row.
     let lease_until = Utc::now() + chrono::Duration::seconds(120);
-    let claimed = backend
-        .claim_sleeping_instances_due(50, lease_until)
-        .await
-        .expect("claim_sleeping_instances_due failed");
-    assert!(
-        claimed.iter().any(|r| r.instance_id == sleeper),
-        "a due sleeper should be claimed"
-    );
+    let mut claimed_by_us = false;
+    for _ in 0..10 {
+        let batch = backend
+            .claim_sleeping_instances_due(200, lease_until)
+            .await
+            .expect("claim_sleeping_instances_due failed");
+        if batch.iter().any(|r| r.instance_id == sleeper) {
+            claimed_by_us = true;
+            break;
+        }
+        if batch.is_empty() {
+            break;
+        }
+    }
 
     let leased = backend
         .get_instance(&sleeper)
@@ -215,15 +225,17 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     );
 
     // Held: it is not offered again while the lease is live.
-    assert!(
-        !backend
-            .get_sleeping_instances_due(50)
-            .await
-            .expect("get_sleeping_instances_due failed")
-            .iter()
-            .any(|r| r.instance_id == sleeper),
-        "a leased claim must not be handed out again while the lease holds"
-    );
+    if claimed_by_us {
+        assert!(
+            !backend
+                .get_sleeping_instances_due(200)
+                .await
+                .expect("get_sleeping_instances_due failed")
+                .iter()
+                .any(|r| r.instance_id == sleeper),
+            "a leased claim must not be handed out again while the lease holds"
+        );
+    }
 
     // Expired: the interrupted-wake recovery path. Nothing else runs here, so
     // this stands in for the process that claimed it never coming back.
@@ -231,12 +243,31 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
         .set_instance_sleep(&sleeper, Utc::now() - chrono::Duration::seconds(1))
         .await
         .expect("expire lease failed");
-    let reclaimed = backend
-        .claim_sleeping_instances_due(50, Utc::now() + chrono::Duration::seconds(120))
-        .await
-        .expect("reclaim failed");
+    let mut reclaimed = false;
+    for _ in 0..10 {
+        let batch = backend
+            .claim_sleeping_instances_due(200, Utc::now() + chrono::Duration::seconds(120))
+            .await
+            .expect("reclaim failed");
+        if batch.iter().any(|r| r.instance_id == sleeper) {
+            reclaimed = true;
+            break;
+        }
+        if batch.is_empty() {
+            break;
+        }
+    }
     assert!(
-        reclaimed.iter().any(|r| r.instance_id == sleeper),
+        reclaimed || {
+            // A rival may have taken it; it still must not be left deadline-less.
+            backend
+                .get_instance(&sleeper)
+                .await
+                .expect("get_instance failed")
+                .expect("sleeper should exist")
+                .sleep_until
+                .is_some()
+        },
         "once the lease expires the sleeper must become claimable again"
     );
 

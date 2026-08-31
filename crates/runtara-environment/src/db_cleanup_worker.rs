@@ -77,20 +77,26 @@ impl DbCleanupWorkerConfig {
     pub fn from_env() -> Self {
         let enabled = parse_enabled_env("RUNTARA_DB_CLEANUP_ENABLED");
 
-        let poll_interval_secs = std::env::var("RUNTARA_DB_CLEANUP_POLL_INTERVAL_SECS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(3600);
+        let poll_interval_secs = positive_or_default(
+            std::env::var("RUNTARA_DB_CLEANUP_POLL_INTERVAL_SECS")
+                .ok()
+                .as_deref(),
+            3600,
+        );
 
-        let max_age_days = std::env::var("RUNTARA_DB_CLEANUP_MAX_AGE_DAYS")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(3);
+        let max_age_days = positive_or_default(
+            std::env::var("RUNTARA_DB_CLEANUP_MAX_AGE_DAYS")
+                .ok()
+                .as_deref(),
+            3,
+        );
 
-        let batch_size = std::env::var("RUNTARA_DB_CLEANUP_BATCH_SIZE")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(100);
+        let batch_size = positive_or_default(
+            std::env::var("RUNTARA_DB_CLEANUP_BATCH_SIZE")
+                .ok()
+                .as_deref(),
+            100,
+        );
 
         let debug_event_max_age = debug_event_max_age_from_raw(
             std::env::var("RUNTARA_EVENT_DEBUG_RETENTION_HOURS")
@@ -106,6 +112,23 @@ impl DbCleanupWorkerConfig {
             debug_event_max_age,
         }
     }
+}
+
+/// Parse a positive setting, falling back to `default` for anything that is
+/// absent, unparseable, or non-positive.
+///
+/// Zero is rejected rather than honoured: a zero batch size makes the sweep
+/// delete `LIMIT 0` rows forever, because the loop only stops when a pass comes
+/// back short of a full batch and `0 < 0` never does. A zero poll interval
+/// spins the same way. Both hammer Postgres and stop shutdown from joining the
+/// worker, so neither is a value anyone can usefully ask for.
+fn positive_or_default<T>(raw: Option<&str>, default: T) -> T
+where
+    T: std::str::FromStr + PartialOrd + Default + Copy,
+{
+    raw.and_then(|v| v.trim().parse::<T>().ok())
+        .filter(|parsed| *parsed > T::default())
+        .unwrap_or(default)
 }
 
 /// Step-debug retention window from `RUNTARA_EVENT_DEBUG_RETENTION_HOURS`.
@@ -247,8 +270,11 @@ impl DbCleanupWorker {
                 .await?;
             total_deleted += deleted;
 
-            // Short of a full batch means the backlog is drained.
-            if deleted < self.config.batch_size as u64 {
+            // Short of a full batch means the backlog is drained. The
+            // non-positive guard is belt and braces against a config built
+            // directly rather than through `from_env`: with a batch size of
+            // zero every pass deletes nothing and `0 < 0` never breaks.
+            if self.config.batch_size <= 0 || deleted < self.config.batch_size as u64 {
                 break;
             }
         }
@@ -392,6 +418,32 @@ mod tests {
             config.enabled,
             "Cleanup should be enabled by default; disable via RUNTARA_DB_CLEANUP_ENABLED=false"
         );
+    }
+}
+
+#[cfg(test)]
+mod setting_validation_tests {
+    use super::positive_or_default;
+
+    /// Zero is the dangerous value, not merely an odd one: it makes the debug
+    /// sweep delete `LIMIT 0` rows in a loop that only exits on a short batch,
+    /// which never happens because `0 < 0` is false. That spins on Postgres and
+    /// stops shutdown from joining the worker.
+    #[test]
+    fn non_positive_settings_fall_back_to_the_default() {
+        assert_eq!(positive_or_default(Some("0"), 100i64), 100);
+        assert_eq!(positive_or_default(Some("-5"), 100i64), 100);
+        assert_eq!(positive_or_default(Some(""), 100i64), 100);
+        assert_eq!(positive_or_default(Some("not-a-number"), 100i64), 100);
+        assert_eq!(positive_or_default(None, 100i64), 100);
+        assert_eq!(positive_or_default(Some("0"), 3600u64), 3600);
+    }
+
+    #[test]
+    fn positive_settings_are_honoured() {
+        assert_eq!(positive_or_default(Some("50"), 100i64), 50);
+        assert_eq!(positive_or_default(Some("  7  "), 100i64), 7);
+        assert_eq!(positive_or_default(Some("1"), 3600u64), 1);
     }
 }
 
