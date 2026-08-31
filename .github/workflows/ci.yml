@@ -335,11 +335,29 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-${{ github.sha }}
 
+      # The service container creates only POSTGRES_DB. The runtime schema needs
+      # a database of its own — see the note on TEST_RUNTARA_DATABASE_URL below.
+      - name: Create the runtime-schema database
+        env:
+          PGPASSWORD: postgres
+        run: psql -h localhost -U postgres -c 'CREATE DATABASE runtara_runtime_test;'
+
       - name: Run runtara-server tests
         # Explicit features include the Postgres and plaintext-Valkey suites;
         # both fail closed when their required services are unavailable.
         env:
           TEST_RUNTARA_SERVER_DATABASE_URL: postgres://postgres:postgres@localhost:5432/runtara_test
+          # tests/core_instance_api.rs drives CoreRuntime against the *runtime*
+          # schema, not the server one, so it reads this separate variable and
+          # panics without it.
+          #
+          # It must be its own database, not runtara_test. Both schemas track
+          # their state in the same `_sqlx_migrations` table, so a core migrator
+          # pointed at the server's database sees the server's rows as unknown
+          # versions and aborts with VersionMissing(20250101000000). Sharing is
+          # only safe for a consumer that runs no migrations of its own, which
+          # is why object-store can reuse runtara_test below and this cannot.
+          TEST_RUNTARA_DATABASE_URL: postgres://postgres:postgres@localhost:5432/runtara_runtime_test
           TEST_REPORTS_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
           VALKEY_HOST: localhost
           VALKEY_PORT: "6379"
