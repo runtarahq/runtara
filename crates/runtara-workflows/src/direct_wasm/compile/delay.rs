@@ -32,11 +32,12 @@ use super::debug::{emit_step_breakpoint, emit_step_debug_event};
 use super::dispatcher::emit_run_plan_mapping;
 use super::mapping::emit_build_source;
 use super::{
-    DIRECT_DELAY_DURATION_MS_LOCAL, DIRECT_RET_U64_OK_OFFSET, DIRECT_WAIT_DEADLINE_MS_LOCAL,
-    DIRECT_WAIT_DEADLINE_SCRATCH_OFFSET, DIRECT_WAIT_ON_WAIT_VARIABLES_LEN_LOCAL,
-    DIRECT_WAIT_ON_WAIT_VARIABLES_PTR_LOCAL, DIRECT_WAIT_SIGNAL_ID_LEN_LOCAL,
-    DIRECT_WAIT_SIGNAL_ID_PTR_LOCAL, DirectCoreFunctionIndices, DirectCoreStaticData,
-    DirectDataSegment, DirectFailureTarget, DirectHandledTarget, DirectRunPlan, DirectVariables,
+    DIRECT_DEADLINE_SKEW_TOLERANCE_MS, DIRECT_DELAY_DURATION_MS_LOCAL, DIRECT_RET_U64_OK_OFFSET,
+    DIRECT_WAIT_DEADLINE_MS_LOCAL, DIRECT_WAIT_DEADLINE_SCRATCH_OFFSET,
+    DIRECT_WAIT_ON_WAIT_VARIABLES_LEN_LOCAL, DIRECT_WAIT_ON_WAIT_VARIABLES_PTR_LOCAL,
+    DIRECT_WAIT_SIGNAL_ID_LEN_LOCAL, DIRECT_WAIT_SIGNAL_ID_PTR_LOCAL, DirectCoreFunctionIndices,
+    DirectCoreStaticData, DirectDataSegment, DirectFailureTarget, DirectHandledTarget,
+    DirectRunPlan, DirectVariables,
 };
 
 /// Durable-delay park threshold, in milliseconds: at or above it a delay frees
@@ -67,34 +68,6 @@ const DIRECT_DURABLE_DELAY_PARK_THRESHOLD_MS: i64 = 30_000;
 /// would otherwise read the blocking arm's empty state as "already waited" and
 /// skip its wait entirely.
 const DIRECT_DELAY_DEADLINE_STATE_LEN: i32 = 8;
-
-/// How close to a park's deadline counts as "the wait is over", in milliseconds.
-///
-/// A deadline is minted from the environment host's WALL CLOCK (`runtime_now_ms`),
-/// but the due-instance scan that relaunches the park compares `sleep_until`
-/// against the DATABASE clock (`Dialect::NOW`). Those are two different clocks,
-/// so a database running ahead by `skew` fires the wake that much early. With
-/// an exact comparison the guest re-parks on a deadline the scan STILL
-/// considers due, the scan fires again on its next poll, and every one of those
-/// relaunches REPLAYS the workflow from its entry step. Silently: from inside
-/// the guest an early wake is indistinguishable from an on-time one.
-///
-/// That spin is self-limiting, and it is worth being precise about why, because
-/// it bounds what this constant can buy. The deadline is a fixed absolute value
-/// and the guest's OWN clock advances toward it, so the relaunches stop after
-/// roughly `skew / poll interval` of them whether or not the two clocks are
-/// ever brought back into agreement. The tolerance therefore removes the wasted
-/// relaunches outright only when `skew` falls within it, and saves at most one
-/// poll beyond that. 1s is sized for ordinary NTP-scale skew, which is where
-/// nearly all of it lands.
-///
-/// The tolerance is also how early a park may finish, which is what keeps it
-/// far below [`DIRECT_DURABLE_DELAY_PARK_THRESHOLD_MS`]: at 1s against a 30s
-/// floor the shortest possible park ends at most ~3% early, while a tolerance
-/// anywhere near the threshold would let that shortest park fall straight
-/// through on its first early relaunch — reintroducing the very skip this arm
-/// exists to prevent.
-const DIRECT_DELAY_DEADLINE_TOLERANCE_MS: i64 = 1_000;
 
 /// Blocking durable sleep: the host holds the wasmtime Store and the tokio task
 /// for the whole duration on `durable-sleep-checkpoint`.
@@ -173,10 +146,17 @@ fn emit_park_until_deadline(
     push_retptr_i64_load(body, DIRECT_RET_U64_OK_OFFSET);
     // Compare `now + tolerance` against the deadline rather than `now` alone,
     // to absorb the host/database clock split described on
-    // DIRECT_DELAY_DEADLINE_TOLERANCE_MS. Added to `now` rather than subtracted
+    // DIRECT_DEADLINE_SKEW_TOLERANCE_MS. Added to `now` rather than subtracted
     // from the deadline: both stay unsigned epoch milliseconds, with nothing to
     // underflow once `now` is past the deadline.
-    body.instruction(&Instruction::I64Const(DIRECT_DELAY_DEADLINE_TOLERANCE_MS));
+    //
+    // The tolerance is also how early a park may finish, which is what keeps it
+    // far below DIRECT_DURABLE_DELAY_PARK_THRESHOLD_MS: at 1s against a 30s
+    // floor the shortest possible park ends at most ~3% early, while a
+    // tolerance anywhere near the threshold would let that shortest park fall
+    // straight through on its first early relaunch — reinstating the very skip
+    // this arm exists to prevent.
+    body.instruction(&Instruction::I64Const(DIRECT_DEADLINE_SKEW_TOLERANCE_MS));
     body.instruction(&Instruction::I64Add);
     body.instruction(&Instruction::LocalGet(DIRECT_WAIT_DEADLINE_MS_LOCAL));
     // Unsigned: both sides are u64 epoch milliseconds.

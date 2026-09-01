@@ -7909,6 +7909,110 @@ const STORE_FREEING_WAIT: &str = r#"{
   "outputSchema": {}
 }"#;
 
+/// A WaitForSignal fixture with a caller-chosen timeout, so a test can pick one
+/// SHORTER than the deadline skew tolerance.
+fn timed_wait_fixture(timeout_ms: u64) -> String {
+    format!(
+        r#"{{
+  "name": "Timed Wait",
+  "steps": {{
+    "wait": {{
+      "stepType": "WaitForSignal",
+      "id": "wait",
+      "name": "Approval",
+      "pollIntervalMs": 0,
+      "timeoutMs": {{ "valueType": "immediate", "value": {timeout_ms} }},
+      "responseSchema": {{ "approved": {{ "type": "boolean", "required": true }} }}
+    }},
+    "finish": {{
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {{
+        "approved": {{ "valueType": "reference", "value": "steps.wait.outputs.approved" }}
+      }}
+    }}
+  }},
+  "entryPoint": "wait",
+  "executionPlan": [ {{ "fromStep": "wait", "toStep": "finish" }} ],
+  "variables": {{}},
+  "inputSchema": {{}},
+  "outputSchema": {{}}
+}}"#
+    )
+}
+
+/// The Wait timeout's skew tolerance is armed ONLY on a relaunch.
+///
+/// A Wait's deadline lands in the same `sleep_until` column, stamped from the
+/// same host clock, and is woken by the same database-clock scan as a parked
+/// Delay — so a relaunch can arrive early for the same reason and must not
+/// re-park over a split-second of clock disagreement.
+///
+/// But a Wait has no floor the way a Delay's 30s park threshold gives one:
+/// `wait_timeout_ms` takes any number. So the tolerance cannot simply be
+/// applied to every comparison. On a FIRST reach the deadline is computed from
+/// the very clock it is compared against — there is no skew to absorb — and a
+/// tolerance there would collapse any timeout shorter than it into "poll once,
+/// then give up", losing the window the author asked for. Hence the resumed
+/// flag, and hence both halves of this test.
+#[test]
+fn direct_wasm_execute_invoke_wait_timeout_tolerance_is_armed_only_on_resume() {
+    let components_dir = direct_e2e_components_dir();
+    let input = br#"{}"#.to_vec();
+    // Deliberately SHORTER than the tolerance: with the gate removed this
+    // times out on its first poll instead of parking.
+    let artifact = compile_invoke_abi_artifact(
+        &components_dir,
+        "wait-timeout-tolerance",
+        &timed_wait_fixture(400),
+    );
+    let host = Arc::new(CheckpointingRuntimeHost::new(&input));
+
+    // FIRST REACH: no signal, no elapsed time. It must PARK on its deadline,
+    // not fire the timeout — the deadline came from this same clock.
+    let first = run_invoke_once(&artifact.wasm_path, host.clone(), input.clone());
+    let deadline = match &first {
+        runtara_component_host::InvokeExit::Suspended(wakes) => match &wakes[0] {
+            runtara_component_host::lifecycle::WorkflowWake::OnSignal(wait) => wait
+                .deadline_ms
+                .expect("a timed wait parks carrying its deadline"),
+            other => panic!("a timed wait must park on-signal, got {other:?}"),
+        },
+        other => panic!(
+            "a first reach must park, not time out — a timeout shorter than the \
+             tolerance would otherwise collapse to a single poll. Got {other:?}"
+        ),
+    };
+
+    // RESUMED, still outside the tolerance: real wait owed, so park again on
+    // the SAME deadline.
+    host.pin_clock_before(deadline, 2_000);
+    let outside = run_invoke_once(&artifact.wasm_path, host.clone(), input.clone());
+    match &outside {
+        runtara_component_host::InvokeExit::Suspended(wakes) => match &wakes[0] {
+            runtara_component_host::lifecycle::WorkflowWake::OnSignal(wait) => assert_eq!(
+                wait.deadline_ms,
+                Some(deadline),
+                "a re-park must carry the same absolute deadline — the tolerance \
+                 must not be folded into the parked value, or the next wake moves \
+                 earlier by exactly the tolerance and absorbs nothing"
+            ),
+            other => panic!("expected an on-signal wake, got {other:?}"),
+        },
+        other => panic!("2s of owed wait must still re-park, got {other:?}"),
+    }
+
+    // RESUMED, inside the tolerance: the database clock fired the wake a shade
+    // early. Serve the timeout rather than spinning another relaunch.
+    host.pin_clock_before(deadline, 500);
+    let inside = run_invoke_once(&artifact.wasm_path, host.clone(), input.clone());
+    assert!(
+        !matches!(inside, runtara_component_host::InvokeExit::Suspended(_)),
+        "a resumed wait inside the tolerance must resolve its timeout, not \
+         re-park; got {inside:?}"
+    );
+}
+
 /// A durable WaitForSignal under the invoke export EXITS with
 /// `suspended(on-signal{signal-id, deadline})` on the first poll MISS — freeing
 /// the Store — instead of blocking the poll loop. The wake-scheduler stand-in
