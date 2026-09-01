@@ -7181,6 +7181,20 @@ impl CheckpointingRuntimeHost {
             .insert(checkpoint_id.to_string(), payload.to_vec());
     }
 
+    /// Move the guest's clock to `remaining_ms` SHORT of `deadline_ms` — an
+    /// early wake, which [`advance_clock_past`](Self::advance_clock_past)
+    /// cannot express. Models a database clock running ahead of the host's: the
+    /// due scan fires while the host still reads `now` as before the deadline.
+    ///
+    /// Wall-clock drift between this call and the guest's `now-ms` only eats
+    /// into `remaining_ms`, moving the guest CLOSER to the deadline — so a test
+    /// asserting fall-through inside the tolerance cannot drift out of it.
+    fn set_clock_before(&self, deadline_ms: u64, remaining_ms: u64) {
+        let wall = now_ms();
+        let target = deadline_ms.saturating_sub(remaining_ms);
+        *self.clock_offset_ms.lock().unwrap() = target.saturating_sub(wall);
+    }
+
     /// Move the guest's clock far enough forward that `deadline_ms` has passed —
     /// what the wake scheduler achieves by simply not relaunching until then.
     fn advance_clock_past(&self, deadline_ms: u64) {
@@ -7694,19 +7708,28 @@ fn direct_wasm_execute_invoke_early_relaunch_reparks_instead_of_skipping_the_del
     };
 
     // Relaunch immediately — an hour before the deadline, exactly as a manual
-    // resume would. It must park again, not complete.
-    let second = run_invoke_once(&artifact.wasm_path, host.clone(), input.clone());
-    let second_deadline = match &second {
-        runtara_component_host::InvokeExit::Suspended(wakes) => match &wakes[0] {
-            runtara_component_host::lifecycle::WorkflowWake::At(ms) => *ms,
-            other => panic!("expected a timed wake, got {other:?}"),
-        },
-        other => panic!("an early relaunch must re-park, not run the delay out; got {other:?}"),
-    };
-    assert_eq!(
-        first_deadline, second_deadline,
-        "a re-park must carry the SAME absolute deadline — the wait is not \
-         shortened by having been relaunched"
+    // resume would. TWICE: one re-park shows the deadline was re-read, but only
+    // a second shows re-parking is IDEMPOTENT. A lowering that re-parked at a
+    // recomputed `now + duration` instead of the stored value would satisfy the
+    // first relaunch and slide the deadline forward on every one after it, so
+    // the wait never ends — which is the failure `wait.rs` already documents.
+    let mut deadlines = vec![first_deadline];
+    for relaunch in 0..2 {
+        let exit = run_invoke_once(&artifact.wasm_path, host.clone(), input.clone());
+        match &exit {
+            runtara_component_host::InvokeExit::Suspended(wakes) => match &wakes[0] {
+                runtara_component_host::lifecycle::WorkflowWake::At(ms) => deadlines.push(*ms),
+                other => panic!("relaunch {relaunch} expected a timed wake, got {other:?}"),
+            },
+            other => panic!(
+                "early relaunch {relaunch} must re-park, not run the delay out; got {other:?}"
+            ),
+        }
+    }
+    assert!(
+        deadlines.iter().all(|ms| *ms == first_deadline),
+        "every re-park must carry the SAME absolute deadline — the wait is \
+         neither shortened nor slid forward by having been relaunched; got {deadlines:?}"
     );
     assert!(
         host.completed.lock().unwrap().is_none(),
@@ -7715,6 +7738,64 @@ fn direct_wasm_execute_invoke_early_relaunch_reparks_instead_of_skipping_the_del
     assert!(
         host.sleeps.lock().unwrap().is_empty(),
         "re-parking must not fall back to a blocking sleep"
+    );
+}
+
+/// A relaunch that lands just INSIDE the deadline — the host clock still reads
+/// "not yet", the database clock that fired the wake read "due" — must finish
+/// the wait, not re-park.
+///
+/// The two clocks are genuinely different: a deadline is minted from the
+/// environment host's wall clock, while the due-instance scan compares
+/// `sleep_until` against `Dialect::NOW`. Without the tolerance the guest
+/// re-parks on a deadline the scan STILL considers due, so the scan fires
+/// again on its next poll and the instance replays from its entry step once
+/// per poll interval until the clocks converge — burning a full replay each
+/// time, with nothing logged to say why.
+///
+/// The bound in the other direction is
+/// `direct_wasm_execute_invoke_early_relaunch_reparks_instead_of_skipping_the_delay`:
+/// an hour of owed wait must still re-park. The tolerance absorbs clock skew,
+/// not a real wait.
+#[test]
+fn direct_wasm_execute_invoke_relaunch_within_clock_skew_tolerance_completes() {
+    let components_dir = direct_e2e_components_dir();
+    let input = br#"{"value":"skewed"}"#.to_vec();
+    let artifact = compile_invoke_abi_artifact(
+        &components_dir,
+        "delay-skew-tolerance",
+        &store_freeing_delay_fixture(Some(3_600_000)),
+    );
+    let host = Arc::new(CheckpointingRuntimeHost::new(&input));
+
+    let first = run_invoke_once(&artifact.wasm_path, host.clone(), input.clone());
+    let deadline = match &first {
+        runtara_component_host::InvokeExit::Suspended(wakes) => match &wakes[0] {
+            runtara_component_host::lifecycle::WorkflowWake::At(ms) => *ms,
+            other => panic!("expected a timed wake, got {other:?}"),
+        },
+        other => panic!("first invoke must park, got {other:?}"),
+    };
+
+    // Wake half a second early — well inside the tolerance, and comfortably
+    // short of it even after any drift, since drift only closes the gap.
+    host.set_clock_before(deadline, 500);
+    let exit = run_invoke_once(&artifact.wasm_path, host.clone(), input.clone());
+    let output = match exit {
+        runtara_component_host::InvokeExit::Completed(output) => output,
+        other => panic!(
+            "a relaunch inside the skew tolerance must finish the wait; re-parking \
+             here spins one full replay per scheduler poll until the clocks agree. \
+             Got {other:?}"
+        ),
+    };
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output).expect("output is JSON"),
+        serde_json::json!({ "echo": "skewed" }),
+    );
+    assert!(
+        host.sleeps.lock().unwrap().is_empty(),
+        "finishing the wait must not fall back to a blocking sleep"
     );
 }
 

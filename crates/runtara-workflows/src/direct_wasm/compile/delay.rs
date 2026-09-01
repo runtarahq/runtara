@@ -68,6 +68,25 @@ const DIRECT_DURABLE_DELAY_PARK_THRESHOLD_MS: i64 = 30_000;
 /// skip its wait entirely.
 const DIRECT_DELAY_DEADLINE_STATE_LEN: i32 = 8;
 
+/// How close to a park's deadline counts as "the wait is over", in milliseconds.
+///
+/// A deadline is minted from the environment host's WALL CLOCK (`runtime_now_ms`),
+/// but the due-instance scan that relaunches the park compares `sleep_until`
+/// against the DATABASE clock (`Dialect::NOW`). Those are two different clocks.
+/// A database running ahead fires the wake early, and with an exact comparison
+/// the guest would re-park on a deadline the scan still considers due — so the
+/// scan fires again on its next poll, and the instance REPLAYS from its entry
+/// step once per poll interval until the two clocks converge. Silently: an
+/// early wake is indistinguishable from an on-time one from inside the guest.
+///
+/// The tolerance is also how early a park may finish, which is what keeps it
+/// far below [`DIRECT_DURABLE_DELAY_PARK_THRESHOLD_MS`]: at 1s against a 30s
+/// floor the shortest possible park ends at most ~3% early, while a tolerance
+/// anywhere near the threshold would let that shortest park fall straight
+/// through on its first early relaunch — reintroducing the very skip this arm
+/// exists to prevent.
+const DIRECT_DELAY_DEADLINE_TOLERANCE_MS: i64 = 1_000;
+
 /// Blocking durable sleep: the host holds the wasmtime Store and the tokio task
 /// for the whole duration on `durable-sleep-checkpoint`.
 ///
@@ -143,6 +162,13 @@ fn emit_park_until_deadline(
     body.instruction(&Instruction::Call(indices.runtime_now_ms));
     return_if_retptr_error(body, indices);
     push_retptr_i64_load(body, DIRECT_RET_U64_OK_OFFSET);
+    // Compare `now + tolerance` against the deadline rather than `now` alone,
+    // to absorb the host/database clock split described on
+    // DIRECT_DELAY_DEADLINE_TOLERANCE_MS. Added to `now` rather than subtracted
+    // from the deadline: both stay unsigned epoch milliseconds, with nothing to
+    // underflow once `now` is past the deadline.
+    body.instruction(&Instruction::I64Const(DIRECT_DELAY_DEADLINE_TOLERANCE_MS));
+    body.instruction(&Instruction::I64Add);
     body.instruction(&Instruction::LocalGet(DIRECT_WAIT_DEADLINE_MS_LOCAL));
     // Unsigned: both sides are u64 epoch milliseconds.
     body.instruction(&Instruction::I64LtU);
