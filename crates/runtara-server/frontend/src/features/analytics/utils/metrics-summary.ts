@@ -17,11 +17,7 @@ export interface MetricsSummary {
 export function summarizeMetrics(
   metrics: MetricsDataPoint[] | undefined | null
 ): MetricsSummary {
-
-  if (
-    !metrics ||
-    metrics.length === 0
-  ) {
+  if (!metrics || metrics.length === 0) {
     return {
       totalExecutions: 0,
       successRate: 0,
@@ -79,8 +75,7 @@ export function summarizeMetrics(
   const memoryWeighted = dataPoints.reduce(
     (acc, point) => {
       const mb =
-        point.avg_memory_bytes !== undefined &&
-        point.avg_memory_bytes !== null
+        point.avg_memory_bytes !== undefined && point.avg_memory_bytes !== null
           ? point.avg_memory_bytes / (1024 * 1024)
           : point.avgMemoryMb;
       const count = point.invocation_count ?? point.invocationCount ?? 0;
