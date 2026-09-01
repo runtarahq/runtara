@@ -79,6 +79,15 @@ pub struct EmbeddedWasmRunner {
     persistence: Arc<dyn Persistence>,
     executor: Arc<WorkflowExecutor>,
     tasks: TaskRegistry,
+    /// Bounds how many guests execute at once, whatever asks for them.
+    ///
+    /// `launch_detached` spawns the run and returns, so the caller's own
+    /// concurrency limit does not bound execution — it bounds how fast runs are
+    /// *started*. Nothing else stops a fast producer stacking guests until the
+    /// machine runs out of memory, and each live guest holds a wasmtime store.
+    /// A serial caller used to hide this by never asking for more than one at a
+    /// time; that is not a limit anything should rely on.
+    run_permits: Arc<tokio::sync::Semaphore>,
     /// Shared handler state for per-run [`PersistenceRuntimeHost`]s — the
     /// native runtime interface for HostImport-composed artifacts.
     handler_state: Arc<runtara_core::instance_handlers::InstanceHandlerState>,
@@ -98,6 +107,7 @@ impl EmbeddedWasmRunner {
         Ok(Self {
             config,
             limits: limits_from_env(),
+            run_permits: Arc::new(tokio::sync::Semaphore::new(max_concurrent_runs())),
             persistence,
             executor: Arc::new(executor),
             tasks: Arc::new(Mutex::new(HashMap::new())),
@@ -212,6 +222,25 @@ async fn resolve_run_input(
         .get_instance(instance_id)
         .await?
         .map(|instance| instance.input.unwrap_or_else(|| b"{}".to_vec())))
+}
+
+/// How many guests may execute concurrently in this process.
+///
+/// Each live guest holds a wasmtime store, so this is a memory bound before it
+/// is a throughput one: on a small host, letting a fast producer stack runs
+/// exhausts the machine and the process is killed, which is a far worse outcome
+/// than queueing. `RUNTARA_MAX_CONCURRENT_RUNS`, defaulting to four per core.
+fn max_concurrent_runs() -> usize {
+    std::env::var("RUNTARA_MAX_CONCURRENT_RUNS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map(|n| n.get().saturating_mul(4))
+                .unwrap_or(4)
+        })
+        .clamp(1, 1024)
 }
 
 fn limits_from_env() -> WorkflowLimits {
@@ -631,7 +660,16 @@ impl Runner for EmbeddedWasmRunner {
         // path, with the bytes it has just written. A wake or resume leaves it
         // None and still reads the stored envelope below.
         let prepersisted_input = options.prepersisted_input.clone();
+        let run_permits = Arc::clone(&self.run_permits);
         tokio::spawn(async move {
+            // Wait for a slot before touching the engine. The instance is
+            // already registered and durable at this point, so queueing here
+            // delays the run rather than losing it — which is the trade to
+            // make, because the alternative is the process being killed.
+            let _run_slot = run_permits
+                .acquire_owned()
+                .await
+                .expect("run semaphore closed");
             match executor.load_instance_pre(&wasm_path).await {
                 Ok(instance_pre) => {
                     if runtara_component_host::lifecycle::exports_lifecycle_invoke(
