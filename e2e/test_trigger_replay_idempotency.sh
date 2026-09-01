@@ -95,9 +95,6 @@ cleanup() {
     if [ -n "${INSTANCE_ID}" ]; then
         psql "${RUNTARA_DATABASE_URL}" -v ON_ERROR_STOP=0 >/dev/null <<SQL
 DELETE FROM container_registry WHERE instance_id = '${INSTANCE_ID}';
-DELETE FROM container_status WHERE instance_id = '${INSTANCE_ID}';
-DELETE FROM container_cancellations WHERE instance_id = '${INSTANCE_ID}';
-DELETE FROM container_heartbeats WHERE instance_id = '${INSTANCE_ID}';
 DELETE FROM instances WHERE instance_id = '${INSTANCE_ID}';
 SQL
     fi
