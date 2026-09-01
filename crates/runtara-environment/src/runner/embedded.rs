@@ -727,16 +727,26 @@ impl Runner for EmbeddedWasmRunner {
         // path, with the bytes it has just written. A wake or resume leaves it
         // None and still reads the stored envelope below.
         let prepersisted_input = options.prepersisted_input.clone();
-        let run_permits = Arc::clone(&self.run_permits);
+        // Take the slot BEFORE spawning, so what is bounded is the number of
+        // runs outstanding rather than the number executing. Acquiring inside
+        // the task bounds neither: every caller still gets a task immediately
+        // and only then queues, so each one holds its spec, its input bytes and
+        // its handles for as long as the queue is long. Waking a large parked
+        // population is exactly that shape - the wake scheduler's own limit
+        // frees as soon as the task is spawned, so it launches as fast as it
+        // can read batches - and 20k queued runs cost about a gigabyte, which
+        // killed the process the in-task acquire was added to protect.
+        //
+        // The caller waits here instead. The instance is already registered and
+        // durable, so this delays the run rather than losing it, and it gives
+        // the wake scheduler and trigger worker the backpressure their own
+        // concurrency limits are supposed to express.
+        let run_slot = Arc::clone(&self.run_permits)
+            .acquire_owned()
+            .await
+            .expect("run semaphore closed");
         tokio::spawn(async move {
-            // Wait for a slot before touching the engine. The instance is
-            // already registered and durable at this point, so queueing here
-            // delays the run rather than losing it — which is the trade to
-            // make, because the alternative is the process being killed.
-            let _run_slot = run_permits
-                .acquire_owned()
-                .await
-                .expect("run semaphore closed");
+            let _run_slot = run_slot;
             match executor.load_instance_pre(&wasm_path).await {
                 Ok(instance_pre) => {
                     if runtara_component_host::lifecycle::exports_lifecycle_invoke(
