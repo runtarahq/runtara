@@ -162,10 +162,21 @@ pub trait RuntimeHost: Send + Sync {
         state: Vec<u8>,
         ms: u64,
     ) -> Result<(), String>;
+    /// Milliseconds since the UNIX epoch, as the guest sees them.
+    ///
+    /// Defaults to the wall clock, which is what every production host uses. It
+    /// is a trait method rather than a free function so a harness standing in
+    /// for the wake scheduler can advance to a park's deadline instead of
+    /// waiting out real time: a resumed durable Delay compares `now-ms` against
+    /// its stored deadline to decide whether to continue or re-park, so without
+    /// a movable clock a park can only ever be observed re-parking.
+    fn now_ms(&self) -> Result<u64, String> {
+        wall_clock_now_ms()
+    }
 }
 
-/// Milliseconds since the UNIX epoch (the `now-ms` implementation).
-fn now_ms() -> Result<u64, String> {
+/// Milliseconds since the UNIX epoch (the default `now-ms` implementation).
+fn wall_clock_now_ms() -> Result<u64, String> {
     let elapsed = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|error| error.to_string())?;
@@ -300,8 +311,9 @@ pub fn add_runtime_to_linker(linker: &mut Linker<WorkflowState>) -> anyhow::Resu
 
     inst.func_wrap_async(
         "now-ms",
-        |_store: StoreContextMut<'_, WorkflowState>, (): ()| {
-            Box::new(async move { Ok((now_ms(),)) })
+        |mut store: StoreContextMut<'_, WorkflowState>, (): ()| {
+            let host = require_host(&mut store);
+            Box::new(async move { Ok((host?.now_ms(),)) })
         },
     )?;
 
@@ -397,7 +409,7 @@ mod tests {
 
     #[test]
     fn now_ms_is_epoch_scaled() {
-        let value = now_ms().expect("clock after epoch");
+        let value = wall_clock_now_ms().expect("clock after epoch");
         // 2020-01-01 in ms — sanity floor that catches unit mistakes
         // (seconds vs milliseconds) without pinning a wall clock.
         assert!(value > 1_577_836_800_000);

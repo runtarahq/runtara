@@ -139,12 +139,14 @@ pub(super) fn emit_ai_wait_tool_arm(
     body.instruction(&Instruction::Call(indices.runtime_heartbeat));
     return_if_retptr_error(body, indices);
 
-    // Store-freeing (gated; invoke export only): a human-in-the-loop AI tool
-    // wait has no timeout, so it suspends on-signal with NO deadline — the
-    // custom-signal waker is the sole wake path. Default stays the blocking
-    // poll loop (byte-preserved).
-    let store_freeing = indices.store_freeing_sleep
-        && indices.abi == crate::direct_wasm::component::WorkflowAbi::InvokeHostImports;
+    // Store-freeing, invoke export only: a human-in-the-loop AI tool wait has
+    // no timeout, so it suspends on-signal with NO deadline — the custom-signal
+    // waker is the sole wake path. The remaining condition is a CAPABILITY
+    // check, not a policy: `wasi:cli/run` has no success arm that can carry a
+    // wake, and a workflow published as an agent runs its durable steps inside
+    // the parent's capability invoke, so both must keep the blocking poll loop.
+    let store_freeing =
+        indices.abi == crate::direct_wasm::component::WorkflowAbi::InvokeHostImports;
     if store_freeing {
         emit_entry_suspend_on_signal(
             body,
@@ -458,15 +460,18 @@ pub(super) fn emit_wait_for_signal_plan(
         handled_target,
     );
 
-    // Store-freeing Wait (gated; invoke export only): after one poll MISS and
-    // the timeout check, EXIT with `suspended(on-signal{signal-id, deadline})`
+    // Store-freeing Wait, invoke export only: after one poll MISS and the
+    // timeout check, EXIT with `suspended(on-signal{signal-id, deadline})`
     // instead of blocking the Store for the poll interval. The host parks the
     // instance (sleep_until = timeout deadline, or NULL when there is none) and
     // the custom-signal waker relaunches it when the signal arrives; the replay
-    // re-polls the now-present signal and continues. Default stays the blocking
-    // poll loop — byte-preserved.
-    let store_freeing = indices.store_freeing_sleep
-        && indices.abi == crate::direct_wasm::component::WorkflowAbi::InvokeHostImports;
+    // re-polls the now-present signal and continues. No duration threshold
+    // applies here, unlike a Delay: a Wait is open-ended by construction — what
+    // would be blocked for is the poll interval, not a known wait — so parking
+    // is right however short that interval is. The ABI condition is a
+    // capability check (see the AI-tool wait above).
+    let store_freeing =
+        indices.abi == crate::direct_wasm::component::WorkflowAbi::InvokeHostImports;
     if store_freeing {
         emit_entry_suspend_on_signal(
             body,

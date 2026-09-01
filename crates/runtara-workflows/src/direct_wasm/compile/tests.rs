@@ -10715,6 +10715,20 @@ fn workflow_abi_env_lever_defaults_invoke() {
 }
 
 #[test]
+fn omit_runtime_env_lever_defaults_off() {
+    // Workflow-as-agent's compile lever: opt-in, truthy-only. This parser used
+    // to be shared with the store-freeing durable-sleep gate, which meant a
+    // change to one gate's semantics silently moved the other; it now stands
+    // alone precisely so that cannot happen again.
+    assert!(!super::omit_runtime_from_raw(None));
+    assert!(!super::omit_runtime_from_raw(Some("")));
+    assert!(!super::omit_runtime_from_raw(Some("0")));
+    assert!(!super::omit_runtime_from_raw(Some("yes")));
+    assert!(super::omit_runtime_from_raw(Some("1")));
+    assert!(super::omit_runtime_from_raw(Some("true")));
+}
+
+#[test]
 fn generated_workflow_slugs_are_wit_valid_packages() {
     // The slug plan allows leading digits (decision 3) on the premise that
     // wit-parser accepts digit-led words in

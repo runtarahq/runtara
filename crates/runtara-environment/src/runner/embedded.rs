@@ -273,6 +273,70 @@ fn has_on_signal_wake(wakes: &[runtara_component_host::lifecycle::WorkflowWake])
     wakes.iter().any(|w| matches!(w, WorkflowWake::OnSignal(_)))
 }
 
+/// The checkpoint (signal) ids this park is waiting on, in wake order.
+fn on_signal_checkpoint_ids(
+    wakes: &[runtara_component_host::lifecycle::WorkflowWake],
+) -> Vec<&str> {
+    use runtara_component_host::lifecycle::WorkflowWake;
+    wakes
+        .iter()
+        .filter_map(|wake| match wake {
+            WorkflowWake::OnSignal(wait) => Some(wait.checkpoint_id.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Close the window between the guest's last signal poll and the `suspended`
+/// write above.
+///
+/// A signal delivered in that window is otherwise lost: `handle_send_custom_signal`
+/// inserts the row and calls `wake_suspended_on_signal`, which no-ops unless the
+/// instance is ALREADY `suspended` + `waiting_signal` — and at that moment it is
+/// still `running`. The park then completes, and for a wait with no timeout
+/// `sleep_until` stays NULL with no other wake path, so the instance is stranded
+/// forever with its signal sitting in the table.
+///
+/// Re-reading here, after the row is visible to the waker, closes it: if the
+/// signal is already present we self-wake by stamping `sleep_until = now`, which
+/// is exactly what the waker would have done. The read is non-destructive
+/// (`take_pending_custom_signal` retains the row, despite its name), so the
+/// replayed guest still observes the signal.
+///
+/// Returns true when it woke the instance.
+async fn wake_if_signal_already_arrived(
+    persistence: &dyn Persistence,
+    instance_id: &str,
+    wakes: &[runtara_component_host::lifecycle::WorkflowWake],
+) -> bool {
+    for checkpoint_id in on_signal_checkpoint_ids(wakes) {
+        match persistence
+            .take_pending_custom_signal(instance_id, checkpoint_id)
+            .await
+        {
+            Ok(Some(_)) => {
+                if let Err(e) = persistence
+                    .set_instance_sleep(instance_id, chrono::Utc::now())
+                    .await
+                {
+                    warn!(instance_id, error = %e, "Failed to self-wake after a signal raced the park");
+                    return false;
+                }
+                info!(
+                    instance_id,
+                    checkpoint_id, "Signal arrived while parking; woke the instance immediately"
+                );
+                return true;
+            }
+            Ok(None) => {}
+            Err(e) => {
+                warn!(instance_id, error = %e, "Could not re-check for a signal that raced the park")
+            }
+        }
+    }
+    false
+}
+
 /// Park an invoke-shaped instance that returned `outcome::suspended` (the
 /// store-freeing durable-sleep / wait-for-signal paths). Stamps
 /// `status='suspended'`, plus `sleep_until=deadline` when there is a TIMED wake
@@ -388,6 +452,9 @@ async fn park_invoke_suspend(
         Err(e) => {
             warn!(instance_id, error = %e, "Failed to mark instance suspended after invoke suspend");
         }
+    }
+    if wake_if_signal_already_arrived(persistence, instance_id, wakes).await {
+        return;
     }
     let Some(deadline_ms) = deadline_ms else {
         // Deadline-less on-signal: parked as suspended; the waker relaunches it.
@@ -920,6 +987,80 @@ mod tests {
             inst.termination_reason.as_deref(),
             Some(WAITING_SIGNAL_TERMINATION),
             "the waker must be able to distinguish this park from a pause suspend"
+        );
+    }
+
+    #[cfg(feature = "db-integration-tests")]
+    #[tokio::test]
+    async fn park_self_wakes_when_the_signal_beat_the_suspend_write() {
+        // The lost-wakeup window: `handle_send_custom_signal` inserts the row and
+        // calls `wake_suspended_on_signal`, which no-ops while the instance is
+        // still `running` — which it is, right up until the write inside
+        // `park_invoke_suspend`. For a wait with NO timeout there is no other
+        // wake path, so without the re-check the instance would sit suspended
+        // forever with its signal already in the table.
+        let (persistence, instance_id) = running_instance().await;
+        persistence
+            .insert_custom_signal(&instance_id, "raced-sig", b"{}")
+            .await
+            .expect("insert signal");
+
+        park_invoke_suspend(
+            persistence.as_ref(),
+            &instance_id,
+            &[WorkflowWake::OnSignal(SignalWait {
+                checkpoint_id: "raced-sig".into(),
+                deadline_ms: None,
+            })],
+        )
+        .await;
+
+        let inst = persistence
+            .get_instance(&instance_id)
+            .await
+            .expect("get")
+            .expect("instance exists");
+        assert_eq!(inst.status, "suspended");
+        assert!(
+            inst.sleep_until.is_some(),
+            "a signal already present at park time must self-wake the instance, \
+             not strand it waiting for a waker that already ran"
+        );
+        // Non-destructive: the replayed guest still observes the signal.
+        assert!(
+            persistence
+                .take_pending_custom_signal(&instance_id, "raced-sig")
+                .await
+                .expect("read signal")
+                .is_some(),
+            "the self-wake must not consume the signal the replay needs"
+        );
+    }
+
+    #[cfg(feature = "db-integration-tests")]
+    #[tokio::test]
+    async fn park_leaves_sleep_unset_when_no_signal_has_arrived_yet() {
+        // The ordinary case must be untouched by the re-check above.
+        let (persistence, instance_id) = running_instance().await;
+        park_invoke_suspend(
+            persistence.as_ref(),
+            &instance_id,
+            &[WorkflowWake::OnSignal(SignalWait {
+                checkpoint_id: "quiet-sig".into(),
+                deadline_ms: None,
+            })],
+        )
+        .await;
+
+        let inst = persistence
+            .get_instance(&instance_id)
+            .await
+            .expect("get")
+            .expect("instance exists");
+        assert_eq!(inst.status, "suspended");
+        assert!(
+            inst.sleep_until.is_none(),
+            "with no signal present the waker remains the sole wake path"
         );
     }
 
