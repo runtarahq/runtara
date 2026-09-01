@@ -387,6 +387,39 @@ const DIRECT_AGENT_ATTEMPT_ENV_LEN_LOCAL: u32 = 115;
 /// acted on only at the chunk boundary (after assemble), never with live
 /// subtasks. Lives in the spare slot below the PSPLIT block.
 const DIRECT_PSPLIT_SIGNAL_LOCAL: u32 = 116;
+/// Set when a durable wait's deadline came from a checkpoint HIT — i.e. this
+/// pass is a RELAUNCH of a parked wait rather than its first reach. Gates
+/// [`DIRECT_DEADLINE_SKEW_TOLERANCE_MS`], which is only meaningful once a
+/// deadline has survived a park.
+const DIRECT_WAIT_RESUMED_LOCAL: u32 = 117;
+
+/// How far before a stored deadline a RELAUNCHED durable wait may treat the
+/// wait as served, in milliseconds.
+///
+/// A deadline is minted from the environment host's WALL CLOCK
+/// (`runtime_now_ms`), but the due-instance scan that relaunches a parked
+/// instance compares `sleep_until` against the DATABASE clock (`Dialect::NOW`).
+/// Those are two different clocks, so a database running ahead by `skew` fires
+/// the wake that much early. With an exact comparison the guest re-parks on a
+/// deadline the scan STILL considers due, the scan fires again on its next
+/// poll, and every one of those relaunches REPLAYS the workflow from its entry
+/// step. Silently: from inside the guest an early wake is indistinguishable
+/// from an on-time one.
+///
+/// That spin is self-limiting, and it is worth being precise about why, because
+/// it bounds what this constant can buy. The deadline is a fixed absolute value
+/// and the guest's OWN clock advances toward it, so the relaunches stop after
+/// roughly `skew / poll interval` of them whether or not the two clocks are
+/// ever brought back into agreement. The tolerance therefore removes the wasted
+/// relaunches outright only when `skew` falls within it, and saves at most one
+/// poll beyond that. 1s is sized for ordinary NTP-scale skew, which is where
+/// nearly all of it lands.
+///
+/// It applies ONLY to a deadline read back from a checkpoint. On a first reach
+/// the guest computes the deadline and compares it against the same clock it
+/// came from, so there is no skew to absorb and a tolerance there would be pure
+/// loss — see [`DIRECT_WAIT_RESUMED_LOCAL`].
+const DIRECT_DEADLINE_SKEW_TOLERANCE_MS: i64 = 1_000;
 const DIRECT_PSPLIT_WS_LOCAL: u32 = 118;
 const DIRECT_PSPLIT_PENDING_LOCAL: u32 = 119;
 const DIRECT_PSPLIT_SLOTS_LOCAL: u32 = 120;

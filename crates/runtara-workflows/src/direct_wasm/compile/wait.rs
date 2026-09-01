@@ -28,13 +28,14 @@ use super::dispatcher::emit_run_plan_mapping;
 use super::mapping::emit_build_source;
 use super::split::emit_split_append_error_payload_and_continue;
 use super::{
-    DIRECT_RESULT_OPTION_TAG_OFFSET, DIRECT_RESULT_OPTION_U64_TAG_OFFSET,
-    DIRECT_RESULT_OPTION_U64_VALUE_OFFSET, DIRECT_RET_U64_OK_OFFSET, DIRECT_STEP_ERROR_LEN_LOCAL,
-    DIRECT_STEP_ERROR_PTR_LOCAL, DIRECT_WAIT_DEADLINE_MS_LOCAL,
-    DIRECT_WAIT_DEADLINE_SCRATCH_OFFSET, DIRECT_WAIT_ON_WAIT_VARIABLES_LEN_LOCAL,
-    DIRECT_WAIT_ON_WAIT_VARIABLES_PTR_LOCAL, DIRECT_WAIT_PARENT_STEPS_LEN_LOCAL,
-    DIRECT_WAIT_PARENT_STEPS_PTR_LOCAL, DIRECT_WAIT_POLL_INTERVAL_MS_LOCAL,
-    DIRECT_WAIT_SIGNAL_ID_LEN_LOCAL, DIRECT_WAIT_SIGNAL_ID_PTR_LOCAL, DIRECT_WAIT_TIMEOUT_MS_LOCAL,
+    DIRECT_DEADLINE_SKEW_TOLERANCE_MS, DIRECT_RESULT_OPTION_TAG_OFFSET,
+    DIRECT_RESULT_OPTION_U64_TAG_OFFSET, DIRECT_RESULT_OPTION_U64_VALUE_OFFSET,
+    DIRECT_RET_U64_OK_OFFSET, DIRECT_STEP_ERROR_LEN_LOCAL, DIRECT_STEP_ERROR_PTR_LOCAL,
+    DIRECT_WAIT_DEADLINE_MS_LOCAL, DIRECT_WAIT_DEADLINE_SCRATCH_OFFSET,
+    DIRECT_WAIT_ON_WAIT_VARIABLES_LEN_LOCAL, DIRECT_WAIT_ON_WAIT_VARIABLES_PTR_LOCAL,
+    DIRECT_WAIT_PARENT_STEPS_LEN_LOCAL, DIRECT_WAIT_PARENT_STEPS_PTR_LOCAL,
+    DIRECT_WAIT_POLL_INTERVAL_MS_LOCAL, DIRECT_WAIT_RESUMED_LOCAL, DIRECT_WAIT_SIGNAL_ID_LEN_LOCAL,
+    DIRECT_WAIT_SIGNAL_ID_PTR_LOCAL, DIRECT_WAIT_TIMEOUT_MS_LOCAL,
     DIRECT_WAIT_TIMEOUT_PRESENT_LOCAL, DirectCoreFunctionIndices, DirectCoreStaticData,
     DirectDataSegment, DirectErrorRoutePlan, DirectFailureTarget, DirectHandledTarget,
     DirectRunPlan, DirectVariables, emit_runtime_fail_return,
@@ -307,6 +308,11 @@ pub(super) fn emit_wait_for_signal_plan(
     );
     push_i64_load_from_ptr(body, output_ptr_local);
     body.instruction(&Instruction::LocalSet(DIRECT_WAIT_DEADLINE_MS_LOCAL));
+    // This deadline survived a park, so the wake that brought us back was fired
+    // by the database clock against a deadline minted from the host's. Arm the
+    // skew tolerance for the timeout comparison below.
+    body.instruction(&Instruction::I32Const(1));
+    body.instruction(&Instruction::LocalSet(DIRECT_WAIT_RESUMED_LOCAL));
     body.instruction(&Instruction::Else);
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.runtime_now_ms));
@@ -315,6 +321,12 @@ pub(super) fn emit_wait_for_signal_plan(
     body.instruction(&Instruction::LocalGet(DIRECT_WAIT_TIMEOUT_MS_LOCAL));
     body.instruction(&Instruction::I64Add);
     body.instruction(&Instruction::LocalSet(DIRECT_WAIT_DEADLINE_MS_LOCAL));
+    // First reach: `now` and this deadline come from the SAME clock, so there
+    // is no skew to absorb. A tolerance here would be pure loss — it would fire
+    // the timeout early on the first poll, and a wait whose timeout is shorter
+    // than the tolerance would time out before ever looking for its signal.
+    body.instruction(&Instruction::I32Const(0));
+    body.instruction(&Instruction::LocalSet(DIRECT_WAIT_RESUMED_LOCAL));
     store_local_i64_at(
         body,
         DIRECT_WAIT_DEADLINE_SCRATCH_OFFSET,
@@ -338,6 +350,8 @@ pub(super) fn emit_wait_for_signal_plan(
     body.instruction(&Instruction::LocalSet(DIRECT_WAIT_TIMEOUT_MS_LOCAL));
     body.instruction(&Instruction::I64Const(0));
     body.instruction(&Instruction::LocalSet(DIRECT_WAIT_DEADLINE_MS_LOCAL));
+    body.instruction(&Instruction::I32Const(0));
+    body.instruction(&Instruction::LocalSet(DIRECT_WAIT_RESUMED_LOCAL));
     body.instruction(&Instruction::End);
 
     emit_wait_debug_start_event(
@@ -648,6 +662,7 @@ fn emit_wait_on_wait_plan(
     body.instruction(&Instruction::LocalGet(DIRECT_WAIT_TIMEOUT_PRESENT_LOCAL));
     body.instruction(&Instruction::LocalGet(DIRECT_WAIT_DEADLINE_MS_LOCAL));
     body.instruction(&Instruction::LocalGet(DIRECT_WAIT_TIMEOUT_MS_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_WAIT_RESUMED_LOCAL));
     body.instruction(&Instruction::Block(BlockType::Empty));
     emit_run_plan_mapping(
         body,
@@ -674,6 +689,7 @@ fn emit_wait_on_wait_plan(
     body.instruction(&Instruction::End);
     // Restore the outer wait's signal id / deadline / timeout (reverse push order)
     // before the route/steps restore below re-derives `route` from the signal id.
+    body.instruction(&Instruction::LocalSet(DIRECT_WAIT_RESUMED_LOCAL));
     body.instruction(&Instruction::LocalSet(DIRECT_WAIT_TIMEOUT_MS_LOCAL));
     body.instruction(&Instruction::LocalSet(DIRECT_WAIT_DEADLINE_MS_LOCAL));
     body.instruction(&Instruction::LocalSet(DIRECT_WAIT_TIMEOUT_PRESENT_LOCAL));
@@ -734,6 +750,41 @@ fn emit_wait_timeout_check(
     body.instruction(&Instruction::Call(indices.runtime_now_ms));
     return_if_retptr_error(body, indices);
     push_retptr_i64_load(body, DIRECT_RET_U64_OK_OFFSET);
+    // Add the skew tolerance to `now`, but only on a relaunch — multiplying by
+    // the resumed flag rather than branching on it, so the emitted shape is the
+    // same either way. Added to `now` rather than subtracted from the deadline
+    // for two reasons: both sides stay unsigned epoch milliseconds with nothing
+    // to underflow, and DIRECT_WAIT_DEADLINE_MS_LOCAL stays the TRUE deadline
+    // for the on-signal re-park below, so `sleep_until` is never stamped early.
+    // (Shifting the parked deadline instead would move the next wake earlier by
+    // exactly the tolerance and cancel out the absorption entirely.)
+    //
+    // The tolerance is CLAMPED to half the wait's own timeout, because the
+    // resumed flag alone is not enough of a guard here. A store-freeing Wait has
+    // no park floor — it parks on its FIRST poll miss — so every pass after the
+    // first is a resumed one, and an unclamped tolerance would swallow the whole
+    // remaining window of any timeout near or below it. A wait relaunched off
+    // its deadline (an operator resume, a recovery sweep, another waker) would
+    // then report WAIT_TIMEOUT with time the author asked for still unspent,
+    // which is the same defect as a Delay losing its remaining wait, just
+    // bounded. Halving keeps the absorption proportional: no wait can lose more
+    // than half its window, however short it is, and anything comfortably above
+    // the tolerance is unaffected.
+    body.instruction(&Instruction::LocalGet(DIRECT_WAIT_RESUMED_LOCAL));
+    body.instruction(&Instruction::I64ExtendI32U);
+    // min(tolerance, timeout / 2), via select on `tolerance < timeout / 2`.
+    body.instruction(&Instruction::I64Const(DIRECT_DEADLINE_SKEW_TOLERANCE_MS));
+    body.instruction(&Instruction::LocalGet(DIRECT_WAIT_TIMEOUT_MS_LOCAL));
+    body.instruction(&Instruction::I64Const(1));
+    body.instruction(&Instruction::I64ShrU);
+    body.instruction(&Instruction::I64Const(DIRECT_DEADLINE_SKEW_TOLERANCE_MS));
+    body.instruction(&Instruction::LocalGet(DIRECT_WAIT_TIMEOUT_MS_LOCAL));
+    body.instruction(&Instruction::I64Const(1));
+    body.instruction(&Instruction::I64ShrU);
+    body.instruction(&Instruction::I64LtU);
+    body.instruction(&Instruction::Select);
+    body.instruction(&Instruction::I64Mul);
+    body.instruction(&Instruction::I64Add);
     body.instruction(&Instruction::LocalGet(DIRECT_WAIT_DEADLINE_MS_LOCAL));
     body.instruction(&Instruction::I64GeU);
     body.instruction(&Instruction::If(BlockType::Empty));

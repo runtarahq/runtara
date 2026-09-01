@@ -7155,6 +7155,10 @@ struct CheckpointingRuntimeHost {
     /// compares `now-ms` against its stored deadline, so a stand-in that cannot
     /// move the clock can only ever observe a re-park.
     clock_offset_ms: Mutex<u64>,
+    /// When set, the exact value `now-ms` returns, ignoring the wall clock and
+    /// `clock_offset_ms` entirely. Lets a test place the guest at a precise
+    /// distance from a deadline and hold it there.
+    pinned_clock_ms: Mutex<Option<u64>>,
     /// Fallback payload returned for ANY polled id — for the blocking control,
     /// whose deterministic signal id (workflow-id-scoped) isn't known ahead of
     /// the run.
@@ -7170,6 +7174,7 @@ impl CheckpointingRuntimeHost {
             sleeps: Mutex::new(Vec::new()),
             custom_signals: Mutex::new(HashMap::new()),
             clock_offset_ms: Mutex::new(0),
+            pinned_clock_ms: Mutex::new(None),
             any_signal: Mutex::new(None),
         }
     }
@@ -7179,6 +7184,22 @@ impl CheckpointingRuntimeHost {
             .lock()
             .unwrap()
             .insert(checkpoint_id.to_string(), payload.to_vec());
+    }
+
+    /// PIN the guest's clock exactly `remaining_ms` short of `deadline_ms` — an
+    /// early wake, which [`advance_clock_past`](Self::advance_clock_past)
+    /// cannot express. Models a database clock running ahead of the host's: the
+    /// due scan fires while the host still reads `now` as before the deadline.
+    ///
+    /// Pinned rather than offset from the wall clock so the guest sees this
+    /// value however long instantiation and the entry-step replay take. An
+    /// offset would let real time between here and the guest's `now-ms` eat
+    /// into `remaining_ms` — and on a loaded machine push past it entirely, at
+    /// which point the test still passes, but because the wait genuinely
+    /// elapsed rather than because the tolerance let it through. It would have
+    /// quietly stopped testing the guard.
+    fn pin_clock_before(&self, deadline_ms: u64, remaining_ms: u64) {
+        *self.pinned_clock_ms.lock().unwrap() = Some(deadline_ms.saturating_sub(remaining_ms));
     }
 
     /// Move the guest's clock far enough forward that `deadline_ms` has passed —
@@ -7288,6 +7309,9 @@ impl runtara_component_host::runtime_host::RuntimeHost for CheckpointingRuntimeH
         Ok(false)
     }
     fn now_ms(&self) -> Result<u64, String> {
+        if let Some(pinned) = *self.pinned_clock_ms.lock().unwrap() {
+            return Ok(pinned);
+        }
         Ok(now_ms() + *self.clock_offset_ms.lock().unwrap())
     }
     async fn record_retry_attempt(
@@ -7694,19 +7718,28 @@ fn direct_wasm_execute_invoke_early_relaunch_reparks_instead_of_skipping_the_del
     };
 
     // Relaunch immediately — an hour before the deadline, exactly as a manual
-    // resume would. It must park again, not complete.
-    let second = run_invoke_once(&artifact.wasm_path, host.clone(), input.clone());
-    let second_deadline = match &second {
-        runtara_component_host::InvokeExit::Suspended(wakes) => match &wakes[0] {
-            runtara_component_host::lifecycle::WorkflowWake::At(ms) => *ms,
-            other => panic!("expected a timed wake, got {other:?}"),
-        },
-        other => panic!("an early relaunch must re-park, not run the delay out; got {other:?}"),
-    };
-    assert_eq!(
-        first_deadline, second_deadline,
-        "a re-park must carry the SAME absolute deadline — the wait is not \
-         shortened by having been relaunched"
+    // resume would. TWICE: one re-park shows the deadline was re-read, but only
+    // a second shows re-parking is IDEMPOTENT. A lowering that re-parked at a
+    // recomputed `now + duration` instead of the stored value would satisfy the
+    // first relaunch and slide the deadline forward on every one after it, so
+    // the wait never ends — which is the failure `wait.rs` already documents.
+    let mut deadlines = vec![first_deadline];
+    for relaunch in 0..2 {
+        let exit = run_invoke_once(&artifact.wasm_path, host.clone(), input.clone());
+        match &exit {
+            runtara_component_host::InvokeExit::Suspended(wakes) => match &wakes[0] {
+                runtara_component_host::lifecycle::WorkflowWake::At(ms) => deadlines.push(*ms),
+                other => panic!("relaunch {relaunch} expected a timed wake, got {other:?}"),
+            },
+            other => panic!(
+                "early relaunch {relaunch} must re-park, not run the delay out; got {other:?}"
+            ),
+        }
+    }
+    assert!(
+        deadlines.iter().all(|ms| *ms == first_deadline),
+        "every re-park must carry the SAME absolute deadline — the wait is \
+         neither shortened nor slid forward by having been relaunched; got {deadlines:?}"
     );
     assert!(
         host.completed.lock().unwrap().is_none(),
@@ -7715,6 +7748,86 @@ fn direct_wasm_execute_invoke_early_relaunch_reparks_instead_of_skipping_the_del
     assert!(
         host.sleeps.lock().unwrap().is_empty(),
         "re-parking must not fall back to a blocking sleep"
+    );
+}
+
+/// The skew tolerance is bounded on BOTH sides: a relaunch just outside it
+/// still re-parks, one just inside it finishes the wait.
+///
+/// The two clocks are genuinely different — a deadline is minted from the
+/// environment host's wall clock, while the due-instance scan compares
+/// `sleep_until` against `Dialect::NOW` — so a database running ahead relaunches
+/// the park early. Without a tolerance the guest re-parks on a deadline the scan
+/// STILL considers due, and every relaunch until the host clock catches up
+/// replays the workflow from its entry step, with nothing logged to say why.
+///
+/// The upper bound is the half that is easy to leave untested, and it is the
+/// one that matters: the hour-early case in
+/// `direct_wasm_execute_invoke_early_relaunch_reparks_instead_of_skipping_the_delay`
+/// passes for ANY tolerance under an hour, including one at or above
+/// [`DIRECT_DURABLE_DELAY_PARK_THRESHOLD_MS`] — which would let the shortest
+/// legal park fall straight through on its first early relaunch, reinstating
+/// the skip this arm exists to prevent. Relaunching just outside the tolerance
+/// is what pins it.
+#[test]
+fn direct_wasm_execute_invoke_clock_skew_tolerance_is_bounded_on_both_sides() {
+    let components_dir = direct_e2e_components_dir();
+    let input = br#"{"value":"skewed"}"#.to_vec();
+    let artifact = compile_invoke_abi_artifact(
+        &components_dir,
+        "delay-skew-tolerance",
+        &store_freeing_delay_fixture(Some(3_600_000)),
+    );
+    let host = Arc::new(CheckpointingRuntimeHost::new(&input));
+
+    let first = run_invoke_once(&artifact.wasm_path, host.clone(), input.clone());
+    let deadline = match &first {
+        runtara_component_host::InvokeExit::Suspended(wakes) => match &wakes[0] {
+            runtara_component_host::lifecycle::WorkflowWake::At(ms) => *ms,
+            other => panic!("expected a timed wake, got {other:?}"),
+        },
+        other => panic!("first invoke must park, got {other:?}"),
+    };
+
+    // OUTSIDE: two seconds of wait still owed. Real time, not skew — it must
+    // still be served. This is what stops the tolerance being widened to the
+    // point where it swallows a genuine wait.
+    host.pin_clock_before(deadline, 2_000);
+    let outside = run_invoke_once(&artifact.wasm_path, host.clone(), input.clone());
+    match &outside {
+        runtara_component_host::InvokeExit::Suspended(wakes) => match &wakes[0] {
+            runtara_component_host::lifecycle::WorkflowWake::At(ms) => assert_eq!(
+                *ms, deadline,
+                "a re-park outside the tolerance must keep the same absolute deadline"
+            ),
+            other => panic!("expected a timed wake, got {other:?}"),
+        },
+        other => panic!(
+            "a relaunch OUTSIDE the skew tolerance must re-park — a tolerance wide \
+             enough to swallow 2s of owed wait is wide enough to swallow the \
+             shortest legal park whole. Got {other:?}"
+        ),
+    }
+
+    // INSIDE: half a second short of the deadline, which is the host/database
+    // clock split rather than owed wait. Finish it.
+    host.pin_clock_before(deadline, 500);
+    let inside = run_invoke_once(&artifact.wasm_path, host.clone(), input.clone());
+    let output = match inside {
+        runtara_component_host::InvokeExit::Completed(output) => output,
+        other => panic!(
+            "a relaunch inside the skew tolerance must finish the wait; re-parking \
+             here burns a full replay on every scheduler poll until the host clock \
+             reaches the deadline. Got {other:?}"
+        ),
+    };
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output).expect("output is JSON"),
+        serde_json::json!({ "echo": "skewed" }),
+    );
+    assert!(
+        host.sleeps.lock().unwrap().is_empty(),
+        "finishing the wait must not fall back to a blocking sleep"
     );
 }
 
@@ -7795,6 +7908,229 @@ const STORE_FREEING_WAIT: &str = r#"{
   "inputSchema": {},
   "outputSchema": {}
 }"#;
+
+/// A WaitForSignal fixture with a caller-chosen timeout, so a test can pick one
+/// SHORTER than the deadline skew tolerance.
+fn timed_wait_fixture(timeout_ms: u64) -> String {
+    format!(
+        r#"{{
+  "name": "Timed Wait",
+  "steps": {{
+    "wait": {{
+      "stepType": "WaitForSignal",
+      "id": "wait",
+      "name": "Approval",
+      "pollIntervalMs": 0,
+      "timeoutMs": {{ "valueType": "immediate", "value": {timeout_ms} }},
+      "responseSchema": {{ "approved": {{ "type": "boolean", "required": true }} }}
+    }},
+    "finish": {{
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {{
+        "approved": {{ "valueType": "reference", "value": "steps.wait.outputs.approved" }}
+      }}
+    }}
+  }},
+  "entryPoint": "wait",
+  "executionPlan": [ {{ "fromStep": "wait", "toStep": "finish" }} ],
+  "variables": {{}},
+  "inputSchema": {{}},
+  "outputSchema": {{}}
+}}"#
+    )
+}
+
+/// A wait that never PARKED gets no tolerance at all — which is the whole job
+/// of the resumed flag once the half-window clamp is in place.
+///
+/// Under `wasi:cli/run` a Wait cannot park (no success arm can carry a wake), so
+/// it polls in-process against one clock for its whole timeout. There is no
+/// database scan involved and therefore no skew to absorb, and the clamp does
+/// not help: it bounds the tolerance at half the window, so an ungated wait here
+/// would end its timeout up to HALF early for no reason at all.
+///
+/// Asserted on elapsed time, which can only fail in the safe direction — a
+/// loaded machine makes the run slower, never faster, so the floor cannot flake
+/// red. Ungated, this 400ms wait resolves at ~200ms.
+#[test]
+fn direct_wasm_execute_cli_run_wait_timeout_gets_no_skew_tolerance() {
+    let components_dir = direct_e2e_components_dir();
+    let graph: ExecutionGraph =
+        serde_json::from_str(&timed_wait_fixture(400)).expect("wait fixture parses");
+    let temp = tempfile::tempdir().expect("tempdir");
+    let compiled = compile_direct_workflow_composed_configured(
+        DirectCompilationInput {
+            workflow_id: "wait-cli-run-no-tolerance".to_string(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: graph,
+            child_workflows: vec![],
+            output_dir: temp.path().to_path_buf(),
+            track_events: false,
+            agent_catalog: None,
+            agent_slug: None,
+        },
+        &components_dir,
+        RuntimeBinding::HostImport,
+        runtara_workflows::direct_wasm::WorkflowAbi::CliRunHttp,
+        false,
+    )
+    .expect("cli-run compile+compose succeeds");
+
+    let input = br#"{}"#.to_vec();
+    let host = Arc::new(CheckpointingRuntimeHost::new(&input));
+    let started = std::time::Instant::now();
+    let (ok, _stderr, _) = execute_via_embedded(&compiled.wasm_path, &[], Some(host.clone()));
+    let elapsed = started.elapsed();
+
+    assert!(
+        !ok,
+        "a wait with no signal must fail on its timeout under cli-run"
+    );
+    assert!(
+        elapsed >= std::time::Duration::from_millis(300),
+        "an in-process wait must serve its FULL 400ms window — no park happened, \
+         so there is no clock skew to absorb and the tolerance must stay off. \
+         Resolved after {elapsed:?}"
+    );
+}
+
+/// A resumed Wait absorbs the host/database clock split the same way a resumed
+/// Delay does: woken a shade early it serves its timeout instead of re-parking,
+/// but woken with real time still owed it re-parks on the SAME deadline.
+///
+/// A Wait's deadline lands in the same `sleep_until` column, stamped from the
+/// same host clock, and is woken by the same database-clock scan as a parked
+/// Delay, so it arrives early for the same reason. This fixture's timeout is far
+/// wider than the tolerance, so the half-window clamp is not binding here —
+/// `..._is_clamped_to_half_the_window` covers that.
+#[test]
+fn direct_wasm_execute_invoke_wait_timeout_tolerance_is_armed_only_on_resume() {
+    let components_dir = direct_e2e_components_dir();
+    let input = br#"{}"#.to_vec();
+    let artifact = compile_invoke_abi_artifact(
+        &components_dir,
+        "wait-timeout-tolerance",
+        &timed_wait_fixture(60_000),
+    );
+    let host = Arc::new(CheckpointingRuntimeHost::new(&input));
+
+    let first = run_invoke_once(&artifact.wasm_path, host.clone(), input.clone());
+    let deadline = match &first {
+        runtara_component_host::InvokeExit::Suspended(wakes) => match &wakes[0] {
+            runtara_component_host::lifecycle::WorkflowWake::OnSignal(wait) => wait
+                .deadline_ms
+                .expect("a timed wait parks carrying its deadline"),
+            other => panic!("a timed wait must park on-signal, got {other:?}"),
+        },
+        other => panic!("a first reach with no signal must park, got {other:?}"),
+    };
+
+    // Outside the tolerance: real wait owed, so re-park on the SAME deadline.
+    // The deadline must not absorb the tolerance — if it did, the next wake
+    // would move earlier by exactly the tolerance and absorb nothing.
+    host.pin_clock_before(deadline, 2_000);
+    let outside = run_invoke_once(&artifact.wasm_path, host.clone(), input.clone());
+    match &outside {
+        runtara_component_host::InvokeExit::Suspended(wakes) => match &wakes[0] {
+            runtara_component_host::lifecycle::WorkflowWake::OnSignal(wait) => assert_eq!(
+                wait.deadline_ms,
+                Some(deadline),
+                "a re-park must carry the same absolute deadline"
+            ),
+            other => panic!("expected an on-signal wake, got {other:?}"),
+        },
+        other => panic!("2s of owed wait must still re-park, got {other:?}"),
+    }
+
+    // Inside the tolerance: the database clock fired the wake a shade early.
+    // Serve the timeout rather than spinning another relaunch. Asserted as an
+    // actual WAIT_TIMEOUT failure (the fixture has no onError) rather than a
+    // bare "not suspended", which a trap or a silent completion would satisfy
+    // too — and a broken local index on this path would produce exactly that.
+    host.pin_clock_before(deadline, 500);
+    let inside = run_invoke_once(&artifact.wasm_path, host.clone(), input.clone());
+    let error = match inside {
+        runtara_component_host::InvokeExit::Failed(error) => error,
+        other => panic!(
+            "a resumed wait inside the tolerance must resolve its timeout, not \
+             re-park; got {other:?}"
+        ),
+    };
+    assert!(
+        error.message.contains("timed out"),
+        "the resumed wait must fail with its WAIT_TIMEOUT error, got {error:?}"
+    );
+}
+
+/// The tolerance is clamped to HALF the wait's own timeout, so a short window
+/// cannot be swallowed whole.
+///
+/// The resumed flag alone does not bound this. A store-freeing Wait has no park
+/// floor — it parks on its FIRST poll miss — so every pass after the first is a
+/// resumed one, and a flat 1s tolerance would consume the entire remaining
+/// window of any timeout near or below it. A wait relaunched off its deadline
+/// (an operator resume, a recovery sweep, another waker) would then report
+/// WAIT_TIMEOUT with time the author asked for still unspent: the same defect as
+/// a Delay losing its remaining wait, merely bounded.
+///
+/// 400ms timeout → 200ms of tolerance. Relaunching 300ms early is INSIDE the
+/// unclamped 1s tolerance and outside the clamped one, so this fails if the
+/// clamp is dropped.
+#[test]
+fn direct_wasm_execute_invoke_wait_timeout_tolerance_is_clamped_to_half_the_window() {
+    let components_dir = direct_e2e_components_dir();
+    let input = br#"{}"#.to_vec();
+    let artifact = compile_invoke_abi_artifact(
+        &components_dir,
+        "wait-timeout-clamp",
+        &timed_wait_fixture(400),
+    );
+    let host = Arc::new(CheckpointingRuntimeHost::new(&input));
+
+    let first = run_invoke_once(&artifact.wasm_path, host.clone(), input.clone());
+    let deadline = match &first {
+        runtara_component_host::InvokeExit::Suspended(wakes) => match &wakes[0] {
+            runtara_component_host::lifecycle::WorkflowWake::OnSignal(wait) => wait
+                .deadline_ms
+                .expect("a timed wait parks carrying its deadline"),
+            other => panic!("a timed wait must park on-signal, got {other:?}"),
+        },
+        other => panic!(
+            "a 400ms timeout must still PARK on its first reach rather than \
+             resolve immediately, got {other:?}"
+        ),
+    };
+
+    // 300ms short of a 400ms window: three quarters of the wait still owed.
+    host.pin_clock_before(deadline, 300);
+    let exit = run_invoke_once(&artifact.wasm_path, host.clone(), input.clone());
+    match &exit {
+        runtara_component_host::InvokeExit::Suspended(wakes) => match &wakes[0] {
+            runtara_component_host::lifecycle::WorkflowWake::OnSignal(wait) => assert_eq!(
+                wait.deadline_ms,
+                Some(deadline),
+                "the clamped re-park must keep the same absolute deadline"
+            ),
+            other => panic!("expected an on-signal wake, got {other:?}"),
+        },
+        other => panic!(
+            "an unclamped 1s tolerance would swallow this 400ms window whole; \
+             the clamp must hold it to 200ms and re-park. Got {other:?}"
+        ),
+    }
+
+    // 50ms short — inside the clamped 200ms — still resolves, so the clamp
+    // narrows the tolerance rather than disabling it.
+    host.pin_clock_before(deadline, 50);
+    let served = run_invoke_once(&artifact.wasm_path, host.clone(), input.clone());
+    assert!(
+        matches!(served, runtara_component_host::InvokeExit::Failed(ref e)
+            if e.message.contains("timed out")),
+        "inside the CLAMPED tolerance the timeout must still be served, got {served:?}"
+    );
+}
 
 /// A durable WaitForSignal under the invoke export EXITS with
 /// `suspended(on-signal{signal-id, deadline})` on the first poll MISS — freeing
