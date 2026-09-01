@@ -3005,6 +3005,74 @@ export interface MemoryInfo {
   totalBytes: number;
 }
 
+/**
+ * A single time bucket of aggregated metrics.
+ *
+ * This type *is* the wire contract for `GET /api/runtime/metrics/tenant`: the
+ * handler serialises these buckets directly, so it carries `ToSchema` and is
+ * registered in the OpenAPI components. A separate hand-written DTO used to
+ * declare that shape and had drifted badly from it - different field names, a
+ * different case convention, and three fields missing - which is why the
+ * frontend carried fallbacks for a shape the server never sent.
+ */
+export interface MetricsBucket {
+  /**
+   * Average execution duration in seconds.
+   * @format double
+   */
+  avg_duration_seconds?: number | null;
+  /**
+   * Average peak memory usage in bytes.
+   * @format int64
+   */
+  avg_memory_bytes?: number | null;
+  /**
+   * Start time of this bucket (UTC).
+   * @format date-time
+   */
+  bucket_time: string;
+  /**
+   * Number of cancellations.
+   * @format int64
+   */
+  cancelled_count: number;
+  /**
+   * Number of failures.
+   * @format int64
+   */
+  failure_count: number;
+  /**
+   * Total number of invocations in this bucket.
+   * @format int64
+   */
+  invocation_count: number;
+  /**
+   * Maximum execution duration in seconds.
+   * @format double
+   */
+  max_duration_seconds?: number | null;
+  /**
+   * Maximum peak memory usage in bytes.
+   * @format int64
+   */
+  max_memory_bytes?: number | null;
+  /**
+   * Minimum execution duration in seconds.
+   * @format double
+   */
+  min_duration_seconds?: number | null;
+  /**
+   * Number of successful completions.
+   * @format int64
+   */
+  success_count: number;
+  /**
+   * Success rate as percentage (0-100).
+   * @format double
+   */
+  success_rate_percent?: number | null;
+}
+
 export interface MetricsQuery {
   /** @format date-time */
   endTime?: string | null;
@@ -5350,39 +5418,35 @@ export interface TemplateValue {
   value: string;
 }
 
-/** Tenant metrics response data */
+/**
+ * Tenant metrics response data
+ *
+ * The bucket type is [`MetricsBucket`] itself rather than a DTO mirroring it.
+ * The handler serialises those buckets straight onto the wire, so anything
+ * that restates their shape here can drift from it - and did, for long enough
+ * that the frontend grew fallbacks for field names the server never emitted.
+ */
 export interface TenantMetricsData {
   /** @format date-time */
   endTime: string;
-  metrics: TenantMetricsDataPoint[];
+  /** Bucket width actually used: `hourly`, `daily`, or a width like `6m`. */
+  granularity: string;
+  metrics: MetricsBucket[];
   /** @format date-time */
   startTime: string;
   tenantId: string;
 }
 
-/** Tenant metrics data point */
-export interface TenantMetricsDataPoint {
-  /** @format double */
-  avgDurationSeconds?: number | null;
-  /** @format double */
-  avgMemoryMb?: number | null;
-  /** @format date-time */
-  dayBucket?: string | null;
-  /** @format int64 */
-  failureCount?: number | null;
-  /** @format int64 */
-  invocationCount?: number | null;
-  /** @format int64 */
-  successCount?: number | null;
-  /** @format double */
-  successRatePercent?: number | null;
-  /** @format int64 */
-  timeoutCount?: number | null;
-}
-
 /** Response for tenant metrics */
 export interface TenantMetricsResponse {
-  /** Tenant metrics response data */
+  /**
+   * Tenant metrics response data
+   *
+   * The bucket type is [`MetricsBucket`] itself rather than a DTO mirroring it.
+   * The handler serialises those buckets straight onto the wire, so anything
+   * that restates their shape here can drift from it - and did, for long enough
+   * that the frontend grew fallbacks for field names the server never emitted.
+   */
   data: TenantMetricsData;
   message: string;
   success: boolean;
@@ -6233,12 +6297,13 @@ export interface ApiConfig<SecurityDataType = unknown>
   format?: ResponseType;
 }
 
-export type ContentType =
-  | "application/json"
-  | "application/vnd.api+json"
-  | "multipart/form-data"
-  | "application/x-www-form-urlencoded"
-  | "text/plain";
+export enum ContentType {
+  Json = "application/json",
+  JsonApi = "application/vnd.api+json",
+  FormData = "multipart/form-data",
+  UrlEncoded = "application/x-www-form-urlencoded",
+  Text = "text/plain",
+}
 
 export class HttpClient<SecurityDataType = unknown> {
   public instance: AxiosInstance;
@@ -6335,7 +6400,7 @@ export class HttpClient<SecurityDataType = unknown> {
     const responseFormat = format || this.format || undefined;
 
     if (
-      type === "multipart/form-data" &&
+      type === ContentType.FormData &&
       body &&
       body !== null &&
       typeof body === "object"
@@ -6344,7 +6409,7 @@ export class HttpClient<SecurityDataType = unknown> {
     }
 
     if (
-      type === "text/plain" &&
+      type === ContentType.Text &&
       body &&
       body !== null &&
       typeof body !== "string"
@@ -6481,7 +6546,7 @@ export class Api<
         method: "POST",
         query: query,
         body: data,
-        type: "application/json",
+        type: ContentType.Json,
         format: "json",
         ...params,
       }),
@@ -6553,7 +6618,7 @@ export class Api<
         method: "POST",
         body: data,
         secure: true,
-        type: "application/json",
+        type: ContentType.Json,
         format: "json",
         ...params,
       }),
@@ -6620,7 +6685,7 @@ export class Api<
         path: `/api/runtime/connections`,
         method: "POST",
         body: data,
-        type: "application/json",
+        type: ContentType.Json,
         format: "json",
         ...params,
       }),
@@ -6749,7 +6814,7 @@ export class Api<
         path: `/api/runtime/connections/${id}`,
         method: "PUT",
         body: data,
-        type: "application/json",
+        type: ContentType.Json,
         format: "json",
         ...params,
       }),
@@ -6906,7 +6971,7 @@ export class Api<
         path: `/api/runtime/connections/${id}/resources`,
         method: "POST",
         body: data,
-        type: "application/json",
+        type: ContentType.Json,
         format: "json",
         ...params,
       }),
@@ -7062,7 +7127,7 @@ export class Api<
         startTime?: string;
         /** End time (ISO 8601), defaults to now */
         endTime?: string;
-        /** Time granularity: 'hourly' or 'daily' (default: hourly) */
+        /** Bucket width: 'hourly', 'daily', or a <count><unit> width such as '1m', '6m', '24m', '2h' (default: hourly) */
         granularity?: string;
       },
       params: RequestParams = {},
@@ -7158,7 +7223,7 @@ export class Api<
         query: query,
         body: data,
         secure: true,
-        type: "application/json",
+        type: ContentType.Json,
         format: "json",
         ...params,
       }),
@@ -7219,7 +7284,7 @@ export class Api<
         method: "POST",
         query: query,
         body: data,
-        type: "application/json",
+        type: ContentType.Json,
         format: "json",
         ...params,
       }),
@@ -7246,7 +7311,7 @@ export class Api<
         method: "POST",
         query: query,
         body: data,
-        type: "application/json",
+        type: ContentType.Json,
         ...params,
       }),
 
@@ -7272,7 +7337,7 @@ export class Api<
         method: "POST",
         query: query,
         body: data,
-        type: "application/json",
+        type: ContentType.Json,
         format: "json",
         ...params,
       }),
@@ -7383,7 +7448,7 @@ export class Api<
         query: query,
         body: data,
         secure: true,
-        type: "application/json",
+        type: ContentType.Json,
         format: "json",
         ...params,
       }),
@@ -7412,7 +7477,7 @@ export class Api<
         query: query,
         body: data,
         secure: true,
-        type: "application/json",
+        type: ContentType.Json,
         format: "json",
         ...params,
       }),
@@ -7441,7 +7506,7 @@ export class Api<
         query: query,
         body: data,
         secure: true,
-        type: "application/json",
+        type: ContentType.Json,
         format: "json",
         ...params,
       }),
@@ -7498,7 +7563,7 @@ export class Api<
         query: query,
         body: data,
         secure: true,
-        type: "application/json",
+        type: ContentType.Json,
         format: "json",
         ...params,
       }),
@@ -7586,7 +7651,7 @@ export class Api<
         query: query,
         body: data,
         secure: true,
-        type: "application/json",
+        type: ContentType.Json,
         format: "json",
         ...params,
       }),
@@ -7661,7 +7726,7 @@ export class Api<
         method: "PUT",
         query: query,
         body: data,
-        type: "application/json",
+        type: ContentType.Json,
         format: "json",
         ...params,
       }),
@@ -7711,7 +7776,7 @@ export class Api<
         method: "POST",
         query: query,
         body: data,
-        type: "application/json",
+        type: ContentType.Json,
         format: "json",
         ...params,
       }),
@@ -7737,7 +7802,7 @@ export class Api<
         method: "POST",
         query: query,
         body: data,
-        type: "application/json",
+        type: ContentType.Json,
         format: "json",
         ...params,
       }),
@@ -7763,7 +7828,7 @@ export class Api<
         method: "POST",
         query: query,
         body: data,
-        type: "application/json",
+        type: ContentType.Json,
         format: "json",
         ...params,
       }),
@@ -7789,7 +7854,7 @@ export class Api<
         method: "POST",
         query: query,
         body: data,
-        type: "application/json",
+        type: ContentType.Json,
         format: "json",
         ...params,
       }),
@@ -7835,7 +7900,7 @@ export class Api<
         path: `/api/runtime/reports/${reportId}/blocks/${blockId}/workflow-actions/${actionId}/execute`,
         method: "POST",
         body: data,
-        type: "application/json",
+        type: ContentType.Json,
         format: "json",
         ...params,
       }),
@@ -7857,7 +7922,7 @@ export class Api<
         path: `/api/runtime/reports/${reportId}/edit`,
         method: "POST",
         body: data,
-        type: "application/json",
+        type: ContentType.Json,
         format: "json",
         ...params,
       }),
@@ -8006,7 +8071,7 @@ export class Api<
         path: `/api/runtime/triggers`,
         method: "POST",
         body: data,
-        type: "application/json",
+        type: ContentType.Json,
         format: "json",
         ...params,
       }),
@@ -8044,7 +8109,7 @@ export class Api<
         path: `/api/runtime/triggers/${id}`,
         method: "PUT",
         body: data,
-        type: "application/json",
+        type: ContentType.Json,
         format: "json",
         ...params,
       }),
@@ -8117,7 +8182,7 @@ export class Api<
         path: `/api/runtime/workflows/create`,
         method: "POST",
         body: data,
-        type: "application/json",
+        type: ContentType.Json,
         format: "json",
         ...params,
       }),
@@ -8154,7 +8219,7 @@ export class Api<
         path: `/api/runtime/workflows/folders/rename`,
         method: "PUT",
         body: data,
-        type: "application/json",
+        type: ContentType.Json,
         format: "json",
         ...params,
       }),
@@ -8172,7 +8237,7 @@ export class Api<
         path: `/api/runtime/workflows/graph/validate`,
         method: "POST",
         body: data,
-        type: "application/json",
+        type: ContentType.Json,
         ...params,
       }),
 
@@ -8318,7 +8383,7 @@ export class Api<
         path: `/api/runtime/workflows/${id}/chat`,
         method: "POST",
         body: data,
-        type: "application/json",
+        type: ContentType.Json,
         ...params,
       }),
 
@@ -8339,7 +8404,7 @@ export class Api<
         path: `/api/runtime/workflows/${id}/chat/start`,
         method: "POST",
         body: data,
-        type: "application/json",
+        type: ContentType.Json,
         ...params,
       }),
 
@@ -8360,7 +8425,7 @@ export class Api<
         path: `/api/runtime/workflows/${id}/clone`,
         method: "POST",
         body: data,
-        type: "application/json",
+        type: ContentType.Json,
         format: "json",
         ...params,
       }),
@@ -8406,7 +8471,7 @@ export class Api<
         method: "POST",
         query: query,
         body: data,
-        type: "application/json",
+        type: ContentType.Json,
         format: "json",
         ...params,
       }),
@@ -8428,7 +8493,7 @@ export class Api<
         path: `/api/runtime/workflows/${id}/move`,
         method: "PUT",
         body: data,
-        type: "application/json",
+        type: ContentType.Json,
         format: "json",
         ...params,
       }),
@@ -8466,7 +8531,7 @@ export class Api<
         path: `/api/runtime/workflows/${id}/schedule`,
         method: "POST",
         body: data,
-        type: "application/json",
+        type: ContentType.Json,
         ...params,
       }),
 
@@ -8487,7 +8552,7 @@ export class Api<
         path: `/api/runtime/workflows/${id}/slug`,
         method: "PUT",
         body: data,
-        type: "application/json",
+        type: ContentType.Json,
         format: "json",
         ...params,
       }),
@@ -8509,7 +8574,7 @@ export class Api<
         path: `/api/runtime/workflows/${id}/update`,
         method: "POST",
         body: data,
-        type: "application/json",
+        type: ContentType.Json,
         format: "json",
         ...params,
       }),
@@ -8636,7 +8701,7 @@ export class Api<
         path: `/api/runtime/workflows/${id}/versions/${version}/track-events`,
         method: "PUT",
         body: data,
-        type: "application/json",
+        type: ContentType.Json,
         format: "json",
         ...params,
       }),

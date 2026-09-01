@@ -65,16 +65,22 @@ describe('summarizeMetrics', () => {
     expect(summarizeMetrics(undefined).avgMemory).toBe(0);
   });
 
-  it('still reads the legacy camelCase shape', () => {
+  it('reads every count and average off the wire shape', () => {
+    // This replaces a test that asserted support for a camelCase shape
+    // (`invocationCount`, `timeoutCount`, `avgMemoryMb`). The OpenAPI DTO
+    // declared that shape; the handler never emitted it, serialising
+    // `MetricsBucket` in snake_case instead. The test only compiled because it
+    // cast through `unknown`. Memory is bytes on the wire, not megabytes.
     const s = summarizeMetrics([
       {
-        invocationCount: 10,
-        successCount: 8,
-        failureCount: 2,
-        timeoutCount: 1,
-        avgMemoryMb: 4,
+        bucket_time: '2026-01-05T00:00:00Z',
+        invocation_count: 10,
+        success_count: 8,
+        failure_count: 2,
+        cancelled_count: 1,
+        avg_memory_bytes: 4 * 1024 * 1024,
       },
-    ] as unknown as MetricsDataPoint[]);
+    ] as MetricsDataPoint[]);
     expect(s.totalExecutions).toBe(10);
     expect(s.successRate).toBe(80);
     expect(s.failureCount).toBe(2);

@@ -18,7 +18,7 @@ use serde_json::Value;
 // Re-export types from the SDK for use by other modules
 pub use crate::runtime_types::{
     GetTenantMetricsOptions, InstanceInfo, InstanceStatus, InstanceSummary, ListInstancesResult,
-    MetricsBucket, MetricsGranularity, TenantMetricsResult, TerminationReason,
+    MAX_METRIC_BUCKETS, MetricsBucket, MetricsGranularity, TenantMetricsResult, TerminationReason,
 };
 
 use thiserror::Error;

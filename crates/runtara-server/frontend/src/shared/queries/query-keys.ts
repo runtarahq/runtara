@@ -274,8 +274,15 @@ export const queryKeys = {
   // Analytics domain
   analytics: {
     all: ['analytics'] as const,
-    tenant: (dateRange: string) =>
-      [...queryKeys.analytics.all, 'tenant', dateRange] as const,
+    tenant: (dateRange: string, granularity: string) =>
+      [...queryKeys.analytics.all, 'tenant', dateRange, granularity] as const,
+    tenantPrevious: (dateRange: string, granularity: string) =>
+      [
+        ...queryKeys.analytics.all,
+        'tenant-previous',
+        dateRange,
+        granularity,
+      ] as const,
     workflow: (
       workflowId: string,
       dateRange: string,

@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use utoipa::ToSchema;
 
+use crate::runtime_types::MetricsBucket;
+
 use crate::metrics::{WorkflowMetricsDaily, WorkflowMetricsHourly};
 
 // ============================================================================
@@ -115,28 +117,21 @@ pub struct WorkflowStatsResponse {
     pub data: WorkflowStatsData,
 }
 
-/// Tenant metrics data point
-#[derive(Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct TenantMetricsDataPoint {
-    pub day_bucket: Option<DateTime<Utc>>,
-    pub invocation_count: Option<i64>,
-    pub success_count: Option<i64>,
-    pub failure_count: Option<i64>,
-    pub timeout_count: Option<i64>,
-    pub avg_duration_seconds: Option<f64>,
-    pub avg_memory_mb: Option<f64>,
-    pub success_rate_percent: Option<f64>,
-}
-
 /// Tenant metrics response data
+///
+/// The bucket type is [`MetricsBucket`] itself rather than a DTO mirroring it.
+/// The handler serialises those buckets straight onto the wire, so anything
+/// that restates their shape here can drift from it - and did, for long enough
+/// that the frontend grew fallbacks for field names the server never emitted.
 #[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TenantMetricsData {
     pub tenant_id: String,
     pub start_time: DateTime<Utc>,
     pub end_time: DateTime<Utc>,
-    pub metrics: Vec<TenantMetricsDataPoint>,
+    /// Bucket width actually used: `hourly`, `daily`, or a width like `6m`.
+    pub granularity: String,
+    pub metrics: Vec<MetricsBucket>,
 }
 
 /// Response for tenant metrics

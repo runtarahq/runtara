@@ -342,7 +342,7 @@ use runtime_client::RuntimeClient;
             api::metrics::WorkflowStats,
             api::metrics::TenantMetricsResponse,
             api::metrics::TenantMetricsData,
-            api::metrics::TenantMetricsDataPoint,
+            crate::runtime_types::MetricsBucket,
             metrics::WorkflowMetricsDaily,
             metrics::WorkflowMetricsHourly,
             // Analytics DTOs

@@ -1226,6 +1226,12 @@ pub struct ListStepSummariesResult {
 // ============================================================================
 
 /// Granularity for metrics aggregation buckets.
+///
+/// Every consumer of this type ultimately wants one number - the bucket width in
+/// seconds - so that is what [`MetricsGranularity::seconds`] exposes and what the
+/// aggregation query is written against. `Hourly` and `Daily` are kept as named
+/// variants because the HTTP API, report block config and existing responses all
+/// spell them that way; they are not a different kind of thing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MetricsGranularity {
@@ -1234,23 +1240,98 @@ pub enum MetricsGranularity {
     Hourly,
     /// Daily buckets.
     Daily,
+    /// A fixed bucket width in seconds.
+    ///
+    /// Always at least one second. Construct through [`FromStr`](std::str::FromStr)
+    /// or [`MetricsGranularity::from_seconds`], both of which enforce that; a zero
+    /// width would be a division by zero inside the aggregation query.
+    Seconds(u32),
 }
 
-impl From<MetricsGranularity> for i32 {
-    fn from(granularity: MetricsGranularity) -> Self {
-        match granularity {
-            MetricsGranularity::Hourly => 0,
-            MetricsGranularity::Daily => 1,
+/// Widest bucket count any caller may ask the aggregation query to build.
+///
+/// The `generate_series` spine is the only part of that query which scales with
+/// the bucket width rather than with the rows scanned, so this - not the width -
+/// is what needs bounding. One minute over ninety days would be 129,600 spine
+/// rows; the console's widest legitimate ask is 420 (seven days at 24 minutes).
+pub const MAX_METRIC_BUCKETS: i64 = 1_000;
+
+impl MetricsGranularity {
+    /// Build a width from a second count, rejecting zero.
+    pub fn from_seconds(seconds: u32) -> Option<Self> {
+        (seconds >= 1).then_some(Self::Seconds(seconds))
+    }
+
+    /// Bucket width in seconds. The single source of truth for the SQL.
+    pub const fn seconds(self) -> u32 {
+        match self {
+            Self::Hourly => 3_600,
+            Self::Daily => 86_400,
+            Self::Seconds(s) => s,
+        }
+    }
+
+    /// How many buckets this width produces over `[start, end]`.
+    ///
+    /// Mirrors the aggregation query's `generate_series` exactly - including the
+    /// alignment of the first bucket down to a multiple of the width - so a caller
+    /// checking this against [`MAX_METRIC_BUCKETS`] is measuring what the query
+    /// will really build rather than an estimate of it.
+    pub fn bucket_count(self, start: DateTime<Utc>, end: DateTime<Utc>) -> i64 {
+        let width = i64::from(self.seconds().max(1));
+        let aligned_start = start.timestamp().div_euclid(width) * width;
+        ((end.timestamp() - aligned_start).max(0) / width) + 1
+    }
+}
+
+impl std::fmt::Display for MetricsGranularity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            // Deliberately the strings the API already returned for these two,
+            // so adding the third variant is not an observable change for
+            // callers that never ask for one.
+            Self::Hourly => f.write_str("hourly"),
+            Self::Daily => f.write_str("daily"),
+            Self::Seconds(s) => match (s % 86_400, s % 3_600, s % 60) {
+                (0, _, _) => write!(f, "{}d", s / 86_400),
+                (_, 0, _) => write!(f, "{}h", s / 3_600),
+                (_, _, 0) => write!(f, "{}m", s / 60),
+                _ => write!(f, "{s}s"),
+            },
         }
     }
 }
 
-impl From<i32> for MetricsGranularity {
-    fn from(value: i32) -> Self {
-        match value {
-            1 => MetricsGranularity::Daily,
-            _ => MetricsGranularity::Hourly,
+impl std::str::FromStr for MetricsGranularity {
+    type Err = String;
+
+    /// Accepts the two named granularities, or a `<count><unit>` width such as
+    /// `1m`, `6m`, `24m`, `2h`. Held here rather than at each call site because
+    /// there were two parsers with different vocabularies before - the HTTP
+    /// handler's and the report provider's - and they are the same question.
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        let value = raw.trim().to_ascii_lowercase();
+        match value.as_str() {
+            "hour" | "hourly" => return Ok(Self::Hourly),
+            "day" | "daily" => return Ok(Self::Daily),
+            _ => {}
         }
+
+        let unrecognised = || format!("unrecognised granularity '{raw}'");
+        let (count, unit) = value.split_at(value.len().saturating_sub(1));
+        let multiplier: u32 = match unit {
+            "s" => 1,
+            "m" => 60,
+            "h" => 3_600,
+            "d" => 86_400,
+            _ => return Err(unrecognised()),
+        };
+        let count: u32 = count.parse().map_err(|_| unrecognised())?;
+
+        count
+            .checked_mul(multiplier)
+            .and_then(Self::from_seconds)
+            .ok_or_else(|| format!("granularity '{raw}' is not a positive duration"))
     }
 }
 
@@ -1311,7 +1392,14 @@ pub struct TenantMetricsResult {
 }
 
 /// A single time bucket of aggregated metrics.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// This type *is* the wire contract for `GET /api/runtime/metrics/tenant`: the
+/// handler serialises these buckets directly, so it carries `ToSchema` and is
+/// registered in the OpenAPI components. A separate hand-written DTO used to
+/// declare that shape and had drifted badly from it - different field names, a
+/// different case convention, and three fields missing - which is why the
+/// frontend carried fallbacks for a shape the server never sent.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct MetricsBucket {
     /// Start time of this bucket (UTC).
     pub bucket_time: DateTime<Utc>,
@@ -2205,5 +2293,186 @@ mod tests {
         assert_eq!(deserialized.total_count, 1);
         assert_eq!(deserialized.limit, 100);
         assert_eq!(deserialized.offset, 0);
+    }
+
+    // ========================================================================
+    // MetricsGranularity
+    // ========================================================================
+
+    fn at(secs: i64) -> DateTime<Utc> {
+        DateTime::from_timestamp(secs, 0).expect("timestamp in range")
+    }
+
+    #[test]
+    fn granularity_parses_the_named_widths() {
+        for raw in ["hourly", "hour", "HOURLY", "  Hourly  "] {
+            assert_eq!(raw.parse(), Ok(MetricsGranularity::Hourly), "{raw}");
+        }
+        for raw in ["daily", "day", "DAY"] {
+            assert_eq!(raw.parse(), Ok(MetricsGranularity::Daily), "{raw}");
+        }
+    }
+
+    #[test]
+    fn granularity_parses_count_unit_widths() {
+        let cases = [
+            ("30s", 30),
+            ("1m", 60),
+            ("6m", 360),
+            ("24m", 1_440),
+            ("2h", 7_200),
+            ("6h", 21_600),
+            ("7d", 604_800),
+        ];
+        for (raw, seconds) in cases {
+            assert_eq!(
+                raw.parse(),
+                Ok(MetricsGranularity::Seconds(seconds)),
+                "{raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn granularity_rejects_nonsense_and_zero() {
+        // A zero width would divide by zero inside the aggregation query, so it
+        // has to fail at parse time rather than reach the database.
+        for raw in ["", "0m", "0s", "5x", "m", "-1m", "1.5h", "hourlyish"] {
+            assert!(raw.parse::<MetricsGranularity>().is_err(), "{raw} parsed");
+        }
+    }
+
+    #[test]
+    fn granularity_seconds_are_the_declared_widths() {
+        assert_eq!(MetricsGranularity::Hourly.seconds(), 3_600);
+        assert_eq!(MetricsGranularity::Daily.seconds(), 86_400);
+        assert_eq!(MetricsGranularity::Seconds(360).seconds(), 360);
+    }
+
+    #[test]
+    fn granularity_display_keeps_the_existing_wire_strings() {
+        // These two reach API responses and report rows. Adding the third
+        // variant must not change what an existing caller sees.
+        assert_eq!(MetricsGranularity::Hourly.to_string(), "hourly");
+        assert_eq!(MetricsGranularity::Daily.to_string(), "daily");
+    }
+
+    #[test]
+    fn granularity_display_humanises_widths() {
+        let cases = [
+            (30, "30s"),
+            (60, "1m"),
+            (360, "6m"),
+            (1_440, "24m"),
+            (7_200, "2h"),
+            (21_600, "6h"),
+            (86_400, "1d"),
+            (90, "90s"),
+        ];
+        for (seconds, expected) in cases {
+            assert_eq!(
+                MetricsGranularity::Seconds(seconds).to_string(),
+                expected,
+                "{seconds}"
+            );
+        }
+    }
+
+    #[test]
+    fn granularity_display_round_trips_through_parse() {
+        for granularity in [
+            MetricsGranularity::Hourly,
+            MetricsGranularity::Daily,
+            MetricsGranularity::Seconds(60),
+            MetricsGranularity::Seconds(360),
+            MetricsGranularity::Seconds(7_200),
+        ] {
+            let printed = granularity.to_string();
+            let reparsed: MetricsGranularity = printed.parse().expect(&printed);
+            assert_eq!(
+                reparsed.seconds(),
+                granularity.seconds(),
+                "{printed} lost its width"
+            );
+        }
+    }
+
+    #[test]
+    fn granularity_from_seconds_rejects_zero() {
+        assert_eq!(MetricsGranularity::from_seconds(0), None);
+        assert_eq!(
+            MetricsGranularity::from_seconds(1),
+            Some(MetricsGranularity::Seconds(1))
+        );
+    }
+
+    #[test]
+    fn bucket_count_matches_an_aligned_window() {
+        // An hour of one-minute buckets: the spine is inclusive of both ends,
+        // so 60 whole buckets means 61 series entries.
+        let start = at(0);
+        let end = at(3_600);
+        assert_eq!(MetricsGranularity::Seconds(60).bucket_count(start, end), 61);
+    }
+
+    #[test]
+    fn bucket_count_includes_the_partial_bucket_a_window_starts_inside() {
+        // Start 30 seconds into a minute. The query floors the first bucket
+        // down, so that partial bucket is built and must be counted - otherwise
+        // a request could pass the cap and then exceed it.
+        let start = at(30);
+        let end = at(3_600);
+        assert_eq!(MetricsGranularity::Seconds(60).bucket_count(start, end), 61);
+    }
+
+    #[test]
+    fn bucket_count_covers_the_console_periods() {
+        let cases = [
+            (3_600_i64, MetricsGranularity::Seconds(60), 61),
+            (86_400, MetricsGranularity::Seconds(360), 241),
+            (7 * 86_400, MetricsGranularity::Seconds(1_440), 421),
+            (30 * 86_400, MetricsGranularity::Seconds(7_200), 361),
+            (90 * 86_400, MetricsGranularity::Seconds(21_600), 361),
+        ];
+        for (span, granularity, expected) in cases {
+            let count = granularity.bucket_count(at(0), at(span));
+            assert_eq!(count, expected, "{granularity} over {span}s");
+            assert!(
+                count <= MAX_METRIC_BUCKETS,
+                "{granularity} over {span}s exceeds the cap at {count}"
+            );
+        }
+    }
+
+    #[test]
+    fn bucket_count_catches_the_shape_the_cap_exists_for() {
+        // One-minute buckets over ninety days: 129,601 spine rows.
+        let count = MetricsGranularity::Seconds(60).bucket_count(at(0), at(90 * 86_400));
+        assert_eq!(count, 129_601);
+        assert!(count > MAX_METRIC_BUCKETS);
+    }
+
+    #[test]
+    fn bucket_count_is_one_at_the_cap_boundary() {
+        // Exactly MAX buckets is allowed; one more is not.
+        let width = 60;
+        let span = (MAX_METRIC_BUCKETS - 1) * i64::from(width);
+        let granularity = MetricsGranularity::Seconds(width);
+        assert_eq!(
+            granularity.bucket_count(at(0), at(span)),
+            MAX_METRIC_BUCKETS
+        );
+        assert_eq!(
+            granularity.bucket_count(at(0), at(span + i64::from(width))),
+            MAX_METRIC_BUCKETS + 1
+        );
+    }
+
+    #[test]
+    fn bucket_count_never_goes_negative_for_an_inverted_window() {
+        assert_eq!(
+            MetricsGranularity::Seconds(60).bucket_count(at(3_600), at(0)),
+            1
+        );
     }
 }

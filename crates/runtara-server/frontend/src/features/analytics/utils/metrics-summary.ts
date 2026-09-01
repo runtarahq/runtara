@@ -31,13 +31,12 @@ export function summarizeMetrics(
   const dataPoints = metrics;
 
   const totalExecutions = dataPoints.reduce(
-    (sum, point) =>
-      sum + (point.invocation_count ?? point.invocationCount ?? 0),
+    (sum, point) => sum + (point.invocation_count ?? 0),
     0
   );
 
   const totalSuccesses = dataPoints.reduce(
-    (sum, point) => sum + (point.success_count ?? point.successCount ?? 0),
+    (sum, point) => sum + (point.success_count ?? 0),
     0
   );
   const successRate =
@@ -53,8 +52,8 @@ export function summarizeMetrics(
   // one bucket has data, since the buckets carry different counts.
   const durationWeighted = dataPoints.reduce(
     (acc, point) => {
-      const value = point.avg_duration_seconds ?? point.avgDurationSeconds;
-      const count = point.invocation_count ?? point.invocationCount ?? 0;
+      const value = point.avg_duration_seconds;
+      const count = point.invocation_count ?? 0;
       if (value === null || value === undefined || count <= 0) return acc;
       return { total: acc.total + value * count, count: acc.count + count };
     },
@@ -66,19 +65,18 @@ export function summarizeMetrics(
       : 0;
 
   const failureCount = dataPoints.reduce(
-    (sum, point) => sum + (point.failure_count ?? point.failureCount ?? 0),
+    (sum, point) => sum + (point.failure_count ?? 0),
     0
   );
 
   // Same weighting, and the same empty-bucket trap, as the duration above.
-  // Supports both the old (avgMemoryMb) and current (avg_memory_bytes) shapes.
   const memoryWeighted = dataPoints.reduce(
     (acc, point) => {
       const mb =
-        point.avg_memory_bytes !== undefined && point.avg_memory_bytes !== null
-          ? point.avg_memory_bytes / (1024 * 1024)
-          : point.avgMemoryMb;
-      const count = point.invocation_count ?? point.invocationCount ?? 0;
+        point.avg_memory_bytes === undefined || point.avg_memory_bytes === null
+          ? null
+          : point.avg_memory_bytes / (1024 * 1024);
+      const count = point.invocation_count ?? 0;
       if (mb === null || mb === undefined || count <= 0) return acc;
       return { total: acc.total + mb * count, count: acc.count + count };
     },
@@ -87,9 +85,8 @@ export function summarizeMetrics(
   const avgMemory =
     memoryWeighted.count > 0 ? memoryWeighted.total / memoryWeighted.count : 0;
 
-  // Support both old (timeoutCount) and new (cancelled_count) API formats
   const cancelledCount = dataPoints.reduce(
-    (sum, point) => sum + (point.cancelled_count ?? point.timeoutCount ?? 0),
+    (sum, point) => sum + (point.cancelled_count ?? 0),
     0
   );
 

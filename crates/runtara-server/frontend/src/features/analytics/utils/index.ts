@@ -38,13 +38,3 @@ export function calculatePercentageChange(
   if (previous === 0) return current > 0 ? 100 : 0;
   return ((current - previous) / previous) * 100;
 }
-
-export function determineTrend(
-  current: number,
-  previous: number,
-  threshold: number = 5
-): 'up' | 'down' | 'stable' {
-  const change = calculatePercentageChange(current, previous);
-  if (Math.abs(change) < threshold) return 'stable';
-  return change > 0 ? 'up' : 'down';
-}
