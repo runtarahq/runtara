@@ -221,8 +221,10 @@ export function buildActivityMap(
   // One unit for the whole column, chosen once. Deciding per row produced
   // "+96m, +2h, +144m" in the same stack, because only some offsets happened to
   // land on a whole hour.
-  const useHours = Array.from({ length: config.rows }, (_, r) => r * config.unitMinutes)
-    .every((offset) => offset % 60 === 0);
+  const useHours = Array.from(
+    { length: config.rows },
+    (_, r) => r * config.unitMinutes
+  ).every((offset) => offset % 60 === 0);
 
   const rows: ActivityRow[] = [];
   for (let r = 0; r < config.rows; r++) {

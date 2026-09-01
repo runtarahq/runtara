@@ -19,9 +19,10 @@ interface AnalyticsHeroCardProps {
 /**
  * The oversized top-of-page KPI.
  *
- * Deliberately separate from `MetricCard`, which several other pages render at
- * `text-2xl`: this page wants one focal point, and widening the shared card to
- * get it would change every screen that uses it.
+ * Replaces `shared/components/metric-card`, which despite living in `shared`
+ * had exactly one consumer - this page - and has been deleted with it. Six
+ * equally weighted cards gave the page no focal point; three of unequal weight
+ * put the count and the success rate where the eye lands first.
  *
  * `trend` already encodes whether a move was good, so the arrow and colour come
  * from it rather than from the sign of `change` - a falling duration is an
@@ -47,7 +48,7 @@ export function AnalyticsHeroCard({
           // reserved for things that mean something: the trend arrow, the
           // failure red in the map. A giant green number reads as a judgement
           // the figure has not earned.
-          <div className="text-[1.75rem] font-semibold leading-none tracking-tight tabular-nums xl:text-[2.25rem]">
+          <div className="text-[1.75rem] font-semibold tabular-nums leading-none tracking-tight xl:text-[2.25rem]">
             {value}
           </div>
         )}

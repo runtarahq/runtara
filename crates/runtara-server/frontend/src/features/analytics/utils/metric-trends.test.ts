@@ -22,9 +22,9 @@ describe('comparePeriods', () => {
     // period fetched there is no comparison to make, and the cards say so by
     // showing no indicator.
     for (const previous of [null, undefined]) {
-      expect(comparePeriods(summary({ totalExecutions: 100 }), previous)).toEqual(
-        NO_TRENDS
-      );
+      expect(
+        comparePeriods(summary({ totalExecutions: 100 }), previous)
+      ).toEqual(NO_TRENDS);
     }
   });
 
@@ -42,7 +42,7 @@ describe('comparePeriods', () => {
     expect(trends.failures.trend).toBe('up'); // fewer failures is better
   });
 
-  it('reports the metric\'s own change, not the inverse ratio', () => {
+  it("reports the metric's own change, not the inverse ratio", () => {
     // Which way a metric *should* move never changes the magnitude reported.
     // Executions halving and duration halving are both -50%; only the
     // sentiment differs. Flipped operands used to render a duration halving as

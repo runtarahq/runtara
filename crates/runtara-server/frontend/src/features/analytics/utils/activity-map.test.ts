@@ -22,7 +22,10 @@ function bucket(index: number, overrides: Partial<MetricsBucket> = {}) {
 }
 
 /** A spine of `count` one-minute buckets, oldest first. */
-function spine(count: number, fill: (i: number) => Partial<MetricsBucket> = () => ({})) {
+function spine(
+  count: number,
+  fill: (i: number) => Partial<MetricsBucket> = () => ({})
+) {
   return Array.from({ length: count }, (_, i) => bucket(i, fill(i)));
 }
 
@@ -77,19 +80,34 @@ describe('buildActivityMap', () => {
   });
 
   it('labels rows by their offset inside a column', () => {
-    expect(buildActivityMap(spine(240), ACTIVITY_MAP_CONFIG['24h']).rows.map((r) => r.label))
-      .toEqual(['+0', '+6m', '+12m', '+18m']);
-    expect(buildActivityMap(spine(360), ACTIVITY_MAP_CONFIG['30d']).rows.map((r) => r.label))
-      .toEqual(['+0', '+2h', '+4h', '+6h', '+8h', '+10h']);
+    expect(
+      buildActivityMap(spine(240), ACTIVITY_MAP_CONFIG['24h']).rows.map(
+        (r) => r.label
+      )
+    ).toEqual(['+0', '+6m', '+12m', '+18m']);
+    expect(
+      buildActivityMap(spine(360), ACTIVITY_MAP_CONFIG['30d']).rows.map(
+        (r) => r.label
+      )
+    ).toEqual(['+0', '+2h', '+4h', '+6h', '+8h', '+10h']);
   });
 
   it('keeps one unit across a column of row labels', () => {
     // 24-minute rows: offsets 0, 24, 48, 72, 96, 120, 144. Only 120 is a whole
     // hour, and labelling per-row rendered "+96m, +2h, +144m" in one stack.
-    const labels = buildActivityMap(spine(420), ACTIVITY_MAP_CONFIG['7d']).rows.map(
-      (r) => r.label
-    );
-    expect(labels).toEqual(['+0', '+24m', '+48m', '+72m', '+96m', '+120m', '+144m']);
+    const labels = buildActivityMap(
+      spine(420),
+      ACTIVITY_MAP_CONFIG['7d']
+    ).rows.map((r) => r.label);
+    expect(labels).toEqual([
+      '+0',
+      '+24m',
+      '+48m',
+      '+72m',
+      '+96m',
+      '+120m',
+      '+144m',
+    ]);
 
     for (const config of Object.values(ACTIVITY_MAP_CONFIG)) {
       const suffixes = new Set(
@@ -119,7 +137,9 @@ describe('buildActivityMap', () => {
 
   it('keeps a single run visible against a peak of hundreds', () => {
     const map = buildActivityMap(
-      spine(60, (i) => ({ invocation_count: i === 0 ? 1 : i === 59 ? 400 : 0 })),
+      spine(60, (i) => ({
+        invocation_count: i === 0 ? 1 : i === 59 ? 400 : 0,
+      })),
       ONE_HOUR
     );
     const cells = map.rows[0].cells;
@@ -221,7 +241,6 @@ describe('buildActivityMap', () => {
     expect(buildActivityMap(spine(60), ONE_HOUR).peak).toBeNull();
   });
 
-
   it('counts cells with failures separately from elevated ones', () => {
     // The "all failures" toggle says how many extra intervals it will reveal,
     // so the two counts have to be distinguishable: most windows have failures
@@ -294,7 +313,9 @@ describe('buildActivityMap', () => {
     for (const [period, config] of Object.entries(ACTIVITY_MAP_CONFIG)) {
       expect(config.unitMinutes).toBe(expected[period]);
       expect(config.cols * config.rows * config.unitMinutes).toBe(
-        { '1h': 60, '24h': 1440, '7d': 10080, '30d': 43200, '90d': 129600 }[period]
+        { '1h': 60, '24h': 1440, '7d': 10080, '30d': 43200, '90d': 129600 }[
+          period
+        ]
       );
     }
   });

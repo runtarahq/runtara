@@ -88,7 +88,8 @@ function describeCell(cell: ActivityCell): string {
       `${formatNumber(cell.failed)} failed (${(cell.failRate * 100).toFixed(0)}%)`
     );
   }
-  if (cell.cancelled > 0) parts.push(`${formatNumber(cell.cancelled)} cancelled`);
+  if (cell.cancelled > 0)
+    parts.push(`${formatNumber(cell.cancelled)} cancelled`);
   return `${formatCellRange(cell)}: ${parts.join(', ')}`;
 }
 
@@ -182,7 +183,9 @@ export function ActivityMap({
                     ? 'hsl(var(--muted))'
                     : `hsl(var(--chart-1) / ${level})`,
                 border:
-                  level === 0 ? '1px solid hsl(var(--border) / 0.6)' : undefined,
+                  level === 0
+                    ? '1px solid hsl(var(--border) / 0.6)'
+                    : undefined,
               }}
             />
           ))}
@@ -241,8 +244,12 @@ export function ActivityMap({
               onMouseLeave={() => setHovered(null)}
             >
               {map.rows.map((row, rowIndex) => (
-                <div key={row.label} role="row" className="flex items-center gap-2">
-                  <span className="w-[46px] shrink-0 text-right text-xs leading-[14px] tabular-nums text-muted-foreground">
+                <div
+                  key={row.label}
+                  role="row"
+                  className="flex items-center gap-2"
+                >
+                  <span className="w-[46px] shrink-0 text-right text-xs tabular-nums leading-[14px] text-muted-foreground">
                     {row.label}
                   </span>
                   <div style={gridStyle}>
@@ -264,7 +271,7 @@ export function ActivityMap({
                           }}
                           onMouseEnter={() => setHovered(cell)}
                           onKeyDown={(e) => move(e, rowIndex, colIndex)}
-                          className="aspect-square rounded-[2px] outline-none transition-shadow focus-visible:ring-2 focus-visible:ring-foreground hover:ring-2 hover:ring-foreground"
+                          className="aspect-square rounded-[2px] outline-none transition-shadow hover:ring-2 hover:ring-foreground focus-visible:ring-2 focus-visible:ring-foreground"
                           style={{
                             background: cellBackground(cell, markAllFailures),
                             border: cellBorder(cell),

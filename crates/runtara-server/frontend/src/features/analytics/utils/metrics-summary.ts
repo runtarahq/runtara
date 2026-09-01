@@ -31,8 +31,7 @@ export function summarizeMetrics(
   const dataPoints = metrics;
 
   const totalExecutions = dataPoints.reduce(
-    (sum, point) =>
-      sum + (point.invocation_count ?? 0),
+    (sum, point) => sum + (point.invocation_count ?? 0),
     0
   );
 

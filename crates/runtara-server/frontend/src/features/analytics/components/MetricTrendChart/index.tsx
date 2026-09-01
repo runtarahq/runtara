@@ -110,7 +110,10 @@ export function MetricTrendChart({
             No data for the selected period
           </div>
         ) : (
-          <div className="min-h-0 flex-1" style={{ minHeight: MIN_CHART_HEIGHT }}>
+          <div
+            className="min-h-0 flex-1"
+            style={{ minHeight: MIN_CHART_HEIGHT }}
+          >
             <ResponsiveContainer width="100%" height="100%">
               <AreaChart data={data} margin={CHART_MARGIN}>
                 <defs>
@@ -152,7 +155,10 @@ export function MetricTrendChart({
                     fontSize: '12px',
                   }}
                   labelStyle={{ color: 'hsl(var(--popover-foreground))' }}
-                  formatter={(value: number) => [formatValue(value), seriesName]}
+                  formatter={(value: number) => [
+                    formatValue(value),
+                    seriesName,
+                  ]}
                 />
                 <Area
                   type="monotone"
@@ -169,7 +175,9 @@ export function MetricTrendChart({
           </div>
         )}
         {footnote ? (
-          <p className="mt-2 shrink-0 text-xs text-muted-foreground">{footnote}</p>
+          <p className="mt-2 shrink-0 text-xs text-muted-foreground">
+            {footnote}
+          </p>
         ) : null}
       </CardContent>
     </Card>

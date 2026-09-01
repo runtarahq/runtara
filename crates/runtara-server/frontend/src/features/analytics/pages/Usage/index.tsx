@@ -253,7 +253,6 @@ export function Usage() {
         />
       ) : (
         <div className="flex min-h-0 flex-1 flex-col gap-2.5">
-
           {/* Widths follow how much each card carries, rather than three
               identical boxes: the count and the rate are the headline, the
               resource averages are reference. */}
@@ -282,9 +281,14 @@ export function Usage() {
               loading={isLoading}
             >
               <div className="mt-1 flex flex-col gap-2">
-                <Progress value={Math.round(metrics.successRate)} className="h-1.5" />
+                <Progress
+                  value={Math.round(metrics.successRate)}
+                  className="h-1.5"
+                />
                 <div className="flex items-center justify-between text-sm">
-                  <span className="text-muted-foreground">Failed executions</span>
+                  <span className="text-muted-foreground">
+                    Failed executions
+                  </span>
                   <span className="font-medium tabular-nums">
                     {formatNumber(metrics.failureCount)}
                   </span>
@@ -376,7 +380,7 @@ function Card2({
         {loading ? (
           <div className="h-6 w-24 animate-pulse rounded bg-muted" />
         ) : (
-          <div className="text-2xl font-semibold leading-none tracking-tight tabular-nums">
+          <div className="text-2xl font-semibold tabular-nums leading-none tracking-tight">
             {duration}
           </div>
         )}
@@ -389,7 +393,7 @@ function Card2({
         {loading ? (
           <div className="h-6 w-24 animate-pulse rounded bg-muted" />
         ) : (
-          <div className="text-2xl font-semibold leading-none tracking-tight tabular-nums">
+          <div className="text-2xl font-semibold tabular-nums leading-none tracking-tight">
             {memory}
           </div>
         )}
