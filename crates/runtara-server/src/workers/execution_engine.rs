@@ -335,6 +335,14 @@ pub struct ExecutionEngine {
     /// admissions alongside the cached figure keeps the decision honest until
     /// a fresh count subsumes them.
     concurrency_reservations: Arc<DashMap<String, Arc<AtomicU64>>>,
+    /// Held by whichever task is currently refreshing a tenant's count.
+    ///
+    /// Without this the TTL does not bound how often the count runs: while one
+    /// refresh is in flight every other intake still sees an expired entry and
+    /// starts its own. That is self-reinforcing, because each extra concurrent
+    /// count makes the database slower, which widens the window, which admits
+    /// more of them.
+    concurrency_refresh: Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// Short-lived cache of the compiled artifact for a workflow version.
     ///
     /// Resolving it reads the whole workflow definition out of Postgres and
@@ -411,6 +419,7 @@ impl ExecutionEngine {
             events,
             concurrency_counts: Arc::new(DashMap::new()),
             concurrency_reservations: Arc::new(DashMap::new()),
+            concurrency_refresh: Arc::new(DashMap::new()),
             registered_images: Arc::new(DashMap::new()),
         }
     }
@@ -435,6 +444,21 @@ impl ExecutionEngine {
             return Ok(entry.1.saturating_add(reserved.load(Ordering::SeqCst)));
         }
 
+        // One refresh at a time per tenant. A caller that finds one already
+        // running answers from the last count rather than starting another;
+        // that is still safe to admit on, because every admission since then
+        // has incremented `reserved` and is added below, so the figure only
+        // errs high while the refresh completes.
+        let refresh = self.refresh_lock_for(tenant_id);
+        let Ok(_refreshing) = refresh.try_lock() else {
+            let last = self
+                .concurrency_counts
+                .get(tenant_id)
+                .map(|entry| entry.1)
+                .unwrap_or(0);
+            return Ok(last.saturating_add(reserved.load(Ordering::SeqCst)));
+        };
+
         // Snapshot before the query, not after: anything admitted while it is
         // in flight is not in the result, so only the admissions this count
         // subsumes may be forgiven.
@@ -447,6 +471,16 @@ impl ExecutionEngine {
         self.concurrency_counts
             .insert(tenant_id.to_string(), (Instant::now(), count));
         Ok(count.saturating_add(retained))
+    }
+
+    /// The refresh mutex for a tenant, created on first use.
+    fn refresh_lock_for(&self, tenant_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+        Arc::clone(
+            self.concurrency_refresh
+                .entry(tenant_id.to_string())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .value(),
+        )
     }
 
     /// The admission counter for a tenant, created on first use.
@@ -2437,6 +2471,61 @@ mod tests {
         );
 
         first.starting_workflows.lock().await.remove(&key);
+    }
+
+    /// A refresh already in flight must not start another.
+    ///
+    /// The count is only cheap when one runs at a time. Without this, a slow
+    /// count keeps every arriving intake past its TTL, so each starts its own
+    /// and the database gets slower, which keeps the next batch waiting too. A
+    /// count measured at 15ms standalone reached 11s per call this way, and
+    /// consumed 94% of all database time under load.
+    #[tokio::test]
+    async fn a_refresh_in_flight_blocks_a_second_one() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://unused/unused")
+            .expect("lazy pool");
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let engine = ExecutionEngine::new(
+            pool.clone(),
+            Arc::new(WorkflowRepository::new(pool)),
+            None,
+            None,
+            None,
+            ProductEventSink::new(tx),
+        );
+        let tenant = format!("tenant-{}", uuid::Uuid::new_v4());
+
+        // Seed a count so a caller that finds the lock taken has one to answer
+        // from, and stamp it stale so the TTL cannot be what returns it.
+        engine.concurrency_counts.insert(
+            tenant.clone(),
+            (
+                Instant::now() - CONCURRENCY_COUNT_TTL - Duration::from_secs(1),
+                7,
+            ),
+        );
+        engine.reservations_for(&tenant).store(2, Ordering::SeqCst);
+
+        let held = engine.refresh_lock_for(&tenant);
+        let guard = held.lock().await;
+
+        // The lock is taken, so this must answer from the stale count plus the
+        // admissions since, and must not wait on the holder.
+        let seen = tokio::time::timeout(
+            Duration::from_secs(2),
+            engine.active_execution_count(&tenant, 100),
+        )
+        .await
+        .expect("must not block behind the in-flight refresh")
+        .expect("stale answer, not an error");
+
+        assert_eq!(
+            seen, 9,
+            "expected the last count (7) plus admissions since (2); a caller \
+             that finds a refresh running must reuse it rather than start one"
+        );
+        drop(guard);
     }
 
     /// Admissions the gate has made but the cached count cannot see yet must
