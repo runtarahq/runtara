@@ -107,7 +107,11 @@ impl EmbeddedWasmRunner {
         Ok(Self {
             config,
             limits: limits_from_env(),
-            run_permits: Arc::new(tokio::sync::Semaphore::new(max_concurrent_runs())),
+            run_permits: Arc::new(tokio::sync::Semaphore::new({
+                let permits = max_concurrent_runs();
+                warn_if_run_bound_exceeds_memory(permits);
+                permits
+            })),
             persistence,
             executor: Arc::new(executor),
             tasks: Arc::new(Mutex::new(HashMap::new())),
@@ -241,6 +245,51 @@ fn max_concurrent_runs() -> usize {
                 .unwrap_or(4)
         })
         .clamp(1, 1024)
+}
+
+/// Roughly what one live guest costs in resident memory.
+///
+/// Measured on a 4 GB host holding a million parked instances: waking them with
+/// the bound raised to 96 drove the process from ~800 MB to the 2.86 GB the
+/// kernel killed it at, while the same work at the default 16 peaked at 1.3 GB
+/// and fell back. It is an order-of-magnitude figure for a sanity check, not an
+/// accounting of any particular workflow - a guest that allocates will cost
+/// more, one that parks immediately less.
+const OBSERVED_BYTES_PER_RUN: u64 = 40 * 1024 * 1024;
+
+/// Total memory visible to this host, when it can be read.
+///
+/// Linux-only and best-effort: the check that uses it is advisory, so anywhere
+/// this returns `None` simply skips the warning.
+fn host_memory_bytes() -> Option<u64> {
+    let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
+    meminfo.lines().find_map(|line| {
+        let kb = line.strip_prefix("MemTotal:")?.trim().strip_suffix(" kB")?;
+        kb.trim().parse::<u64>().ok().map(|kb| kb * 1024)
+    })
+}
+
+/// Say so when the configured run bound cannot fit in the host's memory.
+///
+/// The default is sized to the host, but an operator raising it for throughput
+/// gets no feedback until the kernel kills the process - and the symptom then
+/// looks like a leak rather than a setting, because memory climbs steadily and
+/// the crash lands minutes later somewhere unrelated to the change.
+fn warn_if_run_bound_exceeds_memory(permits: usize) {
+    let Some(total) = host_memory_bytes() else {
+        return;
+    };
+    let needed = (permits as u64).saturating_mul(OBSERVED_BYTES_PER_RUN);
+    if needed > total {
+        tracing::warn!(
+            max_concurrent_runs = permits,
+            approx_required_mb = needed / (1024 * 1024),
+            host_memory_mb = total / (1024 * 1024),
+            "RUNTARA_MAX_CONCURRENT_RUNS is set above what this host can hold; \
+             a burst of concurrent runs may exhaust memory and the process will \
+             be killed. Each live guest holds a wasmtime store."
+        );
+    }
 }
 
 fn limits_from_env() -> WorkflowLimits {
@@ -960,6 +1009,32 @@ impl Runner for EmbeddedWasmRunner {
 
 #[cfg(test)]
 mod tests {
+    /// The advisory bound check must fire only when the setting cannot fit.
+    ///
+    /// It exists because raising `RUNTARA_MAX_CONCURRENT_RUNS` for throughput
+    /// presents as a memory leak rather than as a setting: memory climbs, and
+    /// the kernel kills the process minutes later, far from the change.
+    #[test]
+    fn run_bound_warning_tracks_host_memory() {
+        // Whatever this host reports, a bound of one must fit and an absurd one
+        // must not; the warning itself is a log line, so this pins the maths
+        // that decides it rather than the emission.
+        if let Some(total) = super::host_memory_bytes() {
+            assert!(total > 0, "a readable MemTotal must be positive");
+            let fits = super::OBSERVED_BYTES_PER_RUN <= total;
+            assert!(fits, "one run must fit in any host this can run on");
+
+            let absurd = (total / super::OBSERVED_BYTES_PER_RUN) as usize + 2;
+            assert!(
+                (absurd as u64).saturating_mul(super::OBSERVED_BYTES_PER_RUN) > total,
+                "a bound past the host's memory must be recognised as too large"
+            );
+        }
+        // Must not panic regardless of platform or how large the value is.
+        super::warn_if_run_bound_exceeds_memory(1);
+        super::warn_if_run_bound_exceeds_memory(usize::MAX);
+    }
+
     use super::*;
     #[cfg(feature = "db-integration-tests")]
     use crate::test_support;
