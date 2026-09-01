@@ -129,6 +129,20 @@ impl EnvironmentClient {
         })
     }
 
+    /// Count a tenant's instances in the given statuses.
+    #[instrument(skip(self), level = "debug")]
+    pub async fn count_instances_by_status(
+        &self,
+        tenant_id: Option<&str>,
+        statuses: &[String],
+        ceiling: i64,
+    ) -> Result<i64> {
+        Ok(
+            handlers::handle_count_instances_by_status(&self.state, tenant_id, statuses, ceiling)
+                .await?,
+        )
+    }
+
     /// List instances with optional filtering.
     #[instrument(skip(self, options), level = "debug")]
     pub async fn list_instances(

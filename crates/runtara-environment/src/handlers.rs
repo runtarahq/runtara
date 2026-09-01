@@ -1809,6 +1809,20 @@ pub struct ListInstancesResult {
     pub total_count: i64,
 }
 
+/// Count a tenant's instances in the given statuses.
+///
+/// The admission gate needs a number, not rows. Routing it through
+/// `handle_list_instances` ran the paginated list query too and then discarded
+/// its rows, and that list was by far the more expensive of the two.
+pub async fn handle_count_instances_by_status(
+    state: &EnvironmentHandlerState,
+    tenant_id: Option<&str>,
+    statuses: &[String],
+    ceiling: i64,
+) -> Result<i64> {
+    Ok(db::count_instances_by_status(&state.pool, tenant_id, statuses, ceiling).await?)
+}
+
 /// List instances matching `options`.
 ///
 /// A failing count degrades to `0` rather than failing the call: the page is

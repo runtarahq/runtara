@@ -254,6 +254,52 @@ pub async fn list_instances(
         .await
 }
 
+/// Count a tenant's instances in the given statuses.
+///
+/// Separate from [`count_instances`] on purpose. That one backs pagination, so
+/// it carries every optional filter and joins the image tables; the optional
+/// filters are written `$n IS NULL OR col = $n`, which is not sargable, and the
+/// status compare casts the enum to text, so neither `idx_instances_status` nor
+/// any other index applies and it degrades to a sequential scan.
+///
+/// The admission gate only ever wants "how many are active for this tenant",
+/// and it runs on every intake. Binding the status list as the enum array and
+/// dropping the joins keeps it on `idx_instances_status`, so its cost tracks the
+/// number of ACTIVE instances rather than the size of the table. That matters
+/// because the table is dominated by suspended rows: under the old shape the
+/// gate got steadily slower the more instances were parked, which throttled
+/// intake exactly when a large sleeping population had accumulated.
+pub async fn count_instances_by_status(
+    pool: &PgPool,
+    tenant_id: Option<&str>,
+    statuses: &[String],
+    ceiling: i64,
+) -> Result<i64, sqlx::Error> {
+    // Stop counting at `ceiling`. The caller is an admission gate asking "am I
+    // at the cap", so every row scanned past the cap changes nothing it can
+    // decide. Without the bound the count is O(active instances), and a backlog
+    // of pending work is precisely when the gate is consulted most and when
+    // that set is largest - the count then becomes the thing throttling intake.
+    let count: (i64,) = sqlx::query_as(
+        r#"
+        SELECT COUNT(*) FROM (
+            SELECT 1
+            FROM instances
+            WHERE ($1::TEXT IS NULL OR tenant_id = $1)
+              AND status = ANY($2::instance_status[])
+            LIMIT $3
+        ) capped
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(statuses)
+    .bind(ceiling)
+    .fetch_one(pool)
+    .await?;
+
+    Ok(count.0)
+}
+
 /// Count instances matching filters (for pagination total_count).
 pub async fn count_instances(
     pool: &PgPool,

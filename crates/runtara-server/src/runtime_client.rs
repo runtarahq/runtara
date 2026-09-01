@@ -522,6 +522,28 @@ impl RuntimeClient {
         Ok(())
     }
 
+    /// Count a tenant's instances in the given statuses.
+    ///
+    /// The admission gate wants a number. Asking for it via a list-with-limit-1
+    /// also ran the paginated list query, whose rows were then thrown away.
+    pub async fn count_instances_by_status(
+        &self,
+        tenant_id: &str,
+        statuses: &[String],
+        ceiling: u64,
+    ) -> Result<u64, RuntimeError> {
+        let count = self
+            .client
+            .count_instances_by_status(
+                Some(tenant_id),
+                statuses,
+                i64::try_from(ceiling).unwrap_or(i64::MAX),
+            )
+            .await
+            .map_err(|e| RuntimeError::SdkError(e.to_string()))?;
+        Ok(u64::try_from(count).unwrap_or(0))
+    }
+
     /// List running instances for a tenant (simple API)
     ///
     /// # Arguments

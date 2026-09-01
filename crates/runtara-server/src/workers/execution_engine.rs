@@ -423,7 +423,11 @@ impl ExecutionEngine {
     /// counter precisely because the runtime reflects real completion — an
     /// execution drops out of this count the instant it terminates, so the
     /// gate means "N concurrent", not "N started recently".
-    async fn active_execution_count(&self, tenant_id: &str) -> Result<u64, ExecutionError> {
+    async fn active_execution_count(
+        &self,
+        tenant_id: &str,
+        ceiling: u64,
+    ) -> Result<u64, ExecutionError> {
         let reserved = self.reservations_for(tenant_id);
         if let Some(entry) = self.concurrency_counts.get(tenant_id)
             && entry.0.elapsed() < CONCURRENCY_COUNT_TTL
@@ -435,7 +439,9 @@ impl ExecutionEngine {
         // in flight is not in the result, so only the admissions this count
         // subsumes may be forgiven.
         let subsumed = reserved.load(Ordering::SeqCst);
-        let count = self.count_active_executions_uncached(tenant_id).await?;
+        let count = self
+            .count_active_executions_uncached(tenant_id, ceiling)
+            .await?;
         let retained = retained_reservations(subsumed, reserved.load(Ordering::SeqCst));
         reserved.store(retained, Ordering::SeqCst);
         self.concurrency_counts
@@ -457,27 +463,27 @@ impl ExecutionEngine {
     async fn count_active_executions_uncached(
         &self,
         tenant_id: &str,
+        ceiling: u64,
     ) -> Result<u64, ExecutionError> {
         let Some(client) = self.runtime_client.as_ref() else {
             // No runtime wired (e.g. trigger worker engine) — can't count.
             return Ok(0);
         };
-        let mut total: u64 = 0;
-        for status in [InstanceStatus::Running, InstanceStatus::Pending] {
-            let result = client
-                .list_instances_with_options(
-                    ListInstancesOptions::new()
-                        .with_tenant_id(tenant_id)
-                        .with_status(status)
-                        .with_limit(1),
-                )
-                .await
-                .map_err(|e| {
-                    ExecutionError::RuntimeError(format!("Failed to count active instances: {e}"))
-                })?;
-            total += u64::from(result.total_count);
-        }
-        Ok(total)
+        // One count for both statuses, and a count rather than a list: the
+        // previous shape asked for a page of rows purely to read its
+        // total_count, and that discarded list was ~25x the cost of the count
+        // itself. Both scanned the whole table, so the gate slowed down as
+        // instances accumulated - throttling intake exactly when a large parked
+        // population had built up.
+        let statuses = vec!["running".to_string(), "pending".to_string()];
+        // `ceiling + 1` so the gate can still distinguish "at the cap" from
+        // "over it"; anything beyond that is indistinguishable to the decision.
+        client
+            .count_instances_by_status(tenant_id, &statuses, ceiling.saturating_add(1))
+            .await
+            .map_err(|e| {
+                ExecutionError::RuntimeError(format!("Failed to count active instances: {e}"))
+            })
     }
 
     /// Enforce `maxConcurrentExecutions` at intake. Returns the
@@ -513,7 +519,14 @@ impl ExecutionEngine {
         // counts only Running + Pending, so suspended instances (which are not
         // terminal, but are also not consuming a slot) never count against the
         // cap.
-        let active = match self.active_execution_count(tenant_id).await {
+        // Resolve the cap before counting so the count can stop there. The
+        // gate only needs to know whether the cap is reached, and an unbounded
+        // count gets slower exactly as a backlog builds.
+        let cap = crate::middleware::entitlement::effective_limit(
+            crate::config::raw_max_concurrent_executions(),
+            snapshot.limits.max_concurrent_executions,
+        ) as u64;
+        let active = match self.active_execution_count(tenant_id, cap).await {
             Ok(n) => n,
             Err(e) => {
                 tracing::warn!(
