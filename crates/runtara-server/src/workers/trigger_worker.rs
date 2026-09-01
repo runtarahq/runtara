@@ -21,7 +21,7 @@ use crate::shutdown::ShutdownSignal;
 use crate::types::CancellationHandle;
 use crate::valkey::ValkeyConfig;
 use crate::valkey::client::ValkeyClient;
-use crate::valkey::stream::StreamConsumer;
+use crate::valkey::stream::{StreamAcker, StreamConsumer};
 use crate::workers::execution_engine::{DetachedExecution, ExecutionEngine, ExecutionError};
 
 /// Result of processing a trigger event
@@ -177,6 +177,11 @@ pub async fn run(
         event_sink.clone(),
     ));
 
+    // Acknowledging through the consumer would hold its mutex across the XACK
+    // round trip, serialising every event in a fanned-out batch on one lock.
+    // This handle shares the same multiplexed connection and needs no lock.
+    let acker = consumer.lock().await.acker();
+
     // Track the start ID for XAUTOCLAIM pagination
     let mut autoclaim_start_id = "0-0".to_string();
 
@@ -208,7 +213,7 @@ pub async fn run(
                 let mut tasks = tokio::task::JoinSet::new();
                 for (entry_id, valkey_event) in pending_events {
                     let permits = Arc::clone(&event_permits);
-                    let consumer = Arc::clone(&consumer);
+                    let acker = acker.clone();
                     let engine = Arc::clone(&engine);
                     let running_executions = Arc::clone(&running_executions);
                     let event_sink = event_sink.clone();
@@ -219,7 +224,7 @@ pub async fn run(
                             .await
                             .expect("trigger event semaphore closed");
                         process_event(
-                            &consumer,
+                            &acker,
                             &engine,
                             &entry_id,
                             &valkey_event,
@@ -262,7 +267,7 @@ pub async fn run(
                 let mut tasks = tokio::task::JoinSet::new();
                 for (entry_id, valkey_event) in events {
                     let permits = Arc::clone(&event_permits);
-                    let consumer = Arc::clone(&consumer);
+                    let acker = acker.clone();
                     let engine = Arc::clone(&engine);
                     let running_executions = Arc::clone(&running_executions);
                     let event_sink = event_sink.clone();
@@ -274,7 +279,7 @@ pub async fn run(
                             .await
                             .expect("trigger event semaphore closed");
                         process_event(
-                            &consumer,
+                            &acker,
                             &engine,
                             &entry_id,
                             &valkey_event,
@@ -351,7 +356,7 @@ fn trigger_concurrency() -> usize {
 /// Process a single event from the stream
 #[allow(clippy::too_many_arguments)]
 async fn process_event(
-    consumer: &tokio::sync::Mutex<StreamConsumer>,
+    acker: &StreamAcker,
     engine: &Arc<ExecutionEngine>,
     entry_id: &str,
     valkey_event: &crate::valkey::events::ValkeyEvent,
@@ -370,7 +375,7 @@ async fn process_event(
                 "Failed to parse trigger event, acknowledging and skipping"
             );
             // Acknowledge malformed events to prevent reprocessing
-            if let Err(ack_err) = consumer.lock().await.acknowledge_event(entry_id).await {
+            if let Err(ack_err) = acker.acknowledge_event(entry_id).await {
                 error!(entry_id = %entry_id, error = %ack_err, "Failed to ACK malformed event");
             }
             return;
@@ -460,7 +465,7 @@ async fn process_event(
         ProcessResult::Success => {
             emit_fired("success");
             // Acknowledge successful processing
-            if let Err(e) = consumer.lock().await.acknowledge_event(entry_id).await {
+            if let Err(e) = acker.acknowledge_event(entry_id).await {
                 error!(
                     entry_id = %entry_id,
                     error = %e,
@@ -478,7 +483,7 @@ async fn process_event(
         ProcessResult::Deduplicated => {
             // The original delivery owns execution and analytics. This replay
             // only closes the at-least-once delivery loop.
-            if let Err(ack_err) = consumer.lock().await.acknowledge_event(entry_id).await {
+            if let Err(ack_err) = acker.acknowledge_event(entry_id).await {
                 error!(entry_id = %entry_id, error = %ack_err, "Failed to ACK deduplicated event");
             } else {
                 info!(
@@ -499,7 +504,7 @@ async fn process_event(
                 duration_ms = (duration * 1000.0) as u64,
                 "Event processing failed permanently"
             );
-            if let Err(ack_err) = consumer.lock().await.acknowledge_event(entry_id).await {
+            if let Err(ack_err) = acker.acknowledge_event(entry_id).await {
                 error!(entry_id = %entry_id, error = %ack_err, "Failed to ACK failed event");
             }
         }
@@ -515,18 +520,13 @@ async fn process_event(
                 duration_ms = (duration * 1000.0) as u64,
                 "Workflow cannot run as authored"
             );
-            if let Err(ack_err) = consumer.lock().await.acknowledge_event(entry_id).await {
+            if let Err(ack_err) = acker.acknowledge_event(entry_id).await {
                 error!(entry_id = %entry_id, error = %ack_err, "Failed to ACK unrunnable event");
             }
         }
         ProcessResult::RetryLater(ref reason) => {
             // Check delivery count to enforce max retries
-            let delivery_count = consumer
-                .lock()
-                .await
-                .get_delivery_count(entry_id)
-                .await
-                .unwrap_or(1); // Default to 1 if query fails
+            let delivery_count = acker.get_delivery_count(entry_id).await.unwrap_or(1); // Default to 1 if query fails
 
             if delivery_count >= max_retries {
                 emit_fired("failed");
@@ -544,7 +544,7 @@ async fn process_event(
                     m.trigger_events_failed.add(1, &attributes);
                 }
                 // ACK to remove from PEL
-                if let Err(ack_err) = consumer.lock().await.acknowledge_event(entry_id).await {
+                if let Err(ack_err) = acker.acknowledge_event(entry_id).await {
                     error!(entry_id = %entry_id, error = %ack_err, "Failed to ACK exhausted event");
                 }
             } else if is_retry {
