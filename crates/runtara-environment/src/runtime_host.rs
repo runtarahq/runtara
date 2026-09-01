@@ -57,6 +57,11 @@ pub struct PersistenceRuntimeHost {
     state: Arc<InstanceHandlerState>,
     instance_id: String,
     debug_mode: bool,
+    /// The instance's enriched input envelope, supplied by a launch that had
+    /// just written it. `None` means `load_input` reads the store, which is
+    /// what a wake or resume must do — see
+    /// [`crate::runner::traits::LaunchOptions::prepersisted_input`].
+    prepersisted_input: Option<Vec<u8>>,
     /// Mirrors `runtara_sdk::inst_id.as_str()_CANCELLED` (per-run, not process-global).
     cancelled: AtomicBool,
     /// Signal-poll rate limiter state (mirrors the SDK's `last_signal_poll`).
@@ -83,6 +88,8 @@ impl PersistenceRuntimeHost {
             state,
             instance_id,
             debug_mode,
+            prepersisted_input: None,
+
             cancelled: AtomicBool::new(false),
             last_signal_poll: std::sync::Mutex::new(None),
             signal_poll_interval: DEFAULT_SIGNAL_POLL_INTERVAL,
@@ -90,6 +97,16 @@ impl PersistenceRuntimeHost {
             cancel_token: None,
             interrupt_guest: None,
         }
+    }
+
+    /// Serve `load_input` from these bytes instead of reading the store.
+    ///
+    /// Only a first-start launch may set this, and only with the bytes it has
+    /// just persisted; anything else must leave it unset so a woken instance
+    /// still resumes on its real input.
+    pub fn with_prepersisted_input(mut self, input: Option<Vec<u8>>) -> Self {
+        self.prepersisted_input = input;
+        self
     }
 
     /// Share the run's cancel flag so an ignored cancel can stop the guest.
@@ -331,6 +348,9 @@ impl PersistenceRuntimeHost {
 impl RuntimeHost for PersistenceRuntimeHost {
     async fn load_input(&self) -> Result<Option<Vec<u8>>, String> {
         self.escalate_if_cancel_ignored().await;
+        if let Some(input) = &self.prepersisted_input {
+            return Ok(Some(input.clone()));
+        }
         let instance = self
             .state
             .persistence

@@ -236,6 +236,9 @@ async fn test_cleanup_old_terminal_instances() {
         poll_interval: Duration::from_secs(1),
         max_age: Duration::from_secs(30 * 24 * 3600), // 30 days
         batch_size: 100,
+        // Instance retention is what these cases exercise; the debug-event
+        // sweep has its own window and is covered separately.
+        debug_event_max_age: None,
     };
     let worker = DbCleanupWorker::new(pool.clone(), persistence, config);
     let shutdown = worker.shutdown_handle();
@@ -312,6 +315,9 @@ async fn test_cleanup_disabled_by_default() {
         poll_interval: Duration::from_secs(1),
         max_age: Duration::from_secs(30 * 24 * 3600),
         batch_size: 100,
+        // Instance retention is what these cases exercise; the debug-event
+        // sweep has its own window and is covered separately.
+        debug_event_max_age: None,
     };
     let worker = DbCleanupWorker::new(pool.clone(), persistence, config);
     let shutdown = worker.shutdown_handle();
@@ -354,6 +360,9 @@ fn test_config_custom() {
         poll_interval: Duration::from_secs(7200),
         max_age: Duration::from_secs(7 * 24 * 3600),
         batch_size: 50,
+        // Instance retention is what these cases exercise; the debug-event
+        // sweep has its own window and is covered separately.
+        debug_event_max_age: None,
     };
 
     assert!(config.enabled);
@@ -473,6 +482,9 @@ async fn test_e2e_cascade_deletion_checkpoints_and_events() {
         poll_interval: Duration::from_secs(1),
         max_age: Duration::from_secs(30 * 24 * 3600),
         batch_size: 100,
+        // Instance retention is what these cases exercise; the debug-event
+        // sweep has its own window and is covered separately.
+        debug_event_max_age: None,
     };
     let worker = DbCleanupWorker::new(pool.clone(), persistence, config);
     let shutdown = worker.shutdown_handle();
@@ -548,6 +560,9 @@ async fn test_e2e_batch_processing() {
         poll_interval: Duration::from_secs(1),
         max_age: Duration::from_secs(30 * 24 * 3600),
         batch_size,
+        // Instance retention is what these cases exercise; the debug-event
+        // sweep has its own window and is covered separately.
+        debug_event_max_age: None,
     };
     let worker = DbCleanupWorker::new(pool.clone(), persistence, config);
     let shutdown = worker.shutdown_handle();
@@ -603,6 +618,9 @@ async fn test_e2e_cancelled_instances_deleted() {
         poll_interval: Duration::from_secs(1),
         max_age: Duration::from_secs(30 * 24 * 3600),
         batch_size: 100,
+        // Instance retention is what these cases exercise; the debug-event
+        // sweep has its own window and is covered separately.
+        debug_event_max_age: None,
     };
     let worker = DbCleanupWorker::new(pool.clone(), persistence, config);
     let shutdown = worker.shutdown_handle();
@@ -658,6 +676,9 @@ async fn test_e2e_suspended_instances_not_deleted() {
         poll_interval: Duration::from_secs(1),
         max_age: Duration::from_secs(30 * 24 * 3600),
         batch_size: 100,
+        // Instance retention is what these cases exercise; the debug-event
+        // sweep has its own window and is covered separately.
+        debug_event_max_age: None,
     };
     let worker = DbCleanupWorker::new(pool.clone(), persistence, config);
     let shutdown = worker.shutdown_handle();
@@ -713,6 +734,9 @@ async fn test_e2e_pending_instances_not_deleted() {
         poll_interval: Duration::from_secs(1),
         max_age: Duration::from_secs(30 * 24 * 3600),
         batch_size: 100,
+        // Instance retention is what these cases exercise; the debug-event
+        // sweep has its own window and is covered separately.
+        debug_event_max_age: None,
     };
     let worker = DbCleanupWorker::new(pool.clone(), persistence, config);
     let shutdown = worker.shutdown_handle();
@@ -733,4 +757,157 @@ async fn test_e2e_pending_instances_not_deleted() {
 
     // Cleanup
     cleanup_test_data(&pool, &[&old_pending], &image_id).await;
+}
+
+/// Insert an event with an explicit age and subtype.
+async fn create_aged_event(
+    pool: &PgPool,
+    instance_id: &str,
+    event_type: &str,
+    subtype: Option<&str>,
+    hours_ago: i64,
+) {
+    sqlx::query(
+        r#"
+        INSERT INTO instance_events (instance_id, event_type, subtype, created_at)
+        VALUES ($1, $2::instance_event_type, $3, NOW() - ($4 || ' hours')::interval)
+        "#,
+    )
+    .bind(instance_id)
+    .bind(event_type)
+    .bind(subtype)
+    .bind(hours_ago.to_string())
+    .execute(pool)
+    .await
+    .expect("Failed to create aged event");
+}
+
+async fn count_events(pool: &PgPool, instance_id: &str, subtype: Option<&str>) -> i64 {
+    let (n,): (i64,) = match subtype {
+        Some(sub) => sqlx::query_as(
+            "SELECT COUNT(*) FROM instance_events WHERE instance_id = $1 AND subtype = $2",
+        )
+        .bind(instance_id)
+        .bind(sub),
+        None => sqlx::query_as(
+            "SELECT COUNT(*) FROM instance_events WHERE instance_id = $1 AND subtype IS NULL",
+        )
+        .bind(instance_id),
+    }
+    .fetch_one(pool)
+    .await
+    .expect("Failed to count events");
+    n
+}
+
+/// Step-debug events age out on their own, shorter window; everything else
+/// waits for its instance.
+///
+/// Debug payloads dominate `instance_events` — a burst that drains a large
+/// sleeping population writes millions of them — but they are only read while a
+/// run is recent. Ageing them separately keeps the table bounded without
+/// reducing what workflows record, and without touching the lifecycle events
+/// that are the run's durable history.
+#[tokio::test]
+async fn debug_events_age_out_before_their_instance_does() {
+    skip_if_no_db!();
+    let pool = get_test_pool().await.expect("test pool");
+    let persistence = Arc::new(PostgresPersistence::new(pool.clone()));
+
+    let tenant_id = format!("debug-sweep-{}", Uuid::new_v4());
+    let image_id = create_test_image(&pool, &tenant_id).await;
+    // Still running, so instance retention can never be what removes these.
+    let instance_id = Uuid::new_v4().to_string();
+    create_test_instance(&pool, &instance_id, &tenant_id, &image_id, "running", None).await;
+    create_instance_image(&pool, &instance_id, &image_id, &tenant_id).await;
+
+    create_aged_event(&pool, &instance_id, "custom", Some("step_debug_start"), 48).await;
+    create_aged_event(&pool, &instance_id, "custom", Some("step_debug_end"), 48).await;
+    create_aged_event(&pool, &instance_id, "custom", Some("step_debug_start"), 1).await;
+    create_aged_event(&pool, &instance_id, "custom", Some("workflow_log"), 48).await;
+    create_aged_event(&pool, &instance_id, "completed", None, 48).await;
+
+    let config = DbCleanupWorkerConfig {
+        enabled: true,
+        poll_interval: Duration::from_secs(1),
+        // Far longer than anything here: the instance sweep must not be what
+        // removes the debug rows.
+        max_age: Duration::from_secs(365 * 24 * 3600),
+        batch_size: 100,
+        debug_event_max_age: Some(Duration::from_secs(24 * 3600)),
+    };
+    let worker = DbCleanupWorker::new(pool.clone(), persistence, config);
+    let shutdown = worker.shutdown_handle();
+    let handle = tokio::spawn(async move { worker.run().await });
+
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    shutdown.notify_one();
+    let _ = handle.await;
+
+    assert_eq!(
+        count_events(&pool, &instance_id, Some("step_debug_start")).await,
+        1,
+        "the aged step_debug_start must go and the recent one must stay"
+    );
+    assert_eq!(
+        count_events(&pool, &instance_id, Some("step_debug_end")).await,
+        0,
+        "the aged step_debug_end must go"
+    );
+    assert_eq!(
+        count_events(&pool, &instance_id, Some("workflow_log")).await,
+        1,
+        "non-debug custom events are not the sweep's business"
+    );
+    assert_eq!(
+        count_events(&pool, &instance_id, None).await,
+        1,
+        "lifecycle events are the run's history and must survive"
+    );
+    let (still_there,): (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM instances WHERE instance_id = $1")
+            .bind(&instance_id)
+            .fetch_one(&pool)
+            .await
+            .expect("Failed to query instance");
+    assert_eq!(still_there, 1, "the instance itself must be untouched");
+
+    cleanup_test_data(&pool, &[&instance_id], &image_id).await;
+}
+
+/// `debug_event_max_age: None` must leave every debug event alone.
+#[tokio::test]
+async fn debug_sweep_is_off_when_no_window_is_configured() {
+    skip_if_no_db!();
+    let pool = get_test_pool().await.expect("test pool");
+    let persistence = Arc::new(PostgresPersistence::new(pool.clone()));
+
+    let tenant_id = format!("debug-sweep-off-{}", Uuid::new_v4());
+    let image_id = create_test_image(&pool, &tenant_id).await;
+    let instance_id = Uuid::new_v4().to_string();
+    create_test_instance(&pool, &instance_id, &tenant_id, &image_id, "running", None).await;
+    create_instance_image(&pool, &instance_id, &image_id, &tenant_id).await;
+    create_aged_event(&pool, &instance_id, "custom", Some("step_debug_start"), 999).await;
+
+    let config = DbCleanupWorkerConfig {
+        enabled: true,
+        poll_interval: Duration::from_secs(1),
+        max_age: Duration::from_secs(365 * 24 * 3600),
+        batch_size: 100,
+        debug_event_max_age: None,
+    };
+    let worker = DbCleanupWorker::new(pool.clone(), persistence, config);
+    let shutdown = worker.shutdown_handle();
+    let handle = tokio::spawn(async move { worker.run().await });
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    shutdown.notify_one();
+    let _ = handle.await;
+
+    assert_eq!(
+        count_events(&pool, &instance_id, Some("step_debug_start")).await,
+        1,
+        "with no window configured the sweep must not run at all"
+    );
+
+    cleanup_test_data(&pool, &[&instance_id], &image_id).await;
 }

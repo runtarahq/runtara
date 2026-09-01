@@ -69,7 +69,7 @@ pub async fn handle_register_instance(
     //    (which already have a row in persistence) can still resume.
     let instance_exists = state
         .persistence
-        .get_instance(&request.instance_id)
+        .get_instance_meta(&request.instance_id)
         .await
         .map(|opt| opt.is_some())
         .unwrap_or(false);

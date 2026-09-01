@@ -53,17 +53,10 @@ use super::traits::{
 /// The existing `started_at` is re-used rather than restamped, so a run that
 /// suspends and wakes still reports when it first began.
 async fn mark_running(persistence: &dyn Persistence, instance_id: &str) {
-    let started_at = match persistence.get_instance(instance_id).await {
-        Ok(Some(instance)) => instance.started_at.unwrap_or_else(chrono::Utc::now),
-        Ok(None) => chrono::Utc::now(),
-        Err(e) => {
-            warn!(instance_id, error = %e, "Could not read instance before marking it running");
-            chrono::Utc::now()
-        }
-    };
-
+    // One statement: the COALESCE inside `mark_instance_running` carries the
+    // original `started_at` forward, which this used to read the row to do.
     if let Err(e) = persistence
-        .update_instance_status(instance_id, "running", Some(started_at))
+        .mark_instance_running(instance_id, chrono::Utc::now())
         .await
     {
         warn!(instance_id, error = %e, "Failed to mark invoke instance running");
@@ -86,6 +79,15 @@ pub struct EmbeddedWasmRunner {
     persistence: Arc<dyn Persistence>,
     executor: Arc<WorkflowExecutor>,
     tasks: TaskRegistry,
+    /// Bounds how many guests execute at once, whatever asks for them.
+    ///
+    /// `launch_detached` spawns the run and returns, so the caller's own
+    /// concurrency limit does not bound execution — it bounds how fast runs are
+    /// *started*. Nothing else stops a fast producer stacking guests until the
+    /// machine runs out of memory, and each live guest holds a wasmtime store.
+    /// A serial caller used to hide this by never asking for more than one at a
+    /// time; that is not a limit anything should rely on.
+    run_permits: Arc<tokio::sync::Semaphore>,
     /// Shared handler state for per-run [`PersistenceRuntimeHost`]s — the
     /// native runtime interface for HostImport-composed artifacts.
     handler_state: Arc<runtara_core::instance_handlers::InstanceHandlerState>,
@@ -105,6 +107,7 @@ impl EmbeddedWasmRunner {
         Ok(Self {
             config,
             limits: limits_from_env(),
+            run_permits: Arc::new(tokio::sync::Semaphore::new(max_concurrent_runs())),
             persistence,
             executor: Arc::new(executor),
             tasks: Arc::new(Mutex::new(HashMap::new())),
@@ -141,7 +144,11 @@ impl EmbeddedWasmRunner {
             Arc::clone(&self.handler_state),
             options.instance_id.clone(),
             debug_mode,
-        );
+        )
+        // A guest that asks for its input through the host interface gets the
+        // same bytes the launch already has, rather than a second read of what
+        // was just written. Unset on wake/resume, so those still read the store.
+        .with_prepersisted_input(options.prepersisted_input.clone());
         // Share the run's cancel flag: it is how the host stops a guest that
         // woke from an interrupted sleep and ignored the cancel, without
         // routing the cancel through the guest's catchable error channel.
@@ -167,17 +174,19 @@ impl EmbeddedWasmRunner {
     }
 
     /// The instance's persisted (enriched) input envelope — what
-    /// `runtime.load-input` served the legacy guest. Fetched fresh on every
-    /// launch so a woken instance re-reads the SAME stored bytes (never the
-    /// relaunch request's placeholder input).
-    async fn persisted_input(&self, instance_id: &str) -> Result<Vec<u8>> {
-        let instance = self
-            .persistence
-            .get_instance(instance_id)
-            .await
-            .map_err(|e| RunnerError::StartFailed(format!("load instance input: {e:#}")))?
-            .ok_or_else(|| RunnerError::StartFailed(format!("instance {instance_id} not found")))?;
-        Ok(instance.input.unwrap_or_else(|| b"{}".to_vec()))
+    /// `runtime.load-input` served the legacy guest. Errors if the instance is
+    /// gone; the detached path logs and falls back instead.
+    async fn persisted_input(&self, options: &LaunchOptions) -> Result<Vec<u8>> {
+        resolve_run_input(
+            self.persistence.as_ref(),
+            &options.instance_id,
+            options.prepersisted_input.clone(),
+        )
+        .await
+        .map_err(|e| RunnerError::StartFailed(format!("load instance input: {e:#}")))?
+        .ok_or_else(|| {
+            RunnerError::StartFailed(format!("instance {} not found", options.instance_id))
+        })
     }
 
     fn task_of(&self, instance_id: &str) -> Option<Arc<InstanceTask>> {
@@ -187,6 +196,51 @@ impl EmbeddedWasmRunner {
             .get(instance_id)
             .cloned()
     }
+}
+
+/// The enriched input envelope a run starts from.
+///
+/// `prepersisted` is [`LaunchOptions::prepersisted_input`]: the first-start
+/// path passes the bytes it has just written so the launch does not read back
+/// its own write. Every other path passes `None` and gets the stored envelope,
+/// which is what makes a woken instance resume on its real input instead of the
+/// relaunch request's placeholder.
+///
+/// Both launch paths — synchronous `run` and the spawned `launch_detached` —
+/// go through here on purpose. They used to each fetch the input themselves,
+/// and the duplicate was how the detached path came to ignore this field.
+/// `Ok(None)` means no such instance; callers differ on how loudly to fail.
+async fn resolve_run_input(
+    persistence: &dyn Persistence,
+    instance_id: &str,
+    prepersisted: Option<Vec<u8>>,
+) -> std::result::Result<Option<Vec<u8>>, runtara_core::error::CoreError> {
+    if let Some(input) = prepersisted {
+        return Ok(Some(input));
+    }
+    Ok(persistence
+        .get_instance(instance_id)
+        .await?
+        .map(|instance| instance.input.unwrap_or_else(|| b"{}".to_vec())))
+}
+
+/// How many guests may execute concurrently in this process.
+///
+/// Each live guest holds a wasmtime store, so this is a memory bound before it
+/// is a throughput one: on a small host, letting a fast producer stack runs
+/// exhausts the machine and the process is killed, which is a far worse outcome
+/// than queueing. `RUNTARA_MAX_CONCURRENT_RUNS`, defaulting to four per core.
+fn max_concurrent_runs() -> usize {
+    std::env::var("RUNTARA_MAX_CONCURRENT_RUNS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map(|n| n.get().saturating_mul(4))
+                .unwrap_or(4)
+        })
+        .clamp(1, 1024)
 }
 
 fn limits_from_env() -> WorkflowLimits {
@@ -522,7 +576,7 @@ impl Runner for EmbeddedWasmRunner {
             &instance_pre,
             self.executor.engine(),
         ) {
-            let input = self.persisted_input(&options.instance_id).await?;
+            let input = self.persisted_input(options).await?;
             // Run as `running` (see the detached path for why relaunches need
             // this) — no-op on the first-run path, which is already running.
             mark_running(self.persistence.as_ref(), &options.instance_id).await;
@@ -669,17 +723,40 @@ impl Runner for EmbeddedWasmRunner {
         let task_for_run = Arc::clone(&task);
         let registry = Arc::clone(&self.tasks);
         let instance_id = options.instance_id.clone();
+        // See `LaunchOptions::prepersisted_input`: set only by the first-start
+        // path, with the bytes it has just written. A wake or resume leaves it
+        // None and still reads the stored envelope below.
+        let prepersisted_input = options.prepersisted_input.clone();
+        let run_permits = Arc::clone(&self.run_permits);
         tokio::spawn(async move {
+            // Wait for a slot before touching the engine. The instance is
+            // already registered and durable at this point, so queueing here
+            // delays the run rather than losing it — which is the trade to
+            // make, because the alternative is the process being killed.
+            let _run_slot = run_permits
+                .acquire_owned()
+                .await
+                .expect("run semaphore closed");
             match executor.load_instance_pre(&wasm_path).await {
                 Ok(instance_pre) => {
                     if runtara_component_host::lifecycle::exports_lifecycle_invoke(
                         &instance_pre,
                         executor.engine(),
                     ) {
-                        // Invoke-shaped artifact: input from persistence (the
-                        // enriched stored envelope), terminal result in-band.
-                        let input = match persistence.get_instance(&instance_id).await {
-                            Ok(Some(instance)) => instance.input.unwrap_or_else(|| b"{}".to_vec()),
+                        // Invoke-shaped artifact: input is the enriched stored
+                        // envelope, terminal result in-band. The first-start
+                        // path hands those bytes over directly rather than
+                        // making this read back what it just wrote; every other
+                        // path goes to the store, so a woken instance still gets
+                        // its real input and never a relaunch placeholder.
+                        let input = match resolve_run_input(
+                            persistence.as_ref(),
+                            &instance_id,
+                            prepersisted_input,
+                        )
+                        .await
+                        {
+                            Ok(Some(input)) => input,
                             Ok(None) => {
                                 error!(instance_id = %instance_id, "Instance not found for invoke launch");
                                 b"{}".to_vec()
@@ -740,6 +817,13 @@ impl Runner for EmbeddedWasmRunner {
                             .await
                         {
                             Ok(pre) => {
+                                // Same reason the invoke branch does it: the
+                                // guest must be `running` before it starts, or
+                                // a terminal event it reports is dropped by the
+                                // `if_running` guard. Doing it on both branches
+                                // is what lets the launching caller stop
+                                // stamping it a second time after the fact.
+                                mark_running(persistence.as_ref(), &instance_id).await;
                                 let run = executor.execute(&pre, spec).await;
                                 {
                                     let mut guard = metrics_for_task.lock().await;

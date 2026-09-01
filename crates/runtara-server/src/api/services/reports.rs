@@ -5509,6 +5509,13 @@ async fn observe_report_execution(
                 }));
             }
             Ok(TerminalOutcome::GaveUp) => return Ok(None),
+            // A parked instance ends `poll_until_terminal`, but this caller is a
+            // foreground render bounded by `max_wait`, not a fire-and-forget watcher:
+            // keep waiting it out exactly as before, at the same cadence the poll loop
+            // would have used. The outer loop re-checks `remaining`, so this stays bounded.
+            Ok(TerminalOutcome::Suspended) => {
+                tokio::time::sleep(StdDuration::from_millis(25)).await;
+            }
             Err(error) if runtime_instance_not_ready(&error) => {
                 tokio::time::sleep(StdDuration::from_millis(25)).await;
             }

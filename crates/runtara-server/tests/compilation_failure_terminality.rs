@@ -129,8 +129,9 @@ async fn failure_for_the_current_definition_is_terminal_and_kept() {
 
     let repo = WorkflowRepository::new(pool.clone());
     let status = repo
-        .ensure_compilation_ready(&tenant, &workflow_id, 1)
+        .ensure_compilation_ready(&tenant, &workflow_id, Some(1))
         .await
+        .map(|(_, status)| status)
         .expect("readiness check must succeed");
 
     match status {
@@ -176,8 +177,9 @@ async fn failure_stays_terminal_across_repeated_checks() {
     let repo = WorkflowRepository::new(pool.clone());
     for attempt in 1..=3 {
         let status = repo
-            .ensure_compilation_ready(&tenant, &workflow_id, 1)
+            .ensure_compilation_ready(&tenant, &workflow_id, Some(1))
             .await
+            .map(|(_, status)| status)
             .expect("readiness check must succeed");
         assert!(
             matches!(status, CompilationStatus::Failed { terminal: true, .. }),
@@ -197,8 +199,9 @@ async fn failure_from_an_older_definition_is_retryable_and_cleared() {
 
     let repo = WorkflowRepository::new(pool.clone());
     let status = repo
-        .ensure_compilation_ready(&tenant, &workflow_id, 1)
+        .ensure_compilation_ready(&tenant, &workflow_id, Some(1))
         .await
+        .map(|(_, status)| status)
         .expect("readiness check must succeed");
 
     assert!(
@@ -230,8 +233,9 @@ async fn failure_without_a_checksum_is_retryable() {
 
     let repo = WorkflowRepository::new(pool.clone());
     let status = repo
-        .ensure_compilation_ready(&tenant, &workflow_id, 1)
+        .ensure_compilation_ready(&tenant, &workflow_id, Some(1))
         .await
+        .map(|(_, status)| status)
         .expect("readiness check must succeed");
 
     assert!(
@@ -256,8 +260,9 @@ async fn a_workflow_awaiting_its_first_compilation_is_still_retryable() {
     // must keep returning NotReady so the caller queues a build.
     let repo = WorkflowRepository::new(pool.clone());
     let status = repo
-        .ensure_compilation_ready(&tenant, &workflow_id, 1)
+        .ensure_compilation_ready(&tenant, &workflow_id, Some(1))
         .await
+        .map(|(_, status)| status)
         .expect("readiness check must succeed");
 
     assert!(

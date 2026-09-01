@@ -10,9 +10,9 @@ use runtara_environment::container_registry::{ContainerInfo, ContainerRegistry};
 use runtara_environment::db;
 use runtara_environment::handlers::{
     DrainController, EnvironmentHandlerState, GetCapabilityRequest, RegisterImageRequest,
-    ResumeInstanceRequest, StartInstanceRequest, StopInstanceRequest, detect_stale_monitor,
-    handle_get_capability, handle_health_check, handle_list_agents, handle_register_image,
-    handle_resume_instance, handle_start_instance, handle_stop_instance, spawn_container_monitor,
+    ResumeInstanceRequest, StartInstanceRequest, StopInstanceRequest, handle_get_capability,
+    handle_health_check, handle_list_agents, handle_register_image, handle_resume_instance,
+    handle_start_instance, handle_stop_instance, spawn_container_monitor,
 };
 use runtara_environment::image_registry::ImageRegistry;
 use runtara_environment::runner::MockRunner;
@@ -431,6 +431,223 @@ async fn test_start_instance_replay_is_deduplicated_without_second_launch() {
 
     let replay = handle_start_instance(&state, request()).await.unwrap();
     assert!(replay.success, "replay failed: {:?}", replay.error);
+    assert!(replay.deduplicated);
+    assert_eq!(replay.instance_id, instance_id);
+    assert_eq!(runner.launch_count(), 1, "replay launched a second process");
+
+    cleanup(&pool, Some(&instance_id), Some(&image_id)).await;
+}
+
+/// A first start hands the runner the same bytes it just stored.
+///
+/// The stored envelope is *enriched* (image variable defaults merged, system
+/// variables stripped), so the guest must receive that, not the raw request
+/// input. Passing the bytes through instead of reading them straight back is
+/// only safe while those two are the same thing, which is what this pins.
+#[tokio::test]
+async fn test_start_instance_hands_runner_the_stored_input() {
+    skip_if_no_db!();
+    let pool = get_test_pool().await;
+
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let runner = Arc::new(MockRunner::never_completing());
+    let persistence = Arc::new(PostgresPersistence::new(pool.clone()));
+    let state = EnvironmentHandlerState::new(
+        pool.clone(),
+        persistence.clone(),
+        runner.clone(),
+        "127.0.0.1:8001".to_string(),
+        temp_dir.path().to_path_buf(),
+    );
+
+    let image_id = Uuid::new_v4().to_string();
+    let image_name = format!("test-image-input-passthrough-{image_id}");
+    sqlx::query(
+        r#"
+        INSERT INTO images (image_id, tenant_id, name, description, binary_path)
+        VALUES ($1, 'test-tenant', $2, 'desc', $3)
+        "#,
+    )
+    .bind(&image_id)
+    .bind(&image_name)
+    .bind(test_artifact_path())
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let instance_id = format!("input-passthrough-{}", Uuid::new_v4());
+    let response = handle_start_instance(
+        &state,
+        StartInstanceRequest {
+            image_id: image_id.clone(),
+            tenant_id: "test-tenant".to_string(),
+            instance_id: Some(instance_id.clone()),
+            // `_internal` must be stripped by enrichment, so a passthrough of
+            // the raw request input would be visibly wrong here.
+            input: Some(serde_json::json!({
+                "data": {"hello": "world"},
+                "variables": {"keep": 1, "_internal": "secret"}
+            })),
+            timeout_seconds: Some(60),
+            env: std::collections::HashMap::new(),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(response.success, "start failed: {:?}", response.error);
+
+    let stored = persistence
+        .get_instance(&instance_id)
+        .await
+        .unwrap()
+        .expect("instance row")
+        .input
+        .expect("input should have been stored");
+
+    let launched = runner
+        .last_launch()
+        .expect("runner should have been launched");
+    assert_eq!(
+        launched.prepersisted_input.as_deref(),
+        Some(stored.as_slice()),
+        "the runner must get exactly the bytes that were persisted"
+    );
+
+    let handed: serde_json::Value = serde_json::from_slice(&stored).unwrap();
+    assert!(
+        handed["variables"].get("_internal").is_none(),
+        "system variables must be stripped before the guest sees the input"
+    );
+    assert_eq!(handed["variables"]["keep"], serde_json::json!(1));
+
+    cleanup(&pool, Some(&instance_id), Some(&image_id)).await;
+}
+
+/// A resume must NOT carry prepersisted input.
+///
+/// Its request input is a relaunch placeholder, so the runner has to go back to
+/// the store for the instance's real envelope. Setting this field on the resume
+/// path would silently feed a woken workflow the placeholder instead.
+#[tokio::test]
+async fn test_resume_instance_does_not_prepersist_placeholder_input() {
+    skip_if_no_db!();
+    let pool = get_test_pool().await;
+
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let runner = Arc::new(MockRunner::never_completing());
+    let persistence = Arc::new(PostgresPersistence::new(pool.clone()));
+    let state = EnvironmentHandlerState::new(
+        pool.clone(),
+        persistence,
+        runner.clone(),
+        "127.0.0.1:8001".to_string(),
+        temp_dir.path().to_path_buf(),
+    );
+
+    let image_id = Uuid::new_v4().to_string();
+    let image_name = format!("test-image-resume-placeholder-{image_id}");
+    sqlx::query(
+        r#"
+        INSERT INTO images (image_id, tenant_id, name, description, binary_path)
+        VALUES ($1, 'test-tenant', $2, 'desc', $3)
+        "#,
+    )
+    .bind(&image_id)
+    .bind(&image_name)
+    .bind(test_artifact_path())
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let instance_id = format!("resume-placeholder-{}", Uuid::new_v4());
+    create_test_instance(&pool, &instance_id, "test-tenant", &image_id).await;
+    update_test_instance_status(&pool, &instance_id, "suspended", None).await;
+
+    let resumed = handle_resume_instance(
+        &state,
+        ResumeInstanceRequest {
+            instance_id: instance_id.clone(),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(resumed.success, "resume failed: {:?}", resumed.error);
+
+    let launched = runner
+        .last_launch()
+        .expect("runner should have been launched");
+    assert!(
+        launched.prepersisted_input.is_none(),
+        "a resume must re-read the stored envelope, not carry its placeholder input"
+    );
+
+    cleanup(&pool, Some(&instance_id), Some(&image_id)).await;
+}
+
+/// A replay must stay deduplicated even if the artifact has since vanished.
+///
+/// The start was already accepted while the wasm was on disk, and the instance
+/// is running from a process that no longer needs the file. Letting the
+/// artifact check run first would turn an at-least-once retry into a spurious
+/// "artifact not found" for a launch that actually succeeded, so the dedup
+/// answer has to win over the artifact error on this path.
+#[tokio::test]
+async fn test_start_instance_replay_is_deduplicated_after_artifact_disappears() {
+    skip_if_no_db!();
+    let pool = get_test_pool().await;
+
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let runner = Arc::new(MockRunner::never_completing());
+    let persistence = Arc::new(PostgresPersistence::new(pool.clone()));
+    let state = EnvironmentHandlerState::new(
+        pool.clone(),
+        persistence,
+        runner.clone(),
+        "127.0.0.1:8001".to_string(),
+        temp_dir.path().to_path_buf(),
+    );
+
+    // A real artifact this test owns, so removing it cannot disturb anything else.
+    let artifact = temp_dir.path().join("vanishing.wasm");
+    std::fs::copy(test_artifact_path(), &artifact).unwrap();
+
+    let image_id = Uuid::new_v4().to_string();
+    let image_name = format!("test-image-vanishing-{image_id}");
+    sqlx::query(
+        r#"
+        INSERT INTO images (image_id, tenant_id, name, description, binary_path)
+        VALUES ($1, 'test-tenant', $2, 'desc', $3)
+        "#,
+    )
+    .bind(&image_id)
+    .bind(&image_name)
+    .bind(artifact.to_str().unwrap())
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let instance_id = format!("vanishing-{}", Uuid::new_v4());
+    let request = || StartInstanceRequest {
+        image_id: image_id.clone(),
+        tenant_id: "test-tenant".to_string(),
+        instance_id: Some(instance_id.clone()),
+        input: Some(serde_json::json!({"attempt": 1})),
+        timeout_seconds: Some(60),
+        env: std::collections::HashMap::new(),
+    };
+
+    let first = handle_start_instance(&state, request()).await.unwrap();
+    assert!(first.success, "first start failed: {:?}", first.error);
+    assert!(!first.deduplicated);
+
+    std::fs::remove_file(&artifact).unwrap();
+
+    let replay = handle_start_instance(&state, request()).await.unwrap();
+    assert!(
+        replay.success,
+        "replay after the artifact vanished must still be deduplicated, got: {:?}",
+        replay.error
+    );
     assert!(replay.deduplicated);
     assert_eq!(replay.instance_id, instance_id);
     assert_eq!(runner.launch_count(), 1, "replay launched a second process");
@@ -1197,6 +1414,7 @@ async fn test_spawn_container_monitor_timeout_enforcement() {
             timeout: Duration::from_millis(100),
             checkpoint_id: None,
             env: std::collections::HashMap::new(),
+            prepersisted_input: None,
         })
         .await
         .expect("Failed to launch detached");
@@ -1298,6 +1516,7 @@ async fn test_spawn_container_monitor_no_timeout_on_quick_completion() {
             timeout: Duration::from_secs(10), // Long timeout
             checkpoint_id: None,
             env: std::collections::HashMap::new(),
+            prepersisted_input: None,
         })
         .await
         .expect("Failed to launch detached");
@@ -1384,6 +1603,7 @@ async fn test_spawn_container_monitor_timeout_race_condition() {
             timeout: Duration::from_millis(200),
             checkpoint_id: None,
             env: std::collections::HashMap::new(),
+            prepersisted_input: None,
         })
         .await
         .expect("Failed to launch detached");
@@ -1430,6 +1650,126 @@ async fn test_spawn_container_monitor_timeout_race_condition() {
     cleanup(&pool, Some(&instance_id), None).await;
 }
 
+/// The container monitor's ownership check, which is now the guarded delete
+/// itself rather than a read followed by one.
+///
+/// Three branches, the same three the previous `detect_stale_monitor` covered:
+/// a registry row under a different container id means this monitor is stale,
+/// no row at all means stale, and a matching row means it still owns the
+/// instance — and claiming it removes it, so the monitor's tail no longer
+/// deletes by instance alone.
+#[tokio::test]
+async fn claiming_the_registry_row_is_the_monitors_ownership_check() {
+    skip_if_no_db!();
+    let pool = get_test_pool().await;
+    let tenant_id = "monitor-ownership-tenant";
+    let instance_id = format!("monitor-ownership-{}", Uuid::new_v4());
+    let registry = ContainerRegistry::new(pool.clone());
+
+    // No row at all: nothing to claim, so this monitor is stale.
+    assert!(
+        !registry
+            .cleanup_generation(&instance_id, "monitor-handle")
+            .await
+            .expect("cleanup_generation failed"),
+        "a monitor whose registry row is gone must read as stale"
+    );
+
+    // A row belonging to a newer run: not ours, and it must survive.
+    registry
+        .register(&make_container_info(&instance_id, tenant_id, "newer-run"))
+        .await
+        .expect("register failed");
+    assert!(
+        !registry
+            .cleanup_generation(&instance_id, "monitor-handle")
+            .await
+            .expect("cleanup_generation failed"),
+        "a monitor must not claim a row registered by the run that replaced it"
+    );
+    assert!(
+        registry
+            .get(&instance_id)
+            .await
+            .expect("registry read failed")
+            .is_some(),
+        "the newer run's row must survive a stale monitor"
+    );
+
+    // Our own row: claimed, and removed by the claim.
+    assert!(
+        registry
+            .cleanup_generation(&instance_id, "newer-run")
+            .await
+            .expect("cleanup_generation failed"),
+        "the owning monitor must claim its own row"
+    );
+    assert!(
+        registry
+            .get(&instance_id)
+            .await
+            .expect("registry read failed")
+            .is_none(),
+        "claiming the row must also remove it"
+    );
+
+    cleanup(&pool, Some(&instance_id), None).await;
+}
+
+/// A cached image read must not outlive a re-registration.
+///
+/// `register` upserts on `(tenant_id, name)`, so recompiling a workflow
+/// rewrites the row that a live image id already points at — a cache keyed by
+/// id would otherwise keep serving the old `binary_path` and the launch would
+/// run the previous artifact.
+#[tokio::test]
+async fn registering_an_image_invalidates_the_cached_read() {
+    skip_if_no_db!();
+    let pool = get_test_pool().await;
+    let registry = runtara_environment::image_registry::ImageRegistry::new(pool.clone());
+
+    let tenant_id = format!("image-cache-tenant-{}", Uuid::new_v4());
+    let image_id = Uuid::new_v4().to_string();
+    let name = format!("cache-probe-{}", Uuid::new_v4());
+    let image = |path: &str| runtara_environment::image_registry::Image {
+        image_id: image_id.clone(),
+        tenant_id: tenant_id.clone(),
+        name: name.clone(),
+        description: None,
+        binary_path: path.to_string(),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+        metadata: None,
+    };
+
+    registry
+        .register(&image("/first/workflow.wasm"))
+        .await
+        .unwrap();
+    assert_eq!(
+        registry.get(&image_id).await.unwrap().unwrap().binary_path,
+        "/first/workflow.wasm"
+    );
+
+    // Recompile: same tenant and name, new artifact. The read above is cached.
+    registry
+        .register(&image("/second/workflow.wasm"))
+        .await
+        .unwrap();
+    assert_eq!(
+        registry.get(&image_id).await.unwrap().unwrap().binary_path,
+        "/second/workflow.wasm",
+        "a re-registration must invalidate the cached row, or a launch runs the \
+         artifact it replaced"
+    );
+
+    sqlx::query("DELETE FROM images WHERE image_id = $1")
+        .bind(&image_id)
+        .execute(&pool)
+        .await
+        .ok();
+}
+
 /// Helper: build a `ContainerInfo` populated with the fields the registry stores.
 fn make_container_info(instance_id: &str, tenant_id: &str, container_id: &str) -> ContainerInfo {
     ContainerInfo {
@@ -1440,53 +1780,6 @@ fn make_container_info(instance_id: &str, tenant_id: &str, container_id: &str) -
         started_at: Utc::now(),
         timeout_seconds: Some(60),
     }
-}
-
-/// Verify `detect_stale_monitor`'s three branches: mismatched container_id is
-/// stale, missing entry is stale, matching entry is fresh.
-#[tokio::test]
-async fn test_detect_stale_monitor_registry_cleared() {
-    skip_if_no_db!();
-    let pool = get_test_pool().await;
-
-    let registry = ContainerRegistry::new(pool.clone());
-    let instance_id = Uuid::new_v4().to_string();
-    let tenant_id = "test-tenant-stale-monitor";
-
-    // 1. No registry entry → stale.
-    assert!(
-        detect_stale_monitor(&registry, &instance_id, "monitor-handle").await,
-        "Missing registry entry should be considered stale"
-    );
-
-    // 2. Registry entry whose container_id != monitor_handle_id → stale.
-    let other_handle = "other-handle-id";
-    registry
-        .register(&make_container_info(&instance_id, tenant_id, other_handle))
-        .await
-        .expect("Failed to register container");
-    assert!(
-        detect_stale_monitor(&registry, &instance_id, "monitor-handle").await,
-        "Mismatched container_id should be considered stale"
-    );
-
-    // 3. Registry entry whose container_id matches → fresh.
-    let monitor_handle = "monitor-handle";
-    registry
-        .register(&make_container_info(
-            &instance_id,
-            tenant_id,
-            monitor_handle,
-        ))
-        .await
-        .expect("Failed to update registered container");
-    assert!(
-        !detect_stale_monitor(&registry, &instance_id, monitor_handle).await,
-        "Matching container_id should be considered fresh"
-    );
-
-    // Cleanup
-    cleanup(&pool, Some(&instance_id), None).await;
 }
 
 /// Verify the default `Runner::wait_for_exit` impl returns once `is_running`
@@ -1507,6 +1800,7 @@ async fn test_wait_for_exit_default_impl_returns_on_not_running() {
             timeout: Duration::from_secs(10),
             checkpoint_id: None,
             env: std::collections::HashMap::new(),
+            prepersisted_input: None,
         })
         .await
         .expect("Failed to launch detached");
@@ -1540,5 +1834,151 @@ async fn test_wait_for_exit_default_impl_returns_on_not_running() {
     assert!(
         !runner.is_running(&handle).await,
         "Runner should report not running after wait_for_exit returns"
+    );
+}
+
+// ============================================================================
+// Regression: a run that parks before its launcher returns
+// ============================================================================
+
+/// A runner that parks the instance *inside* `launch_detached`, before it
+/// returns — the deterministic version of what a `Delay` or a no-timeout
+/// `WaitForSignal` does in production, where the spawned run reaches
+/// `suspended` in a millisecond or two while the launching caller is still
+/// doing its post-launch bookkeeping.
+struct ParksBeforeReturningRunner {
+    persistence: Arc<PostgresPersistence>,
+}
+
+#[async_trait::async_trait]
+impl Runner for ParksBeforeReturningRunner {
+    fn runner_type(&self) -> &'static str {
+        "parks-before-returning"
+    }
+
+    async fn run(
+        &self,
+        _options: &LaunchOptions,
+        _cancel_token: Option<runtara_environment::runner::CancelToken>,
+    ) -> runtara_environment::runner::Result<runtara_environment::runner::LaunchResult> {
+        unimplemented!("not used by this test")
+    }
+
+    async fn launch_detached(
+        &self,
+        options: &LaunchOptions,
+    ) -> runtara_environment::runner::Result<RunnerHandle> {
+        // The guest ran and parked on a signal wait before we returned.
+        self.persistence
+            .complete_instance(
+                CompleteInstanceParams::new(&options.instance_id, "suspended")
+                    .with_termination("waiting_signal", None),
+            )
+            .await
+            .expect("park write must succeed");
+        Ok(RunnerHandle {
+            handle_id: format!("handle-{}", options.instance_id),
+            instance_id: options.instance_id.clone(),
+            tenant_id: options.tenant_id.clone(),
+            started_at: Utc::now(),
+            metrics: None,
+        })
+    }
+
+    // Keep the monitor spawned by `handle_start_instance` from concluding
+    // anything during the test; the assertion is about the status write.
+    async fn is_running(&self, _handle: &RunnerHandle) -> bool {
+        true
+    }
+
+    async fn stop(&self, _handle: &RunnerHandle) -> runtara_environment::runner::Result<()> {
+        Ok(())
+    }
+
+    async fn collect_result(
+        &self,
+        _handle: &RunnerHandle,
+    ) -> (
+        Option<serde_json::Value>,
+        Option<String>,
+        runtara_environment::runner::ContainerMetrics,
+    ) {
+        (
+            None,
+            None,
+            runtara_environment::runner::ContainerMetrics::default(),
+        )
+    }
+}
+
+/// Launching must not resurrect a run that already parked.
+///
+/// Regression: `handle_start_instance` stamped `running` unconditionally after
+/// `launch_detached` returned. Because a detached launch returns as soon as the
+/// run is spawned, a workflow that parks immediately was already `suspended` —
+/// so the write flipped it back to `running` (clearing `termination_reason`
+/// along the way) with no process behind it, and the container monitor failed
+/// it as `crashed` one poll later. Measured at ~0.02% of parks under load.
+#[tokio::test]
+async fn test_launch_does_not_resurrect_a_run_that_already_parked() {
+    skip_if_no_db!();
+    let pool = get_test_pool().await;
+    let temp_dir = tempfile::tempdir().unwrap();
+
+    let persistence = Arc::new(PostgresPersistence::new(pool.clone()));
+    let state = EnvironmentHandlerState::new(
+        pool.clone(),
+        persistence.clone(),
+        Arc::new(ParksBeforeReturningRunner {
+            persistence: persistence.clone(),
+        }),
+        "127.0.0.1:8001".to_string(),
+        temp_dir.path().to_path_buf(),
+    );
+
+    let image_id = Uuid::new_v4().to_string();
+    sqlx::query(
+        r#"
+        INSERT INTO images (image_id, tenant_id, name, description, binary_path)
+        VALUES ($1, 'test-tenant', $2, 'desc', $3)
+        "#,
+    )
+    .bind(&image_id)
+    .bind(format!("park-race-image-{}", image_id))
+    .bind(test_artifact_path())
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let response = handle_start_instance(
+        &state,
+        StartInstanceRequest {
+            image_id: image_id.clone(),
+            tenant_id: "test-tenant".to_string(),
+            instance_id: None,
+            input: Some(serde_json::json!({})),
+            timeout_seconds: Some(60),
+            env: std::collections::HashMap::new(),
+        },
+    )
+    .await
+    .expect("start should succeed");
+    assert!(response.success, "error: {:?}", response.error);
+
+    let instance = persistence
+        .get_instance(&response.instance_id)
+        .await
+        .unwrap()
+        .expect("instance must exist");
+
+    assert_eq!(
+        instance.status, "suspended",
+        "a run that parked before launch returned must stay parked, not be \
+         flipped back to running"
+    );
+    assert_eq!(
+        instance.termination_reason.as_deref(),
+        Some("waiting_signal"),
+        "the park marker must survive launch bookkeeping"
     );
 }

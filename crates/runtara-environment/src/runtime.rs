@@ -53,7 +53,71 @@ use crate::handlers::{DrainController, EnvironmentHandlerState};
 use crate::heartbeat_monitor::{HeartbeatMonitor, HeartbeatMonitorConfig};
 use crate::image_cleanup_worker::{ImageCleanupWorker, ImageCleanupWorkerConfig};
 use crate::runner::Runner;
-use crate::wake_scheduler::{WakeScheduler, WakeSchedulerConfig};
+use crate::wake_scheduler::{WakeScheduler, WakeSchedulerConfig, default_wake_concurrency};
+
+/// Idle poll interval for the wake scheduler, from
+/// `RUNTARA_WAKE_POLL_INTERVAL_MS` (default 5000).
+///
+/// This is only the wait after a poll that found nothing more to do — a poll
+/// that fills its batch is followed immediately by the next one — so it bounds
+/// wake *latency* for an idle system, not wake throughput.
+fn wake_poll_interval_from_env() -> Duration {
+    wake_poll_interval_from_raw(
+        std::env::var("RUNTARA_WAKE_POLL_INTERVAL_MS")
+            .ok()
+            .as_deref(),
+    )
+}
+
+/// Instances claimed per wake poll, from `RUNTARA_WAKE_BATCH_SIZE`
+/// (default 200).
+fn wake_batch_size_from_env() -> i64 {
+    wake_batch_size_from_raw(std::env::var("RUNTARA_WAKE_BATCH_SIZE").ok().as_deref())
+}
+
+/// Concurrent relaunches within a wake batch, from `RUNTARA_WAKE_CONCURRENCY`
+/// (default: eight per core, see [`default_wake_concurrency`]).
+/// How long a wake claim is leased for, from `RUNTARA_WAKE_CLAIM_LEASE_SECS`
+/// (default: 300s). A batch claimed by a process that then dies becomes due
+/// again after this long, which is the recovery path for an interrupted wake.
+fn wake_claim_lease_from_env() -> Duration {
+    std::env::var("RUNTARA_WAKE_CLAIM_LEASE_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|secs| *secs > 0)
+        .map(Duration::from_secs)
+        .unwrap_or_else(|| Duration::from_secs(300))
+}
+
+fn wake_concurrency_from_env() -> usize {
+    wake_concurrency_from_raw(std::env::var("RUNTARA_WAKE_CONCURRENCY").ok().as_deref())
+}
+
+// The parsing halves are split out so they can be tested without mutating
+// process-global environment state, which is shared by every test in the
+// binary. Each rejects a non-positive or unparseable value rather than
+// honouring it: a zero interval would busy-spin, and a zero batch or
+// concurrency would stop the scheduler entirely.
+
+fn wake_poll_interval_from_raw(raw: Option<&str>) -> Duration {
+    Duration::from_millis(
+        raw.and_then(|v| v.parse::<u64>().ok())
+            .filter(|ms| *ms > 0)
+            .unwrap_or(5_000),
+    )
+}
+
+fn wake_batch_size_from_raw(raw: Option<&str>) -> i64 {
+    raw.and_then(|v| v.parse::<i64>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(200)
+}
+
+fn wake_concurrency_from_raw(raw: Option<&str>) -> usize {
+    raw.and_then(|v| v.parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or_else(default_wake_concurrency)
+}
 
 /// Builder for creating an [`EnvironmentRuntime`].
 pub struct EnvironmentRuntimeBuilder {
@@ -64,6 +128,8 @@ pub struct EnvironmentRuntimeBuilder {
     data_dir: PathBuf,
     wake_poll_interval: Duration,
     wake_batch_size: i64,
+    wake_concurrency: usize,
+    wake_claim_lease: Duration,
     request_timeout: Duration,
     cleanup_poll_interval: Duration,
     cleanup_max_age: Duration,
@@ -81,8 +147,10 @@ impl Default for EnvironmentRuntimeBuilder {
             runner: None,
             core_addr: "127.0.0.1:8001".to_string(),
             data_dir: PathBuf::from(".data"),
-            wake_poll_interval: Duration::from_secs(5),
-            wake_batch_size: 10,
+            wake_poll_interval: wake_poll_interval_from_env(),
+            wake_batch_size: wake_batch_size_from_env(),
+            wake_concurrency: wake_concurrency_from_env(),
+            wake_claim_lease: wake_claim_lease_from_env(),
             request_timeout: Duration::from_secs(30),
             cleanup_poll_interval: Duration::from_secs(3600), // 1 hour
             cleanup_max_age: Duration::from_secs(3 * 24 * 3600), // 3 days
@@ -137,9 +205,12 @@ impl EnvironmentRuntimeBuilder {
         self
     }
 
-    /// Set the wake scheduler poll interval.
+    /// Set the wake scheduler **idle** poll interval.
     ///
-    /// Default: 5 seconds
+    /// Only applies when a poll did not fill its batch; a full batch is
+    /// followed immediately by the next one.
+    ///
+    /// Default: 5 seconds, or `RUNTARA_WAKE_POLL_INTERVAL_MS`.
     pub fn wake_poll_interval(mut self, interval: Duration) -> Self {
         self.wake_poll_interval = interval;
         self
@@ -147,9 +218,17 @@ impl EnvironmentRuntimeBuilder {
 
     /// Set the wake scheduler batch size.
     ///
-    /// Default: 10
+    /// Default: 200, or `RUNTARA_WAKE_BATCH_SIZE`.
     pub fn wake_batch_size(mut self, size: i64) -> Self {
         self.wake_batch_size = size;
+        self
+    }
+
+    /// Set how many instances a wake batch relaunches concurrently.
+    ///
+    /// Default: eight per core, or `RUNTARA_WAKE_CONCURRENCY`.
+    pub fn wake_concurrency(mut self, concurrency: usize) -> Self {
+        self.wake_concurrency = concurrency;
         self
     }
 
@@ -230,6 +309,8 @@ impl EnvironmentRuntimeBuilder {
             data_dir: self.data_dir,
             wake_poll_interval: self.wake_poll_interval,
             wake_batch_size: self.wake_batch_size,
+            wake_concurrency: self.wake_concurrency,
+            wake_claim_lease: self.wake_claim_lease,
             request_timeout: self.request_timeout,
             cleanup_poll_interval: self.cleanup_poll_interval,
             cleanup_max_age: self.cleanup_max_age,
@@ -250,6 +331,8 @@ pub struct EnvironmentRuntimeConfig {
     data_dir: PathBuf,
     wake_poll_interval: Duration,
     wake_batch_size: i64,
+    wake_concurrency: usize,
+    wake_claim_lease: Duration,
     request_timeout: Duration,
     cleanup_poll_interval: Duration,
     cleanup_max_age: Duration,
@@ -289,6 +372,9 @@ impl EnvironmentRuntimeConfig {
         let wake_config = WakeSchedulerConfig {
             poll_interval: self.wake_poll_interval,
             batch_size: self.wake_batch_size,
+            concurrency: self.wake_concurrency,
+            claim_lease: self.wake_claim_lease,
+            failed_wake_retry_delay: Duration::from_secs(5),
             core_addr: self.core_addr.clone(),
             data_dir: self.data_dir.clone(),
         };
@@ -444,6 +530,22 @@ impl EnvironmentRuntime {
         self.drain.set();
         info!(grace_secs = grace.as_secs(), "EnvironmentRuntime draining");
 
+        // Stop the wake scheduler before the snapshot below, and give it a
+        // moment to finish the batch it is on. The snapshot is what decides who
+        // gets a shutdown signal, so a wake that registers its container after
+        // it is taken is invisible to the drain: no signal, absent from the
+        // straggler list, and still running into teardown. The scheduler also
+        // re-checks the drain flag per launch, which covers the batch already
+        // in flight here; this just stops new ones being claimed at all.
+        self.wake_shutdown.notify_one();
+        let quiesce_deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !self.wake_handle.is_finished() && std::time::Instant::now() < quiesce_deadline {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        if !self.wake_handle.is_finished() {
+            warn!("Wake scheduler did not quiesce before the drain snapshot");
+        }
+
         let container_registry = ContainerRegistry::new(self.state.pool.clone());
         let active = match container_registry.list_all_registered().await {
             Ok(list) => list,
@@ -567,7 +669,7 @@ impl EnvironmentRuntime {
     ) -> Vec<crate::container_registry::ContainerInfo> {
         let mut still_active = Vec::with_capacity(candidates.len());
         for info in candidates {
-            match persistence.get_instance(&info.instance_id).await {
+            match persistence.get_instance_meta(&info.instance_id).await {
                 Ok(Some(inst))
                     if matches!(
                         inst.status.as_str(),
@@ -697,7 +799,7 @@ async fn recover_orphaned_containers(pool: &PgPool, persistence: &dyn Persistenc
         let instance_id = &container.instance_id;
 
         // The guest died with the previous process — check Core status.
-        match persistence.get_instance(instance_id).await {
+        match persistence.get_instance_meta(instance_id).await {
             Ok(Some(inst)) => {
                 let status = inst.status.as_str();
                 if matches!(status, "completed" | "failed" | "cancelled" | "suspended") {
@@ -788,7 +890,71 @@ mod tests {
         assert_eq!(builder.core_addr, "127.0.0.1:8001");
         assert_eq!(builder.data_dir, PathBuf::from(".data"));
         assert_eq!(builder.wake_poll_interval, Duration::from_secs(5));
-        assert_eq!(builder.wake_batch_size, 10);
+        // Batch of 10 could not feed a concurrent waker; the interval is now
+        // only the idle wait, so a larger batch costs nothing when idle.
+        assert_eq!(builder.wake_batch_size, 200);
+        assert!(builder.wake_concurrency >= 1);
+    }
+
+    #[test]
+    fn wake_poll_interval_parsing() {
+        assert_eq!(
+            wake_poll_interval_from_raw(None),
+            Duration::from_secs(5),
+            "unset falls back to the documented default"
+        );
+        assert_eq!(
+            wake_poll_interval_from_raw(Some("250")),
+            Duration::from_millis(250)
+        );
+        // A zero or malformed interval would turn the loop into a busy wait.
+        assert_eq!(
+            wake_poll_interval_from_raw(Some("0")),
+            Duration::from_secs(5)
+        );
+        assert_eq!(
+            wake_poll_interval_from_raw(Some("not-a-number")),
+            Duration::from_secs(5)
+        );
+    }
+
+    #[test]
+    fn wake_batch_size_parsing() {
+        assert_eq!(wake_batch_size_from_raw(None), 200);
+        assert_eq!(wake_batch_size_from_raw(Some("50")), 50);
+        // Zero or negative would claim nothing, stalling the scheduler.
+        assert_eq!(wake_batch_size_from_raw(Some("0")), 200);
+        assert_eq!(wake_batch_size_from_raw(Some("-5")), 200);
+        assert_eq!(wake_batch_size_from_raw(Some("")), 200);
+    }
+
+    #[test]
+    fn wake_concurrency_parsing() {
+        assert_eq!(wake_concurrency_from_raw(Some("7")), 7);
+        // Zero would deadlock the semaphore; fall back to the cored default.
+        assert_eq!(
+            wake_concurrency_from_raw(Some("0")),
+            default_wake_concurrency()
+        );
+        assert_eq!(
+            wake_concurrency_from_raw(Some("nope")),
+            default_wake_concurrency()
+        );
+        assert_eq!(wake_concurrency_from_raw(None), default_wake_concurrency());
+    }
+
+    #[test]
+    fn wake_concurrency_default_is_bounded() {
+        // Eight per core, but never zero (which would deadlock the semaphore)
+        // and never an unbounded surge on a very large host.
+        let n = crate::wake_scheduler::default_wake_concurrency();
+        assert!((1..=512).contains(&n), "concurrency out of bounds: {n}");
+    }
+
+    #[test]
+    fn wake_concurrency_setter_overrides_default() {
+        let builder = EnvironmentRuntimeBuilder::new().wake_concurrency(3);
+        assert_eq!(builder.wake_concurrency, 3);
     }
 
     #[test]

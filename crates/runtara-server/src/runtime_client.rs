@@ -92,6 +92,16 @@ pub enum TerminalOutcome {
     /// `max_wait` elapsed before the instance reached a terminal state. The instance is left
     /// running — this is an *observation* timeout, not an execution timeout.
     GaveUp,
+    /// The instance parked durably: a `Delay`, or a `WaitForSignal` with no signal yet. It is
+    /// not running and holds no runtime state; it resumes when its deadline passes or its
+    /// signal arrives, which may be days away, or never.
+    ///
+    /// This ends the *observation*, not the run. Polling on would cost one query every
+    /// `poll_interval` for the whole of `max_wait` per parked instance — with a 2 s interval
+    /// and a 24 h cap that is ~43,000 queries each, and it is the dominant load on the
+    /// database once parked instances accumulate. It also buys nothing: waking relaunches the
+    /// instance as a fresh execution, which is observed on its own.
+    Suspended,
 }
 
 /// Configuration for the runtime client
@@ -124,6 +134,69 @@ impl RuntimeClientConfig {
 pub struct RuntimeClient {
     client: EnvironmentClient,
     config: RuntimeClientConfig,
+}
+
+/// Decide what an observed [`InstanceInfo`] means for [`RuntimeClient::poll_until_terminal`].
+///
+/// `Some(outcome)` ends the observation; `None` means "poll again". Split out of the poll loop
+/// so the classification — in particular that a `Suspended` instance ends observation rather
+/// than being polled for the rest of `max_wait` — is testable without a live environment.
+fn classify_observed_status(info: InstanceInfo) -> Option<TerminalOutcome> {
+    let duration_ms = info.started_at.and_then(|start| {
+        info.finished_at
+            .map(|end| (end - start).num_milliseconds() as u64)
+    });
+
+    match info.status {
+        InstanceStatus::Completed => Some(TerminalOutcome::Completed(ExecutionOutput {
+            success: true,
+            output: info.output,
+            error: None,
+            stderr: info.stderr,
+            duration_ms,
+            memory_peak_bytes: info.memory_peak_bytes,
+            cpu_usage_usec: info.cpu_usage_usec,
+        })),
+        InstanceStatus::Failed => {
+            let output = ExecutionOutput {
+                success: false,
+                output: info.output,
+                error: info.error,
+                stderr: info.stderr,
+                duration_ms,
+                memory_peak_bytes: info.memory_peak_bytes,
+                cpu_usage_usec: info.cpu_usage_usec,
+            };
+            Some(match info.termination_reason {
+                Some(TerminationReason::Timeout | TerminationReason::HeartbeatTimeout) => {
+                    TerminalOutcome::TimedOut(output)
+                }
+                _ => TerminalOutcome::Failed(output),
+            })
+        }
+        InstanceStatus::Cancelled => Some(TerminalOutcome::Cancelled(ExecutionOutput {
+            success: false,
+            output: info.output,
+            error: info
+                .error
+                .or_else(|| Some("Instance was cancelled".to_string())),
+            stderr: info.stderr,
+            duration_ms,
+            memory_peak_bytes: info.memory_peak_bytes,
+            cpu_usage_usec: info.cpu_usage_usec,
+        })),
+        // Durably parked — stop observing. See `TerminalOutcome::Suspended`.
+        InstanceStatus::Suspended => Some(TerminalOutcome::Suspended),
+        // Still in progress, keep waiting.
+        InstanceStatus::Pending | InstanceStatus::Running => None,
+        InstanceStatus::Unknown => {
+            warn!(
+                instance_id = %info.instance_id,
+                "Instance status unknown, continuing to wait"
+            );
+            None
+        }
+    }
 }
 
 impl RuntimeClient {
@@ -386,59 +459,8 @@ impl RuntimeClient {
         let start = std::time::Instant::now();
         loop {
             let info = self.get_instance_info(instance_id).await?;
-            let duration_ms = info.started_at.and_then(|start| {
-                info.finished_at
-                    .map(|end| (end - start).num_milliseconds() as u64)
-            });
-
-            match info.status {
-                InstanceStatus::Completed => {
-                    return Ok(TerminalOutcome::Completed(ExecutionOutput {
-                        success: true,
-                        output: info.output,
-                        error: None,
-                        stderr: info.stderr,
-                        duration_ms,
-                        memory_peak_bytes: info.memory_peak_bytes,
-                        cpu_usage_usec: info.cpu_usage_usec,
-                    }));
-                }
-                InstanceStatus::Failed => {
-                    let output = ExecutionOutput {
-                        success: false,
-                        output: info.output,
-                        error: info.error,
-                        stderr: info.stderr,
-                        duration_ms,
-                        memory_peak_bytes: info.memory_peak_bytes,
-                        cpu_usage_usec: info.cpu_usage_usec,
-                    };
-                    return Ok(match info.termination_reason {
-                        Some(TerminationReason::Timeout | TerminationReason::HeartbeatTimeout) => {
-                            TerminalOutcome::TimedOut(output)
-                        }
-                        _ => TerminalOutcome::Failed(output),
-                    });
-                }
-                InstanceStatus::Cancelled => {
-                    return Ok(TerminalOutcome::Cancelled(ExecutionOutput {
-                        success: false,
-                        output: info.output,
-                        error: info
-                            .error
-                            .or_else(|| Some("Instance was cancelled".to_string())),
-                        stderr: info.stderr,
-                        duration_ms,
-                        memory_peak_bytes: info.memory_peak_bytes,
-                        cpu_usage_usec: info.cpu_usage_usec,
-                    }));
-                }
-                InstanceStatus::Pending | InstanceStatus::Running | InstanceStatus::Suspended => {
-                    // Still in progress, continue waiting
-                }
-                InstanceStatus::Unknown => {
-                    warn!(instance_id = %instance_id, "Instance status unknown, continuing to wait");
-                }
+            if let Some(outcome) = classify_observed_status(info) {
+                return Ok(outcome);
             }
 
             if start.elapsed() > max_wait {
@@ -856,4 +878,108 @@ impl RuntimeClient {
 /// The UUID is stored in `workflow_compilations.registered_image_id`.
 pub fn build_image_name(workflow_id: &str, version: u32) -> String {
     format!("{}:{}", workflow_id, version)
+}
+
+#[cfg(test)]
+mod classify_observed_status_tests {
+    use super::*;
+    use chrono::{Duration as ChronoDuration, Utc};
+
+    fn info(status: InstanceStatus) -> InstanceInfo {
+        let created = Utc::now();
+        InstanceInfo {
+            instance_id: "inst-1".to_string(),
+            image_id: "img-1".to_string(),
+            image_name: "wf:1".to_string(),
+            tenant_id: "tenant-1".to_string(),
+            status,
+            checkpoint_id: None,
+            created_at: created,
+            started_at: Some(created),
+            finished_at: Some(created + ChronoDuration::milliseconds(1_500)),
+            input: None,
+            output: None,
+            error: None,
+            stderr: None,
+            retry_count: 0,
+            max_retries: 0,
+            memory_peak_bytes: None,
+            cpu_usage_usec: None,
+            termination_reason: None,
+            exit_code: None,
+        }
+    }
+
+    /// The regression this function exists for: a durably parked instance ends the
+    /// observation. Returning `None` here would poll it once per `poll_interval` for the
+    /// whole of `max_wait` — ~43,000 queries per instance at the caller's 2 s / 24 h.
+    #[test]
+    fn suspended_ends_observation() {
+        assert!(matches!(
+            classify_observed_status(info(InstanceStatus::Suspended)),
+            Some(TerminalOutcome::Suspended)
+        ));
+    }
+
+    #[test]
+    fn in_progress_states_poll_again() {
+        for status in [InstanceStatus::Pending, InstanceStatus::Running] {
+            assert!(
+                classify_observed_status(info(status)).is_none(),
+                "{status:?} should keep polling"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_polls_again() {
+        assert!(classify_observed_status(info(InstanceStatus::Unknown)).is_none());
+    }
+
+    #[test]
+    fn completed_carries_output_and_duration() {
+        let mut i = info(InstanceStatus::Completed);
+        i.output = Some(serde_json::json!({"done": true}));
+        match classify_observed_status(i) {
+            Some(TerminalOutcome::Completed(o)) => {
+                assert!(o.success);
+                assert_eq!(o.duration_ms, Some(1_500));
+                assert_eq!(o.output, Some(serde_json::json!({"done": true})));
+            }
+            other => panic!("expected Completed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn failed_is_distinguished_from_platform_timeout() {
+        let mut plain = info(InstanceStatus::Failed);
+        plain.error = Some("boom".to_string());
+        assert!(matches!(
+            classify_observed_status(plain),
+            Some(TerminalOutcome::Failed(_))
+        ));
+
+        for reason in [
+            TerminationReason::Timeout,
+            TerminationReason::HeartbeatTimeout,
+        ] {
+            let mut timed_out = info(InstanceStatus::Failed);
+            timed_out.termination_reason = Some(reason);
+            assert!(matches!(
+                classify_observed_status(timed_out),
+                Some(TerminalOutcome::TimedOut(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn cancelled_gets_a_default_error() {
+        match classify_observed_status(info(InstanceStatus::Cancelled)) {
+            Some(TerminalOutcome::Cancelled(o)) => {
+                assert!(!o.success);
+                assert_eq!(o.error.as_deref(), Some("Instance was cancelled"));
+            }
+            other => panic!("expected Cancelled, got {other:?}"),
+        }
+    }
 }

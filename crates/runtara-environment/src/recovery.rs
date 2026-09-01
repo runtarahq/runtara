@@ -132,7 +132,7 @@ pub async fn recover_or_fail(
 
     // Prior crash-loop counters (best-effort; treat read failure as a fresh
     // instance so we err toward recovering rather than failing).
-    let (prev_attempts, prev_marker) = match persistence.get_instance(instance_id).await {
+    let (prev_attempts, prev_marker) = match persistence.get_instance_meta(instance_id).await {
         Ok(Some(inst)) => (inst.recovery_attempts, inst.recovery_marker),
         _ => (0, None),
     };

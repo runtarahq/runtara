@@ -138,7 +138,7 @@ async fn ensure_instance_running(
     persistence: &dyn Persistence,
     instance_id: &str,
 ) -> std::result::Result<(), CoreError> {
-    match persistence.get_instance(instance_id).await? {
+    match persistence.get_instance_meta(instance_id).await? {
         Some(inst) if inst.status == "running" => Ok(()),
         Some(inst) => Err(CoreError::InvalidInstanceState {
             instance_id: instance_id.to_string(),
@@ -183,7 +183,10 @@ pub async fn handle_get_checkpoint(
     debug!("Looking up checkpoint (read-only)");
 
     // 1. Validate instance exists
-    let instance = state.persistence.get_instance(&request.instance_id).await?;
+    let instance = state
+        .persistence
+        .get_instance_meta(&request.instance_id)
+        .await?;
     if instance.is_none() {
         return Err(CoreError::InstanceNotFound {
             instance_id: request.instance_id.clone(),

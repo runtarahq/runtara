@@ -64,6 +64,18 @@ fn image_template_major(image: &ImageSummary) -> Option<&str> {
         .and_then(|v| v.as_str())
 }
 
+/// The lowering options the image was built with, when it records them.
+///
+/// Absent on images compiled before lowering became part of cache identity,
+/// which reads as a miss and rebuilds them once.
+fn image_lowering_mode(image: &ImageSummary) -> Option<&str> {
+    image
+        .metadata
+        .as_ref()
+        .and_then(|m| m.pointer("/workflow/loweringMode"))
+        .and_then(|v| v.as_str())
+}
+
 fn image_compiler_mode(image: &ImageSummary) -> Option<&str> {
     image
         .metadata
@@ -72,9 +84,14 @@ fn image_compiler_mode(image: &ImageSummary) -> Option<&str> {
         .and_then(|v| v.as_str())
 }
 
-/// Whether `image` is a cache hit for the current source, compiler major, and
-/// desired compiler mode. Older images that lack either provenance field miss
-/// once and are refreshed through the selected compile path.
+/// Whether `image` is a cache hit for the current source, compiler major,
+/// compiler mode, and lowering options. Older images that lack a provenance
+/// field miss once and are refreshed through the selected compile path.
+///
+/// Lowering belongs in the key because it changes the emitted artifact for an
+/// unchanged definition: a workflow compiled before store-freeing sleep was
+/// turned on would otherwise keep serving its blocking-sleep artifact forever,
+/// since nothing else about it changed.
 fn image_cache_hits(
     image: &ImageSummary,
     source_checksum: &str,
@@ -83,6 +100,7 @@ fn image_cache_hits(
     image_source_checksum(image) == Some(source_checksum)
         && image_template_major(image) == Some(runtara_workflows::TEMPLATE_MAJOR_VERSION)
         && image_compiler_mode(image) == Some(compiler_mode.as_str())
+        && image_lowering_mode(image) == Some(runtara_workflows::direct_lowering_tag().as_str())
 }
 
 fn workflow_image_metadata(
@@ -100,6 +118,8 @@ fn workflow_image_metadata(
         // bump invalidates every workflow on next deploy.
         "templateMajor": runtara_workflows::TEMPLATE_MAJOR_VERSION,
         "compilerMode": compilation_result.compiler_mode.as_str(),
+        // Part of cache identity: see `image_cache_hits`.
+        "loweringMode": runtara_workflows::direct_lowering_tag(),
         "directWasm": {
             "enabled": true,
             "outcome": "success",
@@ -1141,7 +1161,8 @@ mod tests {
             "workflow": {
                 "sourceChecksum": "source-sha256",
                 "templateMajor": runtara_workflows::TEMPLATE_MAJOR_VERSION,
-                "compilerMode": "direct-wasm"
+                "compilerMode": "direct-wasm",
+                "loweringMode": runtara_workflows::direct_lowering_tag()
             }
         });
         let image = image_summary_with_metadata(metadata);
@@ -1168,6 +1189,82 @@ mod tests {
             "source-sha256",
             WorkflowCompilerMode::DirectWasm
         ));
+    }
+
+    /// An image built with different lowering is not interchangeable with one
+    /// built now, even though its definition never changed.
+    ///
+    /// This is what makes turning store-freeing sleep on by default actually
+    /// reach existing workflows: without lowering in the key, every already
+    /// compiled workflow keeps serving its old blocking-sleep artifact because
+    /// checksum, template major and compiler mode all still match.
+    #[test]
+    fn image_cache_misses_when_lowering_mode_differs() {
+        let stale = image_summary_with_metadata(serde_json::json!({
+            "workflow": {
+                "sourceChecksum": "source-sha256",
+                "templateMajor": runtara_workflows::TEMPLATE_MAJOR_VERSION,
+                "compilerMode": "direct-wasm",
+                "loweringMode": "store_freeing_sleep=false,omit_runtime=false"
+            }
+        }));
+        assert!(
+            !image_cache_hits(&stale, "source-sha256", WorkflowCompilerMode::DirectWasm)
+                || runtara_workflows::direct_lowering_tag()
+                    == "store_freeing_sleep=false,omit_runtime=false",
+            "an image built with other lowering must not be reused"
+        );
+
+        let current = image_summary_with_metadata(serde_json::json!({
+            "workflow": {
+                "sourceChecksum": "source-sha256",
+                "templateMajor": runtara_workflows::TEMPLATE_MAJOR_VERSION,
+                "compilerMode": "direct-wasm",
+                "loweringMode": runtara_workflows::direct_lowering_tag()
+            }
+        }));
+        assert!(
+            image_cache_hits(&current, "source-sha256", WorkflowCompilerMode::DirectWasm),
+            "an image built with the current lowering must be reused"
+        );
+    }
+
+    /// Images predating lowering provenance have no tag, so they rebuild once
+    /// rather than being served forever from a stale artifact.
+    #[test]
+    fn image_cache_misses_when_lowering_mode_is_absent() {
+        let legacy = image_summary_with_metadata(serde_json::json!({
+            "workflow": {
+                "sourceChecksum": "source-sha256",
+                "templateMajor": runtara_workflows::TEMPLATE_MAJOR_VERSION,
+                "compilerMode": "direct-wasm"
+            }
+        }));
+        assert!(!image_cache_hits(
+            &legacy,
+            "source-sha256",
+            WorkflowCompilerMode::DirectWasm
+        ));
+    }
+
+    #[test]
+    fn workflow_image_metadata_records_lowering_mode() {
+        let result = NativeCompilationResult {
+            binary_path: "/tmp/workflow.wasm".into(),
+            binary_size: 123,
+            binary_checksum: "abc".to_string(),
+            build_dir: "/tmp/build".into(),
+            package_size: 99,
+            child_dependencies: vec![],
+            default_variables: serde_json::json!({}),
+            compiler_mode: WorkflowCompilerMode::DirectWasm,
+        };
+        let metadata = workflow_image_metadata(&result, "workflow-a", 7, "source-sha256", None);
+        assert_eq!(
+            metadata["workflow"]["loweringMode"],
+            serde_json::json!(runtara_workflows::direct_lowering_tag()),
+            "provenance must record the lowering the artifact was built with"
+        );
     }
 
     #[test]

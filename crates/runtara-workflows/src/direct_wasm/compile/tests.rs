@@ -10831,3 +10831,14 @@ fn direct_compile_sequential_split_has_no_async_imports() {
         "sequential compile grew async lowers"
     );
 }
+
+/// The runtime-omit lever is opt-in, and stays that way now that the
+/// store-freeing gate it once shared a parser with is gone.
+#[test]
+fn runtime_omit_stays_opt_in() {
+    assert!(!super::omit_runtime_from_raw(None));
+    assert!(!super::omit_runtime_from_raw(Some("yes")));
+    assert!(!super::omit_runtime_from_raw(Some("on")));
+    assert!(super::omit_runtime_from_raw(Some("1")));
+    assert!(super::omit_runtime_from_raw(Some("true")));
+}

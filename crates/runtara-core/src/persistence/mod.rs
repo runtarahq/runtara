@@ -350,7 +350,52 @@ impl<'a> CompleteInstanceParams<'a> {
 pub trait Persistence: Send + Sync {
     async fn register_instance(&self, instance_id: &str, tenant_id: &str) -> Result<(), CoreError>;
 
+    /// Register an instance, reporting whether this call created the row.
+    ///
+    /// `Ok(true)` means this caller inserted it; `Ok(false)` means the id was
+    /// already taken. Callers that treat the instance id as an idempotency key
+    /// can use this to claim the id and learn they lost the race in a single
+    /// statement, instead of a speculative `get_instance` before every insert.
+    ///
+    /// `input` is persisted by the same statement on the backends that can,
+    /// rather than by a follow-up `store_instance_input`.
+    ///
+    /// This default is the naive read-then-insert and is *not* atomic; it
+    /// exists so in-memory and test backends need no change. Backends that can
+    /// do it in one statement should override it.
+    async fn try_register_instance(
+        &self,
+        instance_id: &str,
+        tenant_id: &str,
+        input: Option<&[u8]>,
+    ) -> Result<bool, CoreError> {
+        if self.get_instance(instance_id).await?.is_some() {
+            return Ok(false);
+        }
+        self.register_instance(instance_id, tenant_id).await?;
+        if let Some(input) = input {
+            self.store_instance_input(instance_id, input).await?;
+        }
+        Ok(true)
+    }
+
     async fn get_instance(&self, instance_id: &str) -> Result<Option<InstanceRecord>, CoreError>;
+
+    /// Like [`Self::get_instance`] but without the `input` blob, for callers
+    /// that only need status/tenant/recovery state.
+    ///
+    /// The returned record always has `input: None` — that is the point, not a
+    /// missing row. Never use this when the input is what you came for; the
+    /// launch payload can be large, and reading it back on every status check
+    /// is what this exists to avoid.
+    ///
+    /// Defaults to the full read so in-memory and test backends need no change.
+    async fn get_instance_meta(
+        &self,
+        instance_id: &str,
+    ) -> Result<Option<InstanceRecord>, CoreError> {
+        self.get_instance(instance_id).await
+    }
 
     async fn update_instance_status(
         &self,
@@ -515,6 +560,79 @@ pub trait Persistence: Send + Sync {
 
     async fn count_active_instances(&self) -> Result<i64, CoreError>;
 
+    /// Record execution metrics and return the instance's current status and
+    /// termination reason, in one statement where the backend supports it.
+    ///
+    /// For the container monitor, which writes what it collected at termination
+    /// and then has to read the status the SDK reported. `None` means no such
+    /// instance. The default is the separate write-then-read this replaces.
+    async fn update_metrics_returning_status(
+        &self,
+        instance_id: &str,
+        memory_peak_bytes: Option<u64>,
+        cpu_usage_usec: Option<u64>,
+    ) -> Result<Option<(String, Option<String>)>, CoreError> {
+        self.update_instance_metrics(instance_id, memory_peak_bytes, cpu_usage_usec)
+            .await?;
+        Ok(self
+            .get_instance_meta(instance_id)
+            .await?
+            .map(|i| (i.status, i.termination_reason)))
+    }
+
+    /// Promote an instance to `running` on a relaunch, preserving its
+    /// original `started_at`.
+    ///
+    /// For wake and resume, which promote from `suspended` — a state
+    /// [`Self::mark_instance_started`] deliberately refuses. The default is the
+    /// read-then-write this replaces; SQL backends do it in one statement.
+    async fn mark_instance_running(
+        &self,
+        instance_id: &str,
+        started_at: DateTime<Utc>,
+    ) -> Result<(), CoreError> {
+        let started_at = match self.get_instance(instance_id).await {
+            Ok(Some(instance)) => instance.started_at.unwrap_or(started_at),
+            _ => started_at,
+        };
+        self.update_instance_status(instance_id, "running", Some(started_at))
+            .await
+    }
+
+    /// Promote an instance to `running`, but only if it has not already moved
+    /// past the pre-run states. Returns whether the promotion applied.
+    ///
+    /// Exists because a detached launch returns as soon as the run is spawned:
+    /// a workflow that parks immediately (a `Delay` or a `WaitForSignal`) can
+    /// be `suspended` before the launching caller stamps `running`. Writing
+    /// `running` unconditionally at that point resurrects a parked instance
+    /// with no live process behind it, and the container monitor then fails it
+    /// as a crash. Callers stamping `running` *after* a launch must use this;
+    /// callers that stamp it *before* launching can use
+    /// [`Persistence::update_instance_status`] directly.
+    ///
+    /// The default implementation reads-then-writes and is adequate for
+    /// in-memory backends; SQL backends override it with a single guarded
+    /// UPDATE.
+    async fn mark_instance_started(
+        &self,
+        instance_id: &str,
+        started_at: DateTime<Utc>,
+    ) -> Result<bool, CoreError> {
+        match self.get_instance(instance_id).await? {
+            Some(inst) if matches!(inst.status.as_str(), "pending" | "running") => {
+                self.update_instance_status(
+                    instance_id,
+                    "running",
+                    Some(inst.started_at.unwrap_or(started_at)),
+                )
+                .await?;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
     /// Set the sleep_until timestamp for an instance.
     async fn set_instance_sleep(
         &self,
@@ -577,6 +695,47 @@ pub trait Persistence: Send + Sync {
         &self,
         limit: i64,
     ) -> Result<Vec<InstanceRecord>, CoreError>;
+
+    /// Claim due sleeping instances for waking, leasing them until `retry_at`.
+    ///
+    /// The claim moves `sleep_until` forward rather than clearing it, so a
+    /// caller that dies between claiming and launching does not strand its
+    /// batch: the rows simply become due again when the lease expires. Clearing
+    /// leaves a row `suspended` with no deadline, which is exactly what a
+    /// signal waiter looks like, so no sweep can tell them apart.
+    /// Select **and claim** up to `limit` due sleeping instances in one step.
+    ///
+    /// Every returned record is already claimed — the caller owns it and must
+    /// launch it, exactly as if [`Persistence::claim_sleeping_instance`] had
+    /// returned `true`. On a launch failure, re-stamp `sleep_until` via
+    /// [`Persistence::set_instance_sleep`] so the instance is retried.
+    ///
+    /// Separate from `get_sleeping_instances_due` + `claim_sleeping_instance`
+    /// because a scheduler that polls back-to-back (rather than sleeping a
+    /// fixed interval between batches) keeps re-selecting rows whose claim has
+    /// not landed yet. Folding the claim into the selecting statement removes
+    /// that window entirely, and costs one round trip per batch instead of one
+    /// per instance.
+    ///
+    /// The default implementation composes the two existing operations and is
+    /// correct but non-atomic — adequate for in-memory/mock backends. SQL
+    /// backends override it with a single claiming statement.
+    async fn claim_sleeping_instances_due(
+        &self,
+        limit: i64,
+        retry_at: DateTime<Utc>,
+    ) -> Result<Vec<InstanceRecord>, CoreError> {
+        let due = self.get_sleeping_instances_due(limit).await?;
+        let mut claimed = Vec::with_capacity(due.len());
+        for record in due {
+            if self.claim_sleeping_instance(&record.instance_id).await? {
+                self.set_instance_sleep(&record.instance_id, retry_at)
+                    .await?;
+                claimed.push(record);
+            }
+        }
+        Ok(claimed)
+    }
 
     /// List events for an instance with filtering and pagination.
     ///
@@ -647,6 +806,27 @@ pub trait Persistence: Send + Sync {
     /// Returns the count of deleted instances.
     async fn delete_instances_batch(&self, _instance_ids: &[String]) -> Result<u64, CoreError> {
         // Default: no-op (no deletion supported)
+        Ok(0)
+    }
+
+    /// Delete step-debug events older than `older_than`, up to `limit` rows.
+    ///
+    /// Step-debug payloads dominate `instance_events` — on a large run they are
+    /// the great majority of rows — but they are only read while a run is
+    /// recent. Ageing them out on their own, shorter window keeps the table
+    /// bounded during a burst without touching the lifecycle events
+    /// (`completed`, `failed`, `suspended`) that are the run's durable history,
+    /// and without reducing what workflows record in the first place.
+    ///
+    /// Callers should loop until this returns fewer than `limit`.
+    ///
+    /// Returns the count of deleted events.
+    async fn delete_debug_events_older_than(
+        &self,
+        _older_than: DateTime<Utc>,
+        _limit: i64,
+    ) -> Result<u64, CoreError> {
+        // Default: no-op (no retention supported)
         Ok(0)
     }
 }

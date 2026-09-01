@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n            SELECT single_instance\n            FROM invocation_trigger\n            WHERE id = $1\n            ",
+  "query": "\n            UPDATE invocation_trigger\n            SET last_run = NOW()\n            WHERE id = $1\n            RETURNING single_instance\n            ",
   "describe": {
     "columns": [
       {
@@ -18,5 +18,5 @@
       false
     ]
   },
-  "hash": "a5083f898693085ff0a8cd72c623a2bd732422f1875c46de2ea24cdea5fe6323"
+  "hash": "af4adede2b484ac83260eb52c088f86f372265c2ee131bbb99e25bb293ff7453"
 }

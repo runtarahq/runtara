@@ -58,6 +58,84 @@ macro_rules! impl_instance_ops {
                 Ok(())
             }
 
+            /// INSERT a new instance row, reporting whether this call created it.
+            ///
+            /// `ON CONFLICT DO NOTHING` on the `instance_id` primary key, so a
+            /// caller can claim an id and find out it lost the race in one
+            /// statement instead of a speculative SELECT followed by an INSERT.
+            /// Returns `true` when this caller inserted the row.
+            ///
+            /// `input` is written by the same statement rather than by a
+            /// follow-up UPDATE. On a lost claim nothing is written at all,
+            /// which is right: the row that already exists owns its input.
+            pub(crate) async fn op_try_register_instance(
+                pool: &$Pool,
+                instance_id: &str,
+                tenant_id: &str,
+                input: ::core::option::Option<&[u8]>,
+            ) -> ::core::result::Result<bool, $crate::error::CoreError> {
+                use $crate::persistence::dialect::{Dialect, EnumKind};
+                let p1 = <$Dialect>::placeholder(1);
+                let p2 = <$Dialect>::placeholder(2);
+                let status_cast = <$Dialect>::enum_cast(EnumKind::InstanceStatus);
+                let now = <$Dialect>::NOW;
+                let p3 = <$Dialect>::placeholder(3);
+                let sql = format!(
+                    "INSERT INTO instances \
+                         (instance_id, tenant_id, definition_version, status, created_at, input) \
+                     VALUES ({p1}, {p2}, 1, 'pending'{status_cast}, {now}, {p3}) \
+                     ON CONFLICT (instance_id) DO NOTHING"
+                );
+                let result = ::sqlx::query(&sql)
+                    .bind(instance_id)
+                    .bind(tenant_id)
+                    .bind(input)
+                    .execute(pool)
+                    .await
+                    .map_err(|e| $crate::error::CoreError::DatabaseError {
+                        operation: "try_register_instance".into(),
+                        details: e.to_string(),
+                    })?;
+                Ok(result.rows_affected() == 1)
+            }
+
+            /// SELECT a single instance by id, WITHOUT the `input` BLOB.
+            ///
+            /// Identical to [`Self::op_get_instance`] minus that one column, so
+            /// the returned record always has `input: None` (the field is
+            /// `#[sqlx(default)]`). Every other column is still selected, which
+            /// is deliberate: dropping one that has no default would leave a
+            /// caller silently reading a zero value instead of the stored one.
+            ///
+            /// For the callers that only want status/tenant/recovery state this
+            /// avoids dragging the whole launch payload, which for a big input
+            /// means a TOAST read on every call.
+            pub(crate) async fn op_get_instance_meta(
+                pool: &$Pool,
+                instance_id: &str,
+            ) -> ::core::result::Result<
+                ::core::option::Option<$crate::persistence::InstanceRecord>,
+                $crate::error::CoreError,
+            > {
+                use $crate::persistence::dialect::Dialect;
+                let p1 = <$Dialect>::placeholder(1);
+                let status_col = <$Dialect>::select_status_col();
+                let termination_col = <$Dialect>::select_termination_col();
+                let sql = format!(
+                    "SELECT instance_id, tenant_id, definition_version, \
+                            {status_col}, {termination_col}, checkpoint_id, attempt, max_attempts, \
+                            created_at, started_at, finished_at, output, error, sleep_until, \
+                            recovery_attempts, recovery_marker \
+                     FROM instances \
+                     WHERE instance_id = {p1}"
+                );
+                let record = ::sqlx::query_as::<_, $crate::persistence::InstanceRecord>(&sql)
+                    .bind(instance_id)
+                    .fetch_optional(pool)
+                    .await?;
+                Ok(record)
+            }
+
             /// SELECT a single instance by id, including the `input` BLOB.
             pub(crate) async fn op_get_instance(
                 pool: &$Pool,
@@ -100,6 +178,86 @@ macro_rules! impl_instance_ops {
             /// cleared to restore the "running rows have no `finished_at`"
             /// invariant. Leaving them would make `finished_at < started_at`
             /// and render a negative duration for any resumed run.
+            /// Promote an instance to `running` **only while it has not already
+            /// moved on**, returning whether the update applied.
+            ///
+            /// A detached launch spawns the run and returns, so for a workflow
+            /// that parks immediately the run task can reach `suspended` before
+            /// the launching caller gets to stamp `running`. An unguarded write
+            /// then resurrects a parked instance as `running` with no live
+            /// process behind it, and the container monitor fails it as a crash
+            /// a poll later. Restricting the promotion to the pre-run states
+            /// makes that write a no-op once the run has advanced.
+            ///
+            /// `started_at` is only filled in when it is not already set, for
+            /// the same reason `mark_running` re-uses it: a run that suspends
+            /// Promote an instance to `running` on a relaunch, keeping the
+            /// original `started_at`.
+            ///
+            /// Deliberately unguarded, unlike
+            /// [`Self::op_mark_instance_started`]: a wake or resume promotes
+            /// from `suspended`, which that guard excludes on purpose. The
+            /// `COALESCE` is what lets this be one statement — the caller used
+            /// to read the row first purely to carry `started_at` forward, so a
+            /// run that suspends and wakes still reports when it first began.
+            pub(crate) async fn op_mark_instance_running(
+                pool: &$Pool,
+                instance_id: &str,
+                started_at: ::chrono::DateTime<::chrono::Utc>,
+            ) -> ::core::result::Result<(), $crate::error::CoreError> {
+                use $crate::persistence::dialect::{Dialect, EnumKind};
+                let p1 = <$Dialect>::placeholder(1);
+                let p2 = <$Dialect>::placeholder(2);
+                let status_cast = <$Dialect>::enum_cast(EnumKind::InstanceStatus);
+                let sql = format!(
+                    "UPDATE instances \
+                     SET status = 'running'{status_cast}, \
+                         started_at = COALESCE(started_at, {p2}), \
+                         finished_at = NULL, termination_reason = NULL \
+                     WHERE instance_id = {p1}"
+                );
+                ::sqlx::query(&sql)
+                    .bind(instance_id)
+                    .bind(started_at)
+                    .execute(pool)
+                    .await
+                    .map_err(|e| $crate::error::CoreError::DatabaseError {
+                        operation: "mark_instance_running".into(),
+                        details: e.to_string(),
+                    })?;
+                Ok(())
+            }
+
+            /// and wakes should still report when it first began.
+            pub(crate) async fn op_mark_instance_started(
+                pool: &$Pool,
+                instance_id: &str,
+                started_at: ::chrono::DateTime<::chrono::Utc>,
+            ) -> ::core::result::Result<bool, $crate::error::CoreError> {
+                use $crate::persistence::dialect::{Dialect, EnumKind};
+                let p1 = <$Dialect>::placeholder(1);
+                let p2 = <$Dialect>::placeholder(2);
+                let status_cast = <$Dialect>::enum_cast(EnumKind::InstanceStatus);
+                let sql = format!(
+                    "UPDATE instances \
+                     SET status = 'running'{status_cast}, \
+                         started_at = COALESCE(started_at, {p2}), \
+                         finished_at = NULL, termination_reason = NULL \
+                     WHERE instance_id = {p1} \
+                       AND status IN ('pending'{status_cast}, 'running'{status_cast})"
+                );
+                let result = ::sqlx::query(&sql)
+                    .bind(instance_id)
+                    .bind(started_at)
+                    .execute(pool)
+                    .await
+                    .map_err(|e| $crate::error::CoreError::DatabaseError {
+                        operation: "mark_instance_started".into(),
+                        details: e.to_string(),
+                    })?;
+                Ok(result.rows_affected() == 1)
+            }
+
             pub(crate) async fn op_update_instance_status(
                 pool: &$Pool,
                 instance_id: &str,

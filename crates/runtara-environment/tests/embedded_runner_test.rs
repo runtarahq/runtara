@@ -120,6 +120,7 @@ fn options(instance_id: &str, wasm_path: &Path) -> LaunchOptions {
         timeout: Duration::from_secs(30),
         checkpoint_id: None,
         env: HashMap::new(),
+        prepersisted_input: None,
     }
 }
 

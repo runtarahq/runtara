@@ -7,7 +7,8 @@
 //! harness comparing two backends; with one backend left it is the only
 //! unit-level coverage in this crate for the sleep lifecycle
 //! (`set_instance_sleep`, `get_sleeping_instances_due`,
-//! `claim_sleeping_instance`, `clear_instance_sleep`) and for
+//! `claim_sleeping_instance`, `claim_sleeping_instances_due`,
+//! `clear_instance_sleep`) and for
 //! `get_terminal_instances_older_than` / `delete_instances_batch`.
 
 use chrono::{Duration, Utc};
@@ -40,6 +41,274 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     assert_eq!(record.instance_id, instance_id);
     assert_eq!(record.tenant_id, tenant_id);
     assert_eq!(record.status, "pending");
+
+    // --- try_register is a claim, not a second insert -----------------------
+    // The id is an idempotency key for an at-least-once trigger stream, so a
+    // replay has to report "already taken" rather than erroring or clobbering
+    // the row that is already mid-launch.
+    let claimed_again = backend
+        .try_register_instance(&instance_id, tenant_id, Some(b"{\"stolen\":true}"))
+        .await
+        .expect("try_register_instance on an existing id should not error");
+    assert!(
+        !claimed_again,
+        "try_register_instance must report false for an id that already exists"
+    );
+    let unchanged = backend
+        .get_instance(&instance_id)
+        .await
+        .expect("get_instance failed")
+        .expect("instance should still exist after a losing claim");
+    assert_eq!(
+        unchanged.tenant_id, tenant_id,
+        "a losing claim must not overwrite the existing row"
+    );
+
+    // A losing claim must not smuggle its own input onto the existing row.
+    assert!(
+        backend
+            .get_instance(&instance_id)
+            .await
+            .expect("get_instance failed")
+            .expect("instance should still exist")
+            .input
+            .is_none(),
+        "a losing claim must not write its input over the existing row"
+    );
+
+    // A winning claim persists the input in the same statement, so no separate
+    // store_instance_input is needed on the launch path.
+    let fresh_id = Uuid::new_v4().to_string();
+    let fresh_input = b"{\"data\":{\"claimed\":true}}".to_vec();
+    assert!(
+        backend
+            .try_register_instance(&fresh_id, tenant_id, Some(&fresh_input))
+            .await
+            .expect("try_register_instance on a fresh id failed"),
+        "try_register_instance must report true when it creates the row"
+    );
+    let created = backend
+        .get_instance(&fresh_id)
+        .await
+        .expect("get_instance failed")
+        .expect("a winning claim must actually insert the row");
+    assert_eq!(
+        created.input.as_deref(),
+        Some(fresh_input.as_slice()),
+        "the claim must persist the input it was given"
+    );
+    assert_eq!(created.status, "pending");
+
+    // And a claim with no input leaves the column null rather than erroring.
+    let no_input_id = Uuid::new_v4().to_string();
+    assert!(
+        backend
+            .try_register_instance(&no_input_id, tenant_id, None)
+            .await
+            .expect("try_register_instance without input failed")
+    );
+    assert!(
+        backend
+            .get_instance(&no_input_id)
+            .await
+            .expect("get_instance failed")
+            .expect("row should exist")
+            .input
+            .is_none()
+    );
+
+    // --- get_instance_meta drops the input and nothing else -----------------
+    // The projection exists to keep status checks off the launch payload, so
+    // the contract is narrow: `input` comes back None, every other column comes
+    // back exactly as the full read gives it. A column quietly falling to its
+    // Default here would be a silent data bug at the call sites that swapped.
+    let payload = b"{\"data\":{\"conformance\":true}}".to_vec();
+    backend
+        .store_instance_input(&instance_id, &payload)
+        .await
+        .expect("store_instance_input failed");
+
+    let full = backend
+        .get_instance(&instance_id)
+        .await
+        .expect("get_instance failed")
+        .expect("instance should exist");
+    assert_eq!(
+        full.input.as_deref(),
+        Some(payload.as_slice()),
+        "the full read must still return the stored input"
+    );
+
+    let meta = backend
+        .get_instance_meta(&instance_id)
+        .await
+        .expect("get_instance_meta failed")
+        .expect("instance should exist");
+    assert!(
+        meta.input.is_none(),
+        "get_instance_meta must not return the input blob"
+    );
+    assert_eq!(meta.instance_id, full.instance_id);
+    assert_eq!(meta.tenant_id, full.tenant_id);
+    assert_eq!(meta.definition_version, full.definition_version);
+    assert_eq!(meta.status, full.status);
+    assert_eq!(meta.termination_reason, full.termination_reason);
+    assert_eq!(meta.checkpoint_id, full.checkpoint_id);
+    assert_eq!(meta.attempt, full.attempt);
+    assert_eq!(meta.max_attempts, full.max_attempts);
+    assert_eq!(meta.created_at, full.created_at);
+    assert_eq!(meta.started_at, full.started_at);
+    assert_eq!(meta.finished_at, full.finished_at);
+    assert_eq!(meta.output, full.output);
+    assert_eq!(meta.error, full.error);
+    assert_eq!(meta.sleep_until, full.sleep_until);
+    assert_eq!(meta.recovery_attempts, full.recovery_attempts);
+    assert_eq!(meta.recovery_marker, full.recovery_marker);
+
+    assert!(
+        backend
+            .get_instance_meta("no-such-instance-for-conformance")
+            .await
+            .expect("get_instance_meta on a missing id should not error")
+            .is_none(),
+        "get_instance_meta must report a missing instance as None"
+    );
+
+    // --- claiming a sleeper leases it, it does not clear it -----------------
+    // A claim that cleared `sleep_until` would leave the row `suspended` with
+    // no deadline, which is exactly what a signal waiter looks like. Nothing
+    // could then tell them apart, so a process that died between claiming and
+    // launching would strand its whole batch permanently. Leasing keeps a
+    // deadline on the row so it simply becomes due again.
+    let sleeper = Uuid::new_v4().to_string();
+    backend
+        .register_instance(&sleeper, tenant_id)
+        .await
+        .expect("register sleeper failed");
+    backend
+        .update_instance_status(&sleeper, "suspended", None)
+        .await
+        .expect("suspend sleeper failed");
+    backend
+        .set_instance_sleep(&sleeper, Utc::now() - chrono::Duration::seconds(30))
+        .await
+        .expect("set_instance_sleep failed");
+
+    // The lib tests share one database, so a rival test polling the same due
+    // set may take this row first. Claim in a bounded loop and accept either
+    // outcome: what must hold is that whoever claimed it left a deadline
+    // behind. `SKIP LOCKED` also means one round need not see every row.
+    let lease_until = Utc::now() + chrono::Duration::seconds(120);
+    let mut claimed_by_us = false;
+    for _ in 0..10 {
+        let batch = backend
+            .claim_sleeping_instances_due(200, lease_until)
+            .await
+            .expect("claim_sleeping_instances_due failed");
+        if batch.iter().any(|r| r.instance_id == sleeper) {
+            claimed_by_us = true;
+            break;
+        }
+        if batch.is_empty() {
+            break;
+        }
+    }
+
+    let leased = backend
+        .get_instance(&sleeper)
+        .await
+        .expect("get_instance failed")
+        .expect("sleeper should exist");
+    assert!(
+        leased.sleep_until.is_some(),
+        "a claim must leave a recovery deadline, not clear it"
+    );
+
+    // Held: it is not offered again while the lease is live.
+    if claimed_by_us {
+        assert!(
+            !backend
+                .get_sleeping_instances_due(200)
+                .await
+                .expect("get_sleeping_instances_due failed")
+                .iter()
+                .any(|r| r.instance_id == sleeper),
+            "a leased claim must not be handed out again while the lease holds"
+        );
+    }
+
+    // Expired: the interrupted-wake recovery path. Nothing else runs here, so
+    // this stands in for the process that claimed it never coming back.
+    backend
+        .set_instance_sleep(&sleeper, Utc::now() - chrono::Duration::seconds(1))
+        .await
+        .expect("expire lease failed");
+    let mut reclaimed = false;
+    for _ in 0..10 {
+        let batch = backend
+            .claim_sleeping_instances_due(200, Utc::now() + chrono::Duration::seconds(120))
+            .await
+            .expect("reclaim failed");
+        if batch.iter().any(|r| r.instance_id == sleeper) {
+            reclaimed = true;
+            break;
+        }
+        if batch.is_empty() {
+            break;
+        }
+    }
+    assert!(
+        reclaimed || {
+            // A rival may have taken it; it still must not be left deadline-less.
+            backend
+                .get_instance(&sleeper)
+                .await
+                .expect("get_instance failed")
+                .expect("sleeper should exist")
+                .sleep_until
+                .is_some()
+        },
+        "once the lease expires the sleeper must become claimable again"
+    );
+
+    // --- mark_instance_running: relaunch promotion --------------------------
+    // Wake and resume promote from `suspended`, which `mark_instance_started`
+    // refuses on purpose, and the original `started_at` has to survive so a run
+    // that suspends and wakes still reports when it first began.
+    let first_started = Utc::now() - chrono::Duration::seconds(120);
+    backend
+        .update_instance_status(&instance_id, "running", Some(first_started))
+        .await
+        .expect("seed running failed");
+    backend
+        .update_instance_status(&instance_id, "suspended", None)
+        .await
+        .expect("suspend failed");
+    let before = backend
+        .get_instance(&instance_id)
+        .await
+        .expect("get_instance failed")
+        .expect("instance should exist");
+    assert_eq!(before.status, "suspended");
+
+    backend
+        .mark_instance_running(&instance_id, Utc::now())
+        .await
+        .expect("mark_instance_running failed");
+    let promoted = backend
+        .get_instance(&instance_id)
+        .await
+        .expect("get_instance failed")
+        .expect("instance should exist");
+    assert_eq!(
+        promoted.status, "running",
+        "mark_instance_running must promote a suspended instance"
+    );
+    assert_eq!(
+        promoted.started_at, before.started_at,
+        "mark_instance_running must keep the original started_at"
+    );
+    assert!(promoted.finished_at.is_none());
 
     // --- update status → running -------------------------------------------
     backend
@@ -351,6 +620,109 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
         .await
         .expect("clear_instance_sleep failed");
 
+    // --- guarded start promotion -------------------------------------------
+    // `mark_instance_started` is what a detached launch uses to stamp `running`
+    // *after* spawning the run. It must promote a not-yet-started instance and
+    // refuse to touch one that already parked, or a workflow that suspends
+    // faster than its launcher returns gets resurrected as `running` with no
+    // process behind it — which the container monitor then fails as a crash.
+    backend
+        .update_instance_status(&instance_id, "suspended", None)
+        .await
+        .expect("update_instance_status suspended failed (start guard setup)");
+    let promoted_parked = backend
+        .mark_instance_started(&instance_id, Utc::now())
+        .await
+        .expect("mark_instance_started failed (suspended)");
+    assert!(
+        !promoted_parked,
+        "a suspended instance must not be promoted back to running"
+    );
+    let parked = backend
+        .get_instance(&instance_id)
+        .await
+        .expect("get_instance failed (start guard)")
+        .expect("instance must still exist");
+    assert_eq!(
+        parked.status, "suspended",
+        "the guarded promotion must leave a parked instance untouched"
+    );
+
+    backend
+        .update_instance_status(&instance_id, "running", Some(Utc::now()))
+        .await
+        .expect("update_instance_status running failed (start guard reset)");
+    let promoted_running = backend
+        .mark_instance_started(&instance_id, Utc::now())
+        .await
+        .expect("mark_instance_started failed (running)");
+    assert!(
+        promoted_running,
+        "an instance still in a pre-run state must be promoted"
+    );
+
+    // Hand the next section the `suspended` instance it expects.
+    backend
+        .update_instance_status(&instance_id, "suspended", None)
+        .await
+        .expect("update_instance_status suspended failed (start guard teardown)");
+
+    // --- batch claim (select and claim in one step) -------------------------
+    // `claim_sleeping_instances_due` is what the wake scheduler uses once it
+    // polls back-to-back: selecting and claiming have to happen together, or
+    // overlapping polls keep re-selecting rows whose claim has not landed.
+    // Re-arm the instance, then assert the batch call both returns it and
+    // takes it out of the candidate set in one go.
+    backend
+        .set_instance_sleep(&instance_id, Utc::now() - Duration::seconds(60))
+        .await
+        .expect("set_instance_sleep failed (batch claim re-arm)");
+
+    let claimed_batch = backend
+        .claim_sleeping_instances_due(50, Utc::now() + chrono::Duration::seconds(120))
+        .await
+        .expect("claim_sleeping_instances_due failed");
+    assert!(
+        claimed_batch.iter().any(|r| r.instance_id == instance_id),
+        "a due instance must be returned by the batch claim"
+    );
+
+    // Claimed means claimed: the row is gone from the due set, and a
+    // subsequent single claim must lose, exactly as if the per-row claim had
+    // run. This is the double-launch guarantee the scheduler relies on.
+    let due_after_batch = backend
+        .get_sleeping_instances_due(50)
+        .await
+        .expect("get_sleeping_instances_due failed (after batch claim)");
+    assert!(
+        due_after_batch.iter().all(|r| r.instance_id != instance_id),
+        "an instance claimed by the batch call must no longer be due to wake"
+    );
+    let claim_after_batch = backend
+        .claim_sleeping_instance(&instance_id)
+        .await
+        .expect("claim_sleeping_instance (after batch) failed");
+    assert!(
+        !claim_after_batch,
+        "the batch claim must already own the instance, so a later claim loses"
+    );
+
+    // A second batch call with nothing due must come back empty rather than
+    // re-returning an already-claimed row.
+    let empty_batch = backend
+        .claim_sleeping_instances_due(50, Utc::now() + chrono::Duration::seconds(120))
+        .await
+        .expect("claim_sleeping_instances_due (drained) failed");
+    assert!(
+        empty_batch.iter().all(|r| r.instance_id != instance_id),
+        "an already-claimed instance must not be returned again"
+    );
+
+    backend
+        .clear_instance_sleep(&instance_id)
+        .await
+        .expect("clear_instance_sleep failed (after batch claim)");
+
     // --- listing ------------------------------------------------------------
     // The instance is `suspended` by this point, and a suspended instance
     // occupies no concurrency slot. Re-running it pins that: count while
@@ -411,14 +783,24 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
         .expect("delete_instances_batch with empty slice failed");
     assert_eq!(empty_deleted, 0);
 
+    // The sweep returns the OLDEST terminal instances first, and this one was
+    // just completed, so it sorts last. A limit near the number of terminal
+    // rows already in the database would exclude it for reasons that have
+    // nothing to do with the sweep working — the lib tests share a database
+    // and it accumulates. Ask for more than it can plausibly hold instead, and
+    // say so if it is ever hit.
     let cutoff = Utc::now() + Duration::seconds(60);
+    let sweep_limit = 100_000;
     let terminal = backend
-        .get_terminal_instances_older_than(cutoff, 50)
+        .get_terminal_instances_older_than(cutoff, sweep_limit)
         .await
         .expect("get_terminal_instances_older_than failed");
     assert!(
         terminal.iter().any(|id| id == &instance_id),
-        "completed instance must appear in terminal sweep before cutoff"
+        "completed instance must appear in terminal sweep before cutoff \
+         (swept {} rows against a limit of {sweep_limit}; if those are equal \
+         the limit, not the sweep, is what excluded it)",
+        terminal.len()
     );
 
     let deleted = backend

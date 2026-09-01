@@ -868,6 +868,25 @@ pub fn compile_direct_workflow(
     compile_direct_workflow_with_abi(input, workflow_abi_from_env(), omit_runtime_from_env())
 }
 
+/// A stable tag for the lowering options the direct compiler is currently
+/// configured to use.
+///
+/// This is part of image cache identity. Two artifacts built from the same
+/// definition but different lowering are NOT interchangeable, so flipping a
+/// toggle has to miss the cache and force a rebuild. Without this, changing a
+/// lowering default silently leaves every already-compiled workflow on the old
+/// shape, because nothing else in the key changed.
+///
+/// Store-freeing sleep used to appear here. It is no longer a toggle — a
+/// durable `Delay` always parks — so it cannot vary between two artifacts and
+/// has nothing to contribute to cache identity. Dropping it also changes the
+/// tag string, which is what retires images compiled under the old lowering.
+///
+/// Older images have no tag at all, which reads as a miss and rebuilds once.
+pub fn direct_lowering_tag() -> String {
+    format!("omit_runtime={}", omit_runtime_from_env())
+}
+
 /// Opt-in to dropping the `runtara:workflow-runtime/runtime` import for a PURE,
 /// non-durable, invoke-ABI workflow (see `WorkflowFeatureSummary::needs_runtime`
 /// and the omit path in the emitter). Default OFF — the runtime import is kept

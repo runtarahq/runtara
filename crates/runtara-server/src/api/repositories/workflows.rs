@@ -1919,15 +1919,7 @@ impl WorkflowRepository {
         .fetch_optional(&self.pool)
         .await?;
 
-        Ok(row.and_then(|r| {
-            r.definition
-                .get("executionTimeoutSeconds")
-                .and_then(|v| {
-                    v.as_i64()
-                        .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
-                })
-                .map(|v| v as i32)
-        }))
+        Ok(row.and_then(|r| execution_timeout_from_definition(&r.definition)))
     }
 
     /// Get workflow names for multiple workflow IDs in bulk
@@ -2042,8 +2034,12 @@ impl WorkflowRepository {
         &self,
         tenant_id: &str,
         workflow_id: &str,
-        version: i32,
-    ) -> Result<CompilationStatus, sqlx::Error> {
+        version: Option<i32>,
+    ) -> Result<(Option<i32>, CompilationStatus), sqlx::Error> {
+        // `version = NULL` means "whichever version would run now", resolved in
+        // this statement rather than by a separate read of `workflows` first.
+        // The launch path wants both the version and this status, and they are
+        // one join apart in the same database.
         let compilation_record = sqlx::query(
             r#"
             SELECT sc.compilation_status,
@@ -2051,7 +2047,8 @@ impl WorkflowRepository {
                    sc.registered_image_id,
                    sc.error_message,
                    sc.source_checksum,
-                   wd.definition
+                   wd.definition,
+                   wd.version AS resolved_version
             FROM workflow_definitions wd
             LEFT JOIN workflow_compilations sc
               ON sc.tenant_id = wd.tenant_id
@@ -2059,7 +2056,14 @@ impl WorkflowRepository {
              AND sc.version = wd.version
             WHERE wd.tenant_id = $1
               AND wd.workflow_id = $2
-              AND wd.version = $3
+              AND wd.version = COALESCE(
+                    $3,
+                    (SELECT COALESCE(w.current_version, w.latest_version)
+                     FROM workflows w
+                     WHERE w.tenant_id = wd.tenant_id
+                       AND w.workflow_id = wd.workflow_id
+                       AND w.deleted_at IS NULL)
+                  )
               AND wd.deleted_at IS NULL
             "#,
         )
@@ -2068,6 +2072,11 @@ impl WorkflowRepository {
         .bind(version)
         .fetch_optional(&self.pool)
         .await?;
+
+        let resolved_version = compilation_record
+            .as_ref()
+            .and_then(|r| r.try_get::<i32, _>("resolved_version").ok())
+            .or(version);
 
         match compilation_record {
             Some(record) => {
@@ -2083,10 +2092,16 @@ impl WorkflowRepository {
                     && registered_image_id.is_some()
                     && source_checksum.as_deref() == Some(current_checksum.as_str())
                 {
-                    return Ok(CompilationStatus::Ready {
-                        translated_path: translated_path.unwrap_or_default(),
-                        registered_image_id: registered_image_id.unwrap_or_default(),
-                    });
+                    return Ok((
+                        resolved_version,
+                        CompilationStatus::Ready {
+                            translated_path: translated_path.unwrap_or_default(),
+                            registered_image_id: registered_image_id.unwrap_or_default(),
+                            execution_timeout_seconds: execution_timeout_from_definition(
+                                &definition,
+                            ),
+                        },
+                    ));
                 }
 
                 if compilation_status.as_deref() == Some("failed") {
@@ -2119,11 +2134,14 @@ impl WorkflowRepository {
                                 "COMPILATION FAILED - definition unchanged, not retrying"
                             );
                         }
-                        return Ok(CompilationStatus::Failed {
-                            error: error_msg,
-                            terminal: true,
-                            authoring,
-                        });
+                        return Ok((
+                            resolved_version,
+                            CompilationStatus::Failed {
+                                error: error_msg,
+                                terminal: true,
+                                authoring,
+                            },
+                        ));
                     }
 
                     // Log at ERROR level so it's visible in logs
@@ -2144,16 +2162,19 @@ impl WorkflowRepository {
                     .execute(&self.pool)
                     .await;
                     let authoring = is_workflow_authoring_error(&error_msg);
-                    return Ok(CompilationStatus::Failed {
-                        error: error_msg,
-                        terminal: false,
-                        authoring,
-                    });
+                    return Ok((
+                        resolved_version,
+                        CompilationStatus::Failed {
+                            error: error_msg,
+                            terminal: false,
+                            authoring,
+                        },
+                    ));
                 }
 
-                Ok(CompilationStatus::NotReady)
+                Ok((resolved_version, CompilationStatus::NotReady))
             }
-            _ => Ok(CompilationStatus::NotReady),
+            _ => Ok((resolved_version, CompilationStatus::NotReady)),
         }
     }
 }
@@ -2176,6 +2197,20 @@ pub fn is_workflow_authoring_error(error_message: &str) -> bool {
     }
 }
 
+/// Read `executionTimeoutSeconds` out of a stored workflow definition.
+///
+/// Shared by `get_execution_timeout` and the compilation check so the two
+/// cannot disagree about how the field is spelled or coerced.
+fn execution_timeout_from_definition(definition: &Value) -> Option<i32> {
+    definition
+        .get("executionTimeoutSeconds")
+        .and_then(|v| {
+            v.as_i64()
+                .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+        })
+        .map(|v| v as i32)
+}
+
 /// Compilation readiness status returned by
 /// [`WorkflowRepository::ensure_compilation_ready`].
 #[derive(Debug, Clone)]
@@ -2186,6 +2221,10 @@ pub enum CompilationStatus {
         translated_path: String,
         /// Image id registered in runtara-environment.
         registered_image_id: String,
+        /// `executionTimeoutSeconds` from the definition this check already
+        /// read, so a launch does not fetch the same definition again just to
+        /// look at one field. `None` when the graph does not set one.
+        execution_timeout_seconds: Option<i32>,
     },
     /// Previous compilation attempt recorded a failure.
     Failed {

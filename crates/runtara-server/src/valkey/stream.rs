@@ -108,6 +108,22 @@ impl StreamConsumer {
         Ok(())
     }
 
+    /// A handle that can acknowledge entries without holding the consumer.
+    ///
+    /// `ConnectionManager` is a cloneable, multiplexed handle onto the same
+    /// connection, so acknowledgements issued through this can be in flight
+    /// concurrently. That matters because the worker fans a batch out across
+    /// many tasks: routing every ack back through the consumer serialised them
+    /// all on one mutex, held across the XACK round trip, which capped the
+    /// worker's throughput well below what the machine could do.
+    pub fn acker(&self) -> StreamAcker {
+        StreamAcker {
+            connection: self.connection.clone(),
+            stream_name: self.stream_name.clone(),
+            consumer_group: self.consumer_group.clone(),
+        }
+    }
+
     /// Claim pending events that have been idle for at least `min_idle_ms` milliseconds.
     ///
     /// Uses XAUTOCLAIM to atomically claim messages that haven't been acknowledged
@@ -165,33 +181,7 @@ impl StreamConsumer {
     /// Returns the number of times this entry has been delivered.
     /// Returns 0 if the entry is not in the pending list.
     pub async fn get_delivery_count(&mut self, entry_id: &str) -> RedisResult<u64> {
-        // XPENDING stream group [start] [end] [count] [consumer]
-        // For a single entry, we query with start and end as the same ID
-        let result: Value = redis::cmd("XPENDING")
-            .arg(&self.stream_name)
-            .arg(&self.consumer_group)
-            .arg(entry_id) // start
-            .arg(entry_id) // end (same as start for single entry)
-            .arg(1) // count
-            .query_async(&mut self.connection)
-            .await?;
-
-        // Response format: [[entry_id, consumer, idle_ms, delivery_count], ...]
-        // If empty, the entry is not pending
-        match result {
-            Value::Array(entries) if !entries.is_empty() => {
-                if let Value::Array(entry) = &entries[0] {
-                    // entry = [id, consumer, idle_ms, delivery_count]
-                    if entry.len() >= 4
-                        && let Value::Int(count) = entry[3]
-                    {
-                        return Ok(count as u64);
-                    }
-                }
-                Ok(0)
-            }
-            _ => Ok(0),
-        }
+        self.acker().get_delivery_count(entry_id).await
     }
 }
 
@@ -662,5 +652,61 @@ mod tests {
 
         let count = parse_delivery_count_from_xpending(response);
         assert_eq!(count, 1);
+    }
+}
+
+/// Lock-free acknowledger for a [`StreamConsumer`]'s stream and group.
+///
+/// Cloneable and cheap: every clone shares one multiplexed Valkey connection.
+#[derive(Clone)]
+pub struct StreamAcker {
+    connection: ConnectionManager,
+    stream_name: String,
+    consumer_group: String,
+}
+
+impl StreamAcker {
+    pub async fn get_delivery_count(&self, entry_id: &str) -> RedisResult<u64> {
+        let mut connection = self.connection.clone();
+        // XPENDING stream group [start] [end] [count] [consumer]
+        // For a single entry, we query with start and end as the same ID
+        let result: Value = redis::cmd("XPENDING")
+            .arg(&self.stream_name)
+            .arg(&self.consumer_group)
+            .arg(entry_id) // start
+            .arg(entry_id) // end (same as start for single entry)
+            .arg(1) // count
+            .query_async(&mut connection)
+            .await?;
+
+        // Response format: [[entry_id, consumer, idle_ms, delivery_count], ...]
+        // If empty, the entry is not pending
+        match result {
+            Value::Array(entries) if !entries.is_empty() => {
+                if let Value::Array(entry) = &entries[0] {
+                    // entry = [id, consumer, idle_ms, delivery_count]
+                    if entry.len() >= 4
+                        && let Value::Int(count) = entry[3]
+                    {
+                        return Ok(count as u64);
+                    }
+                }
+                Ok(0)
+            }
+            _ => Ok(0),
+        }
+    }
+
+    /// Acknowledge one entry, removing it from the group's pending list.
+    pub async fn acknowledge_event(&self, entry_id: &str) -> RedisResult<()> {
+        let mut connection = self.connection.clone();
+        let _: i32 = redis::cmd("XACK")
+            .arg(&self.stream_name)
+            .arg(&self.consumer_group)
+            .arg(entry_id)
+            .query_async(&mut connection)
+            .await?;
+
+        Ok(())
     }
 }

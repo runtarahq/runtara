@@ -78,6 +78,15 @@ pub struct LaunchOptions {
     pub checkpoint_id: Option<String>,
     /// Custom environment variables (applied after system vars, can override)
     pub env: std::collections::HashMap<String, String>,
+    /// The instance's enriched input envelope, exactly as it was just written
+    /// to the store, for a caller that has the authoritative bytes in hand.
+    ///
+    /// `None` means "read them back from the store", which is what a wake or a
+    /// resume MUST do: their `input` field is a relaunch placeholder, not the
+    /// instance's real input, so serving it to the guest would silently change
+    /// what a woken workflow sees. Only the first-start path may set this, and
+    /// only once `store_instance_input` has actually succeeded.
+    pub prepersisted_input: Option<Vec<u8>>,
 }
 
 /// Handle for a launched instance (detached execution).

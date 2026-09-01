@@ -12,6 +12,7 @@
 
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use axum::http::StatusCode;
@@ -311,9 +312,82 @@ pub struct ExecutionEngine {
     #[allow(dead_code)] // Reserved for future in-memory cancellation tracking.
     running_executions: Option<Arc<DashMap<Uuid, CancellationHandle>>>,
     /// Tracks workflows currently starting (prevents single_instance races).
-    starting_workflows: Arc<Mutex<HashSet<(String, String)>>>, // (tenant_id, workflow_id)
+    /// Workflows this process is mid-launch on, shared by every engine in it.
+    ///
+    /// Process-wide on purpose: `single_instance` is decided by checking this
+    /// set and then the runtime, and each trigger worker builds its own engine.
+    /// A per-engine set let two workers both find nothing running, each reserve
+    /// only in its own copy, and launch a second instance of a workflow that
+    /// asked for exactly one.
+    starting_workflows: StartingWorkflows,
     /// Sink for product-analytics execution events.
     events: ProductEventSink,
+    /// Short-lived cache of the per-tenant in-flight count used by the
+    /// concurrency gate, so a burst of intake does not issue two status counts
+    /// per accepted execution.
+    concurrency_counts: Arc<DashMap<String, (Instant, u64)>>,
+    /// Executions admitted by the gate that the cached count cannot see yet.
+    ///
+    /// The count is cached, and an accepted request does not appear in it until
+    /// the instance exists and the entry is refreshed. Without this, a cap of
+    /// one and a cached zero admits every request arriving inside the TTL —
+    /// the overshoot is bounded by arrival rate, not by the limit. Counting
+    /// admissions alongside the cached figure keeps the decision honest until
+    /// a fresh count subsumes them.
+    concurrency_reservations: Arc<DashMap<String, Arc<AtomicU64>>>,
+    /// Short-lived cache of the compiled artifact for a workflow version.
+    ///
+    /// Resolving it reads the whole workflow definition out of Postgres and
+    /// hashes it to check the compilation is still current — per instance
+    /// start. The answer is the same for every instance of a version, so
+    /// caching it briefly removes a blob read and a hash from the hot path
+    /// without changing what the check means.
+    registered_images: Arc<RegisteredImageCache>,
+}
+
+/// How long an in-flight execution count stays usable for the concurrency gate.
+///
+/// Short enough that the cap still tracks reality, long enough that a
+/// sustained intake burst collapses two counts per execution into two counts
+/// per tick.
+const CONCURRENCY_COUNT_TTL: Duration = Duration::from_millis(500);
+
+/// How long a resolved compiled-artifact id stays usable.
+///
+/// Short enough that a recompile of the same version is picked up promptly,
+/// long enough that a burst of starts resolves it once rather than once per
+/// instance — at a few hundred starts a second this is the difference between
+/// one definition read and hundreds.
+const REGISTERED_IMAGE_TTL: Duration = Duration::from_secs(5);
+
+/// `(tenant, workflow, version) -> (resolved at, compiled artifact id)`.
+type RegisteredImageCache = DashMap<(String, String, i32), (Instant, String)>;
+
+/// Workflows currently being launched, keyed by `(tenant_id, workflow_id)`.
+type StartingWorkflows = Arc<Mutex<HashSet<(String, String)>>>;
+
+/// The reservation set shared by every [`ExecutionEngine`] in this process.
+///
+/// Scoped to the process rather than the database because a Runtara server owns
+/// its tenant: one process per tenant, so "this process" and "this tenant's
+/// runtime" are the same boundary. If several replicas were ever to share a
+/// tenant database, this would have to become a database-level lock — the set
+/// cannot see a reservation made in another process.
+fn starting_workflows() -> &'static StartingWorkflows {
+    static STARTING: std::sync::OnceLock<StartingWorkflows> = std::sync::OnceLock::new();
+    STARTING.get_or_init(|| Arc::new(Mutex::new(HashSet::new())))
+}
+
+/// Admissions still unaccounted for after a fresh count landed.
+///
+/// `subsumed` is the counter as it stood when the query was issued: those
+/// admissions have had time to become instances and are in the result, so they
+/// are forgiven. Anything admitted while the query was in flight is not in that
+/// result and has to stay counted, or a burst arriving during the query is
+/// admitted twice over — once against the stale figure and again against the
+/// fresh one.
+fn retained_reservations(subsumed: u64, current: u64) -> u64 {
+    current.saturating_sub(subsumed.min(current))
 }
 
 impl ExecutionEngine {
@@ -333,8 +407,11 @@ impl ExecutionEngine {
             runtime_client,
             trigger_stream,
             running_executions,
-            starting_workflows: Arc::new(Mutex::new(HashSet::new())),
+            starting_workflows: Arc::clone(starting_workflows()),
             events,
+            concurrency_counts: Arc::new(DashMap::new()),
+            concurrency_reservations: Arc::new(DashMap::new()),
+            registered_images: Arc::new(DashMap::new()),
         }
     }
 
@@ -347,6 +424,40 @@ impl ExecutionEngine {
     /// execution drops out of this count the instant it terminates, so the
     /// gate means "N concurrent", not "N started recently".
     async fn active_execution_count(&self, tenant_id: &str) -> Result<u64, ExecutionError> {
+        let reserved = self.reservations_for(tenant_id);
+        if let Some(entry) = self.concurrency_counts.get(tenant_id)
+            && entry.0.elapsed() < CONCURRENCY_COUNT_TTL
+        {
+            return Ok(entry.1.saturating_add(reserved.load(Ordering::SeqCst)));
+        }
+
+        // Snapshot before the query, not after: anything admitted while it is
+        // in flight is not in the result, so only the admissions this count
+        // subsumes may be forgiven.
+        let subsumed = reserved.load(Ordering::SeqCst);
+        let count = self.count_active_executions_uncached(tenant_id).await?;
+        let retained = retained_reservations(subsumed, reserved.load(Ordering::SeqCst));
+        reserved.store(retained, Ordering::SeqCst);
+        self.concurrency_counts
+            .insert(tenant_id.to_string(), (Instant::now(), count));
+        Ok(count.saturating_add(retained))
+    }
+
+    /// The admission counter for a tenant, created on first use.
+    fn reservations_for(&self, tenant_id: &str) -> Arc<AtomicU64> {
+        Arc::clone(
+            self.concurrency_reservations
+                .entry(tenant_id.to_string())
+                .or_insert_with(|| Arc::new(AtomicU64::new(0)))
+                .value(),
+        )
+    }
+
+    /// The uncached two-status count behind [`Self::active_execution_count`].
+    async fn count_active_executions_uncached(
+        &self,
+        tenant_id: &str,
+    ) -> Result<u64, ExecutionError> {
         let Some(client) = self.runtime_client.as_ref() else {
             // No runtime wired (e.g. trigger worker engine) — can't count.
             return Ok(0);
@@ -373,19 +484,35 @@ impl ExecutionEngine {
     /// `EntitlementDenial` to surface when the tenant's live active-instance
     /// count is at/over the effective cap; `Ok(())` otherwise.
     ///
-    /// Only queries the runtime when the tenant has an explicit
-    /// `maxConcurrentExecutions` entitlement — with no tenant cap there's
-    /// nothing to enforce (the infra default is effectively unlimited), so we
-    /// skip the round-trip entirely. Fails **open** if the count query errors:
-    /// a transient runtime/count failure should not wedge execution.
+    /// Applies whether or not the tenant carries a `maxConcurrentExecutions`
+    /// entitlement: with no tenant cap the infra bound
+    /// (`MAX_CONCURRENT_EXECUTIONS`) is still enforced, which is the only thing
+    /// standing between an untiered deployment and unbounded intake. Fails
+    /// **open** if the count query errors: a transient runtime/count failure
+    /// should not wedge execution.
+    ///
+    /// The count is cached for [`CONCURRENCY_COUNT_TTL`] so a high intake rate
+    /// does not issue two status counts per accepted execution. The cap is a
+    /// backstop against runaway intake, not a precise quota, and the runtime
+    /// count is itself a moment-in-time reading — a sub-second staleness window
+    /// cannot let intake exceed the cap by more than one TTL's worth of work.
     pub(crate) async fn check_concurrency_gate(
         &self,
         tenant_id: &str,
     ) -> Result<(), crate::entitlement_error::EntitlementDenial> {
         let snapshot = crate::config::entitlements();
-        if snapshot.limits.max_concurrent_executions.is_none() {
-            return Ok(());
-        }
+        // No early return when the tenant has no `maxConcurrentExecutions`:
+        // the infra cap (`MAX_CONCURRENT_EXECUTIONS`, default cores x 32) has
+        // to stand on its own, or an untiered deployment has no admission
+        // control at all — it will accept executions until it runs out of file
+        // descriptors or memory. `concurrent_executions_decision` already
+        // composes the two with `effective_limit`, so passing through with the
+        // entitlement unset simply applies the infra bound.
+        //
+        // Safe against large sleeping populations: `active_execution_count`
+        // counts only Running + Pending, so suspended instances (which are not
+        // terminal, but are also not consuming a slot) never count against the
+        // cap.
         let active = match self.active_execution_count(tenant_id).await {
             Ok(n) => n,
             Err(e) => {
@@ -397,12 +524,20 @@ impl ExecutionEngine {
                 return Ok(());
             }
         };
-        crate::middleware::entitlement::concurrent_executions_decision(
+        let decision = crate::middleware::entitlement::concurrent_executions_decision(
             snapshot,
             active,
             crate::config::raw_max_concurrent_executions(),
         )
-        .inspect_err(|denial| denial.audit_log(tenant_id))
+        .inspect_err(|denial| denial.audit_log(tenant_id));
+
+        // Record the admission so the next caller sees it even though the
+        // cached count still cannot.
+        if decision.is_ok() {
+            self.reservations_for(tenant_id)
+                .fetch_add(1, Ordering::SeqCst);
+        }
+        decision
     }
 
     /// Check if the runtime client is available.
@@ -865,11 +1000,20 @@ impl ExecutionEngine {
             let version = event.version;
             let instance_id = instance_id.clone();
             let trigger_id = event.trigger_id().map(|s| s.to_string());
+            const ANALYTICS_POLL_INTERVAL: Duration = Duration::from_secs(2);
             tokio::spawn(async move {
+                // Wait one interval before the first look. The run was started
+                // microseconds ago, so an immediate poll almost never sees a
+                // terminal state, and each poll is the two-join instance read.
+                // Skipping it takes a workflow that starts and parks from two
+                // of those reads down to one; anything that really did finish
+                // in under an interval is simply observed an interval later,
+                // which for an analytics event is not a meaningful delay.
+                tokio::time::sleep(ANALYTICS_POLL_INTERVAL).await;
                 let outcome = runtime_client
                     .poll_until_terminal(
                         &instance_id,
-                        Duration::from_secs(2),
+                        ANALYTICS_POLL_INTERVAL,
                         Duration::from_secs(24 * 3600),
                     )
                     .await;
@@ -886,7 +1030,8 @@ impl ExecutionEngine {
                     Ok(crate::runtime_client::TerminalOutcome::TimedOut(o)) => {
                         (EventType::ExecutionTimeout, o)
                     }
-                    Ok(crate::runtime_client::TerminalOutcome::GaveUp) => return,
+                    Ok(crate::runtime_client::TerminalOutcome::GaveUp)
+                    | Ok(crate::runtime_client::TerminalOutcome::Suspended) => return,
                     Err(e) => {
                         warn!(
                             instance_id = %instance_id,
@@ -940,29 +1085,17 @@ impl ExecutionEngine {
             ExecutionError::NotConnected("Runtime client not configured".to_string())
         })?;
 
-        // Resolve version if not specified
-        let version = match event.version {
-            Some(v) => v,
-            None => {
-                self.resolve_version(&event.tenant_id, &event.workflow_id, None)
-                    .await?
-            }
-        };
-
-        // Fetch execution timeout from executionGraph (if set)
-        let execution_timeout_secs = self
-            .workflow_repo
-            .get_execution_timeout(&event.tenant_id, &event.workflow_id, version)
-            .await
-            .map_err(|e| {
-                ExecutionError::DatabaseError(format!("Failed to get execution timeout: {}", e))
-            })?
+        // Resolve the version and check compilation together. Both live in the
+        // server database and hang off the same workflow, so an unversioned
+        // event costs one statement rather than a read of `workflows` followed
+        // by a read of its definition. The readiness check reads that
+        // definition anyway, so the execution timeout rides along too.
+        let (version, execution_timeout_secs) = self
+            .ensure_compiled(&event.tenant_id, &event.workflow_id, event.version)
+            .await?;
+        let execution_timeout_secs = execution_timeout_secs
             .map(|secs| secs as u32)
             .unwrap_or(3600); // Default 1 hour timeout
-
-        // Ensure workflow is compiled (non-blocking: returns NotCompiled for retry)
-        self.ensure_compiled(&event.tenant_id, &event.workflow_id, version)
-            .await?;
 
         // Inputs are already in canonical format {"data": {...}, "variables": {...}}
         // from the API layer - inject _workflow_id for cache key isolation
@@ -1067,11 +1200,16 @@ impl ExecutionEngine {
         &self,
         trigger_id: &str,
     ) -> Result<Option<bool>, ExecutionError> {
+        // Stamping `last_run` here rather than at webhook intake keeps it one
+        // statement instead of two, and makes it mean what it says: the row is
+        // touched when the run is actually being started, not when the event
+        // was queued.
         let result = sqlx::query!(
             r#"
-            SELECT single_instance
-            FROM invocation_trigger
+            UPDATE invocation_trigger
+            SET last_run = NOW()
             WHERE id = $1
+            RETURNING single_instance
             "#,
             trigger_id
         )
@@ -1928,7 +2066,15 @@ impl ExecutionEngine {
         workflow_id: &str,
         version: i32,
     ) -> Result<String, ExecutionError> {
-        self.workflow_repo
+        let key = (tenant_id.to_string(), workflow_id.to_string(), version);
+        if let Some(hit) = self.registered_images.get(&key)
+            && hit.0.elapsed() < REGISTERED_IMAGE_TTL
+        {
+            return Ok(hit.1.clone());
+        }
+
+        let resolved = self
+            .workflow_repo
             .get_fresh_registered_image_id(tenant_id, workflow_id, version)
             .await
             .map_err(|e| {
@@ -1939,27 +2085,48 @@ impl ExecutionEngine {
                     "Workflow '{}' version {} not registered with runtara-environment. Recompile it.",
                     workflow_id, version
                 ))
-            })
+            })?;
+
+        // Only successful resolutions are cached: a miss means "not compiled
+        // yet", and that must be re-checked so a freshly compiled workflow
+        // starts running immediately rather than after the TTL.
+        self.registered_images
+            .insert(key, (Instant::now(), resolved.clone()));
+        Ok(resolved)
     }
 
     /// Ensure the workflow is compiled (non-blocking: queues compilation if
     /// needed and returns `NotCompiled` for the caller to retry).
+    ///
+    /// Returns the definition's `executionTimeoutSeconds` when it is ready:
+    /// the readiness check already reads that definition, so a caller that
+    /// needs the timeout should take it from here rather than fetching the
+    /// same row again.
     async fn ensure_compiled(
         &self,
         tenant_id: &str,
         workflow_id: &str,
-        version: i32,
-    ) -> Result<(), ExecutionError> {
-        let status = self
+        version: Option<i32>,
+    ) -> Result<(i32, Option<i32>), ExecutionError> {
+        let (resolved, status) = self
             .workflow_repo
             .ensure_compilation_ready(tenant_id, workflow_id, version)
             .await
             .map_err(|e| {
                 ExecutionError::DatabaseError(format!("Failed to check compilation: {}", e))
             })?;
+        let version = resolved.or(version).ok_or_else(|| {
+            ExecutionError::WorkflowNotFound(format!(
+                "No runnable version for workflow '{workflow_id}'"
+            ))
+        })?;
 
-        if matches!(status, CompilationStatus::Ready { .. }) {
-            return Ok(());
+        if let CompilationStatus::Ready {
+            execution_timeout_seconds,
+            ..
+        } = status
+        {
+            return Ok((version, execution_timeout_seconds));
         }
 
         // A terminal failure will repeat for as long as the definition is
@@ -2074,8 +2241,9 @@ impl ExecutionEngine {
     ) -> Result<(), ExecutionError> {
         let status = self
             .workflow_repo
-            .ensure_compilation_ready(tenant_id, workflow_id, version)
+            .ensure_compilation_ready(tenant_id, workflow_id, Some(version))
             .await
+            .map(|(_, status)| status)
             .map_err(|e| {
                 ExecutionError::DatabaseError(format!("Failed to check compilation: {}", e))
             })?;
@@ -2186,8 +2354,9 @@ impl ExecutionEngine {
 
         let status_after = self
             .workflow_repo
-            .ensure_compilation_ready(tenant_id, workflow_id, version)
+            .ensure_compilation_ready(tenant_id, workflow_id, Some(version))
             .await
+            .map(|(_, status)| status)
             .map_err(|e| {
                 ExecutionError::DatabaseError(format!("Failed to check compilation: {}", e))
             })?;
@@ -2211,6 +2380,96 @@ impl ExecutionEngine {
 
 #[cfg(test)]
 mod tests {
+
+    /// Two engines in one process must share the single-instance reservation.
+    ///
+    /// Each trigger worker builds its own engine. With a set per engine, two
+    /// workers handling events for the same workflow both find nothing
+    /// running, each reserve in their own copy, and both launch — which is
+    /// precisely what `single_instance` is supposed to prevent.
+    #[tokio::test]
+    async fn engines_share_one_single_instance_reservation_set() {
+        // Lazy pools so this needs no database: nothing here touches one, and
+        // the point is what the constructor wires up, not what it queries.
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://unused/unused")
+            .expect("lazy pool");
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let engine = |pool: PgPool| {
+            ExecutionEngine::new(
+                pool.clone(),
+                Arc::new(WorkflowRepository::new(pool)),
+                None,
+                None,
+                None,
+                ProductEventSink::new(tx.clone()),
+            )
+        };
+
+        // Two engines, exactly as two trigger workers build them.
+        let first = engine(pool.clone());
+        let second = engine(pool);
+
+        let key = (
+            format!("tenant-{}", uuid::Uuid::new_v4()),
+            "workflow-a".to_string(),
+        );
+        first.starting_workflows.lock().await.insert(key.clone());
+
+        assert!(
+            second.starting_workflows.lock().await.contains(&key),
+            "a workflow reserved through one engine must be visible to another; \
+             a set per engine lets two workers each launch a single_instance \
+             workflow believing nothing is running"
+        );
+
+        first.starting_workflows.lock().await.remove(&key);
+    }
+
+    /// Admissions the gate has made but the cached count cannot see yet must
+    /// keep counting, or a burst inside one TTL is admitted against a figure
+    /// that predates all of it — with a cap of one and a cached zero, every
+    /// request arriving in that window gets in.
+    #[test]
+    fn a_refresh_only_forgives_the_admissions_it_could_see() {
+        use super::retained_reservations;
+
+        // Nothing admitted during the query: the fresh count covers them all.
+        assert_eq!(retained_reservations(3, 3), 0);
+        assert_eq!(retained_reservations(0, 0), 0);
+
+        // Two more arrived while the query was in flight. They are not in the
+        // result, so they must survive it — forgiving them would let the same
+        // burst be admitted twice, once per count.
+        assert_eq!(retained_reservations(3, 5), 2);
+        assert_eq!(retained_reservations(0, 4), 4);
+
+        // A concurrent refresh may already have cleared the counter; never
+        // underflow back into a huge number.
+        assert_eq!(retained_reservations(5, 2), 0);
+        assert_eq!(retained_reservations(u64::MAX, 1), 0);
+    }
+
+    /// The TTLs on the hot path must actually collapse a burst, and must not
+    /// be so long that a recompile or a finished execution goes unnoticed for
+    /// an age. Pinned because both are the difference between one database
+    /// read per burst and one per instance.
+    #[test]
+    fn hot_path_caches_have_sane_windows() {
+        use super::{CONCURRENCY_COUNT_TTL, REGISTERED_IMAGE_TTL};
+        use std::time::Duration;
+
+        // Long enough to collapse a burst: at even 100 starts a second these
+        // turn hundreds of lookups into one.
+        assert!(CONCURRENCY_COUNT_TTL >= Duration::from_millis(100));
+        assert!(REGISTERED_IMAGE_TTL >= Duration::from_secs(1));
+
+        // Short enough to stay honest. The concurrency count is a backstop
+        // against runaway intake, not a quota, but it still has to track
+        // reality; a stale artifact id must not outlive a recompile by long.
+        assert!(CONCURRENCY_COUNT_TTL <= Duration::from_secs(2));
+        assert!(REGISTERED_IMAGE_TTL <= Duration::from_secs(30));
+    }
     use super::*;
     use serde_json::json;
 

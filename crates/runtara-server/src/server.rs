@@ -1379,28 +1379,59 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         // Start trigger worker (replaces native_worker for stream-based execution)
         // NOTE: Trigger worker does NOT compile - it only executes pre-compiled workflows.
         // Compilation is handled by the compilation worker.
-        let trigger_worker_tenant_id = tenant_id.clone();
-        let trigger_shutdown = shutdown_signal.clone();
-        let trigger_events = product_event_sink.clone();
-        tokio::spawn(async move {
-            let worker_config = workers::trigger_worker::TriggerWorkerConfig {
-                tenant_id: trigger_worker_tenant_id,
-                batch_size: 10,
-                block_timeout_ms: 5000,
-                ..Default::default()
-            };
+        // A trigger worker processes its batch one await at a time, so a single
+        // one caps instance starts at whatever one sequential consumer can do —
+        // measured around 100/s with the host less than a third busy. The
+        // stream is a consumer group and each worker claims a distinct consumer
+        // name, so more of them is the natural way to scale intake.
+        //
+        // Defaulting to one anyway: with several workers the pending-entry
+        // autoclaim in PHASE 1 keeps re-examining entries owned by the other
+        // consumers, and that showed up as a constant ~12.5 instance-list
+        // queries per second on a completely idle system — a two-join scan of
+        // the whole instances table whose cost grows with the table. One worker
+        // measured 0/s idle. Raise this once the autoclaim path is scoped to a
+        // worker's own pending entries; until then it trades a real background
+        // load for intake that is not the current bottleneck.
+        let trigger_workers: usize = std::env::var("RUNTARA_TRIGGER_WORKERS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(1);
+        let trigger_batch_size: usize = std::env::var("TRIGGER_BATCH_SIZE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(50);
+        println!("  Trigger intake: {trigger_workers} worker(s), batch {trigger_batch_size}");
+        for _ in 0..trigger_workers {
+            let trigger_worker_tenant_id = tenant_id.clone();
+            let trigger_shutdown = shutdown_signal.clone();
+            let trigger_events = product_event_sink.clone();
+            let pool_for_worker = trigger_pool.clone();
+            let running_for_worker = trigger_running_executions.clone();
+            let client_for_worker = trigger_runtime_client.clone();
+            let cfg_for_worker = trigger_worker_config.clone();
+            tokio::spawn(async move {
+                let worker_config = workers::trigger_worker::TriggerWorkerConfig {
+                    tenant_id: trigger_worker_tenant_id,
+                    batch_size: trigger_batch_size,
+                    block_timeout_ms: 5000,
+                    ..Default::default()
+                };
 
-            workers::trigger_worker::run(
-                trigger_pool,
-                trigger_running_executions,
-                trigger_runtime_client,
-                trigger_worker_config,
-                worker_config,
-                trigger_shutdown,
-                trigger_events,
-            )
-            .await;
-        });
+                workers::trigger_worker::run(
+                    pool_for_worker,
+                    running_for_worker,
+                    client_for_worker,
+                    cfg_for_worker,
+                    worker_config,
+                    trigger_shutdown,
+                    trigger_events,
+                )
+                .await;
+            });
+        }
 
         // Start compilation worker (processes compilation queue)
         // This worker handles async compilation requests queued by save operations.

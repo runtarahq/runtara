@@ -399,7 +399,7 @@ async fn existing_start_response(
     tenant_id: &str,
     image_id: &str,
 ) -> Result<Option<StartInstanceResponse>> {
-    let Some(existing) = state.persistence.get_instance(instance_id).await? else {
+    let Some(existing) = state.persistence.get_instance_meta(instance_id).await? else {
         return Ok(None);
     };
 
@@ -579,17 +579,28 @@ pub async fn handle_start_instance(
 
     // The trigger stream is intentionally at-least-once. A worker can lose its
     // response or fail XACK after Environment has durably reserved the ID. The
-    // primary key is therefore an idempotency key, not a permanent start error.
-    if let Some(response) =
-        existing_start_response(state, &instance_id, &request.tenant_id, &request.image_id).await?
-    {
-        return Ok(response);
-    }
+    // primary key is therefore an idempotency key, not a permanent start error,
+    // so a replay is answered with the original response rather than an error.
+    //
+    // The claim itself is the INSERT below: it reports whether it won the id,
+    // which costs one statement instead of a SELECT that misses on every fresh
+    // launch. The only place a replay still has to be recognised *before* then
+    // is the artifact check, because an already-accepted start does not depend
+    // on the wasm still being on disk.
 
     // Validate the filesystem half of the image registration before writing
     // any instance state. Otherwise a stale image row creates a failed instance
     // and the trigger retry collides with that row after recompilation.
     if !wasm_path.is_file() {
+        // A replay of an already-accepted start is still answered from the
+        // existing row: it was accepted when the artifact was present, and
+        // losing the file afterwards must not turn a duplicate into an error.
+        if let Some(response) =
+            existing_start_response(state, &instance_id, &request.tenant_id, &request.image_id)
+                .await?
+        {
+            return Ok(response);
+        }
         warn!(
             image_id = %request.image_id,
             binary_path = %wasm_path.display(),
@@ -617,21 +628,31 @@ pub async fn handle_start_instance(
         Some(&request.env)
     };
 
-    // Create instance in Core's table via Persistence trait
-    if let Err(e) = state
+    // Create instance in Core's table via Persistence trait. This doubles as the
+    // idempotency claim: ON CONFLICT DO NOTHING means a replay, or a concurrent
+    // retry that got there first, comes back as `false` rather than an error.
+    // The input rides along on that same statement rather than a follow-up
+    // UPDATE, so a launch writes the instance row exactly once.
+    let claimed = state
         .persistence
-        .register_instance(&instance_id, &request.tenant_id)
-        .await
-    {
-        // Close the check/insert race between concurrent retries. If another
-        // request reserved the same compatible ID, it owns the launch and this
-        // request is an idempotent replay.
+        .try_register_instance(&instance_id, &request.tenant_id, input_bytes.as_deref())
+        .await;
+    if !matches!(claimed, Ok(true)) {
+        // Either the id was already taken or the insert failed outright. If
+        // another request reserved the same compatible ID, it owns the launch
+        // and this request is an idempotent replay.
         if let Some(response) =
             existing_start_response(state, &instance_id, &request.tenant_id, &request.image_id)
                 .await?
         {
             return Ok(response);
         }
+        let e = match claimed {
+            Err(e) => e.to_string(),
+            // Claim reported "already exists", but no usable instance backs it
+            // up - `existing_start_response` already logged why it was rejected.
+            Ok(_) => format!("Instance '{}' already exists", instance_id),
+        };
         error!(error = %e, "Failed to register instance via Persistence");
         return Ok(StartInstanceResponse {
             success: false,
@@ -641,15 +662,9 @@ pub async fn handle_start_instance(
         });
     }
 
-    // Store input data via Persistence trait
-    if let Some(ref input_data) = input_bytes
-        && let Err(e) = state
-            .persistence
-            .store_instance_input(&instance_id, input_data)
-            .await
-    {
-        warn!(error = %e, "Failed to store instance input (non-fatal)");
-    }
+    // The claim above persisted the input, so hand those same bytes to the
+    // runner rather than making the launch read back what it just wrote.
+    let prepersisted_input = input_bytes.clone();
 
     // Resolve the effective execution timeout once, so the value persisted for
     // wake/resume matches the one the monitor enforces on this first run.
@@ -689,6 +704,7 @@ pub async fn handle_start_instance(
         timeout,
         checkpoint_id: None,
         env: request.env,
+        prepersisted_input,
     };
 
     // Launch via runner (detached)
@@ -717,18 +733,12 @@ pub async fn handle_start_instance(
                 warn!(error = %e, "Failed to register container (instance still running)");
             }
 
-            // Update instance status to running via Persistence trait
-            if let Err(e) = state
-                .persistence
-                .update_instance_status(&instance_id, "running", Some(chrono::Utc::now()))
-                .await
-            {
-                error!(
-                    error = %e,
-                    instance_id = %instance_id,
-                    "Failed to update instance status to running (instance launched but status may be incorrect)"
-                );
-            }
+            // The runner promotes the instance to `running` from inside the run
+            // task, before the guest starts, on both the invoke and the legacy
+            // branch. Stamping it again here would be a second write of the
+            // same fact, and a racy one: `launch_detached` returns as soon as
+            // the run is spawned, so a workflow that parks immediately can
+            // already be `suspended` by the time this line is reached.
 
             // Spawn background task to monitor container and process output when done
             spawn_container_monitor(
@@ -1008,6 +1018,9 @@ pub async fn handle_resume_instance(
         input: serde_json::json!({}), // Input was consumed on first run
         timeout,
         checkpoint_id: checkpoint_id.clone(),
+        // A resume must re-read the stored envelope: the input on this
+        // request is a relaunch placeholder, not the instance's real input.
+        prepersisted_input: None,
         env: stored_env, // Restore env from initial launch
     };
 
@@ -1106,34 +1119,6 @@ pub async fn handle_resume_instance(
 // Container Monitor
 // ============================================================================
 
-/// True if this monitor's handle no longer owns the container registry
-/// entry for the instance.
-///
-/// When an instance is resumed, a NEW monitor is spawned for the new process
-/// and the registry is rewritten with that monitor's `handle_id`. The OLD
-/// monitor (still polling the previous PID) must NOT touch instance state
-/// when it observes its own process exit, otherwise it would clobber the
-/// fresh execution.
-///
-/// Semantics (preserved from the inline check that previously lived in
-/// `spawn_container_monitor`):
-/// - registry has a different `container_id` than this monitor's handle → stale
-/// - registry has no entry (e.g. cleared by resume before relaunch) → stale
-/// - registry lookup errors → assume fresh, since being conservative here
-///   would cause us to silently drop the crash-detection write on a transient
-///   DB blip
-pub async fn detect_stale_monitor(
-    registry: &ContainerRegistry,
-    instance_id: &str,
-    monitor_handle_id: &str,
-) -> bool {
-    match registry.get(instance_id).await {
-        Ok(Some(current)) => current.container_id != monitor_handle_id,
-        Ok(None) => true,
-        Err(_) => false,
-    }
-}
-
 /// Spawn a background task that monitors the container and processes output when done.
 ///
 /// This function should be called after launching an instance to monitor its lifecycle
@@ -1155,9 +1140,10 @@ pub async fn detect_stale_monitor(
 /// When the process exits, we:
 /// 1. Collect metrics and stderr (`runner.collect_result`).
 /// 2. Persist them best-effort.
-/// 3. Check whether this monitor still owns the instance (`detect_stale_monitor`)
-///    — a resumed instance gets a new monitor, and the old one must not write
-///    crash state for the previous PID.
+/// 3. Claim the registry row this monitor registered. The delete succeeds only
+///    while this monitor still owns the instance, so it doubles as the
+///    ownership check — a resumed instance gets a new monitor, and the old one
+///    must not write crash state for the previous PID.
 /// 4. If we're still the owning monitor, mirror Core's view: if the SDK already
 ///    wrote a terminal status we leave it alone, otherwise we mark the instance
 ///    failed/crashed (or suspended/shutdown_requested if draining).
@@ -1201,30 +1187,42 @@ pub fn spawn_container_monitor(
                 // Collect metrics and stderr from cgroup before container cleanup
                 let (_output, stderr, metrics) = runner.collect_result(&handle).await;
 
-                // Store metrics via Persistence trait
-                if metrics.memory_peak_bytes.is_some() || metrics.cpu_usage_usec.is_some() {
-                    if let Err(e) = persistence
-                        .update_instance_metrics(
-                            &instance_id,
-                            metrics.memory_peak_bytes,
-                            metrics.cpu_usage_usec,
-                        )
-                        .await
-                    {
-                        warn!(
-                            instance_id = %instance_id,
-                            error = %e,
-                            "Failed to store container metrics"
-                        );
-                    } else {
+                // Store metrics and pick up the status the SDK reported in the
+                // same statement: this monitor needs both, and they are the
+                // same row. Kept even when there are no metrics to write, so
+                // the crash check below always has a status to look at.
+                let observed_status = match persistence
+                    .update_metrics_returning_status(
+                        &instance_id,
+                        metrics.memory_peak_bytes,
+                        metrics.cpu_usage_usec,
+                    )
+                    .await
+                {
+                    Ok(observed) => {
                         debug!(
                             instance_id = %instance_id,
                             memory_peak_bytes = ?metrics.memory_peak_bytes,
                             cpu_usage_usec = ?metrics.cpu_usage_usec,
                             "Stored container metrics"
                         );
+                        Ok(observed)
                     }
-                }
+                    Err(e) => {
+                        warn!(
+                            instance_id = %instance_id,
+                            error = %e,
+                            "Failed to store container metrics"
+                        );
+                        // The status this carries decides crash vs normal exit
+                        // below, so a failed metrics write must not be read as a
+                        // crash. Fall back to a plain status read, as before.
+                        persistence
+                            .get_instance_meta(&instance_id)
+                            .await
+                            .map(|found| found.map(|i| (i.status, i.termination_reason)))
+                    }
+                };
 
                 // Store stderr via Persistence trait for debugging (even if instance succeeds via Core)
                 if let Some(ref stderr_content) = stderr {
@@ -1252,9 +1250,31 @@ pub fn spawn_container_monitor(
                 // interfere with the new execution. The check intentionally happens AFTER
                 // metrics/stderr writes so a stale monitor doesn't drop diagnostic data
                 // for the previous process.
-                let is_stale_monitor =
-                    detect_stale_monitor(&container_registry, &instance_id, &handle.handle_id)
-                        .await;
+                // Deleting the row this monitor registered answers both
+                // questions in one statement: it succeeds only while this
+                // monitor is still the owner, so a `false` IS the stale signal,
+                // and the cleanup the tail of this arm used to repeat is
+                // already done. That tail deleted by instance alone, which a
+                // stale monitor would have used to throw away the row of the
+                // run that replaced it.
+                let is_stale_monitor = match container_registry
+                    .cleanup_generation(&instance_id, &handle.handle_id)
+                    .await
+                {
+                    Ok(owned) => !owned,
+                    Err(e) => {
+                        // Unknown rather than stale. Being conservative here
+                        // would silently drop the crash-detection write on a
+                        // transient blip; the row is left to the cleanup
+                        // workers instead.
+                        warn!(
+                            instance_id = %instance_id,
+                            error = %e,
+                            "Could not claim the container registry row; assuming this monitor still owns it"
+                        );
+                        false
+                    }
+                };
 
                 if is_stale_monitor {
                     info!(
@@ -1263,19 +1283,19 @@ pub fn spawn_container_monitor(
                         "Stale monitor detected — instance was resumed with a new process, skipping crash check"
                     );
                 } else {
-                    // Check Core status via the same persistence layer that the SDK writes to.
-                    let current_status = persistence.get_instance(&instance_id).await;
-                    match current_status {
-                        Ok(Some(inst))
+                    // Status came back with the metrics write above, so this
+                    // no longer needs a read of its own.
+                    match &observed_status {
+                        Ok(Some((status, _)))
                             if matches!(
-                                inst.status.as_str(),
+                                status.as_str(),
                                 "completed" | "failed" | "cancelled" | "suspended"
                             ) =>
                         {
                             // SDK already reported terminal status — normal termination
                             info!(
                                 instance_id = %instance_id,
-                                status = %inst.status,
+                                status = %status,
                                 "Instance completed normally (SDK reported)"
                             );
                         }
@@ -1368,8 +1388,6 @@ pub fn spawn_container_monitor(
                     }
                 }
 
-                // Clean up container registry
-                let _ = container_registry.cleanup(&instance_id).await;
             }
             _ = tokio::time::sleep_until(sleep_until) => {
                 warn!(
@@ -1396,8 +1414,11 @@ pub fn spawn_container_monitor(
                     );
                 }
 
-                // Clean up container registry
-                let _ = container_registry.cleanup(&instance_id).await;
+                // Clean up container registry, but only the row this monitor
+                // registered: a resume may have replaced it with a live run.
+                let _ = container_registry
+                    .cleanup_generation(&instance_id, &handle.handle_id)
+                    .await;
             }
         }
     });
@@ -1854,7 +1875,7 @@ pub async fn handle_send_signal(
     signal_type: &str,
     payload: Option<&str>,
 ) -> Result<SendSignalOutcome> {
-    let Some(instance) = state.persistence.get_instance(instance_id).await? else {
+    let Some(instance) = state.persistence.get_instance_meta(instance_id).await? else {
         return Ok(SendSignalOutcome::InstanceNotFound);
     };
 
@@ -1898,7 +1919,12 @@ pub async fn handle_send_custom_signal(
     checkpoint_id: &str,
     payload: Option<&str>,
 ) -> Result<SendCustomSignalOutcome> {
-    if state.persistence.get_instance(instance_id).await?.is_none() {
+    if state
+        .persistence
+        .get_instance_meta(instance_id)
+        .await?
+        .is_none()
+    {
         return Ok(SendCustomSignalOutcome::InstanceNotFound);
     }
 
@@ -1934,7 +1960,7 @@ pub async fn handle_send_custom_signal(
 /// stamping `sleep_until` on those would relaunch a replay that runs PAST the
 /// pause, silently auto-resuming a paused instance on any custom signal.
 pub async fn wake_suspended_on_signal(persistence: &dyn Persistence, instance_id: &str) {
-    match persistence.get_instance(instance_id).await {
+    match persistence.get_instance_meta(instance_id).await {
         Ok(Some(inst))
             if inst.status == "suspended"
                 && inst.termination_reason.as_deref()

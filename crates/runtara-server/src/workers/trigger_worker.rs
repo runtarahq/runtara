@@ -21,7 +21,7 @@ use crate::shutdown::ShutdownSignal;
 use crate::types::CancellationHandle;
 use crate::valkey::ValkeyConfig;
 use crate::valkey::client::ValkeyClient;
-use crate::valkey::stream::StreamConsumer;
+use crate::valkey::stream::{StreamAcker, StreamConsumer};
 use crate::workers::execution_engine::{DetachedExecution, ExecutionEngine, ExecutionError};
 
 /// Result of processing a trigger event
@@ -148,6 +148,15 @@ pub async fn run(
         return;
     }
 
+    // Shared so a batch can be processed concurrently. Starting an instance is
+    // almost entirely waiting — roughly eighteen database round trips — so a
+    // serial loop over a batch leaves the machine idle between them. The
+    // consumer itself is only touched for short Valkey calls (ack, delivery
+    // count), so it sits behind a mutex held for microseconds while the slow
+    // part of each event runs outside it.
+    let consumer = Arc::new(tokio::sync::Mutex::new(consumer));
+    let event_permits = Arc::new(tokio::sync::Semaphore::new(trigger_concurrency()));
+
     info!(
         worker_id = %worker_id,
         stream_key = %stream_key,
@@ -168,6 +177,11 @@ pub async fn run(
         event_sink.clone(),
     ));
 
+    // Acknowledging through the consumer would hold its mutex across the XACK
+    // round trip, serialising every event in a fanned-out batch on one lock.
+    // This handle shares the same multiplexed connection and needs no lock.
+    let acker = consumer.lock().await.acker();
+
     // Track the start ID for XAUTOCLAIM pagination
     let mut autoclaim_start_id = "0-0".to_string();
 
@@ -182,34 +196,55 @@ pub async fn run(
 
         // PHASE 1: Process pending events (retries)
         // These are events that weren't ACKed (e.g., NotCompiled errors)
-        match consumer
-            .claim_pending_events(
-                worker_config.pending_retry_delay_ms,
-                worker_config.pending_batch_size,
-                &autoclaim_start_id,
-            )
-            .await
-        {
+        let claimed = {
+            let mut guard = consumer.lock().await;
+            guard
+                .claim_pending_events(
+                    worker_config.pending_retry_delay_ms,
+                    worker_config.pending_batch_size,
+                    &autoclaim_start_id,
+                )
+                .await
+        };
+        match claimed {
             Ok((pending_events, next_start_id)) => {
                 autoclaim_start_id = next_start_id;
 
+                let mut tasks = tokio::task::JoinSet::new();
                 for (entry_id, valkey_event) in pending_events {
-                    process_event(
-                        &mut consumer,
-                        &engine,
-                        &entry_id,
-                        &valkey_event,
-                        &running_executions,
-                        worker_config.max_retries,
-                        true, // is_retry
-                        &event_sink,
-                    )
-                    .await;
+                    let permits = Arc::clone(&event_permits);
+                    let acker = acker.clone();
+                    let engine = Arc::clone(&engine);
+                    let running_executions = Arc::clone(&running_executions);
+                    let event_sink = event_sink.clone();
+                    let max_retries = worker_config.max_retries;
+                    tasks.spawn(async move {
+                        let _permit = permits
+                            .acquire_owned()
+                            .await
+                            .expect("trigger event semaphore closed");
+                        process_event(
+                            &acker,
+                            &engine,
+                            &entry_id,
+                            &valkey_event,
+                            &running_executions,
+                            max_retries,
+                            true, // is_retry
+                            &event_sink,
+                        )
+                        .await;
+                    });
+                }
+                while let Some(joined) = tasks.join_next().await {
+                    if let Err(e) = joined {
+                        error!(error = %e, "Trigger retry task panicked");
+                    }
                 }
             }
             Err(e) if is_consumer_group_missing(&e) => {
                 warn!(error = %e, "Trigger consumer group missing (Valkey restarted?)");
-                recreate_consumer_group(&mut consumer, &mut autoclaim_start_id).await;
+                recreate_consumer_group(&mut *consumer.lock().await, &mut autoclaim_start_id).await;
             }
             Err(e) => {
                 // Log but continue to process new events
@@ -218,28 +253,53 @@ pub async fn run(
         }
 
         // PHASE 2: Process new events
-        match consumer
-            .read_events(worker_config.block_timeout_ms, worker_config.batch_size)
-            .await
-        {
+        // Bind before matching: a guard held in the match scrutinee lives for the
+        // whole match, so the spawned tasks below would wait on a lock this loop
+        // is still holding while it waits for them — a deadlock.
+        let read = {
+            let mut guard = consumer.lock().await;
+            guard
+                .read_events(worker_config.block_timeout_ms, worker_config.batch_size)
+                .await
+        };
+        match read {
             Ok(events) => {
+                let mut tasks = tokio::task::JoinSet::new();
                 for (entry_id, valkey_event) in events {
-                    process_event(
-                        &mut consumer,
-                        &engine,
-                        &entry_id,
-                        &valkey_event,
-                        &running_executions,
-                        worker_config.max_retries,
-                        false, // is_retry
-                        &event_sink,
-                    )
-                    .await;
+                    let permits = Arc::clone(&event_permits);
+                    let acker = acker.clone();
+                    let engine = Arc::clone(&engine);
+                    let running_executions = Arc::clone(&running_executions);
+                    let event_sink = event_sink.clone();
+                    let max_retries = worker_config.max_retries;
+                    tasks.spawn(async move {
+                        // Semaphore is never closed, so acquire cannot fail.
+                        let _permit = permits
+                            .acquire_owned()
+                            .await
+                            .expect("trigger event semaphore closed");
+                        process_event(
+                            &acker,
+                            &engine,
+                            &entry_id,
+                            &valkey_event,
+                            &running_executions,
+                            max_retries,
+                            false, // is_retry
+                            &event_sink,
+                        )
+                        .await;
+                    });
+                }
+                while let Some(joined) = tasks.join_next().await {
+                    if let Err(e) = joined {
+                        error!(error = %e, "Trigger event task panicked");
+                    }
                 }
             }
             Err(e) if is_consumer_group_missing(&e) => {
                 warn!(error = %e, "Trigger consumer group missing (Valkey restarted?)");
-                recreate_consumer_group(&mut consumer, &mut autoclaim_start_id).await;
+                recreate_consumer_group(&mut *consumer.lock().await, &mut autoclaim_start_id).await;
             }
             Err(e) => {
                 error!(error = %e, "Error reading from Valkey stream, retrying in 5 seconds");
@@ -268,10 +328,35 @@ async fn recreate_consumer_group(consumer: &mut StreamConsumer, autoclaim_start_
     }
 }
 
+/// How many events of one batch a trigger worker starts at once.
+///
+/// Starting an instance is dominated by waiting — the trigger lookup, the
+/// compilation check, then creating and launching the instance, roughly
+/// eighteen database round trips. Doing that one event at a time leaves the
+/// machine idle between round trips, which is what capped intake. This is the
+/// same shape of fix the wake scheduler already carries.
+///
+/// `RUNTARA_TRIGGER_CONCURRENCY`, defaulting to eight per core within sane
+/// bounds. Raising the *worker* count instead does not help: workers share one
+/// consumer group and contend, and the pending-entry autoclaim between them
+/// makes it actively worse.
+fn trigger_concurrency() -> usize {
+    std::env::var("RUNTARA_TRIGGER_CONCURRENCY")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map(|n| n.get().saturating_mul(8))
+                .unwrap_or(8)
+        })
+        .clamp(1, 512)
+}
+
 /// Process a single event from the stream
 #[allow(clippy::too_many_arguments)]
 async fn process_event(
-    consumer: &mut StreamConsumer,
+    acker: &StreamAcker,
     engine: &Arc<ExecutionEngine>,
     entry_id: &str,
     valkey_event: &crate::valkey::events::ValkeyEvent,
@@ -290,7 +375,7 @@ async fn process_event(
                 "Failed to parse trigger event, acknowledging and skipping"
             );
             // Acknowledge malformed events to prevent reprocessing
-            if let Err(ack_err) = consumer.acknowledge_event(entry_id).await {
+            if let Err(ack_err) = acker.acknowledge_event(entry_id).await {
                 error!(entry_id = %entry_id, error = %ack_err, "Failed to ACK malformed event");
             }
             return;
@@ -380,7 +465,7 @@ async fn process_event(
         ProcessResult::Success => {
             emit_fired("success");
             // Acknowledge successful processing
-            if let Err(e) = consumer.acknowledge_event(entry_id).await {
+            if let Err(e) = acker.acknowledge_event(entry_id).await {
                 error!(
                     entry_id = %entry_id,
                     error = %e,
@@ -398,7 +483,7 @@ async fn process_event(
         ProcessResult::Deduplicated => {
             // The original delivery owns execution and analytics. This replay
             // only closes the at-least-once delivery loop.
-            if let Err(ack_err) = consumer.acknowledge_event(entry_id).await {
+            if let Err(ack_err) = acker.acknowledge_event(entry_id).await {
                 error!(entry_id = %entry_id, error = %ack_err, "Failed to ACK deduplicated event");
             } else {
                 info!(
@@ -419,7 +504,7 @@ async fn process_event(
                 duration_ms = (duration * 1000.0) as u64,
                 "Event processing failed permanently"
             );
-            if let Err(ack_err) = consumer.acknowledge_event(entry_id).await {
+            if let Err(ack_err) = acker.acknowledge_event(entry_id).await {
                 error!(entry_id = %entry_id, error = %ack_err, "Failed to ACK failed event");
             }
         }
@@ -435,13 +520,13 @@ async fn process_event(
                 duration_ms = (duration * 1000.0) as u64,
                 "Workflow cannot run as authored"
             );
-            if let Err(ack_err) = consumer.acknowledge_event(entry_id).await {
+            if let Err(ack_err) = acker.acknowledge_event(entry_id).await {
                 error!(entry_id = %entry_id, error = %ack_err, "Failed to ACK unrunnable event");
             }
         }
         ProcessResult::RetryLater(ref reason) => {
             // Check delivery count to enforce max retries
-            let delivery_count = consumer.get_delivery_count(entry_id).await.unwrap_or(1); // Default to 1 if query fails
+            let delivery_count = acker.get_delivery_count(entry_id).await.unwrap_or(1); // Default to 1 if query fails
 
             if delivery_count >= max_retries {
                 emit_fired("failed");
@@ -459,7 +544,7 @@ async fn process_event(
                     m.trigger_events_failed.add(1, &attributes);
                 }
                 // ACK to remove from PEL
-                if let Err(ack_err) = consumer.acknowledge_event(entry_id).await {
+                if let Err(ack_err) = acker.acknowledge_event(entry_id).await {
                     error!(entry_id = %entry_id, error = %ack_err, "Failed to ACK exhausted event");
                 }
             } else if is_retry {
