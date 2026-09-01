@@ -432,45 +432,67 @@ impl ExecutionEngine {
     /// counter precisely because the runtime reflects real completion — an
     /// execution drops out of this count the instant it terminates, so the
     /// gate means "N concurrent", not "N started recently".
-    async fn active_execution_count(
-        &self,
-        tenant_id: &str,
-        ceiling: u64,
-    ) -> Result<u64, ExecutionError> {
+    fn active_execution_count(&self, tenant_id: &str, ceiling: u64) -> u64 {
         let reserved = self.reservations_for(tenant_id);
-        if let Some(entry) = self.concurrency_counts.get(tenant_id)
-            && entry.0.elapsed() < CONCURRENCY_COUNT_TTL
-        {
-            return Ok(entry.1.saturating_add(reserved.load(Ordering::SeqCst)));
+        let cached = self.concurrency_counts.get(tenant_id).map(|e| (e.0, e.1));
+
+        // Refresh behind the caller, never in front of it. The count reads a
+        // table that the same workload is churning, so its cost tracks dead
+        // tuples rather than the answer's size; on the request path that makes
+        // admission slower exactly when admissions are frequent. Answering from
+        // the last count keeps the decision honest, because every admission
+        // since it was taken is counted in `reserved` and added below.
+        let stale = cached.is_none_or(|(at, _)| at.elapsed() >= CONCURRENCY_COUNT_TTL);
+        if stale {
+            self.spawn_count_refresh(tenant_id.to_string(), ceiling);
         }
 
-        // One refresh at a time per tenant. A caller that finds one already
-        // running answers from the last count rather than starting another;
-        // that is still safe to admit on, because every admission since then
-        // has incremented `reserved` and is added below, so the figure only
-        // errs high while the refresh completes.
-        let refresh = self.refresh_lock_for(tenant_id);
-        let Ok(_refreshing) = refresh.try_lock() else {
-            let last = self
-                .concurrency_counts
-                .get(tenant_id)
-                .map(|entry| entry.1)
-                .unwrap_or(0);
-            return Ok(last.saturating_add(reserved.load(Ordering::SeqCst)));
-        };
+        cached
+            .map(|(_, count)| count)
+            .unwrap_or(0)
+            .saturating_add(reserved.load(Ordering::SeqCst))
+    }
 
-        // Snapshot before the query, not after: anything admitted while it is
-        // in flight is not in the result, so only the admissions this count
-        // subsumes may be forgiven.
-        let subsumed = reserved.load(Ordering::SeqCst);
-        let count = self
-            .count_active_executions_uncached(tenant_id, ceiling)
-            .await?;
-        let retained = retained_reservations(subsumed, reserved.load(Ordering::SeqCst));
-        reserved.store(retained, Ordering::SeqCst);
-        self.concurrency_counts
-            .insert(tenant_id.to_string(), (Instant::now(), count));
-        Ok(count.saturating_add(retained))
+    /// Refresh one tenant's count in the background, at most one at a time.
+    ///
+    /// Without the guard the TTL does not bound how often the count runs: every
+    /// caller past it would start another, and each concurrent count makes the
+    /// database slower, which widens the window and starts more of them.
+    fn spawn_count_refresh(&self, tenant_id: String, ceiling: u64) {
+        let Some(client) = self.runtime_client.clone() else {
+            return;
+        };
+        let refresh = self.refresh_lock_for(&tenant_id);
+        let reserved = self.reservations_for(&tenant_id);
+        let counts = Arc::clone(&self.concurrency_counts);
+
+        tokio::spawn(async move {
+            let Ok(_refreshing) = refresh.try_lock() else {
+                return;
+            };
+            // Snapshot before the query, not after: anything admitted while it
+            // is in flight is not in the result, so only the admissions this
+            // count subsumes may be forgiven.
+            let subsumed = reserved.load(Ordering::SeqCst);
+            let statuses = vec!["running".to_string(), "pending".to_string()];
+            match client
+                .count_instances_by_status(&tenant_id, &statuses, ceiling.saturating_add(1))
+                .await
+            {
+                Ok(count) => {
+                    let retained = retained_reservations(subsumed, reserved.load(Ordering::SeqCst));
+                    reserved.store(retained, Ordering::SeqCst);
+                    counts.insert(tenant_id, (Instant::now(), count));
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        tenant_id = %tenant_id,
+                        error = %e,
+                        "concurrency gate: background count failed, keeping the previous figure"
+                    );
+                }
+            }
+        });
     }
 
     /// The refresh mutex for a tenant, created on first use.
@@ -491,33 +513,6 @@ impl ExecutionEngine {
                 .or_insert_with(|| Arc::new(AtomicU64::new(0)))
                 .value(),
         )
-    }
-
-    /// The uncached two-status count behind [`Self::active_execution_count`].
-    async fn count_active_executions_uncached(
-        &self,
-        tenant_id: &str,
-        ceiling: u64,
-    ) -> Result<u64, ExecutionError> {
-        let Some(client) = self.runtime_client.as_ref() else {
-            // No runtime wired (e.g. trigger worker engine) — can't count.
-            return Ok(0);
-        };
-        // One count for both statuses, and a count rather than a list: the
-        // previous shape asked for a page of rows purely to read its
-        // total_count, and that discarded list was ~25x the cost of the count
-        // itself. Both scanned the whole table, so the gate slowed down as
-        // instances accumulated - throttling intake exactly when a large parked
-        // population had built up.
-        let statuses = vec!["running".to_string(), "pending".to_string()];
-        // `ceiling + 1` so the gate can still distinguish "at the cap" from
-        // "over it"; anything beyond that is indistinguishable to the decision.
-        client
-            .count_instances_by_status(tenant_id, &statuses, ceiling.saturating_add(1))
-            .await
-            .map_err(|e| {
-                ExecutionError::RuntimeError(format!("Failed to count active instances: {e}"))
-            })
     }
 
     /// Enforce `maxConcurrentExecutions` at intake. Returns the
@@ -560,17 +555,7 @@ impl ExecutionEngine {
             crate::config::raw_max_concurrent_executions(),
             snapshot.limits.max_concurrent_executions,
         ) as u64;
-        let active = match self.active_execution_count(tenant_id, cap).await {
-            Ok(n) => n,
-            Err(e) => {
-                tracing::warn!(
-                    tenant_id = %tenant_id,
-                    error = %e,
-                    "concurrency gate: failed to count active instances, allowing execution"
-                );
-                return Ok(());
-            }
-        };
+        let active = self.active_execution_count(tenant_id, cap);
         let decision = crate::middleware::entitlement::concurrent_executions_decision(
             snapshot,
             active,
@@ -2473,15 +2458,18 @@ mod tests {
         first.starting_workflows.lock().await.remove(&key);
     }
 
-    /// A refresh already in flight must not start another.
+    /// The gate must answer from memory, never from a query.
     ///
-    /// The count is only cheap when one runs at a time. Without this, a slow
-    /// count keeps every arriving intake past its TTL, so each starts its own
-    /// and the database gets slower, which keeps the next batch waiting too. A
-    /// count measured at 15ms standalone reached 11s per call this way, and
-    /// consumed 94% of all database time under load.
+    /// The count reads a table the same workload is churning, so its cost
+    /// tracks dead tuples rather than the size of the answer: measured at 15ms
+    /// standalone, it reached 11s per call under load and took 94% of all
+    /// database time. On the request path that makes admission slowest exactly
+    /// when admissions are most frequent, so the caller takes the last count
+    /// and a refresh happens behind it.
     #[tokio::test]
-    async fn a_refresh_in_flight_blocks_a_second_one() {
+    async fn the_gate_answers_from_memory_without_querying() {
+        // No runtime client, so any attempt to refresh in-band would have to
+        // fail or hang rather than silently succeed.
         let pool = sqlx::postgres::PgPoolOptions::new()
             .connect_lazy("postgres://unused/unused")
             .expect("lazy pool");
@@ -2496,8 +2484,7 @@ mod tests {
         );
         let tenant = format!("tenant-{}", uuid::Uuid::new_v4());
 
-        // Seed a count so a caller that finds the lock taken has one to answer
-        // from, and stamp it stale so the TTL cannot be what returns it.
+        // Deliberately stale, so the TTL cannot be what serves this.
         engine.concurrency_counts.insert(
             tenant.clone(),
             (
@@ -2507,25 +2494,18 @@ mod tests {
         );
         engine.reservations_for(&tenant).store(2, Ordering::SeqCst);
 
-        let held = engine.refresh_lock_for(&tenant);
-        let guard = held.lock().await;
-
-        // The lock is taken, so this must answer from the stale count plus the
-        // admissions since, and must not wait on the holder.
-        let seen = tokio::time::timeout(
-            Duration::from_secs(2),
-            engine.active_execution_count(&tenant, 100),
-        )
-        .await
-        .expect("must not block behind the in-flight refresh")
-        .expect("stale answer, not an error");
-
         assert_eq!(
-            seen, 9,
-            "expected the last count (7) plus admissions since (2); a caller \
-             that finds a refresh running must reuse it rather than start one"
+            engine.active_execution_count(&tenant, 100),
+            9,
+            "expected the last count (7) plus the admissions since (2); a stale \
+             entry must be answered from, not waited on"
         );
-        drop(guard);
+
+        // And with nothing cached at all it still answers rather than querying,
+        // counting only what this process has admitted.
+        let fresh = format!("tenant-{}", uuid::Uuid::new_v4());
+        engine.reservations_for(&fresh).store(3, Ordering::SeqCst);
+        assert_eq!(engine.active_execution_count(&fresh, 100), 3);
     }
 
     /// Admissions the gate has made but the cached count cannot see yet must
