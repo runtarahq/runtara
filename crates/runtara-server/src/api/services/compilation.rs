@@ -883,10 +883,9 @@ impl CompilationService {
             let mut result = runtara_workflows::direct_wasm::compile_direct_workflow_with_abi(
                 direct_input,
                 runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
-                // Blocking durable-sleep (store-freeing suspend stays gated) and
                 // omit-runtime "requested" — the AgentCapabilities arm decides
-                // the effective shape.
-                false,
+                // the effective shape. Durable steps published as an agent block
+                // regardless: the capability invoke has no wake to park on.
                 true,
             )?;
             runtara_workflows::direct_wasm::compose_direct_workflow_with_extra_dirs(

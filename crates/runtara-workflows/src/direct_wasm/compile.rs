@@ -781,8 +781,7 @@ pub fn compile_direct_workflow_composed_with_binding(
         components_dir,
         binding,
         super::component::WorkflowAbi::CliRunHttp,
-        // Legacy axes keep the blocking durable-sleep path and the runtime import.
-        false,
+        // Legacy axes keep the runtime import.
         false,
     )
 }
@@ -795,7 +794,6 @@ pub fn compile_direct_workflow_composed_configured(
     components_dir: impl AsRef<Path>,
     binding: super::component::RuntimeBinding,
     abi: super::component::WorkflowAbi,
-    store_freeing_sleep: bool,
     omit_runtime: bool,
 ) -> Result<DirectCompilationResult, DirectCompileError> {
     // Mirror the inner path's export-id derivation so the re-emitted world
@@ -811,8 +809,7 @@ pub fn compile_direct_workflow_composed_configured(
         }
         _ => None,
     };
-    let mut result =
-        compile_direct_workflow_with_abi(input, abi, store_freeing_sleep, omit_runtime)?;
+    let mut result = compile_direct_workflow_with_abi(input, abi, omit_runtime)?;
     let agent_ids: Vec<String> = result
         .component_artifacts
         .agent_components
@@ -868,30 +865,7 @@ const DIRECT_COMPILE_STACK_SIZE: usize = 256 * 1024 * 1024;
 pub fn compile_direct_workflow(
     input: DirectCompilationInput,
 ) -> Result<DirectCompilationResult, DirectCompileError> {
-    compile_direct_workflow_with_abi(
-        input,
-        workflow_abi_from_env(),
-        store_freeing_sleep_from_env(),
-        omit_runtime_from_env(),
-    )
-}
-
-/// Store-freeing durable-sleep gate for production compiles, from
-/// `RUNTARA_DIRECT_STORE_FREEING_SLEEP`. Default (unset or anything but a
-/// truthy value): OFF — durable Delay blocks in the host, byte-identical to the
-/// legacy path. Set to `1`/`true` to opt a compile into the exit-and-reschedule
-/// lowering (only takes effect under the invoke export). See
-/// [`super::compile::core_imports::DirectCoreFunctionIndices::store_freeing_sleep`].
-fn store_freeing_sleep_from_env() -> bool {
-    store_freeing_sleep_from_raw(
-        std::env::var("RUNTARA_DIRECT_STORE_FREEING_SLEEP")
-            .ok()
-            .as_deref(),
-    )
-}
-
-fn store_freeing_sleep_from_raw(raw: Option<&str>) -> bool {
-    matches!(raw, Some("1") | Some("true"))
+    compile_direct_workflow_with_abi(input, workflow_abi_from_env(), omit_runtime_from_env())
 }
 
 /// Opt-in to dropping the `runtara:workflow-runtime/runtime` import for a PURE,
@@ -901,7 +875,14 @@ fn store_freeing_sleep_from_raw(raw: Option<&str>) -> bool {
 /// to let eligible workflows compile agent-shaped (zero runtime imports). This
 /// is the compile lever behind workflow-as-agent.
 fn omit_runtime_from_env() -> bool {
-    store_freeing_sleep_from_raw(std::env::var("RUNTARA_DIRECT_OMIT_RUNTIME").ok().as_deref())
+    omit_runtime_from_raw(std::env::var("RUNTARA_DIRECT_OMIT_RUNTIME").ok().as_deref())
+}
+
+/// Truthiness for [`omit_runtime_from_env`]. Deliberately its OWN parser rather
+/// than one shared with a neighbouring lever: a shared parser turns any change
+/// to one gate's semantics into a silent change to the other's.
+fn omit_runtime_from_raw(raw: Option<&str>) -> bool {
+    matches!(raw, Some("1") | Some("true"))
 }
 
 /// Export shape for production compiles, from `RUNTARA_DIRECT_WORKFLOW_ABI` —
@@ -939,7 +920,6 @@ fn workflow_abi_from_raw(raw: Option<&str>) -> super::component::WorkflowAbi {
 pub fn compile_direct_workflow_with_abi(
     input: DirectCompilationInput,
     abi: super::component::WorkflowAbi,
-    store_freeing_sleep: bool,
     omit_runtime: bool,
 ) -> Result<DirectCompilationResult, DirectCompileError> {
     let span = tracing::Span::current();
@@ -948,7 +928,7 @@ pub fn compile_direct_workflow_with_abi(
         .stack_size(DIRECT_COMPILE_STACK_SIZE)
         .spawn(move || {
             let _span = span.entered();
-            compile_direct_workflow_inner(input, abi, store_freeing_sleep, omit_runtime)
+            compile_direct_workflow_inner(input, abi, omit_runtime)
         })
         .map_err(DirectCompileError::Io)?;
     match handle.join() {
@@ -960,7 +940,6 @@ pub fn compile_direct_workflow_with_abi(
 fn compile_direct_workflow_inner(
     input: DirectCompilationInput,
     abi: super::component::WorkflowAbi,
-    store_freeing_sleep: bool,
     omit_runtime_requested: bool,
 ) -> Result<DirectCompilationResult, DirectCompileError> {
     // The agent catalog is supplied by the caller (the server passes the
@@ -1059,7 +1038,6 @@ fn compile_direct_workflow_inner(
         input.track_events,
         &input.workflow_id,
         abi,
-        store_freeing_sleep,
         omit_runtime,
         export_agent_id.as_deref(),
     )?;
@@ -1149,7 +1127,6 @@ fn emit_direct_artifact(
     track_events: bool,
     workflow_id: &str,
     abi: super::component::WorkflowAbi,
-    store_freeing_sleep: bool,
     omit_runtime: bool,
     export_agent_id: Option<&str>,
 ) -> Result<(Vec<u8>, std::collections::BTreeMap<String, u32>), DirectCompileError> {
@@ -1202,7 +1179,6 @@ fn emit_direct_artifact(
         track_events,
         workflow_id,
         abi,
-        store_freeing_sleep,
         omit_runtime,
         export_agent_id,
     )?;
@@ -1228,14 +1204,12 @@ fn emit_direct_component(
     track_events: bool,
     workflow_id: &str,
     abi: super::component::WorkflowAbi,
-    store_freeing_sleep: bool,
     omit_runtime: bool,
     export_agent_id: Option<&str>,
 ) -> Result<(Vec<u8>, std::collections::BTreeMap<String, u32>), DirectCompileError> {
     let core_config =
         DirectCoreConfig::new_with_workflow_id(manifest, manifest_json, track_events, workflow_id)?
             .with_abi(abi)
-            .with_store_freeing_sleep(store_freeing_sleep)
             .with_omit_runtime(omit_runtime);
     // Parallel-split instance pools: each
     // pooled agent contributes phantom world imports (`…-par<n>`) that the wac

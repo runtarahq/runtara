@@ -784,7 +784,7 @@ fn route(
                 );
             }
             ("POST", "sleep") => {
-                capture_sleep(body, sink);
+                capture_sleep(body, sink, server_state);
                 return (200, serde_json::json!({"success": true}));
             }
             ("POST", "failed") => {
@@ -896,7 +896,10 @@ fn capture_event(body: &[u8], sink: &mpsc::Sender<CapturedMessage>) {
     }
 }
 
-fn capture_sleep(body: &[u8], sink: &mpsc::Sender<CapturedMessage>) {
+/// Mirror production `handle_sleep`: persist the checkpoint, then (here) skip
+/// the sleep itself. See [`CapturingRuntimeHost::durable_sleep_checkpoint`] for
+/// why the save has to happen even though the wait does not.
+fn capture_sleep(body: &[u8], sink: &mpsc::Sender<CapturedMessage>, server_state: &ServerState) {
     if let Ok(parsed) = serde_json::from_slice::<Value>(body)
         && let Some(checkpoint_id) = parsed.get("checkpoint_id").and_then(Value::as_str)
     {
@@ -909,6 +912,11 @@ fn capture_sleep(body: &[u8], sink: &mpsc::Sender<CapturedMessage>) {
             .and_then(Value::as_str)
             .and_then(|b64| base64::engine::general_purpose::STANDARD.decode(b64).ok())
             .unwrap_or_default();
+        server_state
+            .checkpoints
+            .lock()
+            .expect("checkpoint state lock")
+            .insert(checkpoint_id.to_string(), state.clone());
         let _ = sink.send(CapturedMessage::Sleep(SleepRequest {
             checkpoint_id: checkpoint_id.to_string(),
             duration_ms,
@@ -1268,9 +1276,6 @@ fn run_direct_workflow_capture_attempt(
         components_dir,
         binding,
         abi,
-        // The battery axis exercises the blocking durable-sleep path; the
-        // store-freeing lowering has its own dedicated suspend/resume test.
-        false,
         // Runtime import kept — omit-runtime has its own dedicated test.
         false,
     )
@@ -1611,8 +1616,17 @@ impl runtara_component_host::runtime_host::RuntimeHost for CapturingRuntimeHost 
         state: Vec<u8>,
         ms: u64,
     ) -> Result<(), String> {
-        // Mirror POST /sleep: capture only — the mock neither persists the
-        // checkpoint nor sleeps, keeping delay-heavy fixtures fast.
+        // Mirror POST /sleep, which mirrors production `handle_sleep`: SAVE the
+        // checkpoint, then sleep. The save is not optional the way it reads —
+        // it moves the instance's current checkpoint — so a mock that skipped it
+        // diverged from production on every durable Delay. The sleep itself is
+        // still skipped, which is what keeps delay-heavy fixtures fast; that is
+        // a timing shortcut, not a persistence one.
+        self.state
+            .checkpoints
+            .lock()
+            .expect("checkpoint state lock")
+            .insert(checkpoint_id.clone(), state.clone());
         self.send(CapturedMessage::Sleep(SleepRequest {
             checkpoint_id,
             duration_ms: ms,
@@ -1654,6 +1668,29 @@ fn execute_via_cli(wasm_path: &Path, env_pairs: &[(String, String)]) -> (bool, S
 /// keep flowing through the additive complete/fail recordings the
 /// CapturingRuntimeHost already mirrors — the CapturedRun shape is identical
 /// across all three execution paths.
+/// Relaunch budget for a parked run on the invoke axis. A fixture parks at most
+/// once per durable step; four covers every fixture in the battery with room to
+/// spare, and bounds a lowering bug that parks in a loop.
+const INVOKE_MAX_RELAUNCHES: usize = 4;
+
+/// Whether the wake scheduler would relaunch a park carrying these wakes.
+///
+/// Mirrors `park_invoke_suspend` in runtara-environment: a TIMED wake (`at`, or
+/// `on-signal` with a timeout) gets `sleep_until` stamped and is relaunched at
+/// the deadline, while a park whose only wake is `on-resume` — a cancel ack, a
+/// breakpoint, a drain pause — is deliberately left alone. Relaunching one of
+/// those would resurrect a run the host just stopped, so this is what keeps the
+/// loop below from turning a cancel into a completion.
+fn scheduler_would_relaunch(wakes: &[runtara_component_host::lifecycle::WorkflowWake]) -> bool {
+    use runtara_component_host::lifecycle::WorkflowWake;
+    !wakes.is_empty()
+        && wakes.iter().all(|wake| match wake {
+            WorkflowWake::At(_) => true,
+            WorkflowWake::OnSignal(wait) => wait.deadline_ms.is_some(),
+            WorkflowWake::OnResume => false,
+        })
+}
+
 fn execute_via_embedded_invoke(
     wasm_path: &Path,
     env_pairs: &[(String, String)],
@@ -1670,25 +1707,43 @@ fn execute_via_embedded_invoke(
         limits.max_memory_bytes = max;
     }
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+    // Stand in for the wake scheduler: a parked run is not a finished run, so
+    // relaunch it (replaying against the same mock state, exactly as a
+    // relaunched instance replays against the same durable store) until it
+    // reaches a terminal outcome. Without this the harness sees only the park —
+    // which is fine while nothing parks, and wrong the moment a durable Delay
+    // or a Wait timeout does.
     let result = runtime.block_on(async {
         let pre = executor
             .load_instance_pre(wasm_path)
             .await
             .expect("load invoke-shaped workflow component");
-        executor
-            .execute_invoke(
-                &pre,
-                runtara_component_host::WorkflowRunSpec {
-                    env: env_pairs.iter().cloned().collect(),
-                    stderr: None,
-                    timeout: Duration::from_secs(300),
-                    cancel: None,
-                    limits,
-                    runtime: Some(runtime_host),
-                },
-                input,
-            )
-            .await
+        let mut attempt = 0;
+        loop {
+            let result = executor
+                .execute_invoke(
+                    &pre,
+                    runtara_component_host::WorkflowRunSpec {
+                        env: env_pairs.iter().cloned().collect(),
+                        stderr: None,
+                        timeout: Duration::from_secs(300),
+                        cancel: None,
+                        limits: limits.clone(),
+                        runtime: Some(runtime_host.clone()),
+                    },
+                    input.clone(),
+                )
+                .await;
+            let relaunch = matches!(
+                &result.exit,
+                runtara_component_host::InvokeExit::Suspended(wakes)
+                    if scheduler_would_relaunch(wakes)
+            );
+            if !relaunch || attempt == INVOKE_MAX_RELAUNCHES {
+                break result;
+            }
+            attempt += 1;
+        }
     });
     let peak = Some(result.memory_peak_bytes);
     match result.exit {
@@ -2270,7 +2325,6 @@ fn direct_wasm_execute_host_import_runtime_runs_without_http() {
             agent_slug: None,
         },
         WorkflowAbi::CliRunHttp,
-        false,
         false,
     )
     .expect("direct emit succeeds");
@@ -4652,6 +4706,11 @@ fn direct_wasm_execute_durable_delay_reports_sleep_and_completion() {
     assert_eq!(sleep.checkpoint_id, "delay");
     assert_eq!(sleep.duration_ms, 0);
     assert!(sleep.state.is_empty());
+    // No GUEST-side `checkpoint` call: a blocking delay reaches persistence only
+    // through the sleep. The checkpoint itself is still written — production
+    // `handle_sleep` saves one before sleeping, and the mock now does too — so
+    // this asserts the shape of the call the guest made, not that the sleep left
+    // nothing behind.
     assert!(result.checkpoints.is_empty());
 }
 
@@ -6393,29 +6452,13 @@ fn compile_invoke_abi_artifact(
     workflow_id: &str,
     graph_json: &str,
 ) -> runtara_workflows::direct_wasm::DirectCompilationResult {
-    compile_invoke_abi_artifact_configured(components_dir, workflow_id, graph_json, false)
-}
-
-fn compile_invoke_abi_artifact_configured(
-    components_dir: &Path,
-    workflow_id: &str,
-    graph_json: &str,
-    store_freeing_sleep: bool,
-) -> runtara_workflows::direct_wasm::DirectCompilationResult {
-    compile_invoke_abi_artifact_full(
-        components_dir,
-        workflow_id,
-        graph_json,
-        store_freeing_sleep,
-        false,
-    )
+    compile_invoke_abi_artifact_full(components_dir, workflow_id, graph_json, false)
 }
 
 fn compile_invoke_abi_artifact_full(
     components_dir: &Path,
     workflow_id: &str,
     graph_json: &str,
-    store_freeing_sleep: bool,
     omit_runtime: bool,
 ) -> runtara_workflows::direct_wasm::DirectCompilationResult {
     let graph: ExecutionGraph = serde_json::from_str(graph_json).expect("fixture parses");
@@ -6437,7 +6480,6 @@ fn compile_invoke_abi_artifact_full(
         components_dir,
         RuntimeBinding::HostImport,
         runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
-        store_freeing_sleep,
         omit_runtime,
     )
     .expect("invoke-abi compile+compose succeeds");
@@ -6478,7 +6520,6 @@ fn direct_wasm_execute_invoke_omit_runtime_pure_workflow_runs_with_no_runtime_ho
         &components_dir,
         "omit-runtime-pure",
         PURE_PASSTHROUGH,
-        false,
         true,
     );
 
@@ -6539,7 +6580,6 @@ fn direct_wasm_execute_invoke_omit_runtime_pure_workflow_runs_with_no_runtime_ho
         "omit-runtime-off",
         PURE_PASSTHROUGH,
         false,
-        false,
     );
     assert!(!kept.omit_runtime);
     assert!(
@@ -6555,7 +6595,6 @@ fn direct_wasm_execute_invoke_omit_runtime_pure_workflow_runs_with_no_runtime_ho
         &components_dir,
         "omit-runtime-guarded",
         AGENT_CACHED_REPLAY,
-        false,
         true,
     );
     assert!(
@@ -6592,7 +6631,6 @@ fn compile_agent_capabilities_artifact(
         components_dir,
         RuntimeBinding::HostImport,
         runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
-        false,
         // omit_runtime is forced true for AgentCapabilities by the compiler.
         false,
     )
@@ -6663,8 +6701,8 @@ fn direct_wasm_execute_agent_capabilities_workflow_invocable_as_agent() {
 #[test]
 fn direct_wasm_execute_agent_capabilities_keeps_runtime_for_durable_workflow() {
     let components_dir = direct_e2e_components_dir();
-    let graph: ExecutionGraph =
-        serde_json::from_str(STORE_FREEING_DELAY).expect("delay fixture parses");
+    let graph: ExecutionGraph = serde_json::from_str(&store_freeing_delay_fixture(Some(3_600_000)))
+        .expect("delay fixture parses");
     let temp = tempfile::tempdir().expect("tempdir");
     let compiled = compile_direct_workflow_composed_configured(
         DirectCompilationInput {
@@ -6681,7 +6719,6 @@ fn direct_wasm_execute_agent_capabilities_keeps_runtime_for_durable_workflow() {
         &components_dir,
         RuntimeBinding::HostImport,
         runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
-        false,
         false,
     )
     .expect("a durable workflow now compiles as an agent");
@@ -6738,7 +6775,6 @@ fn direct_wasm_execute_agent_capabilities_keeps_runtime_for_durable_workflow() {
             &components_dir,
             RuntimeBinding::HostImport,
             runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
-            false,
             false,
         )
         .expect("agent compile succeeds")
@@ -7015,30 +7051,48 @@ fn direct_wasm_execute_split_durable_delay_keys_are_per_iteration() {
 /// A single durable Delay whose only job downstream is to echo the input, so
 /// the store-freeing (suspend/relaunch) and blocking (in-host sleep) lowerings
 /// are trivially comparable at the output.
-const STORE_FREEING_DELAY: &str = r#"{
+/// A single durable Delay then a Finish echoing the input. `duration` is the
+/// literal `durationMs` when `Some`, and a REFERENCE to `data.waitMs` when
+/// `None` — the reference form is what makes the park/block choice unresolvable
+/// at compile time, so one artifact has to decide it at runtime.
+fn store_freeing_delay_fixture(duration_ms: Option<u64>) -> String {
+    let (duration, extra_input) = match duration_ms {
+        Some(ms) => (
+            format!(r#"{{ "valueType": "immediate", "value": {ms} }}"#),
+            String::new(),
+        ),
+        None => (
+            r#"{ "valueType": "reference", "value": "data.waitMs" }"#.to_string(),
+            r#", "waitMs": { "type": "number", "required": true }"#.to_string(),
+        ),
+    };
+    format!(
+        r#"{{
   "name": "Store Freeing Delay",
   "durable": true,
-  "steps": {
-    "delay": {
+  "steps": {{
+    "delay": {{
       "stepType": "Delay",
       "id": "delay",
       "name": "Wait",
-      "durationMs": { "valueType": "immediate", "value": 3600000 }
-    },
-    "finish": {
+      "durationMs": {duration}
+    }},
+    "finish": {{
       "stepType": "Finish",
       "id": "finish",
-      "inputMapping": {
-        "echo": { "valueType": "reference", "value": "data.value" }
-      }
-    }
-  },
+      "inputMapping": {{
+        "echo": {{ "valueType": "reference", "value": "data.value" }}
+      }}
+    }}
+  }},
   "entryPoint": "delay",
-  "executionPlan": [ { "fromStep": "delay", "toStep": "finish" } ],
-  "variables": {},
-  "inputSchema": { "value": { "type": "string", "required": true } },
-  "outputSchema": {}
-}"#;
+  "executionPlan": [ {{ "fromStep": "delay", "toStep": "finish" }} ],
+  "variables": {{}},
+  "inputSchema": {{ "value": {{ "type": "string", "required": true }}{extra_input} }},
+  "outputSchema": {{}}
+}}"#
+    )
+}
 
 /// Checkpoint-persisting runtime host: unlike [`RecordingRuntimeHost`] its
 /// checkpoint map survives across `execute_invoke` calls (share one `Arc`), so
@@ -7078,6 +7132,16 @@ impl CheckpointingRuntimeHost {
             .lock()
             .unwrap()
             .insert(checkpoint_id.to_string(), payload.to_vec());
+    }
+
+    /// Whether a custom signal is armed for `checkpoint_id` — what the
+    /// wake-scheduler stand-in consults before relaunching an on-signal park.
+    fn has_signal(&self, checkpoint_id: &str) -> bool {
+        self.custom_signals
+            .lock()
+            .unwrap()
+            .contains_key(checkpoint_id)
+            || self.any_signal.lock().unwrap().is_some()
     }
 
     fn deliver_signal_any(&self, payload: &[u8]) {
@@ -7233,40 +7297,132 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
-/// Store-freeing Slice 2: with the gate ON, a durable Delay under the invoke
-/// export EXITS with `suspended(at(deadline))` on first reach (freeing the
-/// Store) and, on relaunch, HITS the deadline checkpoint and skips the sleep —
-/// completing with output byte-identical to the blocking lowering. This is the
-/// in-process stand-in for the wake scheduler: the two invokes share one
-/// checkpoint-persisting host, exactly as a relaunched instance shares the
-/// durable checkpoint store.
+/// What a parked run did on one leg of a [`drive_wake_scheduler`] loop.
+#[derive(Debug)]
+enum ParkLeg {
+    /// The run exited `suspended`, carrying these wakes.
+    Parked(Vec<runtara_component_host::lifecycle::WorkflowWake>),
+    /// The run reached a terminal outcome and the loop stopped.
+    Finished(runtara_component_host::InvokeExit),
+}
+
+/// In-process stand-in for the wake scheduler: relaunch a parked run until it
+/// reaches a terminal outcome, returning every leg in order.
+///
+/// The harness previously invoked exactly once, which cannot be right once a
+/// delay parks — a single invoke sees the suspend and nothing after it. This
+/// drives the real production shape: park, decide, relaunch, replay.
+///
+/// It honours both wake shapes the host supports, refusing to relaunch a park
+/// that production would leave parked:
+///
+/// - `at(deadline)` — a timed park. The scheduler relaunches when the deadline
+///   passes; the GUEST never re-checks it (its checkpoint HIT is what skips the
+///   sleep), so the deadline is purely host-side bookkeeping and a relaunch is
+///   always safe to issue here. Time is not virtualisable in this harness —
+///   `now-ms` is a free function in the host crate, not a `RuntimeHost` method —
+///   so the loop relaunches immediately rather than burning the wall clock, and
+///   callers assert the deadline VALUE separately.
+/// - `on-signal{deadline}` — a signal park. Relaunching is only legitimate once
+///   `deliver` has armed the awaited signal or a timeout deadline exists; a park
+///   with neither would sit forever in production, so the loop stops rather than
+///   spinning and hiding that.
+///
+/// `deliver` is the custom-signal waker: it runs on each park and may deliver a
+/// signal for the id the wake reported.
+fn drive_wake_scheduler(
+    wasm_path: &Path,
+    host: Arc<CheckpointingRuntimeHost>,
+    input: Vec<u8>,
+    max_relaunches: usize,
+    mut deliver: impl FnMut(
+        usize,
+        &CheckpointingRuntimeHost,
+        &[runtara_component_host::lifecycle::WorkflowWake],
+    ),
+) -> Vec<ParkLeg> {
+    use runtara_component_host::lifecycle::WorkflowWake;
+
+    let mut legs = Vec::new();
+    for relaunch in 0..=max_relaunches {
+        let exit = run_invoke_once(wasm_path, host.clone(), input.clone());
+        let runtara_component_host::InvokeExit::Suspended(wakes) = exit else {
+            legs.push(ParkLeg::Finished(exit));
+            return legs;
+        };
+        deliver(relaunch, host.as_ref(), &wakes);
+        let wakeable = wakes.iter().any(|wake| match wake {
+            WorkflowWake::At(_) => true,
+            WorkflowWake::OnSignal(wait) => {
+                wait.deadline_ms.is_some() || host.has_signal(&wait.checkpoint_id)
+            }
+            WorkflowWake::OnResume => false,
+        });
+        legs.push(ParkLeg::Parked(wakes));
+        assert!(
+            wakeable,
+            "leg {relaunch} parked with no wake the scheduler could act on; \
+             production would leave this instance parked forever"
+        );
+    }
+    panic!("run did not finish within {max_relaunches} relaunches");
+}
+
+impl ParkLeg {
+    fn wakes(&self) -> &[runtara_component_host::lifecycle::WorkflowWake] {
+        match self {
+            ParkLeg::Parked(wakes) => wakes,
+            ParkLeg::Finished(exit) => panic!("expected a park, got {exit:?}"),
+        }
+    }
+
+    fn output(&self) -> &[u8] {
+        match self {
+            ParkLeg::Finished(runtara_component_host::InvokeExit::Completed(output)) => output,
+            other => panic!("expected a completed run, got {other:?}"),
+        }
+    }
+}
+
+/// A durable Delay at or above the park threshold under the invoke export
+/// EXITS with `suspended(at(deadline))` on first reach — freeing the Store —
+/// and, on relaunch, HITS the deadline checkpoint and skips the sleep,
+/// completing with output byte-identical to the blocking arm a SHORT delay
+/// takes. The two invokes share one checkpoint-persisting host, exactly as a
+/// relaunched instance shares the durable checkpoint store.
+///
+/// This is the behaviour that used to sit behind `RUNTARA_DIRECT_STORE_FREEING_SLEEP`,
+/// set nowhere; the gate is gone and duration alone decides.
 #[test]
-fn direct_wasm_execute_invoke_store_freeing_delay_suspends_then_resumes() {
+fn direct_wasm_execute_invoke_long_delay_parks_then_resumes() {
     let components_dir = direct_e2e_components_dir();
     let input = br#"{"value":"resume-me"}"#.to_vec();
     let duration_ms = 3_600_000u64;
 
-    // --- Store-freeing lowering (gate ON): suspend, then resume. ---
-    let store_freeing = compile_invoke_abi_artifact_configured(
+    // --- At/above the threshold: park, then resume. ---
+    let parking = compile_invoke_abi_artifact(
         &components_dir,
-        "store-freeing-delay-on",
-        STORE_FREEING_DELAY,
-        true,
+        "delay-park-long",
+        &store_freeing_delay_fixture(Some(duration_ms)),
     );
     let host = Arc::new(CheckpointingRuntimeHost::new(&input));
 
     let before = now_ms();
-    let first = run_invoke_once(&store_freeing.wasm_path, host.clone(), input.clone());
+    let legs = drive_wake_scheduler(
+        &parking.wasm_path,
+        host.clone(),
+        input.clone(),
+        1,
+        |_, _, _| {},
+    );
     let after = now_ms();
 
-    let wakes = match first {
-        runtara_component_host::InvokeExit::Suspended(wakes) => wakes,
-        other => panic!("first invoke must suspend, got {other:?}"),
-    };
+    assert_eq!(legs.len(), 2, "one park then one completing relaunch");
+    let wakes = legs[0].wakes();
     assert_eq!(wakes.len(), 1, "sequential lowering emits one wake");
     let deadline = match &wakes[0] {
         runtara_component_host::lifecycle::WorkflowWake::At(ms) => *ms,
-        other => panic!("durable Delay must suspend on a timed wake, got {other:?}"),
+        other => panic!("a long durable Delay must park on a timed wake, got {other:?}"),
     };
     // deadline == now_ms(at suspend) + duration, and the suspend happened
     // between `before` and `after`.
@@ -7280,60 +7436,150 @@ fn direct_wasm_execute_invoke_store_freeing_delay_suspends_then_resumes() {
     // sleep fired.
     assert!(
         host.checkpoints.lock().unwrap().contains_key("delay"),
-        "store-freeing suspend must checkpoint its deadline under the delay key"
+        "a park must checkpoint its deadline under the delay key"
     );
     assert!(
         host.sleeps.lock().unwrap().is_empty(),
-        "store-freeing lowering must not call the blocking durable-sleep host fn"
+        "a parked delay must not call the blocking durable-sleep host fn — \
+         not on the park, and not on the resume whose checkpoint HIT skips it"
     );
-    assert!(
-        host.completed.lock().unwrap().is_none(),
-        "a suspended run has not completed yet"
-    );
+    let resumed_output = legs[1].output().to_vec();
 
-    // Relaunch: same host (checkpoint survives), replay from the start. The
-    // deadline checkpoint HITS, the sleep is skipped, and the run completes.
-    let second = run_invoke_once(&store_freeing.wasm_path, host.clone(), input.clone());
-    let resumed_output = match second {
-        runtara_component_host::InvokeExit::Completed(output) => output,
-        other => panic!("relaunch must complete, got {other:?}"),
-    };
-    assert!(
-        host.sleeps.lock().unwrap().is_empty(),
-        "resume must not block either — the checkpoint HIT skips the sleep"
-    );
-
-    // --- Blocking lowering (gate OFF): completes in ONE invoke. ---
-    let blocking = compile_invoke_abi_artifact_configured(
+    // --- Below the threshold: blocks, completing in ONE invoke. ---
+    let blocking = compile_invoke_abi_artifact(
         &components_dir,
-        "store-freeing-delay-off",
-        STORE_FREEING_DELAY,
-        false,
+        "delay-park-short",
+        &store_freeing_delay_fixture(Some(25)),
     );
     let blocking_host = Arc::new(CheckpointingRuntimeHost::new(&input));
     let blocking_exit = run_invoke_once(&blocking.wasm_path, blocking_host.clone(), input.clone());
     let blocking_output = match blocking_exit {
         runtara_component_host::InvokeExit::Completed(output) => output,
-        other => panic!("blocking Delay must complete in one invoke, got {other:?}"),
+        other => panic!("a short Delay must block and complete in one invoke, got {other:?}"),
     };
-    // The blocking path DID call the durable-sleep host fn (its whole point),
-    // proving the two lowerings diverge internally...
+    // The blocking arm DID call the durable-sleep host fn (its whole point),
+    // proving the two arms diverge internally...
     assert_eq!(
         blocking_host.sleeps.lock().unwrap().as_slice(),
         &["delay".to_string()],
-        "blocking lowering must go through durable-sleep-checkpoint"
+        "the blocking arm must go through durable-sleep-checkpoint"
     );
 
-    // ...yet converge on byte-identical observable output. This is the
-    // "semantics == legacy blocking, byte-preserved" guarantee.
+    // ...yet converge on byte-identical observable output. Which arm a delay
+    // takes must not be visible to the workflow.
     assert_eq!(
         resumed_output, blocking_output,
-        "store-freeing resume output must byte-match the blocking output"
+        "a resumed park's output must byte-match the blocking arm's"
     );
     let expected: Value = serde_json::json!({ "echo": "resume-me" });
     assert_eq!(
         serde_json::from_slice::<Value>(&resumed_output).expect("output is JSON"),
         expected
+    );
+}
+
+/// The park/block choice is made at RUNTIME, not compile time: ONE artifact,
+/// whose `durationMs` is a reference the emitter cannot resolve, blocks on a
+/// short input and parks on a long one. Both arms are therefore emitted into
+/// every durable delay under the invoke export — which is the whole reason the
+/// threshold could not be a compile-time decision.
+#[test]
+fn direct_wasm_execute_invoke_delay_threshold_is_decided_at_runtime() {
+    let components_dir = direct_e2e_components_dir();
+    let artifact = compile_invoke_abi_artifact(
+        &components_dir,
+        "delay-threshold-runtime",
+        &store_freeing_delay_fixture(None),
+    );
+
+    // Same wasm, short duration: blocks through to completion in one invoke.
+    let short_input = br#"{"value":"short","waitMs":25}"#.to_vec();
+    let short_host = Arc::new(CheckpointingRuntimeHost::new(&short_input));
+    let short_exit = run_invoke_once(&artifact.wasm_path, short_host.clone(), short_input.clone());
+    assert!(
+        matches!(short_exit, runtara_component_host::InvokeExit::Completed(_)),
+        "a below-threshold duration must block, got {short_exit:?}"
+    );
+    assert_eq!(
+        short_host.sleeps.lock().unwrap().as_slice(),
+        &["delay".to_string()],
+        "a below-threshold duration must go through durable-sleep-checkpoint"
+    );
+    assert!(
+        short_host.checkpoints.lock().unwrap().is_empty(),
+        "the blocking arm writes no guest-side deadline checkpoint"
+    );
+
+    // Same wasm, long duration: parks on a timed wake instead.
+    let long_input = br#"{"value":"long","waitMs":3600000}"#.to_vec();
+    let long_host = Arc::new(CheckpointingRuntimeHost::new(&long_input));
+    let long_legs = drive_wake_scheduler(
+        &artifact.wasm_path,
+        long_host.clone(),
+        long_input.clone(),
+        1,
+        |_, _, _| {},
+    );
+    assert!(
+        matches!(
+            long_legs[0].wakes().first(),
+            Some(runtara_component_host::lifecycle::WorkflowWake::At(_))
+        ),
+        "an at-or-above-threshold duration must park on a timed wake, got {:?}",
+        long_legs[0]
+    );
+    assert!(
+        long_host.sleeps.lock().unwrap().is_empty(),
+        "a parked delay must not block"
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(long_legs[1].output()).expect("output is JSON"),
+        serde_json::json!({ "echo": "long" }),
+    );
+}
+
+/// The `wasi:cli/run` export blocks a long Delay even though the invoke export
+/// parks the identical graph. What survived the gate's deletion is a CAPABILITY
+/// check, not a policy one: `cli-run` has no success arm that can carry a wake,
+/// so it has nowhere to put a deadline and must block.
+#[test]
+fn direct_wasm_execute_cli_run_abi_blocks_a_long_delay() {
+    let components_dir = direct_e2e_components_dir();
+    let graph: ExecutionGraph = serde_json::from_str(&store_freeing_delay_fixture(Some(3_600_000)))
+        .expect("delay fixture parses");
+    let temp = tempfile::tempdir().expect("tempdir");
+    let compiled = compile_direct_workflow_composed_configured(
+        DirectCompilationInput {
+            workflow_id: "delay-cli-run-blocks".to_string(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: graph,
+            child_workflows: vec![],
+            output_dir: temp.path().to_path_buf(),
+            track_events: false,
+            agent_catalog: None,
+            agent_slug: None,
+        },
+        &components_dir,
+        RuntimeBinding::HostImport,
+        runtara_workflows::direct_wasm::WorkflowAbi::CliRunHttp,
+        false,
+    )
+    .expect("cli-run compile+compose succeeds");
+
+    let input = br#"{"value":"cli-run"}"#.to_vec();
+    let host = Arc::new(CheckpointingRuntimeHost::new(&input));
+    let (ok, stderr, _) = execute_via_embedded(&compiled.wasm_path, &[], Some(host.clone()));
+    assert!(ok, "cli-run artifact must run to completion: {stderr}");
+
+    assert_eq!(
+        host.sleeps.lock().unwrap().as_slice(),
+        &["delay".to_string()],
+        "under cli-run even an hours-long Delay must block on durable-sleep-checkpoint"
+    );
+    assert!(
+        host.checkpoints.lock().unwrap().is_empty(),
+        "cli-run has no wake to carry a deadline, so it must write no deadline checkpoint"
     );
 }
 
@@ -7363,39 +7609,48 @@ const STORE_FREEING_WAIT: &str = r#"{
   "outputSchema": {}
 }"#;
 
-/// Store-freeing Slice 2 (on-signal waker half): with the gate ON, a durable
-/// WaitForSignal under the invoke export EXITS with
-/// `suspended(on-signal{signal-id, deadline})` on the first poll MISS (freeing
-/// the Store) instead of blocking the poll loop. On relaunch — the in-process
-/// stand-in for the custom-signal waker delivering the signal then the wake
-/// scheduler relaunching — the wait re-polls the now-present signal and
-/// completes. A no-timeout wait carries NO deadline (the waker is the sole wake
-/// path); the blocking lowering (gate OFF) reaches the same output.
+/// A durable WaitForSignal under the invoke export EXITS with
+/// `suspended(on-signal{signal-id, deadline})` on the first poll MISS — freeing
+/// the Store — instead of blocking the poll loop. The wake-scheduler stand-in
+/// then plays the custom-signal waker: it delivers the signal for the id the
+/// wake reported and relaunches, and the replayed wait re-polls the now-present
+/// signal and completes.
+///
+/// A no-timeout wait carries NO deadline (the waker is the sole wake path),
+/// which is exactly the shape the stand-in refuses to relaunch until a signal
+/// is armed. Unlike a Delay, no duration threshold applies: a Wait is
+/// open-ended by construction.
 #[test]
-fn direct_wasm_execute_invoke_store_freeing_wait_suspends_on_signal_then_resumes() {
+fn direct_wasm_execute_invoke_wait_parks_on_signal_then_resumes() {
     let components_dir = direct_e2e_components_dir();
     let input = br#"{}"#.to_vec();
 
-    let artifact = compile_invoke_abi_artifact_configured(
-        &components_dir,
-        "store-freeing-wait-on",
-        STORE_FREEING_WAIT,
-        true,
-    );
+    let artifact = compile_invoke_abi_artifact(&components_dir, "wait-park", STORE_FREEING_WAIT);
     let host = Arc::new(CheckpointingRuntimeHost::new(&input));
 
-    // Invoke #1: the signal is absent, so the wait suspends on-signal.
-    let first = run_invoke_once(&artifact.wasm_path, host.clone(), input.clone());
-    let wakes = match first {
-        runtara_component_host::InvokeExit::Suspended(wakes) => wakes,
-        other => panic!("first invoke must suspend, got {other:?}"),
-    };
+    let legs = drive_wake_scheduler(
+        &artifact.wasm_path,
+        host.clone(),
+        input.clone(),
+        1,
+        |_, host, wakes| {
+            // The custom-signal waker: arm the signal the park is waiting on.
+            for wake in wakes {
+                if let runtara_component_host::lifecycle::WorkflowWake::OnSignal(wait) = wake {
+                    host.deliver_signal(&wait.checkpoint_id, br#"{"approved": true}"#);
+                }
+            }
+        },
+    );
+
+    assert_eq!(legs.len(), 2, "one park then one completing relaunch");
+    let wakes = legs[0].wakes();
     assert_eq!(wakes.len(), 1, "sequential lowering emits one wake");
     let (checkpoint_id, deadline) = match &wakes[0] {
         runtara_component_host::lifecycle::WorkflowWake::OnSignal(wait) => {
             (wait.checkpoint_id.clone(), wait.deadline_ms)
         }
-        other => panic!("a WaitForSignal must suspend on-signal, got {other:?}"),
+        other => panic!("a WaitForSignal must park on-signal, got {other:?}"),
     };
     assert!(
         !checkpoint_id.is_empty(),
@@ -7403,49 +7658,35 @@ fn direct_wasm_execute_invoke_store_freeing_wait_suspends_on_signal_then_resumes
     );
     assert_eq!(
         deadline, None,
-        "a no-timeout wait suspends without a deadline (waker is the sole wake path)"
+        "a no-timeout wait parks without a deadline (waker is the sole wake path)"
     );
     assert!(
         host.sleeps.lock().unwrap().is_empty(),
-        "store-freeing wait must not block on the poll interval"
+        "a parked wait must not block on the poll interval"
     );
-    assert!(host.completed.lock().unwrap().is_none());
-
-    // Deliver the signal for the id the wake reported (the waker stand-in),
-    // then relaunch (same host: the signal store + any checkpoints survive).
-    host.deliver_signal(&checkpoint_id, br#"{"approved": true}"#);
-    let second = run_invoke_once(&artifact.wasm_path, host.clone(), input.clone());
-    let output = match second {
-        runtara_component_host::InvokeExit::Completed(output) => output,
-        other => panic!("relaunch after signal must complete, got {other:?}"),
-    };
+    let output = legs[1].output().to_vec();
     assert_eq!(
         serde_json::from_slice::<Value>(&output).expect("output is JSON"),
         serde_json::json!({ "approved": true }),
         "the resumed wait must surface the delivered signal payload"
     );
 
-    // Control: the blocking lowering (gate OFF) reaches the same output when the
-    // signal is already present (its poll loop finds it on the first pass).
-    let blocking = compile_invoke_abi_artifact_configured(
-        &components_dir,
-        "store-freeing-wait-off",
-        STORE_FREEING_WAIT,
-        false,
-    );
-    let blocking_host = Arc::new(CheckpointingRuntimeHost::new(&input));
-    // The blocking artifact's deterministic signal id is workflow-id-scoped and
-    // differs from the store-freeing one, so pre-deliver for ANY polled id — its
-    // first poll then finds the signal and the loop exits.
-    blocking_host.deliver_signal_any(br#"{"approved": true}"#);
-    let blocking_exit = run_invoke_once(&blocking.wasm_path, blocking_host.clone(), input.clone());
-    let blocking_output = match blocking_exit {
+    // Control: a wait whose signal is ALREADY present never parks — its first
+    // poll finds the signal — and reaches the same output.
+    let present =
+        compile_invoke_abi_artifact(&components_dir, "wait-signal-present", STORE_FREEING_WAIT);
+    let present_host = Arc::new(CheckpointingRuntimeHost::new(&input));
+    // The deterministic signal id is workflow-id-scoped, so pre-deliver for ANY
+    // polled id.
+    present_host.deliver_signal_any(br#"{"approved": true}"#);
+    let present_exit = run_invoke_once(&present.wasm_path, present_host.clone(), input.clone());
+    let present_output = match present_exit {
         runtara_component_host::InvokeExit::Completed(output) => output,
-        other => panic!("blocking wait with a present signal must complete, got {other:?}"),
+        other => panic!("a wait with a present signal must complete, got {other:?}"),
     };
     assert_eq!(
-        blocking_output, output,
-        "store-freeing wait output must byte-match the blocking output"
+        present_output, output,
+        "a resumed park's output must byte-match the never-parked run's"
     );
 }
 
@@ -7497,7 +7738,6 @@ fn parent_workflow_composes_and_invokes_published_workflow_agent() {
         &components_dir,
         RuntimeBinding::HostImport,
         runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
-        false,
         false,
     )
     .expect("child agent compile+compose succeeds");
@@ -7577,7 +7817,6 @@ fn parent_workflow_composes_and_invokes_published_workflow_agent() {
             agent_slug: None,
         },
         runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
-        false,
         false,
     )
     .expect("parent compile succeeds");
@@ -7675,7 +7914,6 @@ fn parent_workflow_invokes_published_durable_workflow_agent() {
         RuntimeBinding::HostImport,
         runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
         false,
-        false,
     )
     .expect("durable child publishes as an agent");
     assert!(
@@ -7742,7 +7980,6 @@ fn parent_workflow_invokes_published_durable_workflow_agent() {
             agent_slug: None,
         },
         runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
-        false,
         false,
     )
     .expect("parent compile succeeds");
@@ -7850,7 +8087,6 @@ fn composed_durable_child_checkpoints_are_namespaced_per_invocation_site() {
         RuntimeBinding::HostImport,
         runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
         false,
-        false,
     )
     .expect("durable child publishes as an agent");
     assert!(
@@ -7935,7 +8171,6 @@ fn composed_durable_child_checkpoints_are_namespaced_per_invocation_site() {
             agent_slug: None,
         },
         runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
-        false,
         false,
     )
     .expect("parent compile succeeds");
@@ -8076,7 +8311,6 @@ fn nested_composed_workflow_agents_chain_checkpoint_namespaces() {
         RuntimeBinding::HostImport,
         runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
         false,
-        false,
     )
     .expect("grandchild publishes as an agent");
 
@@ -8141,7 +8375,6 @@ fn nested_composed_workflow_agents_chain_checkpoint_namespaces() {
         },
         runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
         false,
-        false,
     )
     .expect("mid compiles as an agent");
     runtara_workflows::direct_wasm::compose_direct_workflow_with_extra_dirs(
@@ -8203,7 +8436,6 @@ fn nested_composed_workflow_agents_chain_checkpoint_namespaces() {
             agent_slug: None,
         },
         runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
-        false,
         false,
     )
     .expect("top compile succeeds");
@@ -8312,7 +8544,6 @@ fn stale_durable_workflow_agent_artifact_fails_compose() {
         RuntimeBinding::HostImport,
         runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
         false,
-        false,
     )
     .expect("durable child compiles as an agent");
     assert!(
@@ -8390,7 +8621,6 @@ fn stale_durable_workflow_agent_artifact_fails_compose() {
         },
         runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
         false,
-        false,
     )
     .expect("parent compile itself succeeds");
     let error = runtara_workflows::direct_wasm::compose_direct_workflow_with_extra_dirs(
@@ -8464,7 +8694,6 @@ fn stale_pure_workflow_agent_artifact_composes_freely() {
         RuntimeBinding::HostImport,
         runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
         false,
-        false,
     )
     .expect("pure child compiles as an agent");
     assert!(child.omit_runtime, "pure child must not import the runtime");
@@ -8536,7 +8765,6 @@ fn stale_pure_workflow_agent_artifact_composes_freely() {
         },
         runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
         false,
-        false,
     )
     .expect("parent compile succeeds");
     runtara_workflows::direct_wasm::compose_direct_workflow_with_extra_dirs(
@@ -8599,7 +8827,6 @@ fn composed_children_waiting_on_same_step_get_per_site_signal_ids() {
         &components_dir,
         RuntimeBinding::HostImport,
         runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
-        false,
         false,
     )
     .expect("waiting child publishes as an agent");
@@ -8677,7 +8904,6 @@ fn composed_children_waiting_on_same_step_get_per_site_signal_ids() {
             agent_slug: None,
         },
         runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
-        false,
         false,
     )
     .expect("parent compile succeeds");
@@ -8841,7 +9067,6 @@ fn embedded_children_waiting_on_same_step_get_per_site_signal_ids() {
         },
         runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
         false,
-        false,
     )
     .expect("embed parent compiles");
     runtara_workflows::direct_wasm::compose_direct_workflow(&mut parent, &components_dir)
@@ -8960,7 +9185,6 @@ fn scoped_signal_wait_survives_drain_and_resume() {
         RuntimeBinding::HostImport,
         runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
         false,
-        false,
     )
     .expect("waiting child publishes as an agent");
 
@@ -9023,7 +9247,6 @@ fn scoped_signal_wait_survives_drain_and_resume() {
             agent_slug: None,
         },
         runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
-        false,
         false,
     )
     .expect("parent compile succeeds");
@@ -9155,7 +9378,6 @@ fn pause_during_composed_child_wait_suspends_and_resumes() {
         RuntimeBinding::HostImport,
         runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
         false,
-        false,
     )
     .expect("waiting child publishes as an agent");
 
@@ -9218,7 +9440,6 @@ fn pause_during_composed_child_wait_suspends_and_resumes() {
             agent_slug: None,
         },
         runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
-        false,
         false,
     )
     .expect("parent compile succeeds");
@@ -9369,7 +9590,6 @@ fn pause_inside_nested_composed_agents_chains_the_suspend() {
         RuntimeBinding::HostImport,
         runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
         false,
-        false,
     )
     .expect("grandchild publishes as an agent");
 
@@ -9433,7 +9653,6 @@ fn pause_inside_nested_composed_agents_chains_the_suspend() {
         },
         runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
         false,
-        false,
     )
     .expect("mid compiles as an agent");
     runtara_workflows::direct_wasm::compose_direct_workflow_with_extra_dirs(
@@ -9495,7 +9714,6 @@ fn pause_inside_nested_composed_agents_chains_the_suspend() {
             agent_slug: None,
         },
         runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
-        false,
         false,
     )
     .expect("top compile succeeds");
@@ -9614,7 +9832,6 @@ fn workflow_agent_tool_calls_get_per_call_checkpoint_scopes() {
         RuntimeBinding::HostImport,
         runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
         false,
-        false,
     )
     .expect("durable tool child publishes as an agent");
     assert!(!child.omit_runtime, "durable tool child keeps the runtime");
@@ -9679,7 +9896,6 @@ fn workflow_agent_tool_calls_get_per_call_checkpoint_scopes() {
             agent_slug: None,
         },
         runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
-        false,
         false,
     )
     .expect("parent compile succeeds");
@@ -11664,7 +11880,6 @@ fn direct_wasm_execute_delay_observes_cancel_and_suspends() {
             agent_slug: None,
         },
         WorkflowAbi::CliRunHttp,
-        false,
         false,
     )
     .expect("direct emit succeeds");
