@@ -631,7 +631,8 @@ const CANONICAL_LOCAL_GROUPS: &[(u32, ValType)] = &[
     // the AiAgent loop's heap watermark; 110-115 (DIRECT_AGENT_ATTEMPT_*) are
     // the durable Agent retry per-attempt-result checkpoint scratch.
     (20, ValType::I32),
-    // 116 = parallel-Split suspend flag, 117 spare; 118-123 are the
+    // 116 = parallel-Split suspend flag, 117 = DIRECT_WAIT_RESUMED_LOCAL (the
+    // durable Wait's "deadline came from a checkpoint" flag); 118-123 are the
     // parallel-Split scratch (DIRECT_PSPLIT_*);
     // 124-125 are the concurrent-retry-round cursor + timers-fired flag.
     (22, ValType::I32),

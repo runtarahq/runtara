@@ -758,9 +758,31 @@ fn emit_wait_timeout_check(
     // for the on-signal re-park below, so `sleep_until` is never stamped early.
     // (Shifting the parked deadline instead would move the next wake earlier by
     // exactly the tolerance and cancel out the absorption entirely.)
+    //
+    // The tolerance is CLAMPED to half the wait's own timeout, because the
+    // resumed flag alone is not enough of a guard here. A store-freeing Wait has
+    // no park floor — it parks on its FIRST poll miss — so every pass after the
+    // first is a resumed one, and an unclamped tolerance would swallow the whole
+    // remaining window of any timeout near or below it. A wait relaunched off
+    // its deadline (an operator resume, a recovery sweep, another waker) would
+    // then report WAIT_TIMEOUT with time the author asked for still unspent,
+    // which is the same defect as a Delay losing its remaining wait, just
+    // bounded. Halving keeps the absorption proportional: no wait can lose more
+    // than half its window, however short it is, and anything comfortably above
+    // the tolerance is unaffected.
     body.instruction(&Instruction::LocalGet(DIRECT_WAIT_RESUMED_LOCAL));
     body.instruction(&Instruction::I64ExtendI32U);
+    // min(tolerance, timeout / 2), via select on `tolerance < timeout / 2`.
     body.instruction(&Instruction::I64Const(DIRECT_DEADLINE_SKEW_TOLERANCE_MS));
+    body.instruction(&Instruction::LocalGet(DIRECT_WAIT_TIMEOUT_MS_LOCAL));
+    body.instruction(&Instruction::I64Const(1));
+    body.instruction(&Instruction::I64ShrU);
+    body.instruction(&Instruction::I64Const(DIRECT_DEADLINE_SKEW_TOLERANCE_MS));
+    body.instruction(&Instruction::LocalGet(DIRECT_WAIT_TIMEOUT_MS_LOCAL));
+    body.instruction(&Instruction::I64Const(1));
+    body.instruction(&Instruction::I64ShrU);
+    body.instruction(&Instruction::I64LtU);
+    body.instruction(&Instruction::Select);
     body.instruction(&Instruction::I64Mul);
     body.instruction(&Instruction::I64Add);
     body.instruction(&Instruction::LocalGet(DIRECT_WAIT_DEADLINE_MS_LOCAL));
