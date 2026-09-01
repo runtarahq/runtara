@@ -1,41 +1,31 @@
-import { calculatePercentageChange, determineTrend } from './index';
+import type { MetricsBucket } from '@/generated/RuntaraRuntimeApi';
+
+import { calculatePercentageChange } from './index';
+import type { MetricsSummary } from './metrics-summary';
 
 /**
- * One metrics bucket. Both API shapes are accepted because the server has
- * emitted snake_case and camelCase at different times.
+ * One metrics bucket, exactly as `GET /api/runtime/metrics/tenant` returns it.
+ *
+ * An alias rather than a restatement: the endpoint serialises
+ * `runtime_types::MetricsBucket` directly, and the generated client describes
+ * that type correctly.
  */
-export interface MetricsDataPoint {
-  // New API format (snake_case)
-  invocation_count?: number | null;
-  success_count?: number | null;
-  failure_count?: number | null;
-  avg_duration_seconds?: number | null;
-  avg_memory_bytes?: number | null;
-  cancelled_count?: number | null;
-  bucket_time?: string | null;
-  success_rate_percent?: number | null;
-  // Old API format (camelCase)
-  invocationCount?: number | null;
-  successCount?: number | null;
-  failureCount?: number | null;
-  avgDurationSeconds?: number | null;
-  avgMemoryMb?: number | null;
-  timeoutCount?: number | null;
-  dayBucket?: string | null;
-  successRatePercent?: number | null;
-}
+export type MetricsDataPoint = MetricsBucket;
 
 export interface MetricTrend {
+  /**
+   * Whether the move was an improvement, not which way the number went.
+   *
+   * `up` means better for this metric: more executions, but *fewer* failures.
+   * The direction the number itself moved is the sign of `change`.
+   */
   trend: 'up' | 'down' | 'stable';
   /**
-   * Percentage change behind `trend`, measured on this metric's own values.
-   * Signed consistently with `trend` — the card renders its sign from `trend`
-   * and its magnitude from here, so the two must be derived from the same
-   * comparison.
+   * The metric's actual signed change against the preceding period.
    *
-   * `undefined` when the earlier period holds no data for this metric: a
-   * percentage change out of zero is undefined, and the card omits the
-   * indicator rather than claiming a measured swing.
+   * `undefined` when there is nothing to compare against - no preceding period
+   * fetched yet, or one that holds no runs. A percentage change out of zero is
+   * undefined, and the card omits the indicator rather than inventing a swing.
    */
   change?: number;
 }
@@ -60,120 +50,83 @@ export const NO_TRENDS: MetricTrends = {
   cancelled: FLAT,
 };
 
-/**
- * Which way is an improvement for a given metric.
- *
- * Stated explicitly rather than encoded in argument order, so that "is the
- * baseline empty?" stays a question about the earlier period and not about
- * whichever operand happens to sit first.
- */
+/** Which way is an improvement for a given metric. */
 type Direction = 'growth-is-good' | 'shrink-is-good';
 
-/** Compare a metric's earlier half against its later half. */
+/** Below this, a move is noise and the card shows no indicator at all. */
+const STABLE_THRESHOLD_PERCENT = 5;
+
 function compare(
-  earlier: number,
-  later: number,
+  previous: number,
+  current: number,
   direction: Direction
 ): MetricTrend {
-  // Nothing to measure against. The dashboard's default window is 30 days of
-  // hourly buckets, so a tenant that only started running recently has an
-  // entirely empty earlier half — reporting "+100%" there would dress up
-  // "no prior data" as a measured doubling.
-  if (earlier === 0) return FLAT;
+  // Nothing to measure against. A tenant whose first runs fall inside this
+  // window has no preceding period, and reporting "+100%" would dress up "no
+  // prior data" as a measured doubling.
+  if (previous === 0) return FLAT;
 
-  // Flipping the operands is what makes "up" read as an improvement for the
-  // metrics we want to see fall.
-  const [current, previous] =
-    direction === 'growth-is-good' ? [later, earlier] : [earlier, later];
+  // The magnitude is always the metric's own change. Whether that change is
+  // welcome is a separate question, answered by `direction`.
+  const change = calculatePercentageChange(current, previous);
+  if (Math.abs(change) < STABLE_THRESHOLD_PERCENT) {
+    return { trend: 'stable', change };
+  }
 
-  return {
-    trend: determineTrend(current, previous),
-    change: calculatePercentageChange(current, previous),
-  };
+  const grew = change > 0;
+  const improved = direction === 'growth-is-good' ? grew : !grew;
+  return { trend: improved ? 'up' : 'down', change };
 }
 
-function sum(
-  points: MetricsDataPoint[],
-  pick: (p: MetricsDataPoint) => number
-) {
-  return points.reduce((total, point) => total + pick(point), 0);
-}
-
-function mean(
-  points: MetricsDataPoint[],
-  pick: (p: MetricsDataPoint) => number
-) {
-  return points.length === 0 ? 0 : sum(points, pick) / points.length;
-}
-
-const executionsOf = (p: MetricsDataPoint) =>
-  p.invocation_count ?? p.invocationCount ?? 0;
-const successesOf = (p: MetricsDataPoint) =>
-  p.success_count ?? p.successCount ?? 0;
-const failuresOf = (p: MetricsDataPoint) =>
-  p.failure_count ?? p.failureCount ?? 0;
-const cancelledOf = (p: MetricsDataPoint) =>
-  p.cancelled_count ?? p.timeoutCount ?? 0;
-const durationOf = (p: MetricsDataPoint) =>
-  p.avg_duration_seconds ?? p.avgDurationSeconds ?? 0;
-const memoryMbOf = (p: MetricsDataPoint) =>
-  p.avg_memory_bytes !== undefined && p.avg_memory_bytes !== null
-    ? p.avg_memory_bytes / (1024 * 1024)
-    : (p.avgMemoryMb ?? 0);
-
-function successRateOf(points: MetricsDataPoint[]): number {
-  const executions = sum(points, executionsOf);
-  return executions > 0 ? (sum(points, successesOf) / executions) * 100 : 0;
+/** A rate comparison is only meaningful when both periods actually ran work. */
+function compareRates(
+  previous: MetricsSummary,
+  current: MetricsSummary
+): MetricTrend {
+  if (previous.totalExecutions === 0 || current.totalExecutions === 0) {
+    return FLAT;
+  }
+  return compare(previous.successRate, current.successRate, 'growth-is-good');
 }
 
 /**
- * Half-over-half trend for every KPI on the usage dashboard.
+ * Compare this window against the equally long window immediately before it.
  *
- * Each metric is compared against its own earlier half. Previously only the
- * execution count was measured and the other cards derived their percentage
- * from it by a fixed multiplier, which produced numbers with no relationship
- * to the metric they sat under — including a positive change on a metric whose
- * value was zero.
+ * This used to split the *displayed* window in half and compare its later half
+ * to its earlier one. That produced a number for every metric without fetching
+ * anything, and it was not the comparison the label claimed: on a 24-hour view
+ * the "previous 12h" being compared against sat inside the same 24 hours the
+ * headline was counting, so the figure and its trend described overlapping
+ * data. The preceding period is now fetched, and `previous` is null until it
+ * arrives - a comparison the data cannot support is not shown at all.
  */
-export function computeMetricTrends(
-  dataPoints: MetricsDataPoint[] | undefined | null
+export function comparePeriods(
+  current: MetricsSummary,
+  previous: MetricsSummary | null | undefined
 ): MetricTrends {
-  // A single bucket has nothing to compare against.
-  if (!dataPoints || dataPoints.length < 2) return NO_TRENDS;
-
-  const midPoint = Math.floor(dataPoints.length / 2);
-  const earlier = dataPoints.slice(0, midPoint);
-  const later = dataPoints.slice(midPoint);
+  if (!previous) return NO_TRENDS;
 
   return {
     executions: compare(
-      sum(earlier, executionsOf),
-      sum(later, executionsOf),
+      previous.totalExecutions,
+      current.totalExecutions,
       'growth-is-good'
     ),
-    successRate: compare(
-      successRateOf(earlier),
-      successRateOf(later),
-      'growth-is-good'
-    ),
+    successRate: compareRates(previous, current),
     duration: compare(
-      mean(earlier, durationOf),
-      mean(later, durationOf),
+      previous.avgDurationSeconds,
+      current.avgDurationSeconds,
       'shrink-is-good'
     ),
-    memory: compare(
-      mean(earlier, memoryMbOf),
-      mean(later, memoryMbOf),
-      'shrink-is-good'
-    ),
+    memory: compare(previous.avgMemory, current.avgMemory, 'shrink-is-good'),
     failures: compare(
-      sum(earlier, failuresOf),
-      sum(later, failuresOf),
+      previous.failureCount,
+      current.failureCount,
       'shrink-is-good'
     ),
     cancelled: compare(
-      sum(earlier, cancelledOf),
-      sum(later, cancelledOf),
+      previous.cancelledCount,
+      current.cancelledCount,
       'shrink-is-good'
     ),
   };

@@ -356,11 +356,21 @@ describe('queryKeys', () => {
     });
 
     it('returns correct key for tenant analytics', () => {
-      expect(queryKeys.analytics.tenant('7d')).toEqual([
+      expect(queryKeys.analytics.tenant('7d', '24m')).toEqual([
         'analytics',
         'tenant',
         '7d',
+        '24m',
       ]);
+    });
+
+    it('separates tenant analytics cached at different bucket widths', () => {
+      // The same period can be requested at different granularities, and the
+      // responses are not interchangeable - one is a 421-bucket series, the
+      // other 169. Sharing a cache entry would render one as the other.
+      expect(queryKeys.analytics.tenant('7d', '24m')).not.toEqual(
+        queryKeys.analytics.tenant('7d', 'hourly')
+      );
     });
 
     it('returns correct key for workflow analytics', () => {

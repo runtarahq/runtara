@@ -5,7 +5,7 @@ import { createAuthHeaders } from '@/shared/queries/utils';
 export type {
   TenantMetricsResponse,
   TenantMetricsData,
-  TenantMetricsDataPoint,
+  MetricsBucket,
   WorkflowMetricsHourlyResponse,
   WorkflowMetricsHourlyData,
   WorkflowMetricsHourly,
@@ -27,16 +27,21 @@ export type {
  * @param token - Authentication token
  * @param startTime - Start time in ISO 8601 format
  * @param endTime - End time in ISO 8601 format
+ * @param granularity - Bucket width: 'hourly', 'daily', or a width such as
+ *   '6m' or '2h'. Sent explicitly rather than omitted, which the API reads as
+ *   hourly - so a 90-day window used to come back as 2161 buckets.
  */
 export async function getTenantMetrics(
   token: string,
   startTime: string,
-  endTime: string
+  endTime: string,
+  granularity: string
 ) {
   const result = await RuntimeREST.api.getTenantMetrics(
     {
       startTime,
       endTime,
+      granularity,
     },
     createAuthHeaders(token)
   );
