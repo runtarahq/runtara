@@ -32,11 +32,12 @@ use super::debug::{emit_step_breakpoint, emit_step_debug_event};
 use super::dispatcher::emit_run_plan_mapping;
 use super::mapping::emit_build_source;
 use super::{
-    DIRECT_DELAY_DURATION_MS_LOCAL, DIRECT_RET_U64_OK_OFFSET, DIRECT_WAIT_DEADLINE_MS_LOCAL,
-    DIRECT_WAIT_DEADLINE_SCRATCH_OFFSET, DIRECT_WAIT_ON_WAIT_VARIABLES_LEN_LOCAL,
-    DIRECT_WAIT_ON_WAIT_VARIABLES_PTR_LOCAL, DIRECT_WAIT_SIGNAL_ID_LEN_LOCAL,
-    DIRECT_WAIT_SIGNAL_ID_PTR_LOCAL, DirectCoreFunctionIndices, DirectCoreStaticData,
-    DirectDataSegment, DirectFailureTarget, DirectHandledTarget, DirectRunPlan, DirectVariables,
+    DIRECT_DEADLINE_SKEW_TOLERANCE_MS, DIRECT_DELAY_DURATION_MS_LOCAL, DIRECT_RET_U64_OK_OFFSET,
+    DIRECT_WAIT_DEADLINE_MS_LOCAL, DIRECT_WAIT_DEADLINE_SCRATCH_OFFSET,
+    DIRECT_WAIT_ON_WAIT_VARIABLES_LEN_LOCAL, DIRECT_WAIT_ON_WAIT_VARIABLES_PTR_LOCAL,
+    DIRECT_WAIT_SIGNAL_ID_LEN_LOCAL, DIRECT_WAIT_SIGNAL_ID_PTR_LOCAL, DirectCoreFunctionIndices,
+    DirectCoreStaticData, DirectDataSegment, DirectFailureTarget, DirectHandledTarget,
+    DirectRunPlan, DirectVariables,
 };
 
 /// Durable-delay park threshold, in milliseconds: at or above it a delay frees
@@ -143,6 +144,20 @@ fn emit_park_until_deadline(
     body.instruction(&Instruction::Call(indices.runtime_now_ms));
     return_if_retptr_error(body, indices);
     push_retptr_i64_load(body, DIRECT_RET_U64_OK_OFFSET);
+    // Compare `now + tolerance` against the deadline rather than `now` alone,
+    // to absorb the host/database clock split described on
+    // DIRECT_DEADLINE_SKEW_TOLERANCE_MS. Added to `now` rather than subtracted
+    // from the deadline: both stay unsigned epoch milliseconds, with nothing to
+    // underflow once `now` is past the deadline.
+    //
+    // The tolerance is also how early a park may finish, which is what keeps it
+    // far below DIRECT_DURABLE_DELAY_PARK_THRESHOLD_MS: at 1s against a 30s
+    // floor the shortest possible park ends at most ~3% early, while a
+    // tolerance anywhere near the threshold would let that shortest park fall
+    // straight through on its first early relaunch — reinstating the very skip
+    // this arm exists to prevent.
+    body.instruction(&Instruction::I64Const(DIRECT_DEADLINE_SKEW_TOLERANCE_MS));
+    body.instruction(&Instruction::I64Add);
     body.instruction(&Instruction::LocalGet(DIRECT_WAIT_DEADLINE_MS_LOCAL));
     // Unsigned: both sides are u64 epoch milliseconds.
     body.instruction(&Instruction::I64LtU);
