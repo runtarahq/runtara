@@ -16,7 +16,9 @@ use std::sync::Arc;
 
 use crate::api::dto::metrics::*;
 use crate::metrics::MetricsService;
-use crate::runtime_client::{GetTenantMetricsOptions, MetricsGranularity, RuntimeClient};
+use crate::runtime_client::{
+    GetTenantMetricsOptions, MAX_METRIC_BUCKETS, MetricsGranularity, RuntimeClient,
+};
 
 /// Get metrics for a specific workflow
 #[utoipa::path(
@@ -196,10 +198,11 @@ pub async fn get_workflow_stats(
     params(
         ("startTime" = Option<String>, Query, description = "Start time (ISO 8601), defaults to 24 hours ago"),
         ("endTime" = Option<String>, Query, description = "End time (ISO 8601), defaults to now"),
-        ("granularity" = Option<String>, Query, description = "Time granularity: 'hourly' or 'daily' (default: hourly)")
+        ("granularity" = Option<String>, Query, description = "Bucket width: 'hourly', 'daily', or a <count><unit> width such as '1m', '6m', '24m', '2h' (default: hourly)")
     ),
     responses(
         (status = 200, description = "Tenant metrics retrieved successfully", body = TenantMetricsResponse),
+        (status = 400, description = "Unparseable granularity, or a width producing too many buckets", body = MetricsResponse),
         (status = 503, description = "Runtara environment not configured", body = MetricsResponse),
         (status = 500, description = "Internal server error", body = MetricsResponse)
     ),
@@ -232,11 +235,30 @@ pub async fn get_tenant_metrics(
         .start_time
         .unwrap_or_else(|| end_time - Duration::hours(24));
 
-    // Parse granularity from query parameter
+    // Parse granularity from query parameter. Omitting it still means hourly,
+    // so every existing caller keeps the response it had.
     let granularity = match query.granularity.as_deref() {
-        Some("daily") => MetricsGranularity::Daily,
-        _ => MetricsGranularity::Hourly, // Default to hourly
+        None => MetricsGranularity::Hourly,
+        Some(raw) => match raw.parse::<MetricsGranularity>() {
+            Ok(granularity) => granularity,
+            Err(message) => {
+                return bad_request(format!(
+                    "{message}. Use hourly, daily, or a width such as 1m, 6m, 2h."
+                ));
+            }
+        },
     };
+
+    // Bound the empty-bucket spine, not the width. A narrow width over a wide
+    // range is the only shape of this request that is expensive, and it is
+    // expensive in the query planner rather than in the rows scanned.
+    let buckets = granularity.bucket_count(start_time, end_time);
+    if buckets > MAX_METRIC_BUCKETS {
+        return bad_request(format!(
+            "granularity '{granularity}' over this range would produce {buckets} buckets; \
+             the maximum is {MAX_METRIC_BUCKETS}. Widen the granularity or shorten the range."
+        ));
+    }
 
     let options = GetTenantMetricsOptions::new(&tenant_id)
         .with_start_time(start_time)
@@ -253,7 +275,7 @@ pub async fn get_tenant_metrics(
                     "tenantId": result.tenant_id,
                     "startTime": result.start_time,
                     "endTime": result.end_time,
-                    "granularity": format!("{:?}", result.granularity).to_lowercase(),
+                    "granularity": result.granularity.to_string(),
                     "metrics": result.buckets
                 }
             })),
@@ -267,4 +289,16 @@ pub async fn get_tenant_metrics(
             })),
         ),
     }
+}
+
+/// A 400 in the envelope this module's other error arms already use.
+fn bad_request(message: String) -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({
+            "success": false,
+            "message": message,
+            "data": null
+        })),
+    )
 }

@@ -658,10 +658,7 @@ impl EnvironmentClient {
                 tenant_id: options.tenant_id.clone(),
                 start_time,
                 end_time,
-                granularity: match granularity {
-                    MetricsGranularity::Hourly => db::MetricsGranularity::Hourly,
-                    MetricsGranularity::Daily => db::MetricsGranularity::Daily,
-                },
+                bucket_seconds: granularity.seconds(),
             },
         )
         .await?;

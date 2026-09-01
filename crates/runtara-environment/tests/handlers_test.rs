@@ -9,10 +9,11 @@ use runtara_core::persistence::{CompleteInstanceParams, Persistence, PostgresPer
 use runtara_environment::container_registry::{ContainerInfo, ContainerRegistry};
 use runtara_environment::db;
 use runtara_environment::handlers::{
-    DrainController, EnvironmentHandlerState, GetCapabilityRequest, RegisterImageRequest,
-    ResumeInstanceRequest, StartInstanceRequest, StopInstanceRequest, handle_get_capability,
-    handle_health_check, handle_list_agents, handle_register_image, handle_resume_instance,
-    handle_start_instance, handle_stop_instance, spawn_container_monitor,
+    DrainController, EnvironmentHandlerState, GetCapabilityRequest, MAX_METRIC_BUCKETS,
+    RegisterImageRequest, ResumeInstanceRequest, StartInstanceRequest, StopInstanceRequest,
+    handle_get_capability, handle_get_tenant_metrics, handle_health_check, handle_list_agents,
+    handle_register_image, handle_resume_instance, handle_start_instance, handle_stop_instance,
+    spawn_container_monitor,
 };
 use runtara_environment::image_registry::ImageRegistry;
 use runtara_environment::runner::MockRunner;
@@ -1980,5 +1981,88 @@ async fn test_launch_does_not_resurrect_a_run_that_already_parked() {
         instance.termination_reason.as_deref(),
         Some("waiting_signal"),
         "the park marker must survive launch bookkeeping"
+    );
+}
+
+// ============================================================================
+// Tenant metrics validation
+//
+// This crate is a library and the HTTP handler is not its only caller, so the
+// two inputs that can hurt the aggregation query are rejected here as well as
+// at the API boundary: a zero width divides by zero in SQL, and an unbounded
+// bucket count turns the empty-bucket spine into the dominant cost of the
+// whole query.
+// ============================================================================
+
+fn metrics_options(
+    tenant_id: &str,
+    bucket_seconds: u32,
+    span_seconds: i64,
+) -> db::TenantMetricsOptions {
+    let start_time = chrono::DateTime::from_timestamp(0, 0).expect("epoch");
+    db::TenantMetricsOptions {
+        tenant_id: tenant_id.to_string(),
+        start_time,
+        end_time: start_time + chrono::Duration::seconds(span_seconds),
+        bucket_seconds,
+    }
+}
+
+#[tokio::test]
+async fn test_tenant_metrics_rejects_a_zero_bucket_width() {
+    skip_if_no_db!();
+    let pool = get_test_pool().await;
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let state = create_test_state(pool, temp_dir.path().to_path_buf());
+
+    let error = handle_get_tenant_metrics(&state, &metrics_options("tenant-a", 0, 3_600))
+        .await
+        .expect_err("a zero bucket width must be rejected, not sent to Postgres");
+
+    let message = error.to_string();
+    assert!(
+        message.contains("bucket_seconds"),
+        "error should name the offending field, got: {message}"
+    );
+}
+
+#[tokio::test]
+async fn test_tenant_metrics_rejects_a_width_that_overruns_the_bucket_cap() {
+    skip_if_no_db!();
+    let pool = get_test_pool().await;
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let state = create_test_state(pool, temp_dir.path().to_path_buf());
+
+    // One-minute buckets over ninety days: 129,601 spine rows.
+    let ninety_days = 90 * 86_400;
+    let error = handle_get_tenant_metrics(&state, &metrics_options("tenant-a", 60, ninety_days))
+        .await
+        .expect_err("a request past the bucket cap must be rejected");
+
+    let message = error.to_string();
+    assert!(
+        message.contains("129601") && message.contains(&MAX_METRIC_BUCKETS.to_string()),
+        "error should report both the requested count and the cap, got: {message}"
+    );
+}
+
+#[tokio::test]
+async fn test_tenant_metrics_allows_the_widest_console_request() {
+    skip_if_no_db!();
+    let pool = get_test_pool().await;
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let state = create_test_state(pool, temp_dir.path().to_path_buf());
+
+    // The console's widest ask: seven days at 24-minute buckets, 421 rows.
+    let seven_days = 7 * 86_400;
+    let buckets =
+        handle_get_tenant_metrics(&state, &metrics_options("tenant-a", 1_440, seven_days))
+            .await
+            .expect("the widest legitimate console request must be allowed");
+
+    assert_eq!(buckets.len(), 421);
+    assert!(
+        buckets.iter().all(|bucket| bucket.invocation_count == 0),
+        "an unseeded tenant should aggregate to an empty but complete spine"
     );
 }

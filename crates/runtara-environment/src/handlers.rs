@@ -2422,6 +2422,29 @@ pub async fn handle_get_scope_ancestors(
     Ok(ancestors)
 }
 
+/// Widest bucket count the aggregation query may be asked to build.
+///
+/// Mirrors `runtara_server`'s limit of the same name. Kept as its own constant
+/// rather than shared because this crate does not depend on that one, and the
+/// bound is a property of the query living here.
+pub const MAX_METRIC_BUCKETS: i64 = 1_000;
+
+/// Buckets a width produces over `[start, end]`, matching the query's spine.
+///
+/// The query floors the first bucket down to a multiple of the width, so a
+/// range that starts mid-bucket still yields the partial bucket containing it.
+/// Counting any other way would let a request slip past the cap and then build
+/// more rows than the cap allows.
+fn bucket_count(
+    bucket_seconds: u32,
+    start: chrono::DateTime<chrono::Utc>,
+    end: chrono::DateTime<chrono::Utc>,
+) -> i64 {
+    let width = i64::from(bucket_seconds.max(1));
+    let aligned_start = start.timestamp().div_euclid(width) * width;
+    ((end.timestamp() - aligned_start).max(0) / width) + 1
+}
+
 /// One bucket of tenant execution metrics.
 #[derive(Debug, Serialize)]
 pub struct MetricsBucket {
@@ -2468,6 +2491,23 @@ pub async fn handle_get_tenant_metrics(
         return Err(crate::error::Error::InvalidRequest(
             "tenant_id is required".to_string(),
         ));
+    }
+
+    // Checked here as well as at the HTTP boundary because this crate is a
+    // library and that boundary is not its only door. A zero width divides by
+    // zero in the query, and an unbounded bucket count turns the empty-bucket
+    // spine into the dominant cost of the whole aggregation.
+    if options.bucket_seconds == 0 {
+        return Err(crate::error::Error::InvalidRequest(
+            "bucket_seconds must be at least 1".to_string(),
+        ));
+    }
+    let buckets = bucket_count(options.bucket_seconds, options.start_time, options.end_time);
+    if buckets > MAX_METRIC_BUCKETS {
+        return Err(crate::error::Error::InvalidRequest(format!(
+            "a {}s bucket width over this range would produce {} buckets; the maximum is {}",
+            options.bucket_seconds, buckets, MAX_METRIC_BUCKETS
+        )));
     }
 
     let bucket_rows = db::get_tenant_metrics(&state.pool, options).await?;

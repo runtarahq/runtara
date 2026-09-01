@@ -214,7 +214,7 @@ async fn runtime_execution_metric_rows(
         })?;
 
     let result_tenant_id = result.tenant_id.clone();
-    let result_granularity = format!("{:?}", result.granularity).to_lowercase();
+    let result_granularity = result.granularity.to_string();
 
     Ok(result
         .buckets
@@ -1076,20 +1076,17 @@ fn percent(numerator: f64, denominator: f64) -> f64 {
 fn parse_metrics_granularity(
     granularity: Option<&str>,
 ) -> Result<MetricsGranularity, ReportServiceError> {
-    match granularity
+    granularity
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or("hourly")
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "hour" | "hourly" => Ok(MetricsGranularity::Hourly),
-        "day" | "daily" => Ok(MetricsGranularity::Daily),
-        other => Err(ReportServiceError::Validation(format!(
-            "Unsupported system metrics granularity '{}'. Use hourly or daily.",
-            other
-        ))),
-    }
+        .parse::<MetricsGranularity>()
+        .map_err(|message| {
+            ReportServiceError::Validation(format!(
+                "Unsupported system metrics granularity. {}. Use hourly, daily, or a width such as 1m, 6m, 2h.",
+                message
+            ))
+        })
 }
 
 fn infer_rate_limit_timeline_granularity(
@@ -1213,5 +1210,78 @@ fn parse_datetime_value(value: &Value) -> Option<DateTime<Utc>> {
             .as_i64()
             .and_then(DateTime::<Utc>::from_timestamp_millis),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // `parse_metrics_granularity` now delegates to `MetricsGranularity`'s
+    // `FromStr`, replacing a second, narrower parser that only knew the two
+    // named granularities. These pin that report block config kept every
+    // spelling it accepted before, and gained the widths.
+
+    #[test]
+    fn report_granularity_defaults_to_hourly() {
+        assert_eq!(
+            parse_metrics_granularity(None).unwrap(),
+            MetricsGranularity::Hourly
+        );
+        assert_eq!(
+            parse_metrics_granularity(Some("   ")).unwrap(),
+            MetricsGranularity::Hourly
+        );
+    }
+
+    #[test]
+    fn report_granularity_keeps_every_previously_accepted_spelling() {
+        for raw in ["hour", "hourly", "HOURLY", " hourly "] {
+            assert_eq!(
+                parse_metrics_granularity(Some(raw)).unwrap(),
+                MetricsGranularity::Hourly,
+                "{raw}"
+            );
+        }
+        for raw in ["day", "daily", "Daily"] {
+            assert_eq!(
+                parse_metrics_granularity(Some(raw)).unwrap(),
+                MetricsGranularity::Daily,
+                "{raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn report_granularity_now_accepts_widths() {
+        assert_eq!(
+            parse_metrics_granularity(Some("6h")).unwrap().seconds(),
+            21_600
+        );
+        assert_eq!(
+            parse_metrics_granularity(Some("15m")).unwrap().seconds(),
+            900
+        );
+    }
+
+    #[test]
+    fn report_granularity_rejects_junk_with_a_validation_error() {
+        let error = parse_metrics_granularity(Some("fortnightly"))
+            .expect_err("junk granularity should not be accepted");
+        assert!(matches!(error, ReportServiceError::Validation(_)));
+        let message = error.to_string();
+        assert!(
+            message.contains("fortnightly"),
+            "error should quote the offending value, got: {message}"
+        );
+        assert!(
+            message.contains("hourly") && message.contains("1m"),
+            "error should name both the named granularities and the width form, got: {message}"
+        );
+    }
+
+    #[test]
+    fn report_granularity_rejects_a_zero_width() {
+        assert!(parse_metrics_granularity(Some("0m")).is_err());
     }
 }

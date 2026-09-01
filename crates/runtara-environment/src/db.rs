@@ -463,15 +463,6 @@ pub async fn remove_instance_image(pool: &PgPool, instance_id: &str) -> Result<(
 // Tenant Metrics
 // ============================================================================
 
-/// Granularity for metrics aggregation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MetricsGranularity {
-    /// Hourly buckets.
-    Hourly,
-    /// Daily buckets.
-    Daily,
-}
-
 /// Options for tenant metrics aggregation.
 #[derive(Debug, Clone)]
 pub struct TenantMetricsOptions {
@@ -481,8 +472,12 @@ pub struct TenantMetricsOptions {
     pub start_time: DateTime<Utc>,
     /// End of time range.
     pub end_time: DateTime<Utc>,
-    /// Bucket granularity.
-    pub granularity: MetricsGranularity,
+    /// Bucket width in seconds.
+    ///
+    /// A plain number rather than an enum: the aggregation query only ever needs
+    /// the width, and the named granularities callers speak in (`hourly`,
+    /// `daily`) belong at the API boundary that has to parse them.
+    pub bucket_seconds: u32,
 }
 
 /// Aggregated metrics bucket from database.
@@ -512,40 +507,41 @@ pub struct MetricsBucketRow {
 
 /// Get aggregated tenant metrics.
 ///
-/// Aggregates instance execution metrics into time buckets using PostgreSQL
-/// date_trunc for bucket alignment and aggregate functions for statistics.
+/// Aggregates instance execution metrics into time buckets of
+/// `options.bucket_seconds`, using aggregate functions for statistics.
+///
+/// Buckets are aligned by flooring the Unix epoch to a multiple of the width
+/// rather than by `date_trunc`. That admits widths `date_trunc` has no unit for -
+/// six minutes, two hours - and it fixes a latent inconsistency along the way:
+/// `date_trunc` on a `timestamptz` truncates in the *session* time zone, which
+/// nothing in this codebase pins, while `bucket_time` was always reported as UTC.
+/// Flooring the epoch is UTC unconditionally.
 ///
 /// Returns all buckets in the time range, including empty ones (with zero counts).
 pub async fn get_tenant_metrics(
     pool: &PgPool,
     options: &TenantMetricsOptions,
 ) -> Result<Vec<MetricsBucketRow>, sqlx::Error> {
-    let trunc_unit = match options.granularity {
-        MetricsGranularity::Hourly => "hour",
-        MetricsGranularity::Daily => "day",
-    };
+    // A zero width divides by zero inside the query. Callers are validated at
+    // both the HTTP boundary and in `handle_get_tenant_metrics`, so reaching
+    // here with one is a bug rather than bad input; clamp instead of panicking.
+    let bucket_seconds = f64::from(options.bucket_seconds.max(1));
 
-    let interval = match options.granularity {
-        MetricsGranularity::Hourly => "1 hour",
-        MetricsGranularity::Daily => "1 day",
-    };
-
-    // Build query with date_trunc for bucket alignment
-    // Duration = finished_at - started_at (only for terminal states with both timestamps)
-    // Uses generate_series + LEFT JOIN to include empty buckets for charting
-    // Note: Uses CASE WHEN instead of FILTER for broader PostgreSQL compatibility
-    let query = format!(
-        r#"
+    // The spine and the aggregate derive their bucket key with the same
+    // expression, so the join keys align by construction. Getting that wrong is
+    // the one way this query fails quietly - every bucket would read as empty.
+    let query = r#"
         WITH time_series AS (
             SELECT generate_series(
-                date_trunc('{trunc_unit}', $2::timestamptz),
-                date_trunc('{trunc_unit}', $3::timestamptz),
-                interval '{interval}'
+                to_timestamp(floor(extract(epoch FROM $2::timestamptz)::float8 / $4::float8) * $4::float8),
+                $3::timestamptz,
+                make_interval(secs => $4::float8)
             ) AS bucket_time
         ),
         metrics AS (
             SELECT
-                date_trunc('{trunc_unit}', i.finished_at) AS bucket_time,
+                to_timestamp(floor(extract(epoch FROM i.finished_at)::float8 / $4::float8) * $4::float8)
+                    AS bucket_time,
                 COUNT(*) AS invocation_count,
                 SUM(CASE WHEN i.status = 'completed' THEN 1 ELSE 0 END) AS success_count,
                 SUM(CASE WHEN i.status = 'failed' THEN 1 ELSE 0 END) AS failure_count,
@@ -566,7 +562,7 @@ pub async fn get_tenant_metrics(
               AND i.finished_at >= $2
               AND i.finished_at < $3
               AND i.status IN ('completed', 'failed', 'cancelled')
-            GROUP BY date_trunc('{trunc_unit}', i.finished_at)
+            GROUP BY 1
         )
         SELECT
             ts.bucket_time,
@@ -582,13 +578,13 @@ pub async fn get_tenant_metrics(
         FROM time_series ts
         LEFT JOIN metrics m ON ts.bucket_time = m.bucket_time
         ORDER BY ts.bucket_time ASC
-        "#
-    );
+    "#;
 
-    sqlx::query_as::<_, MetricsBucketRow>(&query)
+    sqlx::query_as::<_, MetricsBucketRow>(query)
         .bind(&options.tenant_id)
         .bind(options.start_time)
         .bind(options.end_time)
+        .bind(bucket_seconds)
         .fetch_all(pool)
         .await
 }
