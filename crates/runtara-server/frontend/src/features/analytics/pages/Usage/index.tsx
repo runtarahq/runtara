@@ -1,3 +1,4 @@
+import { summarizeMetrics } from '../../utils/metrics-summary';
 import { useState, useMemo, useEffect } from 'react';
 import { useSearchParams } from 'react-router';
 import { usePageTitle } from '@/shared/hooks/usePageTitle';
@@ -79,87 +80,10 @@ export function Usage() {
     setDateRange(value);
   };
 
-  const metrics = useMemo(() => {
-    if (
-      !tenantMetrics?.data?.metrics ||
-      tenantMetrics.data.metrics.length === 0
-    ) {
-      return {
-        totalExecutions: 0,
-        successRate: 0,
-        avgDurationSeconds: 0,
-        failureCount: 0,
-        avgMemory: 0,
-        cancelledCount: 0,
-      };
-    }
-
-    const dataPoints = tenantMetrics.data.metrics as MetricsDataPoint[];
-
-    const totalExecutions = dataPoints.reduce(
-      (sum, point) =>
-        sum + (point.invocation_count ?? point.invocationCount ?? 0),
-      0
-    );
-
-    const totalSuccesses = dataPoints.reduce(
-      (sum, point) => sum + (point.success_count ?? point.successCount ?? 0),
-      0
-    );
-    const successRate =
-      totalExecutions > 0 ? (totalSuccesses / totalExecutions) * 100 : 0;
-
-    const pointsWithDuration = dataPoints.filter(
-      (point) =>
-        (point.avg_duration_seconds ?? point.avgDurationSeconds) !== null
-    );
-    const avgDurationSeconds =
-      pointsWithDuration.length > 0
-        ? pointsWithDuration.reduce(
-            (sum, point) =>
-              sum +
-              (point.avg_duration_seconds ?? point.avgDurationSeconds ?? 0),
-            0
-          ) / pointsWithDuration.length
-        : 0;
-
-    const failureCount = dataPoints.reduce(
-      (sum, point) => sum + (point.failure_count ?? point.failureCount ?? 0),
-      0
-    );
-
-    // Support both old (avgMemoryMb) and new (avg_memory_bytes) API formats
-    const pointsWithMemory = dataPoints.filter(
-      (point) => (point.avg_memory_bytes ?? point.avgMemoryMb) !== null
-    );
-    const avgMemory =
-      pointsWithMemory.length > 0
-        ? pointsWithMemory.reduce((sum, point) => {
-            if (
-              point.avg_memory_bytes !== undefined &&
-              point.avg_memory_bytes !== null
-            ) {
-              return sum + point.avg_memory_bytes / (1024 * 1024); // Convert bytes to MB
-            }
-            return sum + (point.avgMemoryMb ?? 0);
-          }, 0) / pointsWithMemory.length
-        : 0;
-
-    // Support both old (timeoutCount) and new (cancelled_count) API formats
-    const cancelledCount = dataPoints.reduce(
-      (sum, point) => sum + (point.cancelled_count ?? point.timeoutCount ?? 0),
-      0
-    );
-
-    return {
-      totalExecutions,
-      successRate,
-      avgDurationSeconds,
-      failureCount,
-      avgMemory,
-      cancelledCount,
-    };
-  }, [tenantMetrics]);
+  const metrics = useMemo(
+    () => summarizeMetrics(tenantMetrics?.data?.metrics as MetricsDataPoint[]),
+    [tenantMetrics]
+  );
 
   const trends = useMemo(
     () =>
