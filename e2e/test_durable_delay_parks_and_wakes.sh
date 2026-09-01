@@ -237,6 +237,31 @@ AHEAD=$(psql_quiet -d "${TEST_DB_RUNTIME}" -c \
 echo "  sleep_until is ${AHEAD}s ahead of now (delay was $((LONG_DELAY_MS / 1000))s)"
 [ "${AHEAD}" -gt 5 ] || { print_error "sleep_until is only ${AHEAD}s out — the deadline was not computed from the duration"; exit 1; }
 
+# A manual resume is NOT the wake scheduler: `handle_resume_instance` accepts any
+# `suspended` row with no termination_reason filter, so it reaches a parked Delay
+# an hour early. The guest must re-read its stored deadline and re-park rather
+# than treat the checkpoint HIT as "already waited" and skip the whole delay.
+print_step "Resuming early — the parked Delay must re-park, not skip..."
+BEFORE_SLEEP_UNTIL="${P_SLEEP_UNTIL}"
+api_post "/workflows/instances/${INST_LONG}/resume" '{}' >/dev/null || true
+REPARKED=""
+for _ in {1..30}; do
+    ROW=$(instance_row "${INST_LONG}")
+    ST=$(instance_status "${INST_LONG}")
+    if [ "${ST}" = "completed" ]; then
+        print_error "An early resume ran the Delay out — the deadline was not re-checked"; exit 1
+    fi
+    if [ "${ROW%%|*}" = "suspended" ] && [ -n "${ROW##*|}" ]; then REPARKED="${ROW}"; fi
+    sleep 1
+    # Give the relaunch a moment, then confirm it parked again rather than finishing.
+    [ -n "${REPARKED}" ] && break
+done
+[ -n "${REPARKED}" ] || { print_error "Instance did not re-park after an early resume (row: $(instance_row "${INST_LONG}"))"; exit 1; }
+AFTER_SLEEP_UNTIL="${REPARKED##*|}"
+echo "  re-parked, sleep_until ${BEFORE_SLEEP_UNTIL} -> ${AFTER_SLEEP_UNTIL}"
+[ "${BEFORE_SLEEP_UNTIL}" = "${AFTER_SLEEP_UNTIL}" ] || print_warn "sleep_until moved across the re-park (expected the same absolute deadline)"
+print_success "Early resume re-parked on the same deadline, wait not skipped ✓"
+
 print_step "Waiting for the wake scheduler to relaunch it..."
 WOKE=""
 DEADLINE=$(( $(date +%s) + LONG_DELAY_MS / 1000 + 60 ))

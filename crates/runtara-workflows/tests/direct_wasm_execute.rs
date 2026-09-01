@@ -1673,6 +1673,26 @@ fn execute_via_cli(wasm_path: &Path, env_pairs: &[(String, String)]) -> (bool, S
 /// spare, and bounds a lowering bug that parks in a loop.
 const INVOKE_MAX_RELAUNCHES: usize = 4;
 
+/// Longest a park's deadline may be from now before this axis refuses to wait it
+/// out. Battery fixtures use millisecond timeouts; anything beyond this is a
+/// fixture the harness cannot honour, and saying so beats stalling the suite.
+const INVOKE_MAX_PARK_WAIT: Duration = Duration::from_secs(5);
+
+/// The earliest wall-clock deadline across a park's wakes, if any is timed.
+fn earliest_timed_deadline_ms(
+    wakes: &[runtara_component_host::lifecycle::WorkflowWake],
+) -> Option<u64> {
+    use runtara_component_host::lifecycle::WorkflowWake;
+    wakes
+        .iter()
+        .filter_map(|wake| match wake {
+            WorkflowWake::At(ms) => Some(*ms),
+            WorkflowWake::OnSignal(wait) => wait.deadline_ms,
+            WorkflowWake::OnResume => None,
+        })
+        .min()
+}
+
 /// Whether the wake scheduler would relaunch a park carrying these wakes.
 ///
 /// Mirrors `park_invoke_suspend` in runtara-environment: a TIMED wake (`at`, or
@@ -1734,14 +1754,34 @@ fn execute_via_embedded_invoke(
                     input.clone(),
                 )
                 .await;
-            let relaunch = matches!(
-                &result.exit,
-                runtara_component_host::InvokeExit::Suspended(wakes)
-                    if scheduler_would_relaunch(wakes)
-            );
-            if !relaunch || attempt == INVOKE_MAX_RELAUNCHES {
+            let runtara_component_host::InvokeExit::Suspended(wakes) = &result.exit else {
+                break result;
+            };
+            if !scheduler_would_relaunch(wakes) {
                 break result;
             }
+            // Wait out the deadline before relaunching, exactly as the scheduler
+            // does. Relaunching early is not a shortcut: a park re-reads its own
+            // deadline and re-parks while it is still in the future, so an
+            // instant relaunch would burn the budget without making progress.
+            // Fixture deadlines are milliseconds, so this costs almost nothing.
+            if let Some(deadline_ms) = earliest_timed_deadline_ms(wakes) {
+                let remaining = deadline_ms.saturating_sub(now_ms());
+                assert!(
+                    remaining <= INVOKE_MAX_PARK_WAIT.as_millis() as u64,
+                    "fixture parked {remaining}ms out, past the {}ms this axis will wait — \
+                     the battery has no way to fast-forward that far",
+                    INVOKE_MAX_PARK_WAIT.as_millis()
+                );
+                if remaining > 0 {
+                    tokio::time::sleep(Duration::from_millis(remaining)).await;
+                }
+            }
+            assert!(
+                attempt < INVOKE_MAX_RELAUNCHES,
+                "run still parked after {INVOKE_MAX_RELAUNCHES} relaunches — a lowering \
+                 that parks in a loop must fail the suite, not read as a clean suspend"
+            );
             attempt += 1;
         }
     });
@@ -7109,6 +7149,12 @@ struct CheckpointingRuntimeHost {
     /// the wake-scheduler-side signal store. `poll_custom_signal` reads it
     /// non-destructively (a replayed wait re-reads the same signal).
     custom_signals: Mutex<HashMap<String, Vec<u8>>>,
+    /// Milliseconds added to the wall clock for every `now-ms` the guest asks
+    /// for. The wake-scheduler stand-in advances this to a park's deadline so a
+    /// 1-hour Delay can be woken without waiting an hour: a resumed park
+    /// compares `now-ms` against its stored deadline, so a stand-in that cannot
+    /// move the clock can only ever observe a re-park.
+    clock_offset_ms: Mutex<u64>,
     /// Fallback payload returned for ANY polled id — for the blocking control,
     /// whose deterministic signal id (workflow-id-scoped) isn't known ahead of
     /// the run.
@@ -7123,6 +7169,7 @@ impl CheckpointingRuntimeHost {
             completed: Mutex::new(None),
             sleeps: Mutex::new(Vec::new()),
             custom_signals: Mutex::new(HashMap::new()),
+            clock_offset_ms: Mutex::new(0),
             any_signal: Mutex::new(None),
         }
     }
@@ -7132,6 +7179,15 @@ impl CheckpointingRuntimeHost {
             .lock()
             .unwrap()
             .insert(checkpoint_id.to_string(), payload.to_vec());
+    }
+
+    /// Move the guest's clock far enough forward that `deadline_ms` has passed —
+    /// what the wake scheduler achieves by simply not relaunching until then.
+    fn advance_clock_past(&self, deadline_ms: u64) {
+        let wall = now_ms();
+        let mut offset = self.clock_offset_ms.lock().unwrap();
+        // +1 so the guest sees `now > deadline`, not `now == deadline`.
+        *offset = (*offset).max(deadline_ms.saturating_sub(wall).saturating_add(1));
     }
 
     /// Whether a custom signal is armed for `checkpoint_id` — what the
@@ -7231,6 +7287,9 @@ impl runtara_component_host::runtime_host::RuntimeHost for CheckpointingRuntimeH
     async fn handle_checkpoint_signal(&self, _signal_type: String) -> Result<bool, String> {
         Ok(false)
     }
+    fn now_ms(&self) -> Result<u64, String> {
+        Ok(now_ms() + *self.clock_offset_ms.lock().unwrap())
+    }
     async fn record_retry_attempt(
         &self,
         _checkpoint_id: String,
@@ -7245,9 +7304,13 @@ impl runtara_component_host::runtime_host::RuntimeHost for CheckpointingRuntimeH
         state: Vec<u8>,
         _ms: u64,
     ) -> Result<(), String> {
-        // Blocking path: record the key (and persist the checkpoint like core's
-        // handle_sleep) but never actually sleep — keeps the 1h fixture fast.
-        if !state.is_empty() {
+        // Blocking path: record the key and persist the checkpoint exactly as
+        // core's `handle_sleep` does — which saves whenever the checkpoint id is
+        // non-empty, EMPTY STATE INCLUDED. Skipping the empty case (as this mock
+        // used to) hid the fact that the blocking arm leaves a `some([])` behind
+        // under the very key the park arm looks up. Only the sleep itself is
+        // skipped here, which is what keeps the 1h fixture fast.
+        {
             self.checkpoints
                 .lock()
                 .unwrap()
@@ -7316,13 +7379,12 @@ enum ParkLeg {
 /// It honours both wake shapes the host supports, refusing to relaunch a park
 /// that production would leave parked:
 ///
-/// - `at(deadline)` — a timed park. The scheduler relaunches when the deadline
-///   passes; the GUEST never re-checks it (its checkpoint HIT is what skips the
-///   sleep), so the deadline is purely host-side bookkeeping and a relaunch is
-///   always safe to issue here. Time is not virtualisable in this harness —
-///   `now-ms` is a free function in the host crate, not a `RuntimeHost` method —
-///   so the loop relaunches immediately rather than burning the wall clock, and
-///   callers assert the deadline VALUE separately.
+/// - `at(deadline)` — a timed park. The scheduler relaunches once the deadline
+///   passes, and the GUEST enforces that: a resumed park re-reads its stored
+///   deadline and re-parks if it is still in the future, so relaunching early
+///   does NOT run the delay out. The loop therefore advances the host's virtual
+///   clock past the deadline before relaunching — honouring it exactly, without
+///   burning the wall clock on an hour-long fixture.
 /// - `on-signal{deadline}` — a signal park. Relaunching is only legitimate once
 ///   `deliver` has armed the awaited signal or a timeout deadline exists; a park
 ///   with neither would sit forever in production, so the loop stops rather than
@@ -7351,6 +7413,19 @@ fn drive_wake_scheduler(
             return legs;
         };
         deliver(relaunch, host.as_ref(), &wakes);
+        // Honour every timed wake by moving the clock to it, the way the
+        // scheduler honours it by waiting.
+        for wake in &wakes {
+            match wake {
+                WorkflowWake::At(ms) => host.advance_clock_past(*ms),
+                WorkflowWake::OnSignal(wait) => {
+                    if let Some(ms) = wait.deadline_ms {
+                        host.advance_clock_past(ms);
+                    }
+                }
+                WorkflowWake::OnResume => {}
+            }
+        }
         let wakeable = wakes.iter().any(|wake| match wake {
             WorkflowWake::At(_) => true,
             WorkflowWake::OnSignal(wait) => {
@@ -7505,9 +7580,13 @@ fn direct_wasm_execute_invoke_delay_threshold_is_decided_at_runtime() {
         &["delay".to_string()],
         "a below-threshold duration must go through durable-sleep-checkpoint"
     );
-    assert!(
-        short_host.checkpoints.lock().unwrap().is_empty(),
-        "the blocking arm writes no guest-side deadline checkpoint"
+    // The blocking arm writes no guest-side deadline, but core's `handle_sleep`
+    // still saves a checkpoint under the sleep key with an EMPTY state — which
+    // is exactly why the park arm cannot treat a bare HIT as "already waited".
+    assert_eq!(
+        short_host.checkpoints.lock().unwrap().get("delay"),
+        Some(&Vec::new()),
+        "the blocking arm must leave the host's empty sleep checkpoint under the delay key"
     );
 
     // Same wasm, long duration: parks on a timed wake instead.
@@ -7577,9 +7656,117 @@ fn direct_wasm_execute_cli_run_abi_blocks_a_long_delay() {
         &["delay".to_string()],
         "under cli-run even an hours-long Delay must block on durable-sleep-checkpoint"
     );
+    // The blocking sleep leaves core's empty checkpoint behind, but never an
+    // 8-byte deadline: cli-run has no wake that could carry one.
+    assert_eq!(
+        host.checkpoints.lock().unwrap().get("delay"),
+        Some(&Vec::new()),
+        "cli-run must record only the blocking sleep's empty checkpoint, never a deadline"
+    );
+}
+
+/// Relaunching a parked Delay BEFORE its deadline must not skip the wait: the
+/// guest re-reads the stored deadline and re-parks on the same absolute value.
+///
+/// The wake scheduler is not the only relauncher — `handle_resume_instance`
+/// accepts any instance whose status is `suspended`, with no `termination_reason`
+/// filter, so an operator resuming a workflow parked on a long Delay lands here
+/// early. A HIT means "a deadline was recorded", never "the wait is over".
+#[test]
+fn direct_wasm_execute_invoke_early_relaunch_reparks_instead_of_skipping_the_delay() {
+    let components_dir = direct_e2e_components_dir();
+    let input = br#"{"value":"early"}"#.to_vec();
+    let duration_ms = 3_600_000u64;
+    let artifact = compile_invoke_abi_artifact(
+        &components_dir,
+        "delay-early-relaunch",
+        &store_freeing_delay_fixture(Some(duration_ms)),
+    );
+    let host = Arc::new(CheckpointingRuntimeHost::new(&input));
+
+    let first = run_invoke_once(&artifact.wasm_path, host.clone(), input.clone());
+    let first_deadline = match &first {
+        runtara_component_host::InvokeExit::Suspended(wakes) => match &wakes[0] {
+            runtara_component_host::lifecycle::WorkflowWake::At(ms) => *ms,
+            other => panic!("expected a timed wake, got {other:?}"),
+        },
+        other => panic!("first invoke must park, got {other:?}"),
+    };
+
+    // Relaunch immediately — an hour before the deadline, exactly as a manual
+    // resume would. It must park again, not complete.
+    let second = run_invoke_once(&artifact.wasm_path, host.clone(), input.clone());
+    let second_deadline = match &second {
+        runtara_component_host::InvokeExit::Suspended(wakes) => match &wakes[0] {
+            runtara_component_host::lifecycle::WorkflowWake::At(ms) => *ms,
+            other => panic!("expected a timed wake, got {other:?}"),
+        },
+        other => panic!("an early relaunch must re-park, not run the delay out; got {other:?}"),
+    };
+    assert_eq!(
+        first_deadline, second_deadline,
+        "a re-park must carry the SAME absolute deadline — the wait is not \
+         shortened by having been relaunched"
+    );
     assert!(
-        host.checkpoints.lock().unwrap().is_empty(),
-        "cli-run has no wake to carry a deadline, so it must write no deadline checkpoint"
+        host.completed.lock().unwrap().is_none(),
+        "an early relaunch must not complete the run"
+    );
+    assert!(
+        host.sleeps.lock().unwrap().is_empty(),
+        "re-parking must not fall back to a blocking sleep"
+    );
+}
+
+/// The blocking arm and the park arm share one checkpoint key, and core's
+/// `handle_sleep` saves an EMPTY state under it. The park arm must tell that
+/// apart from its own 8-byte deadline — and having done so, treat it as a
+/// SERVED wait and continue.
+///
+/// That is the correct resume, not a shortcut: the only writer of empty state
+/// under this key is `handle_sleep`, so its presence means the blocking arm
+/// already slept this delay on an earlier pass. Re-parking instead would hang
+/// the run outright — `handle_checkpoint` is get-or-set, so the park's deadline
+/// could never overwrite the empty state and every relaunch would park again.
+#[test]
+fn direct_wasm_execute_invoke_blocking_sleep_checkpoint_reads_as_a_served_wait() {
+    let components_dir = direct_e2e_components_dir();
+    let input = br#"{"value":"aliased"}"#.to_vec();
+    let artifact = compile_invoke_abi_artifact(
+        &components_dir,
+        "delay-key-aliasing",
+        &store_freeing_delay_fixture(Some(3_600_000)),
+    );
+    let host = Arc::new(CheckpointingRuntimeHost::new(&input));
+    // Seed the key exactly as a prior BLOCKING pass through this step would
+    // have, via core's handle_sleep.
+    host.checkpoints
+        .lock()
+        .unwrap()
+        .insert("delay".to_string(), Vec::new());
+
+    let exit = run_invoke_once(&artifact.wasm_path, host.clone(), input.clone());
+    let output = match exit {
+        runtara_component_host::InvokeExit::Completed(output) => output,
+        other => panic!(
+            "a served blocking-sleep checkpoint must let the run continue, not park \
+             (a re-park here could never persist its deadline and would hang); got {other:?}"
+        ),
+    };
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output).expect("output is JSON"),
+        serde_json::json!({ "echo": "aliased" }),
+    );
+    assert!(
+        host.sleeps.lock().unwrap().is_empty(),
+        "the served wait must not be slept again"
+    );
+    // The empty state is left exactly as it was: nothing overwrote it, which is
+    // precisely why the length check has to happen before the deadline read.
+    assert_eq!(
+        host.checkpoints.lock().unwrap().get("delay"),
+        Some(&Vec::new()),
+        "a get-or-set checkpoint store leaves the blocking arm's empty state in place"
     );
 }
 
