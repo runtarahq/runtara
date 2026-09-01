@@ -72,12 +72,21 @@ const DIRECT_DELAY_DEADLINE_STATE_LEN: i32 = 8;
 ///
 /// A deadline is minted from the environment host's WALL CLOCK (`runtime_now_ms`),
 /// but the due-instance scan that relaunches the park compares `sleep_until`
-/// against the DATABASE clock (`Dialect::NOW`). Those are two different clocks.
-/// A database running ahead fires the wake early, and with an exact comparison
-/// the guest would re-park on a deadline the scan still considers due — so the
-/// scan fires again on its next poll, and the instance REPLAYS from its entry
-/// step once per poll interval until the two clocks converge. Silently: an
-/// early wake is indistinguishable from an on-time one from inside the guest.
+/// against the DATABASE clock (`Dialect::NOW`). Those are two different clocks,
+/// so a database running ahead by `skew` fires the wake that much early. With
+/// an exact comparison the guest re-parks on a deadline the scan STILL
+/// considers due, the scan fires again on its next poll, and every one of those
+/// relaunches REPLAYS the workflow from its entry step. Silently: from inside
+/// the guest an early wake is indistinguishable from an on-time one.
+///
+/// That spin is self-limiting, and it is worth being precise about why, because
+/// it bounds what this constant can buy. The deadline is a fixed absolute value
+/// and the guest's OWN clock advances toward it, so the relaunches stop after
+/// roughly `skew / poll interval` of them whether or not the two clocks are
+/// ever brought back into agreement. The tolerance therefore removes the wasted
+/// relaunches outright only when `skew` falls within it, and saves at most one
+/// poll beyond that. 1s is sized for ordinary NTP-scale skew, which is where
+/// nearly all of it lands.
 ///
 /// The tolerance is also how early a park may finish, which is what keeps it
 /// far below [`DIRECT_DURABLE_DELAY_PARK_THRESHOLD_MS`]: at 1s against a 30s

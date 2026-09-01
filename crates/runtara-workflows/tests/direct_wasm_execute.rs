@@ -7155,6 +7155,10 @@ struct CheckpointingRuntimeHost {
     /// compares `now-ms` against its stored deadline, so a stand-in that cannot
     /// move the clock can only ever observe a re-park.
     clock_offset_ms: Mutex<u64>,
+    /// When set, the exact value `now-ms` returns, ignoring the wall clock and
+    /// `clock_offset_ms` entirely. Lets a test place the guest at a precise
+    /// distance from a deadline and hold it there.
+    pinned_clock_ms: Mutex<Option<u64>>,
     /// Fallback payload returned for ANY polled id — for the blocking control,
     /// whose deterministic signal id (workflow-id-scoped) isn't known ahead of
     /// the run.
@@ -7170,6 +7174,7 @@ impl CheckpointingRuntimeHost {
             sleeps: Mutex::new(Vec::new()),
             custom_signals: Mutex::new(HashMap::new()),
             clock_offset_ms: Mutex::new(0),
+            pinned_clock_ms: Mutex::new(None),
             any_signal: Mutex::new(None),
         }
     }
@@ -7181,18 +7186,20 @@ impl CheckpointingRuntimeHost {
             .insert(checkpoint_id.to_string(), payload.to_vec());
     }
 
-    /// Move the guest's clock to `remaining_ms` SHORT of `deadline_ms` — an
+    /// PIN the guest's clock exactly `remaining_ms` short of `deadline_ms` — an
     /// early wake, which [`advance_clock_past`](Self::advance_clock_past)
     /// cannot express. Models a database clock running ahead of the host's: the
     /// due scan fires while the host still reads `now` as before the deadline.
     ///
-    /// Wall-clock drift between this call and the guest's `now-ms` only eats
-    /// into `remaining_ms`, moving the guest CLOSER to the deadline — so a test
-    /// asserting fall-through inside the tolerance cannot drift out of it.
-    fn set_clock_before(&self, deadline_ms: u64, remaining_ms: u64) {
-        let wall = now_ms();
-        let target = deadline_ms.saturating_sub(remaining_ms);
-        *self.clock_offset_ms.lock().unwrap() = target.saturating_sub(wall);
+    /// Pinned rather than offset from the wall clock so the guest sees this
+    /// value however long instantiation and the entry-step replay take. An
+    /// offset would let real time between here and the guest's `now-ms` eat
+    /// into `remaining_ms` — and on a loaded machine push past it entirely, at
+    /// which point the test still passes, but because the wait genuinely
+    /// elapsed rather than because the tolerance let it through. It would have
+    /// quietly stopped testing the guard.
+    fn pin_clock_before(&self, deadline_ms: u64, remaining_ms: u64) {
+        *self.pinned_clock_ms.lock().unwrap() = Some(deadline_ms.saturating_sub(remaining_ms));
     }
 
     /// Move the guest's clock far enough forward that `deadline_ms` has passed —
@@ -7302,6 +7309,9 @@ impl runtara_component_host::runtime_host::RuntimeHost for CheckpointingRuntimeH
         Ok(false)
     }
     fn now_ms(&self) -> Result<u64, String> {
+        if let Some(pinned) = *self.pinned_clock_ms.lock().unwrap() {
+            return Ok(pinned);
+        }
         Ok(now_ms() + *self.clock_offset_ms.lock().unwrap())
     }
     async fn record_retry_attempt(
@@ -7741,24 +7751,26 @@ fn direct_wasm_execute_invoke_early_relaunch_reparks_instead_of_skipping_the_del
     );
 }
 
-/// A relaunch that lands just INSIDE the deadline — the host clock still reads
-/// "not yet", the database clock that fired the wake read "due" — must finish
-/// the wait, not re-park.
+/// The skew tolerance is bounded on BOTH sides: a relaunch just outside it
+/// still re-parks, one just inside it finishes the wait.
 ///
-/// The two clocks are genuinely different: a deadline is minted from the
+/// The two clocks are genuinely different — a deadline is minted from the
 /// environment host's wall clock, while the due-instance scan compares
-/// `sleep_until` against `Dialect::NOW`. Without the tolerance the guest
-/// re-parks on a deadline the scan STILL considers due, so the scan fires
-/// again on its next poll and the instance replays from its entry step once
-/// per poll interval until the clocks converge — burning a full replay each
-/// time, with nothing logged to say why.
+/// `sleep_until` against `Dialect::NOW` — so a database running ahead relaunches
+/// the park early. Without a tolerance the guest re-parks on a deadline the scan
+/// STILL considers due, and every relaunch until the host clock catches up
+/// replays the workflow from its entry step, with nothing logged to say why.
 ///
-/// The bound in the other direction is
-/// `direct_wasm_execute_invoke_early_relaunch_reparks_instead_of_skipping_the_delay`:
-/// an hour of owed wait must still re-park. The tolerance absorbs clock skew,
-/// not a real wait.
+/// The upper bound is the half that is easy to leave untested, and it is the
+/// one that matters: the hour-early case in
+/// `direct_wasm_execute_invoke_early_relaunch_reparks_instead_of_skipping_the_delay`
+/// passes for ANY tolerance under an hour, including one at or above
+/// [`DIRECT_DURABLE_DELAY_PARK_THRESHOLD_MS`] — which would let the shortest
+/// legal park fall straight through on its first early relaunch, reinstating
+/// the skip this arm exists to prevent. Relaunching just outside the tolerance
+/// is what pins it.
 #[test]
-fn direct_wasm_execute_invoke_relaunch_within_clock_skew_tolerance_completes() {
+fn direct_wasm_execute_invoke_clock_skew_tolerance_is_bounded_on_both_sides() {
     let components_dir = direct_e2e_components_dir();
     let input = br#"{"value":"skewed"}"#.to_vec();
     let artifact = compile_invoke_abi_artifact(
@@ -7777,16 +7789,36 @@ fn direct_wasm_execute_invoke_relaunch_within_clock_skew_tolerance_completes() {
         other => panic!("first invoke must park, got {other:?}"),
     };
 
-    // Wake half a second early — well inside the tolerance, and comfortably
-    // short of it even after any drift, since drift only closes the gap.
-    host.set_clock_before(deadline, 500);
-    let exit = run_invoke_once(&artifact.wasm_path, host.clone(), input.clone());
-    let output = match exit {
+    // OUTSIDE: two seconds of wait still owed. Real time, not skew — it must
+    // still be served. This is what stops the tolerance being widened to the
+    // point where it swallows a genuine wait.
+    host.pin_clock_before(deadline, 2_000);
+    let outside = run_invoke_once(&artifact.wasm_path, host.clone(), input.clone());
+    match &outside {
+        runtara_component_host::InvokeExit::Suspended(wakes) => match &wakes[0] {
+            runtara_component_host::lifecycle::WorkflowWake::At(ms) => assert_eq!(
+                *ms, deadline,
+                "a re-park outside the tolerance must keep the same absolute deadline"
+            ),
+            other => panic!("expected a timed wake, got {other:?}"),
+        },
+        other => panic!(
+            "a relaunch OUTSIDE the skew tolerance must re-park — a tolerance wide \
+             enough to swallow 2s of owed wait is wide enough to swallow the \
+             shortest legal park whole. Got {other:?}"
+        ),
+    }
+
+    // INSIDE: half a second short of the deadline, which is the host/database
+    // clock split rather than owed wait. Finish it.
+    host.pin_clock_before(deadline, 500);
+    let inside = run_invoke_once(&artifact.wasm_path, host.clone(), input.clone());
+    let output = match inside {
         runtara_component_host::InvokeExit::Completed(output) => output,
         other => panic!(
             "a relaunch inside the skew tolerance must finish the wait; re-parking \
-             here spins one full replay per scheduler poll until the clocks agree. \
-             Got {other:?}"
+             here burns a full replay on every scheduler poll until the host clock \
+             reaches the deadline. Got {other:?}"
         ),
     };
     assert_eq!(
