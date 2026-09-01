@@ -46,11 +46,6 @@ pub(super) struct DirectCoreConfig {
     /// Top-level export shape (see `component::WorkflowAbi`). Defaults to the
     /// legacy `wasi:cli/run`; set via [`Self::with_abi`].
     pub(super) abi: crate::direct_wasm::component::WorkflowAbi,
-    /// Opt-in gate for the store-freeing durable-sleep lowering (see
-    /// [`DirectCoreFunctionIndices::store_freeing_sleep`]). Defaults to false —
-    /// the blocking, byte-preserved path — and is set via
-    /// [`Self::with_store_freeing_sleep`].
-    pub(super) store_freeing_sleep: bool,
     /// When true, the component imports no `runtara:workflow-runtime/runtime`,
     /// so the emitter must NOT lower any `runtime.*` call — the terminal
     /// `complete`/`fail` are dropped and the result travels solely in-band via
@@ -94,12 +89,6 @@ impl DirectCoreConfig {
         self
     }
 
-    /// Enable the store-freeing durable-sleep lowering (opt-in; default off).
-    pub(super) fn with_store_freeing_sleep(mut self, enabled: bool) -> Self {
-        self.store_freeing_sleep = enabled;
-        self
-    }
-
     /// Compile with no runtime import (agent-shaped; opt-in, default off).
     pub(super) fn with_omit_runtime(mut self, enabled: bool) -> Self {
         self.omit_runtime = enabled;
@@ -115,7 +104,6 @@ impl DirectCoreConfig {
         let variables_json = direct_core_variables_json(&manifest.graph.variables, workflow_id)?;
         Ok(Self {
             abi: crate::direct_wasm::component::WorkflowAbi::default(),
-            store_freeing_sleep: false,
             omit_runtime: false,
             run_plan: direct_run_plan(manifest)?,
             static_data: DirectCoreStaticData::new_with_child_workflows(
@@ -351,7 +339,6 @@ pub(super) fn emit_direct_core_module(
 
     let import_indices = import_indices.require_all(
         config.abi,
-        config.store_freeing_sleep,
         config.omit_runtime,
         config.static_data.has_connections(),
     )?;

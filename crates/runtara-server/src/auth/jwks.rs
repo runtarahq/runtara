@@ -22,6 +22,10 @@ pub struct RetryPolicy {
     /// Minimum gap between refreshes triggered from the request path, so a cache miss storm
     /// cannot fan out one upstream fetch per request.
     pub miss_cooldown: Duration,
+    /// Hard bound on a single fetch. Startup makes exactly one, so this is also the whole
+    /// inline startup budget — the longest [`JwksCache::with_policy`] can take before it gives
+    /// up and hands retrying to the background refresher.
+    pub fetch_timeout: Duration,
 }
 
 impl Default for RetryPolicy {
@@ -31,6 +35,7 @@ impl Default for RetryPolicy {
             empty_retry_interval: Duration::from_secs(15),
             refresh_interval: Duration::from_secs(3600),
             miss_cooldown: Duration::from_secs(10),
+            fetch_timeout: Duration::from_secs(10),
         }
     }
 }
@@ -124,7 +129,7 @@ impl JwksCache {
         let response = self
             .client
             .get(&self.jwks_uri)
-            .timeout(std::time::Duration::from_secs(10))
+            .timeout(self.policy.fetch_timeout)
             .send()
             .await
             .map_err(|e| format!("JWKS fetch failed: {e}"))?;

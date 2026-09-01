@@ -10715,6 +10715,20 @@ fn workflow_abi_env_lever_defaults_invoke() {
 }
 
 #[test]
+fn omit_runtime_env_lever_defaults_off() {
+    // Workflow-as-agent's compile lever: opt-in, truthy-only. This parser used
+    // to be shared with the store-freeing durable-sleep gate, which meant a
+    // change to one gate's semantics silently moved the other; it now stands
+    // alone precisely so that cannot happen again.
+    assert!(!super::omit_runtime_from_raw(None));
+    assert!(!super::omit_runtime_from_raw(Some("")));
+    assert!(!super::omit_runtime_from_raw(Some("0")));
+    assert!(!super::omit_runtime_from_raw(Some("yes")));
+    assert!(super::omit_runtime_from_raw(Some("1")));
+    assert!(super::omit_runtime_from_raw(Some("true")));
+}
+
+#[test]
 fn generated_workflow_slugs_are_wit_valid_packages() {
     // The slug plan allows leading digits (decision 3) on the premise that
     // wit-parser accepts digit-led words in
@@ -10818,43 +10832,13 @@ fn direct_compile_sequential_split_has_no_async_imports() {
     );
 }
 
-// ── compile-time gate defaults ──────────────────────────────────────────────
-
-/// Store-freeing durable sleep is the default, and only an explicit opt-out
-/// turns it off.
-///
-/// This is load-bearing rather than cosmetic: with the legacy blocking
-/// lowering a sleeping instance is a live wasmtime store holding a file
-/// descriptor, which caps a host in the low thousands. If this default ever
-/// flips back, workflows silently stop parking and every downstream figure —
-/// drain rate, sleeper cost, the on-signal waker — stops being true.
-#[test]
-fn store_freeing_sleep_is_on_unless_opted_out() {
-    assert!(
-        super::enabled_unless_opted_out(None),
-        "unset must mean on: this is the shipped default"
-    );
-    for off in ["false", "0", "no", "off", "disabled", "FALSE", " Off "] {
-        assert!(
-            !super::enabled_unless_opted_out(Some(off)),
-            "{off:?} must opt out of the store-freeing lowering"
-        );
-    }
-    for on in ["1", "true", "yes", "on", ""] {
-        assert!(
-            super::enabled_unless_opted_out(Some(on)),
-            "{on:?} must leave the default in place"
-        );
-    }
-}
-
-/// The runtime-omit lever is a separate, still opt-in flag. It shared a parser
-/// with the sleep gate before that gate flipped; keep them distinct.
+/// The runtime-omit lever is opt-in, and stays that way now that the
+/// store-freeing gate it once shared a parser with is gone.
 #[test]
 fn runtime_omit_stays_opt_in() {
-    assert!(!super::enabled_only_if_opted_in(None));
-    assert!(!super::enabled_only_if_opted_in(Some("yes")));
-    assert!(!super::enabled_only_if_opted_in(Some("on")));
-    assert!(super::enabled_only_if_opted_in(Some("1")));
-    assert!(super::enabled_only_if_opted_in(Some("true")));
+    assert!(!super::omit_runtime_from_raw(None));
+    assert!(!super::omit_runtime_from_raw(Some("yes")));
+    assert!(!super::omit_runtime_from_raw(Some("on")));
+    assert!(super::omit_runtime_from_raw(Some("1")));
+    assert!(super::omit_runtime_from_raw(Some("true")));
 }
