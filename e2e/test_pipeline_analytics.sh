@@ -136,7 +136,12 @@ make_workflow() {
     }')
     resp=$(api_post "/workflows/${wf_id}/update" "{\"executionGraph\": ${definition}}")
     [ "$(echo "${resp}" | jq -r '.success // false')" = "true" ] || { print_error "Update failed: ${resp}"; exit 1; }
-    version=$(curl -sS "${API}/workflows/${wf_id}/versions" | jq -r '[.data[]?.version // .data[]?.versionNumber // empty] | max // 1')
+    # `versionNumber` is the field the API returns; `.version` is always null,
+    # and jq's `//` treats that as falsy only per-element — so a list of nulls
+    # yields a null max and silently falls back to 1. That compiles version 1
+    # of a workflow whose steps live in version 2, which fails as "no steps
+    # defined" nowhere near the mistake.
+    version=$(curl -sS "${API}/workflows/${wf_id}/versions" | jq -r '[.data[]?.versionNumber // empty] | max // 1')
     resp=$(api_post "/workflows/${wf_id}/versions/${version}/compile" '{}' 900)
     [ "$(echo "${resp}" | jq -r '.success // false')" = "true" ] || { print_error "Compile failed: ${resp}"; exit 1; }
     echo "${wf_id}"

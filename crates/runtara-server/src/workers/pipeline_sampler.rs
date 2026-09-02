@@ -241,12 +241,18 @@ pub struct SamplerInputs {
     pub valkey: Option<redis::aio::ConnectionManager>,
     /// Trigger stream key and consumer group.
     pub stream: Option<(String, String)>,
-    /// Environment pool and tenant, for the parked count.
-    pub pool: sqlx::PgPool,
+    /// The **runtime** database pool, for the parked count.
+    ///
+    /// Not the server pool: `instances` lives in the runtime database, and
+    /// pointing this at the server one makes every parked count fail silently
+    /// and the stage read as permanently unmeasured.
+    pub pool: Option<sqlx::PgPool>,
     /// Tenant whose instances are counted.
     pub tenant_id: String,
     /// Composed admission cap.
     pub admission_limit: u64,
+    /// The engine, for the in-flight count the gate itself decides on.
+    pub engine: Option<Arc<crate::workers::execution_engine::ExecutionEngine>>,
 }
 
 /// Run the sampler until shutdown.
@@ -284,7 +290,10 @@ pub async fn run(
         // carry its last value between slow ticks.
         if last_slow.elapsed() >= SLOW_TICK {
             last_slow = Instant::now();
-            parked = count_parked(&inputs.pool, &inputs.tenant_id).await;
+            parked = match inputs.pool.as_ref() {
+                Some(pool) => count_parked(pool, &inputs.tenant_id).await,
+                None => None,
+            };
         }
 
         let occupancy = inputs.runner.as_ref().and_then(|r| r.occupancy());
@@ -335,7 +344,10 @@ pub async fn run(
 
         let reading = PipelineReading {
             admission_limit: Some(inputs.admission_limit),
-            admission_used: None,
+            admission_used: inputs
+                .engine
+                .as_ref()
+                .map(|e| e.observed_in_flight(&inputs.tenant_id, inputs.admission_limit)),
             queue_depth: backlog.map(|b| b.pending),
             queue_oldest_ms: backlog.and_then(|b| b.oldest_pending_ms),
             trigger_limit,
@@ -383,7 +395,10 @@ async fn count_parked(pool: &sqlx::PgPool, tenant_id: &str) -> Option<u64> {
             Some(count.max(0) as u64)
         }
         Err(e) => {
-            tracing::debug!(error = %e, "pipeline sampler could not count parked instances");
+            // Warn, not debug: this stage reading as permanently unmeasured is
+            // exactly the symptom of pointing at the wrong database, and a
+            // debug line would hide it behind the default log level.
+            tracing::warn!(error = %e, "pipeline sampler could not count parked instances");
             None
         }
     }

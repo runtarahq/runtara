@@ -436,6 +436,19 @@ impl ExecutionEngine {
         &self.gauges
     }
 
+    /// In-flight executions as the admission gate itself counts them.
+    ///
+    /// The same cached figure the gate decides on, so a viewer sees what the
+    /// gate sees rather than a second opinion taken from a different query at
+    /// a different moment — two numbers that disagree about the same thing are
+    /// worse than one.
+    ///
+    /// Never queries: it reads the cache the gate maintains, so calling it on
+    /// a sampler tick costs nothing and cannot slow intake.
+    pub fn observed_in_flight(&self, tenant_id: &str, ceiling: u64) -> u64 {
+        self.active_execution_count(tenant_id, ceiling)
+    }
+
     /// Count the tenant's currently in-flight executions (Running + Pending)
     /// as reported by the runtime — the source of truth. Two cheap
     /// `total_count` lookups (limit 1) rather than fetching rows.

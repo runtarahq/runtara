@@ -17,6 +17,12 @@ interface PipelineStageRowProps {
   history: (number | null)[];
   /// Rate flowing into this stage, or `null` before the first window closes.
   inflow: number | null;
+  /// Is the pipeline being offered any work at all?
+  ///
+  /// Zero throughput is only a symptom when there is something upstream to
+  /// have moved. On an idle deployment every stage is legitimately at zero, and
+  /// reddening all six would cry wolf on a system doing exactly what it should.
+  pipelineActive: boolean;
   isChokepoint: boolean;
 }
 
@@ -45,6 +51,7 @@ export function PipelineStageRow({
   stage,
   history,
   inflow,
+  pipelineActive,
   isChokepoint,
 }: PipelineStageRowProps) {
   const pct = utilisation(stage);
@@ -73,7 +80,9 @@ export function PipelineStageRow({
         <span
           className={cn(
             'text-sm font-semibold tabular-nums',
-            inflow === 0 ? 'text-destructive' : 'text-foreground'
+            inflow === 0 && pipelineActive
+              ? 'text-destructive'
+              : 'text-foreground'
           )}
         >
           {formatRate(inflow)}

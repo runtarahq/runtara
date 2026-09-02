@@ -1625,9 +1625,14 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
                     cfg.trigger_consumer_group.clone(),
                 )
             }),
-            pool: pool.clone(),
+            // The runtime database, where `instances` lives — not the server
+            // pool that most of this function passes around.
+            pool: embedded_runtara
+                .as_ref()
+                .map(|r| r.environment_state().pool.clone()),
             tenant_id: tenant_id.clone(),
             admission_limit: config::max_concurrent_executions() as u64,
+            engine: Some(Arc::clone(&execution_engine)),
         };
         let sampler_feed = pipeline_feed.clone();
         let sampler_latest = pipeline_latest.clone();

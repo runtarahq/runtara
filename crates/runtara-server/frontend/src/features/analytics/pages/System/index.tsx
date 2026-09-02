@@ -97,6 +97,9 @@ export function System() {
                           )[stage.inflowKey] ?? null)
                         : null
                     }
+                    pipelineActive={
+                      (pipeline.snapshot?.rates?.offered ?? 0) > 0
+                    }
                     isChokepoint={pipeline.chokepointKey === stage.key}
                   />
                 ))}

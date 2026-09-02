@@ -31,6 +31,7 @@ describe('PipelineStageRow', () => {
         })}
         history={HISTORY}
         inflow={398}
+        pipelineActive
         isChokepoint={false}
       />
     );
@@ -47,6 +48,7 @@ describe('PipelineStageRow', () => {
         stage={stage({ key: 'runPermits', limit: 16, used: null })}
         history={[]}
         inflow={null}
+        pipelineActive={false}
         isChokepoint={false}
       />
     );
@@ -60,6 +62,7 @@ describe('PipelineStageRow', () => {
         stage={stage({ key: 'runPermits', limit: 8, used: 8 })}
         history={HISTORY}
         inflow={0}
+        pipelineActive
         isChokepoint
       />
     );
@@ -67,6 +70,22 @@ describe('PipelineStageRow', () => {
     // the row at fault — so zero has to be visually distinct from a small rate.
     const inflow = container.querySelector('.text-destructive');
     expect(inflow).not.toBeNull();
+  });
+
+  it('does not redden a zero inflow on an idle pipeline', () => {
+    // Every stage of an idle deployment is legitimately at zero. Reddening all
+    // six would cry wolf on a system doing exactly what it should, and teach
+    // its reader to ignore the colour when it finally means something.
+    const { container } = render(
+      <PipelineStageRow
+        stage={stage({ key: 'runPermits', limit: 64, used: 0 })}
+        history={Array(30).fill(0)}
+        inflow={0}
+        pipelineActive={false}
+        isChokepoint={false}
+      />
+    );
+    expect(container.querySelector('.text-destructive')).toBeNull();
   });
 
   it('flags a stage that is full and not draining', () => {
@@ -80,6 +99,7 @@ describe('PipelineStageRow', () => {
         })}
         history={Array(30).fill(8)}
         inflow={0}
+        pipelineActive
         isChokepoint
       />
     );
@@ -100,6 +120,7 @@ describe('PipelineStageRow', () => {
         })}
         history={Array(30).fill(16)}
         inflow={805}
+        pipelineActive
         isChokepoint={false}
       />
     );
@@ -113,6 +134,7 @@ describe('PipelineStageRow', () => {
         stage={stage({ key: 'runPermits', limit: 8, used: 8 })}
         history={HISTORY}
         inflow={0}
+        pipelineActive
         isChokepoint
       />
     );
@@ -128,6 +150,7 @@ describe('PipelineStageRow', () => {
         stage={stage({ key: 'parked', label: 'Parked', used: 1_009_739 })}
         history={Array(30).fill(1_009_739)}
         inflow={396}
+        pipelineActive
         isChokepoint={false}
       />
     );
@@ -141,6 +164,7 @@ describe('PipelineStageRow', () => {
         stage={stage({ key: 'runPermits', limit: 16, used: 4 })}
         history={[4]}
         inflow={10}
+        pipelineActive
         isChokepoint={false}
       />
     );
