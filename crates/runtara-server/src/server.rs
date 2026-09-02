@@ -137,6 +137,8 @@ use runtime_client::RuntimeClient;
         api::metrics::get_tenant_metrics,
         // Analytics endpoints
         api::analytics::get_system_analytics_handler,
+        api::analytics::get_pipeline_snapshot_handler,
+        api::analytics::stream_pipeline_handler,
         // Rate limit analytics endpoints (served by runtara-connections crate)
         runtara_connections::handler::rate_limits::list_rate_limits_handler,
         runtara_connections::handler::rate_limits::get_connection_rate_limit_status_handler,
@@ -347,6 +349,10 @@ use runtime_client::RuntimeClient;
             metrics::WorkflowMetricsHourly,
             // Analytics DTOs
             api::analytics::SystemAnalyticsResponse,
+            api::dto::pipeline::PipelineSnapshotResponse,
+            api::dto::pipeline::PipelineSnapshotDto,
+            api::dto::pipeline::PipelineStageDto,
+            api::dto::pipeline::PipelineRatesDto,
             api::analytics::SystemAnalyticsData,
             api::analytics::MemoryInfo,
             api::analytics::DiskInfo,
@@ -548,6 +554,25 @@ struct AppState {
     /// background drain batches the events and ships them to Valkey for smo-management's
     /// per-tenant consumer to persist into its `product_events` table.
     events: product_events::ProductEventSink,
+    /// Live pipeline snapshots, published by the sampler on its own tick.
+    ///
+    /// Handlers subscribe rather than read the world, so a viewer costs a
+    /// broadcast receiver and never a query.
+    pipeline_feed: workers::pipeline_sampler::PipelineFeed,
+    /// The most recent pipeline snapshot, so a plain GET need not await a tick.
+    pipeline_latest: workers::pipeline_sampler::PipelineLatest,
+}
+
+impl axum::extract::FromRef<AppState> for workers::pipeline_sampler::PipelineFeed {
+    fn from_ref(state: &AppState) -> Self {
+        state.pipeline_feed.clone()
+    }
+}
+
+impl axum::extract::FromRef<AppState> for workers::pipeline_sampler::PipelineLatest {
+    fn from_ref(state: &AppState) -> Self {
+        state.pipeline_latest.clone()
+    }
 }
 
 // Implement FromRef to allow extracting PgPool from AppState
@@ -1025,6 +1050,12 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     // writes them: the trigger workers spawn well ahead of the execution engine
     // and both must share these, or intake would be counted twice over.
     let pipeline_gauges = workers::pipeline_gauges::PipelineGauges::new();
+    let pipeline_feed = workers::pipeline_sampler::PipelineFeed::new();
+    let pipeline_latest = workers::pipeline_sampler::PipelineLatest::default();
+    // Empty until trigger intake is configured. An empty set reports "no
+    // workers", which the sampler renders as an unmeasured stage rather than
+    // an idle one — the two are different facts.
+    let mut trigger_permits_for_sampler = workers::pipeline_gauges::TriggerPermits::default();
 
     // Product-analytics: build the channel + sink up front so it can be injected into the
     // connections crate (constructed just below). The drain (single consumer) is spawned
@@ -1417,6 +1448,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             trigger_workers,
             workers::trigger_worker::trigger_concurrency(),
         );
+        trigger_permits_for_sampler = trigger_permits.clone();
         for worker_index in 0..trigger_workers {
             let trigger_worker_tenant_id = tenant_id.clone();
             let permits_for_worker = trigger_permits
@@ -1576,6 +1608,40 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         Arc::clone(&pipeline_gauges),
     ));
     println!("✓ Execution engine initialized");
+
+    // Pipeline sampler: one tick produces one snapshot for every viewer, so the
+    // System page costs a broadcast receiver per client rather than a query.
+    {
+        let sampler_inputs = workers::pipeline_sampler::SamplerInputs {
+            gauges: Arc::clone(&pipeline_gauges),
+            trigger_permits: trigger_permits_for_sampler.clone(),
+            runner: embedded_runtara
+                .as_ref()
+                .map(|r| Arc::clone(&r.environment_state().runner)),
+            valkey: valkey_conn.clone(),
+            stream: valkey::ValkeyConfig::from_env().map(|cfg| {
+                (
+                    cfg.trigger_stream_key(&tenant_id),
+                    cfg.trigger_consumer_group.clone(),
+                )
+            }),
+            pool: pool.clone(),
+            tenant_id: tenant_id.clone(),
+            admission_limit: config::max_concurrent_executions() as u64,
+        };
+        let sampler_feed = pipeline_feed.clone();
+        let sampler_latest = pipeline_latest.clone();
+        let sampler_shutdown = shutdown_signal.clone();
+        tokio::spawn(async move {
+            workers::pipeline_sampler::run(
+                sampler_inputs,
+                sampler_feed,
+                sampler_latest,
+                sampler_shutdown,
+            )
+            .await;
+        });
+    }
 
     // CORS — configured via CORS_ALLOWED_ORIGINS env var.
     // Supports: "*" (any origin), comma-separated origins, or defaults to localhost for dev.
@@ -1878,6 +1944,14 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             "/api/runtime/analytics/system",
             get(api::analytics::get_system_analytics_handler),
         )
+        .route(
+            "/api/runtime/analytics/pipeline",
+            get(api::analytics::get_pipeline_snapshot_handler),
+        )
+        .route(
+            "/api/runtime/analytics/pipeline/stream",
+            get(api::analytics::stream_pipeline_handler),
+        )
         // Reporting endpoints — defined in `reports_router` above and merged below.
         // NOTE: Rate limit analytics routes are now served by runtara-connections crate.
         // Invocation Trigger endpoints
@@ -1989,6 +2063,8 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             agents: agents_service.clone(),
             agent_catalog: agent_catalog.clone(),
             events: product_event_sink.clone(),
+            pipeline_feed: pipeline_feed.clone(),
+            pipeline_latest: pipeline_latest.clone(),
         })
         // Reject API-key-authenticated requests when the `api` feature is
         // off. Sits *between* auth (outermost) and the per-feature gates
@@ -2343,6 +2419,8 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             agents: agents_service.clone(),
             agent_catalog: agent_catalog.clone(),
             events: product_event_sink.clone(),
+            pipeline_feed: pipeline_feed.clone(),
+            pipeline_latest: pipeline_latest.clone(),
         })
         // Defense in depth: cap the request body on these public,
         // unauthenticated webhook ingest routes. events.rs also enforces this

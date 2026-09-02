@@ -159,6 +159,13 @@ pub struct PipelineRates {
     pub denied: f64,
     /// Started per second.
     pub started: f64,
+    /// Guests that stopped running, per second.
+    ///
+    /// Sourced from the runner rather than these counters, because only the
+    /// runner knows when a guest actually stopped. A workflow that parked
+    /// itself has finished executing without having completed, and counting
+    /// submissions as outcomes would conflate the two.
+    pub finished: f64,
     /// Steps per second, or `None` when nothing live could report one.
     pub steps: Option<f64>,
     /// The window these rates were measured over.
@@ -174,6 +181,8 @@ pub struct PipelineRates {
 pub fn rates_between(
     prev: PipelineTotals,
     next: PipelineTotals,
+    prev_finished: u64,
+    next_finished: u64,
     window_ms: u64,
 ) -> Option<PipelineRates> {
     if window_ms == 0 {
@@ -191,6 +200,7 @@ pub fn rates_between(
         accepted: per_sec(prev.accepted, next.accepted),
         denied: per_sec(prev.denied, next.denied),
         started: per_sec(prev.started, next.started),
+        finished: per_sec(prev_finished, next_finished),
         steps: measurable.then(|| per_sec(prev.steps, next.steps)),
         window_ms,
     })
@@ -284,7 +294,7 @@ mod tests {
             steps: 6_000,
             tracked_runs: 6,
         };
-        let r = rates_between(prev, next, 1_000).expect("a non-empty window yields rates");
+        let r = rates_between(prev, next, 0, 0, 1_000).expect("a non-empty window yields rates");
         assert_eq!(r.offered, 400.0);
         assert_eq!(r.accepted, 400.0);
         assert_eq!(
@@ -303,7 +313,7 @@ mod tests {
             accepted: 100,
             ..PipelineTotals::default()
         };
-        let r = rates_between(prev, next, 500).expect("rates");
+        let r = rates_between(prev, next, 0, 0, 500).expect("rates");
         assert_eq!(
             r.accepted, 200.0,
             "the sampler's real elapsed time decides the rate, not its nominal interval"
@@ -322,7 +332,7 @@ mod tests {
             accepted: 9_999,
             ..PipelineTotals::default()
         };
-        assert!(rates_between(PipelineTotals::default(), next, 0).is_none());
+        assert!(rates_between(PipelineTotals::default(), next, 0, 0, 0).is_none());
     }
 
     /// With nothing tracked live, steps must be absent rather than zero.
@@ -346,7 +356,7 @@ mod tests {
             tracked_runs: 0,
             ..PipelineTotals::default()
         };
-        let r = rates_between(quiet, later, 1_000).expect("rates");
+        let r = rates_between(quiet, later, 0, 0, 1_000).expect("rates");
         assert_eq!(
             r.steps, None,
             "no tracked run means not measured, which is not the same as zero"
@@ -365,7 +375,7 @@ mod tests {
             tracked_runs: 8,
             ..PipelineTotals::default()
         };
-        let r = rates_between(held, held, 1_000).expect("rates");
+        let r = rates_between(held, held, 0, 0, 1_000).expect("rates");
         assert_eq!(
             r.steps,
             Some(0.0),
@@ -449,7 +459,7 @@ mod tests {
             ..PipelineTotals::default()
         };
         let next = PipelineTotals::default();
-        let r = rates_between(prev, next, 1_000).expect("rates");
+        let r = rates_between(prev, next, 0, 0, 1_000).expect("rates");
         assert_eq!(
             r.accepted, 0.0,
             "saturating subtraction, never a negative rate"

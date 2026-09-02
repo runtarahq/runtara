@@ -1,7 +1,7 @@
 // Analytics HTTP handlers
 // Provides runtime system information including memory, disk, and CPU details
 
-use axum::{http::StatusCode, response::Json};
+use axum::{http::StatusCode, http::header, response::Json};
 use serde_json::Value;
 use std::path::PathBuf;
 use sysinfo::Disks;
@@ -92,5 +92,119 @@ pub async fn get_system_analytics_handler(
     (
         StatusCode::OK,
         Json(serde_json::to_value(response).unwrap()),
+    )
+}
+
+// ============================================================================
+// Execution pipeline
+// ============================================================================
+
+/// Current occupancy of every stage of the execution pipeline.
+///
+/// Answers from the sampler's last snapshot rather than reading the world, so
+/// this costs the same whether one viewer or fifty ask for it and no request
+/// can ever cause a database query.
+#[utoipa::path(
+    get,
+    path = "/api/runtime/analytics/pipeline",
+    responses(
+        (status = 200, description = "Pipeline snapshot retrieved successfully", body = crate::api::dto::pipeline::PipelineSnapshotResponse),
+        (status = 503, description = "The sampler has not produced a snapshot yet", body = Value)
+    ),
+    tag = "analytics-controller"
+)]
+pub async fn get_pipeline_snapshot_handler(
+    crate::middleware::tenant_auth::OrgId(_tenant_id): crate::middleware::tenant_auth::OrgId,
+    axum::extract::State(latest): axum::extract::State<
+        crate::workers::pipeline_sampler::PipelineLatest,
+    >,
+) -> (StatusCode, Json<Value>) {
+    match latest.get() {
+        Some(snapshot) => {
+            let response = crate::api::dto::pipeline::PipelineSnapshotResponse {
+                success: true,
+                message: "Pipeline snapshot retrieved successfully".to_string(),
+                data: (*snapshot).clone(),
+            };
+            (
+                StatusCode::OK,
+                Json(serde_json::to_value(response).unwrap_or(Value::Null)),
+            )
+        }
+        // Distinct from an empty snapshot on purpose: "the sampler has not run
+        // yet" is a different fact from "the pipeline is empty", and answering
+        // the first with the second would show a booting server as an idle one.
+        None => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "success": false,
+                "message": "Pipeline sampler has not produced a snapshot yet",
+            })),
+        ),
+    }
+}
+
+/// Stream pipeline snapshots as they are sampled.
+///
+/// Authenticated with the ordinary bearer extractor and no special-casing,
+/// because the frontend consumes this with `fetch` rather than `EventSource` —
+/// which cannot set headers and would otherwise push the token into a query
+/// string, where it would end up in every access log.
+#[utoipa::path(
+    get,
+    path = "/api/runtime/analytics/pipeline/stream",
+    responses(
+        (status = 200, description = "SSE stream of pipeline snapshots", content_type = "text/event-stream")
+    ),
+    tag = "analytics-controller"
+)]
+pub async fn stream_pipeline_handler(
+    crate::middleware::tenant_auth::OrgId(_tenant_id): crate::middleware::tenant_auth::OrgId,
+    axum::extract::State(feed): axum::extract::State<
+        crate::workers::pipeline_sampler::PipelineFeed,
+    >,
+    axum::extract::State(latest): axum::extract::State<
+        crate::workers::pipeline_sampler::PipelineLatest,
+    >,
+) -> impl axum::response::IntoResponse {
+    use axum::response::sse::{Event, KeepAlive, Sse};
+    use futures::stream::{self, StreamExt};
+
+    let mut rx = feed.subscribe();
+
+    // Open with whatever is already known, so a freshly loaded page renders
+    // immediately instead of sitting blank until the next tick.
+    let initial = stream::iter(
+        latest
+            .get()
+            .and_then(|snapshot| Event::default().json_data(&*snapshot).ok())
+            .map(Ok::<_, std::convert::Infallible>),
+    );
+
+    let updates = async_stream::stream! {
+        loop {
+            match rx.recv().await {
+                Ok(snapshot) => {
+                    if let Ok(event) = Event::default().json_data(&*snapshot) {
+                        yield Ok::<_, std::convert::Infallible>(event);
+                    }
+                }
+                // This client fell behind; the sampler and every other viewer
+                // carried on. Resume from the current state rather than
+                // ending the stream — a laggard wants now, not a backlog.
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    };
+
+    let headers = [
+        (header::CACHE_CONTROL, "no-cache, no-store, must-revalidate"),
+        (header::HeaderName::from_static("x-accel-buffering"), "no"),
+    ];
+
+    (
+        headers,
+        Sse::new(initial.chain(updates)).keep_alive(KeepAlive::default()),
     )
 }

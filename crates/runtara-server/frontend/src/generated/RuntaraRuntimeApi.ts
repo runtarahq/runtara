@@ -3264,6 +3264,122 @@ export interface PeriodStatsDto {
   totalRequests: number;
 }
 
+/** Throughput between pipeline stages, per second. */
+export interface PipelineRatesDto {
+  /**
+   * Executions the gate admitted.
+   * @format double
+   */
+  accepted: number;
+  /**
+   * Executions the gate refused with `ENTITLEMENT_LIMIT_EXCEEDED`.
+   * @format double
+   */
+  denied: number;
+  /**
+   * Guests that stopped running, including those that parked themselves.
+   * @format double
+   */
+  finished: number;
+  /**
+   * Executions presented to the admission gate.
+   * @format double
+   */
+  offered: number;
+  /**
+   * Instances handed to the runtime for launch.
+   * @format double
+   */
+  started: number;
+  /**
+   * Workflow steps, or `null` when nothing live could report one.
+   *
+   * `trackEvents` is compile-time, so a workflow built without it runs
+   * perfectly and emits no steps. Rendering that as zero would let a
+   * consumer declare a healthy system stalled.
+   * @format double
+   */
+  steps?: number | null;
+}
+
+/** The pipeline at one instant. */
+export interface PipelineSnapshotDto {
+  /**
+   * When this was sampled.
+   * @format date-time
+   */
+  capturedAt: string;
+  /**
+   * Throughput, or `null` on the first tick after start.
+   *
+   * There is no earlier reading to difference against then, and treating the
+   * baseline as zero would publish the process's whole lifetime of work as
+   * one second's throughput.
+   */
+  rates?: null | PipelineRatesDto;
+  /** Every stage, in pipeline order. */
+  stages: PipelineStageDto[];
+  /**
+   * The window the rates were measured over.
+   *
+   * On the wire rather than assumed, so a consumer can tell a normal tick
+   * from one that followed a pause and discard the gap instead of drawing
+   * a spike that never happened.
+   * @format int64
+   * @min 0
+   */
+  windowMs: number;
+}
+
+/** Response envelope for the pipeline endpoint. */
+export interface PipelineSnapshotResponse {
+  /** The snapshot. */
+  data: PipelineSnapshotDto;
+  /** Human-readable status. */
+  message: string;
+  /** Whether the snapshot was produced. */
+  success: boolean;
+}
+
+/** One stage of the pipeline at one instant. */
+export interface PipelineStageDto {
+  /** Which rate feeds this stage, naming a field of [`PipelineRatesDto`]. */
+  inflowKey: string;
+  /**
+   * Stable identifier: `admission`, `triggerQueue`, `triggerWorkers`,
+   * `runPermits`, `executing`, `parked`.
+   */
+  key: string;
+  /**
+   * The setting that bounds this stage, shown verbatim so an operator can
+   * act on it without looking it up.
+   */
+  knob?: string | null;
+  /** Human-readable stage name. */
+  label: string;
+  /**
+   * The bound, or `null` for a stage with no ceiling.
+   * @format int64
+   * @min 0
+   */
+  limit?: number | null;
+  /**
+   * Age of the oldest item held here.
+   *
+   * The signal that separates a stage turning work over from one holding
+   * work that never leaves — the two are indistinguishable by occupancy.
+   * @format int64
+   * @min 0
+   */
+  oldestAgeMs?: number | null;
+  /**
+   * Current occupancy, or `null` when the source could not be read.
+   * @format int64
+   * @min 0
+   */
+  used?: number | null;
+}
+
 /** Position coordinates for UI elements */
 export interface Position {
   /** @format double */
@@ -6565,6 +6681,37 @@ export class Api<
     ) =>
       this.request<any, void>({
         path: `/api/runtime/agents/${name}/connection-schema`,
+        method: "GET",
+        ...params,
+      }),
+
+    /**
+     * @description Answers from the sampler's last snapshot rather than reading the world, so this costs the same whether one viewer or fifty ask for it and no request can ever cause a database query.
+     *
+     * @tags analytics-controller
+     * @name GetPipelineSnapshotHandler
+     * @summary Current occupancy of every stage of the execution pipeline.
+     * @request GET:/api/runtime/analytics/pipeline
+     */
+    getPipelineSnapshotHandler: (params: RequestParams = {}) =>
+      this.request<PipelineSnapshotResponse, any>({
+        path: `/api/runtime/analytics/pipeline`,
+        method: "GET",
+        format: "json",
+        ...params,
+      }),
+
+    /**
+     * @description Authenticated with the ordinary bearer extractor and no special-casing, because the frontend consumes this with `fetch` rather than `EventSource` — which cannot set headers and would otherwise push the token into a query string, where it would end up in every access log.
+     *
+     * @tags analytics-controller
+     * @name StreamPipelineHandler
+     * @summary Stream pipeline snapshots as they are sampled.
+     * @request GET:/api/runtime/analytics/pipeline/stream
+     */
+    streamPipelineHandler: (params: RequestParams = {}) =>
+      this.request<void, any>({
+        path: `/api/runtime/analytics/pipeline/stream`,
         method: "GET",
         ...params,
       }),
