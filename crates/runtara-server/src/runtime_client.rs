@@ -816,7 +816,9 @@ impl RuntimeClient {
 
     /// Get image info by image ID
     ///
-    /// Returns image details including the human-readable name (format: workflow_id:version).
+    /// Returns image details including the human-readable name (legacy
+    /// `workflow_id:version` or artifact-qualified
+    /// `workflow_id:version@fingerprint`).
     pub async fn get_image(
         &self,
         image_id: &str,
@@ -868,17 +870,10 @@ impl RuntimeClient {
         tenant_id: &str,
         name: &str,
     ) -> Result<Option<crate::runtime_types::ImageSummary>, RuntimeError> {
-        // List all images and find by name
-        // Note: This could be optimized with server-side filtering if the SDK supports it
-        let result = self.list_images(tenant_id, 1000).await?;
-
-        for image in result.images {
-            if image.name == name {
-                return Ok(Some(image));
-            }
-        }
-
-        Ok(None)
+        self.client
+            .find_image_by_name(tenant_id, name)
+            .await
+            .map_err(|e| RuntimeError::SdkError(e.to_string()))
     }
 
     /// Register an image using streaming upload
@@ -1022,12 +1017,14 @@ impl RuntimeClient {
     }
 }
 
-/// Build a human-readable image name for registration
+/// Build a legacy human-readable image-name prefix.
 ///
-/// This returns the name used when registering images with runtara-environment.
-/// Format: {workflow_id}:{version}
+/// Compiled workflow artifacts append an opaque `@` fingerprint to this form
+/// so a recompile cannot replace the binary used by an already-selected image
+/// UUID. This helper remains for legacy callers that only need the stable
+/// `{workflow_id}:{version}` prefix.
 ///
-/// **IMPORTANT**: This is the NAME for registration, NOT the ID for execution!
+/// **IMPORTANT**: This is a name, NOT the ID for execution!
 /// When executing, you must use the UUID returned from `register_image_stream`.
 /// The UUID is stored in `workflow_compilations.registered_image_id`.
 pub fn build_image_name(workflow_id: &str, version: u32) -> String {

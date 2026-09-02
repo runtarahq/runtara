@@ -277,87 +277,31 @@ pub async fn handle_register_image(
         });
     }
 
-    let image_registry = ImageRegistry::new(state.pool.clone());
-    let existing_image = match image_registry
-        .get_by_name(&request.tenant_id, &request.name)
-        .await
-    {
-        Ok(image) => image,
-        Err(e) => {
-            error!(error = %e, "Failed to look up existing image");
-            return Ok(RegisterImageResponse {
+    let params = StoreImageParams {
+        tenant_id: request.tenant_id,
+        name: request.name,
+        description: request.description,
+        metadata: request.metadata,
+    };
+
+    match handle_store_image(state, params, &request.binary).await {
+        Ok(image_id) => {
+            info!(image_id = %image_id, "Image registered successfully");
+            Ok(RegisterImageResponse {
+                success: true,
+                image_id,
+                error: None,
+            })
+        }
+        Err(error) => {
+            error!(error = %error, "Failed to register image");
+            Ok(RegisterImageResponse {
                 success: false,
                 image_id: String::new(),
-                error: Some(format!("Failed to look up existing image: {}", e)),
-            });
+                error: Some(error.to_string()),
+            })
         }
-    };
-    let replacing_existing = existing_image.is_some();
-    let image_id = existing_image
-        .map(|image| image.image_id)
-        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-
-    // Create directories
-    let images_dir = state.data_dir.join("images").join(&image_id);
-    let binary_path = images_dir.join("binary");
-
-    if let Err(e) = std::fs::create_dir_all(&images_dir) {
-        error!(error = %e, "Failed to create image directory");
-        return Ok(RegisterImageResponse {
-            success: false,
-            image_id: String::new(),
-            error: Some(format!("Failed to create image directory: {}", e)),
-        });
     }
-
-    // Write binary
-    if let Err(e) = std::fs::write(&binary_path, &request.binary) {
-        error!(error = %e, "Failed to write binary");
-        return Ok(RegisterImageResponse {
-            success: false,
-            image_id: String::new(),
-            error: Some(format!("Failed to write binary: {}", e)),
-        });
-    }
-
-    // Build image
-    let mut builder = ImageBuilder::new(
-        &request.tenant_id,
-        &request.name,
-        binary_path.to_string_lossy(),
-    );
-
-    if let Some(desc) = &request.description {
-        builder = builder.description(desc);
-    }
-
-    if let Some(meta) = request.metadata {
-        builder = builder.metadata(meta);
-    }
-
-    let mut image = builder.build();
-    image.image_id = image_id.clone();
-
-    // Register in database
-    if let Err(e) = image_registry.register(&image).await {
-        error!(error = %e, "Failed to register image in database");
-        if !replacing_existing {
-            let _ = std::fs::remove_dir_all(&images_dir);
-        }
-        return Ok(RegisterImageResponse {
-            success: false,
-            image_id: String::new(),
-            error: Some(format!("Failed to register image: {}", e)),
-        });
-    }
-
-    info!(image_id = %image_id, "Image registered successfully");
-
-    Ok(RegisterImageResponse {
-        success: true,
-        image_id,
-        error: None,
-    })
 }
 
 // ============================================================================
@@ -1786,6 +1730,9 @@ pub struct InstanceSummary {
     /// Image the instance was launched from.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image_id: Option<String>,
+    /// Human-readable name of the image the instance was launched from.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_name: Option<String>,
     /// Lifecycle status.
     pub status: String,
     /// Creation time, epoch milliseconds.
@@ -1849,6 +1796,7 @@ pub async fn handle_list_instances(
                 instance_id: inst.instance_id,
                 tenant_id: inst.tenant_id,
                 image_id: inst.image_id,
+                image_name: inst.image_name,
                 status: instance_status_to_string(&inst.status).to_string(),
                 created_at_ms: inst.created_at.timestamp_millis(),
                 started_at_ms: inst.started_at.map(|t| t.timestamp_millis()),
@@ -2551,11 +2499,11 @@ pub struct StoreImageParams {
 /// Why an image upload could not be stored.
 ///
 /// Split by stage rather than collapsed into one error because the caller is
-/// told something different by each: a lookup or register failure is the
+/// told something different by each: a name-claim or register failure is the
 /// registry's, an I/O failure is the volume's.
 #[derive(Debug)]
 pub enum StoreImageError {
-    /// Looking up an existing image with the same name failed.
+    /// Claiming an existing image name failed.
     Lookup(String),
     /// Creating the image directory or writing the artifact failed.
     Io(String),
@@ -2563,11 +2511,24 @@ pub enum StoreImageError {
     Register(String),
 }
 
+impl std::fmt::Display for StoreImageError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Lookup(message) | Self::Io(message) | Self::Register(message) => {
+                f.write_str(message)
+            }
+        }
+    }
+}
+
+impl std::error::Error for StoreImageError {}
+
 /// Write an uploaded image artifact to disk and register (or replace) its row.
 ///
-/// On any failure after the directory is created, a *new* image's directory is
-/// removed again — but a replacement's is left alone, because deleting it would
-/// destroy the artifact the existing row still points at.
+/// The database claim comes before filesystem work so all concurrent writers
+/// resolve the same image ID.  The binary is uploaded to a private temporary
+/// file and renamed only after it is complete, so a launch never observes a
+/// partially written artifact.
 pub async fn handle_store_image(
     state: &EnvironmentHandlerState,
     params: StoreImageParams,
@@ -2576,15 +2537,22 @@ pub async fn handle_store_image(
     use std::io::Write;
 
     let image_registry = ImageRegistry::new(state.pool.clone());
-    let existing_image = image_registry
-        .get_by_name(&params.tenant_id, &params.name)
+    let candidate_image_id = uuid::Uuid::new_v4().to_string();
+    let candidate_binary_path = state
+        .data_dir
+        .join("images")
+        .join(&candidate_image_id)
+        .join("binary");
+    let name_claim = image_registry
+        .claim_name(
+            &params.tenant_id,
+            &params.name,
+            &candidate_image_id,
+            &candidate_binary_path.to_string_lossy(),
+        )
         .await
-        .map_err(|e| StoreImageError::Lookup(format!("Failed to look up existing image: {}", e)))?;
-
-    let replacing_existing = existing_image.is_some();
-    let image_id = existing_image
-        .map(|image| image.image_id)
-        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        .map_err(|e| StoreImageError::Lookup(format!("Failed to claim image name: {e}")))?;
+    let image_id = name_claim.image_id;
 
     let images_dir = state.data_dir.join("images").join(&image_id);
     let binary_path = images_dir.join("binary");
@@ -2597,17 +2565,23 @@ pub async fn handle_store_image(
         )));
     }
 
-    let cleanup = || {
-        if !replacing_existing {
-            let _ = std::fs::remove_dir_all(&images_dir);
-        }
-    };
-
-    if let Err(e) = std::fs::File::create(&binary_path).and_then(|mut f| f.write_all(binary)) {
+    let temporary_binary_path = images_dir.join(format!(".binary-upload-{}", uuid::Uuid::new_v4()));
+    if let Err(e) = std::fs::File::create(&temporary_binary_path).and_then(|mut file| {
+        file.write_all(binary)?;
+        file.sync_all()
+    }) {
         error!(error = %e, "Failed to write binary");
-        cleanup();
+        let _ = std::fs::remove_file(&temporary_binary_path);
         return Err(StoreImageError::Io(format!(
             "Failed to write binary: {}",
+            e
+        )));
+    }
+    if let Err(e) = std::fs::rename(&temporary_binary_path, &binary_path) {
+        error!(error = %e, "Failed to finalize binary upload");
+        let _ = std::fs::remove_file(&temporary_binary_path);
+        return Err(StoreImageError::Io(format!(
+            "Failed to finalize binary upload: {}",
             e
         )));
     }
@@ -2616,7 +2590,8 @@ pub async fn handle_store_image(
         &params.tenant_id,
         &params.name,
         binary_path.to_string_lossy(),
-    );
+    )
+    .image_id(&image_id);
     if let Some(desc) = &params.description {
         builder = builder.description(desc);
     }
@@ -2624,18 +2599,21 @@ pub async fn handle_store_image(
         builder = builder.metadata(meta);
     }
 
-    let mut image = builder.build();
-    image.image_id = image_id.clone();
+    let image = builder.build();
 
     if let Err(e) = image_registry.register(&image).await {
-        cleanup();
         return Err(StoreImageError::Register(format!(
             "Failed to register image: {}",
             e
         )));
     }
 
-    info!(image_id = %image_id, bytes = binary.len(), "Streaming image registration complete");
+    info!(
+        image_id = %image_id,
+        claimed_new_name = name_claim.created,
+        bytes = binary.len(),
+        "Streaming image registration complete"
+    );
     Ok(image_id)
 }
 

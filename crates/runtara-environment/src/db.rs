@@ -170,7 +170,8 @@ pub struct ListInstancesOptions {
     pub statuses: Option<Vec<String>>,
     /// Filter by image ID (exact match).
     pub image_id: Option<String>,
-    /// Filter by image name prefix (e.g., "workflow_id:" matches "workflow_id:1", "workflow_id:2").
+    /// Filter by image name prefix (e.g., `"workflow_id:"` matches every
+    /// version and artifact of that workflow).
     pub image_name_prefix: Option<String>,
     /// Filter by created_at >= value.
     pub created_after: Option<DateTime<Utc>>,

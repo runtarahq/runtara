@@ -1103,6 +1103,7 @@ pub async fn clone_workflow_handler(
     responses(
         (status = 200, description = "Workflow compiled successfully", body = CompileWorkflowResponse),
         (status = 400, description = "Invalid version format", body = ErrorResponse),
+        (status = 409, description = "Compilation was superseded by a newer workflow definition", body = ErrorResponse),
         (status = 404, description = "Workflow not found", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
     ),
@@ -1451,6 +1452,20 @@ pub async fn compile_workflow_handler(
             });
             (StatusCode::UNPROCESSABLE_ENTITY, Json(error_response))
         }
+        Err(crate::api::services::compilation::ServiceError::Superseded(msg)) => {
+            // The source changed while this direct compile was in flight. Its
+            // result was deliberately not persisted, so tell the caller to
+            // retry against the current definition rather than presenting it
+            // as a server-side compilation failure.
+            let error_response = json!({
+                "success": false,
+                "error": "Compilation superseded",
+                "message": msg,
+                "workflowId": workflow_id,
+                "version": version
+            });
+            (StatusCode::CONFLICT, Json(error_response))
+        }
         Err(crate::api::services::compilation::ServiceError::DatabaseError(msg)) => {
             let error_response = json!({
                 "success": false,
@@ -1593,10 +1608,34 @@ pub async fn compilation_progress_handler(
     .fetch_optional(&pool)
     .await;
 
-    match row {
+    // A raw `success` row can belong to a compile that started before a
+    // tracking-mode or definition change. The progress API must not stop the
+    // frontend's polling with a green result for an artifact execution would
+    // reject.
+    let fresh_image_id = match row.as_ref() {
         Ok(Some(row))
             if row.compilation_status == "success" && row.registered_image_id.is_some() =>
         {
+            match WorkflowRepository::new(pool.clone())
+                .get_fresh_registered_image_id(&tenant_id, &workflow_id, version_num)
+                .await
+            {
+                Ok(image_id) => image_id,
+                Err(e) => {
+                    let error_response = json!({
+                        "success": false,
+                        "error": "Database error",
+                        "message": format!("Failed to check compilation freshness: {}", e),
+                    });
+                    return (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response));
+                }
+            }
+        }
+        _ => None,
+    };
+
+    match row {
+        Ok(Some(_)) if fresh_image_id.is_some() => {
             let response = CompilationProgressResponse {
                 status: "success".to_string(),
                 stage: None,
@@ -1605,8 +1644,34 @@ pub async fn compilation_progress_handler(
                 message: None,
                 started_at: None,
                 updated_at: None,
-                image_id: row.registered_image_id,
+                image_id: fresh_image_id,
                 error_message: None,
+            };
+            (
+                StatusCode::OK,
+                Json(serde_json::to_value(response).unwrap()),
+            )
+        }
+        // The worker completed, but an overlapping definition or tracking-mode
+        // change made its artifact stale before this read. Treat that as a
+        // terminal retryable failure: returning `unknown` would make the
+        // frontend poll forever because it only stops on success or failure.
+        Ok(Some(row))
+            if row.compilation_status == "success" && row.registered_image_id.is_some() =>
+        {
+            let response = CompilationProgressResponse {
+                status: "failed".to_string(),
+                stage: None,
+                stage_index: None,
+                total_stages: None,
+                message: None,
+                started_at: None,
+                updated_at: None,
+                image_id: None,
+                error_message: Some(
+                    "Compilation artifact no longer matches the current workflow definition; retry compilation"
+                        .to_string(),
+                ),
             };
             (
                 StatusCode::OK,
@@ -1698,13 +1763,35 @@ async fn query_compilation_result(
     .fetch_optional(pool)
     .await?;
 
+    let fresh_image_id = match result.as_ref() {
+        Some(record)
+            if record.compilation_status == "success" && record.registered_image_id.is_some() =>
+        {
+            WorkflowRepository::new(pool.clone())
+                .get_fresh_registered_image_id(tenant_id, workflow_id, version)
+                .await?
+        }
+        _ => None,
+    };
+
     match result {
-        Some(record) => Ok(CompilationQueryResult {
-            success: record.compilation_status == "success" && record.registered_image_id.is_some(),
-            image_id: record.registered_image_id,
-            wasm_size: record.wasm_size,
-            error_message: record.error_message,
-        }),
+        Some(record) => {
+            let raw_success = record.compilation_status == "success";
+            let success = fresh_image_id.is_some();
+            Ok(CompilationQueryResult {
+                success,
+                image_id: fresh_image_id,
+                wasm_size: if success { record.wasm_size } else { None },
+                error_message: if raw_success && !success {
+                    Some(
+                        "Compilation artifact no longer matches the current workflow definition; retry compilation"
+                            .to_string(),
+                    )
+                } else {
+                    record.error_message
+                },
+            })
+        }
         None => Ok(CompilationQueryResult {
             success: false,
             image_id: None,

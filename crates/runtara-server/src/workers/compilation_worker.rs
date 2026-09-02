@@ -10,7 +10,7 @@ use opentelemetry::KeyValue;
 use sqlx::PgPool;
 use tracing::{error, info, instrument, warn};
 
-use crate::api::repositories::workflows::{WorkflowRepository, workflow_definition_checksum};
+use crate::api::repositories::workflows::WorkflowRepository;
 use crate::api::services::compilation::{
     CompilationService, ServiceError as CompilationServiceError,
     direct_compilation_settings_from_config,
@@ -61,6 +61,13 @@ impl CompilationWorkerConfig {
             connection_service_url,
         }
     }
+}
+
+/// Whether a compile result was intentionally discarded because its captured
+/// source no longer matches the workflow definition. These attempts complete
+/// their queue item but are neither successful nor failed compilations.
+fn compilation_was_superseded<T>(result: &Result<T, CompilationServiceError>) -> bool {
+    matches!(result, Err(CompilationServiceError::Superseded(_)))
 }
 
 /// Background worker that consumes compilation requests from the queue
@@ -183,46 +190,73 @@ pub async fn run(
                         m.compilations_active.add(1, &[]);
                     }
 
-                    // Perform compilation (target determined by RUNTARA_COMPILE_TARGET env var)
-                    let compile_result = compilation_service
-                        .compile_workflow(
+                    // Capture the source once, then hand that exact snapshot
+                    // to the compiler. If the attempt fails, the failure row
+                    // must carry the same tracking mode instead of rereading a
+                    // definition that may have changed while compilation ran.
+                    let (compile_result, failure_provenance) = match compilation_service
+                        .load_compilation_source(
                             &request.tenant_id,
                             &request.workflow_id,
                             request.version,
-                            request.force_recompile,
                         )
-                        .await;
+                        .await
+                    {
+                        Ok(source) => {
+                            let provenance = Some(source.clone());
+                            (
+                                compilation_service
+                                    .compile_workflow_from_source(
+                                        &request.tenant_id,
+                                        &request.workflow_id,
+                                        request.version,
+                                        request.force_recompile,
+                                        source,
+                                    )
+                                    .await,
+                                provenance,
+                            )
+                        }
+                        Err(error) => (Err(error), None),
+                    };
 
                     // Record metrics
                     let duration = compile_start.elapsed().as_secs_f64();
                     let success = compile_result.is_ok();
+                    let superseded = compilation_was_superseded(&compile_result);
 
                     // Product analytics: the worker is the single emit point for
                     // `workflow.compiled`. The enqueuer optionally supplied an attributed event
                     // (caller + surface); otherwise we emit a no-user, Worker-source default.
                     // Either way it lands exactly once, even if the requesting handler timed out.
-                    let mut event = request.product_event.clone().unwrap_or_else(|| {
-                        ProductEvent::new(EventType::WorkflowCompiled)
-                            .no_user_actor("compilation_worker", ActorType::System)
-                            .resource(&request.workflow_id, "workflow")
-                            .source(EventSource::Worker)
-                    });
-                    event.properties = serde_json::json!({ "success": success });
-                    event.occurred_at = chrono::Utc::now();
-                    events.emit(event);
+                    // A superseded attempt did not produce a terminal outcome,
+                    // so it must not be counted as an ordinary failed compile.
+                    if !superseded {
+                        let mut event = request.product_event.clone().unwrap_or_else(|| {
+                            ProductEvent::new(EventType::WorkflowCompiled)
+                                .no_user_actor("compilation_worker", ActorType::System)
+                                .resource(&request.workflow_id, "workflow")
+                                .source(EventSource::Worker)
+                        });
+                        event.properties = serde_json::json!({ "success": success });
+                        event.occurred_at = chrono::Utc::now();
+                        events.emit(event);
+                    }
 
                     if let Some(m) = metrics() {
-                        let status = if success { "success" } else { "failed" };
-                        let result_attrs = [
-                            KeyValue::new("tenant_id", request.tenant_id.clone()),
-                            KeyValue::new("workflow_id", request.workflow_id.clone()),
-                            KeyValue::new("status", status),
-                        ];
-                        m.compilations_total.add(1, &result_attrs);
-                        // Duration is a histogram: drop tenant_id/workflow_id so
-                        // its buckets don't multiply per workflow and tenant.
-                        m.compilation_duration
-                            .record(duration, &[KeyValue::new("status", status)]);
+                        if !superseded {
+                            let status = if success { "success" } else { "failed" };
+                            let result_attrs = [
+                                KeyValue::new("tenant_id", request.tenant_id.clone()),
+                                KeyValue::new("workflow_id", request.workflow_id.clone()),
+                                KeyValue::new("status", status),
+                            ];
+                            m.compilations_total.add(1, &result_attrs);
+                            // Duration is a histogram: drop tenant_id/workflow_id so
+                            // its buckets don't multiply per workflow and tenant.
+                            m.compilation_duration
+                                .record(duration, &[KeyValue::new("status", status)]);
+                        }
                         m.compilations_active.add(-1, &[]);
                     }
 
@@ -242,7 +276,17 @@ pub async fn run(
                             // A graph that cannot compile as authored is the
                             // author's problem, not a fault to alert on, so it
                             // is recorded at a lower level than a real failure.
-                            if matches!(e, CompilationServiceError::WorkflowAuthoringError(_)) {
+                            if superseded {
+                                info!(
+                                    tenant_id = %request.tenant_id,
+                                    workflow_id = %request.workflow_id,
+                                    version = request.version,
+                                    "Compilation result superseded by a newer source; leaving its state untouched"
+                                );
+                            } else if matches!(
+                                e,
+                                CompilationServiceError::WorkflowAuthoringError(_)
+                            ) {
                                 warn!(
                                     tenant_id = %request.tenant_id,
                                     workflow_id = %request.workflow_id,
@@ -261,17 +305,34 @@ pub async fn run(
                                     "Compilation failed"
                                 );
                             }
-                            // Record the failure in database
-                            if let Err(db_err) = record_compilation_failure(
-                                &pool,
-                                &request.tenant_id,
-                                &request.workflow_id,
-                                request.version,
-                                &e.to_string(),
-                            )
-                            .await
-                            {
-                                error!(error = %db_err, "Failed to record compilation failure");
+                            // Only a real compile attempt can replace the
+                            // existing row. A failure while loading its source
+                            // has no provenance, so writing it would erase a
+                            // valid ready or terminal record with NULLs.
+                            if !superseded && let Some(source) = &failure_provenance {
+                                match repository
+                                    .record_compilation_failure(
+                                        &request.tenant_id,
+                                        &request.workflow_id,
+                                        request.version,
+                                        &source.definition,
+                                        &source.source_checksum,
+                                        source.track_events,
+                                        &e.to_string(),
+                                    )
+                                    .await
+                                {
+                                    Ok(true) => {}
+                                    Ok(false) => info!(
+                                        tenant_id = %request.tenant_id,
+                                        workflow_id = %request.workflow_id,
+                                        version = request.version,
+                                        "Compilation failure was superseded or a valid registered artifact remains"
+                                    ),
+                                    Err(db_err) => {
+                                        error!(error = %db_err, "Failed to record compilation failure");
+                                    }
+                                }
                             }
                             // Terminal state (failed) is now in the DB.
                             // Clear the Redis progress entry so polling
@@ -311,66 +372,6 @@ pub async fn run(
             }
         }
     }
-}
-
-/// Record a compilation failure in the database
-async fn record_compilation_failure(
-    pool: &PgPool,
-    tenant_id: &str,
-    workflow_id: &str,
-    version: i32,
-    error_message: &str,
-) -> Result<(), sqlx::Error> {
-    // Stamp the checksum of the definition that failed. Readers compare it
-    // against the definition currently stored to tell a failure that will
-    // recur (source unchanged) from a stale one worth retrying.
-    let source_checksum: Option<String> = sqlx::query_scalar::<_, serde_json::Value>(
-        r#"
-        SELECT definition
-        FROM workflow_definitions
-        WHERE tenant_id = $1 AND workflow_id = $2 AND version = $3 AND deleted_at IS NULL
-        "#,
-    )
-    .bind(tenant_id)
-    .bind(workflow_id)
-    .bind(version)
-    .fetch_optional(pool)
-    .await?
-    .as_ref()
-    .map(workflow_definition_checksum);
-
-    sqlx::query(
-        r#"
-        INSERT INTO workflow_compilations
-            (tenant_id, workflow_id, version, compilation_status, translated_path, compiled_at, error_message, runtara_version, source_checksum)
-        VALUES ($1, $2, $3, 'failed', '', NOW(), $4, $5, $6)
-        ON CONFLICT (tenant_id, workflow_id, version)
-        DO UPDATE SET
-            compilation_status = 'failed',
-            compiled_at = NOW(),
-            error_message = $4,
-            runtara_version = $5,
-            source_checksum = $6
-        "#,
-    )
-    .bind(tenant_id)
-    .bind(workflow_id)
-    .bind(version)
-    .bind(error_message)
-    .bind(env!("BUILD_VERSION"))
-    .bind(source_checksum.as_deref())
-    .execute(pool)
-    .await?;
-
-    warn!(
-        tenant_id = %tenant_id,
-        workflow_id = %workflow_id,
-        version = version,
-        error = %error_message,
-        "Recorded compilation failure"
-    );
-
-    Ok(())
 }
 
 /// Enqueue a workflow for compilation
@@ -487,6 +488,16 @@ mod tests {
     // =========================================================================
     // CompilationWorkerConfig tests
     // =========================================================================
+
+    #[test]
+    fn superseded_attempt_is_not_a_normal_compile_outcome() {
+        assert!(compilation_was_superseded::<()>(&Err(
+            CompilationServiceError::Superseded("definition changed".to_string(),)
+        )));
+        assert!(!compilation_was_superseded::<()>(&Err(
+            CompilationServiceError::CompilationError("compiler failed".to_string(),)
+        )));
+    }
 
     #[test]
     fn test_compilation_worker_config_from_env() {

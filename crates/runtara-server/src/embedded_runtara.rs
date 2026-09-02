@@ -73,20 +73,29 @@ impl EmbeddedRuntara {
         // Start Core (instance protocol - workflows connect here via HTTP)
         let core_http_addr = config.core_http_bind_addr.unwrap_or(config.core_bind_addr);
         info!(addr = %core_http_addr, "Starting runtara-core...");
-        let core = CoreRuntime::builder()
+        let mut core_builder = CoreRuntime::builder()
             .persistence(persistence.clone())
             .bind_addr(core_http_addr)
-            .apply_overrides(config.core_overrides)
-            .build()?
-            .start()
-            .await?;
+            .apply_overrides(config.core_overrides);
+        if let Some(observer) = event_observer.as_ref() {
+            core_builder = core_builder.event_observer(Arc::clone(observer));
+        }
+        let core = core_builder.build()?.start().await?;
         info!("✓ runtara-core started on {}", core_http_addr);
 
         // Create the workflow runner. Workflows are compiled to wasm32-wasip2
         // and executed on the embedded in-process engine.
+        // Legacy composed artifacts call core through HTTP, while modern ones
+        // use host imports. Use the configured client address rather than the
+        // bind address: it is the endpoint a guest is meant to reach.
+        let core_http_url = format!("http://{}", config.core_client_addr);
         let runner: Arc<dyn runtara_environment::runner::Runner> =
-            runtara_environment::runner::build_runner(persistence.clone(), event_observer)
-                .map_err(|e| anyhow::anyhow!("build workflow runner: {e}"))?;
+            runtara_environment::runner::build_runner_with_core_http_url(
+                persistence.clone(),
+                event_observer,
+                Some(core_http_url),
+            )
+            .map_err(|e| anyhow::anyhow!("build workflow runner: {e}"))?;
         info!(
             runner_type = runner.runner_type(),
             "Workflow runner initialized"

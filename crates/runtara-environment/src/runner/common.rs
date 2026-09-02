@@ -75,16 +75,17 @@ impl WorkflowRunnerConfig {
 
 /// Build the environment variables every workflow instance receives.
 ///
-/// Nothing here points a guest at runtara-core over HTTP. A composed artifact
-/// imports `runtara:workflow-runtime/runtime` as a host import, satisfied
-/// in-process by [`crate::runtime_host`], and carries no `wasi:http` import at
-/// all — so the address of core's instance API is not something a guest can
-/// use, and used to be injected on every run for nobody.
+/// Modern composed artifacts import `runtara:workflow-runtime/runtime` as a
+/// host import, satisfied in-process by [`crate::runtime_host`]. Legacy
+/// composed artifacts use `wasi:http` to reach the same core API, so callers
+/// that support them supply `core_http_url` explicitly. The normal runner API
+/// leaves it unset when no embedded core is available.
 pub(crate) fn build_env(
     config: &WorkflowRunnerConfig,
     instance_id: &str,
     tenant_id: &str,
     checkpoint_id: Option<&str>,
+    core_http_url: Option<&str>,
 ) -> HashMap<String, String> {
     let mut env = HashMap::new();
     env.insert("RUNTARA_INSTANCE_ID".to_string(), instance_id.to_string());
@@ -102,6 +103,9 @@ pub(crate) fn build_env(
     }
     if let Some(ref url) = config.connection_service_url {
         env.insert("CONNECTION_SERVICE_URL".to_string(), url.clone());
+    }
+    if let Some(core_http_url) = core_http_url {
+        env.insert("RUNTARA_HTTP_URL".to_string(), core_http_url.to_string());
     }
 
     // Forward SDK backend selection if set in the host environment.
@@ -202,4 +206,38 @@ pub(crate) async fn load_stderr(
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{WorkflowRunnerConfig, build_env};
+    use std::{path::PathBuf, time::Duration};
+
+    fn config() -> WorkflowRunnerConfig {
+        WorkflowRunnerConfig {
+            data_dir: PathBuf::from("/tmp/runtara-runner-test"),
+            default_timeout: Duration::from_secs(30),
+            skip_cert_verification: false,
+            connection_service_url: None,
+        }
+    }
+
+    #[test]
+    fn legacy_http_composed_guests_receive_the_configured_core_url() {
+        let env = build_env(
+            &config(),
+            "instance-1",
+            "tenant-1",
+            None,
+            Some("http://127.0.0.1:49123"),
+        );
+
+        assert_eq!(
+            env.get("RUNTARA_HTTP_URL").map(String::as_str),
+            Some("http://127.0.0.1:49123")
+        );
+
+        let env_without_core = build_env(&config(), "instance-1", "tenant-1", None, None);
+        assert!(!env_without_core.contains_key("RUNTARA_HTTP_URL"));
+    }
 }

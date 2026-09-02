@@ -25,6 +25,22 @@ pub fn build_runner(
         std::sync::Arc<dyn runtara_core::instance_handlers::InstanceEventObserver>,
     >,
 ) -> Result<std::sync::Arc<dyn Runner>> {
+    build_runner_with_core_http_url(persistence, event_observer, None)
+}
+
+/// Build the workflow runner, optionally giving legacy HTTP-composed guests
+/// the address of runtara-core.
+///
+/// Newer HostImport-composed artifacts do not consume this address; their
+/// runtime calls are satisfied in-process. Older composed artifacts use the
+/// core HTTP API, so the embedded server supplies its client address here.
+pub fn build_runner_with_core_http_url(
+    persistence: std::sync::Arc<dyn runtara_core::persistence::Persistence>,
+    event_observer: Option<
+        std::sync::Arc<dyn runtara_core::instance_handlers::InstanceEventObserver>,
+    >,
+    core_http_url: Option<String>,
+) -> Result<std::sync::Arc<dyn Runner>> {
     if let Ok(requested) = std::env::var("RUNTARA_RUNNER")
         && !requested.is_empty()
     {
@@ -34,6 +50,9 @@ pub fn build_runner(
         );
     }
     let mut runner = EmbeddedWasmRunner::new(WorkflowRunnerConfig::from_env(), persistence)?;
+    if let Some(core_http_url) = core_http_url {
+        runner = runner.with_core_http_url(core_http_url);
+    }
     if let Some(observer) = event_observer {
         runner = runner.with_event_observer(observer);
     }

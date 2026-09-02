@@ -182,13 +182,14 @@ pub fn rates_between(
     }
     let per_sec = |a: u64, b: u64| b.saturating_sub(a) as f64 * 1000.0 / window_ms as f64;
 
-    // Steps are reportable only if something that could report them was live at
-    // either end of the window. A run that started and finished entirely inside
-    // the window is covered by the `next` reading having counted its steps.
-    // Measurable once anything in this process has run with tracking on: from
-    // then a zero is a real zero. Before that, nothing could have reported a
-    // step and "not measured" is the only honest answer.
-    let measurable = next.tracked_starts > 0 || next.steps > prev.steps;
+    // Measurable once either the engine has seen a tracked start or core has
+    // received a step event in this process. The latter matters after a restart:
+    // wakes and resumes launch through Environment rather than the engine, so
+    // their first step is the only evidence this process gets that the artifact
+    // can report progress. Both counters are monotonic, making either fact a
+    // permanent capability latch; before both, "not measured" is the only
+    // honest answer.
+    let measurable = next.tracked_starts > 0 || next.steps > 0;
 
     Some(PipelineRates {
         offered: per_sec(prev.offered, next.offered),
@@ -375,6 +376,26 @@ mod tests {
             r.steps,
             Some(0.0),
             "eight tracked runs making no progress is the stall this must show"
+        );
+    }
+
+    /// A resumed or woken tracked instance can outlive a server restart. Its
+    /// launch bypasses `ExecutionEngine`, but core observes its next step; that
+    /// evidence must keep later quiet windows measurable too.
+    #[test]
+    fn observed_step_keeps_a_resumed_or_woken_run_measurable_after_a_quiet_tick() {
+        let after_first_step = PipelineTotals {
+            steps: 3,
+            tracked_starts: 0,
+            ..PipelineTotals::default()
+        };
+
+        assert_eq!(
+            rates_between(after_first_step, after_first_step, 0, 0, 1_000)
+                .expect("rates")
+                .steps,
+            Some(0.0),
+            "a persisted step event proves this process can measure progress"
         );
     }
 

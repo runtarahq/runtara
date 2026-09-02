@@ -44,6 +44,17 @@ use crate::workers::runtara_dto::{
 };
 use runtara_workflows::input_validation::validate_workflow_start_inputs;
 
+/// Recover workflow identity from an artifact-qualified runtime image name.
+///
+/// The server database retains only the currently selected image ID for a
+/// workflow version.  Older instances still retain their Environment image
+/// name, whose readable prefix is durable provenance for listings after a
+/// recompile.
+fn workflow_info_from_image_name(image_name: &str) -> Option<(String, i32)> {
+    let (workflow_id, version) = parse_image_id(image_name);
+    (!workflow_id.is_empty() && version > 0).then_some((workflow_id, version))
+}
+
 /// Result of workflow execution (native path; currently unused by the server).
 #[derive(Debug)]
 pub struct ExecutionResult {
@@ -343,14 +354,6 @@ pub struct ExecutionEngine {
     /// count makes the database slower, which widens the window, which admits
     /// more of them.
     concurrency_refresh: Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>,
-    /// Short-lived cache of the compiled artifact for a workflow version.
-    ///
-    /// Resolving it reads the whole workflow definition out of Postgres and
-    /// hashes it to check the compilation is still current — per instance
-    /// start. The answer is the same for every instance of a version, so
-    /// caching it briefly removes a blob read and a hash from the hot path
-    /// without changing what the check means.
-    registered_images: Arc<RegisteredImageCache>,
     /// Monotonic counters for the execution pipeline.
     ///
     /// Read by the analytics sampler; written only from the gate below, where
@@ -365,19 +368,19 @@ pub struct ExecutionEngine {
 /// per tick.
 const CONCURRENCY_COUNT_TTL: Duration = Duration::from_millis(500);
 
-/// How long a resolved compiled-artifact id stays usable.
-///
-/// Short enough that a recompile of the same version is picked up promptly,
-/// long enough that a burst of starts resolves it once rather than once per
-/// instance — at a few hundred starts a second this is the difference between
-/// one definition read and hundreds.
-const REGISTERED_IMAGE_TTL: Duration = Duration::from_secs(5);
-
-/// `(tenant, workflow, version) -> (resolved at, compiled artifact id)`.
-type RegisteredImageCache = DashMap<(String, String, i32), (Instant, String)>;
-
 /// Workflows currently being launched, keyed by `(tenant_id, workflow_id)`.
 type StartingWorkflows = Arc<Mutex<HashSet<(String, String)>>>;
+
+/// One verified compilation result, carried unchanged to `start_instance`.
+///
+/// The image ID and tracking mode have to come from the same readiness read.
+/// Re-reading the image after the mode was checked can pair a freshly tracked
+/// row with an older artifact during a toggle or recompile.
+struct ReadyLaunch {
+    image_id: String,
+    execution_timeout_seconds: Option<i32>,
+    track_events: bool,
+}
 
 /// The reservation set shared by every [`ExecutionEngine`] in this process.
 ///
@@ -426,7 +429,6 @@ impl ExecutionEngine {
             concurrency_counts: Arc::new(DashMap::new()),
             concurrency_reservations: Arc::new(DashMap::new()),
             concurrency_refresh: Arc::new(DashMap::new()),
-            registered_images: Arc::new(DashMap::new()),
             gauges,
         }
     }
@@ -693,15 +695,10 @@ impl ExecutionEngine {
             validate_workflow_start_inputs(req.inputs.clone(), &workflow.input_schema)
                 .map_err(|e| ExecutionError::ValidationError(e.message))?;
 
-        // 4. Get track_events (already have it from workflow)
+        // 4. Carry the workflow's tracking mode into the queued event. The
+        // launch path rereads it from the ready artifact, because a queued
+        // request is not itself evidence that a run ever started.
         let track_events = workflow.track_events;
-        // Recorded here because this is the only place that knows it. Whether a
-        // run can report steps is decided when the artifact is compiled, and by
-        // the time the runner ends that run nothing downstream still knows —
-        // which is why the counter is starts, not a live gauge.
-        if track_events {
-            self.gauges.record_tracked_start();
-        }
 
         // 5. Require trigger stream
         let trigger_stream = self.trigger_stream.as_ref().ok_or_else(|| {
@@ -826,33 +823,17 @@ impl ExecutionEngine {
             validate_workflow_start_inputs(req.inputs.clone(), &workflow.input_schema)
                 .map_err(|e| ExecutionError::ValidationError(e.message))?;
 
-        // 3. Block on compilation readiness (delegated to compilation worker)
-        self.wait_for_compilation_blocking(req.tenant_id, req.workflow_id, version)
+        // 3. Block on compilation readiness (delegated to compilation worker).
+        // Keep the image ID and tracking mode from this one verified snapshot:
+        // another database read could otherwise pair the mode of one artifact
+        // with the ID of another while a toggle is recompiling.
+        let ReadyLaunch {
+            image_id,
+            execution_timeout_seconds: execution_timeout,
+            track_events,
+        } = self
+            .wait_for_compilation_blocking(req.tenant_id, req.workflow_id, version)
             .await?;
-
-        // 4. Execution timeout
-        let execution_timeout = self
-            .workflow_repo
-            .get_execution_timeout(req.tenant_id, req.workflow_id, version)
-            .await
-            .map_err(|e| {
-                ExecutionError::DatabaseError(format!("Failed to get execution timeout: {}", e))
-            })?;
-
-        // 5. Image ID
-        let image_id = self
-            .workflow_repo
-            .get_fresh_registered_image_id(req.tenant_id, req.workflow_id, version)
-            .await
-            .map_err(|e| {
-                ExecutionError::DatabaseError(format!("Failed to get registered image ID: {}", e))
-            })?
-            .ok_or_else(|| {
-                ExecutionError::NotFound(format!(
-                    "Workflow '{}' version {} not registered with runtara-environment. Recompile it.",
-                    req.workflow_id, version
-                ))
-            })?;
 
         // 5.5. Per-tenant maxConcurrentExecutions gate (SYN-433 Finding 1).
         // Same runtime-count gate as the async path — the running instance
@@ -884,9 +865,12 @@ impl ExecutionEngine {
                 .properties(serde_json::json!({ "version": version, "sync": true })),
         );
 
-        // 6. Execute via runtime client (no debug for sync executions)
-        let execution_result = runtime_client
-            .execute_sync(
+        // 6. Start via the runtime client, then wait for completion. Do not
+        // use RuntimeClient::execute_sync here: its combined return value
+        // hides the accepted start, so a run that later times out would never
+        // reach the pipeline counters despite having actually launched.
+        let execution_result = match runtime_client
+            .start_instance(
                 &image_id,
                 req.tenant_id,
                 req.workflow_id,
@@ -895,7 +879,20 @@ impl ExecutionEngine {
                 execution_timeout.map(|s| s as u32),
                 false,
             )
-            .await;
+            .await
+        {
+            Ok(start) => {
+                record_new_runtime_start(&self.gauges, track_events, start.deduplicated);
+                runtime_client
+                    .wait_for_completion(
+                        &start.instance_id,
+                        None,
+                        execution_timeout.map(|s| s as u32),
+                    )
+                    .await
+            }
+            Err(error) => Err(error),
+        };
 
         let total_duration = total_start.elapsed().as_secs_f64();
 
@@ -1162,22 +1159,21 @@ impl ExecutionEngine {
         // server database and hang off the same workflow, so an unversioned
         // event costs one statement rather than a read of `workflows` followed
         // by a read of its definition. The readiness check reads that
-        // definition anyway, so the execution timeout rides along too.
-        let (version, execution_timeout_secs) = self
+        // definition anyway, so the image, timeout, and tracking mode ride
+        // along as one verified artifact snapshot.
+        let (version, ready) = self
             .ensure_compiled(&event.tenant_id, &event.workflow_id, event.version)
             .await?;
-        let execution_timeout_secs = execution_timeout_secs
+        let execution_timeout_secs = ready
+            .execution_timeout_seconds
             .map(|secs| secs as u32)
             .unwrap_or(3600); // Default 1 hour timeout
+        let track_events = ready.track_events;
+        let image_id = ready.image_id;
 
         // Inputs are already in canonical format {"data": {...}, "variables": {...}}
         // from the API layer - inject _workflow_id for cache key isolation
         let workflow_input = inject_workflow_id(event.inputs.clone(), &event.workflow_id);
-
-        // Get the registered image ID (UUID returned from runtara-environment)
-        let image_id = self
-            .get_registered_image_id(&event.tenant_id, &event.workflow_id, version)
-            .await?;
 
         // Start instance (non-blocking)
         let start = match runtime_client
@@ -1193,7 +1189,7 @@ impl ExecutionEngine {
             .await
         {
             Ok(start) => {
-                self.gauges.record_started();
+                record_new_runtime_start(&self.gauges, track_events, start.deduplicated);
                 start
             }
             Err(RuntimeError::ImageNotFound(error)) => {
@@ -1207,15 +1203,19 @@ impl ExecutionEngine {
                 );
 
                 // The local compilation record and Environment image metadata
-                // can both outlive the on-disk artifact. Remove the local cache
-                // row and enqueue a forced build so compilation does not accept
-                // the metadata-only Environment cache hit again.
-                let _ = sqlx::query!(
-                    "DELETE FROM workflow_compilations WHERE tenant_id = $1 AND workflow_id = $2 AND version = $3",
-                    &event.tenant_id,
-                    &event.workflow_id,
-                    version
+                // can both outlive the on-disk artifact. Invalidate only the
+                // exact image this launch selected: another compile may have
+                // attached a newer immutable image for the same version while
+                // this old launch was in flight.
+                let _ = sqlx::query(
+                    "DELETE FROM workflow_compilations \
+                     WHERE tenant_id = $1 AND workflow_id = $2 AND version = $3 \
+                       AND registered_image_id = $4",
                 )
+                .bind(&event.tenant_id)
+                .bind(&event.workflow_id)
+                .bind(version)
+                .bind(&image_id)
                 .execute(&self.pool)
                 .await;
 
@@ -1446,19 +1446,20 @@ impl ExecutionEngine {
                         ))
                     })?;
 
-                let (resolved_workflow_id, version, workflow_name) = workflow_info
-                    .get(&instance.image_id)
-                    .map(|(sid, version, name)| {
-                        let name = (!name.is_empty()).then_some(name.clone());
-                        (sid.clone(), *version, name)
-                    })
-                    .unwrap_or_else(|| {
-                        (
-                            workflow_id.unwrap_or_default().to_string(),
-                            0,
-                            Option::<String>::None,
-                        )
-                    });
+                let (resolved_workflow_id, version, workflow_name) =
+                    match workflow_info.get(&instance.image_id) {
+                        Some((sid, version, name)) => {
+                            let name = (!name.is_empty()).then_some(name.clone());
+                            (sid.clone(), *version, name)
+                        }
+                        None => {
+                            let (workflow_id, version) = workflow_info_from_image_name(
+                                &instance.image_name,
+                            )
+                            .unwrap_or_else(|| (workflow_id.unwrap_or_default().to_string(), 0));
+                            (workflow_id, version, None)
+                        }
+                    };
 
                 return Ok(Some(runtara_instance_to_dto_with_info(
                     instance,
@@ -1661,7 +1662,8 @@ impl ExecutionEngine {
 
         let client = self.require_runtime_client()?;
 
-        // Image names follow pattern: {workflow_id}:{version}
+        // Image names retain the `{workflow_id}:` prefix, with an optional
+        // artifact fingerprint after the version.
         let image_name_prefix = format!("{}:", workflow_id);
 
         let options = ListInstancesOptions::new()
@@ -1741,7 +1743,15 @@ impl ExecutionEngine {
             .instances
             .into_iter()
             .map(|inst| {
-                let version = version_info.get(&inst.image_id).copied().unwrap_or(0);
+                let version = version_info
+                    .get(&inst.image_id)
+                    .copied()
+                    .or_else(|| {
+                        workflow_info_from_image_name(&inst.image_name)
+                            .filter(|(parsed_workflow_id, _)| parsed_workflow_id == workflow_id)
+                            .map(|(_, version)| version)
+                    })
+                    .unwrap_or(0);
                 runtara_instance_to_dto_with_info(
                     inst,
                     workflow_id.to_string(),
@@ -1879,6 +1889,16 @@ impl ExecutionEngine {
             .values()
             .filter(|(_, _, name)| name.is_empty())
             .map(|(sid, _, _)| sid.clone())
+            .chain(
+                result
+                    .instances
+                    .iter()
+                    .filter(|instance| !workflow_info.contains_key(&instance.image_id))
+                    .filter_map(|instance| {
+                        workflow_info_from_image_name(&instance.image_name)
+                            .map(|(workflow_id, _)| workflow_id)
+                    }),
+            )
             .filter(|sid| !sid.is_empty())
             .collect::<HashSet<_>>()
             .into_iter()
@@ -1923,7 +1943,13 @@ impl ExecutionEngine {
                         };
                         (sid.clone(), *ver, final_name)
                     })
-                    .unwrap_or_else(|| (String::new(), 0, None));
+                    .unwrap_or_else(|| {
+                        let (workflow_id, version) =
+                            workflow_info_from_image_name(&inst.image_name)
+                                .unwrap_or_else(|| (String::new(), 0));
+                        let workflow_name = workflow_names.get(&workflow_id).cloned();
+                        (workflow_id, version, workflow_name)
+                    });
 
                 runtara_instance_to_dto_with_info(inst, workflow_id, version, workflow_name)
             })
@@ -2135,55 +2161,17 @@ impl ExecutionEngine {
         }
     }
 
-    /// Get the registered image ID for a compiled workflow.
-    async fn get_registered_image_id(
-        &self,
-        tenant_id: &str,
-        workflow_id: &str,
-        version: i32,
-    ) -> Result<String, ExecutionError> {
-        let key = (tenant_id.to_string(), workflow_id.to_string(), version);
-        if let Some(hit) = self.registered_images.get(&key)
-            && hit.0.elapsed() < REGISTERED_IMAGE_TTL
-        {
-            return Ok(hit.1.clone());
-        }
-
-        let resolved = self
-            .workflow_repo
-            .get_fresh_registered_image_id(tenant_id, workflow_id, version)
-            .await
-            .map_err(|e| {
-                ExecutionError::DatabaseError(format!("Failed to get registered image ID: {}", e))
-            })?
-            .ok_or_else(|| {
-                ExecutionError::BinaryNotFound(format!(
-                    "Workflow '{}' version {} not registered with runtara-environment. Recompile it.",
-                    workflow_id, version
-                ))
-            })?;
-
-        // Only successful resolutions are cached: a miss means "not compiled
-        // yet", and that must be re-checked so a freshly compiled workflow
-        // starts running immediately rather than after the TTL.
-        self.registered_images
-            .insert(key, (Instant::now(), resolved.clone()));
-        Ok(resolved)
-    }
-
     /// Ensure the workflow is compiled (non-blocking: queues compilation if
     /// needed and returns `NotCompiled` for the caller to retry).
     ///
-    /// Returns the definition's `executionTimeoutSeconds` when it is ready:
-    /// the readiness check already reads that definition, so a caller that
-    /// needs the timeout should take it from here rather than fetching the
-    /// same row again.
+    /// Returns the ready artifact's ID, `executionTimeoutSeconds`, and tracking
+    /// mode together so the launch cannot mix fields from different reads.
     async fn ensure_compiled(
         &self,
         tenant_id: &str,
         workflow_id: &str,
         version: Option<i32>,
-    ) -> Result<(i32, Option<i32>), ExecutionError> {
+    ) -> Result<(i32, ReadyLaunch), ExecutionError> {
         let (resolved, status) = self
             .workflow_repo
             .ensure_compilation_ready(tenant_id, workflow_id, version)
@@ -2198,11 +2186,20 @@ impl ExecutionEngine {
         })?;
 
         if let CompilationStatus::Ready {
+            registered_image_id,
             execution_timeout_seconds,
+            track_events,
             ..
         } = status
         {
-            return Ok((version, execution_timeout_seconds));
+            return Ok((
+                version,
+                ReadyLaunch {
+                    image_id: registered_image_id,
+                    execution_timeout_seconds,
+                    track_events,
+                },
+            ));
         }
 
         // A terminal failure will repeat for as long as the definition is
@@ -2307,14 +2304,14 @@ impl ExecutionEngine {
     }
 
     /// Block until compilation completes (used by the synchronous execution
-    /// path). Delegates the actual wait to
-    /// `compilation_worker::wait_for_compilation`.
+    /// path), returning one ready-artifact launch snapshot.
+    /// Delegates the actual wait to `compilation_worker::wait_for_compilation`.
     async fn wait_for_compilation_blocking(
         &self,
         tenant_id: &str,
         workflow_id: &str,
         version: i32,
-    ) -> Result<(), ExecutionError> {
+    ) -> Result<ReadyLaunch, ExecutionError> {
         let status = self
             .workflow_repo
             .ensure_compilation_ready(tenant_id, workflow_id, Some(version))
@@ -2323,8 +2320,18 @@ impl ExecutionEngine {
             .map_err(|e| {
                 ExecutionError::DatabaseError(format!("Failed to check compilation: {}", e))
             })?;
-        if matches!(status, CompilationStatus::Ready { .. }) {
-            return Ok(());
+        if let CompilationStatus::Ready {
+            registered_image_id,
+            execution_timeout_seconds,
+            track_events,
+            ..
+        } = status
+        {
+            return Ok(ReadyLaunch {
+                image_id: registered_image_id,
+                execution_timeout_seconds,
+                track_events,
+            });
         }
 
         // Waiting cannot help a failure that will reproduce on the unchanged
@@ -2437,7 +2444,16 @@ impl ExecutionEngine {
                 ExecutionError::DatabaseError(format!("Failed to check compilation: {}", e))
             })?;
         match status_after {
-            CompilationStatus::Ready { .. } => Ok(()),
+            CompilationStatus::Ready {
+                registered_image_id,
+                execution_timeout_seconds,
+                track_events,
+                ..
+            } => Ok(ReadyLaunch {
+                image_id: registered_image_id,
+                execution_timeout_seconds,
+                track_events,
+            }),
             // The compilation we waited on recorded why it failed; report that
             // rather than the generic missing-binary message.
             CompilationStatus::Failed { error, .. } => {
@@ -2454,8 +2470,94 @@ impl ExecutionEngine {
     }
 }
 
+/// Record a runtime start only after Environment confirms it launched a new
+/// instance. A deduplicated request reuses an already-accepted launch, so it
+/// must not make a second run or step-capability claim visible in the pipeline.
+fn record_new_runtime_start(
+    gauges: &crate::workers::pipeline_gauges::PipelineGauges,
+    track_events: bool,
+    deduplicated: bool,
+) {
+    if deduplicated {
+        return;
+    }
+
+    gauges.record_started();
+    if track_events {
+        gauges.record_tracked_start();
+    }
+}
+
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn qualified_image_name_preserves_historical_workflow_identity() {
+        assert_eq!(
+            workflow_info_from_image_name("workflow-a:7@artifact-fingerprint"),
+            Some(("workflow-a".to_string(), 7))
+        );
+        assert_eq!(workflow_info_from_image_name("not-a-workflow"), None);
+    }
+
+    #[test]
+    fn only_a_new_tracked_runtime_start_makes_steps_measurable() {
+        let gauges = crate::workers::pipeline_gauges::PipelineGauges::new();
+
+        // An untracked run is still a real start, but does not make a zero
+        // steps reading meaningful.
+        record_new_runtime_start(&gauges, false, false);
+        assert_eq!(gauges.totals().started, 1);
+        assert_eq!(gauges.totals().tracked_starts, 0);
+
+        // A retry that Environment deduplicates has not launched another run.
+        record_new_runtime_start(&gauges, true, true);
+        assert_eq!(gauges.totals().started, 1);
+        assert_eq!(gauges.totals().tracked_starts, 0);
+
+        record_new_runtime_start(&gauges, true, false);
+        assert_eq!(gauges.totals().started, 2);
+        assert_eq!(gauges.totals().tracked_starts, 1);
+    }
+
+    #[test]
+    fn every_runtime_launch_path_records_its_confirmed_start() {
+        // A unit test of `record_new_runtime_start` alone cannot catch a
+        // perfectly good recorder with no production caller. Keep this guard
+        // outside the production source slice so its own assertion cannot
+        // satisfy it.
+        // `include_str!` resolves a relative literal from this module's
+        // directory; unlike `file!()`, it does not prefix that directory a
+        // second time when Cargo invokes the test from another working dir.
+        let source = include_str!("execution_engine.rs");
+        let production = source
+            .split("\n#[cfg(test)]")
+            .next()
+            .expect("source has a production section");
+        let call = "record_new_runtime_start(&self.gauges, track_events, start.deduplicated)";
+
+        assert_eq!(
+            production.matches(call).count(),
+            2,
+            "sync and detached launch paths must each record their confirmed start"
+        );
+
+        let sync_start = production
+            .find("pub async fn run_sync")
+            .expect("sync launch path exists");
+        let detached_start = production
+            .find("async fn execute_detached_inner")
+            .expect("detached launch path exists");
+        let sync = &production[sync_start..detached_start];
+        let recorded = sync.find(call).expect("sync path records the start");
+        let waited = sync
+            .find(".wait_for_completion(")
+            .expect("sync path waits for completion");
+        assert!(
+            recorded < waited,
+            "sync path must record a successful launch before its completion wait"
+        );
+    }
 
     /// Two engines in one process must share the single-instance reservation.
     ///
@@ -2578,25 +2680,20 @@ mod tests {
         assert_eq!(retained_reservations(u64::MAX, 1), 0);
     }
 
-    /// The TTLs on the hot path must actually collapse a burst, and must not
-    /// be so long that a recompile or a finished execution goes unnoticed for
-    /// an age. Pinned because both are the difference between one database
-    /// read per burst and one per instance.
+    /// The concurrency-count TTL must collapse a burst without letting the
+    /// admission gate reason from an old runtime count for an age.
     #[test]
-    fn hot_path_caches_have_sane_windows() {
-        use super::{CONCURRENCY_COUNT_TTL, REGISTERED_IMAGE_TTL};
+    fn concurrency_count_cache_has_a_sane_window() {
+        use super::CONCURRENCY_COUNT_TTL;
         use std::time::Duration;
 
-        // Long enough to collapse a burst: at even 100 starts a second these
-        // turn hundreds of lookups into one.
+        // Long enough to collapse a burst.
         assert!(CONCURRENCY_COUNT_TTL >= Duration::from_millis(100));
-        assert!(REGISTERED_IMAGE_TTL >= Duration::from_secs(1));
 
         // Short enough to stay honest. The concurrency count is a backstop
         // against runaway intake, not a quota, but it still has to track
-        // reality; a stale artifact id must not outlive a recompile by long.
+        // reality.
         assert!(CONCURRENCY_COUNT_TTL <= Duration::from_secs(2));
-        assert!(REGISTERED_IMAGE_TTL <= Duration::from_secs(30));
     }
     use super::*;
     use serde_json::json;

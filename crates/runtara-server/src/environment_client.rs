@@ -162,6 +162,7 @@ impl EnvironmentClient {
                     instance_id: inst.instance_id,
                     tenant_id: inst.tenant_id,
                     image_id: inst.image_id.unwrap_or_default(),
+                    image_name: inst.image_name.unwrap_or_default(),
                     status: instance_status_from_string(&inst.status),
                     created_at: ms_to_datetime(inst.created_at_ms),
                     started_at: opt_ms_to_datetime(inst.started_at_ms),
@@ -347,6 +348,35 @@ impl EnvironmentClient {
             images: images.into_iter().map(image_summary).collect(),
             total_count,
         })
+    }
+
+    /// Look up one image by its tenant-scoped name.
+    ///
+    /// This goes through Environment's exact-name path rather than scanning a
+    /// paginated image list. Compiled artifacts are immutable and accumulate
+    /// over time, so a bounded list scan can otherwise miss a valid orphaned
+    /// artifact after the first page.
+    #[instrument(skip(self), fields(tenant_id = %tenant_id, name = %name), level = "debug")]
+    pub async fn find_image_by_name(
+        &self,
+        tenant_id: &str,
+        name: &str,
+    ) -> Result<Option<ImageSummary>> {
+        debug!("Finding image by name");
+
+        Ok(handlers::handle_list_images(
+            &self.state,
+            &handlers::ListImagesParams {
+                tenant_id: Some(tenant_id.to_string()),
+                name: Some(name.to_string()),
+                limit: 1,
+                offset: 0,
+            },
+        )
+        .await?
+        .into_iter()
+        .next()
+        .map(image_summary))
     }
 
     /// Get one image, scoped to a tenant.

@@ -1,3 +1,4 @@
+use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
@@ -6,7 +7,8 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use crate::api::repositories::workflows::{
-    CompilationSuccessRecord, WorkflowRepository, workflow_definition_checksum,
+    CompilationSuccessRecord, RegisteredImageRecord, WorkflowRepository,
+    workflow_definition_checksum,
 };
 use crate::compiler::child_workflows::load_child_workflows;
 use crate::runtime_client::RuntimeClient;
@@ -84,9 +86,37 @@ fn image_compiler_mode(image: &ImageSummary) -> Option<&str> {
         .and_then(|v| v.as_str())
 }
 
+/// Whether the image was built with step-event instrumentation enabled.
+///
+/// This is deliberately a required cache-key field rather than a display
+/// detail. `trackEvents` changes the generated workflow component, so an image
+/// built with the opposite value cannot attest that it can (or cannot) report
+/// steps for a deployment.
+fn image_track_events(image: &ImageSummary) -> Option<bool> {
+    image
+        .metadata
+        .as_ref()
+        .and_then(|m| m.pointer("/workflow/trackEvents"))
+        .and_then(|v| v.as_bool())
+}
+
+/// SHA-256 of the exact uploaded workflow binary.
+///
+/// This is separate from source provenance: resolved child workflows and
+/// staged workflow-agent components can change the composed bytes even when
+/// the parent definition is unchanged.
+fn image_binary_checksum(image: &ImageSummary) -> Option<&str> {
+    image
+        .metadata
+        .as_ref()
+        .and_then(|m| m.pointer("/workflow/binaryChecksum"))
+        .and_then(|v| v.as_str())
+}
+
 /// Whether `image` is a cache hit for the current source, compiler major,
-/// compiler mode, and lowering options. Older images that lack a provenance
-/// field miss once and are refreshed through the selected compile path.
+/// compiler mode, lowering options, and step-event instrumentation. Older
+/// images that lack a provenance field miss once and are refreshed through the
+/// selected compile path.
 ///
 /// Lowering belongs in the key because it changes the emitted artifact for an
 /// unchanged definition: a workflow compiled before store-freeing sleep was
@@ -96,11 +126,78 @@ fn image_cache_hits(
     image: &ImageSummary,
     source_checksum: &str,
     compiler_mode: WorkflowCompilerMode,
+    track_events: bool,
 ) -> bool {
     image_source_checksum(image) == Some(source_checksum)
         && image_template_major(image) == Some(runtara_workflows::TEMPLATE_MAJOR_VERSION)
         && image_compiler_mode(image) == Some(compiler_mode.as_str())
         && image_lowering_mode(image) == Some(runtara_workflows::direct_lowering_tag().as_str())
+        && image_track_events(image) == Some(track_events)
+}
+
+/// Whether `image` is the exact compiled artifact about to be registered.
+///
+/// The provenance check makes a same-name image semantically eligible; the
+/// binary checksum makes it safe to reuse as an immutable artifact even when
+/// resolved child graphs or staged agent components changed during a forced
+/// rebuild.
+fn image_matches_compiled_artifact(
+    image: &ImageSummary,
+    source_checksum: &str,
+    compiler_mode: WorkflowCompilerMode,
+    track_events: bool,
+    binary_checksum: &str,
+) -> bool {
+    image_cache_hits(image, source_checksum, compiler_mode, track_events)
+        && image_binary_checksum(image) == Some(binary_checksum)
+}
+
+/// Fingerprint the declared compilation provenance used for cache identity.
+fn workflow_compilation_fingerprint(
+    source_checksum: &str,
+    compiler_mode: WorkflowCompilerMode,
+    track_events: bool,
+) -> String {
+    let lowering_mode = runtara_workflows::direct_lowering_tag();
+    let mut fingerprint = Sha256::new();
+
+    for field in [
+        source_checksum,
+        runtara_workflows::TEMPLATE_MAJOR_VERSION,
+        compiler_mode.as_str(),
+        lowering_mode.as_str(),
+    ] {
+        fingerprint.update(field.as_bytes());
+        fingerprint.update([0]);
+    }
+    fingerprint.update([u8::from(track_events)]);
+
+    hex::encode(fingerprint.finalize())
+}
+
+/// Build the Environment name for one immutable compiled artifact.
+///
+/// Environment deliberately treats a repeated `(tenant, name)` upload as an
+/// in-place replacement. A mutable `{workflow_id}:{version}` name therefore
+/// lets a launch which already holds an image UUID observe a different binary
+/// after a concurrent recompile. The name combines the declared provenance
+/// fingerprint with the final binary checksum, so different output is always
+/// a distinct image row even when a forced retry has the same parent source.
+///
+/// The readable prefix preserves the existing workflow-instance lookup
+/// convention. The `@` suffix is intentionally opaque and filesystem-safe.
+fn workflow_image_name(
+    workflow_id: &str,
+    version: u32,
+    source_checksum: &str,
+    compiler_mode: WorkflowCompilerMode,
+    track_events: bool,
+    binary_checksum: &str,
+) -> String {
+    format!(
+        "{workflow_id}:{version}@{}-{binary_checksum}",
+        workflow_compilation_fingerprint(source_checksum, compiler_mode, track_events)
+    )
 }
 
 fn workflow_image_metadata(
@@ -108,6 +205,7 @@ fn workflow_image_metadata(
     workflow_id: &str,
     version: u32,
     source_checksum: &str,
+    track_events: bool,
     direct_artifact: Option<&DirectArtifactMetadata>,
 ) -> serde_json::Value {
     let mut workflow = serde_json::json!({
@@ -120,6 +218,11 @@ fn workflow_image_metadata(
         "compilerMode": compilation_result.compiler_mode.as_str(),
         // Part of cache identity: see `image_cache_hits`.
         "loweringMode": runtara_workflows::direct_lowering_tag(),
+        // Part of cache identity: step-debug instrumentation changes the
+        // generated workflow component.
+        "trackEvents": track_events,
+        // Immutable registration identity includes the exact composed bytes.
+        "binaryChecksum": compilation_result.binary_checksum,
         "directWasm": {
             "enabled": true,
             "outcome": "success",
@@ -177,6 +280,19 @@ struct WorkflowImageRegistration<'a> {
     workflow_id: &'a str,
     version: u32,
     source_checksum: &'a str,
+    track_events: bool,
+}
+
+/// The exact workflow source a compilation attempt consumes.
+///
+/// A failed attempt needs this provenance just as much as a successful one:
+/// rereading a definition after a toggle can stamp a failure with a mode the
+/// compiler never saw and incorrectly make it terminal.
+#[derive(Debug, Clone)]
+pub(crate) struct CompilationSource {
+    pub(crate) definition: serde_json::Value,
+    pub(crate) source_checksum: String,
+    pub(crate) track_events: bool,
 }
 
 /// Direct WASM compilation settings.
@@ -341,6 +457,35 @@ impl CompilationService {
         self
     }
 
+    /// Load the source and instrumentation mode for one compilation attempt.
+    ///
+    /// Kept separate so the queue worker can persist a failure against the
+    /// exact input handed to the compiler rather than rereading a possibly
+    /// changed definition afterward.
+    pub(crate) async fn load_compilation_source(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        version: i32,
+    ) -> Result<CompilationSource, ServiceError> {
+        let (definition, track_events) = self
+            .repository
+            .get_definition_with_track_events(tenant_id, workflow_id, version)
+            .await
+            .map_err(|e| ServiceError::DatabaseError(format!("Failed to fetch definition: {e}")))?
+            .ok_or_else(|| {
+                ServiceError::NotFound(format!(
+                    "Workflow '{workflow_id}' version {version} not found"
+                ))
+            })?;
+
+        Ok(CompilationSource {
+            source_checksum: workflow_definition_checksum(&definition),
+            definition,
+            track_events,
+        })
+    }
+
     /// Compile a workflow to binary and optionally register with runtara-environment
     ///
     /// This orchestrates the full compilation pipeline:
@@ -362,6 +507,25 @@ impl CompilationService {
         workflow_id: &str,
         version: i32,
         force_recompile: bool,
+    ) -> Result<CompilationResultDto, ServiceError> {
+        let source = self
+            .load_compilation_source(tenant_id, workflow_id, version)
+            .await?;
+        self.compile_workflow_from_source(tenant_id, workflow_id, version, force_recompile, source)
+            .await
+    }
+
+    /// Compile a workflow from an already captured source snapshot.
+    ///
+    /// The queue worker uses this form so a recorded failure carries the same
+    /// source checksum and tracking mode that were actually compiled.
+    pub(crate) async fn compile_workflow_from_source(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        version: i32,
+        force_recompile: bool,
+        source: CompilationSource,
     ) -> Result<CompilationResultDto, ServiceError> {
         let compile_start = std::time::Instant::now();
         info!(
@@ -385,37 +549,23 @@ impl CompilationService {
                 .await;
         }
 
-        // 1. Fetch workflow definition and track-events mode
-        let step_start = std::time::Instant::now();
-        debug!("compile: step 1 - fetching definition from database");
-        let (definition, track_events) = self
-            .repository
-            .get_definition_with_track_events(tenant_id, workflow_id, version)
-            .await
-            .map_err(|e| ServiceError::DatabaseError(format!("Failed to fetch definition: {}", e)))?
-            .ok_or_else(|| {
-                ServiceError::NotFound(format!(
-                    "Workflow '{}' version {} not found",
-                    workflow_id, version
-                ))
-            })?;
-        debug!(
-            duration_ms = step_start.elapsed().as_millis(),
-            "compile: step 1 completed - definition fetched"
-        );
-        let source_checksum = workflow_definition_checksum(&definition);
+        let CompilationSource {
+            definition,
+            source_checksum,
+            track_events,
+        } = source;
 
         let version_u32 = version as u32;
 
-        // 2. Parse execution graph
+        // 1. Parse execution graph
         let step_start = std::time::Instant::now();
-        debug!("compile: step 2 - parsing execution graph");
+        debug!("compile: step 1 - parsing execution graph");
         let execution_graph = parse_execution_graph(&definition).map_err(|e| {
             ServiceError::CompilationError(format!("Failed to parse execution graph: {}", e))
         })?;
         debug!(
             duration_ms = step_start.elapsed().as_millis(),
-            "compile: step 2 completed - execution graph parsed"
+            "compile: step 1 completed - execution graph parsed"
         );
 
         // A workflow with no steps cannot compile, and the downstream planner
@@ -427,7 +577,7 @@ impl CompilationService {
             ));
         }
 
-        // 3. Load child workflows from database
+        // 2. Load child workflows from database
         let step_start = std::time::Instant::now();
         debug!("compile: step 3 - loading child workflows from database");
         let child_workflows = self
@@ -501,6 +651,7 @@ impl CompilationService {
                     workflow_id,
                     version,
                     desired_compiler_mode.as_str(),
+                    track_events,
                 )
                 .await
                 .map_err(|e| {
@@ -535,80 +686,6 @@ impl CompilationService {
             });
         }
 
-        // 5b. Also check runtara-environment directly in case we have an orphaned image
-        // (image exists in runtara but no local record due to failed registration save).
-        if !force_recompile && let Some(client) = &self.runtime_client {
-            let image_name = format!("{}:{}", workflow_id, version);
-            let step_start = std::time::Instant::now();
-            debug!("compile: step 5b - checking runtara-environment for existing image");
-            match client
-                .find_image_by_name_summary(tenant_id, &image_name)
-                .await
-            {
-                Ok(Some(existing_image))
-                    if image_cache_hits(
-                        &existing_image,
-                        source_checksum.as_str(),
-                        desired_compiler_mode,
-                    ) =>
-                {
-                    let compiler_mode = image_compiler_mode(&existing_image).map(str::to_string);
-                    let existing_id = existing_image.image_id;
-                    info!(
-                        duration_ms = step_start.elapsed().as_millis(),
-                        total_duration_ms = compile_start.elapsed().as_millis(),
-                        "Found existing image {} in runtara-environment for workflow {} version {}, recording locally",
-                        existing_id,
-                        workflow_id,
-                        version
-                    );
-                    // Record this in our DB so we don't check again
-                    let _ = self
-                        .repository
-                        .record_registered_image_id(
-                            tenant_id,
-                            workflow_id,
-                            version,
-                            &existing_id,
-                            Some(&source_checksum),
-                            compiler_mode.as_deref(),
-                        )
-                        .await;
-                    if let Some(r) = &progress_reporter {
-                        r.clear().await;
-                    }
-                    return Ok(CompilationResultDto {
-                        workflow_id: workflow_id.to_string(),
-                        version,
-                        build_dir: String::new(),
-                        binary_size: 0,
-                        binary_checksum: String::new(),
-                        image_id: Some(existing_id),
-                    });
-                }
-                Ok(Some(_)) => {
-                    debug!(
-                        duration_ms = step_start.elapsed().as_millis(),
-                        desired_compiler_mode = desired_compiler_mode.as_str(),
-                        "compile: step 5b found image name but source checksum, template major, or compiler mode differed or was absent; rebuilding"
-                    );
-                }
-                Ok(None) => {
-                    debug!(
-                        duration_ms = step_start.elapsed().as_millis(),
-                        "compile: step 5b completed - no existing image found, proceeding with compilation"
-                    );
-                }
-                Err(e) => {
-                    warn!(
-                        duration_ms = step_start.elapsed().as_millis(),
-                        "Failed to check runtara-environment for existing image: {}", e
-                    );
-                    // Continue with compilation attempt
-                }
-            }
-        }
-
         // 6. Compile to workflow.wasm
         // IMPORTANT: compile_workflow is a synchronous blocking function that runs cargo build.
         // We MUST use spawn_blocking to prevent blocking the tokio runtime, which would
@@ -623,8 +700,53 @@ impl CompilationService {
         })?;
         debug!(
             wait_ms = step_start.elapsed().as_millis(),
-            "compile: step 6 - semaphore acquired, compiling workflow artifact"
+            "compile: step 6 - semaphore acquired"
         );
+
+        // Another request may have completed while this one waited for the
+        // process-wide compile permit. Recheck after the wait so identical
+        // normal requests reuse the registered immutable image rather than
+        // compiling and registering the same artifact twice.
+        if !force_recompile {
+            let existing_image_id = self
+                .repository
+                .get_fresh_registered_image_id_for_compiler(
+                    tenant_id,
+                    workflow_id,
+                    version,
+                    desired_compiler_mode.as_str(),
+                    track_events,
+                )
+                .await
+                .map_err(|e| {
+                    ServiceError::DatabaseError(format!(
+                        "Failed to recheck existing image after waiting for compilation: {e}"
+                    ))
+                })?;
+
+            if let Some(existing_id) = existing_image_id {
+                info!(
+                    total_duration_ms = compile_start.elapsed().as_millis(),
+                    "Workflow {} version {} was compiled while this request waited; reusing image {}",
+                    workflow_id,
+                    version,
+                    existing_id
+                );
+                if let Some(r) = &progress_reporter {
+                    r.clear().await;
+                }
+                return Ok(CompilationResultDto {
+                    workflow_id: workflow_id.to_string(),
+                    version,
+                    build_dir: String::new(),
+                    binary_size: 0,
+                    binary_checksum: String::new(),
+                    image_id: Some(existing_id),
+                });
+            }
+        }
+
+        debug!("compile: step 6 - compiling workflow artifact");
         let compile_start_time = std::time::Instant::now();
         let direct_compilation = self.direct_compilation.clone();
         let compile_source_checksum = source_checksum.clone();
@@ -664,13 +786,40 @@ impl CompilationService {
             let _ = handle.await;
         }
 
-        // 7. Record compilation success in database FIRST (before registration)
-        // This ensures we have a record even if registration fails, preventing
-        // orphaned images in runtara-environment with no local record
+        // 7. Lock the source through registration. Image names are immutable
+        // per artifact identity, but the source lock still prevents an old
+        // compile from attaching its artifact to a newer definition.
+        let client = self.runtime_client.as_ref().ok_or_else(|| {
+            ServiceError::RegistrationError(
+                "Runtime client not configured. Compilation requires runtara-environment connection."
+                    .to_string(),
+            )
+        })?;
         let step_start = std::time::Instant::now();
-        debug!("compile: step 7 - recording compilation success in database");
-        self.repository
-            .record_compilation_success(CompilationSuccessRecord {
+        debug!("compile: step 7 - locking current compilation source");
+        let Some(mut completion) = self
+            .repository
+            .lock_current_compilation_source(
+                tenant_id,
+                workflow_id,
+                version,
+                &definition,
+                track_events,
+            )
+            .await
+            .map_err(|e| {
+                ServiceError::DatabaseError(format!("Failed to lock compilation source: {e}"))
+            })?
+        else {
+            if let Some(r) = &progress_reporter {
+                r.clear().await;
+            }
+            return Err(ServiceError::Superseded(format!(
+                "Workflow '{workflow_id}' version {version} changed while compilation was running"
+            )));
+        };
+        completion
+            .record_success(&CompilationSuccessRecord {
                 tenant_id,
                 workflow_id,
                 version,
@@ -678,27 +827,23 @@ impl CompilationService {
                 binary_size: result.binary_size as i32,
                 package_size: result.package_size as i32,
                 binary_checksum: &result.binary_checksum,
+                definition: &definition,
                 source_checksum: &source_checksum,
                 compiler_mode: result.compiler_mode.as_str(),
+                track_events,
             })
             .await
             .map_err(|e| {
-                warn!("Failed to record compilation success: {}", e);
-                ServiceError::DatabaseError(format!("Failed to record compilation: {}", e))
+                warn!("Failed to record compilation success: {e}");
+                ServiceError::DatabaseError(format!("Failed to record compilation: {e}"))
             })?;
         debug!(
             duration_ms = step_start.elapsed().as_millis(),
-            "compile: step 7 completed - compilation success recorded in database"
+            "compile: step 7 completed - compilation source locked and success recorded"
         );
 
         // 8. Register with runtara-environment (REQUIRED)
         // Compilation without registration is useless - the workflow can't be executed
-        let client = self.runtime_client.as_ref().ok_or_else(|| {
-            ServiceError::RegistrationError(
-                "Runtime client not configured. Compilation requires runtara-environment connection.".to_string()
-            )
-        })?;
-
         let step_start = std::time::Instant::now();
         debug!(
             binary_size = result.binary_size,
@@ -711,18 +856,63 @@ impl CompilationService {
             )
             .await;
         }
-        let image_id = self
-            .register_image(
-                client,
-                &result,
-                WorkflowImageRegistration {
-                    tenant_id,
-                    workflow_id,
-                    version: version_u32,
-                    source_checksum: &source_checksum,
-                },
-            )
-            .await?;
+        let registration = WorkflowImageRegistration {
+            tenant_id,
+            workflow_id,
+            version: version_u32,
+            source_checksum: &source_checksum,
+            track_events,
+        };
+        let image_name = workflow_image_name(
+            registration.workflow_id,
+            registration.version,
+            registration.source_checksum,
+            result.compiler_mode,
+            registration.track_events,
+            &result.binary_checksum,
+        );
+        let image_id = match client
+            .find_image_by_name_summary(tenant_id, &image_name)
+            .await
+        {
+            Ok(Some(existing_image))
+                if image_matches_compiled_artifact(
+                    &existing_image,
+                    &source_checksum,
+                    result.compiler_mode,
+                    track_events,
+                    &result.binary_checksum,
+                ) =>
+            {
+                info!(
+                    image_id = %existing_image.image_id,
+                    "Reusing already registered immutable workflow artifact"
+                );
+                existing_image.image_id
+            }
+            Ok(Some(existing_image)) => {
+                warn!(
+                    image_id = %existing_image.image_id,
+                    image_name = %image_name,
+                    "Image name is occupied by an artifact with mismatched provenance; registering the compiled binary"
+                );
+                self.register_image(client, &result, registration, &image_name)
+                    .await?
+            }
+            Ok(None) => {
+                self.register_image(client, &result, registration, &image_name)
+                    .await?
+            }
+            Err(error) => {
+                warn!(
+                    image_name = %image_name,
+                    error = %error,
+                    "Failed to look up a compiled image by name; registering it"
+                );
+                self.register_image(client, &result, registration, &image_name)
+                    .await?
+            }
+        };
         debug!(
             duration_ms = step_start.elapsed().as_millis(),
             image_id = %image_id,
@@ -732,15 +922,18 @@ impl CompilationService {
         // 8b. Record registered image ID (required for execution)
         let step_start = std::time::Instant::now();
         debug!("compile: step 8b - recording registered image ID in database");
-        self.repository
-            .record_registered_image_id(
-                tenant_id,
-                workflow_id,
-                version,
-                &image_id,
-                Some(&source_checksum),
-                Some(result.compiler_mode.as_str()),
-            )
+        let registered_image = RegisteredImageRecord {
+            tenant_id,
+            workflow_id,
+            version,
+            image_id: &image_id,
+            definition: &definition,
+            source_checksum: &source_checksum,
+            compiler_mode: Some(result.compiler_mode.as_str()),
+            track_events,
+        };
+        completion
+            .record_registered_image_id(&registered_image)
             .await
             .map_err(|e| {
                 ServiceError::DatabaseError(format!("Failed to record registered image ID: {}", e))
@@ -749,6 +942,9 @@ impl CompilationService {
             duration_ms = step_start.elapsed().as_millis(),
             "compile: step 8b completed - image ID recorded in database"
         );
+        completion.commit().await.map_err(|e| {
+            ServiceError::DatabaseError(format!("Failed to commit registered image ID: {e}"))
+        })?;
 
         // 9. Record child workflow dependencies
         if !result.child_dependencies.is_empty() {
@@ -1000,10 +1196,8 @@ impl CompilationService {
         client: &RuntimeClient,
         compilation_result: &runtara_workflows::NativeCompilationResult,
         registration: WorkflowImageRegistration<'_>,
+        image_name: &str,
     ) -> Result<String, ServiceError> {
-        // Build the image name: {workflow_id}:{version}
-        let image_name = format!("{}:{}", registration.workflow_id, registration.version);
-
         // Get binary path and size (use binary_path from compilation result,
         // which is target-aware: "workflow" for native, "workflow.wasm" for WASM)
         let binary_path = &compilation_result.binary_path;
@@ -1022,7 +1216,7 @@ impl CompilationService {
         // runner type is always `Wasm` now.
         let direct_artifact = direct_artifact_metadata_for_image(compilation_result).await;
         let options =
-            RegisterImageStreamOptions::new(registration.tenant_id, &image_name, binary_size)
+            RegisterImageStreamOptions::new(registration.tenant_id, image_name, binary_size)
                 .with_description(format!(
                     "Workflow {} version {}",
                     registration.workflow_id, registration.version
@@ -1033,6 +1227,7 @@ impl CompilationService {
                     registration.workflow_id,
                     registration.version,
                     registration.source_checksum,
+                    registration.track_events,
                     direct_artifact.as_ref(),
                 ));
 
@@ -1086,6 +1281,9 @@ pub enum ServiceError {
     /// the problem, so this is reported to the author rather than alerted on.
     WorkflowAuthoringError(String),
     RegistrationError(String),
+    /// The definition or instrumentation mode changed after this attempt
+    /// captured its input. A newer compilation owns terminal state instead.
+    Superseded(String),
 }
 
 impl std::fmt::Display for ServiceError {
@@ -1096,6 +1294,7 @@ impl std::fmt::Display for ServiceError {
             ServiceError::CompilationError(msg) => write!(f, "Compilation error: {}", msg),
             ServiceError::WorkflowAuthoringError(msg) => write!(f, "{}", msg),
             ServiceError::RegistrationError(msg) => write!(f, "Registration error: {}", msg),
+            ServiceError::Superseded(msg) => write!(f, "Compilation superseded: {}", msg),
         }
     }
 }
@@ -1156,13 +1355,14 @@ mod tests {
     }
 
     #[test]
-    fn image_cache_hit_requires_matching_compiler_mode() {
+    fn image_cache_hit_requires_matching_compiler_and_tracking_modes() {
         let metadata = serde_json::json!({
             "workflow": {
                 "sourceChecksum": "source-sha256",
                 "templateMajor": runtara_workflows::TEMPLATE_MAJOR_VERSION,
                 "compilerMode": "direct-wasm",
-                "loweringMode": runtara_workflows::direct_lowering_tag()
+                "loweringMode": runtara_workflows::direct_lowering_tag(),
+                "trackEvents": true
             }
         });
         let image = image_summary_with_metadata(metadata);
@@ -1170,13 +1370,24 @@ mod tests {
         assert!(image_cache_hits(
             &image,
             "source-sha256",
-            WorkflowCompilerMode::DirectWasm
+            WorkflowCompilerMode::DirectWasm,
+            true,
         ));
         assert!(!image_cache_hits(
             &image,
             "other-source",
-            WorkflowCompilerMode::DirectWasm
+            WorkflowCompilerMode::DirectWasm,
+            true,
         ));
+        assert!(
+            !image_cache_hits(
+                &image,
+                "source-sha256",
+                WorkflowCompilerMode::DirectWasm,
+                false,
+            ),
+            "step instrumentation changes the artifact and must miss the cache"
+        );
 
         let missing_mode = image_summary_with_metadata(serde_json::json!({
             "workflow": {
@@ -1187,8 +1398,72 @@ mod tests {
         assert!(!image_cache_hits(
             &missing_mode,
             "source-sha256",
-            WorkflowCompilerMode::DirectWasm
+            WorkflowCompilerMode::DirectWasm,
+            true,
         ));
+    }
+
+    #[test]
+    fn workflow_image_name_is_specific_to_the_compilation_identity() {
+        let source = "source-sha256";
+        let current = workflow_image_name(
+            "workflow-a",
+            7,
+            source,
+            WorkflowCompilerMode::DirectWasm,
+            true,
+            "binary-sha256-a",
+        );
+
+        assert!(current.starts_with("workflow-a:7@"));
+        assert_eq!(
+            current,
+            workflow_image_name(
+                "workflow-a",
+                7,
+                source,
+                WorkflowCompilerMode::DirectWasm,
+                true,
+                "binary-sha256-a",
+            ),
+            "the same compiled bytes must recover the same orphaned image"
+        );
+        assert_ne!(
+            current,
+            workflow_image_name(
+                "workflow-a",
+                7,
+                "other-source-sha256",
+                WorkflowCompilerMode::DirectWasm,
+                true,
+                "binary-sha256-a",
+            ),
+            "a changed definition must receive a distinct Environment image"
+        );
+        assert_ne!(
+            current,
+            workflow_image_name(
+                "workflow-a",
+                7,
+                source,
+                WorkflowCompilerMode::DirectWasm,
+                false,
+                "binary-sha256-a",
+            ),
+            "opposite step instrumentation must never overwrite this image"
+        );
+        assert_ne!(
+            current,
+            workflow_image_name(
+                "workflow-a",
+                7,
+                source,
+                WorkflowCompilerMode::DirectWasm,
+                true,
+                "binary-sha256-b",
+            ),
+            "different composed bytes must never share an Environment image"
+        );
     }
 
     /// An image built with different lowering is not interchangeable with one
@@ -1205,13 +1480,18 @@ mod tests {
                 "sourceChecksum": "source-sha256",
                 "templateMajor": runtara_workflows::TEMPLATE_MAJOR_VERSION,
                 "compilerMode": "direct-wasm",
-                "loweringMode": "store_freeing_sleep=false,omit_runtime=false"
+                "loweringMode": "store_freeing_sleep=false,omit_runtime=false",
+                "trackEvents": true
             }
         }));
         assert!(
-            !image_cache_hits(&stale, "source-sha256", WorkflowCompilerMode::DirectWasm)
-                || runtara_workflows::direct_lowering_tag()
-                    == "store_freeing_sleep=false,omit_runtime=false",
+            !image_cache_hits(
+                &stale,
+                "source-sha256",
+                WorkflowCompilerMode::DirectWasm,
+                true,
+            ) || runtara_workflows::direct_lowering_tag()
+                == "store_freeing_sleep=false,omit_runtime=false",
             "an image built with other lowering must not be reused"
         );
 
@@ -1220,11 +1500,17 @@ mod tests {
                 "sourceChecksum": "source-sha256",
                 "templateMajor": runtara_workflows::TEMPLATE_MAJOR_VERSION,
                 "compilerMode": "direct-wasm",
-                "loweringMode": runtara_workflows::direct_lowering_tag()
+                "loweringMode": runtara_workflows::direct_lowering_tag(),
+                "trackEvents": true
             }
         }));
         assert!(
-            image_cache_hits(&current, "source-sha256", WorkflowCompilerMode::DirectWasm),
+            image_cache_hits(
+                &current,
+                "source-sha256",
+                WorkflowCompilerMode::DirectWasm,
+                true,
+            ),
             "an image built with the current lowering must be reused"
         );
     }
@@ -1243,7 +1529,8 @@ mod tests {
         assert!(!image_cache_hits(
             &legacy,
             "source-sha256",
-            WorkflowCompilerMode::DirectWasm
+            WorkflowCompilerMode::DirectWasm,
+            true,
         ));
     }
 
@@ -1259,7 +1546,8 @@ mod tests {
             default_variables: serde_json::json!({}),
             compiler_mode: WorkflowCompilerMode::DirectWasm,
         };
-        let metadata = workflow_image_metadata(&result, "workflow-a", 7, "source-sha256", None);
+        let metadata =
+            workflow_image_metadata(&result, "workflow-a", 7, "source-sha256", true, None);
         assert_eq!(
             metadata["workflow"]["loweringMode"],
             serde_json::json!(runtara_workflows::direct_lowering_tag()),
@@ -1280,7 +1568,8 @@ mod tests {
             compiler_mode: WorkflowCompilerMode::DirectWasm,
         };
 
-        let metadata = workflow_image_metadata(&result, "workflow-a", 7, "source-sha256", None);
+        let metadata =
+            workflow_image_metadata(&result, "workflow-a", 7, "source-sha256", true, None);
 
         assert_eq!(metadata["variables"], serde_json::json!({ "limit": 5 }));
         assert_eq!(metadata["workflow"]["workflowId"], "workflow-a");
@@ -1291,6 +1580,8 @@ mod tests {
             runtara_workflows::TEMPLATE_MAJOR_VERSION
         );
         assert_eq!(metadata["workflow"]["compilerMode"], "direct-wasm");
+        assert_eq!(metadata["workflow"]["trackEvents"], true);
+        assert_eq!(metadata["workflow"]["binaryChecksum"], "abc");
         assert_eq!(metadata["workflow"]["directWasm"]["enabled"], true);
         assert_eq!(metadata["workflow"]["directWasm"]["outcome"], "success");
         assert_eq!(metadata["workflow"]["directWasm"]["reason"], "none");
@@ -1301,8 +1592,14 @@ mod tests {
         let result = native_result_with_mode(WorkflowCompilerMode::DirectWasm, "/tmp/build".into());
         let artifact = direct_artifact_metadata_fixture();
 
-        let metadata =
-            workflow_image_metadata(&result, "workflow-a", 7, "source-sha256", Some(&artifact));
+        let metadata = workflow_image_metadata(
+            &result,
+            "workflow-a",
+            7,
+            "source-sha256",
+            true,
+            Some(&artifact),
+        );
 
         let direct_artifact = &metadata["workflow"]["directArtifact"];
         assert_eq!(

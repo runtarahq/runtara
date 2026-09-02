@@ -148,7 +148,7 @@ async fn query_mcp_compilation_result(
 ) -> Result<McpCompileResult, rmcp::ErrorData> {
     let record = sqlx::query(
         r#"
-        SELECT compilation_status, registered_image_id, wasm_size, wasm_checksum, error_message
+        SELECT compilation_status, wasm_size, wasm_checksum, error_message
         FROM workflow_compilations
         WHERE tenant_id = $1 AND workflow_id = $2 AND version = $3
         "#,
@@ -168,12 +168,19 @@ async fn query_mcp_compilation_result(
 
             match status.as_str() {
                 "success" => {
-                    let image_id = record
-                        .try_get::<Option<String>, _>("registered_image_id")
-                        .map_err(|e| err(format!("Failed to read compilation result: {}", e)))?;
+                    // A raw successful row is not enough: an older compile can
+                    // finish after the definition's tracking mode changed. Use
+                    // the same source/mode-aware lookup as execution before
+                    // telling MCP that the artifact is deployable.
+                    let image_id = WorkflowRepository::new(server.pool.clone())
+                        .get_fresh_registered_image_id(&server.tenant_id, workflow_id, version)
+                        .await
+                        .map_err(|e| {
+                            err(format!("Failed to check compilation freshness: {}", e))
+                        })?;
                     let Some(image_id) = image_id else {
                         return Err(err(format!(
-                            "Compilation finished but workflow '{}' version {} is not registered (status: success)",
+                            "Compilation finished but workflow '{}' version {} has no current registered artifact; retry compilation",
                             workflow_id, version
                         )));
                     };

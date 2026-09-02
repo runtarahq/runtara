@@ -195,6 +195,47 @@ async fn test_duplicate_name_updates() {
 }
 
 #[tokio::test]
+async fn test_claim_name_returns_one_canonical_id() {
+    skip_if_no_db!();
+    let pool = get_pool().await.expect("Failed to connect to database");
+    let registry = ImageRegistry::new(pool.clone());
+
+    let tenant_id = "test-tenant";
+    let name = format!("test-image-claim-{}", Uuid::new_v4());
+    let first_candidate = Uuid::new_v4().to_string();
+    let second_candidate = Uuid::new_v4().to_string();
+
+    let (first, second) = tokio::join!(
+        registry.claim_name(
+            tenant_id,
+            &name,
+            &first_candidate,
+            "/tmp/test-claimed-binary",
+        ),
+        registry.claim_name(
+            tenant_id,
+            &name,
+            &second_candidate,
+            "/tmp/test-claimed-binary",
+        ),
+    );
+    let first = first.expect("first name claim must succeed");
+    let second = second.expect("second name claim must succeed");
+
+    assert_eq!(u8::from(first.created) + u8::from(second.created), 1);
+    assert!(
+        first.image_id == first_candidate || first.image_id == second_candidate,
+        "one of the contenders must establish the canonical image ID"
+    );
+    assert_eq!(second.image_id, first.image_id);
+
+    registry
+        .delete(&first.image_id)
+        .await
+        .expect("Failed to delete claimed image");
+}
+
+#[tokio::test]
 async fn test_delete_nonexistent() {
     skip_if_no_db!();
     let pool = get_pool().await.expect("Failed to connect to database");

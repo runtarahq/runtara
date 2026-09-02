@@ -1,28 +1,47 @@
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 use sha2::Digest;
-use sqlx::{PgPool, Row};
+use sqlx::{PgPool, Postgres, Row, Transaction};
 
 use crate::api::dto::workflows::{Note, WorkflowDto, WorkflowVersionInfoDto, graph_supports_chat};
 use crate::types::MemoryTier;
 
-type WorkflowVersionRow = (
-    i32,                   // version
-    DateTime<Utc>,         // created_at
-    DateTime<Utc>,         // updated_at
-    bool,                  // track_events
-    Option<DateTime<Utc>>, // compiled_at
-    Option<i32>,           // current_version
-    Option<i32>,           // latest_version
-    Option<i32>,           // wasm_size (composed .wasm bytes)
-    Option<i32>,           // package_size (generated crate source bytes)
-    Option<String>,        // compilation_status ('success' | 'failed' | 'pending')
-    Option<String>,        // error_message (populated when status='failed')
-);
+#[derive(sqlx::FromRow)]
+struct WorkflowVersionRow {
+    version: i32,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+    track_events: bool,
+    compiled_at: Option<DateTime<Utc>>,
+    current_version: Option<i32>,
+    latest_version: Option<i32>,
+    /// Composed `.wasm` bytes.
+    wasm_size: Option<i32>,
+    /// Generated workflow-logic crate source bytes.
+    package_size: Option<i32>,
+    /// `success`, `failed`, or `pending`.
+    compilation_status: Option<String>,
+    error_message: Option<String>,
+    registered_image_id: Option<String>,
+    source_checksum: Option<String>,
+    compiled_track_events: Option<bool>,
+    compiled_template_major: Option<String>,
+    compiled_lowering_mode: Option<String>,
+    definition: Value,
+}
 
 pub fn workflow_definition_checksum(definition: &Value) -> String {
     let bytes = serde_json::to_vec(definition).unwrap_or_default();
     hex::encode(sha2::Sha256::digest(&bytes))
+}
+
+/// Whether durable compilation provenance still describes this server's
+/// compiler.  Missing fields deliberately miss: legacy rows cannot safely
+/// attest that they were produced by the current template and lowering mode.
+fn compiler_provenance_matches(template_major: Option<&str>, lowering_mode: Option<&str>) -> bool {
+    let current_lowering_mode = runtara_workflows::direct_lowering_tag();
+    template_major == Some(runtara_workflows::TEMPLATE_MAJOR_VERSION)
+        && lowering_mode == Some(current_lowering_mode.as_str())
 }
 
 pub struct CompilationSuccessRecord<'a> {
@@ -36,15 +55,213 @@ pub struct CompilationSuccessRecord<'a> {
     /// which is the composed `.wasm` output.
     pub package_size: i32,
     pub binary_checksum: &'a str,
+    /// The exact definition handed to the compiler. It is compared while the
+    /// definition row is locked before this completion may change state.
+    pub definition: &'a Value,
     pub source_checksum: &'a str,
     /// Stable compiler-mode metadata value stored with the compilation row.
     pub compiler_mode: &'a str,
+    /// Whether the compiled artifact emits step-debug events.
+    ///
+    /// This is part of the artifact identity: changing it changes generated
+    /// code even when the workflow definition itself has not changed.
+    pub track_events: bool,
+}
+
+/// The exact artifact identity to attach after Environment has accepted it.
+///
+/// Keeping the definition snapshot with the image ID makes it impossible for a
+/// caller to attach an image without also proving that the source it compiled
+/// is still current.
+pub struct RegisteredImageRecord<'a> {
+    pub tenant_id: &'a str,
+    pub workflow_id: &'a str,
+    pub version: i32,
+    pub image_id: &'a str,
+    pub definition: &'a Value,
+    pub source_checksum: &'a str,
+    pub compiler_mode: Option<&'a str>,
+    pub track_events: bool,
 }
 
 /// Repository for workflow CRUD operations
 #[allow(dead_code)]
 pub struct WorkflowRepository {
     pool: PgPool,
+}
+
+/// A lock on the workflow definition whose source was compiled.
+///
+/// The transaction deliberately remains open through Environment registration.
+/// Image registration replaces the artifact for a stable `(tenant, name)`, so
+/// checking that a source is current before registration and attaching its ID
+/// afterward in separate transactions would still let an old artifact replace
+/// a newer one between those operations.
+pub(crate) struct CompilationWriteGuard<'a> {
+    transaction: Transaction<'a, Postgres>,
+}
+
+impl CompilationWriteGuard<'_> {
+    pub(crate) async fn record_success(
+        &mut self,
+        record: &CompilationSuccessRecord<'_>,
+    ) -> Result<(), sqlx::Error> {
+        let lowering_mode = runtara_workflows::direct_lowering_tag();
+        sqlx::query(
+            r#"
+            INSERT INTO workflow_compilations
+                (tenant_id, workflow_id, version, compiled_at, translated_path, compilation_status, wasm_size, wasm_checksum, runtara_version, source_checksum, package_size, compiler_mode, track_events, template_major, lowering_mode)
+            VALUES ($1, $2, $3, NOW(), $4, 'success', $5, $6, $7, $8, $9, $10, $11, $12, $13)
+            ON CONFLICT (tenant_id, workflow_id, version)
+            DO UPDATE SET
+                compiled_at = NOW(),
+                translated_path = $4,
+                compilation_status = 'success',
+                error_message = NULL,
+                -- This row describes a newly built artifact. Keeping the
+                -- prior image here would briefly make that old artifact look
+                -- ready under the new compilation metadata before step 8
+                -- registers the replacement.
+                registered_image_id = NULL,
+                wasm_size = $5,
+                wasm_checksum = $6,
+                runtara_version = $7,
+                source_checksum = $8,
+                package_size = $9,
+                compiler_mode = $10,
+                track_events = $11,
+                template_major = $12,
+                lowering_mode = $13
+            "#,
+        )
+        .bind(record.tenant_id)
+        .bind(record.workflow_id)
+        .bind(record.version)
+        .bind(record.build_dir.to_string_lossy().to_string())
+        .bind(record.binary_size)
+        .bind(record.binary_checksum)
+        .bind(env!("BUILD_VERSION"))
+        .bind(record.source_checksum)
+        .bind(record.package_size)
+        .bind(record.compiler_mode)
+        .bind(record.track_events)
+        .bind(runtara_workflows::TEMPLATE_MAJOR_VERSION)
+        .bind(&lowering_mode)
+        .execute(&mut *self.transaction)
+        .await?;
+
+        Ok(())
+    }
+
+    pub(crate) async fn record_registered_image_id(
+        &mut self,
+        record: &RegisteredImageRecord<'_>,
+    ) -> Result<(), sqlx::Error> {
+        let lowering_mode = runtara_workflows::direct_lowering_tag();
+        sqlx::query(
+            r#"
+            INSERT INTO workflow_compilations
+                (tenant_id, workflow_id, version, compiled_at, translated_path, compilation_status, registered_image_id, runtara_version, source_checksum, compiler_mode, track_events, template_major, lowering_mode)
+            VALUES ($1, $2, $3, NOW(), '', 'success', $4, $5, $6, $7, $8, $9, $10)
+            ON CONFLICT (tenant_id, workflow_id, version)
+            DO UPDATE SET
+                registered_image_id = $4,
+                compilation_status = 'success',
+                error_message = NULL,
+                runtara_version = $5,
+                source_checksum = $6,
+                compiler_mode = COALESCE($7, workflow_compilations.compiler_mode),
+                track_events = $8,
+                template_major = $9,
+                lowering_mode = $10
+            "#,
+        )
+        .bind(record.tenant_id)
+        .bind(record.workflow_id)
+        .bind(record.version)
+        .bind(record.image_id)
+        .bind(env!("BUILD_VERSION"))
+        .bind(record.source_checksum)
+        .bind(record.compiler_mode)
+        .bind(record.track_events)
+        .bind(runtara_workflows::TEMPLATE_MAJOR_VERSION)
+        .bind(&lowering_mode)
+        .execute(&mut *self.transaction)
+        .await?;
+
+        Ok(())
+    }
+
+    async fn record_failure(
+        &mut self,
+        tenant_id: &str,
+        workflow_id: &str,
+        version: i32,
+        error_message: &str,
+        source_checksum: &str,
+        track_events: bool,
+    ) -> Result<bool, sqlx::Error> {
+        let lowering_mode = runtara_workflows::direct_lowering_tag();
+        let result = sqlx::query(
+            r#"
+            INSERT INTO workflow_compilations
+                (tenant_id, workflow_id, version, compilation_status, translated_path, compiled_at, error_message, runtara_version, source_checksum, track_events, template_major, lowering_mode)
+            VALUES ($1, $2, $3, 'failed', '', NOW(), $4, $5, $6, $7, $8, $9)
+            ON CONFLICT (tenant_id, workflow_id, version)
+            DO UPDATE SET
+                compilation_status = 'failed',
+                translated_path = '',
+                compiled_at = NOW(),
+                error_message = $4,
+                runtara_version = $5,
+                source_checksum = $6,
+                compiler_mode = NULL,
+                track_events = $7,
+                template_major = $8,
+                lowering_mode = $9,
+                -- A failed row never attests that a previously registered
+                -- image remains executable.
+                registered_image_id = NULL,
+                wasm_size = NULL,
+                wasm_checksum = NULL,
+                package_size = NULL
+            -- Keep a still-valid successful artifact when a forced rebuild of
+            -- the same current source and event-tracking mode fails. A
+            -- success written before registration has no usable image,
+            -- though, and must become the failure that registration just
+            -- reported. Likewise, an old registered artifact whose
+            -- provenance no longer matches the current source must not mask
+            -- the current failure.
+            WHERE workflow_compilations.compilation_status <> 'success'
+               OR workflow_compilations.registered_image_id IS NULL
+               OR workflow_compilations.source_checksum
+                    IS DISTINCT FROM EXCLUDED.source_checksum
+               OR workflow_compilations.track_events
+                    IS DISTINCT FROM EXCLUDED.track_events
+               OR workflow_compilations.template_major
+                    IS DISTINCT FROM EXCLUDED.template_major
+               OR workflow_compilations.lowering_mode
+                    IS DISTINCT FROM EXCLUDED.lowering_mode
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(workflow_id)
+        .bind(version)
+        .bind(error_message)
+        .bind(env!("BUILD_VERSION"))
+        .bind(source_checksum)
+        .bind(track_events)
+        .bind(runtara_workflows::TEMPLATE_MAJOR_VERSION)
+        .bind(&lowering_mode)
+        .execute(&mut *self.transaction)
+        .await?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    pub(crate) async fn commit(self) -> Result<(), sqlx::Error> {
+        self.transaction.commit().await
+    }
 }
 
 #[allow(dead_code)]
@@ -844,9 +1061,10 @@ impl WorkflowRepository {
         // failed and never-attempted into the same shape and stranded the
         // user with no way to retry a failed row from the UI). We expose
         // the raw status + error_message so the frontend can distinguish.
-        // wasm/package sizes are only meaningful for successful rows;
-        // failed rows have wasm_size = NULL in the DB so they fall through
-        // to "—" naturally without an explicit guard here.
+        // `compilation_status` remains raw diagnostic state. `compiled`, on
+        // the other hand, is an execution-facing promise and must only be set
+        // for an image whose source and instrumentation mode still match the
+        // definition shown on this row.
         let rows: Vec<WorkflowVersionRow> = sqlx::query_as(
             r#"
             SELECT
@@ -854,13 +1072,19 @@ impl WorkflowRepository {
                 sd.created_at,
                 sd.updated_at,
                 sd.track_events,
-                sc.compiled_at as "compiled_at?",
+                sc.compiled_at,
                 s.current_version,
                 s.latest_version,
-                sc.wasm_size as "wasm_size?",
-                sc.package_size as "package_size?",
-                sc.compilation_status as "compilation_status?",
-                sc.error_message as "error_message?"
+                sc.wasm_size,
+                sc.package_size,
+                sc.compilation_status,
+                sc.error_message,
+                sc.registered_image_id,
+                sc.source_checksum,
+                sc.track_events AS compiled_track_events,
+                sc.template_major AS compiled_template_major,
+                sc.lowering_mode AS compiled_lowering_mode,
+                sd.definition
             FROM workflow_definitions sd
             LEFT JOIN workflow_compilations sc
                 ON sd.tenant_id = sc.tenant_id
@@ -884,34 +1108,41 @@ impl WorkflowRepository {
             .iter()
             .map(|row| {
                 // Determine current version (current_version takes precedence, fallback to latest_version)
-                let current_version = row.5.unwrap_or_else(|| row.6.unwrap_or(0));
-                let is_active = row.0 == current_version;
-                let compilation_status = row.9.clone();
-                // `compiled = true` only on actual success. Previously the
-                // JOIN filter handled this; now we derive it explicitly so
-                // failed/pending rows stay false.
-                let is_compiled = compilation_status.as_deref() == Some("success");
+                let current_version = row
+                    .current_version
+                    .unwrap_or_else(|| row.latest_version.unwrap_or(0));
+                let is_active = row.version == current_version;
+                let compilation_status = row.compilation_status.clone();
+                let current_checksum = workflow_definition_checksum(&row.definition);
+                let is_compiled = compilation_status.as_deref() == Some("success")
+                    && row.registered_image_id.is_some()
+                    && row.source_checksum.as_deref() == Some(current_checksum.as_str())
+                    && row.compiled_track_events == Some(row.track_events)
+                    && compiler_provenance_matches(
+                        row.compiled_template_major.as_deref(),
+                        row.compiled_lowering_mode.as_deref(),
+                    );
 
                 WorkflowVersionInfoDto {
                     workflow_id: workflow_id.to_string(),
-                    version_id: format!("{}-v{}", workflow_id, row.0),
-                    version_number: row.0,
-                    created_at: row.1.to_rfc3339(),
-                    updated_at: row.2.to_rfc3339(),
-                    track_events: row.3,
+                    version_id: format!("{}-v{}", workflow_id, row.version),
+                    version_number: row.version,
+                    created_at: row.created_at.to_rfc3339(),
+                    updated_at: row.updated_at.to_rfc3339(),
+                    track_events: row.track_events,
                     is_active,
                     compiled: is_compiled,
                     // compiled_at is also stamped on failure, so only emit
                     // it when the row genuinely compiled to avoid mislabeling.
                     compiled_at: if is_compiled {
-                        row.4.map(|t| t.to_rfc3339())
+                        row.compiled_at.map(|t| t.to_rfc3339())
                     } else {
                         None
                     },
-                    wasm_size: row.7,
-                    package_size: row.8,
+                    wasm_size: if is_compiled { row.wasm_size } else { None },
+                    package_size: if is_compiled { row.package_size } else { None },
                     compilation_status,
-                    error_message: row.10.clone(),
+                    error_message: row.error_message.clone(),
                 }
             })
             .collect();
@@ -1083,89 +1314,144 @@ impl WorkflowRepository {
     // Compilation Operations
     // ============================================================================
 
-    /// Record successful compilation in the database
+    /// Lock the current definition only when it is exactly the source this
+    /// compilation attempt consumed.
     ///
-    /// Stores binary path, checksum, and metadata in workflow_compilations table.
-    /// The binary itself is stored on filesystem, not in the database.
-    pub async fn record_compilation_success(
-        &self,
-        record: CompilationSuccessRecord<'_>,
-    ) -> Result<(), sqlx::Error> {
-        sqlx::query(
-            r#"
-            INSERT INTO workflow_compilations
-                (tenant_id, workflow_id, version, compiled_at, translated_path, compilation_status, wasm_size, wasm_checksum, runtara_version, source_checksum, package_size, compiler_mode)
-            VALUES ($1, $2, $3, NOW(), $4, 'success', $5, $6, $7, $8, $9, $10)
-            ON CONFLICT (tenant_id, workflow_id, version)
-            DO UPDATE SET
-                compiled_at = NOW(),
-                translated_path = $4,
-                compilation_status = 'success',
-                error_message = NULL,
-                wasm_size = $5,
-                wasm_checksum = $6,
-                runtara_version = $7,
-                source_checksum = $8,
-                package_size = $9,
-                compiler_mode = $10
-            "#,
-        )
-        .bind(record.tenant_id)
-        .bind(record.workflow_id)
-        .bind(record.version)
-        .bind(record.build_dir.to_string_lossy().to_string())
-        .bind(record.binary_size)
-        .bind(record.binary_checksum)
-        .bind(env!("BUILD_VERSION"))
-        .bind(record.source_checksum)
-        .bind(record.package_size)
-        .bind(record.compiler_mode)
-        .execute(&self.pool)
-        .await?;
-
-        Ok(())
-    }
-
-    /// Record the registered image ID from runtara-environment
-    ///
-    /// Upserts the workflow_compilations table with the image_id returned
-    /// from runtara-environment registration. Creates a record if one doesn't exist
-    /// (e.g., when recovering an orphaned image from runtara-environment).
-    pub async fn record_registered_image_id(
+    /// Callers that register a runtime image keep the returned transaction open
+    /// through registration and image-ID attachment. Environment replaces an
+    /// image in place by name, so releasing this lock before registration would
+    /// still permit an older source to overwrite a newer artifact's bytes.
+    pub(crate) async fn lock_current_compilation_source(
         &self,
         tenant_id: &str,
         workflow_id: &str,
         version: i32,
-        image_id: &str,
-        source_checksum: Option<&str>,
-        compiler_mode: Option<&str>,
-    ) -> Result<(), sqlx::Error> {
-        sqlx::query(
+        definition: &Value,
+        track_events: bool,
+    ) -> Result<Option<CompilationWriteGuard<'_>>, sqlx::Error> {
+        let mut transaction = self.pool.begin().await?;
+        let current: Option<i32> = sqlx::query_scalar(
             r#"
-            INSERT INTO workflow_compilations
-                (tenant_id, workflow_id, version, compiled_at, translated_path, compilation_status, registered_image_id, runtara_version, source_checksum, compiler_mode)
-            VALUES ($1, $2, $3, NOW(), '', 'success', $4, $5, $6, $7)
-            ON CONFLICT (tenant_id, workflow_id, version)
-            DO UPDATE SET
-                registered_image_id = $4,
-                compilation_status = 'success',
-                error_message = NULL,
-                runtara_version = $5,
-                source_checksum = COALESCE($6, workflow_compilations.source_checksum),
-                compiler_mode = COALESCE($7, workflow_compilations.compiler_mode)
+            SELECT 1
+            FROM workflow_definitions
+            WHERE tenant_id = $1
+              AND workflow_id = $2
+              AND version = $3
+              AND deleted_at IS NULL
+              AND definition = $4
+              AND track_events = $5
+            FOR UPDATE
             "#,
         )
         .bind(tenant_id)
         .bind(workflow_id)
         .bind(version)
-        .bind(image_id)
-        .bind(env!("BUILD_VERSION"))
-        .bind(source_checksum)
-        .bind(compiler_mode)
-        .execute(&self.pool)
+        .bind(definition)
+        .bind(track_events)
+        .fetch_optional(&mut *transaction)
         .await?;
 
-        Ok(())
+        if current.is_some() {
+            Ok(Some(CompilationWriteGuard { transaction }))
+        } else {
+            transaction.rollback().await?;
+            Ok(None)
+        }
+    }
+
+    /// Record successful compilation in the database
+    ///
+    /// Stores binary path, checksum, and metadata in workflow_compilations table.
+    /// The binary itself is stored on filesystem, not in the database. Returns
+    /// `false` when the source was superseded before completion.
+    pub async fn record_compilation_success(
+        &self,
+        record: CompilationSuccessRecord<'_>,
+    ) -> Result<bool, sqlx::Error> {
+        let Some(mut guard) = self
+            .lock_current_compilation_source(
+                record.tenant_id,
+                record.workflow_id,
+                record.version,
+                record.definition,
+                record.track_events,
+            )
+            .await?
+        else {
+            return Ok(false);
+        };
+
+        guard.record_success(&record).await?;
+        guard.commit().await?;
+        Ok(true)
+    }
+
+    /// Record the registered image ID from runtara-environment
+    ///
+    /// Upserts the workflow_compilations table with the image_id returned
+    /// from runtara-environment registration. Returns `false` when the source
+    /// was superseded before the attachment could be persisted.
+    pub async fn record_registered_image_id(
+        &self,
+        record: RegisteredImageRecord<'_>,
+    ) -> Result<bool, sqlx::Error> {
+        let Some(mut guard) = self
+            .lock_current_compilation_source(
+                record.tenant_id,
+                record.workflow_id,
+                record.version,
+                record.definition,
+                record.track_events,
+            )
+            .await?
+        else {
+            return Ok(false);
+        };
+
+        guard.record_registered_image_id(&record).await?;
+        guard.commit().await?;
+        Ok(true)
+    }
+
+    /// Persist a compile failure only if the definition and instrumentation
+    /// mode that failed are still current. Returns `false` for a superseded
+    /// attempt or when a valid registered success is intentionally retained.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn record_compilation_failure(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        version: i32,
+        definition: &Value,
+        source_checksum: &str,
+        track_events: bool,
+        error_message: &str,
+    ) -> Result<bool, sqlx::Error> {
+        let Some(mut guard) = self
+            .lock_current_compilation_source(
+                tenant_id,
+                workflow_id,
+                version,
+                definition,
+                track_events,
+            )
+            .await?
+        else {
+            return Ok(false);
+        };
+
+        let recorded = guard
+            .record_failure(
+                tenant_id,
+                workflow_id,
+                version,
+                error_message,
+                source_checksum,
+                track_events,
+            )
+            .await?;
+        guard.commit().await?;
+        Ok(recorded)
     }
 
     /// Get the registered image ID for a compiled workflow
@@ -1204,7 +1490,13 @@ impl WorkflowRepository {
     ) -> Result<Option<String>, sqlx::Error> {
         let row = sqlx::query(
             r#"
-            SELECT sc.registered_image_id, sc.source_checksum, wd.definition
+            SELECT sc.registered_image_id,
+                   sc.source_checksum,
+                   sc.track_events AS compiled_track_events,
+                   sc.template_major AS compiled_template_major,
+                   sc.lowering_mode AS compiled_lowering_mode,
+                   wd.definition,
+                   wd.track_events AS definition_track_events
             FROM workflow_definitions wd
             LEFT JOIN workflow_compilations sc
               ON sc.tenant_id = wd.tenant_id
@@ -1229,11 +1521,24 @@ impl WorkflowRepository {
 
         let image_id: Option<String> = row.try_get("registered_image_id")?;
         let stored_checksum: Option<String> = row.try_get("source_checksum")?;
+        let compiled_track_events: Option<bool> = row.try_get("compiled_track_events")?;
+        let compiled_template_major: Option<String> = row.try_get("compiled_template_major")?;
+        let compiled_lowering_mode: Option<String> = row.try_get("compiled_lowering_mode")?;
         let definition: Value = row.try_get("definition")?;
+        let definition_track_events: bool = row.try_get("definition_track_events")?;
         let current_checksum = workflow_definition_checksum(&definition);
 
-        Ok(match (image_id, stored_checksum) {
-            (Some(image_id), Some(stored)) if stored == current_checksum => Some(image_id),
+        Ok(match (image_id, stored_checksum, compiled_track_events) {
+            (Some(image_id), Some(stored), Some(compiled_track_events))
+                if stored == current_checksum
+                    && compiled_track_events == definition_track_events
+                    && compiler_provenance_matches(
+                        compiled_template_major.as_deref(),
+                        compiled_lowering_mode.as_deref(),
+                    ) =>
+            {
+                Some(image_id)
+            }
             _ => None,
         })
     }
@@ -1244,10 +1549,18 @@ impl WorkflowRepository {
         workflow_id: &str,
         version: i32,
         compiler_mode: &str,
+        track_events: bool,
     ) -> Result<Option<String>, sqlx::Error> {
         let row = sqlx::query(
             r#"
-            SELECT sc.registered_image_id, sc.source_checksum, sc.compiler_mode, wd.definition
+            SELECT sc.registered_image_id,
+                   sc.source_checksum,
+                   sc.compiler_mode,
+                   sc.track_events AS compiled_track_events,
+                   sc.template_major AS compiled_template_major,
+                   sc.lowering_mode AS compiled_lowering_mode,
+                   wd.definition,
+                   wd.track_events AS definition_track_events
             FROM workflow_definitions wd
             LEFT JOIN workflow_compilations sc
               ON sc.tenant_id = wd.tenant_id
@@ -1273,17 +1586,39 @@ impl WorkflowRepository {
         let image_id: Option<String> = row.try_get("registered_image_id")?;
         let stored_checksum: Option<String> = row.try_get("source_checksum")?;
         let stored_compiler_mode: Option<String> = row.try_get("compiler_mode")?;
+        let compiled_track_events: Option<bool> = row.try_get("compiled_track_events")?;
+        let compiled_template_major: Option<String> = row.try_get("compiled_template_major")?;
+        let compiled_lowering_mode: Option<String> = row.try_get("compiled_lowering_mode")?;
         let definition: Value = row.try_get("definition")?;
+        let definition_track_events: bool = row.try_get("definition_track_events")?;
         let current_checksum = workflow_definition_checksum(&definition);
 
-        Ok(match (image_id, stored_checksum, stored_compiler_mode) {
-            (Some(image_id), Some(stored_checksum), Some(stored_compiler_mode))
-                if stored_checksum == current_checksum && stored_compiler_mode == compiler_mode =>
-            {
-                Some(image_id)
-            }
-            _ => None,
-        })
+        Ok(
+            match (
+                image_id,
+                stored_checksum,
+                stored_compiler_mode,
+                compiled_track_events,
+            ) {
+                (
+                    Some(image_id),
+                    Some(stored_checksum),
+                    Some(stored_compiler_mode),
+                    Some(compiled_track_events),
+                ) if stored_checksum == current_checksum
+                    && stored_compiler_mode == compiler_mode
+                    && compiled_track_events == definition_track_events
+                    && compiled_track_events == track_events
+                    && compiler_provenance_matches(
+                        compiled_template_major.as_deref(),
+                        compiled_lowering_mode.as_deref(),
+                    ) =>
+                {
+                    Some(image_id)
+                }
+                _ => None,
+            },
+        )
     }
 
     /// Update workflow by creating a new version
@@ -1381,35 +1716,46 @@ impl WorkflowRepository {
         version: i32,
         track_events: bool,
     ) -> Result<(), sqlx::Error> {
-        // Fetch current value to detect whether it actually changes
-        let current_track_events = self
-            .get_track_events(tenant_id, workflow_id, version)
-            .await?
-            .unwrap_or(false);
-
-        // Update track_events column in workflow_definitions
-        sqlx::query(
+        // The definition update and its invalidation form one state change.
+        // Readers must never observe the new compilation input alongside a
+        // still-ready record from the old artifact, even though the readiness
+        // provenance check would reject that combination defensively.
+        let mut transaction = self.pool.begin().await?;
+        let update = sqlx::query(
             r#"
             UPDATE workflow_definitions
             SET track_events = $4, updated_at = NOW()
-            WHERE tenant_id = $1 AND workflow_id = $2 AND version = $3 AND deleted_at IS NULL
+            WHERE tenant_id = $1
+              AND workflow_id = $2
+              AND version = $3
+              AND deleted_at IS NULL
+              AND track_events IS DISTINCT FROM $4
             "#,
         )
         .bind(tenant_id)
         .bind(workflow_id)
         .bind(version)
         .bind(track_events)
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await?;
 
-        // Only invalidate compilation if track-events mode actually changed.
-        // Calling toggle_track_events with the same value (e.g. from UI post-compile refresh)
-        // must NOT wipe the freshly created compilation record.
-        if current_track_events != track_events {
-            self.invalidate_compilation(tenant_id, workflow_id, version)
-                .await?;
+        // Calling toggle_track_events with the same value (e.g. from UI
+        // post-compile refresh) must not wipe the freshly created row.
+        if update.rows_affected() > 0 {
+            sqlx::query(
+                r#"
+                DELETE FROM workflow_compilations
+                WHERE tenant_id = $1 AND workflow_id = $2 AND version = $3
+                "#,
+            )
+            .bind(tenant_id)
+            .bind(workflow_id)
+            .bind(version)
+            .execute(&mut *transaction)
+            .await?;
         }
 
+        transaction.commit().await?;
         Ok(())
     }
 
@@ -1426,27 +1772,42 @@ impl WorkflowRepository {
         let definition_bytes = serde_json::to_vec(definition).unwrap_or_default();
         let file_size = definition_bytes.len() as i32;
 
-        let result = sqlx::query!(
+        // The graph and its compiled artifact are one observable state
+        // change. Keep the update and invalidation together so readers never
+        // see new source metadata paired with a ready artifact from the old
+        // graph.
+        let mut transaction = self.pool.begin().await?;
+        let result = sqlx::query(
             r#"
             UPDATE workflow_definitions
             SET definition = $4, file_size = $5, updated_at = NOW()
             WHERE tenant_id = $1 AND workflow_id = $2 AND version = $3 AND deleted_at IS NULL
             "#,
-            tenant_id,
-            workflow_id,
-            version,
-            definition,
-            file_size
         )
-        .execute(&self.pool)
+        .bind(tenant_id)
+        .bind(workflow_id)
+        .bind(version)
+        .bind(definition)
+        .bind(file_size)
+        .execute(&mut *transaction)
         .await?;
 
         if result.rows_affected() > 0 {
             // Invalidate compilation since the graph changed
-            self.invalidate_compilation(tenant_id, workflow_id, version)
-                .await?;
+            sqlx::query(
+                r#"
+                DELETE FROM workflow_compilations
+                WHERE tenant_id = $1 AND workflow_id = $2 AND version = $3
+                "#,
+            )
+            .bind(tenant_id)
+            .bind(workflow_id)
+            .bind(version)
+            .execute(&mut *transaction)
+            .await?;
         }
 
+        transaction.commit().await?;
         Ok(result.rows_affected())
     }
 
@@ -1983,19 +2344,26 @@ impl WorkflowRepository {
             return Ok(std::collections::HashMap::new());
         }
 
-        // Query workflow info by registered_image_id
-        // Join with workflow_definitions to get the workflow name from the definition
+        // `workflow_compilations` is in the server database. Environment's
+        // image registry is deliberately in the separate runtime database, so
+        // historical image names are resolved by the execution layer from the
+        // runtime list response rather than by trying to join those databases
+        // here.
         let rows: Vec<(String, String, i32, Option<Value>)> = sqlx::query_as(
             r#"
-            SELECT sc.registered_image_id, sc.workflow_id, sc.version, sd.definition
+            SELECT sc.registered_image_id,
+                   sc.workflow_id,
+                   sc.version,
+                   sd.definition
             FROM workflow_compilations sc
-            JOIN workflow_definitions sd ON sc.tenant_id = sd.tenant_id
-                AND sc.workflow_id = sd.workflow_id
-                AND sc.version = sd.version
-                AND sd.deleted_at IS NULL
+            LEFT JOIN workflow_definitions sd
+              ON sd.tenant_id = $1
+             AND sd.workflow_id = sc.workflow_id
+             AND sd.version = sc.version
+             AND sd.deleted_at IS NULL
             WHERE sc.tenant_id = $1
-                AND sc.registered_image_id = ANY($2)
-                AND sc.compilation_status = 'success'
+              AND sc.registered_image_id = ANY($2)
+              AND sc.compilation_status = 'success'
             "#,
         )
         .bind(tenant_id)
@@ -2047,7 +2415,11 @@ impl WorkflowRepository {
                    sc.registered_image_id,
                    sc.error_message,
                    sc.source_checksum,
+                   sc.track_events AS compiled_track_events,
+                   sc.template_major AS compiled_template_major,
+                   sc.lowering_mode AS compiled_lowering_mode,
                    wd.definition,
+                   wd.track_events AS definition_track_events,
                    wd.version AS resolved_version
             FROM workflow_definitions wd
             LEFT JOIN workflow_compilations sc
@@ -2085,12 +2457,27 @@ impl WorkflowRepository {
                 let registered_image_id: Option<String> = record.try_get("registered_image_id")?;
                 let error_message: Option<String> = record.try_get("error_message")?;
                 let source_checksum: Option<String> = record.try_get("source_checksum")?;
+                let compiled_track_events: Option<bool> =
+                    record.try_get("compiled_track_events")?;
+                let compiled_template_major: Option<String> =
+                    record.try_get("compiled_template_major")?;
+                let compiled_lowering_mode: Option<String> =
+                    record.try_get("compiled_lowering_mode")?;
                 let definition: Value = record.try_get("definition")?;
+                let definition_track_events: bool = record.try_get("definition_track_events")?;
                 let current_checksum = workflow_definition_checksum(&definition);
+                let artifact_matches_current_compiler = compiler_provenance_matches(
+                    compiled_template_major.as_deref(),
+                    compiled_lowering_mode.as_deref(),
+                );
+                let artifact_matches_tracking_mode = compiled_track_events
+                    == Some(definition_track_events)
+                    && artifact_matches_current_compiler;
 
                 if compilation_status.as_deref() == Some("success")
                     && registered_image_id.is_some()
                     && source_checksum.as_deref() == Some(current_checksum.as_str())
+                    && artifact_matches_tracking_mode
                 {
                     return Ok((
                         resolved_version,
@@ -2100,6 +2487,7 @@ impl WorkflowRepository {
                             execution_timeout_seconds: execution_timeout_from_definition(
                                 &definition,
                             ),
+                            track_events: definition_track_events,
                         },
                     ));
                 }
@@ -2108,11 +2496,14 @@ impl WorkflowRepository {
                     let error_msg =
                         error_message.unwrap_or_else(|| "Unknown compilation error".to_string());
 
-                    // The failure was recorded against the definition still
-                    // stored, so recompiling it would fail identically. Keep
-                    // the record and report the failure as terminal, otherwise
-                    // every execution attempt requeues the same doomed build.
-                    if source_checksum.as_deref() == Some(current_checksum.as_str()) {
+                    // The failure was recorded against the definition and
+                    // instrumentation mode still stored, so recompiling it
+                    // would fail identically. Keep the record and report the
+                    // failure as terminal; a changed mode may emit different
+                    // guest code, so it must retry just like a changed graph.
+                    if source_checksum.as_deref() == Some(current_checksum.as_str())
+                        && artifact_matches_tracking_mode
+                    {
                         let authoring = is_workflow_authoring_error(&error_msg);
                         // An unrunnable graph is reported to its author, not
                         // alerted on, and this is read on every attempt to run
@@ -2152,15 +2543,36 @@ impl WorkflowRepository {
                         compilation_error = %error_msg,
                         "COMPILATION FAILED - deleting record for retry"
                     );
-                    // Delete failed record so it can be retried
-                    let _ = sqlx::query(
-                        "DELETE FROM workflow_compilations WHERE tenant_id = $1 AND workflow_id = $2 AND version = $3",
-                    )
-                    .bind(tenant_id)
-                    .bind(workflow_id)
-                    .bind(version)
-                    .execute(&self.pool)
-                    .await;
+                    // Delete only the exact stale failure that this read
+                    // observed. A current build may have completed between
+                    // the read above and this cleanup; an unconditional
+                    // delete would erase that new terminal state. Use the
+                    // version resolved by the joined read rather than the
+                    // optional request input (`None` means current version).
+                    if let Some(resolved_version) = resolved_version {
+                        let _ = sqlx::query(
+                            r#"
+                            DELETE FROM workflow_compilations
+                            WHERE tenant_id = $1
+                              AND workflow_id = $2
+                              AND version = $3
+                              AND compilation_status = 'failed'
+                              AND source_checksum IS NOT DISTINCT FROM $4
+                              AND track_events IS NOT DISTINCT FROM $5
+                              AND template_major IS NOT DISTINCT FROM $6
+                              AND lowering_mode IS NOT DISTINCT FROM $7
+                            "#,
+                        )
+                        .bind(tenant_id)
+                        .bind(workflow_id)
+                        .bind(resolved_version)
+                        .bind(source_checksum.as_deref())
+                        .bind(compiled_track_events)
+                        .bind(compiled_template_major.as_deref())
+                        .bind(compiled_lowering_mode.as_deref())
+                        .execute(&self.pool)
+                        .await;
+                    }
                     let authoring = is_workflow_authoring_error(&error_msg);
                     return Ok((
                         resolved_version,
@@ -2225,6 +2637,11 @@ pub enum CompilationStatus {
         /// read, so a launch does not fetch the same definition again just to
         /// look at one field. `None` when the graph does not set one.
         execution_timeout_seconds: Option<i32>,
+        /// Whether this ready artifact emits step-debug events. Changing this
+        /// setting invalidates the compilation, so this is the tracking mode
+        /// of the artifact about to be launched rather than a stale request
+        /// flag from the trigger queue.
+        track_events: bool,
     },
     /// Previous compilation attempt recorded a failure.
     Failed {

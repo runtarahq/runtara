@@ -54,7 +54,7 @@ use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
 use runtara_core::config::RuntimeOverrides;
-use runtara_core::instance_handlers::InstanceHandlerState;
+use runtara_core::instance_handlers::{InstanceEventObserver, InstanceHandlerState};
 use runtara_core::persistence::Persistence;
 
 /// How long [`CoreRuntime::shutdown`] waits for in-flight requests to finish
@@ -71,6 +71,7 @@ pub const DEFAULT_SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 /// Builder for creating a [`CoreRuntime`].
 pub struct CoreRuntimeBuilder {
     persistence: Option<Arc<dyn Persistence>>,
+    event_observer: Option<Arc<dyn InstanceEventObserver>>,
     bind_addr: SocketAddr,
     max_concurrent_instances: u32,
     shutdown_grace: Duration,
@@ -80,6 +81,10 @@ impl std::fmt::Debug for CoreRuntimeBuilder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CoreRuntimeBuilder")
             .field("persistence", &self.persistence.as_ref().map(|_| "..."))
+            .field(
+                "event_observer",
+                &self.event_observer.as_ref().map(|_| "..."),
+            )
             .field("bind_addr", &self.bind_addr)
             .field("max_concurrent_instances", &self.max_concurrent_instances)
             .field("shutdown_grace", &self.shutdown_grace)
@@ -91,6 +96,7 @@ impl Default for CoreRuntimeBuilder {
     fn default() -> Self {
         Self {
             persistence: None,
+            event_observer: None,
             bind_addr: "0.0.0.0:8001".parse().unwrap(),
             max_concurrent_instances: 0,
             shutdown_grace: DEFAULT_SHUTDOWN_GRACE,
@@ -107,6 +113,16 @@ impl CoreRuntimeBuilder {
     /// Set the persistence layer (required).
     pub fn persistence(mut self, persistence: Arc<dyn Persistence>) -> Self {
         self.persistence = Some(persistence);
+        self
+    }
+
+    /// Observe instance events handled through this runtime's HTTP endpoint.
+    ///
+    /// The default workflow composition reaches the same handlers in-process,
+    /// but legacy composed artifacts use the HTTP endpoint. Hosts that observe
+    /// guest events must attach the same observer to both paths.
+    pub fn event_observer(mut self, observer: Arc<dyn InstanceEventObserver>) -> Self {
+        self.event_observer = Some(observer);
         self
     }
 
@@ -169,6 +185,7 @@ impl CoreRuntimeBuilder {
 
         Ok(CoreRuntimeConfig {
             persistence,
+            event_observer: self.event_observer,
             bind_addr: self.bind_addr,
             max_concurrent_instances: self.max_concurrent_instances,
             shutdown_grace: self.shutdown_grace,
@@ -179,6 +196,7 @@ impl CoreRuntimeBuilder {
 /// Configuration for a [`CoreRuntime`].
 pub struct CoreRuntimeConfig {
     persistence: Arc<dyn Persistence>,
+    event_observer: Option<Arc<dyn InstanceEventObserver>>,
     bind_addr: SocketAddr,
     max_concurrent_instances: u32,
     shutdown_grace: Duration,
@@ -188,6 +206,10 @@ impl std::fmt::Debug for CoreRuntimeConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CoreRuntimeConfig")
             .field("persistence", &"...")
+            .field(
+                "event_observer",
+                &self.event_observer.as_ref().map(|_| "..."),
+            )
             .field("bind_addr", &self.bind_addr)
             .field("max_concurrent_instances", &self.max_concurrent_instances)
             .field("shutdown_grace", &self.shutdown_grace)
@@ -198,13 +220,21 @@ impl std::fmt::Debug for CoreRuntimeConfig {
 impl CoreRuntimeConfig {
     /// Start the runtime, spawning the HTTP server task.
     pub async fn start(self) -> Result<CoreRuntime> {
-        let state = Arc::new(InstanceHandlerState::with_limits(
-            self.persistence,
-            self.max_concurrent_instances,
-        ));
+        let CoreRuntimeConfig {
+            persistence,
+            event_observer,
+            bind_addr,
+            max_concurrent_instances,
+            shutdown_grace,
+        } = self;
+        let state = InstanceHandlerState::with_limits(persistence, max_concurrent_instances);
+        let state = match event_observer {
+            Some(observer) => state.with_event_observer(observer),
+            None => state,
+        };
+        let state = Arc::new(state);
         let draining = state.draining_handle();
 
-        let bind_addr = self.bind_addr;
         let server_state = state.clone();
         let shutdown_signal = Arc::new(Notify::new());
         let server_shutdown = Arc::clone(&shutdown_signal);
@@ -223,7 +253,7 @@ impl CoreRuntimeConfig {
             bind_addr,
             draining,
             shutdown_signal,
-            shutdown_grace: self.shutdown_grace,
+            shutdown_grace,
         })
     }
 }
@@ -856,6 +886,56 @@ mod tests {
     fn test_core_runtime_builder_static_method() {
         let builder = CoreRuntime::builder();
         assert!(builder.persistence.is_none());
+    }
+
+    /// The HTTP runtime owns a different handler state from the native
+    /// HostImport runner. Keep its observer wired too, or legacy composed
+    /// artifacts can persist step events without ever reaching the counter.
+    #[tokio::test]
+    async fn start_attaches_event_observer_to_the_http_handler_state() {
+        use std::sync::atomic::AtomicUsize;
+
+        struct CountingObserver(AtomicUsize);
+
+        impl InstanceEventObserver for CountingObserver {
+            fn on_step_started(&self) {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+
+        let observer = Arc::new(CountingObserver(AtomicUsize::new(0)));
+        let addr = free_port().await;
+        let runtime = CoreRuntimeBuilder::new()
+            .persistence(Arc::new(MockPersistence::new()))
+            .event_observer(observer.clone())
+            .bind_addr(addr)
+            .build()
+            .unwrap()
+            .start()
+            .await
+            .expect("CoreRuntime starts on loopback");
+
+        wait_until_listening(addr).await;
+        let response = reqwest::Client::new()
+            .post(format!(
+                "http://{addr}/api/v1/instances/legacy-composed-instance/events"
+            ))
+            .json(&serde_json::json!({
+                "event_type": "custom",
+                "subtype": "step_debug_start",
+                "payload": "e30="
+            }))
+            .send()
+            .await
+            .expect("legacy HTTP event request succeeds");
+        assert!(response.status().is_success());
+
+        assert_eq!(
+            observer.0.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the HTTP handler state must retain the configured observer for legacy composed events"
+        );
+        runtime.shutdown().await.unwrap();
     }
 
     #[tokio::test]

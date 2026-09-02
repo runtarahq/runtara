@@ -80,10 +80,95 @@ pub struct ImageRegistry {
     pool: PgPool,
 }
 
+/// The stable image ID claimed for a tenant-scoped name.
+///
+/// `images` preserves its original primary key when a name is re-registered,
+/// because `instance_images` refers to that ID.  Callers which need to create
+/// the directory before registering the final metadata must therefore claim
+/// the name first rather than speculating that a fresh UUID will win the
+/// unique `(tenant_id, name)` race.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageNameClaim {
+    /// The canonical image ID for this name.
+    pub image_id: String,
+    /// Whether this caller inserted the row which established the name.
+    pub created: bool,
+}
+
 impl ImageRegistry {
     /// Create a new image registry
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
+    }
+
+    /// Atomically claim the stable ID for an image name.
+    ///
+    /// The first writer inserts a minimal row using `candidate_image_id`; all
+    /// subsequent writers read that exact ID.  Keeping this as an insert plus
+    /// a new-statement read (rather than a read followed by an insert) is
+    /// important: PostgreSQL's uniqueness check observes concurrent inserts
+    /// which the earlier statement snapshot cannot yet see.
+    ///
+    /// The placeholder is deliberately retained if filesystem work later
+    /// fails.  Removing it from a failed request could race another uploader
+    /// which has already resolved the same canonical ID.  It is harmless to
+    /// normal callers because no workflow stores the ID until registration
+    /// succeeds, and the regular stale-image cleanup eventually reclaims an
+    /// abandoned placeholder.
+    pub async fn claim_name(
+        &self,
+        tenant_id: &str,
+        name: &str,
+        candidate_image_id: &str,
+        binary_path: &str,
+    ) -> Result<ImageNameClaim> {
+        // A concurrent delete after a losing insert is extraordinarily rare,
+        // but retrying makes the read-after-conflict path robust without ever
+        // returning a speculative ID.
+        for _ in 0..3 {
+            let inserted: Option<String> = sqlx::query_scalar(
+                r#"
+                INSERT INTO images (
+                    image_id, tenant_id, name, binary_path, created_at, updated_at
+                ) VALUES ($1, $2, $3, $4, NOW(), NOW())
+                ON CONFLICT (tenant_id, name) DO NOTHING
+                RETURNING image_id
+                "#,
+            )
+            .bind(candidate_image_id)
+            .bind(tenant_id)
+            .bind(name)
+            .bind(binary_path)
+            .fetch_optional(&self.pool)
+            .await?;
+
+            if let Some(image_id) = inserted {
+                invalidate_image_cache();
+                return Ok(ImageNameClaim {
+                    image_id,
+                    created: true,
+                });
+            }
+
+            let existing: Option<String> = sqlx::query_scalar(
+                "SELECT image_id FROM images WHERE tenant_id = $1 AND name = $2",
+            )
+            .bind(tenant_id)
+            .bind(name)
+            .fetch_optional(&self.pool)
+            .await?;
+
+            if let Some(image_id) = existing {
+                return Ok(ImageNameClaim {
+                    image_id,
+                    created: false,
+                });
+            }
+        }
+
+        Err(crate::error::Error::Other(format!(
+            "image name '{name}' for tenant '{tenant_id}' was repeatedly removed while being claimed"
+        )))
     }
 
     /// Register a new image

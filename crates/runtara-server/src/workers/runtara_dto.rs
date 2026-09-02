@@ -206,7 +206,8 @@ pub fn runtara_info_to_dto(info: InstanceInfo) -> WorkflowInstanceDto {
         .map(|t| t.to_rfc3339())
         .unwrap_or_else(|| created.clone());
 
-    // Extract workflow_id and version from image_name (format: workflow_id:version)
+    // Extract workflow_id and version from image_name (format:
+    // workflow_id:version or workflow_id:version@artifact-fingerprint).
     let (workflow_id, version) = parse_image_id(&info.image_name);
 
     // Extract data and variables from input to avoid double-wrapping
@@ -361,12 +362,18 @@ pub fn elide_instance_io(dto: &mut WorkflowInstanceDto) {
     }
 }
 
-/// Parse `image_id` (format: `"workflow_id:version"`) into
-/// `(workflow_id, version)`. Returns `(workflow_id, 0)` if no colon is found.
+/// Parse an image name (`"workflow_id:version"` or
+/// `"workflow_id:version@artifact-fingerprint"`) into `(workflow_id, version)`.
+/// Returns `(workflow_id, 0)` if no colon is found.
 pub fn parse_image_id(image_id: &str) -> (String, i32) {
     if let Some(pos) = image_id.rfind(':') {
         let workflow_id = image_id[..pos].to_string();
-        let version = image_id[pos + 1..].parse::<i32>().unwrap_or(0);
+        let version = image_id[pos + 1..]
+            .split('@')
+            .next()
+            .unwrap_or_default()
+            .parse::<i32>()
+            .unwrap_or(0);
         (workflow_id, version)
     } else {
         (image_id.to_string(), 0)
@@ -416,6 +423,14 @@ mod tests {
         let (workflow_id, version) = parse_image_id("my-workflow:5");
         assert_eq!(workflow_id, "my-workflow");
         assert_eq!(version, 5);
+    }
+
+    #[test]
+    fn test_parse_image_id_artifact_qualified_format() {
+        let (workflow_id, version) =
+            parse_image_id("550e8400-e29b-41d4-a716-446655440000:42@f81d4fae7dec11d0a32e");
+        assert_eq!(workflow_id, "550e8400-e29b-41d4-a716-446655440000");
+        assert_eq!(version, 42);
     }
 
     #[test]

@@ -75,6 +75,9 @@ type TaskRegistry = Arc<Mutex<HashMap<String, Arc<InstanceTask>>>>;
 /// In-process workflow runner backed by an embedded wasmtime engine.
 pub struct EmbeddedWasmRunner {
     config: WorkflowRunnerConfig,
+    /// Address legacy HTTP-composed artifacts use for runtara-core. Modern
+    /// HostImport-composed artifacts receive the native runtime host instead.
+    core_http_url: Option<String>,
     limits: WorkflowLimits,
     persistence: Arc<dyn Persistence>,
     executor: Arc<WorkflowExecutor>,
@@ -189,6 +192,7 @@ impl EmbeddedWasmRunner {
         warn_if_run_bound_exceeds_memory(run_limit);
         Ok(Self {
             config,
+            core_http_url: None,
             limits: limits_from_env(),
             run_permits: Arc::new(tokio::sync::Semaphore::new(run_limit)),
             run_limit,
@@ -220,12 +224,23 @@ impl EmbeddedWasmRunner {
         self
     }
 
+    /// Give legacy HTTP-composed artifacts the core API address.
+    ///
+    /// This is deliberately a runner setting rather than an inherited process
+    /// environment variable: guest execution receives only the explicitly
+    /// constructed environment in [`Self::merged_env`].
+    pub fn with_core_http_url(mut self, core_http_url: String) -> Self {
+        self.core_http_url = Some(core_http_url);
+        self
+    }
+
     fn merged_env(&self, options: &LaunchOptions) -> HashMap<String, String> {
         let mut env = common::build_env(
             &self.config,
             &options.instance_id,
             &options.tenant_id,
             options.checkpoint_id.as_deref(),
+            self.core_http_url.as_deref(),
         );
         env.extend(options.env.clone());
         env
