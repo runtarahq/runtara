@@ -35,6 +35,30 @@ plain environment variables read by `config.rs`; see that module for the
 authoritative list. Once the server is up, the OpenAPI spec is exposed by the
 router and the MCP transport is mounted under the `mcp` module's routes.
 
+`RUNTARA_DEFAULT_EXECUTION_TIMEOUT_SECS` (default `300`) is the execution timeout
+applied to a workflow instance whose definition names no `executionTimeoutSeconds`
+of its own. It is a kill deadline, not a patience setting: runtara-environment's
+container monitor stops the instance when it elapses and records the run `failed`
+with `termination_reason: timeout`, and a synchronous execution cancels it. It is
+read by `runtime_client.rs`, not by `config.rs`. The server always sends a
+timeout, so it is this value rather than runtara-environment's own
+`RUNTARA_DEFAULT_INSTANCE_TIMEOUT_SECS` (3600) that governs anything the server
+starts.
+
+It replaces `RUNTARA_REQUEST_TIMEOUT_MS`, which is the runtara-sdk per-request
+HTTP timeout, in milliseconds, and never meant this. The two never collided in
+effect — a server process does not run the SDK, and `build_env` does not forward
+the variable to workflow guests — but they collided in name and in unit: an
+operator who set it here was writing milliseconds for a value the server keeps in
+seconds, and divided it by 1000 to get there.
+
+The old name is still read when the new one is unset, so a deployment that relied
+on it keeps the timeout it had, and the server warns, quoting both the
+milliseconds it found and the seconds it derived. A value under `1000` truncates
+to zero seconds, under which every workflow is killed the instant it starts —
+migrate rather than leave the old name in place. Whichever name supplies it, the
+resolved timeout is logged at startup.
+
 ## Embedded UI (optional)
 
 The crate can bundle the `./frontend` React app into the binary behind the
