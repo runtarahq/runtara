@@ -54,10 +54,29 @@ impl HttpSdkConfig {
         let base_url = std::env::var("RUNTARA_HTTP_URL")
             .unwrap_or_else(|_| "http://127.0.0.1:8003".to_string());
 
-        let request_timeout_ms = std::env::var("RUNTARA_REQUEST_TIMEOUT_MS")
+        // A parsed 0 is refused rather than accepted or quietly defaulted. It
+        // reads as the conventional "no limit", but the client builds its
+        // deadline as `now + timeout`, so zero is a deadline already in the past
+        // and EVERY request — sleep, checkpoint, heartbeat, complete — fails
+        // instantly with a timeout. Unparseable values still fall back to the
+        // default: those are typos, and a typo that costs nothing is not worth
+        // refusing to start over. Zero is different — it is a deliberate setting
+        // whose meaning is the opposite of what it looks like.
+        let request_timeout_ms = match std::env::var("RUNTARA_REQUEST_TIMEOUT_MS")
             .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(30_000);
+            .and_then(|value| value.parse::<u64>().ok())
+        {
+            Some(0) => {
+                return Err(SdkError::Config(
+                    "RUNTARA_REQUEST_TIMEOUT_MS=0 is not \"no timeout\": it puts every request's \
+                     deadline in the past, so all of them fail instantly. Set a positive number \
+                     of milliseconds, or leave it unset for 30000."
+                        .into(),
+                ));
+            }
+            Some(value) => value,
+            None => 30_000,
+        };
 
         let signal_poll_interval_ms = std::env::var("RUNTARA_SIGNAL_POLL_INTERVAL_MS")
             .ok()
@@ -132,24 +151,34 @@ impl HttpBackend {
     ///
     /// Left to run, the failure names neither sleep nor the ceiling: it reads as
     /// a server that stopped answering. Refusing up front costs milliseconds
-    /// instead of the whole timeout and says which knob moves the ceiling.
+    /// instead of the whole timeout, and names what can actually move it.
     ///
-    /// A zero timeout is left alone deliberately. It is a degenerate
-    /// configuration under which no request of any kind can complete, so
-    /// reporting it against the sleep would blame the sleep for something that
-    /// is not about sleeping at all.
+    /// A zero timeout is passed through rather than reported. Zero is not "no
+    /// limit" — it is a deadline already in the past, so nothing completes,
+    /// sleep or otherwise; blaming the sleep would point at the wrong thing
+    /// entirely. [`HttpSdkConfig::from_env`] refuses it up front, so this only
+    /// covers a config built by hand.
     fn reject_sleep_beyond_request_timeout(&self, duration_ms: u64) -> Result<()> {
         let timeout_ms = self.request_timeout_ms;
         if timeout_ms == 0 || duration_ms < timeout_ms {
             return Ok(());
         }
 
+        // The remedy named first is the one that always works. Raising
+        // RUNTARA_REQUEST_TIMEOUT_MS is real only where the SDK reads its own
+        // process environment: a workflow guest's environment is BUILT for it by
+        // the host (`build_env` in runtara-environment) and carries just the
+        // handful of variables that function forwards, this not among them. An
+        // operator told to raise it there would change nothing and conclude the
+        // diagnosis was wrong — which is the failure this message exists to end.
         Err(SdkError::Sleep(format!(
             "durable sleep of {duration_ms}ms does not fit inside the {timeout_ms}ms client \
              request timeout: this backend holds the sleep request open for the whole duration, \
-             so the client aborts it at {timeout_ms}ms before the server ever answers. Raise \
-             RUNTARA_REQUEST_TIMEOUT_MS above the sleep duration, or run the workflow on the \
-             host-import binding, whose durable sleep issues no request at all."
+             so the client aborts it at {timeout_ms}ms before the server ever answers. A sleep \
+             this long needs the host-import binding, whose durable sleep is a host call and \
+             issues no request at all. Raising RUNTARA_REQUEST_TIMEOUT_MS helps only where this \
+             SDK reads its own process environment — a workflow guest's environment is built by \
+             the host and does not carry it."
         )))
     }
 
@@ -791,6 +820,41 @@ mod config_tests {
         assert_eq!(cfg.base_url, "http://127.0.0.1:8003");
     }
 
+    /// Zero looks like "no timeout" and behaves like the exact opposite: the
+    /// client's deadline lands in the past and every request fails instantly.
+    /// Refused by name rather than accepted, so the setting is diagnosed where
+    /// it is made instead of surfacing later as a fleet of instant timeouts.
+    #[test]
+    fn test_http_sdk_config_refuses_a_zero_request_timeout() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let mut guard = EnvGuard::new();
+        guard.set("RUNTARA_INSTANCE_ID", "test-instance");
+        guard.set("RUNTARA_TENANT_ID", "test-tenant");
+        guard.set("RUNTARA_REQUEST_TIMEOUT_MS", "0");
+
+        let message = HttpSdkConfig::from_env()
+            .expect_err("a zero request timeout is refused")
+            .to_string();
+
+        assert!(message.contains("RUNTARA_REQUEST_TIMEOUT_MS"), "{message}");
+        assert!(message.contains("30000"), "{message}");
+    }
+
+    /// A value that is not a number stays a fall-back to the default: typos cost
+    /// nothing, so refusing to start over one would be worse than absorbing it.
+    #[test]
+    fn test_http_sdk_config_falls_back_on_an_unparseable_request_timeout() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let mut guard = EnvGuard::new();
+        guard.set("RUNTARA_INSTANCE_ID", "test-instance");
+        guard.set("RUNTARA_TENANT_ID", "test-tenant");
+        guard.set("RUNTARA_REQUEST_TIMEOUT_MS", "not-a-number");
+
+        let cfg = HttpSdkConfig::from_env().expect("a typo falls back to the default");
+
+        assert_eq!(cfg.request_timeout_ms, 30_000);
+    }
+
     #[test]
     fn test_http_sdk_config_uses_http_url() {
         let _lock = ENV_MUTEX.lock().unwrap();
@@ -863,6 +927,9 @@ mod sleep_ceiling_tests {
         let message = error.to_string();
         assert!(message.contains("35000ms"), "{message}");
         assert!(message.contains("30000ms"), "{message}");
+        // The binding is the remedy that always works; the env var is qualified
+        // rather than offered, because a workflow guest never sees it.
+        assert!(message.contains("host-import binding"), "{message}");
         assert!(message.contains("RUNTARA_REQUEST_TIMEOUT_MS"), "{message}");
     }
 
@@ -894,9 +961,10 @@ mod sleep_ceiling_tests {
         );
     }
 
-    /// Zero is not a ceiling of zero. It is a configuration under which no
-    /// request of any kind completes, so reporting it against the sleep would
-    /// blame the sleep for something that has nothing to do with sleeping.
+    /// Zero is not a ceiling of zero. It is a deadline already in the past, so
+    /// no request of any kind completes and blaming the sleep would point at the
+    /// wrong thing; `from_env` refuses it before it can get this far, and this
+    /// covers the hand-built config that bypasses it.
     #[test]
     fn a_zero_timeout_is_not_treated_as_a_ceiling() {
         assert!(
