@@ -139,16 +139,23 @@ static METRICS: OnceLock<Metrics> = OnceLock::new();
 pub struct Metrics {
     meter: Meter,
 
-    // Worker metrics
-    pub worker_executions_total: Counter<u64>,
-    pub worker_executions_active: UpDownCounter<i64>,
-    pub worker_execution_duration: Histogram<f64>,
+    // Worker execution counts, durations and live occupancy are deliberately
+    // absent. History comes from the DB-backed metrics API, which has the real
+    // start and finish timestamps; live occupancy comes from `PipelineGauges`,
+    // which the admission gate already writes on every intake. A third copy
+    // exported from here could only ever be a fourth thing to keep in sync, and
+    // these three sat declared-but-never-written long enough to prove it: they
+    // exported a flat zero, which reads as an answer rather than an absence.
 
     // Compilation metrics
     pub compilations_total: Counter<u64>,
     pub compilations_active: UpDownCounter<i64>,
     pub compilation_duration: Histogram<f64>,
-    pub compilation_queue_size: UpDownCounter<i64>,
+    // No `compilation_queue_size`: the queue's truth lives in Valkey and
+    // outlives this process, so a delta-maintained UpDownCounter would reset to
+    // zero on every restart while the backlog was still there. Compilation
+    // backlog belongs sampled from the queue itself, the way the trigger queue
+    // is, not counted locally.
     pub direct_compilations_total: Counter<u64>,
     pub direct_compilation_duration: Histogram<f64>,
 
@@ -191,23 +198,6 @@ pub struct Metrics {
 
 impl Metrics {
     fn new(meter: Meter) -> Self {
-        // Worker metrics
-        let worker_executions_total = meter
-            .u64_counter("runtara.worker.executions.total")
-            .with_description("Total number of workflow executions")
-            .build();
-
-        let worker_executions_active = meter
-            .i64_up_down_counter("runtara.worker.executions.active")
-            .with_description("Currently active workflow executions")
-            .build();
-
-        let worker_execution_duration = meter
-            .f64_histogram("runtara.worker.execution.duration")
-            .with_description("Workflow execution duration in seconds")
-            .with_unit("s")
-            .build();
-
         // Compilation metrics
         let compilations_total = meter
             .u64_counter("runtara.compilation.total")
@@ -223,11 +213,6 @@ impl Metrics {
             .f64_histogram("runtara.compilation.duration")
             .with_description("Compilation duration in seconds")
             .with_unit("s")
-            .build();
-
-        let compilation_queue_size = meter
-            .i64_up_down_counter("runtara.compilation.queue.size")
-            .with_description("Number of pending compilations in queue")
             .build();
 
         let direct_compilations_total = meter
@@ -326,13 +311,9 @@ impl Metrics {
 
         Self {
             meter,
-            worker_executions_total,
-            worker_executions_active,
-            worker_execution_duration,
             compilations_total,
             compilations_active,
             compilation_duration,
-            compilation_queue_size,
             direct_compilations_total,
             direct_compilation_duration,
             trigger_events_total,
@@ -719,5 +700,112 @@ mod tests {
 
         assert!(targets.contains(&("wasmtime", tracing::Level::TRACE)));
         assert!(!targets.contains(&("wasmtime_cranelift", tracing::Level::DEBUG)));
+    }
+
+    /// Every declared instrument must actually be written to.
+    ///
+    /// Four instruments here — worker executions total, active and duration,
+    /// and the compilation queue size — were declared, constructed and exported
+    /// with no write site anywhere in the workspace. They shipped a flat zero to
+    /// whatever collector was configured, which is worse than exporting nothing:
+    /// a dashboard reading "0 executions" looks like an answer, and nobody
+    /// double-checks an answer. The same defect then recurred in
+    /// `PipelineGauges::record_step`, which is how it earned a test rather than
+    /// a note.
+    ///
+    /// No unit test can catch this from the inside: an instrument with no writer
+    /// satisfies every assertion made about the instrument. So this reads the
+    /// crate source and asserts each field of [`Metrics`] is reachable — either
+    /// written directly from outside this module, or written inside a `record_*`
+    /// helper here that itself has an outside caller.
+    #[test]
+    fn every_declared_instrument_is_written_somewhere() {
+        use std::path::Path;
+
+        let this_file = include_str!("mod.rs");
+
+        // Field names, straight from the struct that declares them, so adding
+        // an instrument enrolls it in this check automatically.
+        let fields: Vec<String> = this_file
+            .split("pub struct Metrics {")
+            .nth(1)
+            .expect("Metrics struct")
+            .split("\n}")
+            .next()
+            .expect("struct body")
+            .lines()
+            .filter_map(|line| {
+                let line = line.trim();
+                let name = line.strip_prefix("pub ")?.split(':').next()?;
+                (!name.is_empty() && name != "meter").then(|| name.to_string())
+            })
+            .collect();
+        assert!(
+            fields.len() > 5,
+            "expected to parse the Metrics fields, got {fields:?}"
+        );
+
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut sources = Vec::new();
+        collect_rs(&src, &mut sources);
+
+        // Helpers defined here that reach an instrument on someone's behalf,
+        // paired with whether anything outside actually calls them.
+        let helper_has_caller = |helper: &str| -> bool {
+            sources.iter().any(|(path, body)| {
+                !path.ends_with("observability/mod.rs")
+                    && body.lines().any(|l| {
+                        !l.trim_start().starts_with("//") && l.contains(&format!("{helper}("))
+                    })
+            })
+        };
+
+        for field in &fields {
+            let needle = format!(".{field}");
+
+            let written_outside = sources.iter().any(|(path, body)| {
+                !path.ends_with("observability/mod.rs")
+                    && body
+                        .lines()
+                        .any(|l| !l.trim_start().starts_with("//") && l.contains(&needle))
+            });
+            if written_outside {
+                continue;
+            }
+
+            // Otherwise it must be written by a helper here that is itself
+            // called from outside — the shape the auth instruments use.
+            let reached_via_live_helper = this_file
+                .split("pub fn ")
+                .skip(1)
+                .filter(|block| block.contains(&needle))
+                .filter_map(|block| block.split(['(', '<']).next())
+                .any(|helper| helper_has_caller(helper.trim()));
+
+            assert!(
+                reached_via_live_helper,
+                "instrument `{field}` is declared, constructed and exported, but \
+                 nothing writes to it — it will publish a flat zero forever, \
+                 which reads as an answer rather than as an absence. Wire it or \
+                 delete the declaration."
+            );
+        }
+    }
+
+    /// Walk a directory collecting `.rs` sources as (path, contents).
+    fn collect_rs(dir: &std::path::Path, out: &mut Vec<(String, String)>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_rs(&path, out);
+            } else if path.extension().is_some_and(|e| e == "rs")
+                && let Ok(body) = std::fs::read_to_string(&path)
+            {
+                out.push((path.display().to_string(), body));
+            }
+        }
     }
 }
