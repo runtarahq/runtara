@@ -66,7 +66,7 @@
 //! | `RUNTARA_INSTANCE_ID` | Yes | - | Unique instance identifier |
 //! | `RUNTARA_TENANT_ID` | Yes | - | Tenant identifier |
 //! | `RUNTARA_HTTP_URL` | No | `http://127.0.0.1:8003` | HTTP API URL |
-//! | `RUNTARA_REQUEST_TIMEOUT_MS` | No | `30000` | Request timeout |
+//! | `RUNTARA_REQUEST_TIMEOUT_MS` | No | `30000` | Request timeout. `0` is refused — it is a deadline in the past, not "no timeout". Read from the SDK's own process environment, which a workflow guest does not have. |
 //! | `RUNTARA_SIGNAL_POLL_INTERVAL_MS` | No | `1000` | Signal poll rate limit |
 //!
 //! ## Programmatic Configuration

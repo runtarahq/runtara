@@ -21,9 +21,9 @@
 use wasm_encoder::{BlockType, Function as WasmFunction, Instruction};
 
 use super::abi::{
-    emit_entry_suspend_at, emit_retptr_error_or_step_fail, load_retptr_list,
-    push_i64_load_from_ptr, push_retptr_arg, push_retptr_i64_load, push_segment_args,
-    return_if_retptr_error, store_local_i64_at,
+    emit_entry_suspend_at, emit_fail_if_retptr_error_inplace, emit_retptr_error_or_step_fail,
+    load_retptr_list, push_i64_load_from_ptr, push_retptr_arg, push_retptr_i64_load,
+    push_segment_args, return_if_retptr_error, store_local_i64_at,
 };
 use super::checkpoint::{
     emit_check_signals_and_suspend, emit_checkpoint_lookup, emit_checkpoint_save,
@@ -83,7 +83,15 @@ fn emit_blocking_durable_sleep(body: &mut WasmFunction, indices: &DirectCoreFunc
     body.instruction(&Instruction::LocalGet(DIRECT_DELAY_DURATION_MS_LOCAL));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.runtime_durable_sleep_checkpoint));
-    return_if_retptr_error(body, indices);
+    // REPORT the failure rather than returning a bare `Err`. Under `wasi:cli/run`
+    // a bare return is an exit code and nothing else — no SDK event, no
+    // diagnostic — so a sleep that fails surfaces to an operator as a process
+    // that died for no stated reason. That is the whole of what they get, and it
+    // names neither the sleep nor its cause. The blocking arm is also the only
+    // one that can fail this way: it is the arm the composed binding takes, where
+    // the sleep is an HTTP request held open for its full duration and so subject
+    // to the client's request deadline.
+    emit_fail_if_retptr_error_inplace(body, indices);
     // The sleep writes no checkpoint on the GUEST side, so it has no
     // `emit_checkpoint_save` to fold signal handling into. Poll explicitly:
     // without this a cancel that arrived mid-sleep is never observed, and a
