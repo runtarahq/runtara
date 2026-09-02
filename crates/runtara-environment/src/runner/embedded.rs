@@ -23,7 +23,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tracing::{error, info, warn};
 
 use runtara_component_host::{
@@ -38,7 +38,7 @@ use runtara_core::persistence::Persistence;
 use super::common::{self, WorkflowRunnerConfig};
 use super::traits::{
     CancelToken, ContainerMetrics, LaunchOptions, LaunchResult, Result, Runner, RunnerError,
-    RunnerHandle,
+    RunnerHandle, RunnerOccupancy,
 };
 
 /// Mark a run `running`, clearing what a previous stop left behind.
@@ -88,9 +88,78 @@ pub struct EmbeddedWasmRunner {
     /// A serial caller used to hide this by never asking for more than one at a
     /// time; that is not a limit anything should rely on.
     run_permits: Arc<tokio::sync::Semaphore>,
+    /// The bound `run_permits` was built with.
+    ///
+    /// A `Semaphore` reports what is *available*, never what it started with,
+    /// so the total has to be kept alongside it to turn that into occupancy.
+    run_limit: usize,
+    /// When each currently-held run permit was taken.
+    ///
+    /// Exists so a full runner can be told apart from a stuck one — see
+    /// [`RunnerOccupancy`]. Bounded by `run_limit` (cores x 4 by default), so
+    /// it needs no eviction policy; entries are removed by [`RunSlot`]'s drop,
+    /// which runs on the success, error and panic paths alike.
+    run_slots: RunSlotRegistry,
     /// Shared handler state for per-run [`PersistenceRuntimeHost`]s — the
     /// native runtime interface for HostImport-composed artifacts.
     handler_state: Arc<runtara_core::instance_handlers::InstanceHandlerState>,
+}
+
+/// Acquisition times of the run permits currently held, keyed by instance.
+type RunSlotRegistry = Arc<Mutex<HashMap<String, Instant>>>;
+
+/// A held run permit, tied to the moment it was taken.
+///
+/// The permit alone would bound concurrency perfectly well; this wrapper exists
+/// only so that releasing it also retires the acquisition time. Pairing them in
+/// one value is what makes the two impossible to drift apart — there is no path
+/// that returns a permit without also dropping this.
+struct RunSlot {
+    /// Dropped with the struct; that release is the whole point of the field.
+    _permit: tokio::sync::OwnedSemaphorePermit,
+    instance_id: String,
+    registry: RunSlotRegistry,
+}
+
+/// Turn a semaphore reading plus the slot map into an occupancy report.
+///
+/// Split out from [`Runner::occupancy`] so the decisions it makes are testable
+/// without standing up a runner (which needs a live persistence layer): that
+/// `held` is read from the semaphore rather than counted from the map, and that
+/// the reported age belongs to the *oldest* holder rather than any other.
+fn compute_occupancy(
+    limit: usize,
+    available: usize,
+    slots: &HashMap<String, Instant>,
+    now: Instant,
+) -> RunnerOccupancy {
+    // Deliberately not `slots.len()`. A permit is taken before its acquisition
+    // time is recorded, so during that window the map under-reports; the
+    // semaphore never does. The map's only job is answering "how old is the
+    // oldest", where a momentarily missing entry costs nothing.
+    let held = limit.saturating_sub(available);
+    let oldest = slots.iter().min_by_key(|(_, taken)| **taken);
+    RunnerOccupancy {
+        limit: limit as u64,
+        held: held as u64,
+        oldest_held_ms: oldest
+            .map(|(_, taken)| now.saturating_duration_since(*taken).as_millis() as u64),
+        oldest_instance_id: oldest.map(|(id, _)| id.clone()),
+    }
+}
+
+impl Drop for RunSlot {
+    fn drop(&mut self) {
+        // Recover from poisoning rather than propagate it. This runs while the
+        // task may already be unwinding, so panicking here would abort the
+        // process; and a poisoned occupancy map is not a reason to refuse to
+        // give a permit back.
+        let mut slots = self
+            .registry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        slots.remove(&self.instance_id);
+    }
 }
 
 impl EmbeddedWasmRunner {
@@ -104,14 +173,14 @@ impl EmbeddedWasmRunner {
         let handler_state = Arc::new(runtara_core::instance_handlers::InstanceHandlerState::new(
             Arc::clone(&persistence),
         ));
+        let run_limit = max_concurrent_runs();
+        warn_if_run_bound_exceeds_memory(run_limit);
         Ok(Self {
             config,
             limits: limits_from_env(),
-            run_permits: Arc::new(tokio::sync::Semaphore::new({
-                let permits = max_concurrent_runs();
-                warn_if_run_bound_exceeds_memory(permits);
-                permits
-            })),
+            run_permits: Arc::new(tokio::sync::Semaphore::new(run_limit)),
+            run_limit,
+            run_slots: Arc::new(Mutex::new(HashMap::new())),
             persistence,
             executor: Arc::new(executor),
             tasks: Arc::new(Mutex::new(HashMap::new())),
@@ -598,6 +667,19 @@ impl Runner for EmbeddedWasmRunner {
         "wasm-embedded"
     }
 
+    fn occupancy(&self) -> Option<RunnerOccupancy> {
+        let slots = self
+            .run_slots
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        Some(compute_occupancy(
+            self.run_limit,
+            self.run_permits.available_permits(),
+            &slots,
+            Instant::now(),
+        ))
+    }
+
     async fn run(
         &self,
         options: &LaunchOptions,
@@ -790,10 +872,22 @@ impl Runner for EmbeddedWasmRunner {
         // durable, so this delays the run rather than losing it, and it gives
         // the wake scheduler and trigger worker the backpressure their own
         // concurrency limits are supposed to express.
-        let run_slot = Arc::clone(&self.run_permits)
+        let permit = Arc::clone(&self.run_permits)
             .acquire_owned()
             .await
             .expect("run semaphore closed");
+        // Stamp the acquisition before the task is spawned, so the age covers
+        // the whole time the permit is held rather than starting once the task
+        // happens to be scheduled.
+        self.run_slots
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(options.instance_id.clone(), Instant::now());
+        let run_slot = RunSlot {
+            _permit: permit,
+            instance_id: options.instance_id.clone(),
+            registry: Arc::clone(&self.run_slots),
+        };
         tokio::spawn(async move {
             let _run_slot = run_slot;
             match executor.load_instance_pre(&wasm_path).await {
@@ -1009,6 +1103,155 @@ impl Runner for EmbeddedWasmRunner {
 
 #[cfg(test)]
 mod tests {
+    use super::{RunSlot, compute_occupancy};
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    /// Nothing running must be reported as "nothing running", not as "unknown".
+    ///
+    /// The distinction matters downstream: a consumer renders an absent
+    /// occupancy as "not measured" and a present-but-zero one as idle, and
+    /// collapsing the two invents an idle system that is actually unobserved.
+    #[test]
+    fn idle_runner_reports_zero_held_and_no_age() {
+        let occ = compute_occupancy(16, 16, &HashMap::new(), Instant::now());
+        assert_eq!(occ.limit, 16);
+        assert_eq!(occ.held, 0);
+        assert_eq!(occ.oldest_held_ms, None);
+        assert_eq!(occ.oldest_instance_id, None);
+    }
+
+    /// `held` must follow the semaphore, not the bookkeeping map.
+    ///
+    /// A permit is taken before its acquisition time is recorded, so the map
+    /// lags by that window. Were `held` counted from the map, a runner at its
+    /// bound would briefly report headroom it does not have.
+    #[test]
+    fn held_comes_from_the_semaphore_not_the_slot_map() {
+        let now = Instant::now();
+        let mut slots = HashMap::new();
+        slots.insert("only-one-recorded".to_string(), now);
+
+        // Eight permits gone, but only one has been stamped yet.
+        let occ = compute_occupancy(8, 0, &slots, now);
+        assert_eq!(occ.held, 8, "occupancy must not lag behind the semaphore");
+        assert_eq!(
+            occ.oldest_instance_id.as_deref(),
+            Some("only-one-recorded"),
+            "the age still comes from whatever has been recorded"
+        );
+    }
+
+    /// The reported age must belong to the longest-held permit.
+    ///
+    /// This is the signal that separates a runner turning work over from one
+    /// holding work that never leaves, so picking any other holder — the first
+    /// inserted, or whatever the map happens to yield first — would report a
+    /// stalled runner as healthy.
+    #[test]
+    fn age_belongs_to_the_oldest_holder() {
+        let now = Instant::now();
+        let mut slots = HashMap::new();
+        slots.insert("recent".to_string(), now - Duration::from_secs(2));
+        slots.insert("ancient".to_string(), now - Duration::from_secs(2880));
+        slots.insert("middling".to_string(), now - Duration::from_secs(45));
+
+        let occ = compute_occupancy(8, 5, &slots, now);
+        assert_eq!(occ.held, 3);
+        assert_eq!(occ.oldest_instance_id.as_deref(), Some("ancient"));
+        assert_eq!(
+            occ.oldest_held_ms,
+            Some(2_880_000),
+            "48 minutes held is exactly the case this exists to surface"
+        );
+    }
+
+    /// An over-subscribed reading must clamp rather than wrap.
+    ///
+    /// `held` is `limit - available` on unsigned values; a stale or racing read
+    /// where available exceeds the limit would otherwise underflow into an
+    /// enormous occupancy and paint a healthy runner as catastrophically full.
+    #[test]
+    fn available_above_limit_clamps_to_zero() {
+        let occ = compute_occupancy(4, 9, &HashMap::new(), Instant::now());
+        assert_eq!(occ.held, 0, "must saturate, never wrap");
+    }
+
+    /// Dropping the slot must release the permit *and* retire its timestamp.
+    ///
+    /// The pairing is the invariant: a permit returned without its entry
+    /// removed leaves a timestamp that never ages out, and the runner would
+    /// report a permanently stuck holder that finished long ago.
+    #[tokio::test]
+    async fn dropping_a_slot_releases_the_permit_and_forgets_its_age() {
+        let permits = Arc::new(tokio::sync::Semaphore::new(2));
+        let registry: Arc<Mutex<HashMap<String, Instant>>> = Arc::new(Mutex::new(HashMap::new()));
+
+        {
+            let permit = Arc::clone(&permits).acquire_owned().await.expect("acquire");
+            registry
+                .lock()
+                .expect("registry")
+                .insert("inst-1".to_string(), Instant::now());
+            let _slot = RunSlot {
+                _permit: permit,
+                instance_id: "inst-1".to_string(),
+                registry: Arc::clone(&registry),
+            };
+
+            assert_eq!(permits.available_permits(), 1);
+            assert_eq!(registry.lock().expect("registry").len(), 1);
+        }
+
+        assert_eq!(
+            permits.available_permits(),
+            2,
+            "the permit must return on drop"
+        );
+        assert!(
+            registry.lock().expect("registry").is_empty(),
+            "the acquisition time must retire with the permit"
+        );
+    }
+
+    /// A panicking run must not leave a phantom holder behind.
+    ///
+    /// Unwinding is exactly when bookkeeping is most likely to be skipped, and
+    /// a leaked entry here is worse than none: it ages forever and would make
+    /// every later reading report a stall that is not happening.
+    #[tokio::test]
+    async fn a_panicking_run_still_retires_its_slot() {
+        let permits = Arc::new(tokio::sync::Semaphore::new(1));
+        let registry: Arc<Mutex<HashMap<String, Instant>>> = Arc::new(Mutex::new(HashMap::new()));
+
+        let permit = Arc::clone(&permits).acquire_owned().await.expect("acquire");
+        registry
+            .lock()
+            .expect("registry")
+            .insert("doomed".to_string(), Instant::now());
+        let slot = RunSlot {
+            _permit: permit,
+            instance_id: "doomed".to_string(),
+            registry: Arc::clone(&registry),
+        };
+
+        let handle = tokio::spawn(async move {
+            let _slot = slot;
+            panic!("the guest blew up");
+        });
+        assert!(handle.await.is_err(), "the task must have panicked");
+
+        assert_eq!(permits.available_permits(), 1);
+        assert!(
+            registry
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_empty(),
+            "drop runs while unwinding, so the entry must still be retired"
+        );
+    }
+
     /// The advisory bound check must fire only when the setting cannot fit.
     ///
     /// It exists because raising `RUNTARA_MAX_CONCURRENT_RUNS` for throughput
