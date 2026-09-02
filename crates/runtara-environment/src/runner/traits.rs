@@ -163,6 +163,17 @@ pub struct RunnerOccupancy {
     pub oldest_held_ms: Option<u64>,
     /// Instance holding that longest-held permit.
     pub oldest_instance_id: Option<String>,
+    /// Runs this runner has begun executing, since process start.
+    pub runs_started: u64,
+    /// Runs this runner has finished executing, since process start.
+    ///
+    /// "Finished" means the guest stopped and gave its permit back, which
+    /// includes a run that parked itself to await a wake or a signal. It is
+    /// therefore the throughput of the executing stage, and deliberately not a
+    /// count of instances reaching a terminal status — those differ whenever
+    /// durable workflows are in play, and conflating them would report a
+    /// healthy parking workload as a flood of completions.
+    pub runs_finished: u64,
 }
 
 /// Trait for instance runners.

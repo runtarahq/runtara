@@ -1021,6 +1021,11 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         runtara_connections::IntegrationCompatibility::from_catalog(&agent_catalog),
     );
 
+    // One set of pipeline counters for the process, built before anything that
+    // writes them: the trigger workers spawn well ahead of the execution engine
+    // and both must share these, or intake would be counted twice over.
+    let pipeline_gauges = workers::pipeline_gauges::PipelineGauges::new();
+
     // Product-analytics: build the channel + sink up front so it can be injected into the
     // connections crate (constructed just below). The drain (single consumer) is spawned
     // later, once the shutdown signal exists — it holds `product_event_rx`.
@@ -1404,8 +1409,20 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             .filter(|n| *n > 0)
             .unwrap_or(50);
         println!("  Trigger intake: {trigger_workers} worker(s), batch {trigger_batch_size}");
-        for _ in 0..trigger_workers {
+        // Built here rather than inside each worker so the analytics sampler can
+        // read the very semaphores the workers wait on. Each worker still gets
+        // its own, bounded exactly as before; nothing about the concurrency
+        // changes, only whether it can be observed.
+        let trigger_permits = workers::pipeline_gauges::TriggerPermits::new(
+            trigger_workers,
+            workers::trigger_worker::trigger_concurrency(),
+        );
+        for worker_index in 0..trigger_workers {
             let trigger_worker_tenant_id = tenant_id.clone();
+            let permits_for_worker = trigger_permits
+                .for_worker(worker_index)
+                .expect("a semaphore exists for every spawned trigger worker");
+            let gauges_for_worker = Arc::clone(&pipeline_gauges);
             let trigger_shutdown = shutdown_signal.clone();
             let trigger_events = product_event_sink.clone();
             let pool_for_worker = trigger_pool.clone();
@@ -1428,6 +1445,8 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
                     worker_config,
                     trigger_shutdown,
                     trigger_events,
+                    permits_for_worker,
+                    gauges_for_worker,
                 )
                 .await;
             });
@@ -1554,6 +1573,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         trigger_stream.clone(),
         Some(running_executions.clone()),
         product_event_sink.clone(),
+        Arc::clone(&pipeline_gauges),
     ));
     println!("✓ Execution engine initialized");
 

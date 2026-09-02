@@ -351,6 +351,11 @@ pub struct ExecutionEngine {
     /// caching it briefly removes a blob read and a hash from the hot path
     /// without changing what the check means.
     registered_images: Arc<RegisteredImageCache>,
+    /// Monotonic counters for the execution pipeline.
+    ///
+    /// Read by the analytics sampler; written only from the gate below, where
+    /// the cost is one relaxed atomic add per intake.
+    gauges: Arc<crate::workers::pipeline_gauges::PipelineGauges>,
 }
 
 /// How long an in-flight execution count stays usable for the concurrency gate.
@@ -408,6 +413,7 @@ impl ExecutionEngine {
         trigger_stream: Option<Arc<TriggerStreamPublisher>>,
         running_executions: Option<Arc<DashMap<Uuid, CancellationHandle>>>,
         events: ProductEventSink,
+        gauges: Arc<crate::workers::pipeline_gauges::PipelineGauges>,
     ) -> Self {
         Self {
             pool,
@@ -421,7 +427,13 @@ impl ExecutionEngine {
             concurrency_reservations: Arc::new(DashMap::new()),
             concurrency_refresh: Arc::new(DashMap::new()),
             registered_images: Arc::new(DashMap::new()),
+            gauges,
         }
+    }
+
+    /// The pipeline counters this engine writes to.
+    pub fn gauges(&self) -> &Arc<crate::workers::pipeline_gauges::PipelineGauges> {
+        &self.gauges
     }
 
     /// Count the tenant's currently in-flight executions (Running + Pending)
@@ -535,6 +547,9 @@ impl ExecutionEngine {
         &self,
         tenant_id: &str,
     ) -> Result<(), crate::entitlement_error::EntitlementDenial> {
+        // Counted here rather than at either call site, so the identity
+        // `offered == accepted + denied` cannot drift as call sites are added.
+        self.gauges.record_offered();
         let snapshot = crate::config::entitlements();
         // No early return when the tenant has no `maxConcurrentExecutions`:
         // the infra cap (`MAX_CONCURRENT_EXECUTIONS`, default cores x 32) has
@@ -566,8 +581,14 @@ impl ExecutionEngine {
         // Record the admission so the next caller sees it even though the
         // cached count still cannot.
         if decision.is_ok() {
+            self.gauges.record_accepted();
             self.reservations_for(tenant_id)
                 .fetch_add(1, Ordering::SeqCst);
+        } else {
+            // The refusal rate had no counter at all before this: the denial
+            // was returned to the caller and observed nowhere, so the first
+            // question anyone asks about failing intake was unanswerable.
+            self.gauges.record_denied();
         }
         decision
     }
@@ -1151,7 +1172,10 @@ impl ExecutionEngine {
             )
             .await
         {
-            Ok(start) => start,
+            Ok(start) => {
+                self.gauges.record_started();
+                start
+            }
             Err(RuntimeError::ImageNotFound(error)) => {
                 tracing::warn!(
                     tenant_id = %event.tenant_id,
@@ -2435,6 +2459,7 @@ mod tests {
                 None,
                 None,
                 ProductEventSink::new(tx.clone()),
+                crate::workers::pipeline_gauges::PipelineGauges::new(),
             )
         };
 
@@ -2481,6 +2506,7 @@ mod tests {
             None,
             None,
             ProductEventSink::new(tx),
+            crate::workers::pipeline_gauges::PipelineGauges::new(),
         );
         let tenant = format!("tenant-{}", uuid::Uuid::new_v4());
 

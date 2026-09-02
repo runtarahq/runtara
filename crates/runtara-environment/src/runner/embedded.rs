@@ -21,7 +21,7 @@
 use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tracing::{error, info, warn};
@@ -100,6 +100,10 @@ pub struct EmbeddedWasmRunner {
     /// it needs no eviction policy; entries are removed by [`RunSlot`]'s drop,
     /// which runs on the success, error and panic paths alike.
     run_slots: RunSlotRegistry,
+    /// Runs begun since process start.
+    runs_started: Arc<AtomicU64>,
+    /// Runs finished since process start, incremented as each permit returns.
+    runs_finished: Arc<AtomicU64>,
     /// Shared handler state for per-run [`PersistenceRuntimeHost`]s — the
     /// native runtime interface for HostImport-composed artifacts.
     handler_state: Arc<runtara_core::instance_handlers::InstanceHandlerState>,
@@ -119,6 +123,9 @@ struct RunSlot {
     _permit: tokio::sync::OwnedSemaphorePermit,
     instance_id: String,
     registry: RunSlotRegistry,
+    /// Bumped as the permit returns, so the count of finished runs cannot drift
+    /// from the count of released permits.
+    finished: Arc<AtomicU64>,
 }
 
 /// Turn a semaphore reading plus the slot map into an occupancy report.
@@ -145,6 +152,10 @@ fn compute_occupancy(
         oldest_held_ms: oldest
             .map(|(_, taken)| now.saturating_duration_since(*taken).as_millis() as u64),
         oldest_instance_id: oldest.map(|(id, _)| id.clone()),
+        // Filled in by the caller, which owns the lifetime counters; this
+        // function is about a single instant's occupancy.
+        runs_started: 0,
+        runs_finished: 0,
     }
 }
 
@@ -159,6 +170,7 @@ impl Drop for RunSlot {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         slots.remove(&self.instance_id);
+        self.finished.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -181,6 +193,8 @@ impl EmbeddedWasmRunner {
             run_permits: Arc::new(tokio::sync::Semaphore::new(run_limit)),
             run_limit,
             run_slots: Arc::new(Mutex::new(HashMap::new())),
+            runs_started: Arc::new(AtomicU64::new(0)),
+            runs_finished: Arc::new(AtomicU64::new(0)),
             persistence,
             executor: Arc::new(executor),
             tasks: Arc::new(Mutex::new(HashMap::new())),
@@ -672,12 +686,15 @@ impl Runner for EmbeddedWasmRunner {
             .run_slots
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        Some(compute_occupancy(
+        let mut occupancy = compute_occupancy(
             self.run_limit,
             self.run_permits.available_permits(),
             &slots,
             Instant::now(),
-        ))
+        );
+        occupancy.runs_started = self.runs_started.load(Ordering::Relaxed);
+        occupancy.runs_finished = self.runs_finished.load(Ordering::Relaxed);
+        Some(occupancy)
     }
 
     async fn run(
@@ -883,10 +900,12 @@ impl Runner for EmbeddedWasmRunner {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(options.instance_id.clone(), Instant::now());
+        self.runs_started.fetch_add(1, Ordering::Relaxed);
         let run_slot = RunSlot {
             _permit: permit,
             instance_id: options.instance_id.clone(),
             registry: Arc::clone(&self.run_slots),
+            finished: Arc::clone(&self.runs_finished),
         };
         tokio::spawn(async move {
             let _run_slot = run_slot;
@@ -1187,6 +1206,7 @@ mod tests {
     async fn dropping_a_slot_releases_the_permit_and_forgets_its_age() {
         let permits = Arc::new(tokio::sync::Semaphore::new(2));
         let registry: Arc<Mutex<HashMap<String, Instant>>> = Arc::new(Mutex::new(HashMap::new()));
+        let finished = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
         {
             let permit = Arc::clone(&permits).acquire_owned().await.expect("acquire");
@@ -1198,6 +1218,7 @@ mod tests {
                 _permit: permit,
                 instance_id: "inst-1".to_string(),
                 registry: Arc::clone(&registry),
+                finished: Arc::clone(&finished),
             };
 
             assert_eq!(permits.available_permits(), 1);
@@ -1213,6 +1234,11 @@ mod tests {
             registry.lock().expect("registry").is_empty(),
             "the acquisition time must retire with the permit"
         );
+        assert_eq!(
+            finished.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "a released permit is a finished run; the two must not drift"
+        );
     }
 
     /// A panicking run must not leave a phantom holder behind.
@@ -1224,6 +1250,7 @@ mod tests {
     async fn a_panicking_run_still_retires_its_slot() {
         let permits = Arc::new(tokio::sync::Semaphore::new(1));
         let registry: Arc<Mutex<HashMap<String, Instant>>> = Arc::new(Mutex::new(HashMap::new()));
+        let finished = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
         let permit = Arc::clone(&permits).acquire_owned().await.expect("acquire");
         registry
@@ -1234,6 +1261,7 @@ mod tests {
             _permit: permit,
             instance_id: "doomed".to_string(),
             registry: Arc::clone(&registry),
+            finished: Arc::clone(&finished),
         };
 
         let handle = tokio::spawn(async move {
@@ -1249,6 +1277,11 @@ mod tests {
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .is_empty(),
             "drop runs while unwinding, so the entry must still be retired"
+        );
+        assert_eq!(
+            finished.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "a run that panicked still finished, and must be counted as such"
         );
     }
 

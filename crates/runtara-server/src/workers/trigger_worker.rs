@@ -104,6 +104,8 @@ pub async fn run(
     worker_config: TriggerWorkerConfig,
     shutdown: ShutdownSignal,
     event_sink: ProductEventSink,
+    event_permits: Arc<tokio::sync::Semaphore>,
+    gauges: Arc<crate::workers::pipeline_gauges::PipelineGauges>,
 ) {
     let worker_id = format!("trigger-worker-{}", Uuid::new_v4());
     let tenant_id = worker_config.tenant_id.clone();
@@ -155,7 +157,9 @@ pub async fn run(
     // count), so it sits behind a mutex held for microseconds while the slow
     // part of each event runs outside it.
     let consumer = Arc::new(tokio::sync::Mutex::new(consumer));
-    let event_permits = Arc::new(tokio::sync::Semaphore::new(trigger_concurrency()));
+    // Supplied by the caller rather than built here, so the analytics sampler
+    // can read the same semaphore this worker waits on. Each worker still gets
+    // its own, exactly as before — see `TriggerPermits`.
 
     info!(
         worker_id = %worker_id,
@@ -175,6 +179,7 @@ pub async fn run(
         None, // trigger_stream not needed for the trigger worker
         Some(running_executions.clone()),
         event_sink.clone(),
+        Arc::clone(&gauges),
     ));
 
     // Acknowledging through the consumer would hold its mutex across the XACK
@@ -340,7 +345,7 @@ async fn recreate_consumer_group(consumer: &mut StreamConsumer, autoclaim_start_
 /// bounds. Raising the *worker* count instead does not help: workers share one
 /// consumer group and contend, and the pending-entry autoclaim between them
 /// makes it actively worse.
-fn trigger_concurrency() -> usize {
+pub fn trigger_concurrency() -> usize {
     std::env::var("RUNTARA_TRIGGER_CONCURRENCY")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
