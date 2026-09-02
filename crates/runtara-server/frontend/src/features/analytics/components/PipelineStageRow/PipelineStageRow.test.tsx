@@ -24,7 +24,7 @@ describe('PipelineStageRow', () => {
       <PipelineStageRow
         stage={stage({
           key: 'runPermits',
-          label: 'Run permits',
+          label: 'Concurrent runs',
           knob: 'RUNTARA_MAX_CONCURRENT_RUNS',
           limit: 16,
           used: 12,

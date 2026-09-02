@@ -82,6 +82,12 @@ pub struct PipelineReading {
 
 /// Turn one tick's readings into the wire snapshot.
 ///
+/// Labels name what an operator is looking at, never what it is built from:
+/// the queue is where work waits for a worker, not "a Valkey stream", and a run
+/// is a run, not "a guest". The exception is a `knob` that is a real setting —
+/// those are printed verbatim because the operator has to type them exactly to
+/// change anything, and paraphrasing an environment variable helps nobody.
+///
 /// Every stage is emitted even when its source could not be read, so the shape
 /// of the pipeline stays stable and a missing reading shows up as an absent
 /// value on a stage that is still there — rather than as a stage that vanished,
@@ -104,7 +110,7 @@ pub fn build_snapshot(
         PipelineStageDto {
             key: "triggerQueue".to_string(),
             label: "Trigger queue".to_string(),
-            knob: Some("Valkey stream depth".to_string()),
+            knob: Some("waiting for a worker".to_string()),
             // Unbounded on purpose: the stream has no ceiling this process
             // enforces, and inventing one would make a consumer render a
             // percentage of a limit that does not exist.
@@ -124,7 +130,7 @@ pub fn build_snapshot(
         },
         PipelineStageDto {
             key: "runPermits".to_string(),
-            label: "Run permits".to_string(),
+            label: "Concurrent runs".to_string(),
             knob: Some("RUNTARA_MAX_CONCURRENT_RUNS".to_string()),
             limit: reading.run_limit,
             used: reading.run_used,
@@ -133,8 +139,8 @@ pub fn build_snapshot(
         },
         PipelineStageDto {
             key: "executing".to_string(),
-            label: "Executing".to_string(),
-            knob: Some("live guests".to_string()),
+            label: "Running now".to_string(),
+            knob: Some("started, not yet finished".to_string()),
             limit: None,
             used: reading.run_used,
             oldest_age_ms: reading.run_oldest_ms,

@@ -33,7 +33,8 @@ pub struct PipelineRatesDto {
     pub denied: f64,
     /// Instances handed to the runtime for launch.
     pub started: f64,
-    /// Guests that stopped running, including those that parked themselves.
+    /// Runs that stopped, including those that parked themselves to await a
+    /// wake or a signal.
     pub finished: f64,
     /// Workflow steps, or `null` when nothing live could report one.
     ///

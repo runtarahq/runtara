@@ -127,7 +127,8 @@ describe('isNotDraining', () => {
 
 describe('findChokepoint', () => {
   it('accuses nothing when every stage has headroom', () => {
-    // Regression: this once named Run permits at 69% on a healthy pipeline.
+    // Regression: this once named the run-slot stage at 69% on a healthy
+    // pipeline.
     // A page that always points somewhere teaches its reader to ignore where
     // it points.
     expect(findChokepoint(FIXTURES.healthy)).toBeNull();

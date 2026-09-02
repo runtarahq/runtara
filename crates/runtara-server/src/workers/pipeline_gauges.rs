@@ -159,10 +159,10 @@ pub struct PipelineRates {
     pub denied: f64,
     /// Started per second.
     pub started: f64,
-    /// Guests that stopped running, per second.
+    /// Runs that stopped, per second.
     ///
     /// Sourced from the runner rather than these counters, because only the
-    /// runner knows when a guest actually stopped. A workflow that parked
+    /// runner knows when a run actually stopped. A workflow that parked
     /// itself has finished executing without having completed, and counting
     /// submissions as outcomes would conflate the two.
     pub finished: f64,
