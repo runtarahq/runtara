@@ -140,6 +140,42 @@ pub struct LaunchResult {
 /// Cancellation token for stopping execution.
 pub type CancelToken = Arc<AtomicBool>;
 
+/// How much of a runner's concurrency bound is currently spoken for.
+///
+/// `held` answers "is the stage full"; `oldest_held_ms` answers the question a
+/// count cannot, which is whether a full stage is turning work over as fast as
+/// the host allows or holding work that never leaves. Those look identical on a
+/// gauge and call for opposite responses, so the age is the point of this type
+/// rather than a nicety: a runner pinned at its bound with a permit held for
+/// forty minutes is stalled, and the same runner pinned with permits recycling
+/// every few seconds is merely busy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunnerOccupancy {
+    /// Concurrency bound this runner enforces.
+    pub limit: u64,
+    /// Permits currently held.
+    ///
+    /// Read from the semaphore rather than counted from any bookkeeping map, so
+    /// it stays authoritative even in the window where a permit has been taken
+    /// but its acquisition time is not yet recorded.
+    pub held: u64,
+    /// Age of the longest-held permit, if anything is running.
+    pub oldest_held_ms: Option<u64>,
+    /// Instance holding that longest-held permit.
+    pub oldest_instance_id: Option<String>,
+    /// Runs this runner has begun executing, since process start.
+    pub runs_started: u64,
+    /// Runs this runner has finished executing, since process start.
+    ///
+    /// "Finished" means the guest stopped and gave its permit back, which
+    /// includes a run that parked itself to await a wake or a signal. It is
+    /// therefore the throughput of the executing stage, and deliberately not a
+    /// count of instances reaching a terminal status — those differ whenever
+    /// durable workflows are in play, and conflating them would report a
+    /// healthy parking workload as a flood of completions.
+    pub runs_finished: u64,
+}
+
 /// Trait for instance runners.
 ///
 /// Runners are responsible for launching and managing workflow guests.
@@ -181,6 +217,17 @@ pub trait Runner: Send + Sync {
         &self,
         handle: &RunnerHandle,
     ) -> (Option<Value>, Option<String>, ContainerMetrics);
+
+    /// Current occupancy of this runner's concurrency bound, if it has one.
+    ///
+    /// Defaults to `None` — "this runner does not report occupancy" — which is
+    /// distinct from `Some` with a zero `held`, i.e. "nothing is running". A
+    /// caller must render the two differently: collapsing an unavailable source
+    /// to zero is how a dashboard invents an idle system that is actually
+    /// unobserved.
+    fn occupancy(&self) -> Option<RunnerOccupancy> {
+        None
+    }
 
     /// Wait for the instance to exit, polling with the given interval.
     ///

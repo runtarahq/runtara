@@ -11,6 +11,7 @@ pub mod executions;
 pub mod metrics;
 pub mod object_model;
 pub mod operators;
+pub mod pipeline;
 pub mod reports;
 pub mod trigger_event;
 pub mod triggers;

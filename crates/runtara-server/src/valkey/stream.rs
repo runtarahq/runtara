@@ -653,6 +653,177 @@ mod tests {
         let count = parse_delivery_count_from_xpending(response);
         assert_eq!(count, 1);
     }
+
+    /// A stream ID's millisecond prefix is the entry's arrival time.
+    ///
+    /// This is what lets depth and age come from one round trip instead of two,
+    /// so the parsing has to hold for the shapes Valkey actually returns —
+    /// including the sentinel IDs it uses when nothing is pending.
+    #[test]
+    fn stream_ids_yield_their_arrival_millis() {
+        assert_eq!(
+            super::stream_id_millis("1756800000000-0"),
+            Some(1_756_800_000_000)
+        );
+        assert_eq!(
+            super::stream_id_millis("1756800000000-42"),
+            Some(1_756_800_000_000)
+        );
+        assert_eq!(
+            super::stream_id_millis("1756800000000"),
+            Some(1_756_800_000_000)
+        );
+        assert_eq!(
+            super::stream_id_millis("-"),
+            None,
+            "the empty-range sentinel is not a time"
+        );
+        assert_eq!(super::stream_id_millis("+"), None);
+        assert_eq!(super::stream_id_millis(""), None);
+        assert_eq!(super::stream_id_millis("not-an-id"), None);
+    }
+
+    /// A backlog reports both how much is held and how long the oldest has waited.
+    #[test]
+    fn xpending_summary_yields_depth_and_age() {
+        let now_ms = 1_756_800_060_000u64;
+        let response = Value::Array(vec![
+            Value::Int(28),
+            Value::BulkString(b"1756800000000-0".to_vec()),
+            Value::BulkString(b"1756800059000-3".to_vec()),
+            Value::Array(vec![]),
+        ]);
+
+        let backlog = super::parse_xpending_summary(response, now_ms);
+        assert_eq!(backlog.pending, 28);
+        assert_eq!(
+            backlog.oldest_pending_ms,
+            Some(60_000),
+            "the age comes from the summary's minimum id, not a second query"
+        );
+    }
+
+    /// An empty pending list must read as empty, not as an unknown age.
+    ///
+    /// Valkey answers a drained group with a zero count and nil ids rather than
+    /// an empty array, and reading that as a pending entry of unknown age would
+    /// show an idle queue as one holding work.
+    #[test]
+    fn a_drained_group_reports_nothing_pending() {
+        let response = Value::Array(vec![Value::Int(0), Value::Nil, Value::Nil, Value::Nil]);
+        let backlog = super::parse_xpending_summary(response, 1_756_800_060_000);
+        assert_eq!(backlog.pending, 0);
+        assert_eq!(backlog.oldest_pending_ms, None);
+    }
+
+    /// A malformed or unexpected reply must degrade to "nothing known".
+    #[test]
+    fn an_unparseable_reply_is_not_invented_into_a_backlog() {
+        assert_eq!(
+            super::parse_xpending_summary(Value::Nil, 1_000),
+            super::StreamBacklog::default()
+        );
+        assert_eq!(
+            super::parse_xpending_summary(Value::Array(vec![]), 1_000),
+            super::StreamBacklog::default()
+        );
+    }
+
+    /// A clock skew must not manufacture an enormous age.
+    ///
+    /// The entry timestamp comes from whichever node wrote it, so it can sit
+    /// slightly ahead of the sampler's clock. Unsigned subtraction there would
+    /// wrap into an age of half a billion years and paint a healthy queue as
+    /// catastrophically stuck.
+    #[test]
+    fn an_entry_from_the_future_reads_as_just_arrived() {
+        let response = Value::Array(vec![
+            Value::Int(1),
+            Value::BulkString(b"1756800005000-0".to_vec()),
+            Value::BulkString(b"1756800005000-0".to_vec()),
+            Value::Array(vec![]),
+        ]);
+        let backlog = super::parse_xpending_summary(response, 1_756_800_000_000);
+        assert_eq!(backlog.oldest_pending_ms, Some(0), "must saturate at zero");
+    }
+}
+
+/// How much work a consumer group has claimed but not finished.
+///
+/// Depth alone cannot tell a busy queue from a stuck one, so the age of the
+/// oldest pending entry is carried alongside it. Both come from a single
+/// `XPENDING` summary: Valkey stream IDs are `<ms-timestamp>-<seq>`, so the
+/// summary's minimum ID *is* the arrival time of the oldest unfinished entry
+/// and needs no second query and no timestamp of our own.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StreamBacklog {
+    /// Entries delivered to a consumer and not yet acknowledged.
+    pub pending: u64,
+    /// Age of the oldest such entry, or `None` when nothing is pending.
+    pub oldest_pending_ms: Option<u64>,
+}
+
+/// Milliseconds encoded in a Valkey stream ID (`<ms>-<seq>`).
+///
+/// Returns `None` for anything that is not that shape, including the special
+/// IDs (`-`, `+`) a summary reports for an empty pending list.
+fn stream_id_millis(id: &str) -> Option<u64> {
+    id.split_once('-')
+        .map(|(ms, _)| ms)
+        .unwrap_or(id)
+        .parse::<u64>()
+        .ok()
+}
+
+/// Parse the summary form of `XPENDING`: `[count, min-id, max-id, [[consumer, count]...]]`.
+///
+/// Split out from the query so the shape handling is testable without a live
+/// Valkey — including the empty case, where Valkey answers with a zero count
+/// and nil IDs rather than an empty array.
+fn parse_xpending_summary(value: Value, now_ms: u64) -> StreamBacklog {
+    let Value::Array(parts) = value else {
+        return StreamBacklog::default();
+    };
+    let pending = match parts.first() {
+        Some(Value::Int(n)) if *n > 0 => *n as u64,
+        _ => return StreamBacklog::default(),
+    };
+    let oldest_pending_ms = parts
+        .get(1)
+        .and_then(|v| match v {
+            Value::BulkString(bytes) => std::str::from_utf8(bytes).ok().map(str::to_owned),
+            Value::SimpleString(text) => Some(text.clone()),
+            _ => None,
+        })
+        .and_then(|id| stream_id_millis(&id))
+        // Saturating: a clock skew that puts the entry in the future must read
+        // as "just arrived", not wrap into an age of half a billion years.
+        .map(|arrived| now_ms.saturating_sub(arrived));
+
+    StreamBacklog {
+        pending,
+        oldest_pending_ms,
+    }
+}
+
+/// Read a consumer group's backlog: how much it holds and how old the oldest is.
+///
+/// One round trip, issued on a sampler's timer and never on a request path.
+/// Takes its own connection clone, so it neither waits on nor blocks the
+/// consumer's mutex.
+pub async fn stream_backlog(
+    connection: &ConnectionManager,
+    stream_name: &str,
+    consumer_group: &str,
+    now_ms: u64,
+) -> RedisResult<StreamBacklog> {
+    let mut connection = connection.clone();
+    let result: Value = redis::cmd("XPENDING")
+        .arg(stream_name)
+        .arg(consumer_group)
+        .query_async(&mut connection)
+        .await?;
+    Ok(parse_xpending_summary(result, now_ms))
 }
 
 /// Lock-free acknowledger for a [`StreamConsumer`]'s stream and group.
