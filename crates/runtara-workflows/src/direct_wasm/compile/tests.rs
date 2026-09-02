@@ -10832,6 +10832,34 @@ fn direct_compile_sequential_split_has_no_async_imports() {
     );
 }
 
+/// The ABI must be part of image cache identity.
+///
+/// It decides whether an artifact exports `wasi:cli/run` or
+/// `lifecycle.invoke`. A release that changed the default ABI once left
+/// this tag untouched, so every already-compiled workflow kept an artifact
+/// of the wrong shape: launches hung with no steps and no error, held their
+/// run permits until the execution timeout, and asking the server to
+/// recompile returned success without rebuilding anything.
+#[test]
+fn abi_is_part_of_the_lowering_tag() {
+    use super::super::component::WorkflowAbi;
+    let cli = super::workflow_abi_tag(WorkflowAbi::CliRunHttp);
+    let invoke = super::workflow_abi_tag(WorkflowAbi::InvokeHostImports);
+    let agent = super::workflow_abi_tag(WorkflowAbi::AgentCapabilities);
+    assert_ne!(
+        cli, invoke,
+        "cli-run and invoke artifacts are not interchangeable"
+    );
+    assert_ne!(invoke, agent);
+    assert_ne!(cli, agent);
+
+    let tag = super::direct_lowering_tag();
+    assert!(
+        tag.contains("abi="),
+        "the tag must name the ABI, or changing it cannot invalidate a cached image: {tag}"
+    );
+}
+
 /// The runtime-omit lever is opt-in, and stays that way now that the
 /// store-freeing gate it once shared a parser with is gone.
 #[test]
