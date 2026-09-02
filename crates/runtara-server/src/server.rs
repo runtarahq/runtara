@@ -1284,7 +1284,11 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     // Migrations are run automatically via runtara_environment::migrations::run()
 
     // Start embedded Runtara servers (using dedicated database)
-    let embedded_runtara = match embedded_runtara::maybe_start_embedded().await {
+    let embedded_runtara = match embedded_runtara::maybe_start_embedded(Some(
+        workers::step_counter::StepCounter::new(Arc::clone(&pipeline_gauges)),
+    ))
+    .await
+    {
         Ok(Some(runtara)) => {
             println!("✓ Embedded runtara-core started on {}", runtara.core_addr());
             println!("✓ Embedded runtara-environment started (in-process)");

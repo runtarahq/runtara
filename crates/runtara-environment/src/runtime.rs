@@ -17,7 +17,7 @@
 //! #[tokio::main]
 //! async fn main() -> anyhow::Result<()> {
 //!     let pool = sqlx::PgPool::connect("postgres://...").await?;
-//!     let runner = build_runner(persistence.clone())?;
+//!     let runner = build_runner(persistence.clone(), None)?;
 //!
 //!     let runtime = EnvironmentRuntime::builder()
 //!         .pool(pool)

@@ -71,6 +71,16 @@ pub async fn handle_instance_event(
     };
     state.persistence.insert_event(&event_record).await?;
 
+    // Count the step where every step is already passing. Doing it here rather
+    // than at a call site means a new step type cannot be added without being
+    // counted — the alternative drifts silently, and a step counter that
+    // undercounts reads as a stall.
+    if event.subtype.as_deref() == Some("step_debug_start")
+        && let Some(observer) = &state.event_observer
+    {
+        observer.on_step_started();
+    }
+
     // 5. Update instance status based on event type
     // All events return a response to acknowledge persistence
     match event.event_type() {
@@ -316,6 +326,96 @@ mod tests {
         // Verify instance was suspended
         let inst = persistence.get_instance("inst-1").await.unwrap().unwrap();
         assert_eq!(inst.status, "suspended");
+    }
+
+    /// A step event must reach an observer that is watching for it.
+    ///
+    /// This is the seam that lets a host count steps without core depending on
+    /// it. Nothing else proves the wiring: an observer that is never called
+    /// passes every test written against the observer itself, which is exactly
+    /// how the counter behind it shipped reporting "not measured" forever.
+    #[tokio::test]
+    async fn a_step_debug_start_reaches_the_event_observer() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct Counting(AtomicUsize);
+        impl super::super::InstanceEventObserver for Counting {
+            fn on_step_started(&self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let observer = Arc::new(Counting(AtomicUsize::new(0)));
+        let persistence = Arc::new(
+            MockPersistence::new().with_instance(make_instance("inst-1", "tenant-1", "running")),
+        );
+        let state =
+            InstanceHandlerState::new(persistence.clone()).with_event_observer(observer.clone());
+
+        let step_event = |subtype: &str| InstanceEvent {
+            instance_id: "inst-1".to_string(),
+            event_type: InstanceEventType::EventCustom as i32,
+            checkpoint_id: None,
+            payload: b"{}".to_vec(),
+            timestamp_ms: chrono::Utc::now().timestamp_millis(),
+            subtype: Some(subtype.to_string()),
+        };
+
+        handle_instance_event(&state, step_event("step_debug_start"))
+            .await
+            .unwrap();
+        assert_eq!(
+            observer.0.load(Ordering::SeqCst),
+            1,
+            "a step start must be counted"
+        );
+
+        // The end of a step is not a second start, and a log line is neither.
+        // Counting either would double or inflate the reported step rate.
+        handle_instance_event(&state, step_event("step_debug_end"))
+            .await
+            .unwrap();
+        handle_instance_event(&state, step_event("workflow_log"))
+            .await
+            .unwrap();
+        assert_eq!(
+            observer.0.load(Ordering::SeqCst),
+            1,
+            "only step starts count; ends and logs must not inflate the rate"
+        );
+    }
+
+    /// Everything must still work with no observer attached.
+    ///
+    /// Most callers have no aggregator — tests, the SDK's embedded backend —
+    /// and none of them should be forced to supply one.
+    #[tokio::test]
+    async fn events_are_handled_normally_without_an_observer() {
+        let persistence = Arc::new(
+            MockPersistence::new().with_instance(make_instance("inst-1", "tenant-1", "running")),
+        );
+        let state = InstanceHandlerState::new(persistence.clone());
+
+        let result = handle_instance_event(
+            &state,
+            InstanceEvent {
+                instance_id: "inst-1".to_string(),
+                event_type: InstanceEventType::EventCustom as i32,
+                checkpoint_id: None,
+                payload: b"{}".to_vec(),
+                timestamp_ms: chrono::Utc::now().timestamp_millis(),
+                subtype: Some("step_debug_start".to_string()),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(result.success);
+        assert_eq!(
+            persistence.get_events().len(),
+            1,
+            "the event is still stored"
+        );
     }
 
     #[tokio::test]

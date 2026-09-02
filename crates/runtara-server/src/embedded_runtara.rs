@@ -62,6 +62,7 @@ impl EmbeddedRuntara {
     /// Note: Migrations should be run before calling this via `run_migrations()`.
     pub async fn start(
         config: EmbeddedRuntaraConfig,
+        event_observer: Option<Arc<dyn runtara_core::instance_handlers::InstanceEventObserver>>,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         info!("Starting embedded Runtara servers...");
 
@@ -84,7 +85,7 @@ impl EmbeddedRuntara {
         // Create the workflow runner. Workflows are compiled to wasm32-wasip2
         // and executed on the embedded in-process engine.
         let runner: Arc<dyn runtara_environment::runner::Runner> =
-            runtara_environment::runner::build_runner(persistence.clone())
+            runtara_environment::runner::build_runner(persistence.clone(), event_observer)
                 .map_err(|e| anyhow::anyhow!("build workflow runner: {e}"))?;
         info!(
             runner_type = runner.runner_type(),
@@ -232,8 +233,9 @@ pub async fn create_runtara_pool()
 /// embedded core. Neither has a default of its own in this host: unset leaves
 /// the runtime's builder default, so the cap stays disabled unless a
 /// deployment asks for one.
-pub async fn maybe_start_embedded()
--> Result<Option<EmbeddedRuntara>, Box<dyn std::error::Error + Send + Sync>> {
+pub async fn maybe_start_embedded(
+    event_observer: Option<Arc<dyn runtara_core::instance_handlers::InstanceEventObserver>>,
+) -> Result<Option<EmbeddedRuntara>, Box<dyn std::error::Error + Send + Sync>> {
     let embedded_enabled = std::env::var("RUNTARA_EMBEDDED")
         .map(|v| v.to_lowercase() != "false" && v != "0")
         .unwrap_or(true); // Default to enabled
@@ -296,6 +298,6 @@ pub async fn maybe_start_embedded()
         core_overrides,
     };
 
-    let runtara = EmbeddedRuntara::start(config).await?;
+    let runtara = EmbeddedRuntara::start(config, event_observer).await?;
     Ok(Some(runtara))
 }

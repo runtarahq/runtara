@@ -21,6 +21,9 @@ pub use traits::*;
 /// fail a boot.
 pub fn build_runner(
     persistence: std::sync::Arc<dyn runtara_core::persistence::Persistence>,
+    event_observer: Option<
+        std::sync::Arc<dyn runtara_core::instance_handlers::InstanceEventObserver>,
+    >,
 ) -> Result<std::sync::Arc<dyn Runner>> {
     if let Ok(requested) = std::env::var("RUNTARA_RUNNER")
         && !requested.is_empty()
@@ -30,7 +33,10 @@ pub fn build_runner(
             "RUNTARA_RUNNER is set but only the embedded in-process engine exists; ignoring"
         );
     }
-    let runner = EmbeddedWasmRunner::new(WorkflowRunnerConfig::from_env(), persistence)?;
+    let mut runner = EmbeddedWasmRunner::new(WorkflowRunnerConfig::from_env(), persistence)?;
+    if let Some(observer) = event_observer {
+        runner = runner.with_event_observer(observer);
+    }
     tracing::info!("Using EmbeddedWasmRunner (in-process wasmtime) for workflow execution");
     Ok(std::sync::Arc::new(runner))
 }

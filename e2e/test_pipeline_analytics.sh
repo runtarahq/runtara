@@ -20,6 +20,7 @@
 #   * offered == accepted + denied holds across real traffic
 #   * an unbounded stage reports no limit rather than a fabricated one
 #   * unmeasured steps serialise as null, never as a stalled-looking zero
+#   * a workflow compiled WITH tracking makes steps a real, non-null measurement
 #   * the SSE stream opens with a snapshot immediately, not after a tick
 #   * the stream keeps delivering, and its window is a real elapsed time
 #   * a second concurrent subscriber does not disturb the first
@@ -118,7 +119,7 @@ api_post() {
 # denied` and pass vacuously at 0 == 0 + 0, proving nothing about the wiring
 # it exists to check.
 make_workflow() {
-    local name="$1" resp wf_id definition version
+    local name="$1" track="${2:-false}" resp wf_id definition version
     resp=$(api_post /workflows/create "{\"name\": \"${name}\", \"description\": \"pipeline analytics harness\"}")
     wf_id=$(echo "${resp}" | jq -r '.data.id // empty')
     [ -n "${wf_id}" ] || { print_error "Workflow create failed: ${resp}"; exit 1; }
@@ -134,7 +135,7 @@ make_workflow() {
       executionPlan: [],
       variables: {}, inputSchema: {}, outputSchema: {}
     }')
-    resp=$(api_post "/workflows/${wf_id}/update" "{\"executionGraph\": ${definition}}")
+    resp=$(api_post "/workflows/${wf_id}/update" "{\"executionGraph\": ${definition}, \"trackEvents\": ${track}}")
     [ "$(echo "${resp}" | jq -r '.success // false')" = "true" ] || { print_error "Update failed: ${resp}"; exit 1; }
     # `versionNumber` is the field the API returns; `.version` is always null,
     # and jq's `//` treats that as falsy only per-element — so a list of nulls
@@ -325,6 +326,37 @@ expect_eq "steps report as unmeasured" "null" \
   "$(echo "${AFTER}" | jq -r '.data.rates.steps')"
 expect_true "the other rates are still fully reported" \
   "$(echo "${AFTER}" | jq -r '.data.rates | (.offered != null) and (.accepted != null) and (.denied != null)')"
+
+print_step "7b. A tracked workflow turns steps into a real measurement"
+# The counterpart to step 7, and the reason it matters. Absent steps must be
+# absent because nothing could report one — not because nothing is wired.
+# `record_step` shipped once with no caller at all, so this asserts the whole
+# chain: guest -> host event seam -> observer -> counter -> sampler -> wire.
+WF_TRACKED="$(make_workflow "pipeline-probe-tracked" true)"
+echo "  tracked workflow ${WF_TRACKED} compiled"
+
+(
+  for _ in $(seq 1 40); do
+      curl -sS -o /dev/null --max-time 5 -X POST "${API}/workflows/${WF_TRACKED}/execute" \
+        -H 'Content-Type: application/json' -d '{"inputs": {"data": {}}}' 2>/dev/null || true
+  done
+) &
+TRACKED_PID=$!
+
+SAW_STEPS=0
+for _ in $(seq 1 15); do
+    sleep 1
+    SNAP="$(pipeline)"
+    [ "$(echo "${SNAP}" | jq -r '.data.rates != null')" = "true" ] || continue
+    if [ "$(echo "${SNAP}" | jq -r '.data.rates.steps != null')" = "true" ]; then
+        SAW_STEPS=1
+        echo "    steps now measured: $(echo "${SNAP}" | jq -r '.data.rates.steps')/s"
+        break
+    fi
+done
+wait "${TRACKED_PID}" 2>/dev/null || true
+
+expect_eq "steps become a measurement once something tracked has run" "1" "${SAW_STEPS}"
 
 print_step "8. The stream opens with a snapshot immediately"
 # A freshly loaded page must not sit blank waiting for the next tick.

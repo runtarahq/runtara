@@ -10,6 +10,7 @@ pub mod invocation_cleanup_worker;
 pub mod pipeline_gauges;
 pub mod pipeline_sampler;
 pub mod runtara_dto;
+pub mod step_counter;
 pub mod trigger_worker;
 
 /// Cancellation handle for running executions

@@ -7,6 +7,20 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::persistence::Persistence;
 
+/// Notified as guest events cross the host boundary, for a host that counts them.
+///
+/// Exists because runtara-core cannot depend on the server that aggregates
+/// these — the same dependency inversion the connections crate uses for its
+/// lifecycle events. Core defines the shape; the host implements it.
+///
+/// Implementations run on the event path of every step of every workflow, so
+/// they must be cheap and non-blocking. An atomic add is the intended cost; a
+/// lock or any I/O here is a bug.
+pub trait InstanceEventObserver: Send + Sync {
+    /// A workflow step reported starting.
+    fn on_step_started(&self);
+}
+
 /// Shared state for instance handlers.
 ///
 /// Contains the persistence implementation shared across all handlers.
@@ -20,6 +34,11 @@ pub struct InstanceHandlerState {
     /// `ERROR_SERVER_DRAINING`. In-flight handlers (checkpoint, event, signal
     /// ack) continue to serve so running instances can suspend cleanly.
     pub draining: Arc<AtomicBool>,
+    /// Counts guest events for whoever is watching, if anyone is.
+    ///
+    /// `None` in every context that has no aggregator — tests, the SDK's
+    /// embedded backend — so nothing is forced to supply one.
+    pub event_observer: Option<Arc<dyn InstanceEventObserver>>,
 }
 
 impl InstanceHandlerState {
@@ -31,6 +50,7 @@ impl InstanceHandlerState {
             persistence,
             max_concurrent_instances: 0,
             draining: Arc::new(AtomicBool::new(false)),
+            event_observer: None,
         }
     }
 
@@ -40,7 +60,14 @@ impl InstanceHandlerState {
             persistence,
             max_concurrent_instances,
             draining: Arc::new(AtomicBool::new(false)),
+            event_observer: None,
         }
+    }
+
+    /// Attach an observer that counts guest events as they arrive.
+    pub fn with_event_observer(mut self, observer: Arc<dyn InstanceEventObserver>) -> Self {
+        self.event_observer = Some(observer);
+        self
     }
 
     /// Handle to the draining flag so external coordinators (server, environment)

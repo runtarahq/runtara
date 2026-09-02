@@ -42,12 +42,17 @@ pub struct PipelineTotals {
     /// See [`PipelineGauges::record_step`] for why this can be legitimately
     /// zero while workflows run perfectly.
     pub steps: u64,
-    /// Runs live in this process that were compiled with step tracking on.
+    /// Runs started whose workflow has step tracking switched on.
     ///
     /// Exists so a consumer can tell "no steps ran" from "no run could have
-    /// reported a step", which is the difference between a stalled system and
-    /// an unobserved one.
-    pub tracked_runs: u64,
+    /// reported a step" — the difference between a stalled system and an
+    /// unobserved one. Monotonic rather than a live gauge on purpose: a start
+    /// is observed by the engine and an end by the runner, so a gauge needing
+    /// both would have to be decremented from a place that does not know
+    /// whether the run it is ending was tracked. Counting starts answers the
+    /// question that actually matters — can this deployment report steps at
+    /// all — without a decrement nobody is positioned to make correctly.
+    pub tracked_starts: u64,
 }
 
 /// The pipeline's monotonic counters.
@@ -60,7 +65,7 @@ pub struct PipelineGauges {
     denied: AtomicU64,
     started: AtomicU64,
     steps: AtomicU64,
-    tracked_runs: AtomicU64,
+    tracked_starts: AtomicU64,
 }
 
 impl PipelineGauges {
@@ -106,29 +111,16 @@ impl PipelineGauges {
     ///
     /// Treating that zero as evidence of a stall would raise an alarm on a
     /// healthy system, which is worse than raising none. Consumers must consult
-    /// [`PipelineTotals::tracked_runs`] and render "not measured" when it is
+    /// [`PipelineTotals::tracked_starts`] and render "not measured" when it is
     /// zero; run-permit age is the progress signal that works regardless of how
     /// an artifact was built.
     pub fn record_step(&self) {
         self.steps.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// A run that can report steps started.
-    pub fn enter_tracked_run(&self) {
-        self.tracked_runs.fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// A run that could report steps finished.
-    ///
-    /// Saturating, so an unbalanced release — a path that leaves without a
-    /// matching enter — parks the gauge at zero instead of wrapping to
-    /// eighteen quintillion and claiming the host is measurable when it is not.
-    pub fn leave_tracked_run(&self) {
-        let _ = self
-            .tracked_runs
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
-                Some(n.saturating_sub(1))
-            });
+    /// A run whose workflow has step tracking switched on has started.
+    pub fn record_tracked_start(&self) {
+        self.tracked_starts.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Read every counter.
@@ -139,7 +131,7 @@ impl PipelineGauges {
             denied: self.denied.load(Ordering::Relaxed),
             started: self.started.load(Ordering::Relaxed),
             steps: self.steps.load(Ordering::Relaxed),
-            tracked_runs: self.tracked_runs.load(Ordering::Relaxed),
+            tracked_starts: self.tracked_starts.load(Ordering::Relaxed),
         }
     }
 }
@@ -193,7 +185,10 @@ pub fn rates_between(
     // Steps are reportable only if something that could report them was live at
     // either end of the window. A run that started and finished entirely inside
     // the window is covered by the `next` reading having counted its steps.
-    let measurable = prev.tracked_runs > 0 || next.tracked_runs > 0 || next.steps > prev.steps;
+    // Measurable once anything in this process has run with tracking on: from
+    // then a zero is a real zero. Before that, nothing could have reported a
+    // step and "not measured" is the only honest answer.
+    let measurable = next.tracked_starts > 0 || next.steps > prev.steps;
 
     Some(PipelineRates {
         offered: per_sec(prev.offered, next.offered),
@@ -284,7 +279,7 @@ mod tests {
             denied: 100,
             started: 880,
             steps: 4_000,
-            tracked_runs: 4,
+            tracked_starts: 4,
         };
         let next = PipelineTotals {
             offered: 1_400,
@@ -292,7 +287,7 @@ mod tests {
             denied: 100,
             started: 1_280,
             steps: 6_000,
-            tracked_runs: 6,
+            tracked_starts: 6,
         };
         let r = rates_between(prev, next, 0, 0, 1_000).expect("a non-empty window yields rates");
         assert_eq!(r.offered, 400.0);
@@ -346,14 +341,14 @@ mod tests {
             accepted: 500,
             started: 500,
             steps: 0,
-            tracked_runs: 0,
+            tracked_starts: 0,
             ..PipelineTotals::default()
         };
         let later = PipelineTotals {
             accepted: 900,
             started: 900,
             steps: 0,
-            tracked_runs: 0,
+            tracked_starts: 0,
             ..PipelineTotals::default()
         };
         let r = rates_between(quiet, later, 0, 0, 1_000).expect("rates");
@@ -369,10 +364,10 @@ mod tests {
 
     /// With tracked runs live and no steps, zero is a real and alarming reading.
     #[test]
-    fn steps_are_zero_when_tracked_runs_report_nothing() {
+    fn steps_are_zero_once_a_tracked_run_has_existed() {
         let held = PipelineTotals {
             steps: 700,
-            tracked_runs: 8,
+            tracked_starts: 8,
             ..PipelineTotals::default()
         };
         let r = rates_between(held, held, 0, 0, 1_000).expect("rates");
@@ -383,18 +378,131 @@ mod tests {
         );
     }
 
-    /// Tracked-run accounting must survive an unbalanced release.
+    /// One tracked run makes every later zero a real zero.
+    ///
+    /// Counting starts rather than holding a live gauge is what makes this
+    /// answerable at all: the engine sees a start and knows whether the
+    /// workflow tracks steps, while the runner sees the end and does not.
     #[test]
-    fn leaving_more_tracked_runs_than_were_entered_saturates() {
+    fn a_single_tracked_start_makes_steps_measurable_from_then_on() {
         let g = PipelineGauges::new();
-        g.enter_tracked_run();
-        g.leave_tracked_run();
-        g.leave_tracked_run();
+        assert_eq!(g.totals().tracked_starts, 0);
         assert_eq!(
-            g.totals().tracked_runs,
-            0,
-            "must floor at zero, never wrap to a huge count"
+            rates_between(g.totals(), g.totals(), 0, 0, 1_000)
+                .expect("rates")
+                .steps,
+            None,
+            "nothing has ever tracked, so a zero would be an invention"
         );
+
+        g.record_tracked_start();
+        let after = g.totals();
+        assert_eq!(after.tracked_starts, 1);
+        assert_eq!(
+            rates_between(after, after, 0, 0, 1_000)
+                .expect("rates")
+                .steps,
+            Some(0.0),
+            "something tracked has run, so zero steps is now a real reading"
+        );
+    }
+
+    /// Every recording method must have a caller outside this module.
+    ///
+    /// This exists because the first cut of these counters shipped with
+    /// `record_step` written, documented and unit-tested — and never called
+    /// from anywhere. The steps tile read "not measured" on every deployment
+    /// regardless of what was running, which is worse than showing nothing:
+    /// it looked like an answer. It is exactly the defect already sitting in
+    /// `observability/mod.rs`, where four instruments are declared, constructed
+    /// and exported with no write sites at all.
+    ///
+    /// A unit test cannot catch this, because a counter with no writer passes
+    /// every test written against it. So this reads the source tree instead and
+    /// asserts each method is mentioned somewhere that is not its own
+    /// definition, its own doc comment, or a test.
+    #[test]
+    fn every_counter_has_a_writer_outside_this_module() {
+        use std::path::Path;
+
+        let recorders = [
+            "record_offered",
+            "record_accepted",
+            "record_denied",
+            "record_started",
+            "record_step",
+            "record_tracked_start",
+        ];
+
+        // The crate root, found from this file rather than the working
+        // directory, so the test does not depend on where cargo was invoked.
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut sources = Vec::new();
+        collect_rs(&src, &mut sources);
+        assert!(
+            sources.len() > 10,
+            "expected to walk the crate source, found {} files",
+            sources.len()
+        );
+
+        for method in recorders {
+            let needle = format!(".{method}(");
+            let mut callers = Vec::new();
+            for (path, body) in &sources {
+                // Skip this module: a definition and its own tests are not
+                // evidence that anything in production reaches the counter.
+                if path.ends_with("pipeline_gauges.rs") {
+                    continue;
+                }
+                for line in body.lines() {
+                    let line = line.trim();
+                    if line.starts_with("//") || line.starts_with("///") {
+                        continue;
+                    }
+                    if line.contains(&needle) {
+                        callers.push(path.clone());
+                        break;
+                    }
+                }
+            }
+            assert!(
+                !callers.is_empty(),
+                "`{method}` has no caller outside pipeline_gauges.rs — it is a \
+                 counter nothing writes to, so whatever it reports is fiction"
+            );
+        }
+
+        // A caller is necessary but not sufficient: `record_step` runs inside
+        // an observer, and an observer nothing installs is just as silent as a
+        // method nothing calls. Check the boot path actually hands one over.
+        let joined: String = sources
+            .iter()
+            .filter(|(path, _)| path.ends_with("server.rs"))
+            .map(|(_, body)| body.as_str())
+            .collect();
+        assert!(
+            joined.contains("StepCounter::new("),
+            "nothing installs the step observer at boot, so `record_step` has a \
+             caller that never runs — the counter stays at zero and the steps \
+             tile reads 'not measured' on every deployment"
+        );
+    }
+
+    /// Walk a directory collecting `.rs` sources as (path, contents).
+    fn collect_rs(dir: &std::path::Path, out: &mut Vec<(String, String)>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_rs(&path, out);
+            } else if path.extension().is_some_and(|e| e == "rs")
+                && let Ok(body) = std::fs::read_to_string(&path)
+            {
+                out.push((path.display().to_string(), body));
+            }
+        }
     }
 
     /// Counters must survive concurrent writers without losing an increment.

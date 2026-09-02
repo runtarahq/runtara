@@ -695,6 +695,13 @@ impl ExecutionEngine {
 
         // 4. Get track_events (already have it from workflow)
         let track_events = workflow.track_events;
+        // Recorded here because this is the only place that knows it. Whether a
+        // run can report steps is decided when the artifact is compiled, and by
+        // the time the runner ends that run nothing downstream still knows —
+        // which is why the counter is starts, not a live gauge.
+        if track_events {
+            self.gauges.record_tracked_start();
+        }
 
         // 5. Require trigger stream
         let trigger_stream = self.trigger_stream.as_ref().ok_or_else(|| {

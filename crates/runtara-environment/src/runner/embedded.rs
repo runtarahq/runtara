@@ -202,6 +202,24 @@ impl EmbeddedWasmRunner {
         })
     }
 
+    /// Attach an observer that counts guest events as they cross the host.
+    ///
+    /// Rebuilds the handler state rather than mutating it, because the state is
+    /// shared behind an `Arc` by the time anything could ask for this — and a
+    /// runner is configured once, at startup, before any run exists.
+    pub fn with_event_observer(
+        mut self,
+        observer: Arc<dyn runtara_core::instance_handlers::InstanceEventObserver>,
+    ) -> Self {
+        self.handler_state = Arc::new(
+            runtara_core::instance_handlers::InstanceHandlerState::new(Arc::clone(
+                &self.persistence,
+            ))
+            .with_event_observer(observer),
+        );
+        self
+    }
+
     fn merged_env(&self, options: &LaunchOptions) -> HashMap<String, String> {
         let mut env = common::build_env(
             &self.config,
