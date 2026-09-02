@@ -66,7 +66,7 @@
 //! | `RUNTARA_INSTANCE_ID` | Yes | - | Unique instance identifier |
 //! | `RUNTARA_TENANT_ID` | Yes | - | Tenant identifier |
 //! | `RUNTARA_HTTP_URL` | No | `http://127.0.0.1:8003` | HTTP API URL |
-//! | `RUNTARA_REQUEST_TIMEOUT_MS` | No | `30000` | Request timeout |
+//! | `RUNTARA_REQUEST_TIMEOUT_MS` | No | `30000` | This SDK's per-request HTTP timeout, and nothing else. The server's workflow poll timeout is a separate knob, `RUNTARA_RUNTIME_POLL_TIMEOUT_SECS`. |
 //! | `RUNTARA_SIGNAL_POLL_INTERVAL_MS` | No | `1000` | Signal poll rate limit |
 //!
 //! ## Programmatic Configuration

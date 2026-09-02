@@ -35,6 +35,17 @@ plain environment variables read by `config.rs`; see that module for the
 authoritative list. Once the server is up, the OpenAPI spec is exposed by the
 router and the MCP transport is mounted under the `mcp` module's routes.
 
+`RUNTARA_RUNTIME_POLL_TIMEOUT_SECS` (default `300`) bounds how long the server
+waits for a workflow instance to reach a terminal state when the caller names no
+timeout of its own. It replaces `RUNTARA_REQUEST_TIMEOUT_MS`, which is the
+runtara-sdk per-request HTTP timeout and never meant this: an operator who
+raised it for the SDK also moved this wait, and one who set it here was writing
+milliseconds for a value kept in seconds. The old name is still read when the
+new one is unset — a deployment that relied on it keeps the same wait — and the
+server logs a warning naming both the milliseconds it found and the seconds it
+derived. Values under `1000` truncate to a zero-second wait, so migrate rather
+than leave the old name in place.
+
 ## Embedded UI (optional)
 
 The crate can bundle the `./frontend` React app into the binary behind the

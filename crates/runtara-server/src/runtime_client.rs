@@ -107,8 +107,89 @@ pub enum TerminalOutcome {
 /// Configuration for the runtime client
 #[derive(Debug, Clone)]
 pub struct RuntimeClientConfig {
-    /// Default timeout for operations in seconds
+    /// How long to wait for a workflow instance to reach a terminal state, in
+    /// seconds, when the caller passes no timeout of its own. Not a per-request
+    /// deadline — nothing here issues a request that could take this long; it
+    /// bounds an observation loop.
     pub default_timeout_secs: u32,
+}
+
+/// The wait applied when neither the caller nor the environment names one.
+const DEFAULT_POLL_TIMEOUT_SECS: u32 = 300;
+
+/// The server's own name for that wait, in the unit it is actually kept in.
+const POLL_TIMEOUT_SECS_ENV: &str = "RUNTARA_RUNTIME_POLL_TIMEOUT_SECS";
+
+/// The name this setting used to share with the SDK's per-request HTTP timeout
+/// (`HttpSdkConfig::from_env`), which is milliseconds and means something else
+/// entirely. Still read, because a deployment that set it was getting a longer
+/// poll timeout and silently reverting it to the default on upgrade would cut
+/// long workflows off at five minutes. See [`resolve_poll_timeout`].
+const LEGACY_POLL_TIMEOUT_MS_ENV: &str = "RUNTARA_REQUEST_TIMEOUT_MS";
+
+/// The poll timeout [`RuntimeClientConfig::from_env`] settled on, plus whatever
+/// the operator needs told about how it got there.
+#[derive(Debug, PartialEq, Eq)]
+struct PollTimeout {
+    secs: u32,
+    /// `Some` when the value came from the deprecated variable.
+    deprecation: Option<String>,
+}
+
+/// Decide the poll timeout from the two variables that can name it.
+///
+/// Split out of the env read so the precedence and the millisecond conversion
+/// are testable without mutating process state, which nothing in this crate can
+/// do safely alongside parallel tests.
+///
+/// The deprecated variable is converted the way it always was — integer
+/// division by 1000, truncating — so an existing deployment keeps the exact
+/// number of seconds it had. That conversion is the reason the warning quotes
+/// both numbers: a value chosen as a millisecond request timeout rarely reads
+/// as a sensible number of seconds, and under 1000 it truncates to none at all.
+fn resolve_poll_timeout(configured_secs: Option<String>, legacy_ms: Option<String>) -> PollTimeout {
+    if let Some(secs) = configured_secs
+        .as_deref()
+        .and_then(|value| value.parse::<u32>().ok())
+    {
+        return PollTimeout {
+            secs,
+            deprecation: None,
+        };
+    }
+
+    // An unparseable value falls through rather than failing: a typo in either
+    // name costs nothing here, and the default is a working timeout.
+    let Some(ms) = legacy_ms
+        .as_deref()
+        .and_then(|value| value.parse::<u32>().ok())
+    else {
+        return PollTimeout {
+            secs: DEFAULT_POLL_TIMEOUT_SECS,
+            deprecation: None,
+        };
+    };
+
+    let secs = ms / 1000;
+    let mut deprecation = format!(
+        "{LEGACY_POLL_TIMEOUT_MS_ENV} is deprecated as a server setting. It is the runtara-sdk \
+         per-request HTTP timeout, and the server read the same name for something unrelated: how \
+         long to wait for a workflow instance to finish. Its {ms}ms is being taken as {secs}s for \
+         that wait, in place of the {DEFAULT_POLL_TIMEOUT_SECS}s default. Set \
+         {POLL_TIMEOUT_SECS_ENV} to the seconds you want, and unset \
+         {LEGACY_POLL_TIMEOUT_MS_ENV} from this process's environment."
+    );
+    if secs == 0 {
+        deprecation.push_str(&format!(
+            " {ms}ms truncates to zero seconds, so every wait now times out immediately — set \
+             {POLL_TIMEOUT_SECS_ENV} before this server serves traffic."
+        ));
+    }
+
+    PollTimeout {
+        secs,
+        deprecation: Some(deprecation),
+    }
 }
 
 impl RuntimeClientConfig {
@@ -117,15 +198,22 @@ impl RuntimeClientConfig {
     /// There is no address to read any more: the client talks to the embedded
     /// environment directly, so whether a runtime exists is decided by whether
     /// the embedded runtime started, not by a variable.
+    ///
+    /// `RUNTARA_RUNTIME_POLL_TIMEOUT_SECS` names the poll timeout, in seconds.
+    /// `RUNTARA_REQUEST_TIMEOUT_MS` is still honoured when it does not, and
+    /// warns; see [`resolve_poll_timeout`].
     pub fn from_env() -> Self {
-        let default_timeout_secs = std::env::var("RUNTARA_REQUEST_TIMEOUT_MS")
-            .ok()
-            .and_then(|s| s.parse::<u32>().ok())
-            .map(|ms| ms / 1000)
-            .unwrap_or(300);
+        let resolved = resolve_poll_timeout(
+            std::env::var(POLL_TIMEOUT_SECS_ENV).ok(),
+            std::env::var(LEGACY_POLL_TIMEOUT_MS_ENV).ok(),
+        );
+
+        if let Some(message) = resolved.deprecation {
+            warn!("{message}");
+        }
 
         Self {
-            default_timeout_secs,
+            default_timeout_secs: resolved.secs,
         }
     }
 }
@@ -1003,5 +1091,92 @@ mod classify_observed_status_tests {
             }
             other => panic!("expected Cancelled, got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod poll_timeout_tests {
+    use super::*;
+
+    /// The point of the rename: a server-side wait measured in seconds is now
+    /// named in seconds, and nothing divides it.
+    #[test]
+    fn the_seconds_variable_is_taken_at_face_value() {
+        let resolved = resolve_poll_timeout(Some("900".to_string()), None);
+
+        assert_eq!(resolved.secs, 900);
+        assert_eq!(resolved.deprecation, None);
+    }
+
+    #[test]
+    fn neither_variable_leaves_the_default() {
+        let resolved = resolve_poll_timeout(None, None);
+
+        assert_eq!(resolved.secs, DEFAULT_POLL_TIMEOUT_SECS);
+        assert_eq!(resolved.deprecation, None);
+    }
+
+    /// The fallback the deprecation exists for: a deployment that raised the
+    /// wait through the old name keeps the same wait after the upgrade. Reverting
+    /// it to 300s here would cut every workflow past five minutes short, which is
+    /// exactly the silent change a rename must not make.
+    #[test]
+    fn the_deprecated_variable_still_sets_the_same_wait() {
+        let resolved = resolve_poll_timeout(None, Some("3600000".to_string()));
+
+        assert_eq!(resolved.secs, 3600);
+        let message = resolved.deprecation.expect("the old name warns");
+        assert!(message.contains(LEGACY_POLL_TIMEOUT_MS_ENV), "{message}");
+        assert!(message.contains(POLL_TIMEOUT_SECS_ENV), "{message}");
+        // Both numbers, because the whole trap is that they are not the same
+        // number in the same unit.
+        assert!(message.contains("3600000ms"), "{message}");
+        assert!(message.contains("3600s"), "{message}");
+    }
+
+    /// The collision itself: the same value means one thing to the SDK and
+    /// another here, so whichever name wins has to be the one that decides.
+    #[test]
+    fn the_seconds_variable_wins_over_the_deprecated_one() {
+        let resolved = resolve_poll_timeout(Some("120".to_string()), Some("3600000".to_string()));
+
+        assert_eq!(resolved.secs, 120);
+        assert_eq!(
+            resolved.deprecation, None,
+            "a migrated deployment is not nagged about a variable it no longer relies on"
+        );
+    }
+
+    /// A sub-second request timeout is a reasonable SDK setting and a degenerate
+    /// server one: it truncates to a zero-second wait, under which nothing ever
+    /// finishes in time. Honoured rather than clamped — clamping would change the
+    /// behaviour of the deployments the fallback exists to preserve — but said
+    /// out loud, since no operator picked it on purpose.
+    #[test]
+    fn a_sub_second_deprecated_value_truncates_and_says_so() {
+        let resolved = resolve_poll_timeout(None, Some("500".to_string()));
+
+        assert_eq!(resolved.secs, 0);
+        let message = resolved.deprecation.expect("the old name warns");
+        assert!(message.contains("truncates to zero seconds"), "{message}");
+    }
+
+    /// A typo in either name costs nothing: the default is a working timeout, so
+    /// refusing to start over one would be worse than absorbing it.
+    #[test]
+    fn unparseable_values_fall_back() {
+        assert_eq!(
+            resolve_poll_timeout(Some("ten minutes".to_string()), None).secs,
+            DEFAULT_POLL_TIMEOUT_SECS
+        );
+        assert_eq!(
+            resolve_poll_timeout(None, Some("ten minutes".to_string())).secs,
+            DEFAULT_POLL_TIMEOUT_SECS
+        );
+        assert_eq!(
+            resolve_poll_timeout(None, Some("ten minutes".to_string())).deprecation,
+            None,
+            "a value that was never read should not be reported as honoured"
+        );
     }
 }
