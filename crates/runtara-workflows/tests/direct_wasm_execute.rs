@@ -7163,6 +7163,14 @@ struct CheckpointingRuntimeHost {
     /// whose deterministic signal id (workflow-id-scoped) isn't known ahead of
     /// the run.
     any_signal: Mutex<Option<Vec<u8>>>,
+    /// When set, `durable-sleep-checkpoint` reports this message instead of
+    /// returning cleanly — the shape of a sleep whose request the client
+    /// deadline outlasted.
+    sleep_error: Mutex<Option<String>>,
+    /// What the guest reported through `runtime.fail`. `None` after a failed run
+    /// is the defect this captures: an error the lowering returned without ever
+    /// reporting it.
+    failed: Mutex<Option<Vec<u8>>>,
 }
 
 impl CheckpointingRuntimeHost {
@@ -7176,7 +7184,16 @@ impl CheckpointingRuntimeHost {
             clock_offset_ms: Mutex::new(0),
             pinned_clock_ms: Mutex::new(None),
             any_signal: Mutex::new(None),
+            sleep_error: Mutex::new(None),
+            failed: Mutex::new(None),
         }
+    }
+
+    /// Arm every `durable-sleep-checkpoint` to fail with `message`, standing in
+    /// for the composed binding's sleep request being aborted by the client's
+    /// own request deadline before core can answer it.
+    fn fail_sleeps_with(&self, message: &str) {
+        *self.sleep_error.lock().unwrap() = Some(message.to_string());
     }
 
     fn deliver_signal(&self, checkpoint_id: &str, payload: &[u8]) {
@@ -7238,7 +7255,8 @@ impl runtara_component_host::runtime_host::RuntimeHost for CheckpointingRuntimeH
         *self.completed.lock().unwrap() = Some(output);
         Ok(())
     }
-    async fn fail(&self, _error: Vec<u8>) -> Result<(), String> {
+    async fn fail(&self, error: Vec<u8>) -> Result<(), String> {
+        *self.failed.lock().unwrap() = Some(error);
         Ok(())
     }
     async fn custom_event(&self, _kind: String, _payload: Vec<u8>) -> Result<(), String> {
@@ -7342,6 +7360,12 @@ impl runtara_component_host::runtime_host::RuntimeHost for CheckpointingRuntimeH
                 .or_insert(state);
         }
         self.sleeps.lock().unwrap().push(checkpoint_id);
+        // Report the failure only AFTER the checkpoint and the key are recorded:
+        // core saves before it sleeps, so a sleep that dies on the client's
+        // deadline dies with its checkpoint already durable.
+        if let Some(message) = self.sleep_error.lock().unwrap().as_ref() {
+            return Err(message.clone());
+        }
         Ok(())
     }
 }
@@ -7686,6 +7710,66 @@ fn direct_wasm_execute_cli_run_abi_blocks_a_long_delay() {
         host.checkpoints.lock().unwrap().get("delay"),
         Some(&Vec::new()),
         "cli-run must record only the blocking sleep's empty checkpoint, never a deadline"
+    );
+}
+
+/// A durable sleep that fails must SAY so.
+///
+/// The blocking arm used to end its `durable-sleep-checkpoint` call with a bare
+/// `Err` return, which under `wasi:cli/run` is an exit code and nothing else: no
+/// `failed` event, no message. All an operator got was that the process had
+/// died — a report naming neither the sleep nor its cause, and pointing squarely
+/// at the wrong problem.
+///
+/// This is the arm where that matters. `cli-run` has no success arm able to
+/// carry a wake, so it can never park and always blocks; under the composed
+/// binding that block is an HTTP request held open for the sleep's whole
+/// duration, which the client's own request deadline outlasts for any sleep
+/// beyond it. Every one of those failures was mute.
+#[test]
+fn direct_wasm_execute_cli_run_reports_a_failed_durable_sleep() {
+    const SLEEP_FAILURE: &str =
+        "durable sleep of 3600000ms does not fit inside the 30000ms client request timeout";
+
+    let components_dir = direct_e2e_components_dir();
+    let graph: ExecutionGraph = serde_json::from_str(&store_freeing_delay_fixture(Some(3_600_000)))
+        .expect("delay fixture parses");
+    let temp = tempfile::tempdir().expect("tempdir");
+    let compiled = compile_direct_workflow_composed_configured(
+        DirectCompilationInput {
+            workflow_id: "delay-cli-run-sleep-failure".to_string(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: graph,
+            child_workflows: vec![],
+            output_dir: temp.path().to_path_buf(),
+            track_events: false,
+            agent_catalog: None,
+            agent_slug: None,
+        },
+        &components_dir,
+        RuntimeBinding::HostImport,
+        runtara_workflows::direct_wasm::WorkflowAbi::CliRunHttp,
+        false,
+    )
+    .expect("cli-run compile+compose succeeds");
+
+    let input = br#"{"value":"cli-run"}"#.to_vec();
+    let host = Arc::new(CheckpointingRuntimeHost::new(&input));
+    host.fail_sleeps_with(SLEEP_FAILURE);
+    let (ok, _stderr, _) = execute_via_embedded(&compiled.wasm_path, &[], Some(host.clone()));
+
+    assert!(
+        !ok,
+        "a workflow whose durable sleep failed must not report success"
+    );
+    let reported = host.failed.lock().unwrap().clone().expect(
+        "the sleep failure must reach the operator through runtime.fail, not just an exit code",
+    );
+    assert!(
+        String::from_utf8_lossy(&reported).contains(SLEEP_FAILURE),
+        "the report must carry the sleep's own diagnosis; got {:?}",
+        String::from_utf8_lossy(&reported)
     );
 }
 

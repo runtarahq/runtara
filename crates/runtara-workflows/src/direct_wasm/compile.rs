@@ -917,7 +917,32 @@ pub fn compile_direct_workflow(
 ///
 /// Older images have no tag at all, which reads as a miss and rebuilds once.
 pub fn direct_lowering_tag() -> String {
-    format!("omit_runtime={}", omit_runtime_from_env())
+    // The ABI belongs here as much as any lowering flag — more, in fact. It
+    // decides whether the artifact exports `wasi:cli/run` or `lifecycle.invoke`,
+    // so an artifact built under one and run under the other is not merely
+    // differently optimised, it is the wrong shape. Leaving it out meant a
+    // release that changed the default ABI did not disturb this tag, the
+    // definition checksum was unchanged too, and every existing workflow kept
+    // its stale artifact: launches then hung with no steps and no error, held
+    // their run permits until the execution timeout, and recompiling reported
+    // success without rebuilding anything.
+    format!(
+        "abi={},omit_runtime={}",
+        workflow_abi_tag(workflow_abi_from_env()),
+        omit_runtime_from_env()
+    )
+}
+
+/// Stable name for an ABI in the cache tag.
+///
+/// Spelled out rather than derived from `Debug` so renaming a variant cannot
+/// silently invalidate every image in a deployment.
+fn workflow_abi_tag(abi: super::component::WorkflowAbi) -> &'static str {
+    match abi {
+        super::component::WorkflowAbi::CliRunHttp => "cli-run",
+        super::component::WorkflowAbi::InvokeHostImports => "invoke",
+        super::component::WorkflowAbi::AgentCapabilities => "agent",
+    }
 }
 
 /// Opt-in to dropping the `runtara:workflow-runtime/runtime` import for a PURE,
