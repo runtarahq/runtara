@@ -31,10 +31,26 @@ services:
             - postgres_data:/var/lib/postgresql
             - ./init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
         healthcheck:
-            test: ["CMD-SHELL", "pg_isready -U smo_worker -d smo_container"]
+            # Probed over TCP, and against a database init-db.sql creates.
+            #
+            # On first boot the entrypoint runs a temporary server with
+            # listen_addresses='' so it can execute the initdb scripts, then
+            # shuts it down and starts the real one. `pg_isready` over the unix
+            # socket answers during that window, so the container reported
+            # healthy while the only server running was about to be stopped -
+            # anything that connected on the strength of that got "connection
+            # reset by peer". Requiring TCP means the probe cannot pass until
+            # the real server is listening, and naming `runtara` means it
+            # cannot pass until the init scripts have actually run.
+            test:
+                [
+                    "CMD-SHELL",
+                    "pg_isready -h 127.0.0.1 -U smo_worker -d runtara",
+                ]
             interval: 2s
             timeout: 5s
-            retries: 10
+            retries: 15
+            start_period: 10s
 
     valkey:
         image: valkey/valkey:8-alpine
