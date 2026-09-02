@@ -89,6 +89,10 @@ pub struct HttpBackend {
     tenant_id: String,
     base_url: String,
     client: runtara_http::HttpClient,
+    /// The deadline the client applies to every request, kept alongside the
+    /// client that enforces it because durable sleep has to reason about it —
+    /// see [`HttpBackend::reject_sleep_beyond_request_timeout`].
+    request_timeout_ms: u64,
     connected: AtomicBool,
 }
 
@@ -104,6 +108,7 @@ impl HttpBackend {
             tenant_id: config.tenant_id.clone(),
             base_url: config.base_url.trim_end_matches('/').to_string(),
             client,
+            request_timeout_ms: config.request_timeout_ms,
             connected: AtomicBool::new(false),
         })
     }
@@ -114,6 +119,38 @@ impl HttpBackend {
             "{}/api/v1/instances/{}/{}",
             self.base_url, self.instance_id, path
         )
+    }
+
+    /// Refuse a durable sleep the client deadline cannot outlast.
+    ///
+    /// `POST .../sleep` does not answer until the sleep is over: core holds the
+    /// response open for the whole duration. This backend's client, meanwhile,
+    /// aborts any request that produces no first byte within
+    /// `request_timeout_ms`. A sleep at or beyond that ceiling therefore cannot
+    /// succeed — the abort always lands first, and it lands at the timeout, not
+    /// at the requested duration.
+    ///
+    /// Left to run, the failure names neither sleep nor the ceiling: it reads as
+    /// a server that stopped answering. Refusing up front costs milliseconds
+    /// instead of the whole timeout and says which knob moves the ceiling.
+    ///
+    /// A zero timeout is left alone deliberately. It is a degenerate
+    /// configuration under which no request of any kind can complete, so
+    /// reporting it against the sleep would blame the sleep for something that
+    /// is not about sleeping at all.
+    fn reject_sleep_beyond_request_timeout(&self, duration_ms: u64) -> Result<()> {
+        let timeout_ms = self.request_timeout_ms;
+        if timeout_ms == 0 || duration_ms < timeout_ms {
+            return Ok(());
+        }
+
+        Err(SdkError::Sleep(format!(
+            "durable sleep of {duration_ms}ms does not fit inside the {timeout_ms}ms client \
+             request timeout: this backend holds the sleep request open for the whole duration, \
+             so the client aborts it at {timeout_ms}ms before the server ever answers. Raise \
+             RUNTARA_REQUEST_TIMEOUT_MS above the sleep duration, or run the workflow on the \
+             host-import binding, whose durable sleep issues no request at all."
+        )))
     }
 
     /// POST JSON to an endpoint and deserialize the response.
@@ -548,13 +585,22 @@ impl SdkBackend for HttpBackend {
     }
 
     fn durable_sleep(&self, duration: Duration, checkpoint_id: &str, state: &[u8]) -> Result<()> {
+        let duration_ms = duration.as_millis() as u64;
+        self.reject_sleep_beyond_request_timeout(duration_ms)?;
+
         let body = SleepBody {
-            duration_ms: duration.as_millis() as u64,
+            duration_ms,
             checkpoint_id: checkpoint_id.to_string(),
             state: encode_b64(state),
         };
 
-        let resp: SuccessResp = self.post(&self.url("sleep"), &body)?;
+        // Re-label a transport failure as a sleep failure. The generic text is
+        // "HTTP request failed", which for the one request that is *meant* to
+        // take minutes reads as an unrelated network fault; naming the sleep and
+        // its duration is what points a reader at the right thing.
+        let resp: SuccessResp = self.post(&self.url("sleep"), &body).map_err(|error| {
+            SdkError::Sleep(format!("durable sleep of {duration_ms}ms failed: {error}"))
+        })?;
 
         if resp.success {
             Ok(())
@@ -756,5 +802,150 @@ mod config_tests {
         let cfg = HttpSdkConfig::from_env().unwrap();
 
         assert_eq!(cfg.base_url, "http://example.test:1234");
+    }
+}
+
+#[cfg(test)]
+mod sleep_ceiling_tests {
+    use super::{HttpBackend, HttpSdkConfig};
+    use crate::backend::SdkBackend;
+    use crate::error::SdkError;
+    use std::time::Duration;
+
+    fn backend_at(base_url: String, request_timeout_ms: u64) -> HttpBackend {
+        HttpBackend::new(&HttpSdkConfig {
+            instance_id: "test-instance".to_string(),
+            tenant_id: "test-tenant".to_string(),
+            base_url,
+            request_timeout_ms,
+            signal_poll_interval_ms: 1_000,
+            heartbeat_interval_ms: 30_000,
+        })
+        .expect("backend construction is infallible for a well-formed config")
+    }
+
+    /// `base_url` is deliberately a dead port: these assertions are about sleeps
+    /// that never get as far as building a request, so a backend that stopped
+    /// refusing would fail by dialling rather than pass silently.
+    fn backend(request_timeout_ms: u64) -> HttpBackend {
+        backend_at("http://127.0.0.1:1".to_string(), request_timeout_ms)
+    }
+
+    /// A stand-in core that accepts the connection and then answers nothing —
+    /// what a sleep looks like on the wire for its whole duration, since
+    /// `handle_sleep` writes no byte until the deadline passes.
+    ///
+    /// The accept loop runs detached and holds each connection open; it lives
+    /// for the process, which outlasts anything that would notice.
+    fn silent_core() -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral port");
+        let addr = listener.local_addr().expect("bound address");
+        std::thread::spawn(move || {
+            let mut held = Vec::new();
+            while let Ok((stream, _)) = listener.accept() {
+                held.push(stream);
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    /// The wiring, not just the predicate: `durable_sleep` itself must refuse,
+    /// and the refusal must carry both numbers and the knob that moves the
+    /// ceiling. The failure it replaces named neither — it arrived at the
+    /// timeout, not at the requested duration, and read as a dead server.
+    #[test]
+    fn durable_sleep_refuses_a_duration_the_request_timeout_cannot_outlast() {
+        let error = backend(30_000)
+            .durable_sleep(Duration::from_millis(35_000), "delay", b"")
+            .expect_err("a 35s sleep cannot survive a 30s request timeout");
+
+        assert!(matches!(error, SdkError::Sleep(_)), "got {error:?}");
+        let message = error.to_string();
+        assert!(message.contains("35000ms"), "{message}");
+        assert!(message.contains("30000ms"), "{message}");
+        assert!(message.contains("RUNTARA_REQUEST_TIMEOUT_MS"), "{message}");
+    }
+
+    /// The boundary is inclusive. A sleep of exactly the timeout still loses:
+    /// the response cannot be written until the sleep is over, which is a moment
+    /// after the client has already given up.
+    #[test]
+    fn a_sleep_of_exactly_the_timeout_is_refused_and_one_below_it_is_not() {
+        assert!(
+            backend(30_000)
+                .reject_sleep_beyond_request_timeout(30_000)
+                .is_err()
+        );
+        assert!(
+            backend(30_000)
+                .reject_sleep_beyond_request_timeout(29_999)
+                .is_ok()
+        );
+    }
+
+    /// Raising the timeout raises the ceiling with it, so a deployment
+    /// configured for long sleeps keeps working.
+    #[test]
+    fn a_raised_request_timeout_raises_the_ceiling() {
+        assert!(
+            backend(300_000)
+                .reject_sleep_beyond_request_timeout(35_000)
+                .is_ok()
+        );
+    }
+
+    /// Zero is not a ceiling of zero. It is a configuration under which no
+    /// request of any kind completes, so reporting it against the sleep would
+    /// blame the sleep for something that has nothing to do with sleeping.
+    #[test]
+    fn a_zero_timeout_is_not_treated_as_a_ceiling() {
+        assert!(
+            backend(0)
+                .reject_sleep_beyond_request_timeout(35_000)
+                .is_ok()
+        );
+    }
+
+    /// The refusal is a SHORT-CIRCUIT, not a nicer message on the same wait.
+    /// Against a core that answers nothing, an over-ceiling sleep must come back
+    /// long before the deadline it could never have met — which is the whole
+    /// point: the old failure arrived at the timeout, making a misconfigured
+    /// sleep look like a server that had stopped responding.
+    #[test]
+    fn an_over_ceiling_sleep_is_refused_without_waiting_out_the_timeout() {
+        let backend = backend_at(silent_core(), 1_500);
+
+        let started = std::time::Instant::now();
+        let error = backend
+            .durable_sleep(Duration::from_millis(2_000), "delay", b"")
+            .expect_err("a 2s sleep cannot survive a 1.5s request timeout");
+        let elapsed = started.elapsed();
+
+        assert!(matches!(error, SdkError::Sleep(_)), "got {error:?}");
+        assert!(
+            elapsed < Duration::from_millis(1_000),
+            "the refusal must not wait out the timeout it is predicting; took {elapsed:?}"
+        );
+    }
+
+    /// The other half: a sleep INSIDE the ceiling is still issued, and when the
+    /// request dies anyway the failure names the sleep instead of reading as an
+    /// unrelated transport fault. This is the case the pre-flight cannot catch —
+    /// a duration the client would have tolerated, on a request that overran
+    /// regardless.
+    #[test]
+    fn a_sleep_inside_the_ceiling_is_issued_and_its_failure_names_the_sleep() {
+        let backend = backend_at(silent_core(), 1_000);
+
+        let error = backend
+            .durable_sleep(Duration::from_millis(500), "delay", b"")
+            .expect_err("the stand-in core never answers, so the request times out");
+
+        assert!(matches!(error, SdkError::Sleep(_)), "got {error:?}");
+        let message = error.to_string();
+        assert!(
+            message.contains("durable sleep of 500ms failed"),
+            "{message}"
+        );
     }
 }
