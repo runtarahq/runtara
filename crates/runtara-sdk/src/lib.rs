@@ -66,7 +66,7 @@
 //! | `RUNTARA_INSTANCE_ID` | Yes | - | Unique instance identifier |
 //! | `RUNTARA_TENANT_ID` | Yes | - | Tenant identifier |
 //! | `RUNTARA_HTTP_URL` | No | `http://127.0.0.1:8003` | HTTP API URL |
-//! | `RUNTARA_REQUEST_TIMEOUT_MS` | No | `30000` | This SDK's per-request HTTP timeout, and nothing else. `0` is refused — it is a deadline in the past, not "no timeout". Read from the SDK's own process environment, which a workflow guest does not have. The server's workflow poll timeout is a separate knob, `RUNTARA_RUNTIME_POLL_TIMEOUT_SECS`. |
+//! | `RUNTARA_REQUEST_TIMEOUT_MS` | No | `30000` | This SDK's per-request HTTP timeout. `0` is refused — it is a deadline in the past, not "no timeout". Read from the SDK's own process environment, which a workflow guest does not have. Deprecated as a runtara-server setting, where the same name still supplies the default workflow execution timeout until operators move to `RUNTARA_DEFAULT_EXECUTION_TIMEOUT_SECS`. |
 //! | `RUNTARA_SIGNAL_POLL_INTERVAL_MS` | No | `1000` | Signal poll rate limit |
 //!
 //! ## Programmatic Configuration

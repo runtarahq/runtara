@@ -85,6 +85,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`RUNTARA_REQUEST_TIMEOUT_MS` is deprecated as a runtara-server setting; use
+  `RUNTARA_DEFAULT_EXECUTION_TIMEOUT_SECS`.** One name was read by two unrelated
+  components meaning two different things in two different units: in runtara-sdk
+  it is the per-request HTTP client timeout, in milliseconds; in runtara-server
+  it was divided by 1000 and used as the default execution timeout for a workflow
+  instance that names no `executionTimeoutSeconds` of its own — a kill deadline,
+  enforced by stopping the instance and recording it `failed` with
+  `termination_reason: timeout`. Setting it for one silently moved the other, and
+  neither site said so. The SDK keeps the name; the server's timeout is now named
+  in the unit it is kept in, with no division. **The old name is still read when
+  the new one is unset, so no deployment changes behavior on upgrade**, but the
+  server logs a deprecation warning quoting both the milliseconds found and the
+  seconds derived. Note the old conversion truncates: a value under `1000`
+  becomes a zero-second timeout, under which every workflow is killed the instant
+  it starts. The resolved timeout is now logged at startup regardless of which
+  name supplied it, and `RUNTARA_DEFAULT_EXECUTION_TIMEOUT_SECS=0` is refused
+  rather than honored.
+
 - **BREAKING: `GET /api/runtime/workflows` now takes a 0-based `page`**, matching
   every other paginated endpoint in the runtime API (`/executions`,
   `/workflows/{id}/instances`, `/checkpoints`, `/actions`). It was the only
