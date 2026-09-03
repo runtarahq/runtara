@@ -26,7 +26,7 @@ use crate::image_registry::{Image, ImageRegistry, require_current_workflow_entry
 use crate::launch_queue::{
     LAUNCH_QUEUE_TIMEOUT, Launch, LaunchKind, LaunchRepository, RUNNER_CAPACITY_UNAVAILABLE,
 };
-use crate::runner::{LaunchOptions, Runner, RunnerError, StartGate};
+use crate::runner::{LaunchOptions, Runner, RunnerError, StartGate, StartGateConfirmation};
 
 /// Maximum time a newly accepted launch may remain unhanded to a runner.
 ///
@@ -147,6 +147,45 @@ impl Default for LaunchDispatcherConfig {
             batch_size: 32,
             lease_duration: Duration::from_secs(60),
             capacity_retry_delay: Duration::from_millis(250),
+        }
+    }
+}
+
+/// The durable half of a runner-owned start-gate crossing.
+///
+/// The dispatcher installs this before it hands the closed gate to a runner,
+/// but it deliberately does not call it itself. The runner invokes it at the
+/// last boundary before it loads guest code, so a dispatcher crash after
+/// opening the in-memory gate leaves the durable marker recoverable.
+struct DurableStartGateConfirmation {
+    repository: LaunchRepository,
+    launch_id: String,
+}
+
+#[async_trait]
+impl StartGateConfirmation for DurableStartGateConfirmation {
+    async fn confirm(&self) -> std::result::Result<(), RunnerError> {
+        match self.repository.confirm_gate_open(&self.launch_id).await {
+            Ok(Some(_)) => Ok(()),
+            Ok(None) => {
+                warn!(
+                    launch_id = %self.launch_id,
+                    "Runner reached start gate after durable handoff expired or was cancelled"
+                );
+                Err(RunnerError::StartFailed(
+                    "durable start-gate handoff expired before guest preparation".to_string(),
+                ))
+            }
+            Err(error) => {
+                error!(
+                    launch_id = %self.launch_id,
+                    error = %error,
+                    "Runner could not durably confirm start-gate handoff"
+                );
+                Err(RunnerError::StartFailed(format!(
+                    "could not durably confirm start-gate handoff: {error}"
+                )))
+            }
         }
     }
 }
@@ -332,7 +371,12 @@ impl LaunchDispatcher {
         // than starting a fresh timeout here. If this dispatcher pauses or
         // dies, recovery can reclaim `starting` at the same instant the old
         // runner is forced to abandon its unopened task.
-        let gate = StartGate::new(self.start_gate_remaining(&starting));
+        let gate = StartGate::new(self.start_gate_remaining(&starting)).with_confirmation(
+            Arc::new(DurableStartGateConfirmation {
+                repository: repository.clone(),
+                launch_id: launch.launch_id.clone(),
+            }),
+        );
         options.start_gate = Some(gate.clone());
 
         match self.runner.try_launch_detached(&options).await {
@@ -407,9 +451,10 @@ impl LaunchDispatcher {
                 }
 
                 // Spawn the generation-owned watchdog before opening the
-                // gate. The monitor itself waits for this same gate, so its
-                // active execution timeout starts with the guest rather than
-                // consuming time while the durable handoff is in flight.
+                // gate. The monitor waits for the runner's own durable
+                // confirmation, so its active execution timeout starts with
+                // the guest rather than consuming time while the handoff is
+                // still recoverable.
                 spawn_container_monitor(
                     self.pool.clone(),
                     self.runner.clone(),
@@ -420,54 +465,17 @@ impl LaunchDispatcher {
                     self.lifecycle_observers.clone(),
                     Some(gate.clone()),
                 );
-                match repository.confirm_gate_open(&launch.launch_id).await {
-                    Ok(Some(_confirmed)) if gate.open() => {
-                        // The durable confirmation is committed before the
-                        // runner can load or invoke guest code. A marked
-                        // `running` row therefore remains recoverable until
-                        // this exact point, rather than relying on a later
-                        // heartbeat cleanup.
-                    }
-                    Ok(Some(_confirmed)) => {
-                        warn!(
-                            launch_id = %launch.launch_id,
-                            "Start gate timed out after durable confirmation"
-                        );
-                        self.stop_unopened_handoff(&registry, &handle, &gate).await;
-                        self.fail_after_start_gate(
-                            &launch,
-                            "start gate closed before guest execution",
-                        )
+                if !gate.open() {
+                    // Queue expiry, cancellation, or the durable gate
+                    // deadline won before the in-memory handoff. The gate is
+                    // still closed, so no guest work needs to be rolled back.
+                    warn!(
+                        launch_id = %launch.launch_id,
+                        "Start gate closed before runner handoff"
+                    );
+                    self.stop_unopened_handoff(&registry, &handle, &gate).await;
+                    self.fail_after_start_gate(&launch, "start gate closed before guest execution")
                         .await?;
-                    }
-                    Ok(None) => {
-                        // Queue expiry, cancellation, or the durable gate
-                        // deadline won before the in-memory handoff. The
-                        // gate is still closed, so no guest work needs to be
-                        // rolled back.
-                        warn!(
-                            launch_id = %launch.launch_id,
-                            "Durable start-gate confirmation was no longer valid"
-                        );
-                        self.stop_unopened_handoff(&registry, &handle, &gate).await;
-                        self.fail_after_start_gate(
-                            &launch,
-                            "durable start-gate confirmation expired",
-                        )
-                        .await?;
-                    }
-                    Err(error) => {
-                        // If PostgreSQL is unavailable, keep the durable
-                        // marker intact and close the in-memory gate. The
-                        // expiry scan will terminalize it once the database
-                        // recovers; never let an unconfirmed guest begin.
-                        error!(
-                            launch_id = %launch.launch_id,
-                            error = %error,
-                            "Could not durably confirm start-gate opening"
-                        );
-                        self.stop_unopened_handoff(&registry, &handle, &gate).await;
-                    }
                 }
             }
             Err(RunnerError::CapacityUnavailable) => {

@@ -980,13 +980,20 @@ impl Runner for EmbeddedWasmRunner {
         tokio::spawn(async move {
             let _run_slot = run_slot;
             if let Some(gate) = start_gate {
-                match gate.wait().await {
+                // The durable dispatcher may open the in-memory gate once it
+                // owns the running generation, but this runner is the only
+                // actor allowed to clear its durable marker. Confirm at the
+                // last boundary before guest preparation so a process loss
+                // while this task is merely scheduled remains recoverable.
+                match gate.wait_and_confirm().await {
                     StartGateOutcome::Opened => {}
-                    StartGateOutcome::Cancelled | StartGateOutcome::TimedOut => {
+                    StartGateOutcome::Cancelled
+                    | StartGateOutcome::TimedOut
+                    | StartGateOutcome::ConfirmationFailed => {
                         info!(
                             instance_id = %instance_id,
                             launch_id = %launch_id,
-                            "Detached launch gate closed before guest execution"
+                            "Detached launch gate did not permit guest execution"
                         );
                         task_for_run.finished.store(true, Ordering::SeqCst);
                         remove_task_if_current(&registry, &launch_id, &task_for_run);

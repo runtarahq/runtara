@@ -1125,13 +1125,18 @@ pub fn spawn_container_monitor(
 
     tokio::spawn(async move {
         if let Some(gate) = start_gate {
-            match gate.wait().await {
+            // The runner, not this monitor, performs the durable confirmation
+            // immediately before guest preparation. Waiting for that result
+            // prevents monitor ownership from clearing a recoverable marker.
+            match gate.wait_for_runner_confirmation().await {
                 StartGateOutcome::Opened => {}
-                StartGateOutcome::Cancelled | StartGateOutcome::TimedOut => {
+                StartGateOutcome::Cancelled
+                | StartGateOutcome::TimedOut
+                | StartGateOutcome::ConfirmationFailed => {
                     debug!(
                         instance_id = %instance_id,
                         launch_id = %handle.launch_id,
-                        "Start gate closed before monitor began active execution"
+                        "Start gate did not permit monitor to begin active execution"
                     );
                     return;
                 }

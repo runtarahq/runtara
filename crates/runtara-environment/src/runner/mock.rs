@@ -232,7 +232,7 @@ impl Runner for MockRunner {
         let never_complete = self.never_complete;
         tokio::spawn(async move {
             if let Some(gate) = start_gate
-                && gate.wait().await != StartGateOutcome::Opened
+                && gate.wait_and_confirm().await != StartGateOutcome::Opened
             {
                 return;
             }

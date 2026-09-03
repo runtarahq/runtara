@@ -77,12 +77,32 @@ pub type Result<T> = std::result::Result<T, RunnerError>;
 /// a process loss during handoff self-releasing rather than a leaked permit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StartGateOutcome {
-    /// The supervisor installed ownership and explicitly allowed guest work.
+    /// The runner durably confirmed its handoff and may begin guest work.
     Opened,
     /// The supervisor rejected the handoff before guest work began.
     Cancelled,
-    /// No owner opened the gate before its absolute handoff deadline.
+    /// The supervisor did not open the gate, or the runner did not confirm its
+    /// handoff, before the absolute handoff deadline.
     TimedOut,
+    /// The runner reached the gate but could not durably confirm its handoff.
+    ///
+    /// The durable marker deliberately remains in place in this case, so
+    /// queue recovery can terminalize the generation without a guest running.
+    ConfirmationFailed,
+}
+
+/// Durable confirmation performed by the runner at the guest-execution
+/// boundary.
+///
+/// The dispatcher can open an in-memory [`StartGate`] after it records the
+/// running generation, but that is not permission to load guest code. The
+/// runner invokes this hook immediately before guest preparation. A process
+/// loss before that point therefore leaves the durable gate marker intact for
+/// recovery.
+#[async_trait]
+pub trait StartGateConfirmation: Send + Sync {
+    /// Confirm that the runner is crossing the durable guest-execution gate.
+    async fn confirm(&self) -> Result<()>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,6 +123,9 @@ enum StartGateState {
 pub struct StartGate {
     state: Arc<Mutex<StartGateState>>,
     updates: watch::Sender<StartGateState>,
+    confirmation: Option<Arc<dyn StartGateConfirmation>>,
+    confirmation_started: Arc<Mutex<bool>>,
+    confirmation_updates: watch::Sender<Option<StartGateOutcome>>,
     deadline: tokio::time::Instant,
 }
 
@@ -125,11 +148,25 @@ impl StartGate {
     /// Build a closed gate with an explicit monotonic deadline.
     pub fn until(deadline: tokio::time::Instant) -> Self {
         let (updates, _) = watch::channel(StartGateState::Pending);
+        let (confirmation_updates, _) = watch::channel(None);
         Self {
             state: Arc::new(Mutex::new(StartGateState::Pending)),
             updates,
+            confirmation: None,
+            confirmation_started: Arc::new(Mutex::new(false)),
+            confirmation_updates,
             deadline,
         }
+    }
+
+    /// Require a runner-owned durable confirmation before guest preparation.
+    ///
+    /// This is intentionally configured by the durable dispatcher and invoked
+    /// only by [`Self::wait_and_confirm`], which the runner calls at its
+    /// last safe boundary before loading the guest.
+    pub fn with_confirmation(mut self, confirmation: Arc<dyn StartGateConfirmation>) -> Self {
+        self.confirmation = Some(confirmation);
+        self
     }
 
     /// The absolute monotonic deadline at which a still-closed gate expires.
@@ -137,9 +174,12 @@ impl StartGate {
         self.deadline
     }
 
-    /// Allow guest execution exactly once.
+    /// Allow the runner to attempt its durable guest-execution handoff.
     ///
-    /// Returns `false` when cancellation or timeout already won the handoff.
+    /// A gate with [`Self::with_confirmation`] does not permit guest execution
+    /// until the runner calls [`Self::wait_and_confirm`] and that confirmation
+    /// succeeds. Returns `false` when cancellation or timeout already won the
+    /// handoff.
     pub fn open(&self) -> bool {
         let mut state = self
             .state
@@ -195,6 +235,74 @@ impl StartGate {
                     if self.cancel() {
                         return StartGateOutcome::TimedOut;
                     }
+                }
+            }
+        }
+    }
+
+    /// Wait at the runner's guest-execution boundary and durably confirm it.
+    ///
+    /// This must be used by the runner immediately before it loads or invokes
+    /// a guest. It is intentionally separate from [`Self::wait`], so a
+    /// monitor cannot clear a durable marker merely because it was scheduled
+    /// before the runner reached that boundary.
+    pub async fn wait_and_confirm(&self) -> StartGateOutcome {
+        let outcome = self.wait().await;
+        if outcome != StartGateOutcome::Opened {
+            return outcome;
+        }
+        let Some(confirmation) = self.confirmation.as_ref().cloned() else {
+            return StartGateOutcome::Opened;
+        };
+
+        let should_confirm = {
+            let mut started = self
+                .confirmation_started
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if *started {
+                false
+            } else {
+                *started = true;
+                true
+            }
+        };
+        if should_confirm {
+            let outcome = match confirmation.confirm().await {
+                Ok(()) => StartGateOutcome::Opened,
+                Err(_) => StartGateOutcome::ConfirmationFailed,
+            };
+            self.confirmation_updates.send_replace(Some(outcome));
+        }
+
+        self.wait_for_runner_confirmation().await
+    }
+
+    /// Wait for the runner's durable confirmation after the gate opens.
+    ///
+    /// Monitors use this rather than [`Self::wait_and_confirm`]: only the
+    /// runner is allowed to clear the durable marker. If the runner never
+    /// reaches its boundary, this returns at the same absolute deadline and
+    /// leaves the marker for durable recovery.
+    pub async fn wait_for_runner_confirmation(&self) -> StartGateOutcome {
+        let outcome = self.wait().await;
+        if outcome != StartGateOutcome::Opened || self.confirmation.is_none() {
+            return outcome;
+        }
+
+        let mut updates = self.confirmation_updates.subscribe();
+        loop {
+            if let Some(outcome) = *updates.borrow_and_update() {
+                return outcome;
+            }
+            tokio::select! {
+                changed = updates.changed() => {
+                    if changed.is_err() {
+                        return StartGateOutcome::ConfirmationFailed;
+                    }
+                }
+                _ = tokio::time::sleep_until(self.deadline) => {
+                    return StartGateOutcome::TimedOut;
                 }
             }
         }
@@ -425,8 +533,22 @@ pub trait Runner: Send + Sync {
 
 #[cfg(test)]
 mod start_gate_tests {
-    use super::{StartGate, StartGateOutcome};
+    use super::{Result, StartGate, StartGateConfirmation, StartGateOutcome};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
+
+    struct RecordingConfirmation {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl StartGateConfirmation for RecordingConfirmation {
+        async fn confirm(&self) -> Result<()> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
 
     #[tokio::test]
     async fn gate_opens_exactly_once() {
@@ -453,6 +575,38 @@ mod start_gate_tests {
         assert!(
             !gate.open(),
             "an owner delayed beyond the durable handoff deadline must not start a guest"
+        );
+    }
+
+    #[tokio::test]
+    async fn durable_confirmation_runs_at_the_runner_boundary_not_gate_open() {
+        let confirmation = Arc::new(RecordingConfirmation {
+            calls: AtomicUsize::new(0),
+        });
+        let gate = StartGate::new(Duration::from_secs(1)).with_confirmation(confirmation.clone());
+
+        assert!(gate.open());
+        assert_eq!(
+            confirmation.calls.load(Ordering::SeqCst),
+            0,
+            "opening an in-memory gate must retain the durable marker"
+        );
+
+        let monitor_gate = gate.clone();
+        let monitor =
+            tokio::spawn(async move { monitor_gate.wait_for_runner_confirmation().await });
+        tokio::task::yield_now().await;
+        assert_eq!(
+            confirmation.calls.load(Ordering::SeqCst),
+            0,
+            "a monitor cannot clear the marker before the runner reaches its boundary"
+        );
+
+        assert_eq!(gate.wait_and_confirm().await, StartGateOutcome::Opened);
+        assert_eq!(confirmation.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            monitor.await.expect("monitor must not panic"),
+            StartGateOutcome::Opened
         );
     }
 }
