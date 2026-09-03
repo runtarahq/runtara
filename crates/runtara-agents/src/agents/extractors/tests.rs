@@ -22,6 +22,11 @@ fn test_get_http_extractor_ids() {
         "should contain http_api_key, got: {:?}",
         ids
     );
+    assert!(
+        ids.contains(&"http_mtls"),
+        "should contain http_mtls, got: {:?}",
+        ids
+    );
 }
 
 /// The `http` agent's integration list IS this registry, so an unregistered

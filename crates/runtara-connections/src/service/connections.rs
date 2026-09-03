@@ -73,6 +73,11 @@ fn validate_connection_parameters(
     let Some(meta) = runtara_agents::registry::find_connection_type(integration_id) else {
         return Ok(());
     };
+    // Apply the stricter mTLS base-URL and redacted PEM checks before generic
+    // URL validation, whose legacy diagnostics may echo a supplied URL.
+    if integration_id == "http_mtls" {
+        validate_http_mtls_parameters(params)?;
+    }
     for field in meta.fields {
         if !(field.is_required || field.is_url) {
             continue;
@@ -125,6 +130,47 @@ fn validate_connection_parameters(
         }
     }
     Ok(())
+}
+
+/// `http_mtls` deliberately cannot use the normal local-development HTTP
+/// exception: a client certificate must never be offered over cleartext.
+/// Parse the PEM material at save time as well, so a connection cannot be
+/// stored successfully only to fail on its first proxied request.
+fn validate_http_mtls_parameters(params: Option<&serde_json::Value>) -> Result<(), ServiceError> {
+    let params = params.ok_or_else(|| {
+        ServiceError::ValidationError("HTTP mTLS connection parameters are required".to_string())
+    })?;
+    let base_url = params
+        .get("base_url")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            ServiceError::ValidationError(
+                "HTTP mTLS Base URL is required and must use https://".to_string(),
+            )
+        })?;
+    let parsed = url::Url::parse(base_url).map_err(|_| {
+        ServiceError::ValidationError("HTTP mTLS Base URL must be a valid absolute URL".to_string())
+    })?;
+    if parsed.scheme() != "https" || parsed.host_str().is_none_or(str::is_empty) {
+        return Err(ServiceError::ValidationError(
+            "HTTP mTLS Base URL must use https:// and include a host".to_string(),
+        ));
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(ServiceError::ValidationError(
+            "HTTP mTLS Base URL must not include user credentials".to_string(),
+        ));
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(ServiceError::ValidationError(
+            "HTTP mTLS Base URL must not include a query or fragment".to_string(),
+        ));
+    }
+    crate::net::validate_mtls_client_parameters(params).map_err(|error| {
+        ServiceError::ValidationError(format!("Invalid HTTP mTLS configuration: {error}"))
+    })
 }
 
 /// Validate the complete public create payload against the canonical descriptor.
@@ -1573,6 +1619,66 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    #[test]
+    fn http_mtls_requires_strict_https_and_redacts_invalid_pem() {
+        let invalid_pem = json!({
+            "base_url": "https://api.example.com",
+            "client_certificate_pem": "certificate-sentinel",
+            "client_private_key_pem": "private-key-sentinel",
+        });
+        let error = validate_connection_parameters("http_mtls", Some(&invalid_pem))
+            .expect_err("malformed mTLS PEM must be rejected at save time");
+        let ServiceError::ValidationError(message) = error else {
+            panic!("expected parameter validation error");
+        };
+        assert!(message.contains("Invalid HTTP mTLS configuration"));
+        assert!(!message.contains("certificate-sentinel"));
+        assert!(!message.contains("private-key-sentinel"));
+
+        for invalid_base in [
+            "http://api.example.com",
+            "https://user:password@api.example.com",
+            "https://api.example.com?token=not-allowed",
+        ] {
+            let params = json!({
+                "base_url": invalid_base,
+                "client_certificate_pem": "certificate-sentinel",
+                "client_private_key_pem": "private-key-sentinel",
+            });
+            assert!(
+                is_validation_err(validate_connection_parameters("http_mtls", Some(&params))),
+                "{invalid_base} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn http_mtls_edit_projection_never_returns_pem_values() {
+        let projection = build_edit_projection(
+            "http_mtls",
+            Some(&json!({
+                "base_url": "https://api.example.com",
+                "client_certificate_pem": "certificate-sentinel",
+                "client_private_key_pem": "private-key-sentinel",
+                "server_ca_pem": "ca-sentinel",
+            })),
+            "version".to_string(),
+        );
+
+        assert_eq!(
+            projection.values,
+            json!({"base_url": "https://api.example.com"})
+        );
+        assert!(projection.secret_state["client_certificate_pem"].configured);
+        assert!(!projection.secret_state["client_certificate_pem"].clearable);
+        assert!(projection.secret_state["client_private_key_pem"].configured);
+        assert!(!projection.secret_state["client_private_key_pem"].clearable);
+        assert!(projection.secret_state["server_ca_pem"].configured);
+        assert!(projection.secret_state["server_ca_pem"].clearable);
+        let projection_text = serde_json::to_string(&projection.values).expect("projection JSON");
+        assert!(!projection_text.contains("sentinel"));
     }
 
     #[test]

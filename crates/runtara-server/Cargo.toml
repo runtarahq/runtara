@@ -67,6 +67,11 @@ path = "tests/object_model_connection_e2e.rs"
 required-features = ["db-integration-tests"]
 
 [[test]]
+name = "internal_proxy_mtls"
+path = "tests/internal_proxy_mtls.rs"
+required-features = ["db-integration-tests"]
+
+[[test]]
 name = "reports_runtime_corpus"
 path = "tests/reports_runtime_corpus.rs"
 required-features = ["db-integration-tests"]
@@ -231,3 +236,5 @@ testcontainers = "0.27"
 testcontainers-modules = { version = "0.15", features = ["postgres"] }
 insta = { version = "1", features = ["json", "filters"] }
 proptest = "1"
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }

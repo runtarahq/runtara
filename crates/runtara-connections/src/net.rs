@@ -11,6 +11,7 @@
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
+use zeroize::Zeroizing;
 
 /// SSRF address classifier: is this IP one we must never let credentialed
 /// egress reach?
@@ -130,12 +131,123 @@ impl reqwest::dns::Resolve for GuardedResolver {
 ///   rejected outright (see [`GuardedResolver`]).
 ///
 /// Construct once and reuse — it pools connections like any `reqwest::Client`.
-pub fn build_hardened_client() -> reqwest::Client {
+fn hardened_client_builder() -> reqwest::ClientBuilder {
     reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .dns_resolver(Arc::new(GuardedResolver))
+}
+
+pub fn build_hardened_client() -> reqwest::Client {
+    hardened_client_builder()
         .build()
         .expect("hardened egress client should build")
+}
+
+/// Redacted configuration errors for an HTTP mTLS connection. Keep the PEM
+/// parser's detail out of API responses: it can contain the user-supplied
+/// credential material or implementation-specific TLS diagnostics.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum MtlsClientConfigError {
+    #[error("client certificate and private key must be valid PEM")]
+    InvalidClientIdentity,
+    #[error("server CA certificate bundle must be valid PEM")]
+    InvalidServerCa,
+    #[error("mTLS client could not be initialized")]
+    ClientBuild,
+}
+
+struct MtlsMaterial {
+    identity: reqwest::Identity,
+    root_certificates: Vec<reqwest::Certificate>,
+}
+
+/// Parse the write-only PEM parameters for an `http_mtls` connection.
+///
+/// The identity is assembled only in a zeroizing temporary buffer, then moved
+/// into reqwest's Rustls configuration. `Identity::from_pem` accepts a leaf-
+/// first certificate chain and an unencrypted PKCS#8, RSA PKCS#1, or SEC1 EC
+/// private key in the same buffer.
+fn parse_mtls_material(params: &serde_json::Value) -> Result<MtlsMaterial, MtlsClientConfigError> {
+    let certificate = params
+        .get("client_certificate_pem")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or(MtlsClientConfigError::InvalidClientIdentity)?;
+    let private_key = params
+        .get("client_private_key_pem")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or(MtlsClientConfigError::InvalidClientIdentity)?;
+
+    let mut identity_pem = Zeroizing::new(Vec::with_capacity(
+        certificate
+            .len()
+            .saturating_add(private_key.len())
+            .saturating_add(1),
+    ));
+    identity_pem.extend_from_slice(certificate.as_bytes());
+    identity_pem.push(b'\n');
+    identity_pem.extend_from_slice(private_key.as_bytes());
+    let identity = reqwest::Identity::from_pem(identity_pem.as_slice())
+        .map_err(|_| MtlsClientConfigError::InvalidClientIdentity)?;
+
+    let root_certificates = match params.get("server_ca_pem") {
+        None | Some(serde_json::Value::Null) => Vec::new(),
+        Some(serde_json::Value::String(bundle)) if bundle.trim().is_empty() => Vec::new(),
+        Some(serde_json::Value::String(bundle)) => {
+            let certificates = reqwest::Certificate::from_pem_bundle(bundle.as_bytes())
+                .map_err(|_| MtlsClientConfigError::InvalidServerCa)?;
+            if certificates.is_empty() {
+                return Err(MtlsClientConfigError::InvalidServerCa);
+            }
+            certificates
+        }
+        Some(_) => return Err(MtlsClientConfigError::InvalidServerCa),
+    };
+
+    Ok(MtlsMaterial {
+        identity,
+        root_certificates,
+    })
+}
+
+fn build_hardened_mtls_client_from_material(
+    material: MtlsMaterial,
+) -> Result<reqwest::Client, MtlsClientConfigError> {
+    let mut builder = hardened_client_builder()
+        .use_rustls_tls()
+        .https_only(true)
+        .identity(material.identity);
+    for certificate in material.root_certificates {
+        builder = builder.add_root_certificate(certificate);
+    }
+    builder
+        .build()
+        .map_err(|_| MtlsClientConfigError::ClientBuild)
+}
+
+/// Validate mTLS PEM material at save time without retaining a client.
+///
+/// Building and immediately dropping the client is deliberate: Rustls checks
+/// that the parsed certificate chain and private key actually belong together
+/// only while it builds the client configuration.
+pub(crate) fn validate_mtls_client_parameters(
+    params: &serde_json::Value,
+) -> Result<(), MtlsClientConfigError> {
+    let _ = build_hardened_mtls_client_from_material(parse_mtls_material(params)?)?;
+    Ok(())
+}
+
+/// Build a request-scoped hardened mTLS client for an `http_mtls` connection.
+///
+/// This preserves every regular credentialed-egress control (no redirects and
+/// the guarded DNS resolver), forces Rustls for PEM identity support, and
+/// accepts HTTPS only. Optional server CAs are *added* to the normal trust
+/// roots; hostname and certificate verification remain enabled.
+pub(crate) fn build_hardened_mtls_client(
+    params: &serde_json::Value,
+) -> Result<reqwest::Client, MtlsClientConfigError> {
+    build_hardened_mtls_client_from_material(parse_mtls_material(params)?)
 }
 
 /// Process-shared hardened client for OAuth token / refresh / revoke egress.

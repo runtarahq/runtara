@@ -14,6 +14,7 @@ use std::collections::HashMap;
 pub mod connection_types;
 pub(crate) mod http_api_key;
 pub(crate) mod http_bearer;
+pub(crate) mod http_mtls;
 pub(crate) mod sftp;
 
 #[cfg(test)]
@@ -22,6 +23,7 @@ mod tests;
 // Re-export extractors to ensure they're linked and registered
 pub use http_api_key::HttpApiKeyExtractor;
 pub use http_bearer::HttpBearerExtractor;
+pub use http_mtls::HttpMtlsExtractor;
 
 // SFTP connection type is registered for schema purposes (doesn't implement HttpConnectionExtractor)
 #[allow(unused_imports)]
@@ -52,6 +54,7 @@ pub trait HttpConnectionExtractor: Send + Sync {
 static HTTP_EXTRACTORS: &[&dyn HttpConnectionExtractor] = &[
     &HttpBearerExtractor,
     &HttpApiKeyExtractor,
+    &HttpMtlsExtractor,
     &connection_types::ShopifyExtractor,
     &connection_types::ShopifyClientCredentialsExtractor,
     &connection_types::OpenAiExtractor,

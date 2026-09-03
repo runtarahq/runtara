@@ -28,6 +28,7 @@ pub const RATE_LIMIT_OPT_OUT: &[&str] = &[
     // backstop (see SYN-495).
     "http_api_key",
     "http_bearer",
+    "http_mtls",
     "http_oauth2_client_credentials",
     "http_oauth2_authorization_code",
     // Arbitrary user-provided MCP server — target limits unknowable.

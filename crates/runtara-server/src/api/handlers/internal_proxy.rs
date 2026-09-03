@@ -158,6 +158,35 @@ fn map_proxy_reject(reject: &ProxyReject, connection_id: &str) -> (StatusCode, J
     }
 }
 
+/// Select the URL-pinning policy for one connection-scoped proxy request.
+///
+/// An mTLS client certificate is an authentication credential in its own
+/// right, so it cannot inherit the generic HTTP development or warn/off
+/// rollout exceptions. The Rustls client enforces the same HTTPS-only policy
+/// at dispatch time; this function rejects the request earlier and makes the
+/// proxy's decision auditable.
+fn connection_pin_policy(
+    uses_mtls: bool,
+    uses_aws_signing: bool,
+    uses_azure_signing: bool,
+    relax_path: bool,
+) -> (ProxyStrictMode, proxy_url::PinOptions) {
+    let effective_mode = if uses_mtls || uses_aws_signing || uses_azure_signing {
+        ProxyStrictMode::Enforce
+    } else {
+        proxy_strict_mode()
+    };
+    let pin_opts = proxy_url::PinOptions {
+        enforce_path_prefix: !relax_path,
+        allow_http_base_hosts: if uses_mtls {
+            Vec::new()
+        } else {
+            proxy_allow_http_hosts()
+        },
+    };
+    (effective_mode, pin_opts)
+}
+
 // ============================================================================
 // State
 // ============================================================================
@@ -489,6 +518,10 @@ pub async fn execute_proxy_request(
     let mut final_url = request.url.clone();
     let mut aws_signing: Option<AwsSigningParams> = None;
     let mut azure_signing: Option<AzureSigningParams> = None;
+    // A client-specific mTLS identity must live on the reqwest client, not on
+    // an individual request. It remains opaque here; auth resolution parsed
+    // the write-only PEM fields and built a hardened Rustls client.
+    let mut mtls_client: Option<reqwest::Client> = None;
 
     // ── Connection credential injection ──────────────────────────────────
     if let Some(ref connection_id) = request.connection_id {
@@ -561,6 +594,12 @@ pub async fn execute_proxy_request(
             &mut resolved,
         )?;
 
+        // Unlike generic HTTP connections, mTLS has no development HTTP
+        // escape hatch. A manually-created or legacy record must not gain a
+        // warn/off-mode path around that invariant; the Rustls client also
+        // refuses HTTP as a second line of defense.
+        let uses_mtls = resolved.mtls_client.is_some();
+
         // Record analytics off the request path. This can hit Redis and
         // PostgreSQL, and should not delay the upstream call.
         record_credential_request_async(
@@ -582,15 +621,12 @@ pub async fn execute_proxy_request(
         let relax_path = integration_id == "mcp"
             || resolved.aws_signing.is_some()
             || resolved.azure_signing.is_some();
-        let effective_mode = if resolved.aws_signing.is_some() || resolved.azure_signing.is_some() {
-            ProxyStrictMode::Enforce
-        } else {
-            proxy_strict_mode()
-        };
-        let pin_opts = proxy_url::PinOptions {
-            enforce_path_prefix: !relax_path,
-            allow_http_base_hosts: proxy_allow_http_hosts(),
-        };
+        let (effective_mode, pin_opts) = connection_pin_policy(
+            uses_mtls,
+            resolved.aws_signing.is_some(),
+            resolved.azure_signing.is_some(),
+            relax_path,
+        );
         match proxy_url::pin_url_to_base(&final_url, resolved.base_url.as_deref(), true, &pin_opts)
         {
             Ok(pinned) => final_url = pinned,
@@ -617,6 +653,7 @@ pub async fn execute_proxy_request(
 
         aws_signing = resolved.aws_signing;
         azure_signing = resolved.azure_signing;
+        mtls_client = resolved.mtls_client;
 
         // ── Pre-flight rate limit check ────────────────────────────────────
         // If adaptive rate limiting is enabled, check the token bucket before
@@ -772,7 +809,10 @@ pub async fn execute_proxy_request(
         })?;
     }
 
-    let mut req_builder = client.request(reqwest_method, &final_url).timeout(timeout);
+    let outbound_client = mtls_client.as_ref().unwrap_or(client);
+    let mut req_builder = outbound_client
+        .request(reqwest_method, &final_url)
+        .timeout(timeout);
 
     // Set headers
     let mut header_map = HeaderMap::new();
@@ -1061,6 +1101,15 @@ mod tests {
         .expect("provider match should pass");
     }
 
+    #[test]
+    fn mtls_pin_policy_is_always_strict_and_https_only() {
+        let (mode, options) = connection_pin_policy(true, false, false, false);
+
+        assert_eq!(mode, ProxyStrictMode::Enforce);
+        assert!(options.enforce_path_prefix);
+        assert!(options.allow_http_base_hosts.is_empty());
+    }
+
     fn aws_resolved(base_url: Option<&str>, region: &str, service: &str) -> ResolvedConnectionAuth {
         ResolvedConnectionAuth {
             base_url: base_url.map(str::to_string),
@@ -1072,6 +1121,7 @@ mod tests {
                 session_token: None,
             }),
             azure_signing: None,
+            mtls_client: None,
             rotated_credentials: None,
         }
     }
@@ -1133,6 +1183,7 @@ mod tests {
             base_url: Some("https://api.example.com".into()),
             aws_signing: None,
             azure_signing: None,
+            mtls_client: None,
             rotated_credentials: None,
         };
         apply_aws_service_override(Some("sqs"), &mut resolved);
@@ -1157,6 +1208,7 @@ mod tests {
             base_url: Some(QBO_BASE.into()),
             aws_signing: None,
             azure_signing: None,
+            mtls_client: None,
             rotated_credentials: None,
         }
     }
@@ -1361,6 +1413,7 @@ mod tests {
             base_url: None,
             aws_signing: None,
             azure_signing: None,
+            mtls_client: None,
             rotated_credentials: None,
         }
     }

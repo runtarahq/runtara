@@ -24,6 +24,12 @@
     "fnv1a64": "f33c8b63eec8038f"
   },
   {
+    "integrationId": "http_mtls",
+    "fieldCount": 4,
+    "serializedBytes": 1527,
+    "fnv1a64": "5f926d82798d51fd"
+  },
+  {
     "integrationId": "http_oauth2_authorization_code",
     "fieldCount": 10,
     "serializedBytes": 3414,

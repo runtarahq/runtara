@@ -5,6 +5,8 @@ use runtara_dsl::agent_meta::{OAuthConfig, TokenEndpointAuth};
 use serde_json::Value;
 use std::collections::HashMap;
 
+use crate::net;
+
 use super::aws_signing::AwsSigningParams;
 use super::azure_signing::AzureSigningParams;
 use super::token_cache::{
@@ -15,6 +17,10 @@ pub struct ResolvedConnectionAuth {
     pub base_url: Option<String>,
     pub aws_signing: Option<AwsSigningParams>,
     pub azure_signing: Option<AzureSigningParams>,
+    /// A hardened Rustls client carrying the mTLS identity for this request.
+    /// `reqwest::Client` does not expose the parsed private key, so the proxy
+    /// can select it without receiving raw PEM material.
+    pub mtls_client: Option<Client>,
     /// Credentials produced by an actual OAuth refresh during this resolution that
     /// must be persisted back to the connection. `None` on every cache hit / fast
     /// path and for non-refresh grants. Consumed by the facade write-back.
@@ -73,6 +79,15 @@ pub async fn resolve_connection_auth(
     events: &crate::events::ConnectionEvents,
 ) -> Result<ResolvedConnectionAuth, token_cache::AuthResolutionError> {
     let descriptor = describe_connection_auth(connection_id, integration_id, params, headers);
+    let mtls_client = if integration_id == "http_mtls" {
+        Some(net::build_hardened_mtls_client(params).map_err(|error| {
+            token_cache::AuthResolutionError::permanent(format!(
+                "Invalid HTTP mTLS configuration: {error}"
+            ))
+        })?)
+    } else {
+        None
+    };
 
     let mut rotated_credentials = None;
     if let Some(deferred_auth) = descriptor.deferred_auth {
@@ -92,6 +107,7 @@ pub async fn resolve_connection_auth(
         base_url: descriptor.base_url,
         aws_signing: descriptor.aws_signing,
         azure_signing: descriptor.azure_signing,
+        mtls_client,
         rotated_credentials,
     })
 }
@@ -246,6 +262,16 @@ fn describe_connection_auth(
                 deferred_auth: None,
             }
         }
+        // ── HTTP mutual TLS ─────────────────────────────────────
+        // The certificate/key are parsed into a hardened Rustls client by
+        // `resolve_connection_auth`; no raw TLS material is exposed to the
+        // proxy or the WASM HTTP agent.
+        "http_mtls" => ConnectionAuthDescriptor {
+            base_url: params["base_url"].as_str().map(ToString::to_string),
+            aws_signing: None,
+            azure_signing: None,
+            deferred_auth: None,
+        },
         // ── MCP (Model Context Protocol) ─────────────────────────
         // The agent (runtara-agent-mcp) sends its JSON-RPC bodies through
         // the proxy; this arm injects the right Authorization / api-key
