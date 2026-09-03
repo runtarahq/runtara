@@ -453,7 +453,7 @@ curl -sS --max-time 4 -H 'Accept: text/event-stream' \
 
 FIRST_FRAME="$(grep -m1 '^data:' "${STREAM_OUT}" | sed 's/^data: *//')"
 expect_true "the first frame arrives and is a snapshot" \
-  "$(echo "${FIRST_FRAME}" | jq -r '(.stages | length) == 11 and .stuckAfterMs == 7000' 2>/dev/null || echo false)"
+  "$(echo "${FIRST_FRAME}" | jq -r '(.stages | length) == 14 and .stuckAfterMs == 7000' 2>/dev/null || echo false)"
 
 print_step "9. The stream keeps delivering"
 FRAME_COUNT="$(grep -c '^data:' "${STREAM_OUT}" || true)"
