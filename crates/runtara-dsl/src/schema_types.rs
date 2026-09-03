@@ -473,16 +473,14 @@ pub struct AgentStep {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_delay: Option<u64>,
 
-    /// Step timeout in milliseconds, per attempt.
+    /// Legacy per-step timeout in milliseconds.
     ///
-    /// Bounds the capability's **outbound HTTP call**, not in-guest compute: the
-    /// emitter injects it as `timeout_ms` into the capability input, and the
-    /// server proxy honors that when the capability accepts a `timeout_ms`
-    /// input (e.g. the `http` agent, AI chat). A running invoke cannot be
-    /// preempted in the synchronous component model, so it never fails the step
-    /// purely on elapsed wall-clock, and capabilities that don't read
-    /// `timeout_ms` ignore it (validation warns with W071). Split, While, and
-    /// WaitForSignal timeouts are enforced as true deadlines.
+    /// This field remains parseable so saved legacy definitions receive a
+    /// structured validation error, but new workflows must not use it: a
+    /// running capability invocation cannot be interrupted by the synchronous
+    /// component host. Use a capability's documented input (for example,
+    /// `timeout_ms`) only when that capability itself owns the timeout. Split,
+    /// While, and WaitForSignal have enforced workflow-level step deadlines.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout: Option<u64>,
 
@@ -636,11 +634,12 @@ pub struct EmbedWorkflowStep {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_delay: Option<u64>,
 
-    /// Step timeout in milliseconds.
+    /// Legacy per-step timeout in milliseconds.
     ///
-    /// **Not enforced** — no deadline exists for a running child workflow, so
-    /// this value is accepted and ignored (validation warns with W071).
-    /// Split, While, and WaitForSignal timeouts are enforced.
+    /// This field remains parseable so saved legacy definitions receive a
+    /// structured validation error, but new workflows must not use it: an
+    /// inline child invocation cannot be interrupted. Split, While, and
+    /// WaitForSignal have enforced workflow-level step deadlines.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout: Option<u64>,
 
@@ -1330,8 +1329,10 @@ pub struct AiAgentConfig {
     /// `maxIterations` (which bounds the *number* of turns). Enforced at the
     /// outbound-HTTP layer: the emitter injects it into the LLM invoke and the
     /// server proxy honors it, so it bounds the model call rather than
-    /// preempting in-guest compute. Per-tool-call timeouts come from each
-    /// tool's own Agent step `timeout`, independently of this value.
+    /// preempting in-guest compute. It does not apply to Agent tools: their
+    /// per-step `timeout` field is unsupported because a running tool invoke
+    /// cannot be interrupted. A tool capability may instead expose its own
+    /// documented timeout input.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub turn_timeout: Option<u64>,
 

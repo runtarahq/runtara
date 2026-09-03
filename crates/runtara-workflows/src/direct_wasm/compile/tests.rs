@@ -3072,10 +3072,10 @@ fn direct_compile_supports_ai_agent_multi_tool_graph() {
 }
 
 #[test]
-fn direct_compile_injects_ai_agent_tool_step_timeout() {
-    // Give one of the two Agent tool steps an explicit timeout; leave the other
-    // unset. The tool's own step timeout must reach its DirectAiToolPlan so the
-    // emitter can bound that tool call independently of the AiAgent turnTimeout.
+fn direct_compile_rejects_ai_agent_tool_step_timeout() {
+    // An Agent tool is still an Agent step. Its `timeout` cannot interrupt a
+    // running capability call, so compilation must reject the graph rather
+    // than inject a best-effort timeout_ms hint into the tool payload.
     let mut graph = fixture("ai_agent_multi_tool");
     let Some(runtara_dsl::Step::Agent(tool)) = graph.steps.get_mut("echo") else {
         panic!("expected Agent tool step 'echo'");
@@ -3083,7 +3083,7 @@ fn direct_compile_injects_ai_agent_tool_step_timeout() {
     tool.timeout = Some(2_000);
 
     let temp = tempfile::tempdir().expect("tempdir");
-    let result = compile_direct_workflow(DirectCompilationInput {
+    let error = compile_direct_workflow(DirectCompilationInput {
         workflow_id: "ai-agent-multi-tool-timeout".to_string(),
         version: 1,
         source_checksum: None,
@@ -3094,44 +3094,16 @@ fn direct_compile_injects_ai_agent_tool_step_timeout() {
         agent_catalog: None,
         agent_slug: None,
     })
-    .expect("direct multi-tool AiAgent compile should succeed");
+    .expect_err("Agent tool timeout must be rejected before compilation");
 
-    let manifest: DirectWorkflowManifest =
-        serde_json::from_slice(&fs::read(&result.manifest_path).expect("manifest"))
-            .expect("manifest json");
-    let core_config = DirectCoreConfig::new(
-        &manifest,
-        &manifest.to_canonical_json().expect("manifest json"),
-        false,
-    )
-    .expect("core config");
-    let DirectRunPlan::AiAgentLoop { tools, .. } = &core_config.run_plan else {
-        panic!(
-            "expected AiAgentLoop run plan, got {:?}",
-            core_config.run_plan
-        );
+    let DirectCompileError::Unsupported { report } = error else {
+        panic!("expected unsupported report, got {error}");
     };
-    let agent_tool_timeouts: Vec<Option<u64>> = tools
-        .iter()
-        .filter_map(|t| match t {
-            crate::direct_wasm::plan::DirectAiToolPlan::Agent { timeout_ms, .. } => {
-                Some(*timeout_ms)
-            }
-            _ => None,
-        })
-        .collect();
-    assert_eq!(
-        agent_tool_timeouts.len(),
-        2,
-        "two Agent tools expected: {tools:?}"
-    );
     assert!(
-        agent_tool_timeouts.contains(&Some(2_000)),
-        "the timed tool step's timeout must reach its plan: {agent_tool_timeouts:?}"
-    );
-    assert!(
-        agent_tool_timeouts.contains(&None),
-        "the untimed tool must stay None: {agent_tool_timeouts:?}"
+        report.unsupported.iter().any(|feature| {
+            feature.step_id.as_deref() == Some("echo") && feature.feature == "agent-timeout"
+        }),
+        "{report:?}"
     );
 }
 
@@ -3650,11 +3622,15 @@ fn direct_compile_supports_sync_parallel_branches_diamond() {
 #[test]
 fn direct_compile_supports_split_timeout_graph() {
     let temp = tempfile::tempdir().expect("tempdir");
+    let mut graph = fixture("split_timeout");
+    // The fixture body contains a Delay. It must park durably instead of
+    // holding a runner while the Split timeout is exercised.
+    graph.durable = Some(true);
     let result = compile_direct_workflow(DirectCompilationInput {
         workflow_id: "split-timeout".to_string(),
         version: 1,
         source_checksum: None,
-        execution_graph: fixture("split_timeout"),
+        execution_graph: graph,
         child_workflows: vec![],
         output_dir: temp.path().to_path_buf(),
         track_events: false,
@@ -3684,11 +3660,15 @@ fn direct_compile_supports_split_timeout_graph() {
 #[test]
 fn direct_compile_supports_while_timeout_graph() {
     let temp = tempfile::tempdir().expect("tempdir");
+    let mut graph = fixture("while_timeout");
+    // The fixture body contains a Delay. It must park durably instead of
+    // holding a runner while the While timeout is exercised.
+    graph.durable = Some(true);
     let result = compile_direct_workflow(DirectCompilationInput {
         workflow_id: "while-timeout".to_string(),
         version: 1,
         source_checksum: None,
-        execution_graph: fixture("while_timeout"),
+        execution_graph: graph,
         child_workflows: vec![],
         output_dir: temp.path().to_path_buf(),
         track_events: false,

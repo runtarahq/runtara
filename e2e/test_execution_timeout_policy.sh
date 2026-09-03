@@ -107,6 +107,18 @@ expect_rejected() {
     echo "  ✓ ${label} rejected at save boundary"
 }
 
+expect_step_timeout_rejected() {
+    local label="$1" step_id="$2" graph="$3" body status response
+    response="$(mktemp -t runtara_execution_timeout_step_XXXXXX)"
+    body="$(jq -nc --argjson graph "${graph}" '{executionGraph: $graph}')"
+    status="$(post_status "/workflows/${WORKFLOW_ID}/update" "${body}" "${response}")"
+    [ "${status}" = "400" ] || fail "${label} step timeout: expected HTTP 400, got ${status}: $(cat "${response}")"
+    jq -e --arg step_id "${step_id}" '.validationErrors[] | select(.code == "E128" and .stepId == $step_id and .fieldName == "timeout")' "${response}" >/dev/null \
+        || fail "${label} step timeout: response did not expose E128 on ${step_id}.timeout: $(cat "${response}")"
+    rm -f "${response}"
+    echo "  ✓ unsupported ${label} timeout rejected at save boundary"
+}
+
 echo '==============================================================='
 echo 'E2E: typed execution-timeout save policy'
 echo '==============================================================='
@@ -150,6 +162,52 @@ expect_rejected zero "$(jq -c '. + {executionTimeoutSeconds: 0}' <<<"${BASE_GRAP
 expect_rejected negative "$(jq -c '. + {executionTimeoutSeconds: -1}' <<<"${BASE_GRAPH}")"
 expect_rejected string "$(jq -c '. + {executionTimeoutSeconds: "120"}' <<<"${BASE_GRAPH}")"
 expect_rejected above_deployment_cap "$(jq -c '. + {executionTimeoutSeconds: 301}' <<<"${BASE_GRAPH}")"
+
+AGENT_STEP_TIMEOUT_GRAPH='{
+  "name": "execution-timeout-policy",
+  "entryPoint": "agent",
+  "steps": {
+    "agent": {
+      "stepType": "Agent",
+      "id": "agent",
+      "agentId": "utils",
+      "capabilityId": "get-current-iso-datetime",
+      "inputMapping": {},
+      "timeout": 1000
+    },
+    "finish": {"stepType": "Finish", "id": "finish"}
+  },
+  "executionPlan": [{"fromStep": "agent", "toStep": "finish"}],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}'
+
+step 'Rejecting unsupported Agent step timeouts through the live API...'
+expect_step_timeout_rejected Agent agent "${AGENT_STEP_TIMEOUT_GRAPH}"
+
+EMBED_WORKFLOW_STEP_TIMEOUT_GRAPH='{
+  "name": "execution-timeout-policy",
+  "entryPoint": "embed",
+  "steps": {
+    "embed": {
+      "stepType": "EmbedWorkflow",
+      "id": "embed",
+      "childWorkflowId": "00000000-0000-0000-0000-000000000000",
+      "childVersion": "latest",
+      "inputMapping": {},
+      "timeout": 1000
+    },
+    "finish": {"stepType": "Finish", "id": "finish"}
+  },
+  "executionPlan": [{"fromStep": "embed", "toStep": "finish"}],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}'
+
+step 'Rejecting unsupported EmbedWorkflow step timeouts through the live API...'
+expect_step_timeout_rejected EmbedWorkflow embed "${EMBED_WORKFLOW_STEP_TIMEOUT_GRAPH}"
 
 step 'Accepting a timeout within the deployment policy...'
 VALID_GRAPH="$(jq -c '. + {executionTimeoutSeconds: 300}' <<<"${BASE_GRAPH}")"

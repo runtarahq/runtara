@@ -1109,12 +1109,12 @@ fn mark_inert_on_error_edges(
     }
 }
 
-fn supports_agent_step_baseline(_graph: &ExecutionGraph, _step: &AgentStep) -> bool {
-    // `timeout` is not gated: it is a no-op for this step type, accepted and
-    // ignored rather than rejected. Real timeout enforcement is impossible in
-    // the synchronous component model (a running `capabilities.invoke` cannot
-    // be preempted) and is out of scope.
-    true
+fn supports_agent_step_baseline(_graph: &ExecutionGraph, step: &AgentStep) -> bool {
+    // A running capabilities.invoke cannot be interrupted by the synchronous
+    // component host. Never lower a claimed Agent deadline as a best-effort
+    // hint: validation and this compiler gate reject it until host-owned
+    // cancellation exists.
+    step.timeout.is_none()
 }
 
 /// AiAgent baseline: single-shot completions (optionally with structured
@@ -1237,10 +1237,13 @@ fn supports_embed_workflow_step_baseline(
     child_workflows: &DirectSupportChildWorkflows<'_>,
     child_stack: &mut Vec<String>,
 ) -> bool {
-    // `timeout` is not gated: the generated EmbedWorkflow codegen parses but
-    // never enforces it (no child-run deadline exists), so direct accepts and
-    // ignores it to match the generated accepted-graph set. See
-    // `collect_embed_workflow_step_unsupported`.
+    // A child runs inline and has no host-owned cancellation boundary. Do not
+    // silently treat `timeout` as a hint; reject it with the same rule as an
+    // Agent call.
+    if step.timeout.is_some() {
+        return false;
+    }
+
     if child_stack.iter().any(|visited| visited == &step.id) {
         return false;
     }
@@ -1830,8 +1833,13 @@ fn collect_embed_workflow_step_unsupported(
         });
     };
 
-    // `timeout` is accepted as a no-op (the generated EmbedWorkflow codegen
-    // parses but never enforces it), so it is intentionally not pushed here.
+    if step.timeout.is_some() {
+        push(
+            "embed-workflow-timeout",
+            "EmbedWorkflow timeout is unsupported because an inline child invocation cannot be interrupted; remove the timeout field",
+        );
+    }
+
     let Some(child) = child_workflows.get(&step.id) else {
         push(
             "embed-workflow-missing-child",
@@ -1862,13 +1870,17 @@ fn collect_embed_workflow_step_unsupported(
 
 fn collect_agent_step_unsupported(
     _graph: &ExecutionGraph,
-    _step: &AgentStep,
-    _unsupported: &mut Vec<UnsupportedWorkflowFeature>,
+    step: &AgentStep,
+    unsupported: &mut Vec<UnsupportedWorkflowFeature>,
 ) {
-    // No Agent fields are gated. `timeout` is parsed but never honored, so the
-    // emitter accepts and ignores it rather than rejecting the workflow.
-    // Enforcement is impossible in the synchronous component model — it would
-    // require host/SDK wiring that does not exist.
+    if step.timeout.is_some() {
+        unsupported.push(UnsupportedWorkflowFeature {
+            step_id: Some(step.id.clone()),
+            step_type: Some("Agent".to_string()),
+            feature: "agent-timeout".to_string(),
+            reason: "Agent timeout is unsupported because a running capability invocation cannot be interrupted; remove the timeout field".to_string(),
+        });
+    }
 }
 
 fn collect_delay_step_unsupported(
@@ -2355,6 +2367,33 @@ mod tests {
 
         assert!(report.supported, "{:?}", report.unsupported);
         assert!(report.unsupported.is_empty());
+    }
+
+    #[test]
+    fn embed_workflow_timeout_is_rejected_by_child_aware_check() {
+        let mut graph = fixture("embed_workflow");
+        let Some(Step::EmbedWorkflow(embed)) = graph.steps.get_mut("call_child") else {
+            panic!("expected EmbedWorkflow fixture step");
+        };
+        embed.timeout = Some(1_000);
+
+        let report = analyze_direct_wasm_support_with_child_workflows(
+            &graph,
+            &[ChildWorkflowInput {
+                step_id: "call_child".to_string(),
+                workflow_id: "child_workflow".to_string(),
+                version_requested: "latest".to_string(),
+                version_resolved: 3,
+                execution_graph: fixture("simple"),
+            }],
+        );
+
+        assert!(!report.supported, "{:?}", report.unsupported);
+        assert!(report.unsupported.iter().any(|feature| {
+            feature.step_id.as_deref() == Some("call_child")
+                && feature.step_type.as_deref() == Some("EmbedWorkflow")
+                && feature.feature == "embed-workflow-timeout"
+        }));
     }
 
     #[test]
@@ -3593,32 +3632,8 @@ mod tests {
         assert!(report.supported, "{:?}", report.unsupported);
     }
 
-    /// `AgentStep.timeout` is enforced at the outbound-HTTP layer: the emitter
-    /// injects it as an immediate `timeout_ms` into the capability input
-    /// mapping, so a capability that accepts one (e.g. the http agent) bounds
-    /// its outbound call via the proxy. It is not a wall-clock deadline (a
-    /// running `capabilities.invoke` cannot be preempted), so direct still
-    /// accepts the step; but the timeout is no longer a pure no-op.
     #[test]
-    fn agent_timeout_is_injected_into_capability_input() {
-        use crate::direct_wasm::manifest::build_direct_workflow_manifest;
-
-        // Unset: nothing is injected — the capability's own default applies.
-        let baseline = build_direct_workflow_manifest(&fixture("transform")).expect("manifest");
-        let baseline_mapping = baseline
-            .graph
-            .mappings
-            .iter()
-            .find(|m| m.step_id == "transform" && m.purpose == "agent.inputMapping")
-            .expect("transform input mapping");
-        assert!(
-            baseline_mapping.value.get("timeout_ms").is_none(),
-            "an unset timeout must not inject timeout_ms: {:?}",
-            baseline_mapping.value
-        );
-
-        // Explicit timeout: injected as an immediate timeout_ms, and still a
-        // direct-supported workflow.
+    fn agent_timeout_is_rejected_instead_of_injected_as_a_hint() {
         let mut graph = fixture("transform");
         let Some(Step::Agent(agent)) = graph.steps.get_mut("transform") else {
             panic!("expected Agent fixture step");
@@ -3626,24 +3641,14 @@ mod tests {
         agent.timeout = Some(1_000);
 
         let report = analyze_direct_wasm_support(&graph);
-        assert!(report.supported, "{:?}", report.unsupported);
+        assert!(!report.supported, "{:?}", report.unsupported);
         assert!(
-            !report
+            report
                 .unsupported
                 .iter()
                 .any(|feature| feature.feature == "agent-timeout"),
-            "timeout must not produce an unsupported feature"
+            "timeout must have a precise unsupported feature"
         );
-
-        let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
-        let mapping = manifest
-            .graph
-            .mappings
-            .iter()
-            .find(|m| m.step_id == "transform" && m.purpose == "agent.inputMapping")
-            .expect("transform input mapping");
-        assert_eq!(mapping.value["timeout_ms"]["valueType"], "immediate");
-        assert_eq!(mapping.value["timeout_ms"]["value"], 1_000);
     }
 
     #[test]
