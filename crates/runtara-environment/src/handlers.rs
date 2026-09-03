@@ -23,7 +23,7 @@ use crate::image_registry::{ImageBuilder, ImageRegistry, require_current_workflo
 use crate::launch_dispatcher::{DEFAULT_LAUNCH_QUEUE_TIMEOUT, LaunchLifecycleObservers};
 use crate::launch_queue::{
     CancelOutcome, EnqueueOutcome, EnqueueRequest, InitialLaunchOutcome, InitialLaunchRequest,
-    LaunchKind, LaunchRepository, LaunchState,
+    LaunchKind, LaunchRepository, LaunchState, SINGLE_INSTANCE_ACTIVE, SINGLE_INSTANCE_LAUNCH_ENV,
 };
 use crate::runner::{Runner, RunnerHandle, StartGate, StartGateOutcome};
 
@@ -625,17 +625,34 @@ pub async fn handle_start_instance(
     let repository = LaunchRepository::new(state.pool.clone());
     let request_tenant_id = request.tenant_id.clone();
     let request_image_id = request.image_id.clone();
+    // The embedded server supplies workflow identity on the regular guest
+    // environment and marks only guarded trigger deliveries with this
+    // short-lived reserved key. Consume the marker before persisting guest
+    // environment so this internal admission detail never reaches a workflow.
+    let mut launch_env = request.env;
+    let single_instance = launch_env
+        .remove(SINGLE_INSTANCE_LAUNCH_ENV)
+        .is_some_and(|value| value.eq_ignore_ascii_case("true"));
+    let workflow_id = launch_env
+        .get("WORKFLOW_ID")
+        .filter(|workflow_id| !workflow_id.is_empty())
+        .cloned();
+    let launch = EnqueueRequest::immediate(
+        uuid::Uuid::new_v4().to_string(),
+        instance_id.clone(),
+        request_tenant_id.clone(),
+        request_image_id.clone(),
+        LaunchKind::Start,
+        DEFAULT_LAUNCH_QUEUE_TIMEOUT,
+    );
+    let launch = match workflow_id {
+        Some(workflow_id) => launch.with_workflow_scope(workflow_id, single_instance),
+        None => launch,
+    };
     let initial = InitialLaunchRequest {
-        launch: EnqueueRequest::immediate(
-            uuid::Uuid::new_v4().to_string(),
-            instance_id.clone(),
-            request_tenant_id.clone(),
-            request_image_id.clone(),
-            LaunchKind::Start,
-            DEFAULT_LAUNCH_QUEUE_TIMEOUT,
-        ),
+        launch,
         input: input_bytes,
-        env: Some(request.env),
+        env: Some(launch_env),
         timeout_seconds: Some(
             i64::try_from(timeout.as_secs())
                 .expect("bounded execution timeout fits in database integer"),
@@ -655,6 +672,17 @@ pub async fn handle_start_instance(
                 instance_id,
                 deduplicated: false,
                 error: None,
+            })
+        }
+        Ok(InitialLaunchOutcome::SingleInstanceActive) => {
+            // This is a deliberate trigger skip, not a failed Environment
+            // start. The embedded client maps the stable code back to the
+            // trigger worker, which ACKs it without creating an instance.
+            Ok(StartInstanceResponse {
+                success: false,
+                instance_id: String::new(),
+                deduplicated: false,
+                error: Some(SINGLE_INSTANCE_ACTIVE.to_string()),
             })
         }
         Ok(InitialLaunchOutcome::ExistingLaunch(_)) => {
@@ -960,6 +988,13 @@ pub async fn handle_resume_instance(
                 error: None,
             })
         }
+        Ok(EnqueueOutcome::SingleInstanceActive) => Ok(ResumeInstanceResponse {
+            success: false,
+            error: Some(
+                "Resume deferred because this single-instance workflow already has active work"
+                    .to_string(),
+            ),
+        }),
         Err(error) => Ok(ResumeInstanceResponse {
             success: false,
             error: Some(format!("Resume could not be queued: {error}")),

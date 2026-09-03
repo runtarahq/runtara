@@ -23,6 +23,7 @@ use runtara_environment::handlers::{
     self, EnvironmentHandlerState, ResumeInstanceRequest, SendCustomSignalOutcome,
     SendSignalOutcome, StartInstanceRequest, StopInstanceRequest,
 };
+use runtara_environment::launch_queue::SINGLE_INSTANCE_ACTIVE;
 use thiserror::Error;
 use tracing::{debug, info, instrument};
 
@@ -46,6 +47,10 @@ pub enum EnvironmentError {
     /// The image does not exist.
     #[error("image not found: {0}")]
     ImageNotFound(String),
+
+    /// A guarded trigger lost the durable workflow-wide launch race.
+    #[error("single-instance workflow already has active work")]
+    SingleInstanceActive,
 
     /// The caller supplied something the handler rejected.
     #[error("invalid input: {0}")]
@@ -194,6 +199,10 @@ impl EnvironmentClient {
             },
         )
         .await?;
+
+        if !resp.success && resp.error.as_deref() == Some(SINGLE_INSTANCE_ACTIVE) {
+            return Err(EnvironmentError::SingleInstanceActive);
+        }
 
         // A refusal naming a missing image is reported as such rather than as a
         // generic failure: callers retry the former by re-registering the image.

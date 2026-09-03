@@ -14,6 +14,7 @@ use crate::environment_client::{EnvironmentClient, EnvironmentError};
 use crate::runtime_types::{ListInstancesOptions, StartInstanceOptions};
 use runtara_environment::execution_timeout::{ExecutionTimeoutPolicy, ExecutionTimeoutSeconds};
 use runtara_environment::handlers::EnvironmentHandlerState;
+use runtara_environment::launch_queue::SINGLE_INSTANCE_LAUNCH_ENV;
 use serde_json::Value;
 
 // Re-export types from the SDK for use by other modules
@@ -38,6 +39,9 @@ pub enum RuntimeError {
 
     #[error("Image not found: {0}")]
     ImageNotFound(String),
+
+    #[error("single-instance workflow already has active work")]
+    SingleInstanceActive,
 
     #[error("Instance not found: {0}")]
     InstanceNotFound(String),
@@ -228,6 +232,7 @@ impl RuntimeClient {
     /// * `instance_id` - Optional custom instance ID
     /// * `input` - Input data for the workflow
     /// * `timeout` - Optional validated active-execution deadline
+    /// * `single_instance` - Enforce the durable workflow-wide launch lease
     ///
     /// # Returns
     /// The instance ID of the started workflow
@@ -241,6 +246,7 @@ impl RuntimeClient {
         input: Option<Value>,
         timeout: Option<ExecutionTimeoutSeconds>,
         debug: bool,
+        single_instance: bool,
     ) -> Result<StartInstanceOutcome, RuntimeError> {
         let sdk = &self.client;
 
@@ -315,9 +321,13 @@ impl RuntimeClient {
         if debug {
             options = options.with_env_var("DEBUG_MODE", "true");
         }
+        if single_instance {
+            options = options.with_env_var(SINGLE_INSTANCE_LAUNCH_ENV, "true");
+        }
 
         let result = sdk.start_instance(options).await.map_err(|e| match e {
             EnvironmentError::ImageNotFound(message) => RuntimeError::ImageNotFound(message),
+            EnvironmentError::SingleInstanceActive => RuntimeError::SingleInstanceActive,
             other => RuntimeError::StartFailed(other.to_string()),
         })?;
 
@@ -510,6 +520,7 @@ impl RuntimeClient {
                 input,
                 timeout,
                 debug,
+                false,
             )
             .await?;
 

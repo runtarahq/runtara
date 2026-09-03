@@ -10,7 +10,7 @@
 //! `ExecutionEngine::queue`, `ExecutionEngine::run_sync`, and the various
 //! status / lifecycle helpers.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -19,11 +19,10 @@ use axum::http::StatusCode;
 use dashmap::DashMap;
 use serde_json::Value;
 use sqlx::PgPool;
-use tokio::sync::Mutex;
 use tracing::{debug, info, instrument, warn};
 use uuid::Uuid;
 
-use crate::runtime_types::{InstanceStatus, ListInstancesOptions, ListInstancesOrder};
+use crate::runtime_types::{ListInstancesOptions, ListInstancesOrder};
 
 use crate::api::dto::executions::ExecutionFilters;
 use crate::api::dto::trigger_event::TriggerEvent;
@@ -103,6 +102,8 @@ pub enum ExecutionError {
         version: i32,
         error: String,
     },
+    /// A guarded trigger lost the durable workflow-wide launch race.
+    SingleInstanceActive,
     RuntimeError(String),
     DatabaseError(String),
     NotConnected(String),
@@ -147,6 +148,9 @@ impl std::fmt::Display for ExecutionError {
                     workflow_id, version, error
                 )
             }
+            ExecutionError::SingleInstanceActive => {
+                write!(f, "single-instance workflow already has active work")
+            }
             ExecutionError::RuntimeError(msg) => write!(f, "Runtime error: {}", msg),
             ExecutionError::DatabaseError(msg) => write!(f, "Database error: {}", msg),
             ExecutionError::NotConnected(msg) => write!(f, "Not connected: {}", msg),
@@ -174,6 +178,7 @@ impl ExecutionError {
             ExecutionError::CompilationTimeout(_) => StatusCode::GATEWAY_TIMEOUT,
             ExecutionError::NotCompiled { .. } => StatusCode::CONFLICT,
             ExecutionError::WorkflowNotRunnable { .. } => StatusCode::UNPROCESSABLE_ENTITY,
+            ExecutionError::SingleInstanceActive => StatusCode::CONFLICT,
             ExecutionError::RuntimeError(_) => StatusCode::INTERNAL_SERVER_ERROR,
             ExecutionError::DatabaseError(_) => StatusCode::INTERNAL_SERVER_ERROR,
             ExecutionError::NotConnected(_) => StatusCode::SERVICE_UNAVAILABLE,
@@ -335,15 +340,6 @@ pub struct ExecutionEngine {
     outbox: ExecutionOutbox,
     #[allow(dead_code)] // Reserved for future in-memory cancellation tracking.
     running_executions: Option<Arc<DashMap<Uuid, CancellationHandle>>>,
-    /// Tracks workflows currently starting (prevents single_instance races).
-    /// Workflows this process is mid-launch on, shared by every engine in it.
-    ///
-    /// Process-wide on purpose: `single_instance` is decided by checking this
-    /// set and then the runtime, and each trigger worker builds its own engine.
-    /// A per-engine set let two workers both find nothing running, each reserve
-    /// only in its own copy, and launch a second instance of a workflow that
-    /// asked for exactly one.
-    starting_workflows: StartingWorkflows,
     /// Sink for product-analytics execution events.
     events: ProductEventSink,
     /// Short-lived cache of the per-tenant in-flight count used by the
@@ -386,14 +382,6 @@ pub struct ExecutionEngine {
 /// per tick.
 const CONCURRENCY_COUNT_TTL: Duration = Duration::from_millis(500);
 
-/// Workflows currently being handed to Environment, keyed by
-/// `(tenant_id, workflow_id)`.
-///
-/// The count matters: more than one ordinary trigger may be starting the same
-/// workflow, and releasing one of those starts must not make a still-pending
-/// sibling invisible to a `single_instance` trigger.
-type StartingWorkflows = Arc<Mutex<HashMap<(String, String), usize>>>;
-
 /// One verified compilation result, carried unchanged to `start_instance`.
 ///
 /// The image ID and tracking mode have to come from the same readiness read.
@@ -403,20 +391,6 @@ struct ReadyLaunch {
     image_id: String,
     execution_timeout: Option<ExecutionTimeoutSeconds>,
     track_events: bool,
-}
-
-/// The reservation set shared by every [`ExecutionEngine`] in this process.
-///
-/// Scoped to the process rather than the database because a Runtara server owns
-/// its tenant: one process per tenant, so "this process" and "this tenant's
-/// runtime" are the same boundary. It lasts only until Environment has
-/// durably created the pending instance; after that the runtime's `pending` or
-/// `running` status is the cross-process source of truth. If several replicas
-/// were ever to share a tenant database, the short handoff lock would have to
-/// become a database-level lock too.
-fn starting_workflows() -> &'static StartingWorkflows {
-    static STARTING: std::sync::OnceLock<StartingWorkflows> = std::sync::OnceLock::new();
-    STARTING.get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
 }
 
 /// Admissions still unaccounted for after a fresh count landed.
@@ -429,15 +403,6 @@ fn starting_workflows() -> &'static StartingWorkflows {
 /// fresh one.
 fn retained_reservations(subsumed: u64, current: u64) -> u64 {
     current.saturating_sub(subsumed.min(current))
-}
-
-/// Runtime states that own a workflow-wide `single_instance` slot.
-///
-/// `Suspended` is intentionally absent: a durable approval has parked its
-/// guest and is no longer active work, regardless of how many approvals a
-/// tenant retains.
-fn single_instance_active_statuses() -> [InstanceStatus; 2] {
-    [InstanceStatus::Pending, InstanceStatus::Running]
 }
 
 impl ExecutionEngine {
@@ -459,7 +424,6 @@ impl ExecutionEngine {
             trigger_stream,
             outbox: ExecutionOutbox::new(pool.clone()),
             running_executions,
-            starting_workflows: Arc::clone(starting_workflows()),
             events,
             concurrency_counts: Arc::new(DashMap::new()),
             concurrency_reservations: Arc::new(DashMap::new()),
@@ -1042,6 +1006,7 @@ impl ExecutionEngine {
                 Some(validated_inputs),
                 Some(execution_timeout),
                 false,
+                false,
             )
             .await
         {
@@ -1187,21 +1152,17 @@ impl ExecutionEngine {
         &self,
         event: &TriggerEvent,
     ) -> Result<DetachedExecution, ExecutionError> {
-        let workflow_key = (event.tenant_id.clone(), event.workflow_id.clone());
-        self.reserve_workflow_start(&workflow_key).await;
-        self.execute_detached_with_reservation(event, workflow_key)
-            .await
+        self.execute_detached_with_scope(event, false).await
     }
 
-    /// Atomically enforce `single_instance` while handing a start to
-    /// Environment.
+    /// Atomically enforce `single_instance` through Environment's durable
+    /// workflow-scoped launch lease.
     ///
-    /// A successful Environment start has already durably inserted an
-    /// instance in `pending` before it returns. The short in-process
-    /// reservation therefore only bridges the check/start gap; it is released
-    /// immediately after that response rather than held for an arbitrary grace
-    /// period. From then on, `pending` and `running` are active, while a
-    /// `suspended` approval is intentionally not.
+    /// The scope is persisted with the launch row, and Environment serializes
+    /// admission in PostgreSQL. It therefore survives worker/server restarts
+    /// and is released by the same durable transition that parks or
+    /// terminalizes its generation. A suspended approval intentionally has no
+    /// active lease.
     ///
     /// `None` means another active or in-flight instance already owns the
     /// workflow-wide single-instance slot. The caller should ACK the trigger
@@ -1210,56 +1171,21 @@ impl ExecutionEngine {
         &self,
         event: &TriggerEvent,
     ) -> Result<Option<DetachedExecution>, ExecutionError> {
-        let workflow_key = (event.tenant_id.clone(), event.workflow_id.clone());
-        if !self.try_reserve_workflow_start(&workflow_key).await {
-            return Ok(None);
-        }
-
-        match self
-            .has_runtime_active_instance(&event.tenant_id, &event.workflow_id)
-            .await
-        {
-            Ok(true) => {
-                self.release_workflow_start(&workflow_key).await;
-                Ok(None)
-            }
-            Ok(false) => Ok(Some(
-                self.execute_detached_with_reservation(event, workflow_key)
-                    .await?,
-            )),
-            Err(error) => {
-                // Preserve the established fail-open contract for a temporary
-                // runtime read failure, but keep the reservation while the
-                // start request is in flight so local workers still cannot
-                // race each other into two launches.
-                warn!(
-                    instance_id = %event.instance_id,
-                    workflow_id = %event.workflow_id,
-                    error = %error,
-                    "Failed to check active single_instance workflow; proceeding with the guarded start"
-                );
-                Ok(Some(
-                    self.execute_detached_with_reservation(event, workflow_key)
-                        .await?,
-                ))
-            }
+        match self.execute_detached_with_scope(event, true).await {
+            Ok(launch) => Ok(Some(launch)),
+            Err(ExecutionError::SingleInstanceActive) => Ok(None),
+            Err(error) => Err(error),
         }
     }
 
-    /// Run a start while `workflow_key` is already represented in
-    /// [`Self::starting_workflows`]. Every caller must transfer ownership of
-    /// exactly one reservation to this method.
-    async fn execute_detached_with_reservation(
+    /// Run one durable Environment start and emit the detached execution
+    /// analytics only after the start is accepted.
+    async fn execute_detached_with_scope(
         &self,
         event: &TriggerEvent,
-        workflow_key: (String, String),
+        single_instance: bool,
     ) -> Result<DetachedExecution, ExecutionError> {
-        // Execute and release the short handoff reservation on every result.
-        // Environment persists `pending` before it answers a successful start,
-        // so there is no post-response gap that needs a timer-based grace
-        // period. Keeping one would make a parked approval look active after
-        // it had already released every real resource.
-        let result = self.execute_detached_inner(event).await;
+        let result = self.execute_detached_inner(event, single_instance).await;
 
         // Product analytics: an async execution started. No user context survives into the
         // worker, so attribute to the firing trigger when present, else the system. `source`
@@ -1356,8 +1282,6 @@ impl ExecutionEngine {
             });
         }
 
-        self.release_workflow_start(&workflow_key).await;
-
         result
     }
 
@@ -1365,6 +1289,7 @@ impl ExecutionEngine {
     async fn execute_detached_inner(
         &self,
         event: &TriggerEvent,
+        single_instance: bool,
     ) -> Result<DetachedExecution, ExecutionError> {
         let runtime_client = self.runtime_client.as_ref().ok_or_else(|| {
             ExecutionError::NotConnected("Runtime client not configured".to_string())
@@ -1399,6 +1324,7 @@ impl ExecutionEngine {
                 Some(workflow_input),
                 Some(execution_timeout),
                 event.debug,
+                single_instance,
             )
             .await
         {
@@ -1454,6 +1380,9 @@ impl ExecutionEngine {
                     compilation_queued,
                 });
             }
+            Err(RuntimeError::SingleInstanceActive) => {
+                return Err(ExecutionError::SingleInstanceActive);
+            }
             Err(e) => return Err(ExecutionError::RuntimeError(e.to_string())),
         };
 
@@ -1508,77 +1437,6 @@ impl ExecutionEngine {
         .map_err(|e| ExecutionError::DatabaseError(format!("Failed to get trigger: {}", e)))?;
 
         Ok(result.map(|r| r.single_instance))
-    }
-
-    /// Reserve one in-process start handoff for a workflow.
-    async fn reserve_workflow_start(&self, workflow_key: &(String, String)) {
-        let mut starting = self.starting_workflows.lock().await;
-        *starting.entry(workflow_key.clone()).or_default() += 1;
-    }
-
-    /// Reserve a workflow only when no other local start handoff owns it.
-    ///
-    /// This is the atomic half of `single_instance`: checking the runtime and
-    /// reserving in separate trigger workers would otherwise leave a
-    /// check-then-start window where both workers see an empty runtime.
-    async fn try_reserve_workflow_start(&self, workflow_key: &(String, String)) -> bool {
-        let mut starting = self.starting_workflows.lock().await;
-        if starting.contains_key(workflow_key) {
-            return false;
-        }
-        starting.insert(workflow_key.clone(), 1);
-        true
-    }
-
-    /// Release exactly one start handoff reservation.
-    async fn release_workflow_start(&self, workflow_key: &(String, String)) {
-        let mut starting = self.starting_workflows.lock().await;
-        match starting.get_mut(workflow_key) {
-            Some(count) if *count > 1 => *count -= 1,
-            Some(_) => {
-                starting.remove(workflow_key);
-            }
-            // An idempotent cleanup path may observe an already-released
-            // reservation. It is harmless: Runtime status is authoritative
-            // after the handoff has completed.
-            None => {}
-        }
-    }
-
-    /// Is there an active runtime instance for the workflow?
-    ///
-    /// `single_instance` is workflow-wide, so this deliberately sees work
-    /// started by any source, not merely the trigger that enabled it. An
-    /// instance is active only while it is `pending` or `running`; durable
-    /// `suspended` approvals are intentionally excluded and can scale without
-    /// consuming this gate.
-    async fn has_runtime_active_instance(
-        &self,
-        tenant_id: &str,
-        workflow_id: &str,
-    ) -> Result<bool, ExecutionError> {
-        let runtime_client = match self.runtime_client.as_ref() {
-            Some(client) => client,
-            None => {
-                // If no runtime client, we can't check runtara - assume no running instances
-                return Ok(false);
-            }
-        };
-
-        let result = runtime_client
-            .list_instances_with_options(
-                ListInstancesOptions::new()
-                    .with_image_name_prefix(format!("{}:", workflow_id))
-                    .with_tenant_id(tenant_id)
-                    .with_statuses(single_instance_active_statuses())
-                    .with_limit(1),
-            )
-            .await
-            .map_err(|e| {
-                ExecutionError::RuntimeError(format!("Failed to check running instances: {}", e))
-            })?;
-
-        Ok(!result.instances.is_empty())
     }
 
     // =========================================================================
@@ -2819,140 +2677,6 @@ mod tests {
         );
     }
 
-    /// Two engines in one process must share the single-instance reservation.
-    ///
-    /// Each trigger worker builds its own engine. With a set per engine, two
-    /// workers handling events for the same workflow both find nothing
-    /// running, each reserve in their own copy, and both launch — which is
-    /// precisely what `single_instance` is supposed to prevent.
-    #[tokio::test]
-    async fn engines_share_one_single_instance_reservation_set() {
-        // Lazy pools so this needs no database: nothing here touches one, and
-        // the point is what the constructor wires up, not what it queries.
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .connect_lazy("postgres://unused/unused")
-            .expect("lazy pool");
-        let (tx, _rx) = tokio::sync::mpsc::channel(1);
-        let engine = |pool: PgPool| {
-            ExecutionEngine::new(
-                pool.clone(),
-                Arc::new(WorkflowRepository::new(pool)),
-                None,
-                None,
-                None,
-                ProductEventSink::new(tx.clone()),
-                crate::workers::pipeline_gauges::PipelineGauges::new(),
-            )
-        };
-
-        // Two engines, exactly as two trigger workers build them.
-        let first = engine(pool.clone());
-        let second = engine(pool);
-
-        let key = (
-            format!("tenant-{}", uuid::Uuid::new_v4()),
-            "workflow-a".to_string(),
-        );
-        first.reserve_workflow_start(&key).await;
-
-        assert!(
-            second.starting_workflows.lock().await.contains_key(&key),
-            "a workflow reserved through one engine must be visible to another; \
-             a set per engine lets two workers each launch a single_instance \
-             workflow believing nothing is running"
-        );
-
-        first.release_workflow_start(&key).await;
-    }
-
-    /// A `single_instance` trigger needs one atomic handoff reservation around
-    /// the runtime check and start call. A separate "check then insert" lets
-    /// two workers both observe no active instance and launch duplicates.
-    #[tokio::test]
-    async fn single_instance_handoff_reservation_is_atomic() {
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .connect_lazy("postgres://unused/unused")
-            .expect("lazy pool");
-        let (tx, _rx) = tokio::sync::mpsc::channel(1);
-        let engine = ExecutionEngine::new(
-            pool.clone(),
-            Arc::new(WorkflowRepository::new(pool)),
-            None,
-            None,
-            None,
-            ProductEventSink::new(tx),
-            crate::workers::pipeline_gauges::PipelineGauges::new(),
-        );
-        let key = (
-            format!("tenant-{}", uuid::Uuid::new_v4()),
-            "workflow-a".to_string(),
-        );
-
-        assert!(engine.try_reserve_workflow_start(&key).await);
-        assert!(
-            !engine.try_reserve_workflow_start(&key).await,
-            "the second worker must see the first handoff before either reaches Environment"
-        );
-
-        engine.release_workflow_start(&key).await;
-        assert!(
-            engine.try_reserve_workflow_start(&key).await,
-            "a released handoff must not permanently block a workflow"
-        );
-        engine.release_workflow_start(&key).await;
-    }
-
-    /// Concurrent ordinary starts are reference-counted. Releasing the first
-    /// must not remove the second's handoff reservation early.
-    #[tokio::test]
-    async fn start_handoff_reservations_are_reference_counted() {
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .connect_lazy("postgres://unused/unused")
-            .expect("lazy pool");
-        let (tx, _rx) = tokio::sync::mpsc::channel(1);
-        let engine = ExecutionEngine::new(
-            pool.clone(),
-            Arc::new(WorkflowRepository::new(pool)),
-            None,
-            None,
-            None,
-            ProductEventSink::new(tx),
-            crate::workers::pipeline_gauges::PipelineGauges::new(),
-        );
-        let key = (
-            format!("tenant-{}", uuid::Uuid::new_v4()),
-            "workflow-a".to_string(),
-        );
-
-        engine.reserve_workflow_start(&key).await;
-        engine.reserve_workflow_start(&key).await;
-        engine.release_workflow_start(&key).await;
-        assert!(
-            engine.starting_workflows.lock().await.contains_key(&key),
-            "one pending start still owns the handoff after its sibling returns"
-        );
-        engine.release_workflow_start(&key).await;
-        assert!(
-            !engine.starting_workflows.lock().await.contains_key(&key),
-            "the last handoff release frees the workflow"
-        );
-    }
-
-    #[test]
-    fn single_instance_activity_excludes_parked_approvals() {
-        let options = ListInstancesOptions::new().with_statuses(single_instance_active_statuses());
-        assert_eq!(
-            options.statuses,
-            vec![InstanceStatus::Pending, InstanceStatus::Running],
-            "single_instance must include starts that have not reached running yet, \
-             but never treat a suspended approval as active"
-        );
-        assert!(
-            !options.statuses.contains(&InstanceStatus::Suspended),
-            "a parked approval has no active single-instance lease"
-        );
-    }
-
     /// The gate must answer from memory, never from a query.
     ///
     /// The count reads a table the same workload is churning, so its cost
@@ -3073,6 +2797,16 @@ mod tests {
     fn test_execution_error_display_compilation_failed() {
         let error = ExecutionError::CompilationFailed("syntax error".to_string());
         assert_eq!(format!("{}", error), "Compilation failed: syntax error");
+    }
+
+    #[test]
+    fn test_execution_error_single_instance_active_is_a_conflict() {
+        let error = ExecutionError::SingleInstanceActive;
+        assert_eq!(
+            format!("{error}"),
+            "single-instance workflow already has active work"
+        );
+        assert_eq!(error.http_status(), StatusCode::CONFLICT);
     }
 
     #[test]

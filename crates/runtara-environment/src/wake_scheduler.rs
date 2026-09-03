@@ -531,6 +531,21 @@ impl WakeScheduler {
                 );
                 Ok(())
             }
+            Ok(EnqueueOutcome::SingleInstanceActive) => {
+                // A parked approval intentionally owns no active lease. If a
+                // new trigger won the same workflow scope first, keep this
+                // wake durable and try again later rather than turning the
+                // healthy suspended instance into a failure or silently
+                // discarding its due wake.
+                self.persistence
+                    .set_instance_sleep(&instance.instance_id, self.retry_deadline())
+                    .await?;
+                info!(
+                    instance_id = %instance.instance_id,
+                    "Deferring wake while single-instance workflow has active work"
+                );
+                Ok(())
+            }
             Err(LaunchQueueError::InvalidLaunchTarget { .. }) => {
                 let message = "Wake has no valid tenant-scoped image binding";
                 warn!(instance_id = %instance.instance_id, "Failing wake with invalid image binding");

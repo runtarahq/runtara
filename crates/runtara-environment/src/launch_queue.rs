@@ -10,7 +10,7 @@
 use std::{collections::HashMap, time::Duration};
 
 use chrono::{DateTime, Utc};
-use sqlx::{FromRow, PgPool};
+use sqlx::{FromRow, PgPool, Postgres, Transaction};
 use thiserror::Error;
 
 /// Stable failure detail written when a launch exceeds its queue deadline.
@@ -19,11 +19,21 @@ pub const LAUNCH_QUEUE_TIMEOUT: &str = "launch_queue_timeout";
 /// Stable detail recorded when a dispatcher found the runner full.
 pub const RUNNER_CAPACITY_UNAVAILABLE: &str = "runner_capacity_unavailable";
 
-const LAUNCH_COLUMNS: &str = "launch_id, instance_id, tenant_id, image_id, kind, state, \
+/// Stable refusal detail for a trigger whose workflow already has active work.
+pub const SINGLE_INSTANCE_ACTIVE: &str = "single_instance_active";
+
+/// Reserved environment key used only while the embedded server hands a
+/// single-instance trigger to Environment. The handler consumes it before the
+/// environment is persisted for the guest.
+pub const SINGLE_INSTANCE_LAUNCH_ENV: &str = "RUNTARA_SINGLE_INSTANCE_LAUNCH";
+
+const LAUNCH_COLUMNS: &str = "launch_id, instance_id, tenant_id, image_id, workflow_id, \
+    single_instance, kind, state, \
     available_at, deadline_at, lease_owner, lease_expires_at, attempt_count, \
     last_error, created_at, updated_at";
 const LAUNCH_RETURNING_COLUMNS: &str = "launch.launch_id, launch.instance_id, \
-    launch.tenant_id, launch.image_id, launch.kind, launch.state, launch.available_at, \
+    launch.tenant_id, launch.image_id, launch.workflow_id, launch.single_instance, \
+    launch.kind, launch.state, launch.available_at, \
     launch.deadline_at, launch.lease_owner, launch.lease_expires_at, launch.attempt_count, \
     launch.last_error, launch.created_at, launch.updated_at";
 
@@ -134,6 +144,20 @@ impl LaunchState {
     }
 }
 
+/// Workflow identity carried by a launch generation.
+///
+/// The scope is persisted for ordinary workflow starts too. That preserves the
+/// existing workflow-wide behavior: a later `single_instance` trigger sees an
+/// active launch created by another source, while parked history remains
+/// lease-free.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowLaunchScope {
+    /// Workflow whose active generations share this scope.
+    pub workflow_id: String,
+    /// Whether this logical execution must defer while the scope is active.
+    pub single_instance: bool,
+}
+
 /// One persisted launch generation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Launch {
@@ -145,6 +169,8 @@ pub struct Launch {
     pub tenant_id: String,
     /// Immutable image selected for this generation.
     pub image_id: String,
+    /// Optional durable workflow scope used for `single_instance` admission.
+    pub workflow_scope: Option<WorkflowLaunchScope>,
     /// Source of the launch request.
     pub kind: LaunchKind,
     /// Current durable handoff state.
@@ -178,6 +204,8 @@ pub struct EnqueueRequest {
     pub tenant_id: String,
     /// Existing immutable image selected for the attempt.
     pub image_id: String,
+    /// Optional durable workflow scope for the generation.
+    pub workflow_scope: Option<WorkflowLaunchScope>,
     /// Source of the request.
     pub kind: LaunchKind,
     /// Delay before the row becomes claimable, measured from database time.
@@ -210,6 +238,10 @@ pub enum InitialLaunchOutcome {
     Enqueued(Launch),
     /// Another transaction already owns the instance's live launch generation.
     ExistingLaunch(Launch),
+    /// A matching `single_instance` workflow already owns an active launch.
+    ///
+    /// No Core instance or image binding was committed for this refusal.
+    SingleInstanceActive,
     /// The instance ID predates this request but has no live launch generation.
     ///
     /// Callers must inspect the existing durable instance rather than treating
@@ -233,10 +265,32 @@ impl EnqueueRequest {
             instance_id: instance_id.into(),
             tenant_id: tenant_id.into(),
             image_id: image_id.into(),
+            workflow_scope: None,
             kind,
             available_after: Duration::ZERO,
             queue_timeout,
         }
+    }
+
+    /// Attach the workflow-wide scope for this logical execution.
+    ///
+    /// Empty identifiers are ignored so direct Environment callers without a
+    /// workflow identity remain compatible rather than persisting a malformed
+    /// scope. A single-instance flag therefore can never exist without a
+    /// workflow key.
+    pub fn with_workflow_scope(
+        mut self,
+        workflow_id: impl Into<String>,
+        single_instance: bool,
+    ) -> Self {
+        let workflow_id = workflow_id.into();
+        if !workflow_id.is_empty() {
+            self.workflow_scope = Some(WorkflowLaunchScope {
+                workflow_id,
+                single_instance,
+            });
+        }
+        self
     }
 }
 
@@ -247,6 +301,9 @@ pub enum EnqueueOutcome {
     Enqueued(Launch),
     /// A row with this launch ID or another active generation already existed.
     Existing(Launch),
+    /// A resume/wake inherited `single_instance` scope but another active
+    /// generation became the workflow-wide winner first.
+    SingleInstanceActive,
 }
 
 /// Result of a cancellation attempted before guest execution starts.
@@ -318,6 +375,12 @@ pub enum LaunchQueueError {
         /// Invalid requested state.
         state: LaunchState,
     },
+    /// A stored launch claimed to be single-instance without a workflow key.
+    #[error("single-instance launch {launch_id} has no workflow scope")]
+    InvalidStoredWorkflowScope {
+        /// Durable generation with the malformed scope.
+        launch_id: String,
+    },
 }
 
 /// PostgreSQL repository for [`Launch`] rows.
@@ -365,6 +428,7 @@ impl LaunchRepository {
         let available_after_us =
             duration_to_micros(request.launch.available_after, "available_after")?;
         let queue_timeout_us = duration_to_micros(request.launch.queue_timeout, "queue_timeout")?;
+        let workflow_scope = request.launch.workflow_scope.clone();
         let env = request
             .env
             .filter(|values| !values.is_empty())
@@ -381,13 +445,14 @@ impl LaunchRepository {
         let insert_launch = format!(
             r#"
             INSERT INTO instance_launches (
-                launch_id, instance_id, tenant_id, image_id, kind, state,
+                launch_id, instance_id, tenant_id, image_id, workflow_id,
+                single_instance, kind, state,
                 available_at, deadline_at
             )
             VALUES (
-                $1, $2, $3, $4, 'start', 'queued',
-                NOW() + ($5 * INTERVAL '1 microsecond'),
-                NOW() + ($6 * INTERVAL '1 microsecond')
+                $1, $2, $3, $4, $5, $6, 'start', 'queued',
+                NOW() + ($7 * INTERVAL '1 microsecond'),
+                NOW() + ($8 * INTERVAL '1 microsecond')
             )
             RETURNING {LAUNCH_COLUMNS}
             "#
@@ -421,6 +486,28 @@ impl LaunchRepository {
             };
         }
 
+        // Every workflow-scoped start takes the same transaction advisory
+        // lock, even if this particular source did not opt into
+        // single_instance. That preserves the historical workflow-wide
+        // behavior: a guarded trigger sees regular active workflow work too.
+        if let Some(scope) = workflow_scope.as_ref() {
+            acquire_workflow_scope_lock(&mut tx, &request.launch.tenant_id, &scope.workflow_id)
+                .await?;
+            if scope.single_instance
+                && has_active_workflow_launch(
+                    &mut tx,
+                    &request.launch.tenant_id,
+                    &scope.workflow_id,
+                )
+                .await?
+            {
+                // Dropping the transaction rolls back the instance claim,
+                // preventing an unowned pending row from surviving a skipped
+                // trigger delivery.
+                return Ok(InitialLaunchOutcome::SingleInstanceActive);
+            }
+        }
+
         // Bind only an image owned by the same tenant. The `RETURNING` result
         // makes a missing or cross-tenant image abort the surrounding instance
         // insert rather than leaving a launchable-looking `pending` row.
@@ -452,6 +539,12 @@ impl LaunchRepository {
             .bind(&request.launch.instance_id)
             .bind(&request.launch.tenant_id)
             .bind(&request.launch.image_id)
+            .bind(workflow_scope.as_ref().map(|scope| &scope.workflow_id))
+            .bind(
+                workflow_scope
+                    .as_ref()
+                    .is_some_and(|scope| scope.single_instance),
+            )
             .bind(available_after_us)
             .bind(queue_timeout_us)
             .fetch_one(&mut *tx)
@@ -478,13 +571,14 @@ impl LaunchRepository {
         let insert = format!(
             r#"
             INSERT INTO instance_launches (
-                launch_id, instance_id, tenant_id, image_id, kind, state,
+                launch_id, instance_id, tenant_id, image_id, workflow_id,
+                single_instance, kind, state,
                 available_at, deadline_at
             )
             VALUES (
-                $1, $2, $3, $4, $5, 'queued',
-                NOW() + ($6 * INTERVAL '1 microsecond'),
-                NOW() + ($7 * INTERVAL '1 microsecond')
+                $1, $2, $3, $4, $5, $6, $7, 'queued',
+                NOW() + ($8 * INTERVAL '1 microsecond'),
+                NOW() + ($9 * INTERVAL '1 microsecond')
             )
             ON CONFLICT DO NOTHING
             RETURNING {LAUNCH_COLUMNS}
@@ -562,11 +656,55 @@ impl LaunchRepository {
                 });
             }
 
+            // Resume and wake generations inherit their scope from the
+            // logical instance's earlier launches. A parked instance has no
+            // active row/lease, but its next generation must still compete
+            // with a concurrently arriving single-instance trigger.
+            let historical_scope = sqlx::query_as::<_, WorkflowScopeRow>(
+                r#"
+                SELECT workflow_id, single_instance
+                FROM instance_launches
+                WHERE instance_id = $1
+                  AND workflow_id IS NOT NULL
+                ORDER BY created_at DESC, launch_id DESC
+                LIMIT 1
+                "#,
+            )
+            .bind(&request.instance_id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .map(WorkflowLaunchScope::try_from)
+            .transpose()?;
+            let workflow_scope = match request.kind {
+                LaunchKind::Start => request.workflow_scope.clone().or(historical_scope),
+                LaunchKind::Resume | LaunchKind::Wake => {
+                    historical_scope.or(request.workflow_scope.clone())
+                }
+            };
+
+            if let Some(scope) = workflow_scope.as_ref() {
+                acquire_workflow_scope_lock(&mut tx, &request.tenant_id, &scope.workflow_id)
+                    .await?;
+                if scope.single_instance
+                    && has_active_workflow_launch(&mut tx, &request.tenant_id, &scope.workflow_id)
+                        .await?
+                {
+                    tx.commit().await?;
+                    return Ok(EnqueueOutcome::SingleInstanceActive);
+                }
+            }
+
             if let Some(row) = sqlx::query_as::<_, LaunchRow>(&insert)
                 .bind(&request.launch_id)
                 .bind(&request.instance_id)
                 .bind(&request.tenant_id)
                 .bind(&request.image_id)
+                .bind(workflow_scope.as_ref().map(|scope| &scope.workflow_id))
+                .bind(
+                    workflow_scope
+                        .as_ref()
+                        .is_some_and(|scope| scope.single_instance),
+                )
                 .bind(request.kind.as_str())
                 .bind(available_after_us)
                 .bind(queue_timeout_us)
@@ -617,6 +755,67 @@ impl LaunchRepository {
             .await?
             .map(Launch::try_from)
             .transpose()
+    }
+
+    /// Reconcile active launch rows after their Core instance already parked
+    /// or terminalized.
+    ///
+    /// Normal monitor and cancellation paths transition the Core instance and
+    /// launch generation together. If the host dies after Core records the
+    /// outcome but before the generation is released, this bounded scan makes
+    /// the durable Core state authoritative again. A `suspended` instance is
+    /// reconciled only from `running`: a queued/leased/starting resume or wake
+    /// legitimately remains `suspended` until the start gate opens.
+    pub async fn reconcile_released_instances(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<Launch>, LaunchQueueError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let query = format!(
+            r#"
+            WITH candidates AS (
+                SELECT launch.launch_id, core_instance.status::TEXT AS instance_status
+                FROM instance_launches AS launch
+                JOIN instances AS core_instance
+                  ON core_instance.instance_id = launch.instance_id
+                 AND core_instance.tenant_id = launch.tenant_id
+                WHERE launch.state IN ('queued', 'leased', 'starting', 'running')
+                  AND (
+                        core_instance.status IN ('completed', 'failed', 'cancelled')
+                        OR (
+                            core_instance.status = 'suspended'
+                            AND launch.state = 'running'
+                        )
+                  )
+                ORDER BY launch.updated_at, launch.launch_id
+                FOR UPDATE OF launch SKIP LOCKED
+                LIMIT $1
+            )
+            UPDATE instance_launches AS launch
+            SET state = CASE candidates.instance_status
+                    WHEN 'suspended' THEN 'suspended'
+                    WHEN 'completed' THEN 'completed'
+                    WHEN 'failed' THEN 'failed'
+                    WHEN 'cancelled' THEN 'cancelled'
+                END,
+                lease_owner = NULL,
+                lease_expires_at = NULL,
+                start_gate_deadline_at = NULL,
+                updated_at = NOW()
+            FROM candidates
+            WHERE launch.launch_id = candidates.launch_id
+            RETURNING {LAUNCH_RETURNING_COLUMNS}
+            "#
+        );
+        rows_to_launches(
+            sqlx::query_as::<_, LaunchRow>(&query)
+                .bind(limit)
+                .fetch_all(&self.pool)
+                .await?,
+        )
     }
 
     /// Claim a bounded ready batch for one dispatcher.
@@ -754,7 +953,7 @@ impl LaunchRepository {
             SET state = 'starting',
                 -- This durable marker is the rollout fence for recovery:
                 -- only a start that was created behind a gate can be safely
-                -- reclaimed while it remains in `starting`.
+                -- reclaimed or terminalized while it remains unconfirmed.
                 start_gate_deadline_at = lease_expires_at,
                 updated_at = NOW()
             WHERE launch_id = $1
@@ -775,7 +974,7 @@ impl LaunchRepository {
     }
 
     /// Atomically promote a generation and its Core instance through the
-    /// start gate.
+    /// closed start gate.
     ///
     /// The dispatcher calls this only after the runner has accepted a closed
     /// gate and after it has durably registered that generation. Updating the
@@ -793,7 +992,6 @@ impl LaunchRepository {
             SET state = 'running',
                 lease_owner = NULL,
                 lease_expires_at = NULL,
-                start_gate_deadline_at = NULL,
                 updated_at = NOW()
             WHERE launch_id = $1
               AND state = 'starting'
@@ -851,6 +1049,38 @@ impl LaunchRepository {
 
         tx.commit().await?;
         Ok(Some(running.try_into()?))
+    }
+
+    /// Confirm that a `running` generation may open its in-memory start gate.
+    ///
+    /// The generation remains marked with its durable gate deadline after
+    /// [`Self::mark_running`] so a process loss before guest work begins is
+    /// still distinguishable from normal execution. This conditional update
+    /// removes that recovery marker only while the same running generation is
+    /// still within its gate deadline; the dispatcher calls it immediately
+    /// before [`crate::runner::StartGate::open`].
+    pub async fn confirm_gate_open(
+        &self,
+        launch_id: &str,
+    ) -> Result<Option<Launch>, LaunchQueueError> {
+        let query = format!(
+            r#"
+            UPDATE instance_launches
+            SET start_gate_deadline_at = NULL,
+                updated_at = NOW()
+            WHERE launch_id = $1
+              AND state = 'running'
+              AND start_gate_deadline_at > NOW()
+              AND deadline_at > NOW()
+            RETURNING {LAUNCH_COLUMNS}
+            "#
+        );
+        sqlx::query_as::<_, LaunchRow>(&query)
+            .bind(launch_id)
+            .fetch_optional(&self.pool)
+            .await?
+            .map(Launch::try_from)
+            .transpose()
     }
 
     /// Return a dispatcher-owned pre-run launch to the ready queue.
@@ -995,8 +1225,7 @@ impl LaunchRepository {
             r#"
             UPDATE instances
             SET status = 'suspended',
-                finished_at = NULL,
-                termination_reason = NULL
+                finished_at = NULL
             WHERE instance_id = $1
               AND status IN ('running', 'suspended')
             "#,
@@ -1051,7 +1280,8 @@ impl LaunchRepository {
             .transpose()
     }
 
-    /// Fail a bounded batch whose queue deadline has elapsed.
+    /// Fail a bounded batch whose queue deadline or unconfirmed start-gate
+    /// deadline has elapsed.
     ///
     /// The matching Core instances are terminalized in the same transaction,
     /// immediately releasing their existing pending admission occupancy.  The
@@ -1072,6 +1302,14 @@ impl LaunchRepository {
                     OR (state = 'starting' AND start_gate_deadline_at IS NOT NULL)
                 )
               AND deadline_at <= NOW()
+              OR (
+                    state = 'running'
+                    AND start_gate_deadline_at IS NOT NULL
+                    AND (
+                        start_gate_deadline_at <= NOW()
+                        OR deadline_at <= NOW()
+                    )
+                )
             ORDER BY deadline_at, created_at, launch_id
             FOR UPDATE SKIP LOCKED
             LIMIT $1
@@ -1099,8 +1337,19 @@ impl LaunchRepository {
                 updated_at = NOW()
             WHERE launch_id = ANY($1)
               AND (
-                    state IN ('queued', 'leased')
-                    OR (state = 'starting' AND start_gate_deadline_at IS NOT NULL)
+                    (
+                        state IN ('queued', 'leased')
+                        OR (state = 'starting' AND start_gate_deadline_at IS NOT NULL)
+                    )
+                    AND deadline_at <= NOW()
+                    OR (
+                        state = 'running'
+                        AND start_gate_deadline_at IS NOT NULL
+                        AND (
+                            start_gate_deadline_at <= NOW()
+                            OR deadline_at <= NOW()
+                        )
+                    )
                 )
             RETURNING {LAUNCH_COLUMNS}
             "#
@@ -1125,7 +1374,7 @@ impl LaunchRepository {
                 termination_reason = 'launch_queue_timeout',
                 error = $2
             WHERE instance_id = ANY($1)
-              AND status IN ('pending', 'suspended')
+              AND status IN ('pending', 'suspended', 'running')
             RETURNING instance_id
             "#,
         )
@@ -1143,7 +1392,7 @@ impl LaunchRepository {
         rows_to_launches(expired)
     }
 
-    /// Cancel a queued, leased, or gate-marked starting generation and
+    /// Cancel a queued, leased, or still-unconfirmed gate generation and
     /// terminalize its Core instance.
     ///
     /// This conditional transaction is the pre-start cancellation fence: if a
@@ -1166,7 +1415,7 @@ impl LaunchRepository {
             WHERE launch_id = $1
               AND (
                     state IN ('queued', 'leased')
-                    OR (state = 'starting' AND start_gate_deadline_at IS NOT NULL)
+                    OR (state IN ('starting', 'running') AND start_gate_deadline_at IS NOT NULL)
                 )
             RETURNING {LAUNCH_COLUMNS}
             "#
@@ -1185,7 +1434,7 @@ impl LaunchRepository {
                     sleep_until = NULL,
                     termination_reason = 'cancelled'
                 WHERE instance_id = $1
-                  AND status IN ('pending', 'suspended')
+                  AND status IN ('pending', 'suspended', 'running')
                 "#,
             )
             .bind(&cancelled.instance_id)
@@ -1226,6 +1475,8 @@ struct LaunchRow {
     instance_id: String,
     tenant_id: String,
     image_id: String,
+    workflow_id: Option<String>,
+    single_instance: bool,
     kind: String,
     state: String,
     available_at: DateTime<Utc>,
@@ -1238,15 +1489,45 @@ struct LaunchRow {
     updated_at: DateTime<Utc>,
 }
 
+#[derive(Debug, FromRow)]
+struct WorkflowScopeRow {
+    workflow_id: String,
+    single_instance: bool,
+}
+
+impl TryFrom<WorkflowScopeRow> for WorkflowLaunchScope {
+    type Error = LaunchQueueError;
+
+    fn try_from(row: WorkflowScopeRow) -> Result<Self, Self::Error> {
+        Ok(Self {
+            workflow_id: row.workflow_id,
+            single_instance: row.single_instance,
+        })
+    }
+}
+
 impl TryFrom<LaunchRow> for Launch {
     type Error = LaunchQueueError;
 
     fn try_from(row: LaunchRow) -> Result<Self, Self::Error> {
+        let workflow_scope = match row.workflow_id {
+            Some(workflow_id) => Some(WorkflowLaunchScope {
+                workflow_id,
+                single_instance: row.single_instance,
+            }),
+            None if row.single_instance => {
+                return Err(LaunchQueueError::InvalidStoredWorkflowScope {
+                    launch_id: row.launch_id,
+                });
+            }
+            None => None,
+        };
         Ok(Self {
             launch_id: row.launch_id,
             instance_id: row.instance_id,
             tenant_id: row.tenant_id,
             image_id: row.image_id,
+            workflow_scope,
             kind: LaunchKind::from_db(row.kind)?,
             state: LaunchState::from_db(row.state)?,
             available_at: row.available_at,
@@ -1259,6 +1540,50 @@ impl TryFrom<LaunchRow> for Launch {
             updated_at: row.updated_at,
         })
     }
+}
+
+/// Serialize every workflow-scoped launch admission on one PostgreSQL
+/// transaction advisory lock.
+///
+/// The durable active-row query below is the actual lease. The advisory lock
+/// only makes its check-plus-insert atomic across server processes and is
+/// released automatically with this transaction on commit, rollback, or a
+/// process crash.
+async fn acquire_workflow_scope_lock(
+    tx: &mut Transaction<'_, Postgres>,
+    tenant_id: &str,
+    workflow_id: &str,
+) -> Result<(), LaunchQueueError> {
+    let scope_key = format!("{tenant_id}\u{1f}{workflow_id}");
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(scope_key)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+/// Whether any active generation for a workflow currently owns its durable
+/// lease. The caller must hold [`acquire_workflow_scope_lock`] for this key.
+async fn has_active_workflow_launch(
+    tx: &mut Transaction<'_, Postgres>,
+    tenant_id: &str,
+    workflow_id: &str,
+) -> Result<bool, LaunchQueueError> {
+    Ok(sqlx::query_scalar(
+        r#"
+        SELECT EXISTS(
+            SELECT 1
+            FROM instance_launches
+            WHERE tenant_id = $1
+              AND workflow_id = $2
+              AND state IN ('queued', 'leased', 'starting', 'running')
+        )
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(workflow_id)
+    .fetch_one(&mut **tx)
+    .await?)
 }
 
 fn rows_to_launches(rows: Vec<LaunchRow>) -> Result<Vec<Launch>, LaunchQueueError> {

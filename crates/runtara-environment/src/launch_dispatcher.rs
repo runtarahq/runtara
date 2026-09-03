@@ -253,6 +253,17 @@ impl LaunchDispatcher {
     pub async fn dispatch_once(&self) -> anyhow::Result<usize> {
         let repository = LaunchRepository::new(self.pool.clone());
 
+        // A monitor can be interrupted after Core persisted a park/terminal
+        // outcome but before it released the matching launch generation. The
+        // queue row is the durable single-instance lease, so reconcile that
+        // bounded crash window before admitting any new work.
+        for released in repository
+            .reconcile_released_instances(self.config.batch_size)
+            .await?
+        {
+            self.lifecycle_observers
+                .notify_released(&released, "reconciled");
+        }
         for expired in repository.expire_due(self.config.batch_size).await? {
             self.lifecycle_observers
                 .notify_released(&expired, LAUNCH_QUEUE_TIMEOUT);
@@ -409,14 +420,54 @@ impl LaunchDispatcher {
                     self.lifecycle_observers.clone(),
                     Some(gate.clone()),
                 );
-                if !gate.open() {
-                    // The durable lease elapsed while the monitor was being
-                    // armed. Core is already `running`, but the gate proves no
-                    // guest got that far; fail and release this exact
-                    // generation rather than leaving a fake running slot.
-                    self.stop_unopened_handoff(&registry, &handle, &gate).await;
-                    self.fail_after_start_gate(&launch, "start gate closed before guest execution")
+                match repository.confirm_gate_open(&launch.launch_id).await {
+                    Ok(Some(_confirmed)) if gate.open() => {
+                        // The durable confirmation is committed before the
+                        // runner can load or invoke guest code. A marked
+                        // `running` row therefore remains recoverable until
+                        // this exact point, rather than relying on a later
+                        // heartbeat cleanup.
+                    }
+                    Ok(Some(_confirmed)) => {
+                        warn!(
+                            launch_id = %launch.launch_id,
+                            "Start gate timed out after durable confirmation"
+                        );
+                        self.stop_unopened_handoff(&registry, &handle, &gate).await;
+                        self.fail_after_start_gate(
+                            &launch,
+                            "start gate closed before guest execution",
+                        )
                         .await?;
+                    }
+                    Ok(None) => {
+                        // Queue expiry, cancellation, or the durable gate
+                        // deadline won before the in-memory handoff. The
+                        // gate is still closed, so no guest work needs to be
+                        // rolled back.
+                        warn!(
+                            launch_id = %launch.launch_id,
+                            "Durable start-gate confirmation was no longer valid"
+                        );
+                        self.stop_unopened_handoff(&registry, &handle, &gate).await;
+                        self.fail_after_start_gate(
+                            &launch,
+                            "durable start-gate confirmation expired",
+                        )
+                        .await?;
+                    }
+                    Err(error) => {
+                        // If PostgreSQL is unavailable, keep the durable
+                        // marker intact and close the in-memory gate. The
+                        // expiry scan will terminalize it once the database
+                        // recovers; never let an unconfirmed guest begin.
+                        error!(
+                            launch_id = %launch.launch_id,
+                            error = %error,
+                            "Could not durably confirm start-gate opening"
+                        );
+                        self.stop_unopened_handoff(&registry, &handle, &gate).await;
+                    }
                 }
             }
             Err(RunnerError::CapacityUnavailable) => {
@@ -458,8 +509,9 @@ impl LaunchDispatcher {
     /// Return the remaining durable handoff ownership as a gate timeout.
     ///
     /// A small safety margin makes the runner close first when the process and
-    /// PostgreSQL clocks are near the same deadline; recovery can then safely
-    /// reclaim `starting` without overlapping guest work.
+    /// PostgreSQL clocks are near the same deadline; the durable expiry scan
+    /// can then terminalize an unconfirmed handoff without overlapping guest
+    /// work.
     fn start_gate_remaining(&self, starting: &Launch) -> Duration {
         let Some(lease_expires_at) = starting.lease_expires_at else {
             return Duration::ZERO;
