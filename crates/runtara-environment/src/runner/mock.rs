@@ -240,6 +240,13 @@ impl Runner for MockRunner {
         Ok(handle)
     }
 
+    async fn try_launch_detached(&self, options: &LaunchOptions) -> Result<RunnerHandle> {
+        // The mock does not impose a capacity bound, so every launch is
+        // immediately available. Keeping the same path makes test launch
+        // accounting reflect what the durable dispatcher requested.
+        self.launch_detached(options).await
+    }
+
     async fn is_running(&self, handle: &RunnerHandle) -> bool {
         let instances = self.instances.lock().await;
         instances

@@ -32,6 +32,13 @@ pub enum RunnerError {
     #[error("Start failed: {0}")]
     StartFailed(String),
 
+    /// No runner capacity is available right now.
+    ///
+    /// Callers that own a durable queue must return the launch to that queue
+    /// rather than await a semaphore permit in a request or worker task.
+    #[error("Runner capacity unavailable")]
+    CapacityUnavailable,
+
     /// Process exited with non-zero code.
     #[error("Exit code {exit_code}: {stderr}")]
     ExitCode {
@@ -211,6 +218,14 @@ pub trait Runner: Send + Sync {
     /// Returns a handle that can be used to check status or stop the instance.
     /// The caller is responsible for registering the instance in the database.
     async fn launch_detached(&self, options: &LaunchOptions) -> Result<RunnerHandle>;
+
+    /// Launch an instance only when runner capacity is immediately available.
+    ///
+    /// A full runner returns [`RunnerError::CapacityUnavailable`] without
+    /// parking the caller on an in-memory permit waiter. Durable dispatchers
+    /// use this method; [`Self::launch_detached`] remains for legacy callers
+    /// that intentionally await capacity.
+    async fn try_launch_detached(&self, options: &LaunchOptions) -> Result<RunnerHandle>;
 
     /// Check if an instance is still running.
     async fn is_running(&self, handle: &RunnerHandle) -> bool;

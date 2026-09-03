@@ -24,6 +24,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use tokio::sync::TryAcquireError;
 use tracing::{error, info, warn};
 
 use runtara_component_host::{
@@ -877,6 +878,37 @@ impl Runner for EmbeddedWasmRunner {
             return Err(RunnerError::BinaryNotFound(wasm_path.display().to_string()));
         }
 
+        // Capacity is a durable-dispatch decision, never a reason to park a
+        // request, trigger worker, or wake worker on a semaphore waiter. Take
+        // it before allocating per-run state so an unavailable runner leaves
+        // neither a task-registry entry nor a run directory behind.
+        let permit =
+            Arc::clone(&self.run_permits)
+                .try_acquire_owned()
+                .map_err(|error| match error {
+                    TryAcquireError::NoPermits => RunnerError::CapacityUnavailable,
+                    TryAcquireError::Closed => {
+                        RunnerError::Other("run semaphore closed".to_string())
+                    }
+                })?;
+        self.run_slots
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(
+                options.launch_id.clone(),
+                RunSlotEntry {
+                    instance_id: options.instance_id.clone(),
+                    taken_at: Instant::now(),
+                },
+            );
+        self.runs_started.fetch_add(1, Ordering::Relaxed);
+        let run_slot = RunSlot {
+            _permit: permit,
+            launch_id: options.launch_id.clone(),
+            registry: Arc::clone(&self.run_slots),
+            finished: Arc::clone(&self.runs_finished),
+        };
+
         common::ensure_run_dir(
             &self.config.data_dir,
             &options.tenant_id,
@@ -934,44 +966,9 @@ impl Runner for EmbeddedWasmRunner {
         // path, with the bytes it has just written. A wake or resume leaves it
         // None and still reads the stored envelope below.
         let prepersisted_input = options.prepersisted_input.clone();
-        // Take the slot BEFORE spawning, so what is bounded is the number of
-        // runs outstanding rather than the number executing. Acquiring inside
-        // the task bounds neither: every caller still gets a task immediately
-        // and only then queues, so each one holds its spec, its input bytes and
-        // its handles for as long as the queue is long. Waking a large parked
-        // population is exactly that shape - the wake scheduler's own limit
-        // frees as soon as the task is spawned, so it launches as fast as it
-        // can read batches - and 20k queued runs cost about a gigabyte, which
-        // killed the process the in-task acquire was added to protect.
-        //
-        // The caller waits here instead. The instance is already registered and
-        // durable, so this delays the run rather than losing it, and it gives
-        // the wake scheduler and trigger worker the backpressure their own
-        // concurrency limits are supposed to express.
-        let permit = Arc::clone(&self.run_permits)
-            .acquire_owned()
-            .await
-            .expect("run semaphore closed");
-        // Stamp the acquisition before the task is spawned, so the age covers
-        // the whole time the permit is held rather than starting once the task
-        // happens to be scheduled.
-        self.run_slots
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(
-                options.launch_id.clone(),
-                RunSlotEntry {
-                    instance_id: options.instance_id.clone(),
-                    taken_at: Instant::now(),
-                },
-            );
-        self.runs_started.fetch_add(1, Ordering::Relaxed);
-        let run_slot = RunSlot {
-            _permit: permit,
-            launch_id: options.launch_id.clone(),
-            registry: Arc::clone(&self.run_slots),
-            finished: Arc::clone(&self.runs_finished),
-        };
+        // The run slot was already claimed without waiting before any per-run
+        // allocation. It moves into the task so every completion/error/panic
+        // returns capacity and retires its occupancy timestamp together.
         tokio::spawn(async move {
             let _run_slot = run_slot;
             match executor.load_instance_pre(&wasm_path).await {
@@ -1126,6 +1123,13 @@ impl Runner for EmbeddedWasmRunner {
             started_at: chrono::Utc::now(),
             metrics: Some(metrics),
         })
+    }
+
+    async fn try_launch_detached(&self, options: &LaunchOptions) -> Result<RunnerHandle> {
+        // `launch_detached` itself now uses `try_acquire_owned`, so retaining
+        // this explicit trait entry point makes durable-dispatch intent clear
+        // while guaranteeing it never puts the dispatcher on a permit waiter.
+        self.launch_detached(options).await
     }
 
     async fn is_running(&self, handle: &RunnerHandle) -> bool {
