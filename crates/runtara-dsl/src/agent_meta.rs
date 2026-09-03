@@ -89,8 +89,14 @@ pub mod capability_tags {
     /// workflow-agent sidecar WITHOUT this tag predates namespacing (it would
     /// silently drop the prefix and its checkpoint ids would collide across
     /// invocation sites) — the parent compile refuses to compose it until it
-    /// is republished. Pure (runtime-less) children compose freely either way.
+    /// is republished. The separate `non-suspending:1` marker is required for
+    /// every staged workflow-agent, including a pure one.
     pub const WORKFLOW_AGENT_CHECKPOINT_SCOPE: &str = "checkpoint-scope:1";
+    /// Audit marker for a published workflow-agent whose complete static graph
+    /// closure was proven not to wait, sleep, retry, or pause. The synchronous
+    /// capability ABI cannot propagate a durable suspension to its parent, so
+    /// staged workflow agents without this proof are never composable.
+    pub const WORKFLOW_AGENT_NON_SUSPENDING: &str = "non-suspending:1";
 }
 
 /// Error category for capability errors
@@ -1957,6 +1963,56 @@ pub fn validate_workflow_slug(slug: &str) -> Result<(), SlugError> {
 /// (an Agent step targets it as `agentId: <slug>, capabilityId: "run"`).
 pub const WORKFLOW_AGENT_CAPABILITY_ID: &str = "run";
 
+/// Attach the audit marker after a caller has statically proven that every
+/// reachable path of the workflow is non-suspending.
+///
+/// [`workflow_agent_info`] intentionally does not add this marker itself:
+/// schema synthesis cannot establish execution safety. Production publishing
+/// must first inspect the complete workflow/embedded-child closure, then call
+/// this helper immediately before staging the sidecar.
+pub fn certify_workflow_agent_non_suspending(info: &mut AgentInfo) {
+    for capability in &mut info.capabilities {
+        if capability
+            .tags
+            .iter()
+            .any(|tag| tag == capability_tags::WORKFLOW_AGENT)
+            && !capability
+                .tags
+                .iter()
+                .any(|tag| tag == capability_tags::WORKFLOW_AGENT_NON_SUSPENDING)
+        {
+            capability
+                .tags
+                .push(capability_tags::WORKFLOW_AGENT_NON_SUSPENDING.to_string());
+        }
+    }
+}
+
+/// Whether every workflow-agent capability in this sidecar carries the
+/// non-suspending certification. `false` also covers metadata that is not a
+/// workflow-agent, which keeps callers from accidentally staging a generic
+/// agent through the workflow-agent publisher.
+pub fn is_certified_non_suspending_workflow_agent(info: &AgentInfo) -> bool {
+    let mut has_workflow_capability = false;
+    for capability in &info.capabilities {
+        if capability
+            .tags
+            .iter()
+            .any(|tag| tag == capability_tags::WORKFLOW_AGENT)
+        {
+            has_workflow_capability = true;
+            if !capability
+                .tags
+                .iter()
+                .any(|tag| tag == capability_tags::WORKFLOW_AGENT_NON_SUSPENDING)
+            {
+                return false;
+            }
+        }
+    }
+    has_workflow_capability
+}
+
 /// Synthesize the catalog metadata for a workflow published as an agent — the
 /// exact `AgentInfo` shape a native agent's `meta.json` sidecar carries, so a
 /// staged workflow-agent drops into the same catalog/validation/step-picker
@@ -2797,7 +2853,21 @@ mod workflow_agent_info_tests {
         assert_eq!(
             cap.tags,
             vec!["workflow-agent", "checkpoint-scope:1"],
-            "the checkpoint-scope marker must ride the synthesized meta"
+            "synthesized metadata must not claim a safety proof it has not earned"
+        );
+    }
+
+    #[test]
+    fn non_suspending_certification_is_explicit_and_auditable() {
+        let mut info = workflow_agent_info("echo", "Echo", "", &HashMap::new(), &HashMap::new());
+
+        assert!(!is_certified_non_suspending_workflow_agent(&info));
+        certify_workflow_agent_non_suspending(&mut info);
+
+        assert!(is_certified_non_suspending_workflow_agent(&info));
+        assert_eq!(
+            info.capabilities[0].tags,
+            vec!["workflow-agent", "checkpoint-scope:1", "non-suspending:1",]
         );
     }
 

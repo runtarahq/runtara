@@ -9,11 +9,10 @@
 //! A durable delay under the invoke export PARKS: it checkpoints an absolute
 //! deadline and exits with `outcome::suspended(at(deadline))`, so the host frees
 //! the wasmtime Store and the wake scheduler relaunches at the deadline —
-//! instead of pinning a Store and a tokio task for the whole wait. Short delays
-//! still block, chosen against [`DIRECT_DURABLE_DELAY_PARK_THRESHOLD_MS`] at
-//! RUNTIME rather than compile time, because `durationMs` may be a reference the
-//! emitter cannot resolve. Both arms are therefore emitted into every durable
-//! delay under that export.
+//! instead of pinning a Store and a tokio task for the whole wait. This applies
+//! to every positive durable delay, including a dynamic one that resolves to a
+//! few milliseconds: capacity safety is more important than an in-run fast
+//! path that could let a burst of short waits exhaust the runner pool.
 //!
 //! Everything else is the usual build-output / rebuild-source / continue-to-next
 //! tail.
@@ -40,41 +39,21 @@ use super::{
     DirectRunPlan, DirectVariables,
 };
 
-/// Durable-delay park threshold, in milliseconds: at or above it a delay frees
-/// the Store and reschedules, below it the delay blocks in the host.
-///
-/// Parking is not free. It costs a checkpoint write, a Store teardown, up to one
-/// wake-scheduler poll interval of lag (5s by default), and a relaunch that
-/// REPLAYS the workflow from its entry step — so every already-completed step
-/// pays a checkpoint lookup to skip itself, making the cost grow with how deep
-/// the delay sits in the graph. Blocking costs one pinned Store for the
-/// duration.
-///
-/// 30s sits comfortably above the poll interval, which is what makes the trade
-/// work: scheduler lag stays a small fraction of the wait rather than dwarfing
-/// it, and a sub-second pause inside a While loop keeps blocking instead of
-/// parking and replaying on every iteration. Delays long enough to matter — the
-/// hours-long business waits that pinned a Store for hours — are all far above
-/// it.
-const DIRECT_DURABLE_DELAY_PARK_THRESHOLD_MS: i64 = 30_000;
-
 /// Width of a park's checkpoint state: one `u64` absolute deadline.
 ///
 /// A park's state is checked against this before it is trusted, because the
 /// blocking arm's key is the SAME key and core's `handle_sleep` saves a
 /// checkpoint under it with an EMPTY state. `get-checkpoint` reports that as
-/// `some([])` — a HIT — so a delay that blocked on one pass and parks on a
-/// later replay (its `durationMs` is a reference that resolved differently)
-/// would otherwise read the blocking arm's empty state as "already waited" and
-/// skip its wait entirely.
+/// `some([])` — a HIT — so a legacy blocking run must never be mistaken for a
+/// deadline written by the parked lifecycle-invoke path.
 const DIRECT_DELAY_DEADLINE_STATE_LEN: i32 = 8;
 
 /// Blocking durable sleep: the host holds the wasmtime Store and the tokio task
 /// for the whole duration on `durable-sleep-checkpoint`.
 ///
 /// The host saves the sleep checkpoint but does NOT look one up, so a replayed
-/// blocking delay sleeps again — bounded by the park threshold, which is why the
-/// threshold has to stay small enough for a re-slept delay to be cheap.
+/// blocking delay sleeps again. Only retired/migration ABI paths can reach
+/// this helper; current lifecycle-invoke workflows always park instead.
 fn emit_blocking_durable_sleep(body: &mut WasmFunction, indices: &DirectCoreFunctionIndices) {
     body.instruction(&Instruction::LocalGet(DIRECT_WAIT_SIGNAL_ID_PTR_LOCAL));
     body.instruction(&Instruction::LocalGet(DIRECT_WAIT_SIGNAL_ID_LEN_LOCAL));
@@ -134,12 +113,12 @@ fn emit_park_until_deadline(
     );
     // A HIT of exactly one u64 is a deadline THIS arm wrote: re-read it and
     // decide. Any other width is core's `handle_sleep` checkpoint, saved under
-    // this same key with an EMPTY state when the blocking arm ran — which means
-    // the wait was already served on that pass, so falling through is the
-    // correct resume. (It must be a fall-through, not a re-park: `handle_checkpoint`
-    // is get-or-SET, so a save under an occupied key is a no-op and a re-park
-    // would never persist its deadline — it would park again on every relaunch,
-    // forever.)
+    // this same key with an EMPTY state when the blocking legacy arm ran —
+    // which means the wait was already served on that pass, so falling through
+    // is the correct resume. (It must be a fall-through, not a re-park:
+    // `handle_checkpoint` is get-or-SET, so a save under an occupied key is a
+    // no-op and a re-park would never persist its deadline — it would park
+    // again on every relaunch, forever.)
     body.instruction(&Instruction::LocalGet(
         DIRECT_WAIT_ON_WAIT_VARIABLES_LEN_LOCAL,
     ));
@@ -159,11 +138,10 @@ fn emit_park_until_deadline(
     // underflow once `now` is past the deadline.
     //
     // The tolerance is also how early a park may finish, which is what keeps it
-    // far below DIRECT_DURABLE_DELAY_PARK_THRESHOLD_MS: at 1s against a 30s
-    // floor the shortest possible park ends at most ~3% early, while a
-    // tolerance anywhere near the threshold would let that shortest park fall
-    // straight through on its first early relaunch — reinstating the very skip
-    // this arm exists to prevent.
+    // small enough that it cannot consume a meaningful part of the shortest
+    // supported parked delay. A large tolerance would let a short delay fall
+    // through on its first early relaunch, reinstating the very skip this arm
+    // exists to prevent.
     body.instruction(&Instruction::I64Const(DIRECT_DEADLINE_SKEW_TOLERANCE_MS));
     body.instruction(&Instruction::I64Add);
     body.instruction(&Instruction::LocalGet(DIRECT_WAIT_DEADLINE_MS_LOCAL));
@@ -323,33 +301,15 @@ pub(super) fn emit_delay_plan(
             DIRECT_WAIT_SIGNAL_ID_LEN_LOCAL,
         );
 
-        // Whether this artifact CAN park is a capability question, not a policy
-        // one: only the invoke export has a success arm (`outcome::suspended`)
-        // able to carry a wake. `wasi:cli/run` has none, and a workflow
-        // published as an agent runs its durable steps inside the parent's
-        // capability invoke — both must block.
-        let can_park = indices.abi == crate::direct_wasm::component::WorkflowAbi::InvokeHostImports;
-        if can_park {
-            // WHETHER to park is decided at runtime, not here: `durationMs` may
-            // be a reference (a template, an input field) that the emitter
-            // cannot resolve, so the same artifact must be able to block on one
-            // run and park on the next. Both arms are emitted and the guest
-            // picks between them from the resolved duration.
-            //
-            // Both arms key off the SAME sleep key computed above, so the choice
-            // is stable across a replay: the duration is recomputed from the
-            // same replayed data and lands on the same side of the threshold.
-            body.instruction(&Instruction::LocalGet(DIRECT_DELAY_DURATION_MS_LOCAL));
-            body.instruction(&Instruction::I64Const(
-                DIRECT_DURABLE_DELAY_PARK_THRESHOLD_MS,
-            ));
-            // Unsigned: the duration is a u64 carried in an i64 local.
-            body.instruction(&Instruction::I64GeU);
-            body.instruction(&Instruction::If(BlockType::Empty));
+        // Only the top-level lifecycle invoke ABI can return a durable wake to
+        // its caller. It must park every durable delay, not merely long ones:
+        // short waits are still unbounded in aggregate and must never retain a
+        // runner slot. The legacy reference ABI and the agent capability ABI
+        // have no suspension result, so their lower-level test/migration paths
+        // retain the blocking lowering; workflow-agent publication rejects
+        // Delay before an agent artifact can be staged.
+        if indices.abi == crate::direct_wasm::component::WorkflowAbi::InvokeHostImports {
             emit_park_until_deadline(body, indices, output_ptr_local, output_len_local);
-            body.instruction(&Instruction::Else);
-            emit_blocking_durable_sleep(body, indices);
-            body.instruction(&Instruction::End);
         } else {
             emit_blocking_durable_sleep(body, indices);
         }

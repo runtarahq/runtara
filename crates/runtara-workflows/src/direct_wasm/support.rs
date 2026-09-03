@@ -53,6 +53,288 @@ pub struct DirectWorkflowSupportReport {
     pub feature_summary: WorkflowFeatureSummary,
 }
 
+/// Static proof that a workflow is safe to publish through the synchronous
+/// workflow-as-agent capability ABI.
+///
+/// That ABI has no way to return a durable suspension to its parent. A report
+/// therefore treats every path that can wait, sleep, retry, or pause as
+/// unsafe, even when it is not the graph's happy path.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowAgentSafetyReport {
+    /// Whether any statically reachable path can suspend or sleep.
+    pub may_suspend_or_sleep: bool,
+    /// Deterministic reasons that the graph cannot be published as an agent.
+    pub violations: Vec<WorkflowAgentSafetyViolation>,
+}
+
+/// One stable path that prevents a workflow from being published as an agent.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowAgentSafetyViolation {
+    /// Stable graph path, rooted at `root` and using the authored step-map
+    /// keys rather than iteration order.
+    pub path: String,
+    /// Step id declared by the DSL object.
+    pub step_id: String,
+    /// DSL step type that owns the unsafe behavior.
+    pub step_type: String,
+    /// Short stable classification key.
+    pub feature: String,
+    /// Human-readable explanation and remediation.
+    pub reason: String,
+}
+
+/// Analyze the complete static graph closure before publishing a workflow as
+/// an agent.
+///
+/// The analysis deliberately visits every declared step, nested subgraph, and
+/// preloaded `EmbedWorkflow` child, including error and callback paths. It is
+/// conservative: when a child closure cannot be proven complete, publishing is
+/// refused rather than assuming a missing dependency cannot suspend.
+pub fn analyze_workflow_agent_safety(
+    graph: &ExecutionGraph,
+    child_workflows: &[ChildWorkflowInput],
+) -> WorkflowAgentSafetyReport {
+    let children = DirectSupportChildWorkflows::from_child_workflows(child_workflows);
+    let mut violations = Vec::new();
+    let mut child_stack = Vec::new();
+    collect_workflow_agent_safety(graph, "root", &children, &mut child_stack, &mut violations);
+    violations.sort_by(|left, right| {
+        (
+            left.path.as_str(),
+            left.feature.as_str(),
+            left.step_id.as_str(),
+        )
+            .cmp(&(
+                right.path.as_str(),
+                right.feature.as_str(),
+                right.step_id.as_str(),
+            ))
+    });
+
+    WorkflowAgentSafetyReport {
+        may_suspend_or_sleep: !violations.is_empty(),
+        violations,
+    }
+}
+
+fn collect_workflow_agent_safety(
+    graph: &ExecutionGraph,
+    graph_path: &str,
+    child_workflows: &DirectSupportChildWorkflows<'_>,
+    child_stack: &mut Vec<String>,
+    violations: &mut Vec<WorkflowAgentSafetyViolation>,
+) {
+    // ExecutionGraph.steps is a HashMap. Sorting on its authored key makes
+    // diagnostics stable across process hash seeds and therefore suitable for
+    // sidecars, API errors, and tests.
+    let mut steps: Vec<_> = graph.steps.iter().collect();
+    steps.sort_by(|(left, _), (right, _)| left.cmp(right));
+
+    for (step_key, step) in steps {
+        let step_path = format!("{graph_path}/steps/{step_key}");
+        collect_workflow_agent_step_safety(
+            step,
+            &step_path,
+            child_workflows,
+            child_stack,
+            violations,
+        );
+    }
+}
+
+fn collect_workflow_agent_step_safety(
+    step: &Step,
+    path: &str,
+    child_workflows: &DirectSupportChildWorkflows<'_>,
+    child_stack: &mut Vec<String>,
+    violations: &mut Vec<WorkflowAgentSafetyViolation>,
+) {
+    if step_has_breakpoint(step) {
+        push_workflow_agent_safety_violation(
+            violations,
+            path,
+            step,
+            "breakpoint-pause",
+            "breakpoints can pause an invocation; run this workflow as a top-level workflow or remove the breakpoint before publishing it as an agent",
+        );
+    }
+
+    match step {
+        Step::Delay(_) => push_workflow_agent_safety_violation(
+            violations,
+            path,
+            step,
+            "delay",
+            "Delay can sleep; run this workflow as a top-level workflow or remove the delay before publishing it as an agent",
+        ),
+        Step::WaitForSignal(wait) => {
+            push_workflow_agent_safety_violation(
+                violations,
+                path,
+                step,
+                "wait-for-signal",
+                "WaitForSignal can suspend; run this workflow as a top-level workflow or remove the wait before publishing it as an agent",
+            );
+            if let Some(on_wait) = &wait.on_wait {
+                collect_workflow_agent_safety(
+                    on_wait,
+                    &format!("{path}/on-wait"),
+                    child_workflows,
+                    child_stack,
+                    violations,
+                );
+            }
+        }
+        // Agent retry handling also sleeps for a rate-limit response, even if
+        // maxRetries is set to zero. The current capability ABI cannot bubble
+        // that wait to a parent, so every Agent is conservatively unsafe.
+        Step::Agent(_) => push_workflow_agent_safety_violation(
+            violations,
+            path,
+            step,
+            "retry-or-rate-limit-backoff",
+            "Agent calls can retry or wait for rate limiting; run this workflow as a top-level workflow before publishing it as an agent",
+        ),
+        // AiAgent uses the same outbound retry/rate-limit machinery as Agent
+        // for its model call and may dispatch any declared tool path.
+        Step::AiAgent(_) => push_workflow_agent_safety_violation(
+            violations,
+            path,
+            step,
+            "retry-or-rate-limit-backoff",
+            "AiAgent calls can retry or wait for rate limiting; run this workflow as a top-level workflow before publishing it as an agent",
+        ),
+        Step::Split(split) => {
+            if split
+                .config
+                .as_ref()
+                .and_then(|config| config.max_retries)
+                .unwrap_or(0)
+                > 0
+            {
+                push_workflow_agent_safety_violation(
+                    violations,
+                    path,
+                    step,
+                    "retry-backoff",
+                    "Split retries can sleep between attempts; run this workflow as a top-level workflow or remove the retry policy before publishing it as an agent",
+                );
+            }
+            collect_workflow_agent_safety(
+                &split.subgraph,
+                &format!("{path}/split"),
+                child_workflows,
+                child_stack,
+                violations,
+            );
+        }
+        Step::While(while_step) => collect_workflow_agent_safety(
+            &while_step.subgraph,
+            &format!("{path}/while"),
+            child_workflows,
+            child_stack,
+            violations,
+        ),
+        Step::EmbedWorkflow(embed) => {
+            if embed.max_retries.unwrap_or(3) > 0 {
+                push_workflow_agent_safety_violation(
+                    violations,
+                    path,
+                    step,
+                    "retry-backoff",
+                    "EmbedWorkflow retries can sleep between attempts; run this workflow as a top-level workflow or remove the retry policy before publishing it as an agent",
+                );
+            }
+
+            if child_workflows.duplicate_step_ids.contains(&embed.id) {
+                push_workflow_agent_safety_violation(
+                    violations,
+                    path,
+                    step,
+                    "ambiguous-child-closure",
+                    "EmbedWorkflow has more than one static child graph for this call site, so the compiler cannot prove it is non-suspending; republish after resolving the child dependency",
+                );
+                return;
+            }
+
+            let Some(child) = child_workflows.get(&embed.id) else {
+                push_workflow_agent_safety_violation(
+                    violations,
+                    path,
+                    step,
+                    "missing-child-closure",
+                    "EmbedWorkflow has no loaded static child graph, so the compiler cannot prove it is non-suspending; republish after resolving the child dependency",
+                );
+                return;
+            };
+            if child_stack.iter().any(|step_id| step_id == &embed.id) {
+                push_workflow_agent_safety_violation(
+                    violations,
+                    path,
+                    step,
+                    "child-closure-cycle",
+                    "EmbedWorkflow child graphs form a cycle, so the compiler cannot prove they are non-suspending; break the cycle before publishing it as an agent",
+                );
+                return;
+            }
+
+            child_stack.push(embed.id.clone());
+            collect_workflow_agent_safety(
+                child,
+                &format!("{path}/embedded"),
+                child_workflows,
+                child_stack,
+                violations,
+            );
+            child_stack.pop();
+        }
+        Step::Finish(_)
+        | Step::Conditional(_)
+        | Step::Switch(_)
+        | Step::Log(_)
+        | Step::Error(_)
+        | Step::Filter(_)
+        | Step::GroupBy(_) => {}
+    }
+}
+
+fn push_workflow_agent_safety_violation(
+    violations: &mut Vec<WorkflowAgentSafetyViolation>,
+    path: &str,
+    step: &Step,
+    feature: &str,
+    reason: &str,
+) {
+    violations.push(WorkflowAgentSafetyViolation {
+        path: path.to_string(),
+        step_id: step_id(step).to_string(),
+        step_type: step_type_name(step).to_string(),
+        feature: feature.to_string(),
+        reason: reason.to_string(),
+    });
+}
+
+fn step_has_breakpoint(step: &Step) -> bool {
+    match step {
+        Step::Finish(step) => step.breakpoint == Some(true),
+        Step::Agent(step) => step.breakpoint == Some(true),
+        Step::Conditional(step) => step.breakpoint == Some(true),
+        Step::Split(step) => step.breakpoint == Some(true),
+        Step::Switch(step) => step.breakpoint == Some(true),
+        Step::EmbedWorkflow(step) => step.breakpoint == Some(true),
+        Step::While(step) => step.breakpoint == Some(true),
+        Step::Log(step) => step.breakpoint == Some(true),
+        Step::Error(step) => step.breakpoint == Some(true),
+        Step::Filter(step) => step.breakpoint == Some(true),
+        Step::GroupBy(step) => step.breakpoint == Some(true),
+        Step::Delay(step) => step.breakpoint == Some(true),
+        Step::WaitForSignal(step) => step.breakpoint == Some(true),
+        Step::AiAgent(step) => step.breakpoint == Some(true),
+    }
+}
+
 /// Analyze whether the current production direct emitter can compile `graph`.
 ///
 /// The public report does not receive preloaded child graphs. Callers that
@@ -1477,7 +1759,7 @@ fn collect_step_support(
             "GroupBy steps require stdlib grouping semantics",
             unsupported,
         ),
-        Step::Delay(step) => collect_delay_step_unsupported(graph, step, unsupported),
+        Step::Delay(step) => collect_delay_step_unsupported(graph_durable, step, unsupported),
         Step::WaitForSignal(wait) => collect_wait_for_signal_step_unsupported(
             wait,
             graph_durable,
@@ -1512,6 +1794,13 @@ fn collect_wait_for_signal_step_unsupported(
             reason: reason.to_string(),
         });
     };
+
+    if !graph_durable {
+        push(
+            "non-durable-wait-for-signal",
+            "WaitForSignal requires a durable workflow so the instance can park instead of holding a runner; enable durability or remove the wait",
+        );
+    }
 
     if let Some(on_wait) = &step.on_wait {
         // Nested WaitForSignal inside onWait is supported: the onWait emission
@@ -1583,10 +1872,18 @@ fn collect_agent_step_unsupported(
 }
 
 fn collect_delay_step_unsupported(
-    _graph: &ExecutionGraph,
-    _step: &DelayStep,
-    _unsupported: &mut Vec<UnsupportedWorkflowFeature>,
+    graph_durable: bool,
+    step: &DelayStep,
+    unsupported: &mut Vec<UnsupportedWorkflowFeature>,
 ) {
+    if !graph_durable || step.durable == Some(false) {
+        unsupported.push(UnsupportedWorkflowFeature {
+            step_id: Some(step.id.clone()),
+            step_type: Some("Delay".to_string()),
+            feature: "non-durable-delay".to_string(),
+            reason: "Delay requires durability so the instance can park instead of holding a runner; enable durability or remove the delay".to_string(),
+        });
+    }
 }
 
 fn collect_split_step_unsupported(
@@ -1766,6 +2063,149 @@ mod tests {
 
         assert!(report.supported);
         assert!(report.unsupported.is_empty());
+    }
+
+    #[test]
+    fn workflow_agent_safety_certifies_pure_control_flow() {
+        let report = analyze_workflow_agent_safety(&fixture("simple"), &[]);
+
+        assert!(!report.may_suspend_or_sleep, "{report:?}");
+        assert!(report.violations.is_empty());
+    }
+
+    #[test]
+    fn workflow_agent_safety_rejects_a_breakpoint_even_on_a_finish() {
+        let mut graph = fixture("simple");
+        let Some(Step::Finish(finish)) = graph.steps.get_mut("finish") else {
+            panic!("expected Finish fixture step");
+        };
+        finish.breakpoint = Some(true);
+
+        let report = analyze_workflow_agent_safety(&graph, &[]);
+
+        assert!(
+            report.violations.iter().any(|violation| {
+                violation.path == "root/steps/finish" && violation.feature == "breakpoint-pause"
+            }),
+            "{report:?}"
+        );
+    }
+
+    #[test]
+    fn workflow_agent_safety_finds_a_wait_in_an_embedded_child() {
+        let mut parent = fixture("embed_workflow");
+        let Some(Step::EmbedWorkflow(embed)) = parent.steps.get_mut("call_child") else {
+            panic!("expected EmbedWorkflow fixture step");
+        };
+        // This test isolates the child's wait from the parent's otherwise
+        // default retry policy.
+        embed.max_retries = Some(0);
+
+        let report = analyze_workflow_agent_safety(
+            &parent,
+            &[ChildWorkflowInput {
+                step_id: "call_child".to_string(),
+                workflow_id: "child_workflow".to_string(),
+                version_requested: "latest".to_string(),
+                version_resolved: 3,
+                execution_graph: fixture("wait_simple"),
+            }],
+        );
+
+        assert!(report.may_suspend_or_sleep);
+        assert!(
+            report.violations.iter().any(|violation| {
+                violation.path == "root/steps/call_child/embedded/steps/wait"
+                    && violation.feature == "wait-for-signal"
+            }),
+            "{report:?}"
+        );
+    }
+
+    #[test]
+    fn workflow_agent_safety_scans_on_wait_and_parallel_subgraphs() {
+        let graph = serde_json::from_value::<ExecutionGraph>(serde_json::json!({
+            "steps": {
+                "approval": {
+                    "stepType": "WaitForSignal",
+                    "id": "approval",
+                    "onWait": {
+                        "steps": {
+                            "short_delay": {
+                                "stepType": "Delay",
+                                "id": "short_delay",
+                                "durationMs": { "valueType": "immediate", "value": 1 }
+                            }
+                        },
+                        "entryPoint": "short_delay",
+                        "executionPlan": [],
+                        "variables": {},
+                        "inputSchema": {},
+                        "outputSchema": {}
+                    }
+                },
+                "parallel": {
+                    "stepType": "Split",
+                    "id": "parallel",
+                    "config": {
+                        "value": { "valueType": "immediate", "value": [] },
+                        "parallelism": 2,
+                        "maxRetries": 1
+                    },
+                    "subgraph": {
+                        "steps": {
+                            "retrying_agent": {
+                                "stepType": "Agent",
+                                "id": "retrying_agent",
+                                "agentId": "utils",
+                                "capabilityId": "noop"
+                            }
+                        },
+                        "entryPoint": "retrying_agent",
+                        "executionPlan": [],
+                        "variables": {},
+                        "inputSchema": {},
+                        "outputSchema": {}
+                    }
+                }
+            },
+            "entryPoint": "approval",
+            "executionPlan": [],
+            "variables": {},
+            "inputSchema": {},
+            "outputSchema": {}
+        }))
+        .expect("graph parses");
+
+        let report = analyze_workflow_agent_safety(&graph, &[]);
+
+        assert!(
+            report.violations.iter().any(|violation| {
+                violation.path == "root/steps/approval/on-wait/steps/short_delay"
+                    && violation.feature == "delay"
+            }),
+            "{report:?}"
+        );
+        assert!(
+            report.violations.iter().any(|violation| {
+                violation.path == "root/steps/parallel/split/steps/retrying_agent"
+                    && violation.feature == "retry-or-rate-limit-backoff"
+            }),
+            "{report:?}"
+        );
+        assert!(
+            report.violations.iter().any(|violation| {
+                violation.path == "root/steps/parallel" && violation.feature == "retry-backoff"
+            }),
+            "{report:?}"
+        );
+        assert!(
+            report
+                .violations
+                .windows(2)
+                .all(|pair| pair[0].path <= pair[1].path),
+            "{report:?}"
+        );
     }
 
     #[test]
@@ -2849,14 +3289,54 @@ mod tests {
     }
 
     #[test]
-    fn non_durable_delay_normal_flow_is_supported() {
+    fn non_durable_delays_are_rejected_before_they_can_hold_a_runner() {
         let mut graph = fixture("delay_simple");
         graph.durable = Some(false);
 
         let report = analyze_direct_wasm_support(&graph);
 
-        assert!(report.supported, "{:?}", report.unsupported);
-        assert!(report.unsupported.is_empty());
+        assert!(!report.supported);
+        assert!(
+            report
+                .unsupported
+                .iter()
+                .any(|feature| feature.feature == "non-durable-delay")
+        );
+    }
+
+    #[test]
+    fn step_level_non_durable_dynamic_delay_is_rejected() {
+        let mut graph = fixture("delay_dynamic");
+        let Some(Step::Delay(delay)) = graph.steps.get_mut("delay") else {
+            panic!("expected Delay fixture step");
+        };
+        delay.durable = Some(false);
+
+        let report = analyze_direct_wasm_support(&graph);
+
+        assert!(!report.supported);
+        assert!(
+            report
+                .unsupported
+                .iter()
+                .any(|feature| feature.feature == "non-durable-delay")
+        );
+    }
+
+    #[test]
+    fn non_durable_wait_for_signal_is_rejected_before_they_can_hold_a_runner() {
+        let mut graph = fixture("wait_simple");
+        graph.durable = Some(false);
+
+        let report = analyze_direct_wasm_support(&graph);
+
+        assert!(!report.supported);
+        assert!(
+            report
+                .unsupported
+                .iter()
+                .any(|feature| feature.feature == "non-durable-wait-for-signal")
+        );
     }
 
     #[test]

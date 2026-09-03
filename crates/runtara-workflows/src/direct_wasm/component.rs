@@ -79,15 +79,12 @@ pub enum WorkflowAbi {
     /// agent capability shape, so a compiled workflow drops into the existing
     /// agent-composition path and is invocable AS an agent. A connection is
     /// never an out-of-band argument: it rides inside `input` (under
-    /// `_connection`, or as an ordinary connection-typed input field). A PURE
-    /// workflow omits the runtime import entirely; a DURABLE one keeps it and
-    /// the import bubbles up to the composing parent's instance host, with
-    /// terminal complete/fail suppressed
-    /// ([`DirectCoreFunctionIndices::report_terminal_status`]). The success
-    /// arm is the terminal output; an in-guest lifecycle suspend CAN occur in
-    /// a durable child and surfaces as the reserved
-    /// [`super::compile::abi::AGENT_SUSPEND_SENTINEL_CODE`] error, which the
-    /// composing parent recognizes and re-raises through its own ABI.
+    /// `_connection`, or as an ordinary connection-typed input field).
+    /// Production publication proves the full graph closure is
+    /// non-suspending before selecting this ABI, so staged workflow-agents
+    /// omit the runtime import. The lower-level compiler retains the historic
+    /// runtime-importing shape only for differential tests and migration
+    /// tooling; it is never authorized by the production publisher.
     AgentCapabilities,
 }
 

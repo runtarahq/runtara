@@ -61,8 +61,9 @@ pub use manifest::{
     build_direct_workflow_manifest_with_child_workflows_and_agent_catalog,
 };
 pub use support::{
-    DirectWorkflowSupportReport, UnsupportedWorkflowFeature, analyze_direct_wasm_support,
-    analyze_direct_wasm_support_with_child_workflows,
+    DirectWorkflowSupportReport, UnsupportedWorkflowFeature, WorkflowAgentSafetyReport,
+    WorkflowAgentSafetyViolation, analyze_direct_wasm_support,
+    analyze_direct_wasm_support_with_child_workflows, analyze_workflow_agent_safety,
 };
 
 /// Component id of parallel-pool member `n`

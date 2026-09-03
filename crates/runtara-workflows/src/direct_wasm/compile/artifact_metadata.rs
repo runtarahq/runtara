@@ -21,6 +21,7 @@ use super::super::component::{
 };
 use super::super::error::DirectCompileError;
 use super::super::manifest::DIRECT_WORKFLOW_MANIFEST_VERSION;
+use super::super::support::WorkflowAgentSafetyReport;
 use super::{DIRECT_WORKFLOW_ARTIFACT_METADATA_VERSION, sha256_hex};
 use runtara_dsl::agent_meta::capability_tags;
 
@@ -45,6 +46,11 @@ pub struct DirectArtifactMetadata {
     /// `cli-run` test/migration shape). Image registration records this for
     /// operator inventory, but execution always verifies the actual export.
     pub entry_abi: String,
+    /// Static proof describing whether this graph can safely be published as a
+    /// synchronous workflow-agent. Kept on every artifact so a staged agent's
+    /// non-suspending certification has an auditable source.
+    #[serde(default)]
+    pub workflow_agent_safety: WorkflowAgentSafetyReport,
     /// Direct workflow manifest schema version.
     pub manifest_version: u32,
     /// Major version of the workflow compiler/template.
@@ -155,6 +161,7 @@ pub(super) struct InitialArtifactMetadataInput<'a> {
     pub(super) workflow_logic_size: usize,
     pub(super) direct_abi_version: u32,
     pub(super) entry_abi: &'a str,
+    pub(super) workflow_agent_safety: &'a WorkflowAgentSafetyReport,
     pub(super) component_artifacts: &'a DirectComponentArtifacts,
     pub(super) child_workflows: &'a [DirectChildWorkflowDependencyMetadata],
 }
@@ -170,6 +177,7 @@ pub(super) fn initial_artifact_metadata(
         source_checksum: input.source_checksum.map(str::to_string),
         direct_abi_version: input.direct_abi_version,
         entry_abi: input.entry_abi.to_string(),
+        workflow_agent_safety: input.workflow_agent_safety.clone(),
         manifest_version: DIRECT_WORKFLOW_MANIFEST_VERSION,
         template_major_version: crate::compile::TEMPLATE_MAJOR_VERSION.to_string(),
         manifest_checksum: input.manifest_checksum.to_string(),
@@ -304,20 +312,14 @@ pub(super) fn resolve_agent_component_dependencies(
         .collect()
 }
 
-/// Stale-artifact gate for composed workflow-agents (checkpoint namespacing).
+/// Compatibility and safety gate for staged workflow-agents.
 ///
-/// A DURABLE workflow-agent child shares the composing parent instance's
-/// checkpoint store; the parent namespaces the child's keys by injecting
-/// `variables._cache_key_prefix` through the input envelope. An artifact
-/// published BEFORE that whitelist existed silently drops the injected prefix
-/// (its `build_source` filters every `_`-variable), so its durable keys would
-/// collide across invocation sites — invisibly. Refuse to compose such a
-/// child; a republish rebuilds it against the current stdlib. Detection:
-/// - sidecar capability tagged `workflow-agent` → it is a published
-///   workflow-agent (native agents skip this gate entirely);
-/// - `checkpoint-scope:1` tag present → current artifact, compose freely;
-/// - otherwise, only a runtime-importing (durable) child is dangerous — a
-///   pure child has no checkpoints to protect and composes freely.
+/// A workflow-agent must carry both the checkpoint namespacing marker and an
+/// explicit non-suspending certification. The capability ABI is synchronous:
+/// allowing an old sidecar to compose would let a wait/sleep/retry path hold
+/// the parent's runner without a way to park. Generic agents remain untouched:
+/// only a parseable sidecar explicitly tagged `workflow-agent` enters this
+/// gate.
 fn check_workflow_agent_checkpoint_scope(
     dir: &Path,
     component: &DirectAgentComponentRequirement,
@@ -325,46 +327,66 @@ fn check_workflow_agent_checkpoint_scope(
     let meta = fs::read(dir.join(&component.bundle_meta_filename))
         .ok()
         .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
-    let tags: Vec<String> = meta
+    let workflow_agent_capabilities: Vec<Vec<&str>> = meta
         .as_ref()
         .and_then(|meta| meta.get("capabilities"))
         .and_then(serde_json::Value::as_array)
         .into_iter()
         .flatten()
-        .filter_map(|capability| capability.get("tags").and_then(serde_json::Value::as_array))
-        .flatten()
-        .filter_map(serde_json::Value::as_str)
-        .map(str::to_string)
+        .map(|capability| {
+            capability
+                .get("tags")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(serde_json::Value::as_str)
+                .collect()
+        })
+        .filter(|tags: &Vec<&str>| tags.contains(&capability_tags::WORKFLOW_AGENT))
         .collect();
 
-    if tags.contains(&capability_tags::WORKFLOW_AGENT_CHECKPOINT_SCOPE.to_string()) {
-        // Current artifact — compose freely.
+    if !workflow_agent_capabilities.is_empty() {
+        if workflow_agent_capabilities
+            .iter()
+            .any(|tags| !tags.contains(&capability_tags::WORKFLOW_AGENT_CHECKPOINT_SCOPE))
+        {
+            return Err(DirectCompileError::Component(format!(
+                "published workflow-agent `{}` is a stale artifact that predates checkpoint \
+                 namespacing; republish it (POST /workflows/<id>/publish-agent) and recompile",
+                component.agent_id
+            )));
+        }
+        if workflow_agent_capabilities
+            .iter()
+            .any(|tags| !tags.contains(&capability_tags::WORKFLOW_AGENT_NON_SUSPENDING))
+        {
+            return Err(DirectCompileError::Component(format!(
+                "published workflow-agent `{}` lacks the required non-suspending:1 certification; \
+                 republish it after removing every wait, delay, retry/backoff, and breakpoint path",
+                component.agent_id
+            )));
+        }
         return Ok(());
     }
-    if meta.is_some() && !tags.contains(&capability_tags::WORKFLOW_AGENT.to_string()) {
+    if meta.is_some() {
         // A parseable sidecar without the workflow-agent tag is a native
         // agent — the fast path taken for every bundled agent on every
         // compile; no wasm scan.
         return Ok(());
     }
 
-    // Anomalous branch only: a workflow-agent sidecar without the marker
-    // (stale publish), or a MISSING/unparseable sidecar (partial stage,
-    // manual copy). The wasm itself is the authority: only a
-    // runtime-importing component writes checkpoints into the composing
-    // parent's store, so only that shape is refused.
+    // A missing/unparseable sidecar cannot identify itself as a
+    // workflow-agent without risking a false positive for an unrelated generic
+    // agent. Keep the existing conservative runtime-import fallback for that
+    // anomalous partial-stage/manual-copy case.
     let wasm_bytes = fs::read(dir.join(&component.bundle_wasm_filename))?;
     if component_imports_workflow_runtime(&wasm_bytes)? {
-        let cause = if meta.is_some() {
-            "is a stale artifact that predates checkpoint namespacing"
-        } else {
-            "has a missing or unreadable .meta.json sidecar"
-        };
         return Err(DirectCompileError::Component(format!(
-            "published workflow-agent `{}` {} — composed into this workflow, its durable \
+            "published workflow-agent `{}` has a missing or unreadable .meta.json sidecar — \
+             composed into this workflow, its durable \
              checkpoint ids would collide across invocations; republish it \
              (POST /workflows/<id>/publish-agent) and recompile",
-            component.agent_id, cause
+            component.agent_id
         )));
     }
     Ok(())
@@ -528,4 +550,71 @@ pub(super) fn write_artifact_metadata(
 ) -> Result<(), DirectCompileError> {
     fs::write(path, serde_json::to_vec_pretty(metadata)?)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn component_requirement() -> DirectAgentComponentRequirement {
+        DirectAgentComponentRequirement {
+            agent_id: "published-flow".to_string(),
+            package: "runtara:agent-published-flow".to_string(),
+            package_with_version: "runtara:agent-published-flow@0.1.0".to_string(),
+            bundle_wasm_filename: "runtara_agent_published_flow.wasm".to_string(),
+            bundle_meta_filename: "runtara_agent_published_flow.meta.json".to_string(),
+            cas_wasm_filename: "published-flow.wasm".to_string(),
+        }
+    }
+
+    fn write_sidecar(dir: &Path, tags: &[&str]) {
+        let component = component_requirement();
+        fs::write(
+            dir.join(component.bundle_meta_filename),
+            serde_json::to_vec(&serde_json::json!({
+                "capabilities": [{ "tags": tags }]
+            }))
+            .expect("serialize sidecar"),
+        )
+        .expect("write sidecar");
+    }
+
+    #[test]
+    fn workflow_agent_without_non_suspending_certificate_is_rejected() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let component = component_requirement();
+        write_sidecar(
+            dir.path(),
+            &[
+                capability_tags::WORKFLOW_AGENT,
+                capability_tags::WORKFLOW_AGENT_CHECKPOINT_SCOPE,
+            ],
+        );
+
+        let error = check_workflow_agent_checkpoint_scope(dir.path(), &component)
+            .expect_err("an old workflow-agent sidecar must not compose");
+
+        assert!(error.to_string().contains("non-suspending:1"), "{error}");
+    }
+
+    #[test]
+    fn certified_workflow_agent_and_unrelated_agent_are_distinguished_by_tags() {
+        let certified = tempfile::tempdir().expect("certified tempdir");
+        let component = component_requirement();
+        write_sidecar(
+            certified.path(),
+            &[
+                capability_tags::WORKFLOW_AGENT,
+                capability_tags::WORKFLOW_AGENT_CHECKPOINT_SCOPE,
+                capability_tags::WORKFLOW_AGENT_NON_SUSPENDING,
+            ],
+        );
+        check_workflow_agent_checkpoint_scope(certified.path(), &component)
+            .expect("certified workflow-agent composes");
+
+        let generic = tempfile::tempdir().expect("generic tempdir");
+        write_sidecar(generic.path(), &["memory:read"]);
+        check_workflow_agent_checkpoint_scope(generic.path(), &component)
+            .expect("an unrelated generic agent must not need workflow certification");
+    }
 }

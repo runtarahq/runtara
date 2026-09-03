@@ -314,6 +314,26 @@ pub fn direct_compilation_settings_from_config() -> DirectCompilationSettings {
     }
 }
 
+/// The workflow-agent capability ABI is synchronous. Refuse every graph whose
+/// complete static closure could wait, sleep, retry, or pause before any
+/// artifact or sidecar is staged.
+fn require_non_suspending_workflow_agent(
+    execution_graph: &runtara_dsl::ExecutionGraph,
+    child_workflows: &[ChildWorkflowInput],
+) -> Result<(), ServiceError> {
+    let workflow_agent_safety = runtara_workflows::direct_wasm::analyze_workflow_agent_safety(
+        execution_graph,
+        child_workflows,
+    );
+    if let Some(violation) = workflow_agent_safety.violations.first() {
+        return Err(ServiceError::CompilationError(format!(
+            "workflow cannot be published as an agent because it may suspend or sleep at {} ({}/{}): {}; run it as a top-level workflow or remove that path",
+            violation.path, violation.step_type, violation.feature, violation.reason,
+        )));
+    }
+    Ok(())
+}
+
 fn compile_workflow_direct_only(
     input: CompilationInput,
     source_checksum: String,
@@ -1055,15 +1075,18 @@ impl CompilationService {
             .load_child_workflows_as_input(tenant_id, workflow_id, version, &definition)
             .await?;
 
+        require_non_suspending_workflow_agent(&execution_graph, &child_workflows)?;
+
         let name = execution_graph.name.clone().unwrap_or_else(|| slug.clone());
         let description = execution_graph.description.clone().unwrap_or_default();
-        let info = runtara_dsl::agent_meta::workflow_agent_info(
+        let mut info = runtara_dsl::agent_meta::workflow_agent_info(
             &slug,
             &name,
             &description,
             &execution_graph.input_schema,
             &execution_graph.output_schema,
         );
+        runtara_dsl::agent_meta::certify_workflow_agent_non_suspending(&mut info);
 
         // 2. Compile with the AgentCapabilities ABI + compose. Same catalog
         //    overlay as a normal compile so a workflow-agent may itself invoke
@@ -1100,9 +1123,8 @@ impl CompilationService {
             let mut result = runtara_workflows::direct_wasm::compile_direct_workflow_with_abi(
                 direct_input,
                 runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
-                // omit-runtime "requested" — the AgentCapabilities arm decides
-                // the effective shape. Durable steps published as an agent block
-                // regardless: the capability invoke has no wake to park on.
+                // The static preflight above has proved this graph has no
+                // suspension path, so its capability invoke is synchronous.
                 true,
             )?;
             runtara_workflows::direct_wasm::compose_direct_workflow_with_extra_dirs(
@@ -1368,6 +1390,49 @@ mod tests {
         let error: Box<dyn std::error::Error> =
             Box::new(ServiceError::CompilationError("test".to_string()));
         assert!(error.to_string().contains("Compilation error"));
+    }
+
+    #[test]
+    fn workflow_agent_publish_preflight_rejects_a_delay_with_a_stable_path() {
+        let graph = parse_execution_graph(&serde_json::json!({
+            "steps": {
+                "delay": {
+                    "stepType": "Delay",
+                    "id": "delay",
+                    "durationMs": { "valueType": "immediate", "value": 1 }
+                }
+            },
+            "entryPoint": "delay",
+            "executionPlan": [],
+            "variables": {},
+            "inputSchema": {},
+            "outputSchema": {}
+        }))
+        .expect("graph parses");
+
+        let error = require_non_suspending_workflow_agent(&graph, &[])
+            .expect_err("a workflow-agent cannot sleep");
+
+        assert!(
+            error.to_string().contains("root/steps/delay (Delay/delay)"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn workflow_agent_publish_preflight_accepts_a_pure_finish() {
+        let graph = parse_execution_graph(&serde_json::json!({
+            "steps": { "finish": { "stepType": "Finish", "id": "finish" } },
+            "entryPoint": "finish",
+            "executionPlan": [],
+            "variables": {},
+            "inputSchema": {},
+            "outputSchema": {}
+        }))
+        .expect("graph parses");
+
+        require_non_suspending_workflow_agent(&graph, &[])
+            .expect("a pure finish is safe as a workflow-agent");
     }
 
     #[test]
@@ -1714,6 +1779,8 @@ mod tests {
             direct_abi_version:
                 runtara_workflows::direct_wasm::compile::DIRECT_WORKFLOW_INVOKE_ABI_VERSION,
             entry_abi: "invoke".to_string(),
+            workflow_agent_safety:
+                runtara_workflows::direct_wasm::WorkflowAgentSafetyReport::default(),
             manifest_version: runtara_workflows::direct_wasm::DIRECT_WORKFLOW_MANIFEST_VERSION,
             template_major_version: runtara_workflows::TEMPLATE_MAJOR_VERSION.to_string(),
             manifest_checksum: "manifest-sha256".to_string(),

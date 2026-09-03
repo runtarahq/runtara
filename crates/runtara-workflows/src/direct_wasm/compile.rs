@@ -103,6 +103,7 @@ use super::static_data::{
 };
 use super::support::{
     DirectWorkflowSupportReport, analyze_direct_wasm_support_with_child_workflows,
+    analyze_workflow_agent_safety,
 };
 
 /// Direct workflow artifact ABI version (`wasi:cli/run` export shape).
@@ -117,7 +118,7 @@ pub const DIRECT_WORKFLOW_SUPPORT_SECTION: &str = "runtara.direct_workflow.suppo
 /// Custom section containing direct artifact ABI metadata JSON.
 pub const DIRECT_WORKFLOW_ABI_SECTION: &str = "runtara.direct_workflow.abi";
 /// Version for `artifact-metadata.json` emitted beside direct artifacts.
-pub const DIRECT_WORKFLOW_ARTIFACT_METADATA_VERSION: u32 = 3;
+pub const DIRECT_WORKFLOW_ARTIFACT_METADATA_VERSION: u32 = 4;
 /// Sidecar filename containing direct artifact dependency/provenance metadata.
 pub const DIRECT_WORKFLOW_ARTIFACT_METADATA_FILENAME: &str = "artifact-metadata.json";
 
@@ -915,10 +916,10 @@ pub fn compile_direct_workflow(
 /// lowering default silently leaves every already-compiled workflow on the old
 /// shape, because nothing else in the key changed.
 ///
-/// Store-freeing sleep used to appear here. It is no longer a toggle — a
-/// durable `Delay` always parks — so it cannot vary between two artifacts and
-/// has nothing to contribute to cache identity. Dropping it also changes the
-/// tag string, which is what retires images compiled under the old lowering.
+/// Store-freeing sleep used to be a duration-sensitive optional lowering. A
+/// durable `Delay` now always parks, including dynamic or one-millisecond
+/// waits. Its explicit lowering epoch retires artifacts that were compiled
+/// while short waits could retain a runner.
 ///
 /// Older images have no tag at all, which reads as a miss and rebuilds once.
 pub fn direct_lowering_tag() -> String {
@@ -932,7 +933,7 @@ pub fn direct_lowering_tag() -> String {
     // their run permits until the execution timeout, and recompiling reported
     // success without rebuilding anything.
     format!(
-        "abi={}-v{},omit_runtime={}",
+        "abi={}-v{},durable-delay-parking=v1,omit_runtime={}",
         workflow_abi_tag(super::component::WorkflowAbi::InvokeHostImports),
         DIRECT_WORKFLOW_INVOKE_ABI_VERSION,
         omit_runtime_from_env()
@@ -1058,6 +1059,8 @@ fn compile_direct_workflow_inner(
             report: Box::new(support_report),
         });
     }
+    let workflow_agent_safety =
+        analyze_workflow_agent_safety(&input.execution_graph, &input.child_workflows);
     let child_workflow_metadata =
         resolve_direct_child_workflow_metadata(&manifest, &input.child_workflows)?;
 
@@ -1070,19 +1073,12 @@ fn compile_direct_workflow_inner(
     // a workflow that would call runtime keeps the import.
     let needs_runtime = manifest.feature_summary.needs_runtime(input.track_events);
     let omit_runtime = match abi {
-        // Workflow-as-agent: a PURE workflow (nothing durable, delaying,
-        // waiting, logging, or sub-agent) omits the runtime entirely — the
-        // fully self-contained agent shape. A workflow that DOES need the
-        // runtime keeps the import (HostImport binding): composed into a
-        // parent, the interface bubbles up and is satisfied by the parent
-        // instance's runtime host, so checkpoints/sleeps/events work — this is
-        // what lets ANY workflow, durable ones included, publish as an agent.
-        // Its terminal complete/fail are suppressed either way (the caller
-        // owns instance lifecycle; see
-        // `DirectCoreFunctionIndices::report_terminal_status`). Durable
-        // semantics under a parent are BLOCKING (a Delay/Wait blocks inside
-        // the capability invoke); a graph-level `durable: false` opts a
-        // workflow out of durability wholesale to get the pure shape back.
+        // A production publish runs the static workflow-agent safety gate
+        // before it reaches this lower-level compiler. It accepts only graphs
+        // with no wait/sleep/retry/pause path, so the resulting capability is
+        // synchronous and omits the runtime. This branch remains permissive
+        // for compiler differential tests and migration tooling; callers must
+        // not treat that as a production workflow-agent authorization.
         super::component::WorkflowAbi::AgentCapabilities => !needs_runtime,
         super::component::WorkflowAbi::InvokeHostImports => {
             omit_runtime_requested && !needs_runtime
@@ -1171,6 +1167,7 @@ fn compile_direct_workflow_inner(
         workflow_logic_size: wasm.len(),
         direct_abi_version: workflow_abi_version(abi),
         entry_abi: workflow_abi_tag(abi),
+        workflow_agent_safety: &workflow_agent_safety,
         component_artifacts: &component_artifacts,
         child_workflows: &child_workflow_metadata,
     });

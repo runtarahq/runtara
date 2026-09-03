@@ -472,6 +472,28 @@ fn shared_components_dir() -> PathBuf {
     dir
 }
 
+/// The integration suite constructs staged workflow-agent sidecars directly,
+/// bypassing the server's publish preflight. Keep those fixture sidecars at
+/// the current staged-artifact contract; production certification is granted
+/// only after `publish_workflow_agent` runs the static safety analysis.
+fn certified_workflow_agent_info(
+    slug: &str,
+    name: &str,
+    description: &str,
+    input_schema: &HashMap<String, runtara_dsl::SchemaField>,
+    output_schema: &HashMap<String, runtara_dsl::SchemaField>,
+) -> runtara_dsl::agent_meta::AgentInfo {
+    let mut info = runtara_dsl::agent_meta::workflow_agent_info(
+        slug,
+        name,
+        description,
+        input_schema,
+        output_schema,
+    );
+    runtara_dsl::agent_meta::certify_workflow_agent_non_suspending(&mut info);
+    info
+}
+
 /// Dev-tool lookup for the opt-in CLI reference mode: honor `WASMTIME_PATH`,
 /// then `~/.wasmtime/bin/wasmtime`, then PATH.
 fn wasmtime_binary() -> PathBuf {
@@ -7507,25 +7529,19 @@ impl ParkLeg {
     }
 }
 
-/// A durable Delay at or above the park threshold under the invoke export
-/// EXITS with `suspended(at(deadline))` on first reach — freeing the Store —
-/// and, on relaunch, HITS the deadline checkpoint and skips the sleep,
-/// completing with output byte-identical to the blocking arm a SHORT delay
-/// takes. The two invokes share one checkpoint-persisting host, exactly as a
-/// relaunched instance shares the durable checkpoint store.
-///
-/// This is the behaviour that used to sit behind `RUNTARA_DIRECT_STORE_FREEING_SLEEP`,
-/// set nowhere; the gate is gone and duration alone decides.
+/// A one-millisecond top-level durable Delay under the invoke export exits with
+/// `suspended(at(deadline))` on first reach, freeing the Store. Its one wake
+/// relaunch then hits the persisted absolute deadline and completes without
+/// calling the blocking sleep host function.
 #[test]
-fn direct_wasm_execute_invoke_long_delay_parks_then_resumes() {
+fn direct_wasm_execute_invoke_one_millisecond_delay_parks_then_resumes_once() {
     let components_dir = direct_e2e_components_dir();
     let input = br#"{"value":"resume-me"}"#.to_vec();
-    let duration_ms = 3_600_000u64;
+    let duration_ms = 1u64;
 
-    // --- At/above the threshold: park, then resume. ---
     let parking = compile_invoke_abi_artifact(
         &components_dir,
-        "delay-park-long",
+        "delay-park-one-millisecond",
         &store_freeing_delay_fixture(Some(duration_ms)),
     );
     let host = Arc::new(CheckpointingRuntimeHost::new(&input));
@@ -7545,7 +7561,7 @@ fn direct_wasm_execute_invoke_long_delay_parks_then_resumes() {
     assert_eq!(wakes.len(), 1, "sequential lowering emits one wake");
     let deadline = match &wakes[0] {
         runtara_component_host::lifecycle::WorkflowWake::At(ms) => *ms,
-        other => panic!("a long durable Delay must park on a timed wake, got {other:?}"),
+        other => panic!("a one-millisecond durable Delay must park on a timed wake, got {other:?}"),
     };
     // deadline == now_ms(at suspend) + duration, and the suspend happened
     // between `before` and `after`.
@@ -7566,78 +7582,56 @@ fn direct_wasm_execute_invoke_long_delay_parks_then_resumes() {
         "a parked delay must not call the blocking durable-sleep host fn — \
          not on the park, and not on the resume whose checkpoint HIT skips it"
     );
-    let resumed_output = legs[1].output().to_vec();
-
-    // --- Below the threshold: blocks, completing in ONE invoke. ---
-    let blocking = compile_invoke_abi_artifact(
-        &components_dir,
-        "delay-park-short",
-        &store_freeing_delay_fixture(Some(25)),
-    );
-    let blocking_host = Arc::new(CheckpointingRuntimeHost::new(&input));
-    let blocking_exit = run_invoke_once(&blocking.wasm_path, blocking_host.clone(), input.clone());
-    let blocking_output = match blocking_exit {
-        runtara_component_host::InvokeExit::Completed(output) => output,
-        other => panic!("a short Delay must block and complete in one invoke, got {other:?}"),
-    };
-    // The blocking arm DID call the durable-sleep host fn (its whole point),
-    // proving the two arms diverge internally...
-    assert_eq!(
-        blocking_host.sleeps.lock().unwrap().as_slice(),
-        &["delay".to_string()],
-        "the blocking arm must go through durable-sleep-checkpoint"
-    );
-
-    // ...yet converge on byte-identical observable output. Which arm a delay
-    // takes must not be visible to the workflow.
-    assert_eq!(
-        resumed_output, blocking_output,
-        "a resumed park's output must byte-match the blocking arm's"
-    );
     let expected: Value = serde_json::json!({ "echo": "resume-me" });
     assert_eq!(
-        serde_json::from_slice::<Value>(&resumed_output).expect("output is JSON"),
+        serde_json::from_slice::<Value>(legs[1].output()).expect("output is JSON"),
         expected
     );
 }
 
-/// The park/block choice is made at RUNTIME, not compile time: ONE artifact,
-/// whose `durationMs` is a reference the emitter cannot resolve, blocks on a
-/// short input and parks on a long one. Both arms are therefore emitted into
-/// every durable delay under the invoke export — which is the whole reason the
-/// threshold could not be a compile-time decision.
+/// A dynamic durable Delay must always park under the invoke ABI. The duration
+/// is intentionally evaluated at runtime, so both a one-millisecond input and
+/// an hour-long input exercise the same emitted park-only lowering.
 #[test]
-fn direct_wasm_execute_invoke_delay_threshold_is_decided_at_runtime() {
+fn direct_wasm_execute_invoke_dynamic_delay_always_parks() {
     let components_dir = direct_e2e_components_dir();
     let artifact = compile_invoke_abi_artifact(
         &components_dir,
-        "delay-threshold-runtime",
+        "delay-dynamic-park-runtime",
         &store_freeing_delay_fixture(None),
     );
 
-    // Same wasm, short duration: blocks through to completion in one invoke.
-    let short_input = br#"{"value":"short","waitMs":25}"#.to_vec();
+    let short_input = br#"{"value":"short","waitMs":1}"#.to_vec();
     let short_host = Arc::new(CheckpointingRuntimeHost::new(&short_input));
-    let short_exit = run_invoke_once(&artifact.wasm_path, short_host.clone(), short_input.clone());
+    let short_legs = drive_wake_scheduler(
+        &artifact.wasm_path,
+        short_host.clone(),
+        short_input.clone(),
+        1,
+        |_, _, _| {},
+    );
     assert!(
-        matches!(short_exit, runtara_component_host::InvokeExit::Completed(_)),
-        "a below-threshold duration must block, got {short_exit:?}"
+        matches!(
+            short_legs[0].wakes().first(),
+            Some(runtara_component_host::lifecycle::WorkflowWake::At(_))
+        ),
+        "a one-millisecond dynamic duration must park, got {:?}",
+        short_legs[0]
     );
     assert_eq!(
-        short_host.sleeps.lock().unwrap().as_slice(),
-        &["delay".to_string()],
-        "a below-threshold duration must go through durable-sleep-checkpoint"
+        short_legs.len(),
+        2,
+        "a one-millisecond delay must wake and finish exactly once"
     );
-    // The blocking arm writes no guest-side deadline, but core's `handle_sleep`
-    // still saves a checkpoint under the sleep key with an EMPTY state — which
-    // is exactly why the park arm cannot treat a bare HIT as "already waited".
+    assert!(
+        short_host.sleeps.lock().unwrap().is_empty(),
+        "a parked dynamic delay must not use durable-sleep-checkpoint"
+    );
     assert_eq!(
-        short_host.checkpoints.lock().unwrap().get("delay"),
-        Some(&Vec::new()),
-        "the blocking arm must leave the host's empty sleep checkpoint under the delay key"
+        serde_json::from_slice::<Value>(short_legs[1].output()).expect("output is JSON"),
+        serde_json::json!({ "echo": "short" }),
     );
 
-    // Same wasm, long duration: parks on a timed wake instead.
     let long_input = br#"{"value":"long","waitMs":3600000}"#.to_vec();
     let long_host = Arc::new(CheckpointingRuntimeHost::new(&long_input));
     let long_legs = drive_wake_scheduler(
@@ -7652,7 +7646,7 @@ fn direct_wasm_execute_invoke_delay_threshold_is_decided_at_runtime() {
             long_legs[0].wakes().first(),
             Some(runtara_component_host::lifecycle::WorkflowWake::At(_))
         ),
-        "an at-or-above-threshold duration must park on a timed wake, got {:?}",
+        "an hour-long duration must park on a timed wake, got {:?}",
         long_legs[0]
     );
     assert!(
@@ -7848,11 +7842,10 @@ fn direct_wasm_execute_invoke_early_relaunch_reparks_instead_of_skipping_the_del
 /// The upper bound is the half that is easy to leave untested, and it is the
 /// one that matters: the hour-early case in
 /// `direct_wasm_execute_invoke_early_relaunch_reparks_instead_of_skipping_the_delay`
-/// passes for ANY tolerance under an hour, including one at or above
-/// [`DIRECT_DURABLE_DELAY_PARK_THRESHOLD_MS`] — which would let the shortest
-/// legal park fall straight through on its first early relaunch, reinstating
-/// the skip this arm exists to prevent. Relaunching just outside the tolerance
-/// is what pins it.
+/// passes for any tolerance under an hour. A large tolerance would let a
+/// short legal park fall straight through on its first early relaunch,
+/// reinstating the skip this arm exists to prevent. Relaunching just outside
+/// the tolerance is what pins it.
 #[test]
 fn direct_wasm_execute_invoke_clock_skew_tolerance_is_bounded_on_both_sides() {
     let components_dir = direct_e2e_components_dir();
@@ -8366,7 +8359,7 @@ fn parent_workflow_composes_and_invokes_published_workflow_agent() {
         staging.join("runtara_agent_shout_echo.wasm"),
     )
     .expect("stage child wasm");
-    let info = runtara_dsl::agent_meta::workflow_agent_info(
+    let info = certified_workflow_agent_info(
         "shout-echo",
         "Shout Echo",
         "",
@@ -8535,7 +8528,7 @@ fn parent_workflow_invokes_published_durable_workflow_agent() {
         staging.join("runtara_agent_durable_delay_echo.wasm"),
     )
     .expect("stage child wasm");
-    let info = runtara_dsl::agent_meta::workflow_agent_info(
+    let info = certified_workflow_agent_info(
         "durable-delay-echo",
         "Durable Delay Echo",
         "",
@@ -8708,7 +8701,7 @@ fn composed_durable_child_checkpoints_are_namespaced_per_invocation_site() {
         staging.join("runtara_agent_ns_delay_echo.wasm"),
     )
     .expect("stage child wasm");
-    let info = runtara_dsl::agent_meta::workflow_agent_info(
+    let info = certified_workflow_agent_info(
         "ns-delay-echo",
         "NS Delay Echo",
         "",
@@ -8928,7 +8921,7 @@ fn nested_composed_workflow_agents_chain_checkpoint_namespaces() {
         staging.join("runtara_agent_ns_grandchild.wasm"),
     )
     .expect("stage grandchild wasm");
-    let grandchild_info = runtara_dsl::agent_meta::workflow_agent_info(
+    let grandchild_info = certified_workflow_agent_info(
         "ns-grandchild",
         "NS Grandchild",
         "",
@@ -8991,7 +8984,7 @@ fn nested_composed_workflow_agents_chain_checkpoint_namespaces() {
     )
     .expect("mid composes the grandchild");
     fs::copy(&mid.wasm_path, staging.join("runtara_agent_ns_mid.wasm")).expect("stage mid wasm");
-    let mid_info = runtara_dsl::agent_meta::workflow_agent_info(
+    let mid_info = certified_workflow_agent_info(
         "ns-mid",
         "NS Mid",
         "",
@@ -9167,7 +9160,7 @@ fn stale_durable_workflow_agent_artifact_fails_compose() {
     .expect("stage child wasm");
     // Simulate a pre-namespacing publish: the synthesized meta WITHOUT the
     // `checkpoint-scope:1` marker tag.
-    let info = runtara_dsl::agent_meta::workflow_agent_info(
+    let info = certified_workflow_agent_info(
         "stale-durable",
         "Stale Durable",
         "",
@@ -9260,11 +9253,11 @@ fn stale_durable_workflow_agent_artifact_fails_compose() {
     std::mem::forget(temp);
 }
 
-/// The pure counterpart of the stale-artifact gate: a runtime-LESS
-/// workflow-agent has no checkpoints to protect, so even a pre-namespacing
-/// sidecar (no `checkpoint-scope:1` tag) composes freely.
+/// A pure workflow-agent staged without the explicit non-suspending proof is
+/// refused too. Its bytes happen not to import the runtime, but the parent
+/// must not infer future publication safety from a missing marker.
 #[test]
-fn stale_pure_workflow_agent_artifact_composes_freely() {
+fn uncertified_pure_workflow_agent_artifact_fails_compose() {
     let components_dir = direct_e2e_components_dir();
 
     const PURE_CHILD: &str = r#"{
@@ -9312,7 +9305,7 @@ fn stale_pure_workflow_agent_artifact_composes_freely() {
         staging.join("runtara_agent_stale_pure.wasm"),
     )
     .expect("stage child wasm");
-    let info = runtara_dsl::agent_meta::workflow_agent_info(
+    let info = certified_workflow_agent_info(
         "stale-pure",
         "Stale Pure",
         "",
@@ -9323,7 +9316,7 @@ fn stale_pure_workflow_agent_artifact_composes_freely() {
     stripped["capabilities"][0]["tags"]
         .as_array_mut()
         .expect("capability tags")
-        .retain(|tag| tag != "checkpoint-scope:1");
+        .retain(|tag| tag != "non-suspending:1");
     fs::write(
         staging.join("runtara_agent_stale_pure.meta.json"),
         serde_json::to_vec_pretty(&stripped).expect("meta serializes"),
@@ -9374,12 +9367,16 @@ fn stale_pure_workflow_agent_artifact_composes_freely() {
         false,
     )
     .expect("parent compile succeeds");
-    runtara_workflows::direct_wasm::compose_direct_workflow_with_extra_dirs(
+    let error = runtara_workflows::direct_wasm::compose_direct_workflow_with_extra_dirs(
         &mut parent,
         &components_dir,
         std::slice::from_ref(&staging),
     )
-    .expect("a stale PURE child has no checkpoints to protect — composes freely");
+    .expect_err("a workflow-agent without the safety certificate must not compose");
+    assert!(
+        error.to_string().contains("non-suspending:1"),
+        "the parent must require an auditable safety certificate: {error}"
+    );
     std::mem::forget(temp);
 }
 
@@ -9446,7 +9443,7 @@ fn composed_children_waiting_on_same_step_get_per_site_signal_ids() {
         staging.join("runtara_agent_sig_approve_echo.wasm"),
     )
     .expect("stage child wasm");
-    let info = runtara_dsl::agent_meta::workflow_agent_info(
+    let info = certified_workflow_agent_info(
         "sig-approve-echo",
         "Sig Approve Echo",
         "",
@@ -9802,7 +9799,7 @@ fn scoped_signal_wait_survives_drain_and_resume() {
         staging.join("runtara_agent_sig_drain_echo.wasm"),
     )
     .expect("stage child wasm");
-    let info = runtara_dsl::agent_meta::workflow_agent_info(
+    let info = certified_workflow_agent_info(
         "sig-drain-echo",
         "Sig Drain Echo",
         "",
@@ -9995,7 +9992,7 @@ fn pause_during_composed_child_wait_suspends_and_resumes() {
         staging.join("runtara_agent_pause_approve_echo.wasm"),
     )
     .expect("stage child wasm");
-    let info = runtara_dsl::agent_meta::workflow_agent_info(
+    let info = certified_workflow_agent_info(
         "pause-approve-echo",
         "Pause Approve Echo",
         "",
@@ -10207,7 +10204,7 @@ fn pause_inside_nested_composed_agents_chains_the_suspend() {
         staging.join("runtara_agent_pause_grandchild.wasm"),
     )
     .expect("stage grandchild wasm");
-    let grandchild_info = runtara_dsl::agent_meta::workflow_agent_info(
+    let grandchild_info = certified_workflow_agent_info(
         "pause-grandchild",
         "Pause Grandchild",
         "",
@@ -10269,7 +10266,7 @@ fn pause_inside_nested_composed_agents_chains_the_suspend() {
     )
     .expect("mid composes the grandchild");
     fs::copy(&mid.wasm_path, staging.join("runtara_agent_pause_mid.wasm")).expect("stage mid wasm");
-    let mid_info = runtara_dsl::agent_meta::workflow_agent_info(
+    let mid_info = certified_workflow_agent_info(
         "pause-mid",
         "Pause Mid",
         "",
@@ -10450,7 +10447,7 @@ fn workflow_agent_tool_calls_get_per_call_checkpoint_scopes() {
         staging.join("runtara_agent_tool_delay_echo.wasm"),
     )
     .expect("stage child wasm");
-    let info = runtara_dsl::agent_meta::workflow_agent_info(
+    let info = certified_workflow_agent_info(
         "tool-delay-echo",
         "Tool Delay Echo",
         "",

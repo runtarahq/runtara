@@ -892,6 +892,8 @@ fn direct_compile_emits_finish_only_artifact_without_rust_crate() {
         crate::direct_wasm::compile::DIRECT_WORKFLOW_INVOKE_ABI_VERSION
     );
     assert_eq!(metadata.entry_abi, "invoke");
+    assert!(!metadata.workflow_agent_safety.may_suspend_or_sleep);
+    assert!(metadata.workflow_agent_safety.violations.is_empty());
     assert_eq!(metadata.source_checksum.as_deref(), Some("source-sha256"));
     assert_eq!(
         metadata.template_major_version,
@@ -3935,12 +3937,12 @@ fn direct_compile_supports_dynamic_durable_delay_finish_graph() {
 }
 
 #[test]
-fn direct_compile_supports_non_durable_delay() {
+fn direct_compile_rejects_non_durable_delay() {
     let temp = tempfile::tempdir().expect("tempdir");
     let mut graph = fixture("delay_simple");
     graph.durable = Some(false);
 
-    let result = compile_direct_workflow(DirectCompilationInput {
+    let error = compile_direct_workflow(DirectCompilationInput {
         workflow_id: "delay-non-durable".to_string(),
         version: 1,
         source_checksum: None,
@@ -3951,20 +3953,47 @@ fn direct_compile_supports_non_durable_delay() {
         agent_catalog: None,
         agent_slug: None,
     })
-    .expect("non-durable Delay should compile");
+    .expect_err("non-durable Delay must be rejected before it can hold a runner");
 
-    let wasm = fs::read(&result.wasm_path).expect("wasm");
-    Validator::new_with_features(wasmparser::WasmFeatures::all())
-        .validate_all(&wasm)
-        .expect("direct non-durable Delay artifact should validate");
-    assert!(result.support_report.supported);
-    assert_eq!(result.support_report.unsupported, vec![]);
+    let DirectCompileError::Unsupported { report } = error else {
+        panic!("expected unsupported report, got {error}");
+    };
+    assert!(
+        report
+            .unsupported
+            .iter()
+            .any(|feature| feature.feature == "non-durable-delay")
+    );
+}
 
-    let manifest: DirectWorkflowManifest =
-        serde_json::from_slice(&fs::read(&result.manifest_path).expect("manifest"))
-            .expect("manifest json");
-    assert_eq!(manifest.graph.delays.len(), 1);
-    assert!(!manifest.graph.delays[0].durable);
+#[test]
+fn direct_compile_rejects_non_durable_wait_for_signal() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut graph = fixture("wait_simple");
+    graph.durable = Some(false);
+
+    let error = compile_direct_workflow(DirectCompilationInput {
+        workflow_id: "wait-non-durable".to_string(),
+        version: 1,
+        source_checksum: None,
+        execution_graph: graph,
+        child_workflows: vec![],
+        output_dir: temp.path().to_path_buf(),
+        track_events: false,
+        agent_catalog: None,
+        agent_slug: None,
+    })
+    .expect_err("non-durable WaitForSignal must be rejected before it can hold a runner");
+
+    let DirectCompileError::Unsupported { report } = error else {
+        panic!("expected unsupported report, got {error}");
+    };
+    assert!(
+        report
+            .unsupported
+            .iter()
+            .any(|feature| feature.feature == "non-durable-wait-for-signal")
+    );
 }
 
 #[test]
@@ -10860,6 +10889,10 @@ fn abi_is_part_of_the_lowering_tag() {
     assert!(
         tag.contains("abi=invoke-v2"),
         "the tag must name the ABI, or changing it cannot invalidate a cached image: {tag}"
+    );
+    assert!(
+        tag.contains("durable-delay-parking=v1"),
+        "the tag must retire cached artifacts whose short durable delays could block: {tag}"
     );
 }
 
