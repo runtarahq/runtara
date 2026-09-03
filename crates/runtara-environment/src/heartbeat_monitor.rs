@@ -72,6 +72,7 @@ pub struct HeartbeatMonitor {
 struct StaleContainer {
     instance_id: String,
     container_id: String,
+    launch_id: String,
     tenant_id: String,
     started_at: DateTime<Utc>,
     /// Last activity timestamp from instance_events table (any event counts as activity).
@@ -229,6 +230,7 @@ impl HeartbeatMonitor {
                 String,
                 String,
                 String,
+                String,
                 DateTime<Utc>,
                 Option<DateTime<Utc>>,
             ),
@@ -237,6 +239,7 @@ impl HeartbeatMonitor {
             SELECT
                 cr.instance_id,
                 cr.container_id,
+                cr.launch_id,
                 cr.tenant_id,
                 cr.started_at,
                 (SELECT MAX(ie.created_at) FROM instance_events ie WHERE ie.instance_id = cr.instance_id) as last_activity
@@ -266,10 +269,11 @@ impl HeartbeatMonitor {
         .await?
         .into_iter()
         .map(
-            |(instance_id, container_id, tenant_id, started_at, last_activity)| {
+            |(instance_id, container_id, launch_id, tenant_id, started_at, last_activity)| {
                 StaleContainer {
                     instance_id,
                     container_id,
+                    launch_id,
                     tenant_id,
                     started_at,
                     last_activity,
@@ -297,6 +301,7 @@ impl HeartbeatMonitor {
 
         // Step 1: Try runner.stop() (signals the guest's cancel token)
         let handle = RunnerHandle {
+            launch_id: container.launch_id.clone(),
             handle_id: container.container_id.clone(),
             instance_id: container.instance_id.clone(),
             tenant_id: container.tenant_id.clone(),
@@ -342,7 +347,7 @@ impl HeartbeatMonitor {
         // owns this instance and none of the rest applies.
         if !self
             .container_registry
-            .cleanup_generation(&container.instance_id, &container.container_id)
+            .cleanup_generation(&container.instance_id, &container.launch_id)
             .await?
         {
             info!(

@@ -636,6 +636,11 @@ const CANONICAL_LOCAL_GROUPS: &[(u32, ValType)] = &[
     // parallel-Split scratch (DIRECT_PSPLIT_*);
     // 124-125 are the concurrent-retry-round cursor + timers-fired flag.
     (22, ValType::I32),
+    // 126-127 hold a retry park checkpoint's state pointer/length. 128 is
+    // its absolute deadline. Appending preserves every existing absolute
+    // DIRECT_* local index across all ABI parameter foldings.
+    (2, ValType::I32),
+    (1, ValType::I64),
 ];
 
 /// Drop `n` leading local slots from `groups`, splitting (never merging) the
@@ -764,10 +769,11 @@ fn direct_run_function(
 
     // The additive `runtime.complete` records terminal status/output host-side
     // during the migration. Suppressed when the runtime is omitted (nothing to
-    // call) and under AgentCapabilities even with the runtime imported (a
-    // durable workflow-agent composed into a parent shares the PARENT
-    // instance's runtime — completing it here would finish the parent
-    // mid-flight); the invoke return value is the sole terminal result.
+    // call) and under AgentCapabilities. Production workflow-agents are
+    // statically certified non-suspending and omit runtime; the retained
+    // lower-level runtime-importing test/migration shape shares the parent's
+    // instance, so completing it here would finish the parent mid-flight. The
+    // capability return value is the sole terminal result.
     if !config.omit_runtime && !matches!(config.abi, WorkflowAbi::AgentCapabilities) {
         body.instruction(&Instruction::LocalGet(OUTPUT_PTR_LOCAL));
         body.instruction(&Instruction::LocalGet(OUTPUT_LEN_LOCAL));

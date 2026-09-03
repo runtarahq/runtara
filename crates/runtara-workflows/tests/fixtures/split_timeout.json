@@ -1,6 +1,6 @@
 {
   "name": "Split Timeout",
-  "description": "Direct-emitter fixture: a sequential Split whose per-item body delay drives it past its configured wall-clock timeout, so the step fails with SPLIT_TIMEOUT. Generated Rust parses SplitConfig.timeout but does not enforce it; direct mode is the first to honor the documented behavior.",
+  "description": "Direct-emitter rejection fixture: a sequential Split with a non-durable per-item Delay. It must be rejected before launch, because a delay may not retain a runner while the Split timeout is pending.",
   "durable": false,
   "steps": {
     "split": {

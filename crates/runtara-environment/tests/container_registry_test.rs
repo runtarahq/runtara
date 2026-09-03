@@ -38,6 +38,7 @@ async fn get_test_pool() -> PgPool {
 fn create_test_container_info(instance_id: &str, tenant_id: &str) -> ContainerInfo {
     ContainerInfo {
         container_id: format!("container-{}", Uuid::new_v4()),
+        launch_id: format!("launch-{}", Uuid::new_v4()),
         instance_id: instance_id.to_string(),
         tenant_id: tenant_id.to_string(),
         binary_path: "/usr/bin/test".to_string(),
@@ -63,6 +64,7 @@ async fn cleanup_instance(pool: &PgPool, instance_id: &str) {
 fn test_container_info_creation() {
     let info = ContainerInfo {
         container_id: "container-123".to_string(),
+        launch_id: "launch-123".to_string(),
         instance_id: "instance-456".to_string(),
         tenant_id: "tenant-789".to_string(),
         binary_path: "/usr/bin/test".to_string(),
@@ -71,6 +73,7 @@ fn test_container_info_creation() {
     };
 
     assert_eq!(info.container_id, "container-123");
+    assert_eq!(info.launch_id, "launch-123");
     assert_eq!(info.instance_id, "instance-456");
     assert_eq!(info.tenant_id, "tenant-789");
     assert_eq!(info.binary_path, "/usr/bin/test");
@@ -81,6 +84,7 @@ fn test_container_info_creation() {
 fn test_container_info_optional_fields() {
     let info = ContainerInfo {
         container_id: "c1".to_string(),
+        launch_id: "launch-c1".to_string(),
         instance_id: "i1".to_string(),
         tenant_id: "t1".to_string(),
         binary_path: "/bin/test".to_string(),
@@ -246,6 +250,50 @@ async fn test_cleanup_single_container() {
     }
 }
 
+/// Runner handles are implementation details: an adapter may reuse or rewrite
+/// one while a resume creates a distinct physical generation. Cleanup must be
+/// fenced by the persisted launch ID, never by that opaque handle.
+#[tokio::test]
+async fn cleanup_is_fenced_by_launch_id_not_container_handle() {
+    skip_if_no_db!();
+    let pool = get_test_pool().await;
+    let registry = ContainerRegistry::new(pool.clone());
+    let instance_id = Uuid::new_v4().to_string();
+
+    let mut first = create_test_container_info(&instance_id, "generation-tenant");
+    first.container_id = "opaque-shared-handle".to_string();
+    first.launch_id = "launch-old".to_string();
+    registry
+        .register(&first)
+        .await
+        .expect("register old launch");
+
+    let mut replacement = first.clone();
+    replacement.launch_id = "launch-new".to_string();
+    replacement.started_at = Utc::now();
+    registry
+        .register(&replacement)
+        .await
+        .expect("register replacement launch");
+
+    assert!(
+        !registry
+            .cleanup_generation(&instance_id, "launch-old")
+            .await
+            .expect("old cleanup"),
+        "an old generation must not delete the replacement even if the runner handle matches"
+    );
+    assert!(
+        registry
+            .cleanup_generation(&instance_id, "launch-new")
+            .await
+            .expect("current cleanup"),
+        "the current generation owns the row"
+    );
+
+    cleanup_instance(&pool, &instance_id).await;
+}
+
 /// Every table `ContainerRegistry::cleanup` is responsible for emptying.
 const TRACKING_TABLES: [&str; 1] = ["container_registry"];
 
@@ -286,6 +334,7 @@ async fn test_container_with_no_optional_fields() {
 
     let info = ContainerInfo {
         container_id: format!("c-{}", instance_id),
+        launch_id: format!("launch-{instance_id}"),
         instance_id: instance_id.clone(),
         tenant_id: "tenant".to_string(),
         binary_path: "/bin/test".to_string(),

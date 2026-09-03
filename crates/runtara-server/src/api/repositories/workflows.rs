@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use runtara_environment::execution_timeout::{ExecutionTimeoutError, ExecutionTimeoutSeconds};
 use serde_json::Value;
 use sha2::Digest;
 use sqlx::{PgPool, Postgres, Row, Transaction};
@@ -719,75 +720,73 @@ impl WorkflowRepository {
             "repo.list: main query completed"
         );
 
-        let workflows =
-            rows.iter()
-                .map(|row| {
-                    let memory_tier = row
-                        .5
-                        .as_ref()
-                        .and_then(|s| MemoryTier::parse(s))
-                        .unwrap_or_default();
-                    let current_version = row.2.unwrap_or_else(|| row.1.unwrap_or(0));
+        let workflows = rows
+            .iter()
+            .map(|row| {
+                let memory_tier = row
+                    .5
+                    .as_ref()
+                    .and_then(|s| MemoryTier::parse(s))
+                    .unwrap_or_default();
+                let current_version = row.2.unwrap_or_else(|| row.1.unwrap_or(0));
 
-                    // Extract name, description, schemas, variables, and execution_timeout from execution_graph
-                    let execution_graph = row.7.clone().unwrap_or(serde_json::json!({}));
-                    let name = execution_graph
-                        .get("name")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let description = execution_graph
-                        .get("description")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let input_schema = execution_graph
-                        .get("inputSchema")
-                        .cloned()
-                        .unwrap_or(serde_json::json!({}));
-                    let output_schema = execution_graph
-                        .get("outputSchema")
-                        .cloned()
-                        .unwrap_or(serde_json::json!({}));
-                    let variables = execution_graph
-                        .get("variables")
-                        .cloned()
-                        .unwrap_or(serde_json::json!([]));
-                    let execution_timeout = execution_graph
-                        .get("executionTimeoutSeconds")
-                        .and_then(|v| {
-                            v.as_i64()
-                                .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
-                        });
+                // Extract name, description, schemas, variables, and execution_timeout from execution_graph
+                let execution_graph = row.7.clone().unwrap_or(serde_json::json!({}));
+                let name = execution_graph
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let description = execution_graph
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let input_schema = execution_graph
+                    .get("inputSchema")
+                    .cloned()
+                    .unwrap_or(serde_json::json!({}));
+                let output_schema = execution_graph
+                    .get("outputSchema")
+                    .cloned()
+                    .unwrap_or(serde_json::json!({}));
+                let variables = execution_graph
+                    .get("variables")
+                    .cloned()
+                    .unwrap_or(serde_json::json!([]));
+                let execution_timeout = execution_timeout_from_definition(&execution_graph)
+                    .ok()
+                    .flatten()
+                    .map(|timeout| i64::from(timeout.as_secs()));
 
-                    WorkflowDto {
-                        id: row.0.clone(),
-                        created: row.3.to_rfc3339(),
-                        updated: row.4.to_rfc3339(),
-                        started: None,
-                        finished: None,
-                        execution_time: None,
-                        execution_timeout,
-                        name,
-                        description,
-                        execution_graph: serde_json::json!({}),
-                        input_schema,
-                        output_schema,
-                        variables,
-                        current_version_number: current_version,
-                        last_version_number: row.1.unwrap_or(0),
-                        memory_tier,
-                        track_events: row.6.unwrap_or(false),
-                        notes: Vec::new(), // Empty for list view (no execution graph loaded)
-                        path: row.8.clone(),
-                        slug: row.9.clone(),
-                        // The graph is withheld from list rows, but it is already
-                        // in hand here — so the chat predicate costs nothing extra
-                        // and the list can gate its Chat action on the real answer.
-                        supports_chat: graph_supports_chat(&execution_graph),
-                    }
-                })
-                .collect();
+                WorkflowDto {
+                    id: row.0.clone(),
+                    created: row.3.to_rfc3339(),
+                    updated: row.4.to_rfc3339(),
+                    started: None,
+                    finished: None,
+                    execution_time: None,
+                    execution_timeout,
+                    name,
+                    description,
+                    execution_graph: serde_json::json!({}),
+                    input_schema,
+                    output_schema,
+                    variables,
+                    current_version_number: current_version,
+                    last_version_number: row.1.unwrap_or(0),
+                    memory_tier,
+                    track_events: row.6.unwrap_or(false),
+                    notes: Vec::new(), // Empty for list view (no execution graph loaded)
+                    path: row.8.clone(),
+                    slug: row.9.clone(),
+                    // The graph is withheld from list rows, but it is already
+                    // in hand here — so the chat predicate costs nothing extra
+                    // and the list can gate its Chat action on the real answer.
+                    supports_chat: graph_supports_chat(&execution_graph),
+                }
+            })
+            .collect();
 
         Ok((workflows, total_count))
     }
@@ -873,12 +872,10 @@ impl WorkflowRepository {
                 .get("variables")
                 .cloned()
                 .unwrap_or(serde_json::json!([]));
-            let execution_timeout = execution_graph
-                .get("executionTimeoutSeconds")
-                .and_then(|v| {
-                    v.as_i64()
-                        .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
-                });
+            let execution_timeout = execution_timeout_from_definition(execution_graph)
+                .ok()
+                .flatten()
+                .map(|timeout| i64::from(timeout.as_secs()));
 
             WorkflowDto {
                 id: workflow_id.to_string(),
@@ -2266,7 +2263,7 @@ impl WorkflowRepository {
         tenant_id: &str,
         workflow_id: &str,
         version: i32,
-    ) -> Result<Option<i32>, sqlx::Error> {
+    ) -> Result<Option<ExecutionTimeoutSeconds>, sqlx::Error> {
         let row = sqlx::query!(
             r#"
             SELECT definition
@@ -2280,7 +2277,11 @@ impl WorkflowRepository {
         .fetch_optional(&self.pool)
         .await?;
 
-        Ok(row.and_then(|r| execution_timeout_from_definition(&r.definition)))
+        Ok(row
+            .map(|r| execution_timeout_from_definition(&r.definition))
+            .transpose()
+            .map_err(|error| sqlx::Error::Decode(Box::new(error)))?
+            .flatten())
     }
 
     /// Get workflow names for multiple workflow IDs in bulk
@@ -2465,6 +2466,19 @@ impl WorkflowRepository {
                     record.try_get("compiled_lowering_mode")?;
                 let definition: Value = record.try_get("definition")?;
                 let definition_track_events: bool = record.try_get("definition_track_events")?;
+                let execution_timeout = match execution_timeout_from_definition(&definition) {
+                    Ok(timeout) => timeout,
+                    Err(error) => {
+                        return Ok((
+                            resolved_version,
+                            CompilationStatus::Failed {
+                                error: format!("Invalid executionTimeoutSeconds: {error}"),
+                                terminal: true,
+                                authoring: true,
+                            },
+                        ));
+                    }
+                };
                 let current_checksum = workflow_definition_checksum(&definition);
                 let artifact_matches_current_compiler = compiler_provenance_matches(
                     compiled_template_major.as_deref(),
@@ -2484,9 +2498,7 @@ impl WorkflowRepository {
                         CompilationStatus::Ready {
                             translated_path: translated_path.unwrap_or_default(),
                             registered_image_id: registered_image_id.unwrap_or_default(),
-                            execution_timeout_seconds: execution_timeout_from_definition(
-                                &definition,
-                            ),
+                            execution_timeout,
                             track_events: definition_track_events,
                         },
                     ));
@@ -2613,14 +2625,10 @@ pub fn is_workflow_authoring_error(error_message: &str) -> bool {
 ///
 /// Shared by `get_execution_timeout` and the compilation check so the two
 /// cannot disagree about how the field is spelled or coerced.
-fn execution_timeout_from_definition(definition: &Value) -> Option<i32> {
-    definition
-        .get("executionTimeoutSeconds")
-        .and_then(|v| {
-            v.as_i64()
-                .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
-        })
-        .map(|v| v as i32)
+fn execution_timeout_from_definition(
+    definition: &Value,
+) -> Result<Option<ExecutionTimeoutSeconds>, ExecutionTimeoutError> {
+    crate::config::execution_timeout_policy().timeout_from_definition(definition)
 }
 
 /// Compilation readiness status returned by
@@ -2636,7 +2644,7 @@ pub enum CompilationStatus {
         /// `executionTimeoutSeconds` from the definition this check already
         /// read, so a launch does not fetch the same definition again just to
         /// look at one field. `None` when the graph does not set one.
-        execution_timeout_seconds: Option<i32>,
+        execution_timeout: Option<ExecutionTimeoutSeconds>,
         /// Whether this ready artifact emits step-debug events. Changing this
         /// setting invalidates the compilation, so this is the tracking mode
         /// of the artifact about to be launched rather than a stale request

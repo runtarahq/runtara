@@ -16,6 +16,7 @@ use super::abi::{
     load_retptr_list, push_retptr_arg, push_retptr_i64_load, push_retptr_u8_load,
     push_segment_args, return_if_retptr_error,
 };
+use super::retry_park::emit_retry_park_until_deadline;
 use super::{
     DIRECT_EMBED_RATE_LIMIT_WAIT_TOTAL_LOCAL, DIRECT_EMBED_RATE_LIMITED_LOCAL,
     DIRECT_EMBED_RETRY_AFTER_TAG_LOCAL, DIRECT_EMBED_RETRY_ATTEMPT_LOCAL,
@@ -65,6 +66,51 @@ pub(super) fn emit_embed_retry_before_attempt(
         );
     }
     body.instruction(&Instruction::End);
+}
+
+/// Schedule the next EmbedWorkflow retry as a lifecycle wake. The failed child
+/// result is checkpointed separately by the caller under its per-attempt key;
+/// this key stores only the fixed-width absolute deadline.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn emit_embed_retry_park(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    cache_key_ptr_local: u32,
+    cache_key_len_local: u32,
+    error_ptr_local: u32,
+    error_len_local: u32,
+    max_retries: u32,
+    retry_delay_ms: u64,
+) {
+    emit_embed_retry_delay(body, indices, max_retries, retry_delay_ms);
+    // The audit row is an upsert keyed by the attempt number, so replaying a
+    // pending schedule is harmless and keeps the retry visible while parked.
+    emit_embed_record_retry_attempt(
+        body,
+        indices,
+        cache_key_ptr_local,
+        cache_key_len_local,
+        error_ptr_local,
+        error_len_local,
+    );
+    body.instruction(&Instruction::LocalGet(cache_key_ptr_local));
+    body.instruction(&Instruction::LocalGet(cache_key_len_local));
+    body.instruction(&Instruction::LocalGet(DIRECT_EMBED_RETRY_ATTEMPT_LOCAL));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.stdlib_retry_sleep_key));
+    return_if_retptr_error(body, indices);
+    load_retptr_list(
+        body,
+        DIRECT_EMBED_RETRY_SLEEP_KEY_PTR_LOCAL,
+        DIRECT_EMBED_RETRY_SLEEP_KEY_LEN_LOCAL,
+    );
+    emit_retry_park_until_deadline(
+        body,
+        indices,
+        DIRECT_EMBED_RETRY_SLEEP_KEY_PTR_LOCAL,
+        DIRECT_EMBED_RETRY_SLEEP_KEY_LEN_LOCAL,
+        DIRECT_EMBED_RETRY_SLEEP_MS_LOCAL,
+    );
 }
 
 pub(super) fn emit_embed_retry_error_info(

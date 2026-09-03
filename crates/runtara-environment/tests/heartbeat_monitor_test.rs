@@ -50,6 +50,13 @@ impl Runner for MockRunner {
         unimplemented!("MockRunner::launch_detached not needed for heartbeat monitor tests")
     }
 
+    async fn try_launch_detached(
+        &self,
+        options: &LaunchOptions,
+    ) -> runtara_environment::runner::Result<RunnerHandle> {
+        self.launch_detached(options).await
+    }
+
     async fn is_running(&self, _handle: &RunnerHandle) -> bool {
         false
     }
@@ -137,8 +144,8 @@ async fn register_container(pool: &PgPool, instance_id: &str, tenant_id: &str, _
     let container_id = format!("runtara_{}", &instance_id[..8.min(instance_id.len())]);
     sqlx::query(
         r#"
-        INSERT INTO container_registry (container_id, instance_id, tenant_id, binary_path, started_at)
-        VALUES ($1, $2, $3, '/usr/bin/test', NOW() - INTERVAL '30 minutes')
+        INSERT INTO container_registry (container_id, launch_id, instance_id, tenant_id, binary_path, started_at)
+        VALUES ($1, $1, $2, $3, '/usr/bin/test', NOW() - INTERVAL '30 minutes')
         "#,
     )
     .bind(&container_id)
@@ -1258,8 +1265,8 @@ async fn test_freshly_woken_instance_is_not_stale_despite_old_events() {
     let container_id = format!("runtara_{}", &instance_id[..8]);
     sqlx::query(
         r#"
-        INSERT INTO container_registry (container_id, instance_id, tenant_id, binary_path, started_at)
-        VALUES ($1, $2, $3, '/usr/bin/test', NOW())
+        INSERT INTO container_registry (container_id, launch_id, instance_id, tenant_id, binary_path, started_at)
+        VALUES ($1, $1, $2, $3, '/usr/bin/test', NOW())
         "#,
     )
     .bind(&container_id)
@@ -1329,8 +1336,8 @@ async fn cleanup_generation_refuses_to_remove_a_replacement_container() {
             sqlx::query(
                 r#"
                 INSERT INTO container_registry
-                    (container_id, instance_id, tenant_id, binary_path, started_at)
-                VALUES ($1, $2, $3, '/usr/bin/test', NOW())
+                    (container_id, launch_id, instance_id, tenant_id, binary_path, started_at)
+                VALUES ($1, $1, $2, $3, '/usr/bin/test', NOW())
                 "#,
             )
             .bind(container_id)

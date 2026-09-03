@@ -587,6 +587,7 @@ impl ReportService {
                 inputs: json!({ "data": context, "variables": {} }),
                 debug: false,
                 correlation_id: Some(format!("report:{id_or_slug}:{block_id}:{action_id}")),
+                idempotency_key: None,
                 trigger_source: TriggerSource::HttpApi,
                 instance_id: Some(instance_id),
             })

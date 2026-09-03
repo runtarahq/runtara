@@ -1,8 +1,8 @@
 //! Event API Handlers
 //!
 //! HTTP handlers for trigger-based workflow execution.
-//! When a trigger is found for the given trigger_id, publishes to the trigger stream
-//! for async execution. Returns 404 if trigger is not found.
+//! When a trigger is found for the given trigger_id, durably records an async
+//! execution request. The outbox relay publishes it to the trigger stream.
 
 use axum::{
     body::Bytes,
@@ -15,8 +15,8 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::api::dto::trigger_event::TriggerEvent;
-use crate::api::repositories::trigger_stream::TriggerStreamPublisher;
 use crate::api::repositories::triggers::TriggerRepository;
+use crate::workers::execution_outbox::source_idempotency_key;
 
 /// Default cap on the request body of the public, unauthenticated webhook
 /// ingest endpoints when `WEBHOOK_MAX_BODY_BYTES` is unset or unparseable.
@@ -43,7 +43,7 @@ fn parse_webhook_max_body_bytes(raw: Option<&str>) -> usize {
 /// When a trigger is found for the given trigger_id:
 /// 1. Looks up the trigger in invocation_trigger table
 /// 2. Validates trigger is active
-/// 3. Publishes a TriggerEvent to the trigger stream for async execution
+/// 3. Commits a TriggerEvent plus admission reservation to the durable outbox
 /// 4. Returns instance_id for tracking
 ///
 /// Returns 404 if trigger is not found.
@@ -69,7 +69,6 @@ fn parse_webhook_max_body_bytes(raw: Option<&str>) -> usize {
 pub async fn capture_http_event(
     State(pool): State<PgPool>,
     State(connections): State<std::sync::Arc<runtara_connections::ConnectionsFacade>>,
-    State(trigger_stream): State<Option<std::sync::Arc<TriggerStreamPublisher>>>,
     State(engine): State<std::sync::Arc<crate::workers::execution_engine::ExecutionEngine>>,
     Path((trigger_id, action)): Path<(String, String)>,
     request: Request,
@@ -82,21 +81,6 @@ pub async fn capture_http_event(
     let method = parts.method.clone();
     let uri = parts.uri.clone();
     let headers = parts.headers.clone();
-
-    // Pull the shared trigger stream publisher from AppState (created once at
-    // startup with the shared Redis connection manager). Avoids opening a new
-    // TCP connection per webhook request.
-    let trigger_stream = match trigger_stream {
-        Some(t) => t,
-        None => {
-            eprintln!("VALKEY_HOST not configured");
-            let error_response = json!({
-                "success": false,
-                "message": "Redis/Valkey not configured"
-            });
-            return Err((StatusCode::INTERNAL_SERVER_ERROR, Json(error_response)));
-        }
-    };
 
     // Check if this is a multipart/form-data request
     let content_type = headers
@@ -207,8 +191,25 @@ pub async fn capture_http_event(
             })
             .collect();
 
-        // Generate instance ID
-        let instance_id = Uuid::new_v4();
+        // An upstream delivery ID makes repeated webhooks an idempotent
+        // source operation. If a provider does not supply one we still get a
+        // durable request, but cannot safely collapse two identical-looking
+        // business events into one execution.
+        let supplied_identity = webhook_delivery_identity(&headers);
+        let idempotency_key = supplied_identity.as_ref().map_or_else(
+            || source_idempotency_key("http-event", &Uuid::new_v4().to_string()),
+            |identity| {
+                source_idempotency_key("http-event", &format!("{trigger_id}:{action}:{identity}"))
+            },
+        );
+        let instance_id = supplied_identity
+            .as_ref()
+            .map_or_else(Uuid::new_v4, |identity| {
+                Uuid::new_v5(
+                    &Uuid::NAMESPACE_URL,
+                    format!("{tenant_id}:{trigger_id}:{action}:{identity}").as_bytes(),
+                )
+            });
 
         // Read debug flag from trigger configuration
         let debug = trigger
@@ -233,38 +234,55 @@ pub async fn capture_http_event(
             debug,
         );
 
-        // Per-tenant maxConcurrentExecutions gate (SYN-433 Finding 1).
-        // This handler bypasses ExecutionEngine::queue, so consult the same
-        // runtime-count gate explicitly. Returns the documented
-        // ENTITLEMENT_LIMIT_EXCEEDED 403 when the tenant is at/over the cap.
-        if let Err(denial) = engine.check_concurrency_gate(&tenant_id).await {
-            return Err((StatusCode::FORBIDDEN, Json(denial.json_body())));
-        }
-
-        // Publish to trigger stream (reuses shared connection manager).
-        match trigger_stream.publish(&tenant_id, &event).await {
-            Ok(stream_id) => {
-                // `last_run` is stamped by the worker that actually starts the
-                // run, folded into the lookup it already does for this trigger.
-
+        match engine
+            .enqueue_trigger_event(&tenant_id, event, idempotency_key)
+            .await
+        {
+            Ok(enqueued) => {
                 let response = json!({
                     "status": "queued",
-                    "instance_id": instance_id.to_string(),
-                    "stream_id": stream_id,
+                    "instance_id": enqueued.instance_id,
+                    "request_id": enqueued.request_id,
+                    "duplicate": enqueued.duplicate,
                     "workflow_id": trigger.workflow_id,
                 });
                 Ok((StatusCode::OK, Json(response)))
             }
-            Err(e) => {
-                eprintln!("Failed to publish to trigger stream: {}", e);
+            Err(crate::workers::execution_engine::ExecutionError::EntitlementDenied(denial)) => {
+                Err((StatusCode::FORBIDDEN, Json(denial.json_body())))
+            }
+            Err(error) => {
+                let status = error.http_status();
                 let error_response = json!({
                     "success": false,
-                    "message": format!("Failed to queue execution: {}", e)
+                    "message": format!("Failed to queue execution: {error}")
                 });
-                Err((StatusCode::INTERNAL_SERVER_ERROR, Json(error_response)))
+                Err((status, Json(error_response)))
             }
         }
     }
+}
+
+/// Providers use several spelling conventions for their immutable delivery
+/// ID. Prefer the explicit idempotency header, then common delivery/request
+/// IDs. A missing header intentionally does not hash the body: two legitimate
+/// events with equal JSON must remain two executions.
+fn webhook_delivery_identity(headers: &HeaderMap) -> Option<String> {
+    [
+        "idempotency-key",
+        "x-idempotency-key",
+        "x-request-id",
+        "x-delivery-id",
+    ]
+    .into_iter()
+    .find_map(|header| {
+        headers
+            .get(header)
+            .and_then(|value| value.to_str().ok())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+    })
 }
 
 /// Parse multipart/form-data into a JSON object

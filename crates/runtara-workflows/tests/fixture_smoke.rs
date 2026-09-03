@@ -16,11 +16,13 @@
 //! - `EMBED` — has an `EmbedWorkflow` step. Standalone emit must *require*
 //!   children (proving the embed contract); the full child-wired lowering is
 //!   asserted in `src/direct_wasm/compile/tests.rs`.
+//! - `NON_DURABLE_DELAY_REJECTION` — deliberately uses a non-durable `Delay`.
+//!   It must be rejected with that policy diagnostic, because a delay cannot
+//!   retain a runner while waiting.
 //! - `KNOWN_UNSUPPORTED` — graph shapes the direct emitter genuinely cannot
 //!   lower (e.g. an arbitrary back-edge cycle rather than a `While`/`maxRetries`
-//!   loop). Currently empty — every corpus fixture validates and emits — but
-//!   kept as a conscious escape hatch so a future unsupported shape is an
-//!   explicit table edit, not a silent runtime failure.
+//!   loop). Currently empty; it is kept as a conscious escape hatch so a future
+//!   unsupported shape is an explicit table edit, not a silent runtime failure.
 //! - `VALID` — everything else: must emit a component that validates.
 //!
 //! The completeness guard at the end fails if any fixture file went unvisited.
@@ -32,11 +34,16 @@ use runtara_workflows::ExecutionGraph;
 use runtara_workflows::direct_wasm::{DirectCompilationInput, compile_direct_workflow};
 use wasmparser::Validator;
 
+/// Fixtures that deliberately exercise the rule that a Delay must be durable
+/// so it can park rather than retain a runner. They must fail with the specific
+/// policy diagnostic, not merely fail compilation for an unrelated reason.
+const NON_DURABLE_DELAY_REJECTIONS: &[&str] = &["split_timeout", "while_timeout"];
+
 /// Graph shapes the direct emitter genuinely cannot lower (it linearizes any
 /// DAG — diamonds included — but not an arbitrary back-edge cycle; structured
-/// loops use `While`/Agent `maxRetries`). Currently empty: the whole corpus
-/// validates and emits. Kept as an explicit escape hatch — adding a fixture
-/// here must be a conscious decision, asserted to emit-fail, not a silent gap.
+/// loops use `While`/Agent `maxRetries`). Currently empty. Kept as an explicit
+/// escape hatch — adding a fixture here must be a conscious decision, asserted
+/// to emit-fail, not a silent gap.
 const KNOWN_UNSUPPORTED: &[&str] = &[];
 
 fn fixtures_dir() -> PathBuf {
@@ -117,6 +124,19 @@ fn check(name: &str, json: &str) -> Result<(), String> {
         };
     }
 
+    if NON_DURABLE_DELAY_REJECTIONS.contains(&name) {
+        return match emit(graph) {
+            Err(error) if error.contains("non-durable-delay") => Ok(()),
+            Err(error) => Err(format!(
+                "fixture must be rejected by the non-durable Delay policy, got an unrelated error: {error}"
+            )),
+            Ok(_) => Err(
+                "fixture emitted a component, but its non-durable Delay must be rejected so it cannot retain a runner"
+                    .to_string(),
+            ),
+        };
+    }
+
     if KNOWN_UNSUPPORTED.contains(&name) {
         return match emit(graph) {
             Err(_) => Ok(()),
@@ -148,7 +168,8 @@ fn every_fixture_lowers_as_expected() {
     );
 
     let mut failures: Vec<String> = Vec::new();
-    let mut counts = (0usize, 0usize, 0usize); // (valid, embed, known_unsupported)
+    let mut counts = (0usize, 0usize, 0usize, 0usize);
+    // (valid, embed, non_durable_delay_rejection, known_unsupported)
 
     for path in &entries {
         let name = path.file_stem().unwrap().to_string_lossy().to_string();
@@ -158,8 +179,10 @@ fn every_fixture_lowers_as_expected() {
         if let Ok(g) = load_graph(&json) {
             if has_embed_step(&g) {
                 counts.1 += 1;
-            } else if KNOWN_UNSUPPORTED.contains(&name.as_str()) {
+            } else if NON_DURABLE_DELAY_REJECTIONS.contains(&name.as_str()) {
                 counts.2 += 1;
+            } else if KNOWN_UNSUPPORTED.contains(&name.as_str()) {
+                counts.3 += 1;
             } else {
                 counts.0 += 1;
             }
@@ -175,11 +198,12 @@ fn every_fixture_lowers_as_expected() {
     }
 
     eprintln!(
-        "fixture smoke: {} fixtures — {} VALID, {} EMBED, {} KNOWN_UNSUPPORTED",
+        "fixture smoke: {} fixtures — {} VALID, {} EMBED, {} NON_DURABLE_DELAY_REJECTION, {} KNOWN_UNSUPPORTED",
         entries.len(),
         counts.0,
         counts.1,
         counts.2,
+        counts.3,
     );
 
     assert!(

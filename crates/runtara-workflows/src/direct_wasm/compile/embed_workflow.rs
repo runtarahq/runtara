@@ -27,6 +27,7 @@ use super::debug::{emit_step_breakpoint, emit_step_debug_event};
 use super::dispatcher::emit_run_plan_mapping;
 use super::embed_retry::{
     emit_embed_retry_before_attempt, emit_embed_retry_condition, emit_embed_retry_error_info,
+    emit_embed_retry_park,
 };
 use super::mapping::{emit_apply_mapping_start_step_error, emit_build_source};
 use super::{
@@ -410,45 +411,120 @@ fn emit_embed_workflow_child_with_retry(
 
     body.instruction(&Instruction::Block(BlockType::Empty));
     body.instruction(&Instruction::Loop(BlockType::Empty));
-    emit_embed_retry_before_attempt(
-        body,
-        indices,
-        static_data,
-        durable,
-        route_ptr_local,
-        route_len_local,
-        output_ptr_local,
-        output_len_local,
-        max_retries,
-        retry_delay_ms,
-    );
-    emit_embed_workflow_child_attempt(
-        body,
-        indices,
-        static_data,
-        track_events,
-        child_variables,
-        child_plan,
-        steps_ptr_local,
-        steps_len_local,
-        source_ptr_local,
-        source_len_local,
-        output_ptr_local,
-        output_len_local,
-        route_ptr_local,
-        route_len_local,
-        workflow_log_kind,
-        workflow_error_kind,
-    );
+    let lifecycle_retry_park =
+        durable && indices.abi == crate::direct_wasm::component::WorkflowAbi::InvokeHostImports;
+    if lifecycle_retry_park {
+        // Each failed child attempt is durable on its own. That lets a wake
+        // replay the failure/classification and consume the scheduled next
+        // attempt without re-running the child that already failed.
+        body.instruction(&Instruction::LocalGet(route_ptr_local));
+        body.instruction(&Instruction::LocalGet(route_len_local));
+        body.instruction(&Instruction::LocalGet(DIRECT_EMBED_RETRY_ATTEMPT_LOCAL));
+        push_retptr_arg(body);
+        body.instruction(&Instruction::Call(indices.stdlib_agent_attempt_result_key));
+        return_if_retptr_error(body, indices);
+        load_retptr_list(
+            body,
+            super::DIRECT_EMBED_RETRY_SLEEP_KEY_PTR_LOCAL,
+            super::DIRECT_EMBED_RETRY_SLEEP_KEY_LEN_LOCAL,
+        );
+        emit_checkpoint_lookup(
+            body,
+            indices,
+            super::DIRECT_EMBED_RETRY_SLEEP_KEY_PTR_LOCAL,
+            super::DIRECT_EMBED_RETRY_SLEEP_KEY_LEN_LOCAL,
+            output_ptr_local,
+            output_len_local,
+        );
+        // HIT: the wrapped child error is the failed attempt's envelope.
+        body.instruction(&Instruction::I32Const(1));
+        body.instruction(&Instruction::LocalSet(DIRECT_EMBED_CHILD_ERROR_FLAG_LOCAL));
+        body.instruction(&Instruction::Else);
+        emit_embed_workflow_child_attempt(
+            body,
+            indices,
+            static_data,
+            track_events,
+            child_variables,
+            child_plan,
+            steps_ptr_local,
+            steps_len_local,
+            source_ptr_local,
+            source_len_local,
+            output_ptr_local,
+            output_len_local,
+            route_ptr_local,
+            route_len_local,
+            workflow_log_kind,
+            workflow_error_kind,
+        );
+        body.instruction(&Instruction::LocalGet(DIRECT_EMBED_CHILD_ERROR_FLAG_LOCAL));
+        body.instruction(&Instruction::If(BlockType::Empty));
+        emit_wrapped_child_error(
+            body,
+            indices,
+            step_id_segment,
+            output_ptr_local,
+            output_len_local,
+        );
+        emit_checkpoint_save(
+            body,
+            indices,
+            super::DIRECT_EMBED_RETRY_SLEEP_KEY_PTR_LOCAL,
+            super::DIRECT_EMBED_RETRY_SLEEP_KEY_LEN_LOCAL,
+            output_ptr_local,
+            output_len_local,
+        );
+        body.instruction(&Instruction::End);
+        body.instruction(&Instruction::End);
+    } else {
+        // Legacy export shapes have no wake result and retain the historic
+        // in-run sleep lowering. Current direct workflow images always take
+        // the lifecycle arm above.
+        emit_embed_retry_before_attempt(
+            body,
+            indices,
+            static_data,
+            durable,
+            route_ptr_local,
+            route_len_local,
+            output_ptr_local,
+            output_len_local,
+            max_retries,
+            retry_delay_ms,
+        );
+        emit_embed_workflow_child_attempt(
+            body,
+            indices,
+            static_data,
+            track_events,
+            child_variables,
+            child_plan,
+            steps_ptr_local,
+            steps_len_local,
+            source_ptr_local,
+            source_len_local,
+            output_ptr_local,
+            output_len_local,
+            route_ptr_local,
+            route_len_local,
+            workflow_log_kind,
+            workflow_error_kind,
+        );
+        body.instruction(&Instruction::LocalGet(DIRECT_EMBED_CHILD_ERROR_FLAG_LOCAL));
+        body.instruction(&Instruction::If(BlockType::Empty));
+        emit_wrapped_child_error(
+            body,
+            indices,
+            step_id_segment,
+            output_ptr_local,
+            output_len_local,
+        );
+        body.instruction(&Instruction::End);
+    }
+
     body.instruction(&Instruction::LocalGet(DIRECT_EMBED_CHILD_ERROR_FLAG_LOCAL));
     body.instruction(&Instruction::If(BlockType::Empty));
-    emit_wrapped_child_error(
-        body,
-        indices,
-        step_id_segment,
-        output_ptr_local,
-        output_len_local,
-    );
     emit_embed_retry_error_info(body, indices, output_ptr_local, output_len_local);
     emit_embed_retry_condition(body, max_retries, retry_delay_ms);
     body.instruction(&Instruction::If(BlockType::Empty));
@@ -456,6 +532,18 @@ fn emit_embed_workflow_child_with_retry(
     body.instruction(&Instruction::I32Const(1));
     body.instruction(&Instruction::I32Add);
     body.instruction(&Instruction::LocalSet(DIRECT_EMBED_RETRY_ATTEMPT_LOCAL));
+    if lifecycle_retry_park {
+        emit_embed_retry_park(
+            body,
+            indices,
+            route_ptr_local,
+            route_len_local,
+            output_ptr_local,
+            output_len_local,
+            max_retries,
+            retry_delay_ms,
+        );
+    }
     body.instruction(&Instruction::Br(2));
     body.instruction(&Instruction::End);
     body.instruction(&Instruction::Br(2));

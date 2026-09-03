@@ -14,11 +14,13 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use runtara_core::persistence::{CompleteInstanceParams, Persistence, PostgresPersistence};
 use runtara_environment::runner::{
-    EmbeddedWasmRunner, LaunchOptions, Runner, RunnerError, WorkflowRunnerConfig,
+    EmbeddedWasmRunner, LaunchOptions, Result as RunnerResult, Runner, RunnerError, StartGate,
+    StartGateConfirmation, WorkflowRunnerConfig,
 };
 use uuid::Uuid;
 
@@ -95,8 +97,12 @@ async fn harness() -> Harness {
         skip_cert_verification: false,
         connection_service_url: None,
     };
-    let runner =
-        EmbeddedWasmRunner::new(config, Arc::clone(&persistence)).expect("embedded runner");
+    let runner = EmbeddedWasmRunner::new(config, Arc::clone(&persistence))
+        .expect("embedded runner")
+        // The integration binary is not `runtara-server`, so it cannot serve
+        // the production hidden precompile-child command. Opt in explicitly
+        // to the protocol-compatible test helper instead.
+        .with_in_process_precompiler_for_tests();
     Harness {
         runner,
         persistence,
@@ -113,14 +119,51 @@ fn write_component(dir: &Path, name: &str, wat: &str) -> PathBuf {
 
 fn options(instance_id: &str, wasm_path: &Path) -> LaunchOptions {
     LaunchOptions {
+        launch_id: format!("launch-{instance_id}"),
         instance_id: instance_id.to_string(),
         tenant_id: "embedded-test".to_string(),
         wasm_path: wasm_path.to_path_buf(),
+        requires_lifecycle_invoke: false,
+        expected_workflow_checksum: None,
+        preparation_attempt: None,
+        preparation_deadline: None,
         input: serde_json::Value::Null,
         timeout: Duration::from_secs(30),
         checkpoint_id: None,
         env: HashMap::new(),
         prepersisted_input: None,
+        start_gate: None,
+    }
+}
+
+/// Durable preparation must read the same canonical input envelope that a
+/// production launch persists before it reaches the runner.
+async fn seed_detached_instance(harness: &Harness, instance_id: &str) {
+    const INPUT: &[u8] = br#"{\"data\":{},\"variables\":{}}"#;
+
+    assert!(
+        harness
+            .persistence
+            .try_register_instance(instance_id, "embedded-test", Some(INPUT))
+            .await
+            .expect("register detached instance"),
+        "the freshly generated test instance id must be claimed"
+    );
+}
+
+/// A durable confirmation held by the test to prove guest preparation cannot
+/// cross a merely opened in-memory start gate.
+struct BlockingGateConfirmation {
+    release: Arc<tokio::sync::Notify>,
+    calls: Arc<AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl StartGateConfirmation for BlockingGateConfirmation {
+    async fn confirm(&self) -> RunnerResult<()> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.release.notified().await;
+        Ok(())
     }
 }
 
@@ -184,6 +227,7 @@ async fn launch_detached_completes_and_clears_registry() {
     let h = harness().await;
     let inst_id = unique("inst-detached");
     let wasm = write_component(h.dir.path(), "ok.wasm", RUN_OK_WAT);
+    seed_detached_instance(&h, inst_id.as_str()).await;
 
     let handle = h
         .runner
@@ -208,6 +252,7 @@ async fn stop_cancels_spinning_instance() {
     let h = harness().await;
     let inst_id = unique("inst-spin");
     let wasm = write_component(h.dir.path(), "spin.wasm", RUN_SPIN_WAT);
+    seed_detached_instance(&h, inst_id.as_str()).await;
 
     let handle = h
         .runner
@@ -230,6 +275,85 @@ async fn stop_cancels_spinning_instance() {
     .await
     .expect("cancel did not end the spinning guest");
     assert!(!h.runner.is_running(&handle).await);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn detached_gate_allows_preparation_but_blocks_guest_instantiation() {
+    let h = harness().await;
+    let inst_id = unique("inst-gated");
+    // Preparation is intentionally allowed before the gate. A durable
+    // dispatcher has already compiled and linked this component before it
+    // reserves a scarce guest run permit; only guest instantiation remains
+    // protected by the start gate.
+    let wasm = write_component(h.dir.path(), "gated-spin.wasm", RUN_SPIN_WAT);
+    seed_detached_instance(&h, inst_id.as_str()).await;
+    let confirmation_release = Arc::new(tokio::sync::Notify::new());
+    let confirmation_calls = Arc::new(AtomicUsize::new(0));
+    let gate = StartGate::new(Duration::from_secs(5)).with_confirmation(Arc::new(
+        BlockingGateConfirmation {
+            release: Arc::clone(&confirmation_release),
+            calls: Arc::clone(&confirmation_calls),
+        },
+    ));
+    let mut launch = options(inst_id.as_str(), &wasm);
+    launch.start_gate = Some(gate.clone());
+
+    let handle = h.runner.launch_detached(&launch).await.expect("launch");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        h.runner.is_running(&handle).await,
+        "the closed gate must keep the prepared task alive without instantiating a guest"
+    );
+    assert_eq!(
+        confirmation_calls.load(Ordering::SeqCst),
+        0,
+        "preparation must not clear the durable marker or instantiate a guest before gate open"
+    );
+
+    assert!(gate.open());
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while confirmation_calls.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("runner must reach the exact pre-instantiation confirmation boundary");
+    assert!(
+        h.runner.is_running(&handle).await,
+        "a supervisor-opened gate must still wait for runner-owned durable confirmation before guest execution"
+    );
+
+    confirmation_release.notify_one();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        h.runner.is_running(&handle).await,
+        "the spinning guest must not complete before the test can stop it"
+    );
+    h.runner.stop(&handle).await.expect("stop spinning guest");
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        h.runner.wait_for_exit(&handle, Duration::from_millis(50)),
+    )
+    .await
+    .expect("stopped gated guest must exit");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn invalid_component_fails_during_preparation() {
+    let h = harness().await;
+    let inst_id = unique("inst-invalid-preparation");
+    let invalid = h.dir.path().join("invalid.wasm");
+    std::fs::write(&invalid, b"not a wasm component").expect("write invalid artifact");
+
+    let error = h
+        .runner
+        .try_prepare_launch(&options(inst_id.as_str(), &invalid))
+        .await
+        .expect_err("invalid artifact must fail before a run permit or gate handoff");
+    assert!(
+        matches!(error, RunnerError::StartFailed(_)),
+        "invalid preparation must be reported as a pre-start failure: {error}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

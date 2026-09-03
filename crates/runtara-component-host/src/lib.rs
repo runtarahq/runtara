@@ -23,6 +23,7 @@ pub mod engine;
 pub(crate) mod host_io;
 pub mod host_state;
 pub mod lifecycle;
+pub mod precompile;
 pub mod registry;
 pub mod runtime_host;
 pub mod workflow;
@@ -37,8 +38,8 @@ pub use engine::{EPOCH_TICK, EngineConfig, build_engine, spawn_epoch_ticker};
 pub use host_state::{CallContext, HostState};
 pub use registry::{LoadedAgent, build_linker, instantiate, load_agent};
 pub use workflow::{
-    InvokeExit, InvokeRunResult, WorkflowExecutor, WorkflowExit, WorkflowLimits, WorkflowRunResult,
-    WorkflowRunSpec, WorkflowState,
+    InvokeExit, InvokeRunResult, PreparedWorkflow, WorkflowExecutor, WorkflowExit, WorkflowLimits,
+    WorkflowRunResult, WorkflowRunSpec, WorkflowStartConfirmation, WorkflowState,
 };
 
 /// Agent metadata loaded from a sidecar `<agent>.meta.json` next to the

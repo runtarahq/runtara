@@ -13,7 +13,6 @@ use std::time::Duration;
 
 use serde_json::Value;
 use tokio::fs;
-use tracing::debug;
 
 use runtara_core::persistence::Persistence;
 
@@ -126,16 +125,18 @@ pub(crate) fn run_dir(data_dir: &Path, tenant_id: &str, instance_id: &str) -> Pa
     data_dir.join(tenant_id).join("runs").join(instance_id)
 }
 
-/// Create the run directory for stderr capture.
-pub(crate) async fn ensure_run_dir(
+/// The per-launch run directory.
+///
+/// A durable instance can have a new physical run while stale cleanup for its
+/// predecessor is still unwinding. Keeping stderr under the launch generation
+/// prevents the old task from overwriting diagnostics for the new one.
+pub(crate) fn launch_run_dir(
     data_dir: &Path,
     tenant_id: &str,
     instance_id: &str,
-) -> Result<()> {
-    let dir = run_dir(data_dir, tenant_id, instance_id);
-    fs::create_dir_all(&dir).await?;
-    debug!(instance_id = %instance_id, "Run directory created");
-    Ok(())
+    launch_id: &str,
+) -> PathBuf {
+    run_dir(data_dir, tenant_id, instance_id).join(launch_id)
 }
 
 /// Load output from runtara-core persistence.
@@ -177,8 +178,10 @@ pub(crate) async fn load_stderr(
     data_dir: &Path,
     tenant_id: &str,
     instance_id: &str,
+    launch_id: &str,
 ) -> Option<String> {
-    let stderr_path = run_dir(data_dir, tenant_id, instance_id).join("stderr.log");
+    let stderr_path =
+        launch_run_dir(data_dir, tenant_id, instance_id, launch_id).join("stderr.log");
     if let Ok(stderr_content) = fs::read_to_string(&stderr_path).await {
         let stderr_trimmed = stderr_content.trim();
         if !stderr_trimmed.is_empty() {

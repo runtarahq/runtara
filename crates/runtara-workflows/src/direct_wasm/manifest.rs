@@ -429,7 +429,10 @@ pub struct DirectAgentManifest {
     /// Base retry delay configured on the Agent step.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retry_delay: Option<u64>,
-    /// Step timeout configured on the Agent step.
+    /// Legacy Agent-step timeout retained only for manifest decode compatibility.
+    ///
+    /// Supported artifacts always leave this unset: Agent `timeout` is rejected
+    /// before compilation because the host cannot interrupt an active invoke.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout: Option<u64>,
 }
@@ -930,27 +933,12 @@ fn step_manifest(
         }
         Step::Agent(step) => {
             let agent_id = canonicalize_direct_agent_id(&step.agent_id);
-            let mut input_mapping = step
+            let input_mapping = step
                 .input_mapping
                 .as_ref()
                 .map(canonical_json)
                 .transpose()?
                 .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
-            // Make AgentStep.timeout real: inject it as `timeout_ms` into the
-            // capability input so it reaches the outbound-HTTP layer (the proxy
-            // honors the serialized timeout_ms). Only when explicitly set —
-            // an explicit step timeout overrides any author-mapped timeout_ms;
-            // when unset, the capability's own default applies. Harmless for
-            // capabilities that don't read timeout_ms (inputs ignore unknown
-            // fields), and enforced by those that do (e.g. http, ai-tools).
-            if let Some(timeout) = step.timeout
-                && let serde_json::Value::Object(map) = &mut input_mapping
-            {
-                map.insert(
-                    "timeout_ms".to_string(),
-                    serde_json::json!({ "valueType": "immediate", "value": timeout }),
-                );
-            }
             let input_mapping_id = state.allocate_mapping_id();
             collections.mappings.push(DirectMappingManifest {
                 id: input_mapping_id,
@@ -988,7 +976,10 @@ fn step_manifest(
                 ),
                 max_retries: step.max_retries,
                 retry_delay: step.retry_delay,
-                timeout: step.timeout,
+                // Agent `timeout` is deliberately not lowered as a best-effort
+                // capability hint. The direct support gate rejects it before
+                // an artifact can be emitted.
+                timeout: None,
             });
         }
         Step::AiAgent(step) => {

@@ -8,6 +8,7 @@ import {
   isNotDraining,
   severityOf,
   sparklinePath,
+  snapshotStuckAfterMs,
   stepsAreMeasured,
   stickyChokepoint,
   utilisation,
@@ -122,6 +123,61 @@ describe('isNotDraining', () => {
 
   it('is never true without an age to judge', () => {
     expect(isNotDraining(stage({ key: 'a', limit: 8, used: 8 }))).toBe(false);
+  });
+
+  it('calls out an old durable queue without blaming it as the capacity bound', () => {
+    const queue = stage({
+      key: 'launchQueued',
+      limit: 64,
+      used: 3,
+      oldestAgeMs: 2_880_000,
+    });
+    expect(isNotDraining(queue)).toBe(true);
+    expect(findChokepoint([queue])).toBeNull();
+  });
+
+  it('calls out an old preparation lease without mistaking it for its worker bound', () => {
+    const preparing = stage({
+      key: 'launchPreparing',
+      used: 1,
+      oldestAgeMs: 2_880_000,
+    });
+    expect(isNotDraining(preparing)).toBe(true);
+    expect(findChokepoint([preparing])).toBeNull();
+  });
+
+  it('does not call retained terminal launch history not draining', () => {
+    expect(
+      isNotDraining(
+        stage({
+          key: 'launchExpired',
+          used: 3,
+          oldestAgeMs: 2_880_000,
+        })
+      )
+    ).toBe(false);
+    expect(
+      isNotDraining(
+        stage({
+          key: 'launchCancelled',
+          used: 3,
+          oldestAgeMs: 2_880_000,
+        })
+      )
+    ).toBe(false);
+  });
+});
+
+describe('snapshotStuckAfterMs', () => {
+  it('uses the server policy and only falls back for an older server', () => {
+    const base: PipelineSnapshot = {
+      capturedAt: '2026-09-03T00:00:00Z',
+      windowMs: 1_000,
+      rates: null,
+      stages: [],
+    };
+    expect(snapshotStuckAfterMs({ ...base, stuckAfterMs: 2_000 })).toBe(2_000);
+    expect(snapshotStuckAfterMs(base)).toBe(5 * 60 * 1000);
   });
 });
 

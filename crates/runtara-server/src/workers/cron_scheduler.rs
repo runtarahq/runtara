@@ -1,8 +1,9 @@
 //! Cron Scheduler Worker
 //!
-//! Polls the invocation_trigger table for active CRON triggers and publishes
-//! trigger events when their schedules match the current time.
+//! Polls the invocation_trigger table for active CRON triggers and durably
+//! enqueues events when their schedules match the current time.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -14,8 +15,9 @@ use uuid::Uuid;
 
 use crate::api::dto::trigger_event::TriggerEvent;
 use crate::api::dto::triggers::InvocationTrigger;
-use crate::api::repositories::trigger_stream::TriggerStreamPublisher;
 use crate::shutdown::ShutdownSignal;
+use crate::workers::execution_engine::ExecutionEngine;
+use crate::workers::execution_outbox::source_idempotency_key;
 
 /// Configuration for the cron scheduler
 #[derive(Debug, Clone)]
@@ -36,10 +38,10 @@ impl Default for CronSchedulerConfig {
 }
 
 /// Background worker that schedules cron-triggered workflow executions
-#[instrument(skip(pool, trigger_stream, shutdown))]
+#[instrument(skip(pool, engine, shutdown))]
 pub async fn run(
     pool: PgPool,
-    trigger_stream: TriggerStreamPublisher,
+    engine: Arc<ExecutionEngine>,
     config: CronSchedulerConfig,
     shutdown: ShutdownSignal,
 ) {
@@ -95,29 +97,32 @@ pub async fn run(
         let now = Utc::now();
 
         for trigger in triggers {
-            // Check if this trigger should run now
-            match should_trigger_run(&trigger, now) {
-                Ok(true) => {
+            // Calculate the exact due occurrence, not only a boolean. That
+            // timestamp is the stable identity for an at-least-once cron tick:
+            // a restart after DB commit but before `last_run` update enqueues
+            // the same durable request instead of a second execution.
+            match due_occurrence(&trigger, now) {
+                Ok(Some(scheduled_at)) => {
                     info!(
                         trigger_id = %trigger.id,
                         workflow_id = %trigger.workflow_id,
                         "Cron trigger is due, publishing event"
                     );
 
-                    // Build and publish trigger event
+                    // Build and durably enqueue the trigger event.
                     if let Err(e) =
-                        publish_cron_trigger(&trigger_stream, &trigger, &tenant_id).await
+                        enqueue_cron_trigger(&engine, &trigger, &tenant_id, scheduled_at).await
                     {
                         error!(
                             trigger_id = %trigger.id,
                             error = %e,
-                            "Failed to publish cron trigger event"
+                            "Failed to enqueue cron trigger event"
                         );
                         continue;
                     }
 
                     // Update last_run timestamp
-                    if let Err(e) = update_last_run(&pool, &trigger.id).await {
+                    if let Err(e) = update_last_run(&pool, &trigger.id, scheduled_at).await {
                         warn!(
                             trigger_id = %trigger.id,
                             error = %e,
@@ -125,7 +130,7 @@ pub async fn run(
                         );
                     }
                 }
-                Ok(false) => {
+                Ok(None) => {
                     // Not due yet, skip
                     debug!(
                         trigger_id = %trigger.id,
@@ -165,7 +170,10 @@ async fn get_active_cron_triggers(
 }
 
 /// Check if a cron trigger should run based on its schedule and last_run time
-fn should_trigger_run(trigger: &InvocationTrigger, now: DateTime<Utc>) -> Result<bool, String> {
+fn due_occurrence(
+    trigger: &InvocationTrigger,
+    now: DateTime<Utc>,
+) -> Result<Option<DateTime<Utc>>, String> {
     // Get cron expression from configuration
     let cron_expr = trigger
         .configuration
@@ -196,8 +204,14 @@ fn should_trigger_run(trigger: &InvocationTrigger, now: DateTime<Utc>) -> Result
         .find_next_occurrence(&reference_time, false)
         .map_err(|e| format!("Failed to calculate next occurrence: {}", e))?;
 
-    // Trigger should run if the next occurrence is at or before now
-    Ok(next_occurrence <= now)
+    // Trigger should run if the next occurrence is at or before now.
+    Ok((next_occurrence <= now).then_some(next_occurrence))
+}
+
+/// Compatibility helper retained for the scheduling parser tests.
+#[cfg(test)]
+fn should_trigger_run(trigger: &InvocationTrigger, now: DateTime<Utc>) -> Result<bool, String> {
+    Ok(due_occurrence(trigger, now)?.is_some())
 }
 
 fn normalize_cron_expression(cron_expr: &str) -> Result<String, String> {
@@ -214,11 +228,13 @@ fn normalize_cron_expression(cron_expr: &str) -> Result<String, String> {
     }
 }
 
-/// Publish a cron trigger event to the stream
-async fn publish_cron_trigger(
-    trigger_stream: &TriggerStreamPublisher,
+/// Commit a cron tick to the source outbox. The subsequent relay, rather than
+/// the scheduler, owns Valkey availability and retry.
+async fn enqueue_cron_trigger(
+    engine: &ExecutionEngine,
     trigger: &InvocationTrigger,
     tenant_id: &str,
+    scheduled_at: DateTime<Utc>,
 ) -> Result<(), String> {
     let cron_expr = trigger
         .configuration
@@ -243,11 +259,15 @@ async fn publish_cron_trigger(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
-    // Generate instance ID
-    let instance_id = Uuid::new_v4();
+    let tick_identity = format!("{}:{}", trigger.id, scheduled_at.timestamp_millis());
+    let idempotency_key = source_idempotency_key("cron", &tick_identity);
+    let instance_id = Uuid::new_v5(
+        &Uuid::NAMESPACE_URL,
+        format!("{tenant_id}:{idempotency_key}").as_bytes(),
+    );
 
     // Build TriggerEvent
-    let event = TriggerEvent::cron(
+    let event = TriggerEvent::cron_at(
         instance_id.to_string(),
         tenant_id.to_string(),
         trigger.workflow_id.clone(),
@@ -257,33 +277,38 @@ async fn publish_cron_trigger(
         trigger.id.clone(),
         cron_expr.to_string(),
         debug,
+        scheduled_at.timestamp_millis(),
     );
 
-    // Publish to stream
-    trigger_stream
-        .publish(tenant_id, &event)
+    let enqueued = engine
+        .enqueue_trigger_event(tenant_id, event, idempotency_key)
         .await
-        .map_err(|e| format!("Failed to publish to stream: {}", e))?;
+        .map_err(|e| format!("Failed to enqueue durable cron request: {e}"))?;
 
     info!(
         instance_id = %instance_id,
         trigger_id = %trigger.id,
         workflow_id = %trigger.workflow_id,
         cron_expr = %cron_expr,
-        "Published cron trigger event"
+        request_id = %enqueued.request_id,
+        duplicate = enqueued.duplicate,
+        "Queued durable cron trigger event"
     );
 
     Ok(())
 }
 
 /// Update the last_run timestamp on a trigger
-async fn update_last_run(pool: &PgPool, trigger_id: &str) -> Result<(), sqlx::Error> {
-    sqlx::query!(
-        "UPDATE invocation_trigger SET last_run = NOW() WHERE id = $1",
-        trigger_id
-    )
-    .execute(pool)
-    .await?;
+async fn update_last_run(
+    pool: &PgPool,
+    trigger_id: &str,
+    scheduled_at: DateTime<Utc>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE invocation_trigger SET last_run = $2 WHERE id = $1")
+        .bind(trigger_id)
+        .bind(scheduled_at)
+        .execute(pool)
+        .await?;
     Ok(())
 }
 

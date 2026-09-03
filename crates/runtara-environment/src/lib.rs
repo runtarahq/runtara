@@ -162,8 +162,17 @@ pub mod migrations;
 /// Server configuration loaded from environment variables.
 pub mod config;
 
+/// Typed, bounded active-execution timeout policy.
+pub mod execution_timeout;
+
 /// PostgreSQL database operations for images, instances, and wake queue.
 pub mod db;
+
+/// Durable queue state and transactions for runner launch generations.
+pub mod launch_queue;
+
+/// Background dispatcher for durable runner launch generations.
+pub mod launch_dispatcher;
 
 /// Error types for Environment operations.
 pub mod error;

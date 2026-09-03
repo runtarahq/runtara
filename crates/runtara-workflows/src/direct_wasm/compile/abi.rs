@@ -296,11 +296,11 @@ fn suspend_sentinel_halves() -> (i64, i64) {
 ///   real emission of the suspended arm. The single-element wake list lives
 ///   at offset 88 (past the 80-byte result area, inside the reserved
 ///   low-scratch region, 8-aligned; wake element stride is 32).
-/// - agent capabilities: a DURABLE workflow-agent composed into a parent CAN
-///   reach a suspend site (its runtime import is the parent instance's host),
-///   but its result type has no suspended arm — it raises the
-///   [`AGENT_SUSPEND_SENTINEL_CODE`] error instead, which the parent
-///   recognizes and re-raises (see [`emit_agent_suspend_sentinel_check`]).
+/// - agent capabilities: production workflow-agents are statically certified
+///   non-suspending, so they cannot reach this arm. The retained lower-level
+///   test/migration shape raises [`AGENT_SUSPEND_SENTINEL_CODE`] because its
+///   result type has no suspended arm; a composing parent re-raises it (see
+///   [`emit_agent_suspend_sentinel_check`]).
 pub(super) fn emit_entry_suspend_return(
     function: &mut WasmFunction,
     indices: &DirectCoreFunctionIndices,

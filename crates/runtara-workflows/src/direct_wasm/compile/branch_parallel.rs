@@ -488,7 +488,11 @@ pub(super) fn concurrent_branch_pools(
     }
     let chains: Vec<Vec<&DirectRunPlan>> = branches.iter().map(branch_chain).collect();
     let ok = chains.iter().flatten().all(|node| match node {
-        DirectRunPlan::Agent { agent_id, .. } => !static_data.agent_is_workflow_agent(*agent_id),
+        DirectRunPlan::Agent {
+            agent_id,
+            max_retries,
+            ..
+        } => !static_data.agent_is_workflow_agent(*agent_id) && *max_retries == 0,
         _ => true, // sync steps have no invoke
     });
     if !ok {
@@ -619,8 +623,8 @@ fn emit_branch_agent(
         // slot is empty here and `emit_agent_plan` runs a BLOCKING invoke with the
         // breakpoint emitted first — pause-before-run semantics, no resume double-fire.
         branch.breakpoint,
-        // Retries run in assemble (memoized attempt 1 + sequential backoff), like
-        // the Split window's non-concurrent-backoff path.
+        // Concurrent branch eligibility requires zero retries. A retrying
+        // branch is rejected before it could need an in-run backoff.
         branch.max_retries,
         branch.retry_delay_ms,
         branch.rate_limit_budget_ms,

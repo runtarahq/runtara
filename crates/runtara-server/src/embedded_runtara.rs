@@ -18,6 +18,7 @@ use std::sync::Arc;
 use runtara_core::config::RuntimeOverrides;
 use runtara_core::persistence::Persistence;
 use runtara_core::persistence::postgres::PostgresPersistence;
+use runtara_environment::execution_timeout::ExecutionTimeoutPolicy;
 use runtara_environment::runtime::EnvironmentRuntime;
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
@@ -42,6 +43,9 @@ pub struct EmbeddedRuntaraConfig {
     /// grace). Nothing else here carries it, so without this the embedded core
     /// runs on builder defaults no matter how the deployment is configured.
     pub core_overrides: RuntimeOverrides,
+    /// Bounded active-execution timeout policy shared with the server runtime
+    /// client and Environment lifecycle handlers.
+    pub execution_timeout_policy: ExecutionTimeoutPolicy,
 }
 
 /// Handle to the running embedded Runtara servers.
@@ -113,6 +117,7 @@ impl EmbeddedRuntara {
             .core_persistence(persistence.clone())
             .core_addr(config.core_client_addr.to_string())
             .data_dir(config.data_dir)
+            .execution_timeout_policy(config.execution_timeout_policy)
             .build()?
             .start()
             .await?;
@@ -130,6 +135,18 @@ impl EmbeddedRuntara {
     /// directly rather than over a socket.
     pub fn environment_state(&self) -> Arc<runtara_environment::handlers::EnvironmentHandlerState> {
         Arc::clone(self.environment.state())
+    }
+
+    /// Handle for installing the server's admission-release observer after
+    /// Environment has started.
+    ///
+    /// The execution engine/outbox is built later in server startup, so this
+    /// forwards Environment's shared holder rather than requiring a startup
+    /// order inversion.
+    pub fn launch_lifecycle_observers(
+        &self,
+    ) -> runtara_environment::launch_dispatcher::LaunchLifecycleObservers {
+        self.environment.launch_lifecycle_observers()
     }
 
     /// Get the address where runtara-core is listening.
@@ -243,6 +260,7 @@ pub async fn create_runtara_pool()
 /// the runtime's builder default, so the cap stays disabled unless a
 /// deployment asks for one.
 pub async fn maybe_start_embedded(
+    execution_timeout_policy: ExecutionTimeoutPolicy,
     event_observer: Option<Arc<dyn runtara_core::instance_handlers::InstanceEventObserver>>,
 ) -> Result<Option<EmbeddedRuntara>, Box<dyn std::error::Error + Send + Sync>> {
     let embedded_enabled = std::env::var("RUNTARA_EMBEDDED")
@@ -305,6 +323,7 @@ pub async fn maybe_start_embedded(
         core_client_addr: SocketAddr::from(([127, 0, 0, 1], core_http_addr)),
         core_http_bind_addr: Some(SocketAddr::from(([127, 0, 0, 1], core_http_addr))),
         core_overrides,
+        execution_timeout_policy,
     };
 
     let runtara = EmbeddedRuntara::start(config, event_observer).await?;

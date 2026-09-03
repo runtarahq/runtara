@@ -1,4 +1,7 @@
 use crate::entitlements::EntitlementSnapshot;
+use runtara_environment::execution_timeout::{
+    DEFAULT_EXECUTION_TIMEOUT_SECS, ExecutionTimeoutPolicy, MAX_EXECUTION_TIMEOUT_SECS,
+};
 use std::collections::BTreeSet;
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -9,6 +12,8 @@ const RUNTARA_MCP_SESSION_STORE_ENV: &str = "RUNTARA_MCP_SESSION_STORE";
 const RUNTARA_MCP_SESSION_TTL_SECONDS_ENV: &str = "RUNTARA_MCP_SESSION_TTL_SECONDS";
 const RUNTARA_DIRECT_WASM_COMPONENTS_DIR_ENV: &str = "RUNTARA_DIRECT_WASM_COMPONENTS_DIR";
 const DEFAULT_MCP_SESSION_TTL_SECONDS: u64 = 86_400;
+const RUNTARA_DEFAULT_EXECUTION_TIMEOUT_SECS_ENV: &str = "RUNTARA_DEFAULT_EXECUTION_TIMEOUT_SECS";
+const RUNTARA_MAX_EXECUTION_TIMEOUT_SECS_ENV: &str = "RUNTARA_MAX_EXECUTION_TIMEOUT_SECS";
 
 /// Global application configuration.
 ///
@@ -20,6 +25,9 @@ pub struct Config {
     pub tenant_id: String,
     /// Maximum number of concurrent workflow executions.
     pub max_concurrent_executions: usize,
+    /// One bounded policy shared by workflow validation, the runtime client,
+    /// and the embedded Environment.
+    pub execution_timeout_policy: ExecutionTimeoutPolicy,
     /// Checkpoint TTL in hours.
     pub checkpoint_ttl_hours: u64,
     /// Whether adaptive rate limiting is enabled.
@@ -122,6 +130,7 @@ impl Config {
         let auto_retry_on_429_enabled: bool = parse_bool_or("AUTO_RETRY_ON_429", true)?;
         let max_429_retries: u32 = parse_u32_or("MAX_429_RETRIES", 3)?;
         let max_retry_delay_ms: u64 = parse_u64_or("MAX_RETRY_DELAY_MS", 60_000)?;
+        let execution_timeout_policy = execution_timeout_policy_from_env()?;
 
         let object_model_database_url = std::env::var("OBJECT_MODEL_DATABASE_URL")
             .map_err(|_| ConfigError::Missing("OBJECT_MODEL_DATABASE_URL"))?;
@@ -172,7 +181,7 @@ impl Config {
         // Workflow raw-SQL guard rails. Zero/invalid values fail boot
         // (parse_positive_u64_or) — a knob is never "unset means unbounded".
         let instance_timeout_ms =
-            parse_positive_u64_or("EXECUTION_TIMEOUT_SECS", 300)?.saturating_mul(1000);
+            u64::from(execution_timeout_policy.default_timeout().as_secs()).saturating_mul(1000);
         let raw_sql_guardrails = runtara_object_store::SqlGuardrails {
             statement_timeout_ms: clamp_statement_timeout_ms(
                 parse_positive_u64_or("RUNTARA_RAW_SQL_STATEMENT_TIMEOUT_MS", 60_000)?,
@@ -271,6 +280,7 @@ impl Config {
         Ok(Self {
             tenant_id,
             max_concurrent_executions,
+            execution_timeout_policy,
             checkpoint_ttl_hours,
             adaptive_rate_limiting_enabled,
             auto_retry_on_429_enabled,
@@ -321,6 +331,50 @@ pub enum ConfigError {
     /// An environment variable has an invalid value, with dynamic detail.
     #[error("invalid value for {0}: {1}")]
     InvalidValue(&'static str, String),
+}
+
+/// Parse the process-wide active-execution timeout policy without reading
+/// mutable global state. Keeping the raw parser separate makes the bounds and
+/// unit labels testable without racing other configuration tests.
+fn execution_timeout_policy_from_raw(
+    default_raw: Option<&str>,
+    maximum_raw: Option<&str>,
+) -> Result<ExecutionTimeoutPolicy, ConfigError> {
+    let default_seconds = match default_raw {
+        Some(value) => value.parse::<u32>().map_err(|_| {
+            ConfigError::Invalid(
+                RUNTARA_DEFAULT_EXECUTION_TIMEOUT_SECS_ENV,
+                "must be a positive whole number of seconds",
+            )
+        })?,
+        None => DEFAULT_EXECUTION_TIMEOUT_SECS,
+    };
+    let maximum_seconds = match maximum_raw {
+        Some(value) => value.parse::<u32>().map_err(|_| {
+            ConfigError::Invalid(
+                RUNTARA_MAX_EXECUTION_TIMEOUT_SECS_ENV,
+                "must be a positive whole number of seconds",
+            )
+        })?,
+        None => MAX_EXECUTION_TIMEOUT_SECS,
+    };
+
+    ExecutionTimeoutPolicy::new(default_seconds, maximum_seconds).map_err(|error| {
+        let name = if default_seconds > maximum_seconds {
+            RUNTARA_DEFAULT_EXECUTION_TIMEOUT_SECS_ENV
+        } else if maximum_seconds > MAX_EXECUTION_TIMEOUT_SECS {
+            RUNTARA_MAX_EXECUTION_TIMEOUT_SECS_ENV
+        } else {
+            RUNTARA_DEFAULT_EXECUTION_TIMEOUT_SECS_ENV
+        };
+        ConfigError::InvalidValue(name, error.to_string())
+    })
+}
+
+fn execution_timeout_policy_from_env() -> Result<ExecutionTimeoutPolicy, ConfigError> {
+    let default = std::env::var(RUNTARA_DEFAULT_EXECUTION_TIMEOUT_SECS_ENV).ok();
+    let maximum = std::env::var(RUNTARA_MAX_EXECUTION_TIMEOUT_SECS_ENV).ok();
+    execution_timeout_policy_from_raw(default.as_deref(), maximum.as_deref())
 }
 
 fn parse_bool_or(name: &'static str, default: bool) -> Result<bool, ConfigError> {
@@ -503,6 +557,17 @@ pub fn get() -> &'static Config {
 /// `OnceLock` would be worse than falling back to a default.
 pub fn try_get() -> Option<&'static Config> {
     CONFIG.get()
+}
+
+/// The bounded active-execution timeout policy for this process.
+///
+/// Tests and standalone helpers that run before [`init`] use the same product
+/// default as a standalone Environment rather than inventing an unbounded
+/// fallback.
+pub fn execution_timeout_policy() -> ExecutionTimeoutPolicy {
+    try_get()
+        .map(|config| config.execution_timeout_policy)
+        .unwrap_or_default()
 }
 
 /// Get the tenant ID.
@@ -716,6 +781,33 @@ mod tests {
             std::env::remove_var(name);
         }
         assert_eq!(parse_positive_u64_or(name, 10).unwrap(), 10);
+    }
+
+    #[test]
+    fn execution_timeout_policy_uses_one_bounded_default() {
+        let policy = execution_timeout_policy_from_raw(None, None).unwrap();
+
+        assert_eq!(
+            policy.default_timeout().as_secs(),
+            DEFAULT_EXECUTION_TIMEOUT_SECS
+        );
+        assert_eq!(
+            policy.maximum_timeout().as_secs(),
+            MAX_EXECUTION_TIMEOUT_SECS
+        );
+    }
+
+    #[test]
+    fn execution_timeout_policy_rejects_invalid_and_unbounded_config() {
+        assert!(execution_timeout_policy_from_raw(Some("0"), None).is_err());
+        assert!(execution_timeout_policy_from_raw(Some("3601"), None).is_err());
+        assert!(execution_timeout_policy_from_raw(Some("120"), Some("60")).is_err());
+        assert!(execution_timeout_policy_from_raw(Some("120"), Some("3601")).is_err());
+        assert!(execution_timeout_policy_from_raw(Some("one-minute"), None).is_err());
+
+        let policy = execution_timeout_policy_from_raw(Some("120"), Some("300")).unwrap();
+        assert_eq!(policy.default_timeout().as_secs(), 120);
+        assert_eq!(policy.maximum_timeout().as_secs(), 300);
     }
 
     #[test]

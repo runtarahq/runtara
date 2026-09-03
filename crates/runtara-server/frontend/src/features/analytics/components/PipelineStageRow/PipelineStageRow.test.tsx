@@ -128,6 +128,81 @@ describe('PipelineStageRow', () => {
     expect(screen.getByText('2.9s oldest')).toBeInTheDocument();
   });
 
+  it('uses the server stuck policy rather than a browser-side constant', () => {
+    render(
+      <PipelineStageRow
+        stage={stage({
+          key: 'runPermits',
+          limit: 16,
+          used: 16,
+          oldestAgeMs: 2_900,
+        })}
+        history={Array(30).fill(16)}
+        inflow={0}
+        pipelineActive
+        isChokepoint
+        stuckAfterMs={2_000}
+      />
+    );
+    expect(screen.getByText('not draining')).toBeInTheDocument();
+  });
+
+  it('makes durable queue capacity retries and workflow attribution visible', () => {
+    render(
+      <PipelineStageRow
+        stage={stage({
+          key: 'launchQueued',
+          label: 'Launch queue',
+          limit: 64,
+          used: 6,
+          oldestAgeMs: 20_000,
+          capacityRejections: 3,
+          topWorkflows: [
+            { workflowId: 'expense-approval', count: 4, oldestAgeMs: 20_000 },
+            { workflowId: 'invoice-sync', count: 2, oldestAgeMs: 4_000 },
+          ],
+        })}
+        history={Array(30).fill(6)}
+        inflow={0}
+        pipelineActive
+        isChokepoint={false}
+        stuckAfterMs={10_000}
+      />
+    );
+
+    expect(screen.getByText('3 capacity retries')).toBeInTheDocument();
+    expect(
+      screen.getByTestId('pipeline-workflow-attribution-launchQueued')
+    ).toHaveTextContent('expense-approval (4), invoice-sync (2)');
+    expect(screen.getByText('not draining')).toBeInTheDocument();
+  });
+
+  it('makes a timed-out precompile child awaiting reaping visible', () => {
+    render(
+      <PipelineStageRow
+        stage={stage({
+          key: 'precompileChildren',
+          label: 'Precompile children',
+          limit: 2,
+          used: 1,
+          oldestAgeMs: 20_000,
+          reapingPrecompileChildren: 1,
+        })}
+        history={Array(30).fill(1)}
+        inflow={0}
+        pipelineActive
+        isChokepoint={false}
+      />
+    );
+
+    expect(screen.getByText('1 child reaping')).toBeInTheDocument();
+    expect(
+      screen.getByTestId(
+        'pipeline-reaping-precompile-children-precompileChildren'
+      )
+    ).toBeInTheDocument();
+  });
+
   it('marks the chokepoint in the DOM so it can be asserted on', () => {
     const { container } = render(
       <PipelineStageRow

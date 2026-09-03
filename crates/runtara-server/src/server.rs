@@ -353,6 +353,7 @@ use runtime_client::RuntimeClient;
             api::dto::pipeline::PipelineSnapshotDto,
             api::dto::pipeline::PipelineStageDto,
             api::dto::pipeline::PipelineRatesDto,
+            api::dto::pipeline::PipelineWorkflowAttributionDto,
             api::analytics::SystemAnalyticsData,
             api::analytics::MemoryInfo,
             api::analytics::DiskInfo,
@@ -819,6 +820,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     let commit = env!("BUILD_COMMIT");
 
     let tenant_id = server_config.tenant_id.clone();
+    let execution_timeout_policy = server_config.execution_timeout_policy;
     config::init(server_config);
 
     // Create a root span with global context that will be included in all logs
@@ -1284,9 +1286,12 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     // Migrations are run automatically via runtara_environment::migrations::run()
 
     // Start embedded Runtara servers (using dedicated database)
-    let embedded_runtara = match embedded_runtara::maybe_start_embedded(Some(
-        workers::step_counter::StepCounter::new(Arc::clone(&pipeline_gauges)),
-    ))
+    let embedded_runtara = match embedded_runtara::maybe_start_embedded(
+        execution_timeout_policy,
+        Some(workers::step_counter::StepCounter::new(Arc::clone(
+            &pipeline_gauges,
+        ))),
+    )
     .await
     {
         Ok(Some(runtara)) => {
@@ -1317,7 +1322,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     let runtime_client: Option<Arc<RuntimeClient>> = match embedded_runtara.as_ref() {
         Some(runtara) => Some(Arc::new(RuntimeClient::new(
             runtara.environment_state(),
-            runtime_client::RuntimeClientConfig::from_env(),
+            runtime_client::RuntimeClientConfig::new(execution_timeout_policy),
         ))),
         None => {
             println!("⚠ Embedded Runtara disabled - runtime client disabled");
@@ -1326,6 +1331,20 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     println!("✓ Runtime client initialized");
+
+    // Install before any Valkey worker is started. Environment commits its
+    // launch lifecycle transitions in a separate database, so the adapter
+    // owns only the matching server-side outbox reservation; failed callbacks
+    // are repaired by the bounded reconciler started below.
+    if let Some(runtara) = embedded_runtara.as_ref() {
+        let observer = Arc::new(
+            workers::execution_outbox::ExecutionAdmissionLifecycleObserver::new(
+                workers::execution_outbox::ExecutionOutbox::new(pool.clone()),
+            ),
+        );
+        runtara.launch_lifecycle_observers().install(observer).await;
+        println!("✓ Execution admission lifecycle observer installed");
+    }
 
     // Create running executions map for cancellation support
     let running_executions = Arc::new(DashMap::new());
@@ -1337,6 +1356,20 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         runtime_client.clone(),
     ));
     let shutdown_signal = shutdown_coordinator.signal();
+
+    // A lifecycle callback can commit an Environment transition and then lose
+    // this process before it releases the matching server-side source
+    // reservation. Reconcile only those bounded reservations through the
+    // runtime client; do not turn this into a broad instance-table scan.
+    if let Some(runtime_client) = runtime_client.clone() {
+        let reconciler = workers::execution_outbox::ExecutionAdmissionReconciler::new(
+            workers::execution_outbox::ExecutionOutbox::new(pool.clone()),
+            runtime_client,
+        );
+        let reconcile_shutdown = shutdown_signal.clone();
+        tokio::spawn(async move { reconciler.run(reconcile_shutdown).await });
+        println!("✓ Execution admission reconciler started");
+    }
 
     // Invocation cleanup worker (server DB retention).
     // Does not require Valkey — runs independently.
@@ -1513,27 +1546,19 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             .await;
         });
 
-        // Start cron scheduler
-        let cron_pool = pool.clone();
-        let cron_trigger_stream = redis_manager.clone().map(|m| {
-            api::repositories::trigger_stream::TriggerStreamPublisher::new(m, config.clone())
-        });
-        let cron_tenant_id = tenant_id.clone();
-        let cron_shutdown = shutdown_signal.clone();
-        tokio::spawn(async move {
-            let Some(ts) = cron_trigger_stream else {
-                tracing::warn!(
-                    "Cron scheduler not started: shared Valkey connection manager unavailable"
-                );
-                return;
-            };
-            let scheduler_config = workers::cron_scheduler::CronSchedulerConfig {
-                tenant_id: cron_tenant_id,
-                check_interval_secs: 60,
-            };
-
-            workers::cron_scheduler::run(cron_pool, ts, scheduler_config, cron_shutdown).await;
-        });
+        // Relay source requests after their transaction commits. A publish
+        // failure is retried from `execution_outbox`; it never makes an intake
+        // source lose an accepted execution.
+        if let Some(publisher) = trigger_stream.clone() {
+            let relay = workers::execution_outbox::ExecutionOutboxRelay::new(
+                workers::execution_outbox::ExecutionOutbox::new(pool.clone()),
+                publisher,
+            );
+            let relay_shutdown = shutdown_signal.clone();
+            tokio::spawn(async move { relay.run(relay_shutdown).await });
+        } else {
+            tracing::warn!("Execution outbox relay not started: Valkey publisher unavailable");
+        }
 
         // NOTE: Container monitoring is now handled directly by runtara-environment.
         // Instance status queries are proxied to Runtara via the Management SDK.
@@ -1553,12 +1578,14 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
 
         println!("✓ Trigger worker started (stream-based execution)");
         println!("✓ Compilation worker started (async compilation queue)");
-        println!("✓ Cron scheduler started");
+        println!("✓ Execution outbox relay started");
     } else {
         println!(
-            "Valkey not configured, skipping trigger worker, compilation worker, and cron scheduler"
+            "Valkey not configured, skipping trigger worker, compilation worker, and outbox relay"
         );
-        println!("  (compilation must be done synchronously via API)");
+        println!(
+            "  (cron continues to commit durable requests; they relay when Valkey is restored)"
+        );
     }
 
     // Initialize agent testing service (enabled by default)
@@ -1612,6 +1639,26 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         Arc::clone(&pipeline_gauges),
     ));
     println!("✓ Execution engine initialized");
+
+    // Cron does not publish to Valkey directly. Its durable enqueue remains
+    // available during an outage, and the relay delivers it when connectivity
+    // returns. Start after the shared engine exists so it uses the exact same
+    // admission policy as HTTP, sessions, chat, and webhook sources.
+    {
+        let cron_pool = pool.clone();
+        let cron_engine = Arc::clone(&execution_engine);
+        let cron_tenant_id = tenant_id.clone();
+        let cron_shutdown = shutdown_signal.clone();
+        tokio::spawn(async move {
+            let scheduler_config = workers::cron_scheduler::CronSchedulerConfig {
+                tenant_id: cron_tenant_id,
+                check_interval_secs: 60,
+            };
+            workers::cron_scheduler::run(cron_pool, cron_engine, scheduler_config, cron_shutdown)
+                .await;
+        });
+    }
+    println!("✓ Cron scheduler started (durable outbox)");
 
     // Pipeline sampler: one tick produces one snapshot for every viewer, so the
     // System page costs a broadcast receiver per client rather than a query.

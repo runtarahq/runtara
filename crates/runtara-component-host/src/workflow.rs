@@ -25,6 +25,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result};
+use async_trait::async_trait;
 use wasmtime::component::{Component, Linker};
 use wasmtime::{Engine, Store, UpdateDeadline};
 use wasmtime_wasi::cli::OutputFile;
@@ -33,12 +34,13 @@ use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiVie
 use wasmtime_wasi_http::{
     WasiHttpCtx,
     p2::{
-        HttpResult, WasiHttpCtxView, WasiHttpHooks, WasiHttpView, body::HyperOutgoingBody,
-        default_send_request, types::HostFutureIncomingResponse, types::OutgoingRequestConfig,
+        HttpResult, WasiHttpCtxView, WasiHttpHooks, WasiHttpView, bindings::http::types::ErrorCode,
+        body::HyperOutgoingBody, types::HostFutureIncomingResponse, types::OutgoingRequestConfig,
     },
 };
 
 use crate::engine::EPOCH_TICK;
+use crate::host_io::{DEFAULT_HTTP_TIMEOUT, HostIoContext};
 
 /// Outgoing-body stream tuning, kept identical to the flags `WasmRunner`
 /// passes the wasmtime CLI (`--wasi http-outgoing-body-buffer-chunks=4096`,
@@ -116,6 +118,19 @@ pub struct WorkflowRunSpec {
     pub runtime: Option<Arc<dyn crate::runtime_host::RuntimeHost>>,
 }
 
+/// One final durable handoff confirmation immediately before guest
+/// instantiation.
+///
+/// Environment uses this to retain its durable start-gate marker through all
+/// Store/WASI setup. The confirmation lives at this component-host boundary,
+/// rather than in the runner task, because `instantiate_async` is the first
+/// operation that can execute guest-controlled code.
+#[async_trait]
+pub trait WorkflowStartConfirmation: Send + Sync {
+    /// Confirm the caller's durable handoff before instantiating the guest.
+    async fn confirm_before_instantiate(&self) -> Result<()>;
+}
+
 /// Marker recorded by the epoch callback so a `Trap::Interrupt` can be told
 /// apart from a genuine guest trap after the fact.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -164,9 +179,12 @@ impl WasiHttpHooks for WorkflowHooks {
         request: http::Request<HyperOutgoingBody>,
         config: OutgoingRequestConfig,
     ) -> HttpResult<HostFutureIncomingResponse> {
-        // Workflows talk to runtara-core / the LLM proxy directly with their
-        // own headers; pass through untouched for parity with the CLI runner.
-        Ok(default_send_request(request, config))
+        // Generated workflow and agent HTTP goes through `runtara:host-io`,
+        // where a single absolute deadline and response cap are enforced.
+        // The legacy raw wasi:http route must not remain as an ungoverned
+        // fallback: it would bypass both protections.
+        let _ = (request, config);
+        Err(ErrorCode::HttpRequestDenied.into())
     }
 
     fn outgoing_body_buffer_chunks(&mut self) -> usize {
@@ -184,6 +202,15 @@ pub struct WorkflowState {
     http: WasiHttpCtx,
     table: ResourceTable,
     hooks: WorkflowHooks,
+    /// The active execution deadline. It is reset only after the durable
+    /// runner handoff has been confirmed, so Store/WASI construction does not
+    /// consume the guest's execution budget.
+    /// Host-io caps every nested HTTP request by this absolute deadline.
+    http_deadline: tokio::time::Instant,
+    /// The same active deadline used by the epoch interruption callback.
+    /// Keeping it in store data lets the callback observe the post-handoff
+    /// reset without sharing a wall-clock timestamp across tasks.
+    active_deadline: tokio::time::Instant,
     limiter: WorkflowLimiter,
     termination: Option<Termination>,
     /// Present when the artifact imports the runtime interface (HostImport
@@ -193,7 +220,19 @@ pub struct WorkflowState {
         Result<Arc<dyn crate::connection_resolver_host::ConnectionResolverHost>, String>,
 }
 
+impl HostIoContext for WorkflowState {
+    fn http_deadline(&self) -> Option<tokio::time::Instant> {
+        Some(self.http_deadline)
+    }
+}
+
 impl WorkflowState {
+    fn begin_active_execution(&mut self, timeout: Duration) {
+        let deadline = tokio::time::Instant::now() + timeout;
+        self.http_deadline = deadline;
+        self.active_deadline = deadline;
+    }
+
     /// The run's native runtime host, when configured.
     pub(crate) fn runtime_host(&self) -> Option<&Arc<dyn crate::runtime_host::RuntimeHost>> {
         self.runtime.as_ref()
@@ -238,6 +277,37 @@ struct CachedComponent {
     /// Lazily-derived `wasi:cli/run` wrapper — present only once a legacy
     /// (run-shaped) artifact has been loaded through [`WorkflowExecutor::load`].
     command: Option<Arc<CommandPre<WorkflowState>>>,
+}
+
+/// A linked workflow artifact prepared from an exact, verified child result.
+///
+/// This is intentionally separate from the opportunistic path/mtime cache.
+/// A durable launch can spend time in a queue between compilation and guest
+/// execution. The child response binds the source digest and serialized
+/// component together, so the runner executes those exact prepared bytes
+/// without reopening the mutable artifact path before it accepts a run permit.
+pub struct PreparedWorkflow {
+    instance_pre: Arc<wasmtime::component::InstancePre<WorkflowState>>,
+    command: Option<Arc<CommandPre<WorkflowState>>>,
+}
+
+impl PreparedWorkflow {
+    /// Whether this artifact uses the lifecycle `invoke` export rather than
+    /// the retired `wasi:cli/run` entrypoint.
+    pub fn is_lifecycle_invoke(&self, engine: &Arc<Engine>) -> bool {
+        crate::lifecycle::exports_lifecycle_invoke(&self.instance_pre, engine)
+    }
+
+    /// The linked invoke-shaped component, when [`Self::is_lifecycle_invoke`]
+    /// is true.
+    pub fn instance_pre(&self) -> &Arc<wasmtime::component::InstancePre<WorkflowState>> {
+        &self.instance_pre
+    }
+
+    /// The linked legacy CLI wrapper, when this is a legacy artifact.
+    pub fn command(&self) -> Option<&Arc<CommandPre<WorkflowState>>> {
+        self.command.as_ref()
+    }
 }
 
 /// Loads composed workflow components and executes them in-process.
@@ -361,13 +431,61 @@ impl WorkflowExecutor {
         Ok(instance_pre)
     }
 
+    /// Link a component that a short-lived precompile worker already read,
+    /// hashed, and compiled.
+    ///
+    /// The caller must have received `component` over the private worker
+    /// protocol and verified its source digest against immutable image
+    /// metadata where applicable. This method deliberately does no filesystem
+    /// access or compilation: those operations live in the killable worker
+    /// boundary so an uninterruptible mount read or Cranelift compile cannot
+    /// strand an in-process preparation permit.
+    ///
+    /// Prepared artifacts deliberately do *not* enter the global path cache.
+    /// A queue cancellation or stale promotion must drop their native Wasmtime
+    /// allocations with the opaque prepared token; a count-only cache cannot
+    /// safely bound those allocations.
+    pub async fn prepare_precompiled(&self, component: Component) -> Result<PreparedWorkflow> {
+        let instance_pre =
+            Arc::new(self.linker.instantiate_pre(&component).map_err(|error| {
+                anyhow::anyhow!("link precompiled workflow component: {error:#}")
+            })?);
+        let command = if crate::lifecycle::exports_lifecycle_invoke(&instance_pre, &self.engine) {
+            None
+        } else {
+            Some(Arc::new(
+                CommandPre::new(instance_pre.as_ref().clone()).map_err(|error| {
+                    anyhow::anyhow!("workflow component does not export wasi:cli/run: {error:#}")
+                })?,
+            ))
+        };
+
+        Ok(PreparedWorkflow {
+            instance_pre,
+            command,
+        })
+    }
+
     /// Execute one workflow instance to completion (or interruption).
     pub async fn execute(
         &self,
         pre: &CommandPre<WorkflowState>,
         spec: WorkflowRunSpec,
     ) -> WorkflowRunResult {
-        let started = Instant::now();
+        self.execute_with_start_confirmation(pre, spec, None).await
+    }
+
+    /// Execute one CLI-shaped workflow after an optional durable handoff
+    /// confirmation at the exact pre-instantiation boundary.
+    pub async fn execute_with_start_confirmation(
+        &self,
+        pre: &CommandPre<WorkflowState>,
+        spec: WorkflowRunSpec,
+        start_confirmation: Option<Arc<dyn WorkflowStartConfirmation>>,
+    ) -> WorkflowRunResult {
+        // Keep the externally reported duration, but do not begin the active
+        // guest timeout until the runner has durably crossed its start gate.
+        let overall_started = Instant::now();
 
         let mut builder = WasiCtxBuilder::new();
         // No preopens, no stdin, stdout discarded — parity with
@@ -389,11 +507,14 @@ impl WorkflowExecutor {
             None => None,
         };
 
+        let initial_deadline = tokio::time::Instant::now() + spec.timeout;
         let state = WorkflowState {
             wasi: builder.build(),
             http: WasiHttpCtx::new(),
             table: ResourceTable::new(),
             hooks: WorkflowHooks,
+            http_deadline: initial_deadline,
+            active_deadline: initial_deadline,
             limiter: WorkflowLimiter {
                 max_memory_bytes: spec.limits.max_memory_bytes,
                 max_table_elements: spec.limits.max_table_elements,
@@ -410,7 +531,6 @@ impl WorkflowExecutor {
 
         let timeout = spec.timeout;
         let cancel = spec.cancel.clone();
-        let deadline_started = started;
         store.epoch_deadline_callback(move |mut ctx| {
             if let Some(flag) = &cancel
                 && flag.load(Ordering::Relaxed)
@@ -418,7 +538,7 @@ impl WorkflowExecutor {
                 ctx.data_mut().termination = Some(Termination::Cancelled);
                 return Ok(UpdateDeadline::Interrupt);
             }
-            if deadline_started.elapsed() >= timeout {
+            if tokio::time::Instant::now() >= ctx.data().active_deadline {
                 ctx.data_mut().termination = Some(Termination::Timeout);
                 return Ok(UpdateDeadline::Interrupt);
             }
@@ -430,27 +550,51 @@ impl WorkflowExecutor {
         // epoch callback can't fire. Cancellation = dropping the run future.
         let watchdog_cancel = spec.cancel.clone();
         let run_ended = {
-            let run = async {
-                let command = pre.instantiate_async(&mut store).await?;
-                command.wasi_cli_run().call_run(&mut store).await
-            };
-            tokio::pin!(run);
-            let watchdog = async {
-                loop {
-                    tokio::time::sleep(EPOCH_TICK).await;
-                    if let Some(flag) = &watchdog_cancel
-                        && flag.load(Ordering::Relaxed)
-                    {
-                        return Termination::Cancelled;
-                    }
-                    if started.elapsed() >= timeout {
-                        return Termination::Timeout;
-                    }
+            // Store/WASI setup is host work before guest execution. A closed
+            // durable gate must not burn the active execution budget; only a
+            // successful confirmation starts it.
+            let confirmation = async {
+                if let Some(confirmation) = start_confirmation.as_ref() {
+                    confirmation.confirm_before_instantiate().await?;
                 }
-            };
-            tokio::select! {
-                result = &mut run => Ok(result),
-                termination = watchdog => Err(termination),
+                Ok::<(), anyhow::Error>(())
+            }
+            .await;
+
+            if let Err(error) = confirmation {
+                Ok(Err(error))
+            } else {
+                store.data_mut().begin_active_execution(timeout);
+                let active_started = Instant::now();
+                let run = async {
+                    let command = pre
+                        .instantiate_async(&mut store)
+                        .await
+                        .map_err(anyhow::Error::from)?;
+                    command
+                        .wasi_cli_run()
+                        .call_run(&mut store)
+                        .await
+                        .map_err(anyhow::Error::from)
+                };
+                tokio::pin!(run);
+                let watchdog = async {
+                    loop {
+                        tokio::time::sleep(EPOCH_TICK).await;
+                        if let Some(flag) = &watchdog_cancel
+                            && flag.load(Ordering::Relaxed)
+                        {
+                            return Termination::Cancelled;
+                        }
+                        if active_started.elapsed() >= timeout {
+                            return Termination::Timeout;
+                        }
+                    }
+                };
+                tokio::select! {
+                    result = &mut run => Ok(result),
+                    termination = watchdog => Err(termination),
+                }
             }
         };
 
@@ -486,7 +630,7 @@ impl WorkflowExecutor {
         WorkflowRunResult {
             exit,
             memory_peak_bytes: store.data().limiter.memory_peak_bytes,
-            duration: started.elapsed(),
+            duration: overall_started.elapsed(),
         }
     }
 
@@ -500,7 +644,22 @@ impl WorkflowExecutor {
         spec: WorkflowRunSpec,
         input: Vec<u8>,
     ) -> InvokeRunResult {
-        let started = Instant::now();
+        self.execute_invoke_with_start_confirmation(pre, spec, input, None)
+            .await
+    }
+
+    /// Execute one invoke-shaped workflow after an optional durable handoff
+    /// confirmation at the exact pre-instantiation boundary.
+    pub async fn execute_invoke_with_start_confirmation(
+        &self,
+        pre: &wasmtime::component::InstancePre<WorkflowState>,
+        spec: WorkflowRunSpec,
+        input: Vec<u8>,
+        start_confirmation: Option<Arc<dyn WorkflowStartConfirmation>>,
+    ) -> InvokeRunResult {
+        // Keep the externally reported duration, but do not begin the active
+        // guest timeout until the runner has durably crossed its start gate.
+        let overall_started = Instant::now();
 
         let mut builder = WasiCtxBuilder::new();
         let mut env: Vec<(&String, &String)> = spec.env.iter().collect();
@@ -519,11 +678,14 @@ impl WorkflowExecutor {
             None => None,
         };
 
+        let initial_deadline = tokio::time::Instant::now() + spec.timeout;
         let state = WorkflowState {
             wasi: builder.build(),
             http: WasiHttpCtx::new(),
             table: ResourceTable::new(),
             hooks: WorkflowHooks,
+            http_deadline: initial_deadline,
+            active_deadline: initial_deadline,
             limiter: WorkflowLimiter {
                 max_memory_bytes: spec.limits.max_memory_bytes,
                 max_table_elements: spec.limits.max_table_elements,
@@ -540,7 +702,6 @@ impl WorkflowExecutor {
 
         let timeout = spec.timeout;
         let cancel = spec.cancel.clone();
-        let deadline_started = started;
         store.epoch_deadline_callback(move |mut ctx| {
             if let Some(flag) = &cancel
                 && flag.load(Ordering::Relaxed)
@@ -548,7 +709,7 @@ impl WorkflowExecutor {
                 ctx.data_mut().termination = Some(Termination::Cancelled);
                 return Ok(UpdateDeadline::Interrupt);
             }
-            if deadline_started.elapsed() >= timeout {
+            if tokio::time::Instant::now() >= ctx.data().active_deadline {
                 ctx.data_mut().termination = Some(Termination::Timeout);
                 return Ok(UpdateDeadline::Interrupt);
             }
@@ -558,11 +719,28 @@ impl WorkflowExecutor {
 
         let watchdog_cancel = spec.cancel.clone();
         let run_ended = {
-            let run = async {
-                let instance = pre.instantiate_async(&mut store).await?;
-                // v2 (0.2.0, async-typed invoke) is the current compile shape;
-                // 0.1.0 (sync-typed) artifacts from before ABI v2 keep working.
-                let iface_idx = instance
+            // Store/WASI setup is host work before guest execution. A closed
+            // durable gate must not burn the active execution budget; only a
+            // successful confirmation starts it.
+            let confirmation = async {
+                if let Some(confirmation) = start_confirmation.as_ref() {
+                    confirmation.confirm_before_instantiate().await?;
+                }
+                Ok::<(), anyhow::Error>(())
+            }
+            .await;
+
+            if let Err(error) = confirmation {
+                Ok(Err(error))
+            } else {
+                store.data_mut().begin_active_execution(timeout);
+                let active_started = Instant::now();
+                let run =
+                    async {
+                        let instance = pre.instantiate_async(&mut store).await?;
+                        // v2 (0.2.0, async-typed invoke) is the current compile shape;
+                        // 0.1.0 (sync-typed) artifacts from before ABI v2 keep working.
+                        let iface_idx = instance
                     .get_export_index(&mut store, None, crate::lifecycle::LIFECYCLE_INTERFACE_NAME)
                     .or_else(|| {
                         instance.get_export_index(
@@ -579,41 +757,44 @@ impl WorkflowExecutor {
                             crate::lifecycle::LIFECYCLE_INTERFACE_NAME
                         )
                     })?;
-                let invoke_idx = instance
-                    .get_export_index(&mut store, Some(&iface_idx), "invoke")
-                    .ok_or_else(|| anyhow::anyhow!("lifecycle interface has no `invoke` export"))?;
-                type InvokeFunc = wasmtime::component::TypedFunc<
-                    (Vec<u8>,),
-                    (
-                        Result<
-                            crate::lifecycle::WorkflowOutcome,
-                            crate::lifecycle::WorkflowErrorInfo,
-                        >,
-                    ),
-                >;
-                let invoke: InvokeFunc = instance.get_typed_func(&mut store, invoke_idx)?;
-                let (result,) = invoke.call_async(&mut store, (input,)).await?;
-                // post-return is driven automatically by wasmtime 44's typed
-                // call path; the store is single-use anyway (fresh per run).
-                Ok::<_, anyhow::Error>(result)
-            };
-            tokio::pin!(run);
-            let watchdog = async {
-                loop {
-                    tokio::time::sleep(EPOCH_TICK).await;
-                    if let Some(flag) = &watchdog_cancel
-                        && flag.load(Ordering::Relaxed)
-                    {
-                        return Termination::Cancelled;
+                        let invoke_idx = instance
+                            .get_export_index(&mut store, Some(&iface_idx), "invoke")
+                            .ok_or_else(|| {
+                                anyhow::anyhow!("lifecycle interface has no `invoke` export")
+                            })?;
+                        type InvokeFunc = wasmtime::component::TypedFunc<
+                            (Vec<u8>,),
+                            (
+                                Result<
+                                    crate::lifecycle::WorkflowOutcome,
+                                    crate::lifecycle::WorkflowErrorInfo,
+                                >,
+                            ),
+                        >;
+                        let invoke: InvokeFunc = instance.get_typed_func(&mut store, invoke_idx)?;
+                        let (result,) = invoke.call_async(&mut store, (input,)).await?;
+                        // post-return is driven automatically by wasmtime 44's typed
+                        // call path; the store is single-use anyway (fresh per run).
+                        Ok::<_, anyhow::Error>(result)
+                    };
+                tokio::pin!(run);
+                let watchdog = async {
+                    loop {
+                        tokio::time::sleep(EPOCH_TICK).await;
+                        if let Some(flag) = &watchdog_cancel
+                            && flag.load(Ordering::Relaxed)
+                        {
+                            return Termination::Cancelled;
+                        }
+                        if active_started.elapsed() >= timeout {
+                            return Termination::Timeout;
+                        }
                     }
-                    if started.elapsed() >= timeout {
-                        return Termination::Timeout;
-                    }
+                };
+                tokio::select! {
+                    result = &mut run => Ok(result),
+                    termination = watchdog => Err(termination),
                 }
-            };
-            tokio::select! {
-                result = &mut run => Ok(result),
-                termination = watchdog => Err(termination),
             }
         };
 
@@ -652,7 +833,7 @@ impl WorkflowExecutor {
         InvokeRunResult {
             exit,
             memory_peak_bytes: store.data().limiter.memory_peak_bytes,
-            duration: started.elapsed(),
+            duration: overall_started.elapsed(),
         }
     }
 
@@ -672,11 +853,14 @@ impl WorkflowExecutor {
         input: Vec<u8>,
     ) -> anyhow::Result<Result<Vec<u8>, crate::ErrorInfo>> {
         let limits = WorkflowLimits::default();
+        let deadline = tokio::time::Instant::now() + DEFAULT_HTTP_TIMEOUT;
         let state = WorkflowState {
             wasi: WasiCtxBuilder::new().build(),
             http: WasiHttpCtx::new(),
             table: ResourceTable::new(),
             hooks: WorkflowHooks,
+            http_deadline: deadline,
+            active_deadline: deadline,
             limiter: WorkflowLimiter {
                 max_memory_bytes: limits.max_memory_bytes,
                 max_table_elements: limits.max_table_elements,

@@ -5,10 +5,20 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use uuid::Uuid;
 
 /// Event published to Valkey stream to trigger workflow execution
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TriggerEvent {
+    /// Durable source-request identity, set by the execution-outbox relay.
+    ///
+    /// It remains optional only so the worker can deserialize and terminally
+    /// acknowledge pre-outbox stream entries. Such entries are never allowed
+    /// to launch: a current execution must carry this identity through the
+    /// durable admission and handoff boundary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<Uuid>,
+
     /// Pre-generated instance ID (UUID string)
     pub instance_id: String,
 
@@ -117,6 +127,7 @@ impl TriggerEvent {
         debug: bool,
     ) -> Self {
         Self {
+            request_id: None,
             instance_id,
             tenant_id,
             workflow_id,
@@ -145,6 +156,7 @@ impl TriggerEvent {
         debug: bool,
     ) -> Self {
         Self {
+            request_id: None,
             instance_id,
             tenant_id,
             workflow_id,
@@ -176,7 +188,40 @@ impl TriggerEvent {
         debug: bool,
     ) -> Self {
         let now = chrono::Utc::now().timestamp_millis();
+        Self::cron_at(
+            instance_id,
+            tenant_id,
+            workflow_id,
+            version,
+            inputs,
+            track_events,
+            trigger_id,
+            schedule,
+            debug,
+            now,
+        )
+    }
+
+    /// Create a cron trigger with the scheduler's exact due occurrence.
+    ///
+    /// Keeping this explicit lets a retry/restart retain the same source
+    /// identity instead of turning an already-due cron tick into a fresh,
+    /// duplicate execution merely because wall-clock time advanced.
+    #[allow(clippy::too_many_arguments)]
+    pub fn cron_at(
+        instance_id: String,
+        tenant_id: String,
+        workflow_id: String,
+        version: Option<i32>,
+        inputs: Value,
+        track_events: bool,
+        trigger_id: String,
+        schedule: String,
+        debug: bool,
+        scheduled_at: i64,
+    ) -> Self {
         Self {
+            request_id: None,
             instance_id,
             tenant_id,
             workflow_id,
@@ -185,9 +230,9 @@ impl TriggerEvent {
             trigger: TriggerSource::Cron {
                 trigger_id,
                 schedule,
-                scheduled_at: now,
+                scheduled_at,
             },
-            requested_at: now,
+            requested_at: scheduled_at,
             track_events,
             debug,
         }
@@ -235,6 +280,7 @@ impl TriggerEvent {
         checkpoint_count: u64,
     ) -> Self {
         Self {
+            request_id: None,
             instance_id,
             tenant_id,
             workflow_id,
@@ -260,6 +306,7 @@ impl TriggerEvent {
         debug: bool,
     ) -> Self {
         Self {
+            request_id: None,
             instance_id,
             tenant_id,
             workflow_id,

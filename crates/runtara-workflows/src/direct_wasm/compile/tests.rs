@@ -887,6 +887,13 @@ fn direct_compile_emits_finish_only_artifact_without_rust_crate() {
     );
     assert_eq!(metadata.workflow_id, "simple/workflow");
     assert_eq!(metadata.workflow_version, 7);
+    assert_eq!(
+        metadata.direct_abi_version,
+        crate::direct_wasm::compile::DIRECT_WORKFLOW_INVOKE_ABI_VERSION
+    );
+    assert_eq!(metadata.entry_abi, "invoke");
+    assert!(!metadata.workflow_agent_safety.may_suspend_or_sleep);
+    assert!(metadata.workflow_agent_safety.violations.is_empty());
     assert_eq!(metadata.source_checksum.as_deref(), Some("source-sha256"));
     assert_eq!(
         metadata.template_major_version,
@@ -985,8 +992,8 @@ fn direct_compile_emits_fanout_inside_conditional_branch() {
             "cond": {"id": "cond", "stepType": "Conditional", "condition": {"type": "operation", "op": "EQ", "arguments": [{"value": "x", "valueType": "immediate"}, {"value": "y", "valueType": "immediate"}]}},
             "hit": {"id": "hit", "stepType": "Agent", "agentId": "utils", "capabilityId": "get-current-iso-datetime", "inputMapping": {}},
             "miss_gate": {"id": "miss_gate", "stepType": "Agent", "agentId": "utils", "capabilityId": "get-current-iso-datetime", "inputMapping": {}},
-            "b": {"id": "b", "stepType": "Agent", "agentId": "utils", "capabilityId": "get-current-iso-datetime", "inputMapping": {}},
-            "c": {"id": "c", "stepType": "Agent", "agentId": "utils", "capabilityId": "get-current-iso-datetime", "inputMapping": {}},
+            "b": {"id": "b", "stepType": "Agent", "agentId": "utils", "capabilityId": "get-current-iso-datetime", "maxRetries": 0, "inputMapping": {}},
+            "c": {"id": "c", "stepType": "Agent", "agentId": "utils", "capabilityId": "get-current-iso-datetime", "maxRetries": 0, "inputMapping": {}},
             "join": {"id": "join", "stepType": "Agent", "agentId": "utils", "capabilityId": "get-current-iso-datetime", "inputMapping": {}},
             "finish": {"id": "finish", "stepType": "Finish", "inputMapping": {"out": {"value": "ok", "valueType": "immediate"}}}
           }
@@ -3065,10 +3072,10 @@ fn direct_compile_supports_ai_agent_multi_tool_graph() {
 }
 
 #[test]
-fn direct_compile_injects_ai_agent_tool_step_timeout() {
-    // Give one of the two Agent tool steps an explicit timeout; leave the other
-    // unset. The tool's own step timeout must reach its DirectAiToolPlan so the
-    // emitter can bound that tool call independently of the AiAgent turnTimeout.
+fn direct_compile_rejects_ai_agent_tool_step_timeout() {
+    // An Agent tool is still an Agent step. Its `timeout` cannot interrupt a
+    // running capability call, so compilation must reject the graph rather
+    // than inject a best-effort timeout_ms hint into the tool payload.
     let mut graph = fixture("ai_agent_multi_tool");
     let Some(runtara_dsl::Step::Agent(tool)) = graph.steps.get_mut("echo") else {
         panic!("expected Agent tool step 'echo'");
@@ -3076,7 +3083,7 @@ fn direct_compile_injects_ai_agent_tool_step_timeout() {
     tool.timeout = Some(2_000);
 
     let temp = tempfile::tempdir().expect("tempdir");
-    let result = compile_direct_workflow(DirectCompilationInput {
+    let error = compile_direct_workflow(DirectCompilationInput {
         workflow_id: "ai-agent-multi-tool-timeout".to_string(),
         version: 1,
         source_checksum: None,
@@ -3087,44 +3094,16 @@ fn direct_compile_injects_ai_agent_tool_step_timeout() {
         agent_catalog: None,
         agent_slug: None,
     })
-    .expect("direct multi-tool AiAgent compile should succeed");
+    .expect_err("Agent tool timeout must be rejected before compilation");
 
-    let manifest: DirectWorkflowManifest =
-        serde_json::from_slice(&fs::read(&result.manifest_path).expect("manifest"))
-            .expect("manifest json");
-    let core_config = DirectCoreConfig::new(
-        &manifest,
-        &manifest.to_canonical_json().expect("manifest json"),
-        false,
-    )
-    .expect("core config");
-    let DirectRunPlan::AiAgentLoop { tools, .. } = &core_config.run_plan else {
-        panic!(
-            "expected AiAgentLoop run plan, got {:?}",
-            core_config.run_plan
-        );
+    let DirectCompileError::Unsupported { report } = error else {
+        panic!("expected unsupported report, got {error}");
     };
-    let agent_tool_timeouts: Vec<Option<u64>> = tools
-        .iter()
-        .filter_map(|t| match t {
-            crate::direct_wasm::plan::DirectAiToolPlan::Agent { timeout_ms, .. } => {
-                Some(*timeout_ms)
-            }
-            _ => None,
-        })
-        .collect();
-    assert_eq!(
-        agent_tool_timeouts.len(),
-        2,
-        "two Agent tools expected: {tools:?}"
-    );
     assert!(
-        agent_tool_timeouts.contains(&Some(2_000)),
-        "the timed tool step's timeout must reach its plan: {agent_tool_timeouts:?}"
-    );
-    assert!(
-        agent_tool_timeouts.contains(&None),
-        "the untimed tool must stay None: {agent_tool_timeouts:?}"
+        report.unsupported.iter().any(|feature| {
+            feature.step_id.as_deref() == Some("echo") && feature.feature == "agent-timeout"
+        }),
+        "{report:?}"
     );
 }
 
@@ -3643,11 +3622,15 @@ fn direct_compile_supports_sync_parallel_branches_diamond() {
 #[test]
 fn direct_compile_supports_split_timeout_graph() {
     let temp = tempfile::tempdir().expect("tempdir");
+    let mut graph = fixture("split_timeout");
+    // The fixture body contains a Delay. It must park durably instead of
+    // holding a runner while the Split timeout is exercised.
+    graph.durable = Some(true);
     let result = compile_direct_workflow(DirectCompilationInput {
         workflow_id: "split-timeout".to_string(),
         version: 1,
         source_checksum: None,
-        execution_graph: fixture("split_timeout"),
+        execution_graph: graph,
         child_workflows: vec![],
         output_dir: temp.path().to_path_buf(),
         track_events: false,
@@ -3677,11 +3660,15 @@ fn direct_compile_supports_split_timeout_graph() {
 #[test]
 fn direct_compile_supports_while_timeout_graph() {
     let temp = tempfile::tempdir().expect("tempdir");
+    let mut graph = fixture("while_timeout");
+    // The fixture body contains a Delay. It must park durably instead of
+    // holding a runner while the While timeout is exercised.
+    graph.durable = Some(true);
     let result = compile_direct_workflow(DirectCompilationInput {
         workflow_id: "while-timeout".to_string(),
         version: 1,
         source_checksum: None,
-        execution_graph: fixture("while_timeout"),
+        execution_graph: graph,
         child_workflows: vec![],
         output_dir: temp.path().to_path_buf(),
         track_events: false,
@@ -3930,12 +3917,12 @@ fn direct_compile_supports_dynamic_durable_delay_finish_graph() {
 }
 
 #[test]
-fn direct_compile_supports_non_durable_delay() {
+fn direct_compile_rejects_non_durable_delay() {
     let temp = tempfile::tempdir().expect("tempdir");
     let mut graph = fixture("delay_simple");
     graph.durable = Some(false);
 
-    let result = compile_direct_workflow(DirectCompilationInput {
+    let error = compile_direct_workflow(DirectCompilationInput {
         workflow_id: "delay-non-durable".to_string(),
         version: 1,
         source_checksum: None,
@@ -3946,20 +3933,47 @@ fn direct_compile_supports_non_durable_delay() {
         agent_catalog: None,
         agent_slug: None,
     })
-    .expect("non-durable Delay should compile");
+    .expect_err("non-durable Delay must be rejected before it can hold a runner");
 
-    let wasm = fs::read(&result.wasm_path).expect("wasm");
-    Validator::new_with_features(wasmparser::WasmFeatures::all())
-        .validate_all(&wasm)
-        .expect("direct non-durable Delay artifact should validate");
-    assert!(result.support_report.supported);
-    assert_eq!(result.support_report.unsupported, vec![]);
+    let DirectCompileError::Unsupported { report } = error else {
+        panic!("expected unsupported report, got {error}");
+    };
+    assert!(
+        report
+            .unsupported
+            .iter()
+            .any(|feature| feature.feature == "non-durable-delay")
+    );
+}
 
-    let manifest: DirectWorkflowManifest =
-        serde_json::from_slice(&fs::read(&result.manifest_path).expect("manifest"))
-            .expect("manifest json");
-    assert_eq!(manifest.graph.delays.len(), 1);
-    assert!(!manifest.graph.delays[0].durable);
+#[test]
+fn direct_compile_rejects_non_durable_wait_for_signal() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut graph = fixture("wait_simple");
+    graph.durable = Some(false);
+
+    let error = compile_direct_workflow(DirectCompilationInput {
+        workflow_id: "wait-non-durable".to_string(),
+        version: 1,
+        source_checksum: None,
+        execution_graph: graph,
+        child_workflows: vec![],
+        output_dir: temp.path().to_path_buf(),
+        track_events: false,
+        agent_catalog: None,
+        agent_slug: None,
+    })
+    .expect_err("non-durable WaitForSignal must be rejected before it can hold a runner");
+
+    let DirectCompileError::Unsupported { report } = error else {
+        panic!("expected unsupported report, got {error}");
+    };
+    assert!(
+        report
+            .unsupported
+            .iter()
+            .any(|feature| feature.feature == "non-durable-wait-for-signal")
+    );
 }
 
 #[test]
@@ -6651,6 +6665,161 @@ fn direct_core_lowers_durable_agent_retry_loop() {
     assert!(
         saw_checkpoint_signal_after_checkpoint,
         "successful retry checkpoint should handle pending lifecycle signals"
+    );
+}
+
+#[test]
+fn direct_core_lifecycle_agent_retry_parks_without_sleeping() {
+    use super::super::component::WorkflowAbi;
+
+    let graph = durable_agent_retry_graph();
+    let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
+    let manifest_json = manifest.to_canonical_json().expect("manifest json");
+    let core_config = DirectCoreConfig::new(&manifest, &manifest_json, false)
+        .expect("core config")
+        .with_abi(WorkflowAbi::InvokeHostImports);
+    let (resolve, world) = build_direct_component_resolve_configured(
+        &manifest.feature_summary.agent_ids,
+        WorkflowAbi::InvokeHostImports,
+        false,
+        None,
+        &std::collections::BTreeMap::new(),
+        false,
+    )
+    .expect("invoke resolve");
+    let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
+        .validate_all(&core)
+        .expect("lifecycle retry core module validates");
+
+    let mut next_function_index = 0;
+    let mut get_checkpoint_index = None;
+    let mut checkpoint_index = None;
+    let mut now_ms_index = None;
+    let mut blocking_sleep_index = None;
+    let mut durable_sleep_index = None;
+    let mut durable_sleep_checkpoint_index = None;
+    let mut retry_sleep_key_index = None;
+    for payload in Parser::new(0).parse_all(&core) {
+        if let Payload::ImportSection(reader) = payload.expect("core wasm payload") {
+            for import in reader.into_imports() {
+                let import = import.expect("core import");
+                if !matches!(import.ty, TypeRef::Func(_)) {
+                    continue;
+                }
+                match (import.module, import.name) {
+                    (module, "get-checkpoint")
+                        if module.contains("runtara:workflow-runtime/runtime") =>
+                    {
+                        get_checkpoint_index = Some(next_function_index);
+                    }
+                    (module, "checkpoint")
+                        if module.contains("runtara:workflow-runtime/runtime") =>
+                    {
+                        checkpoint_index = Some(next_function_index);
+                    }
+                    (module, "now-ms") if module.contains("runtara:workflow-runtime/runtime") => {
+                        now_ms_index = Some(next_function_index);
+                    }
+                    (module, "blocking-sleep")
+                        if module.contains("runtara:workflow-runtime/runtime") =>
+                    {
+                        blocking_sleep_index = Some(next_function_index);
+                    }
+                    (module, "durable-sleep")
+                        if module.contains("runtara:workflow-runtime/runtime") =>
+                    {
+                        durable_sleep_index = Some(next_function_index);
+                    }
+                    (module, "durable-sleep-checkpoint")
+                        if module.contains("runtara:workflow-runtime/runtime") =>
+                    {
+                        durable_sleep_checkpoint_index = Some(next_function_index);
+                    }
+                    (module, "agent-retry-sleep-key")
+                        if module.contains("runtara:workflow-stdlib/json") =>
+                    {
+                        retry_sleep_key_index = Some(next_function_index);
+                    }
+                    _ => {}
+                }
+                next_function_index += 1;
+            }
+        }
+    }
+
+    let mut saw_get_checkpoint = false;
+    let mut saw_checkpoint = false;
+    let mut saw_now_ms = false;
+    let mut saw_retry_sleep_key = false;
+    let mut saw_blocking_sleep = false;
+    let mut saw_durable_sleep = false;
+    let mut saw_durable_sleep_checkpoint = false;
+    let mut code_body_index = 0;
+    for payload in Parser::new(0).parse_all(&core) {
+        if let Payload::CodeSectionEntry(body) = payload.expect("core wasm payload") {
+            if code_body_index == 0 {
+                for operator in body.get_operators_reader().expect("operators") {
+                    match operator.expect("operator") {
+                        Operator::Call { function_index }
+                            if Some(function_index) == get_checkpoint_index =>
+                        {
+                            saw_get_checkpoint = true;
+                        }
+                        Operator::Call { function_index }
+                            if Some(function_index) == checkpoint_index =>
+                        {
+                            saw_checkpoint = true;
+                        }
+                        Operator::Call { function_index }
+                            if Some(function_index) == now_ms_index =>
+                        {
+                            saw_now_ms = true;
+                        }
+                        Operator::Call { function_index }
+                            if Some(function_index) == retry_sleep_key_index =>
+                        {
+                            saw_retry_sleep_key = true;
+                        }
+                        Operator::Call { function_index }
+                            if Some(function_index) == blocking_sleep_index =>
+                        {
+                            saw_blocking_sleep = true;
+                        }
+                        Operator::Call { function_index }
+                            if Some(function_index) == durable_sleep_index =>
+                        {
+                            saw_durable_sleep = true;
+                        }
+                        Operator::Call { function_index }
+                            if Some(function_index) == durable_sleep_checkpoint_index =>
+                        {
+                            saw_durable_sleep_checkpoint = true;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            code_body_index += 1;
+        }
+    }
+
+    assert!(
+        saw_get_checkpoint,
+        "retry path must replay checkpointed state"
+    );
+    assert!(
+        saw_checkpoint,
+        "retry path must persist failure/deadline state"
+    );
+    assert!(saw_now_ms, "retry path must mint an absolute deadline");
+    assert!(
+        saw_retry_sleep_key,
+        "retry path must use the next attempt's keyed deadline"
+    );
+    assert!(
+        !saw_blocking_sleep && !saw_durable_sleep && !saw_durable_sleep_checkpoint,
+        "lifecycle retry lowering must park instead of holding the runner in any sleep host call"
     );
 }
 
@@ -10697,21 +10866,19 @@ fn runtime_binding_env_lever_defaults_host_import() {
 }
 
 #[test]
-fn workflow_abi_env_lever_defaults_invoke() {
-    use crate::direct_wasm::component::WorkflowAbi;
-    // Phase-5 default: the invoke export; only the literal "cli-run" reverts.
-    assert_eq!(
-        super::workflow_abi_from_raw(None),
-        WorkflowAbi::InvokeHostImports
+fn legacy_workflow_abi_env_setting_is_rejected() {
+    assert!(super::ensure_supported_production_workflow_abi_raw(None).is_ok());
+    assert!(super::ensure_supported_production_workflow_abi_raw(Some("")).is_ok());
+    assert!(super::ensure_supported_production_workflow_abi_raw(Some("invoke")).is_ok());
+
+    let error = super::ensure_supported_production_workflow_abi_raw(Some("cli-run"))
+        .expect_err("legacy workflow ABI must not be selectable in production");
+    assert!(
+        error.to_string().contains("unsupported"),
+        "unexpected error: {error}"
     );
-    assert_eq!(
-        super::workflow_abi_from_raw(Some("cli-run")),
-        WorkflowAbi::CliRunHttp
-    );
-    assert_eq!(
-        super::workflow_abi_from_raw(Some("invoke")),
-        WorkflowAbi::InvokeHostImports
-    );
+
+    assert!(super::ensure_supported_production_workflow_abi_raw(Some("other")).is_err());
 }
 
 #[test]
@@ -10855,8 +11022,12 @@ fn abi_is_part_of_the_lowering_tag() {
 
     let tag = super::direct_lowering_tag();
     assert!(
-        tag.contains("abi="),
+        tag.contains("abi=invoke-v2"),
         "the tag must name the ABI, or changing it cannot invalidate a cached image: {tag}"
+    );
+    assert!(
+        tag.contains("durable-delay-parking=v1"),
+        "the tag must retire cached artifacts whose short durable delays could block: {tag}"
     );
 }
 

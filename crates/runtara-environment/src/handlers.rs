@@ -15,11 +15,17 @@ use tracing::{debug, error, info, instrument, warn};
 
 use runtara_core::persistence::{CompleteInstanceParams, Persistence};
 
-use crate::container_registry::{ContainerInfo, ContainerRegistry};
+use crate::container_registry::ContainerRegistry;
 use crate::db;
 use crate::error::Result;
-use crate::image_registry::{ImageBuilder, ImageRegistry};
-use crate::runner::{LaunchOptions, Runner, RunnerHandle};
+use crate::execution_timeout::ExecutionTimeoutPolicy;
+use crate::image_registry::{ImageBuilder, ImageRegistry, require_current_workflow_entrypoint};
+use crate::launch_dispatcher::{DEFAULT_LAUNCH_QUEUE_TIMEOUT, LaunchLifecycleObservers};
+use crate::launch_queue::{
+    CancelOutcome, EnqueueOutcome, EnqueueRequest, InitialLaunchOutcome, InitialLaunchRequest,
+    LaunchKind, LaunchRepository, LaunchState, SINGLE_INSTANCE_ACTIVE, SINGLE_INSTANCE_LAUNCH_ENV,
+};
+use crate::runner::{Runner, RunnerHandle, StartGate, StartGateOutcome};
 
 /// Shared drain state for the environment runtime.
 ///
@@ -107,31 +113,35 @@ pub struct EnvironmentHandlerState {
     pub data_dir: PathBuf,
     /// Request timeout for database operations.
     pub request_timeout: Duration,
+    /// Bounded active-execution timeout policy shared with the server.
+    pub execution_timeout_policy: ExecutionTimeoutPolicy,
     /// Drain signal observed by container monitors and workers.
     pub drain: DrainController,
+    /// Wakes the durable dispatcher after a source commits a launch row.
+    pub launch_notifier: Arc<tokio::sync::Notify>,
+    /// Optional server-side admission-release hook installed after startup.
+    pub lifecycle_observers: LaunchLifecycleObservers,
 }
 
 /// Default request timeout for database operations (30 seconds).
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Fallback per-instance execution timeout when no value is persisted and the
-/// caller supplies none (1 hour). Generous by design: the timeout is a safety
-/// net for stuck guests, not the completion mechanism — workflows that finish
-/// report completion immediately via the SDK. Override with
-/// `RUNTARA_DEFAULT_INSTANCE_TIMEOUT_SECS`.
-const FALLBACK_INSTANCE_TIMEOUT_SECS: u64 = 3600;
+/// A monitor that already knows guest execution never started must not become
+/// another unbounded waiter when PostgreSQL is unhealthy. The durable marked
+/// generation remains recoverable by the expiry scan after this local budget.
+const START_GATE_MONITOR_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Resolve the default per-instance execution timeout, honoring
-/// `RUNTARA_DEFAULT_INSTANCE_TIMEOUT_SECS` and falling back to
-/// [`FALLBACK_INSTANCE_TIMEOUT_SECS`]. Used for first launch when the request
-/// omits a timeout, and on wake/resume when no per-instance value was persisted.
+/// Resolve the default standalone-Environment execution timeout.
+///
+/// Production callers should use
+/// [`EnvironmentHandlerState::execution_timeout_policy`] instead: the embedded
+/// server injects one policy into initial starts, resumes, and wakes. This
+/// wrapper remains for external callers that instantiate a standalone
+/// Environment without a policy override.
 pub fn default_instance_timeout() -> Duration {
-    let secs = std::env::var("RUNTARA_DEFAULT_INSTANCE_TIMEOUT_SECS")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .filter(|&s| s > 0)
-        .unwrap_or(FALLBACK_INSTANCE_TIMEOUT_SECS);
-    Duration::from_secs(secs)
+    ExecutionTimeoutPolicy::default()
+        .default_timeout()
+        .as_duration()
 }
 
 impl EnvironmentHandlerState {
@@ -160,7 +170,10 @@ impl EnvironmentHandlerState {
             core_addr,
             data_dir: ensure_absolute_path(data_dir),
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
+            execution_timeout_policy: ExecutionTimeoutPolicy::default(),
             drain: DrainController::new(),
+            launch_notifier: Arc::new(tokio::sync::Notify::new()),
+            lifecycle_observers: LaunchLifecycleObservers::default(),
         }
     }
 
@@ -170,9 +183,27 @@ impl EnvironmentHandlerState {
         self
     }
 
+    /// Set the bounded active-execution timeout policy.
+    pub fn with_execution_timeout_policy(mut self, policy: ExecutionTimeoutPolicy) -> Self {
+        self.execution_timeout_policy = policy;
+        self
+    }
+
     /// Attach an externally-managed drain controller.
     pub fn with_drain(mut self, drain: DrainController) -> Self {
         self.drain = drain;
+        self
+    }
+
+    /// Attach a shared dispatcher wake notification and lifecycle observer
+    /// holder created by the embedding runtime.
+    pub fn with_launch_control(
+        mut self,
+        launch_notifier: Arc<tokio::sync::Notify>,
+        lifecycle_observers: LaunchLifecycleObservers,
+    ) -> Self {
+        self.launch_notifier = launch_notifier;
+        self.lifecycle_observers = lifecycle_observers;
         self
     }
 
@@ -558,126 +589,89 @@ pub async fn handle_start_instance(
         });
     }
 
-    // Parse input for runner
-    let input = request.input.unwrap_or(serde_json::json!({}));
-
-    // Enrich input for DB storage: merge variable defaults, strip system variables
-    let input_for_storage = enrich_input_for_storage(input.clone(), &image);
-    let input_bytes = serde_json::to_vec(&input_for_storage).ok();
-
-    // Persist custom environment for resume/wake.
-    let env_for_db = if request.env.is_empty() {
-        None
-    } else {
-        Some(&request.env)
-    };
-
-    // Resolve the effective execution timeout once, so the value persisted for
-    // wake/resume matches the one the monitor enforces on this first run.
-    let timeout = Duration::from_secs(
-        request
-            .timeout_seconds
-            .unwrap_or(default_instance_timeout().as_secs()),
-    );
-
-    // Claim the instance ID and bind its immutable image in one transaction.
-    // A pending row without an image is not launchable or recoverable, and it
-    // still counts against admission, so an association failure must roll the
-    // whole claim back rather than leave that partial state behind.
-    let claimed = db::claim_instance_with_image(
-        &state.pool,
-        &instance_id,
-        &request.image_id,
-        &request.tenant_id,
-        input_bytes.as_deref(),
-        env_for_db,
-        Some(timeout.as_secs() as i64),
-    )
-    .await;
-    if !matches!(claimed, Ok(true)) {
-        // Either the id was already taken or the insert failed outright. If
-        // another request reserved the same compatible ID, it owns the launch
-        // and this request is an idempotent replay.
-        if let Some(response) =
-            existing_start_response(state, &instance_id, &request.tenant_id, &request.image_id)
-                .await?
-        {
-            return Ok(response);
-        }
-        let e = match claimed {
-            Err(e) => e.to_string(),
-            // Claim reported "already exists", but no usable instance backs it
-            // up - `existing_start_response` already logged why it was rejected.
-            Ok(_) => format!("Instance '{}' already exists", instance_id),
-        };
-        error!(error = %e, "Failed to claim instance and associate its image");
+    // A compiled workflow must prove its current lifecycle ABI before we
+    // create a pending instance. This keeps a retired `wasi:cli/run` artifact
+    // from ever taking a runner permit or consuming admission while it waits.
+    if let Err(error) = require_current_workflow_entrypoint(&image).await {
+        warn!(
+            image_id = %request.image_id,
+            error = %error,
+            "Refusing workflow image without lifecycle.invoke"
+        );
         return Ok(StartInstanceResponse {
             success: false,
             instance_id: String::new(),
             deduplicated: false,
-            error: Some(format!("Failed to create instance: {}", e)),
+            error: Some(error.to_string()),
         });
     }
 
-    // The claim above persisted the input, so hand those same bytes to the
-    // runner rather than making the launch read back what it just wrote.
-    let prepersisted_input = input_bytes.clone();
+    // Prepare the durable input envelope before the atomic initial claim. The
+    // dispatcher reads this committed value later; it never retains request
+    // memory while it waits for a runner slot.
+    let input = request.input.unwrap_or(serde_json::json!({}));
+    let input_for_storage = enrich_input_for_storage(input.clone(), &image);
+    let input_bytes = serde_json::to_vec(&input_for_storage).ok();
 
-    // Build launch options (using the shared image artifact)
-    let options = LaunchOptions {
-        instance_id: instance_id.clone(),
-        tenant_id: request.tenant_id.clone(),
-        wasm_path,
-        input,
-        timeout,
-        checkpoint_id: None,
-        env: request.env,
-        prepersisted_input,
+    // Resolve the effective execution timeout once, before claiming an
+    // instance. A malformed direct Environment request must not leave a
+    // durable pending/queued pair behind.
+    let timeout = state
+        .execution_timeout_policy
+        .resolve_raw(request.timeout_seconds)
+        .map_err(|error| {
+            crate::error::Error::InvalidRequest(format!("invalid execution timeout: {error}"))
+        })?
+        .as_duration();
+
+    // The instance, immutable image binding, and first physical launch must be
+    // one transaction. A process loss after just the first two writes used to
+    // create an unowned `pending` instance that occupied admission forever.
+    let repository = LaunchRepository::new(state.pool.clone());
+    let request_tenant_id = request.tenant_id.clone();
+    let request_image_id = request.image_id.clone();
+    // The embedded server supplies workflow identity on the regular guest
+    // environment and marks only guarded trigger deliveries with this
+    // short-lived reserved key. Consume the marker before persisting guest
+    // environment so this internal admission detail never reaches a workflow.
+    let mut launch_env = request.env;
+    let single_instance = launch_env
+        .remove(SINGLE_INSTANCE_LAUNCH_ENV)
+        .is_some_and(|value| value.eq_ignore_ascii_case("true"));
+    let workflow_id = launch_env
+        .get("WORKFLOW_ID")
+        .filter(|workflow_id| !workflow_id.is_empty())
+        .cloned();
+    let launch = EnqueueRequest::immediate(
+        uuid::Uuid::new_v4().to_string(),
+        instance_id.clone(),
+        request_tenant_id.clone(),
+        request_image_id.clone(),
+        LaunchKind::Start,
+        DEFAULT_LAUNCH_QUEUE_TIMEOUT,
+    );
+    let launch = match workflow_id {
+        Some(workflow_id) => launch.with_workflow_scope(workflow_id, single_instance),
+        None => launch,
+    };
+    let initial = InitialLaunchRequest {
+        launch,
+        input: input_bytes,
+        env: Some(launch_env),
+        timeout_seconds: Some(
+            i64::try_from(timeout.as_secs())
+                .expect("bounded execution timeout fits in database integer"),
+        ),
     };
 
-    // Launch via runner (detached)
-    match state.runner.launch_detached(&options).await {
-        Ok(handle) => {
+    match repository.claim_initial(initial).await {
+        Ok(InitialLaunchOutcome::Enqueued(launch)) => {
+            state.launch_notifier.notify_one();
             info!(
                 instance_id = %instance_id,
-                handle_id = %handle.handle_id,
-                "Instance launched successfully"
+                launch_id = %launch.launch_id,
+                "Instance start durably queued"
             );
-
-            // Clone values for the registry before moving them
-            let handle_id_for_registry = handle.handle_id.clone();
-
-            // Register in container registry
-            let container_registry = ContainerRegistry::new(state.pool.clone());
-            let container_info = ContainerInfo {
-                container_id: handle_id_for_registry,
-                instance_id: instance_id.clone(),
-                tenant_id: request.tenant_id,
-                binary_path: image.binary_path,
-                started_at: handle.started_at,
-                timeout_seconds: Some(timeout.as_secs() as i64),
-            };
-            if let Err(e) = container_registry.register(&container_info).await {
-                warn!(error = %e, "Failed to register container (instance still running)");
-            }
-
-            // The runner promotes the instance to `running` from inside the run
-            // task, before the guest starts, on both the invoke and the legacy
-            // branch. Stamping it again here would be a second write of the
-            // same fact, and a racy one: `launch_detached` returns as soon as
-            // the run is spawned, so a workflow that parks immediately can
-            // already be `suspended` by the time this line is reached.
-
-            // Spawn background task to monitor container and process output when done
-            spawn_container_monitor(
-                state.pool.clone(),
-                state.runner.clone(),
-                handle,
-                state.persistence.clone(),
-                timeout,
-                state.drain.clone(),
-            );
-
             Ok(StartInstanceResponse {
                 success: true,
                 instance_id,
@@ -685,21 +679,56 @@ pub async fn handle_start_instance(
                 error: None,
             })
         }
-        Err(e) => {
-            error!(error = %e, "Failed to launch instance");
-            let launch_error = format!("Launch failed: {}", e);
-            let _ = state
-                .persistence
-                .complete_instance(
-                    CompleteInstanceParams::new(&instance_id, "failed").with_error(&launch_error),
-                )
-                .await;
-
+        Ok(InitialLaunchOutcome::SingleInstanceActive) => {
+            // This is a deliberate trigger skip, not a failed Environment
+            // start. The embedded client maps the stable code back to the
+            // trigger worker, which ACKs it without creating an instance.
             Ok(StartInstanceResponse {
                 success: false,
-                instance_id,
+                instance_id: String::new(),
                 deduplicated: false,
-                error: Some(launch_error),
+                error: Some(SINGLE_INSTANCE_ACTIVE.to_string()),
+            })
+        }
+        Ok(InitialLaunchOutcome::ExistingLaunch(_)) => {
+            // The existing active generation is the idempotency winner. Keep
+            // the older response contract while never enqueueing a second run.
+            if let Some(response) =
+                existing_start_response(state, &instance_id, &request_tenant_id, &request_image_id)
+                    .await?
+            {
+                Ok(response)
+            } else {
+                Ok(StartInstanceResponse {
+                    success: false,
+                    instance_id: String::new(),
+                    deduplicated: false,
+                    error: Some(format!("Instance '{}' already exists", instance_id)),
+                })
+            }
+        }
+        Ok(InitialLaunchOutcome::ExistingInstance) => {
+            // A legacy or malformed row has no active durable owner. Do not
+            // call it a successful replay: doing so would hide exactly the
+            // stranded state the queue is supposed to surface and recover.
+            warn!(instance_id = %instance_id, "Existing instance has no active launch generation");
+            Ok(StartInstanceResponse {
+                success: false,
+                instance_id: String::new(),
+                deduplicated: false,
+                error: Some(format!(
+                    "Instance '{}' exists without an active launch generation",
+                    instance_id
+                )),
+            })
+        }
+        Err(error) => {
+            error!(error = %error, "Failed to atomically queue instance start");
+            Ok(StartInstanceResponse {
+                success: false,
+                instance_id: String::new(),
+                deduplicated: false,
+                error: Some(format!("Failed to create instance: {error}")),
             })
         }
     }
@@ -746,6 +775,46 @@ pub async fn handle_stop_instance(
         "Stop instance request received"
     );
 
+    // A queued/leased launch has no runner handle yet. Cancel it in the same
+    // transaction that terminalizes Core, before falling back to the legacy
+    // registry-based running cancellation path.
+    let launches = LaunchRepository::new(state.pool.clone());
+    match launches.get_active_for_instance(&request.instance_id).await {
+        Ok(Some(active)) => match launches.cancel_before_start(&active.launch_id).await {
+            Ok(CancelOutcome::Cancelled(cancelled)) => {
+                state
+                    .lifecycle_observers
+                    .notify_released(&cancelled, "cancelled");
+                info!(
+                    instance_id = %request.instance_id,
+                    launch_id = %cancelled.launch_id,
+                    "Cancelled instance before runner handoff"
+                );
+                return Ok(StopInstanceResponse {
+                    success: true,
+                    error: None,
+                });
+            }
+            Ok(CancelOutcome::TooLate(_)) | Ok(CancelOutcome::NotFound) => {
+                // The dispatcher passed the generation's start fence. The
+                // registry/runner path below owns cancellation from here.
+            }
+            Err(error) => {
+                return Ok(StopInstanceResponse {
+                    success: false,
+                    error: Some(format!("Failed to cancel queued launch: {error}")),
+                });
+            }
+        },
+        Ok(None) => {}
+        Err(error) => {
+            return Ok(StopInstanceResponse {
+                success: false,
+                error: Some(format!("Failed to inspect queued launch: {error}")),
+            });
+        }
+    }
+
     // Look up container
     let container_registry = ContainerRegistry::new(state.pool.clone());
     let container = match container_registry.get(&request.instance_id).await {
@@ -768,8 +837,10 @@ pub async fn handle_stop_instance(
         }
     };
 
-    // Build runner handle and stop
+    // The registry's persisted generation is the cancellation fence. Older
+    // rows are backfilled by the migration from their legacy handle id.
     let handle = RunnerHandle {
+        launch_id: container.launch_id.clone(),
         handle_id: container.container_id,
         instance_id: request.instance_id.clone(),
         tenant_id: container.tenant_id,
@@ -790,8 +861,37 @@ pub async fn handle_stop_instance(
         ))
         .await;
 
+    // The runner was already handed this generation, so the queue is released
+    // only after the Core cancellation write above has committed. A concurrent
+    // monitor can win this transition; in that case it also owns notification.
+    match launches
+        .mark_terminal(
+            &container.launch_id,
+            LaunchState::Cancelled,
+            Some(&request.reason),
+        )
+        .await
+    {
+        Ok(Some(cancelled)) => state
+            .lifecycle_observers
+            .notify_released(&cancelled, "cancelled"),
+        Ok(None) => {}
+        Err(error) => warn!(
+            instance_id = %request.instance_id,
+            launch_id = %container.launch_id,
+            error = %error,
+            "Failed to terminalize cancelled launch generation"
+        ),
+    }
+
     // Clean up container registry
-    let _ = container_registry.cleanup(&request.instance_id).await;
+    let _ = container_registry
+        .cleanup_handle(
+            &request.instance_id,
+            &container.launch_id,
+            &handle.handle_id,
+        )
+        .await;
 
     info!("Instance stopped successfully");
 
@@ -838,58 +938,23 @@ pub async fn handle_resume_instance(
         }
     };
 
-    // Check status — allow resume from suspended, failed, or cancelled
-    if !matches!(
-        instance.status.as_str(),
-        "suspended" | "failed" | "cancelled"
-    ) {
+    // A physical resume is only meaningful for a parked instance. Failed and
+    // cancelled instances are terminal; accepting them here used to bypass
+    // their terminal lifecycle state by flipping it to running before a
+    // detached runner launch.
+    if instance.status != "suspended" {
         return Ok(ResumeInstanceResponse {
             success: false,
             error: Some(format!(
-                "Cannot resume instance in '{}' state (must be suspended, failed, or cancelled)",
+                "Cannot resume instance in '{}' state (must be suspended)",
                 instance.status
             )),
         });
     }
 
-    // Get checkpoint ID from instance record, or look up the latest checkpoint
-    let checkpoint_id = match instance.checkpoint_id {
-        Some(id) => Some(id),
-        None => {
-            // Failed instances may not have checkpoint_id on the record if the crash
-            // happened before the SDK could update it. Fall back to the latest
-            // checkpoint stored in the checkpoints table.
-            match runtara_core::persistence::postgres::load_latest_checkpoint(
-                &state.pool,
-                &request.instance_id,
-            )
-            .await
-            {
-                Ok(Some(record)) => {
-                    info!(
-                        instance_id = %request.instance_id,
-                        checkpoint_id = %record.checkpoint_id,
-                        "Found latest checkpoint for failed instance"
-                    );
-                    Some(record.checkpoint_id)
-                }
-                _ => {
-                    // No checkpoint anywhere (e.g. suspended for shutdown while
-                    // blocked in a non-durable step before the first checkpoint).
-                    // The workflow model is replay-from-start with checkpoints as
-                    // a result cache, so relaunching without one is valid.
-                    info!(
-                        instance_id = %request.instance_id,
-                        "No checkpoint recorded; relaunching from the start"
-                    );
-                    None
-                }
-            }
-        }
-    };
-
-    // Get image ID and stored env from instance_images table
-    let (image_id, stored_env) =
+    // Read only the durable image binding. Artifact and timeout preflight is
+    // owned by the dispatcher, after this request has a recoverable queue row.
+    let (image_id, _) =
         match db::get_instance_image_with_env(&state.pool, &request.instance_id).await? {
             Some(result) => result,
             None => {
@@ -900,146 +965,49 @@ pub async fn handle_resume_instance(
             }
         };
 
-    let image_registry = ImageRegistry::new(state.pool.clone());
-    let image = match image_registry.get(&image_id).await? {
-        Some(img) => img,
-        None => {
-            return Ok(ResumeInstanceResponse {
-                success: false,
-                error: Some(format!("Image '{}' not found", image_id)),
-            });
-        }
-    };
-
-    if image.tenant_id != instance.tenant_id {
-        warn!(
-            image_id = %image_id,
-            image_tenant = %image.tenant_id,
-            instance_tenant = %instance.tenant_id,
-            "Tenant mismatch when resuming instance"
-        );
-        // Return "not found" to avoid leaking existence
-        return Ok(ResumeInstanceResponse {
-            success: false,
-            error: Some(format!("Image '{}' not found", image_id)),
-        });
-    }
-
-    // Every image is wasm now, so always read binary directly.
-    let wasm_path = PathBuf::from(&image.binary_path);
-
-    // Honor the per-instance timeout persisted at first launch so a long replay
-    // isn't force-killed by a hardcoded default; fall back to the configured
-    // default for instances predating the persisted value.
-    let timeout = db::get_instance_timeout_seconds(&state.pool, &request.instance_id)
-        .await
-        .ok()
-        .flatten()
-        .map(|s| Duration::from_secs(s as u64))
-        .unwrap_or_else(default_instance_timeout);
-
-    // Build launch options with checkpoint and restored env
-    let options = LaunchOptions {
-        instance_id: request.instance_id.clone(),
-        tenant_id: instance.tenant_id.clone(),
-        wasm_path,
-        input: serde_json::json!({}), // Input was consumed on first run
-        timeout,
-        checkpoint_id: checkpoint_id.clone(),
-        // A resume must re-read the stored envelope: the input on this
-        // request is a relaunch placeholder, not the instance's real input.
-        prepersisted_input: None,
-        env: stored_env, // Restore env from initial launch
-    };
-
-    // Remove the old container registry entry BEFORE launching the new process.
-    // This ensures any still-running old monitor will see its handle_id is gone
-    // and skip crash detection, preventing a race where the old monitor marks the
-    // instance as "failed" between launch and new container registration.
-    {
-        let container_registry = ContainerRegistry::new(state.pool.clone());
-        let _ = container_registry.cleanup(&request.instance_id).await;
-    }
-
-    // Update status to "running" BEFORE launch so the WASM process can
-    // immediately perform checkpoint lookups (the Core checkpoint handler
-    // rejects requests from non-running instances).
-    if let Err(e) = state
-        .persistence
-        .update_instance_status(&request.instance_id, "running", Some(chrono::Utc::now()))
-        .await
-    {
-        warn!(error = %e, "Failed to update instance status to running before launch");
-    }
-    // Also update checkpoint_id on the instance record
-    if let Some(cp_id) = checkpoint_id.as_deref()
-        && let Err(e) = state
-            .persistence
-            .update_instance_checkpoint(&request.instance_id, cp_id)
-            .await
-    {
-        warn!(error = %e, "Failed to update instance checkpoint before launch");
-    }
-    // Clear any pending wake so the wake scheduler doesn't relaunch an
-    // instance we're resuming manually (shutdown-suspended instances carry
-    // sleep_until = now for post-restart recovery).
-    if let Err(e) = state
-        .persistence
-        .clear_instance_sleep(&request.instance_id)
-        .await
-    {
-        warn!(error = %e, "Failed to clear sleep_until before resume");
-    }
-
-    // Launch
-    match state.runner.launch_detached(&options).await {
-        Ok(handle) => {
+    let repository = LaunchRepository::new(state.pool.clone());
+    let enqueue = EnqueueRequest::immediate(
+        uuid::Uuid::new_v4().to_string(),
+        request.instance_id.clone(),
+        instance.tenant_id,
+        image_id,
+        LaunchKind::Resume,
+        DEFAULT_LAUNCH_QUEUE_TIMEOUT,
+    );
+    match repository.enqueue(enqueue).await {
+        Ok(EnqueueOutcome::Enqueued(launch)) | Ok(EnqueueOutcome::Existing(launch)) => {
+            // A manual resume supersedes an old timed wake claim. The durable
+            // queue row already fences duplicate runner handoffs, so a failed
+            // clear is safe to retry and does not invalidate this acceptance.
+            if let Err(error) = state
+                .persistence
+                .clear_instance_sleep(&request.instance_id)
+                .await
+            {
+                warn!(instance_id = %request.instance_id, error = %error, "Failed to clear sleep_until after queuing manual resume");
+            }
+            state.launch_notifier.notify_one();
             info!(
                 instance_id = %request.instance_id,
-                handle_id = %handle.handle_id,
-                checkpoint_id = ?checkpoint_id,
-                "Instance resumed successfully"
+                launch_id = %launch.launch_id,
+                "Instance resume durably queued"
             );
-
-            // Clone values for the registry before moving them
-            let handle_id_for_registry = handle.handle_id.clone();
-
-            // Register in container registry
-            let container_registry = ContainerRegistry::new(state.pool.clone());
-            let container_info = ContainerInfo {
-                container_id: handle_id_for_registry,
-                instance_id: request.instance_id.clone(),
-                tenant_id: instance.tenant_id,
-                binary_path: image.binary_path,
-                started_at: handle.started_at,
-                timeout_seconds: Some(timeout.as_secs() as i64),
-            };
-            if let Err(e) = container_registry.register(&container_info).await {
-                warn!(error = %e, "Failed to register container");
-            }
-
-            // Spawn background task to monitor container and process output when done
-            spawn_container_monitor(
-                state.pool.clone(),
-                state.runner.clone(),
-                handle,
-                state.persistence.clone(),
-                options.timeout,
-                state.drain.clone(),
-            );
-
             Ok(ResumeInstanceResponse {
                 success: true,
                 error: None,
             })
         }
-        Err(e) => {
-            error!(error = %e, "Failed to resume instance");
-            Ok(ResumeInstanceResponse {
-                success: false,
-                error: Some(format!("Resume failed: {}", e)),
-            })
-        }
+        Ok(EnqueueOutcome::SingleInstanceActive) => Ok(ResumeInstanceResponse {
+            success: false,
+            error: Some(
+                "Resume deferred because this single-instance workflow already has active work"
+                    .to_string(),
+            ),
+        }),
+        Err(error) => Ok(ResumeInstanceResponse {
+            success: false,
+            error: Some(format!("Resume could not be queued: {error}")),
+        }),
     }
 }
 
@@ -1083,7 +1051,72 @@ pub async fn handle_resume_instance(
 /// and clean up the registry. Metrics/stderr are deliberately NOT collected here
 /// — the previous implementation did not collect them on timeout either, and
 /// doing so now would race with `runner.stop`.
+async fn release_launch_after_monitor(
+    pool: &PgPool,
+    persistence: &dyn Persistence,
+    launch_id: &str,
+    instance_id: &str,
+    lifecycle_observers: &LaunchLifecycleObservers,
+) {
+    let instance = match persistence.get_instance_meta(instance_id).await {
+        Ok(Some(instance)) => instance,
+        Ok(None) => {
+            warn!(
+                launch_id,
+                instance_id, "Launched instance disappeared before queue reconciliation"
+            );
+            return;
+        }
+        Err(error) => {
+            warn!(launch_id, instance_id, error = %error, "Could not read instance after runner exit for queue reconciliation");
+            return;
+        }
+    };
+    let repository = LaunchRepository::new(pool.clone());
+    let result = match instance.status.as_str() {
+        "suspended" => repository
+            .mark_suspended(launch_id)
+            .await
+            .map(|launch| launch.map(|launch| (launch, "suspended"))),
+        "completed" => repository
+            .mark_terminal(launch_id, LaunchState::Completed, None)
+            .await
+            .map(|launch| launch.map(|launch| (launch, "completed"))),
+        "failed" => repository
+            .mark_terminal(launch_id, LaunchState::Failed, instance.error.as_deref())
+            .await
+            .map(|launch| launch.map(|launch| (launch, "failed"))),
+        "cancelled" => repository
+            .mark_terminal(launch_id, LaunchState::Cancelled, None)
+            .await
+            .map(|launch| launch.map(|launch| (launch, "cancelled"))),
+        status => {
+            debug!(
+                launch_id,
+                instance_id, status, "Launch monitor left nonterminal queue generation active"
+            );
+            return;
+        }
+    };
+
+    match result {
+        Ok(Some((launch, reason))) => lifecycle_observers.notify_released(&launch, reason),
+        Ok(None) => {}
+        Err(error) => warn!(
+            launch_id,
+            instance_id,
+            error = %error,
+            "Failed to reconcile queue generation after runner exit"
+        ),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
+/// Spawn the generation-owned monitor for a runner handoff.
+///
+/// The monitor collects diagnostics, writes a crash/timeout fallback when the
+/// guest did not report one, and reconciles the matching durable launch row
+/// only after the Core lifecycle transition has committed.
 pub fn spawn_container_monitor(
     pool: PgPool,
     runner: Arc<dyn Runner>,
@@ -1091,10 +1124,176 @@ pub fn spawn_container_monitor(
     persistence: Arc<dyn Persistence>,
     timeout: Duration,
     drain: DrainController,
+    lifecycle_observers: LaunchLifecycleObservers,
+    // A durable dispatcher installs the monitor before it opens this gate.
+    // The active execution timeout begins only once guest execution is
+    // allowed; a closed gate is bounded by its separate handoff lease. The
+    // durable attempt fences cleanup when a recovered launch reuses its id.
+    start_gate: Option<(StartGate, i32)>,
 ) {
     let instance_id = handle.instance_id.clone();
 
     tokio::spawn(async move {
+        if let Some((gate, attempt_count)) = start_gate {
+            // The runner, not this monitor, performs the durable confirmation
+            // immediately before guest preparation. Waiting for that result
+            // prevents monitor ownership from clearing a recoverable marker.
+            match gate.wait_for_runner_confirmation().await {
+                StartGateOutcome::Opened => {}
+                StartGateOutcome::Cancelled
+                | StartGateOutcome::TimedOut
+                | StartGateOutcome::ConfirmationFailed => {
+                    warn!(
+                        instance_id = %instance_id,
+                        launch_id = %handle.launch_id,
+                        attempt_count,
+                        "Start gate did not permit guest execution; terminalizing exact handoff"
+                    );
+                    let repository = LaunchRepository::new(pool.clone());
+                    let terminal = match tokio::time::timeout(
+                        START_GATE_MONITOR_CLEANUP_TIMEOUT,
+                        repository.fail_unconfirmed_running(
+                            &handle.launch_id,
+                            attempt_count,
+                            "runner did not durably cross start gate",
+                        ),
+                    )
+                    .await
+                    {
+                        Ok(result) => result,
+                        Err(_) => {
+                            warn!(
+                                instance_id = %instance_id,
+                                launch_id = %handle.launch_id,
+                                attempt_count,
+                                "Timed out terminalizing failed start-gate handoff; durable expiry will recover it"
+                            );
+                            return;
+                        }
+                    };
+                    match terminal {
+                        Ok(Some(failed)) => {
+                            // The conditional queue/Core transaction won
+                            // before we touch the runner registry. A
+                            // confirmation that committed just as its
+                            // response was lost clears the marker, making
+                            // this update return `None` instead of killing a
+                            // live guest.
+                            match tokio::time::timeout(
+                                START_GATE_MONITOR_CLEANUP_TIMEOUT,
+                                runner.stop(&handle),
+                            )
+                            .await
+                            {
+                                Ok(Err(error)) => {
+                                    warn!(
+                                        instance_id = %instance_id,
+                                        launch_id = %handle.launch_id,
+                                        error = %error,
+                                        "Failed to stop runner after failed start-gate confirmation"
+                                    );
+                                }
+                                Err(_) => {
+                                    warn!(
+                                        instance_id = %instance_id,
+                                        launch_id = %handle.launch_id,
+                                        "Timed out stopping failed start-gate runner; closed gate/lease recovery remains authoritative"
+                                    );
+                                }
+                                Ok(Ok(())) => {}
+                            }
+                            let registry = ContainerRegistry::new(pool.clone());
+                            match tokio::time::timeout(
+                                START_GATE_MONITOR_CLEANUP_TIMEOUT,
+                                registry.cleanup_handle(
+                                    &instance_id,
+                                    &handle.launch_id,
+                                    &handle.handle_id,
+                                ),
+                            )
+                            .await
+                            {
+                                Ok(Err(error)) => {
+                                    warn!(
+                                        instance_id = %instance_id,
+                                        launch_id = %handle.launch_id,
+                                        error = %error,
+                                        "Could not remove failed start-gate runner registry row"
+                                    );
+                                }
+                                Err(_) => {
+                                    warn!(
+                                        instance_id = %instance_id,
+                                        launch_id = %handle.launch_id,
+                                        "Timed out removing failed start-gate registry row; restart recovery will reconcile it"
+                                    );
+                                }
+                                Ok(Ok(_)) => {}
+                            }
+                            lifecycle_observers.notify_released(&failed, "start_gate_failed");
+                            return;
+                        }
+                        Ok(None) => {
+                            match tokio::time::timeout(
+                                START_GATE_MONITOR_CLEANUP_TIMEOUT,
+                                repository.is_gate_confirmed(&handle.launch_id, attempt_count),
+                            )
+                            .await
+                            {
+                                Err(_) => {
+                                    warn!(
+                                        instance_id = %instance_id,
+                                        launch_id = %handle.launch_id,
+                                        attempt_count,
+                                        "Timed out reading failed start-gate handoff; retaining registry for durable recovery"
+                                    );
+                                    return;
+                                }
+                                Ok(Ok(true)) => {
+                                    // Confirmation won the exact marker race.
+                                    // Continue into the normal monitor path.
+                                    warn!(
+                                        instance_id = %instance_id,
+                                        launch_id = %handle.launch_id,
+                                        attempt_count,
+                                        "Start gate was confirmed while monitor observed its deadline"
+                                    );
+                                }
+                                Ok(Ok(false)) => {
+                                    debug!(
+                                        instance_id = %instance_id,
+                                        launch_id = %handle.launch_id,
+                                        attempt_count,
+                                        "Failed start-gate handoff was already recovered or terminalized"
+                                    );
+                                    return;
+                                }
+                                Ok(Err(error)) => {
+                                    warn!(
+                                        instance_id = %instance_id,
+                                        launch_id = %handle.launch_id,
+                                        attempt_count,
+                                        error = %error,
+                                        "Could not read failed start-gate handoff; retaining registry for recovery"
+                                    );
+                                    return;
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            warn!(
+                                instance_id = %instance_id,
+                                launch_id = %handle.launch_id,
+                                attempt_count,
+                                error = %error,
+                                "Could not terminalize failed start-gate handoff; retaining registry for recovery"
+                            );
+                            return;
+                        }
+                    }
+                }
+            }
+        }
         // Brief initial delay to let the process start before we begin watching it.
         tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -1186,7 +1385,7 @@ pub fn spawn_container_monitor(
                 // stale monitor would have used to throw away the row of the
                 // run that replaced it.
                 let is_stale_monitor = match container_registry
-                    .cleanup_generation(&instance_id, &handle.handle_id)
+                    .cleanup_handle(&instance_id, &handle.launch_id, &handle.handle_id)
                     .await
                 {
                     Ok(owned) => !owned,
@@ -1314,6 +1513,20 @@ pub fn spawn_container_monitor(
                             }
                         }
                     }
+
+                    // The Core transition above (whether guest-reported,
+                    // crash-derived, or drain-derived) has committed before
+                    // this reconciliation runs. Release admission only after
+                    // the matching queue generation is durably terminal or
+                    // parked; observer failure is intentionally out-of-band.
+                    release_launch_after_monitor(
+                        &pool,
+                        persistence.as_ref(),
+                        &handle.launch_id,
+                        &instance_id,
+                        &lifecycle_observers,
+                    )
+                    .await;
                 }
 
             }
@@ -1345,8 +1558,17 @@ pub fn spawn_container_monitor(
                 // Clean up container registry, but only the row this monitor
                 // registered: a resume may have replaced it with a live run.
                 let _ = container_registry
-                    .cleanup_generation(&instance_id, &handle.handle_id)
+                    .cleanup_handle(&instance_id, &handle.launch_id, &handle.handle_id)
                     .await;
+
+                release_launch_after_monitor(
+                    &pool,
+                    persistence.as_ref(),
+                    &handle.launch_id,
+                    &instance_id,
+                    &lifecycle_observers,
+                )
+                .await;
             }
         }
     });

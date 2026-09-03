@@ -26,11 +26,13 @@
 //! `spikes/wasip3-stackful` (`run-both-sync`).
 //!
 //! V1 eligibility (anything else degrades to the sequential lowering):
-//!   - Split: not durable, no retries, no timeout, any `dontStopOnFailed`.
-//!   - Body: exactly one Agent step (terminal next), no retries, not durable,
-//!     no breakpoint, and not a workflow-agent child (those share the parent's
+//!   - Split: no retries or timeout; `dontStopOnFailed` stays on the sequential
+//!     lowering.
+//!   - Body: exactly one Agent step (terminal next), no retries, no breakpoint,
+//!     and not a workflow-agent child (those share the parent's
 //!     runtime host and checkpoint scope — concurrent invocations are a
-//!     Phase-4 question).
+//!     Phase-4 question). A requested retrying body is a stable support error,
+//!     not an in-run timer fallback.
 
 use std::collections::BTreeMap;
 
@@ -110,11 +112,8 @@ pub(super) struct ParallelAgentBody<'a> {
     pub(super) max_retries: u32,
     pub(super) retry_delay_ms: u64,
     pub(super) rate_limit_budget_ms: u64,
-    /// True when the window itself runs the retry backoff as concurrent timer
-    /// subtasks (§3.4) — non-durable agents with retries. Durable agents keep
-    /// the retry loop in assemble (per-attempt checkpoints replay in order);
-    /// no-retry agents never back off. When true, assemble consumes the final
-    /// post-retry result with retries DISABLED.
+    /// Reserved for retired timer-subtask lowering. Production eligibility
+    /// accepts only no-retry items, so this remains false.
     pub(super) concurrent_backoff: bool,
     pub(super) next_plan: &'a DirectRunPlan,
     pub(super) error_plan: Option<&'a super::DirectErrorRoutePlan>,
@@ -172,12 +171,11 @@ pub(super) fn parallel_agent_body<'a>(
     else {
         return None;
     };
-    // Agent RETRIES are fine: attempt 1 consumes the memoized launch result
-    // (consume-once slots), attempts 2+ re-invoke synchronously with the
-    // standard backoff. Agent DURABILITY is fine too: the launch pass gates on
-    // the step-level checkpoint (a HIT never launches, so replay cannot
-    // double side effects), and assemble re-runs the standard durable block.
-    if *breakpoint || static_data.agent_is_workflow_agent(*agent_id) {
+    // A top-level lifecycle retry parks the whole workflow. The concurrent
+    // window cannot retain independent per-item timer continuations across
+    // that park, so support rejects this production shape. Keep the internal
+    // eligibility gate aligned as a defense for callers that bypass support.
+    if *breakpoint || *agent_retries > 0 || static_data.agent_is_workflow_agent(*agent_id) {
         return None;
     }
     // Any continuation after the Agent is fine: the launch pass only fronts
@@ -192,11 +190,9 @@ pub(super) fn parallel_agent_body<'a>(
         max_retries: *agent_retries,
         retry_delay_ms: *retry_delay_ms,
         rate_limit_budget_ms: *rate_limit_budget_ms,
-        // Retrying items back off concurrently in the window (§3.4) — for
-        // durable agents too, via per-attempt `::attempt::N` checkpoints that
-        // replay in order (a HIT skips the invoke AND its already-elapsed
-        // sleep). No-retry items never back off.
-        concurrent_backoff: *agent_retries > 0,
+        // Retry policies are rejected before a concurrent window is planned;
+        // only no-retry items reach this lowering.
+        concurrent_backoff: false,
         next_plan,
         error_plan: error_plan.as_ref(),
     })
@@ -668,8 +664,9 @@ fn emit_pool_reinvoke(
 /// The chunked launch/drain/assemble item pipeline. Emitted INSIDE the split
 /// prologue (frames, source, count, results and heap watermark already set
 /// up by `emit_split_plan`), replacing the sequential item loop. The caller
-/// guarantees: no retries, not durable, no timeout — so no retry frame, no
-/// checkpoint block, no deadline checks exist around this.
+/// guarantees: no retries and no timeout — so no retry frame or deadline
+/// checks exist around this. A durable outer Split checkpoint may still wrap
+/// the item region.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn emit_parallel_split_items(
     body: &mut WasmFunction,
@@ -1530,9 +1527,9 @@ pub(super) fn emit_parallel_agent_body(
         parallel.input_mapping_id,
         parallel.durable_checkpoint,
         false, // breakpoint (excluded by eligibility)
-        // The window already ran the retries when concurrent_backoff is set —
-        // assemble consumes the FINAL result with retries disabled; otherwise
-        // assemble owns the retry loop (durable path).
+        // Production eligibility only permits no-retry items. Keep the
+        // `assemble_max_retries` indirection for migration/differential
+        // lowering tests, but it resolves to zero for supported windows.
         parallel.assemble_max_retries(),
         parallel.retry_delay_ms,
         parallel.rate_limit_budget_ms,

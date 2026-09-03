@@ -21,14 +21,25 @@
 use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tracing::{error, info, warn};
+use tokio::io::AsyncWriteExt;
+use tokio::process::{Child, Command};
+use tokio::sync::{OwnedSemaphorePermit, TryAcquireError};
+use tokio::time::timeout_at;
+use tracing::{debug, error, info, warn};
 
+use runtara_component_host::precompile::{
+    PRECOMPILE_NONCE_BYTES, PRECOMPILE_WORKER_ARGUMENT, PrecompileRequest, PrecompileResponse,
+    deserialize_trusted_precompiled_component, read_precompile_response_async,
+    validate_precompile_response, write_precompile_request_async,
+};
 use runtara_component_host::{
-    EngineConfig, WorkflowExecutor, WorkflowExit, WorkflowLimits, WorkflowRunSpec, build_engine,
-    spawn_epoch_ticker,
+    EngineConfig, PreparedWorkflow, WorkflowExecutor, WorkflowExit, WorkflowLimits,
+    WorkflowRunSpec, WorkflowStartConfirmation, build_engine, spawn_epoch_ticker,
 };
 use runtara_core::instance_handlers::{
     InstanceHandlerState, SignalAck, SignalType, handle_signal_ack,
@@ -37,8 +48,8 @@ use runtara_core::persistence::Persistence;
 
 use super::common::{self, WorkflowRunnerConfig};
 use super::traits::{
-    CancelToken, ContainerMetrics, LaunchOptions, LaunchResult, Result, Runner, RunnerError,
-    RunnerHandle, RunnerOccupancy,
+    CancelToken, ContainerMetrics, LaunchOptions, LaunchResult, PreparationOccupancy,
+    PreparedLaunch, Result, Runner, RunnerError, RunnerHandle, RunnerOccupancy, StartGateOutcome,
 };
 
 /// Mark a run `running`, clearing what a previous stop left behind.
@@ -63,14 +74,82 @@ async fn mark_running(persistence: &dyn Persistence, instance_id: &str) {
     }
 }
 
-/// Per-instance bookkeeping for detached runs.
+/// Per-launch bookkeeping for detached runs.
 struct InstanceTask {
     cancel: CancelToken,
     finished: AtomicBool,
     done: tokio::sync::Notify,
 }
 
+/// Environment's bridge from the runner-owned in-memory gate to the
+/// component-host pre-instantiation boundary.
+///
+/// It is deliberately invoked only after the host has built its Store/WASI
+/// state, immediately before `instantiate_async`. A crash or pause in any
+/// earlier runner work therefore leaves the durable gate marker intact for
+/// queue recovery instead of advertising a guest that never began.
+struct GateWorkflowStartConfirmation {
+    gate: super::traits::StartGate,
+}
+
+#[async_trait]
+impl WorkflowStartConfirmation for GateWorkflowStartConfirmation {
+    async fn confirm_before_instantiate(&self) -> anyhow::Result<()> {
+        match self.gate.wait_and_confirm().await {
+            StartGateOutcome::Opened => Ok(()),
+            StartGateOutcome::Cancelled => {
+                anyhow::bail!("start gate was cancelled before guest instantiation")
+            }
+            StartGateOutcome::TimedOut => {
+                anyhow::bail!("start gate timed out before guest instantiation")
+            }
+            StartGateOutcome::ConfirmationFailed => {
+                anyhow::bail!("durable start gate confirmation failed before guest instantiation")
+            }
+        }
+    }
+}
+
 type TaskRegistry = Arc<Mutex<HashMap<String, Arc<InstanceTask>>>>;
+
+/// Remove a detached task only when this generation still owns the registry
+/// entry. A replacement can be installed while an old task is unwinding; an
+/// unconditional remove would make the live replacement invisible to stop and
+/// monitoring paths.
+fn remove_task_if_current(registry: &TaskRegistry, launch_id: &str, task: &Arc<InstanceTask>) {
+    let mut tasks = registry
+        .lock()
+        // This can run while a guest task is already unwinding. Recovering
+        // the map is safer than turning a bookkeeping cleanup panic into an
+        // abort that permanently leaks the visible runner handle.
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if tasks
+        .get(launch_id)
+        .is_some_and(|current| Arc::ptr_eq(current, task))
+    {
+        tasks.remove(launch_id);
+    }
+}
+
+/// Guarantees that a detached task retires its visible handle even while it
+/// unwinds from a panic or cancellation.
+///
+/// The run permit has its own RAII guard, but the task map is also a capacity
+/// signal to monitors. Leaving it `finished = false` after a panic makes a
+/// completed generation look permanently live until an unrelated cleanup.
+struct TaskCompletionGuard {
+    task: Arc<InstanceTask>,
+    registry: TaskRegistry,
+    launch_id: String,
+}
+
+impl Drop for TaskCompletionGuard {
+    fn drop(&mut self) {
+        self.task.finished.store(true, Ordering::SeqCst);
+        remove_task_if_current(&self.registry, &self.launch_id, &self.task);
+        self.task.done.notify_waiters();
+    }
+}
 
 /// In-process workflow runner backed by an embedded wasmtime engine.
 pub struct EmbeddedWasmRunner {
@@ -82,6 +161,19 @@ pub struct EmbeddedWasmRunner {
     persistence: Arc<dyn Persistence>,
     executor: Arc<WorkflowExecutor>,
     tasks: TaskRegistry,
+    /// Independently bounds filesystem, persisted-input, and component work
+    /// performed before a guest consumes a live run permit.
+    preparation_permits: Arc<tokio::sync::Semaphore>,
+    /// The bound `preparation_permits` was built with.
+    preparation_limit: usize,
+    /// Acquisition times for preparation permits, surfaced separately from
+    /// live-run occupancy in the pipeline.
+    preparation_slots: PreparationSlotRegistry,
+    /// The killable compiler boundary used for durable preparation. It has a
+    /// bounded replacement budget separate from the in-process prep permits:
+    /// a child stuck in uninterruptible kernel I/O keeps its child slot while
+    /// a fresh durable attempt can use the bounded spare capacity.
+    precompiler: Arc<dyn ComponentPrecompiler>,
     /// Bounds how many guests execute at once, whatever asks for them.
     ///
     /// `launch_detached` spawns the run and returns, so the caller's own
@@ -112,8 +204,39 @@ pub struct EmbeddedWasmRunner {
     handler_state: Arc<runtara_core::instance_handlers::InstanceHandlerState>,
 }
 
-/// Acquisition times of the run permits currently held, keyed by instance.
-type RunSlotRegistry = Arc<Mutex<HashMap<String, Instant>>>;
+/// A run permit holder, keyed by launch generation.
+#[derive(Clone)]
+struct RunSlotEntry {
+    instance_id: String,
+    taken_at: Instant,
+}
+
+/// Acquisition times of the run permits currently held, keyed by launch.
+type RunSlotRegistry = Arc<Mutex<HashMap<String, RunSlotEntry>>>;
+
+/// A preparation permit holder, keyed by launch generation.
+#[derive(Clone)]
+struct PreparationSlotEntry {
+    instance_id: String,
+    taken_at: Instant,
+}
+
+/// Acquisition times of preparation permits currently held, keyed by launch.
+type PreparationSlotRegistry = Arc<Mutex<HashMap<String, PreparationSlotEntry>>>;
+
+#[derive(Clone)]
+struct PrecompileChildSlotEntry {
+    started_at: Instant,
+    retired: bool,
+}
+
+/// Process-private bookkeeping for live and reaping precompile children.
+///
+/// The semaphore remains authoritative for the held count; this registry
+/// supplies oldest age and the reaping subset for the pipeline so a timeout is
+/// never rendered as an idle preparation pool while an unkillable child still
+/// exists.
+type PrecompileChildRegistry = Arc<Mutex<HashMap<String, PrecompileChildSlotEntry>>>;
 
 /// A held run permit, tied to the moment it was taken.
 ///
@@ -124,11 +247,434 @@ type RunSlotRegistry = Arc<Mutex<HashMap<String, Instant>>>;
 struct RunSlot {
     /// Dropped with the struct; that release is the whole point of the field.
     _permit: tokio::sync::OwnedSemaphorePermit,
-    instance_id: String,
+    launch_id: String,
     registry: RunSlotRegistry,
     /// Bumped as the permit returns, so the count of finished runs cannot drift
     /// from the count of released permits.
     finished: Arc<AtomicU64>,
+}
+
+/// A held preparation permit. It is intentionally carried inside
+/// [`EmbeddedPreparedLaunch`] until the child-validated component reaches the
+/// short run-permit handoff. If a preparation outlives its durable lease,
+/// dropping the token cannot make the preparation pool look idle early.
+struct PreparationSlot {
+    _permit: tokio::sync::OwnedSemaphorePermit,
+    /// Includes the durable preparation claim incarnation so a recovered
+    /// compiler cannot overwrite/remove telemetry for a newer same-launch
+    /// attempt that happens to share the dispatcher owner.
+    slot_key: String,
+    registry: PreparationSlotRegistry,
+}
+
+/// Everything a verified pre-run phase hands to the short run-permit phase.
+///
+/// The opaque outer [`PreparedLaunch`] keeps this runner-specific state out of
+/// the durable dispatcher. It owns the exact component returned by the child
+/// compiler and releases preparation capacity before a live run permit is
+/// requested.
+struct EmbeddedPreparedLaunch {
+    _preparation_slot: PreparationSlot,
+    workflow: PreparedWorkflow,
+    input: Vec<u8>,
+}
+
+/// A bounded child-process compiler for durable preparations.
+///
+/// All source-file reads, hashing, and Wasmtime compilation happen behind
+/// this interface. The parent only receives a validated serialized component
+/// over a private pipe and links it without a filesystem read.
+#[async_trait]
+trait ComponentPrecompiler: Send + Sync {
+    async fn prepare(
+        &self,
+        executor: &WorkflowExecutor,
+        options: &LaunchOptions,
+    ) -> Result<PreparedWorkflow>;
+
+    fn child_occupancy(&self) -> Option<PrecompileChildOccupancy> {
+        None
+    }
+}
+
+#[derive(Clone, Copy)]
+struct PrecompileChildOccupancy {
+    limit: u64,
+    held: u64,
+    retired: u64,
+    oldest_held_ms: Option<u64>,
+}
+
+/// Production implementation of [`ComponentPrecompiler`].
+///
+/// The program is always the current server executable, which exposes the
+/// hidden `--internal-precompile-component` command. Keeping both ends in the
+/// same trusted binary is part of the provenance contract for Wasmtime's
+/// unsafe serialized-component deserialization boundary.
+struct ChildComponentPrecompiler {
+    child_permits: Arc<tokio::sync::Semaphore>,
+    child_limit: usize,
+    child_slots: PrecompileChildRegistry,
+    /// Child processes still being reaped after a preparation deadline.
+    /// They hold a child permit until `wait()` completes, preventing a stuck
+    /// mount from becoming an unbounded stream of replacement processes.
+    retired_children: Arc<AtomicU64>,
+}
+
+impl ChildComponentPrecompiler {
+    fn new(preparation_limit: usize) -> Self {
+        // Keep one replacement generation available for each active prep
+        // worker. A hard cap means permanently unkillable (for example D
+        // state) children eventually apply backpressure instead of multiplying
+        // forever, while a normal timeout can immediately make forward
+        // progress without borrowing a guest run slot.
+        let child_limit = max_concurrent_precompile_children(preparation_limit);
+        Self {
+            child_permits: Arc::new(tokio::sync::Semaphore::new(child_limit)),
+            child_limit,
+            child_slots: Arc::new(Mutex::new(HashMap::new())),
+            retired_children: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    fn worker_program(&self) -> Result<PathBuf> {
+        std::env::current_exe().map_err(|error| {
+            RunnerError::Other(format!(
+                "could not resolve current server executable for internal component precompile worker: {error}"
+            ))
+        })
+    }
+
+    async fn exchange(
+        &self,
+        options: &LaunchOptions,
+    ) -> Result<(PrecompileRequest, PrecompileResponse)> {
+        let deadline = options
+            .preparation_deadline
+            .unwrap_or_else(|| tokio::time::Instant::now() + DEFAULT_PRECOMPILER_TIMEOUT);
+        if deadline <= tokio::time::Instant::now() {
+            return Err(RunnerError::PreparationTimedOut(
+                "precompile worker reached its preparation deadline before launch".to_string(),
+            ));
+        }
+
+        let child_permit = Arc::clone(&self.child_permits)
+            .try_acquire_owned()
+            .map_err(|error| match error {
+                TryAcquireError::NoPermits => RunnerError::PreparationCapacityUnavailable,
+                TryAcquireError::Closed => {
+                    RunnerError::Other("precompile child semaphore closed".to_string())
+                }
+            })?;
+        let nonce = precompile_nonce()?;
+        let child_slot_key = hex_digest(nonce);
+        let request =
+            PrecompileRequest::for_artifact(nonce, &options.wasm_path).map_err(|error| {
+                RunnerError::StartFailed(format!("build precompile request: {error:#}"))
+            })?;
+        let program = self.worker_program()?;
+        let mut command = Command::new(&program);
+        command
+            .arg(PRECOMPILE_WORKER_ARGUMENT)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            // Protocol failures travel over bounded stdout frames. Do not
+            // retain arbitrary child diagnostics in the parent process.
+            .stderr(Stdio::null());
+        let child = command.spawn().map_err(|error| {
+            RunnerError::StartFailed(format!(
+                "spawn precompile worker {}: {error}",
+                program.display()
+            ))
+        })?;
+        self.child_slots
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(
+                child_slot_key.clone(),
+                PrecompileChildSlotEntry {
+                    started_at: Instant::now(),
+                    retired: false,
+                },
+            );
+        let mut child = ManagedPrecompileChild::new(
+            child,
+            child_permit,
+            Arc::clone(&self.retired_children),
+            Arc::clone(&self.child_slots),
+            child_slot_key,
+        );
+
+        let exchange = async {
+            let stdin = child.child_mut().stdin.take().ok_or_else(|| {
+                RunnerError::StartFailed("precompile worker did not expose stdin".to_string())
+            })?;
+            let stdout = child.child_mut().stdout.take().ok_or_else(|| {
+                RunnerError::StartFailed("precompile worker did not expose stdout".to_string())
+            })?;
+            let mut stdin = stdin;
+            let mut stdout = stdout;
+            write_precompile_request_async(&mut stdin, &request)
+                .await
+                .map_err(|error| {
+                    RunnerError::StartFailed(format!("write precompile request: {error:#}"))
+                })?;
+            stdin.shutdown().await.map_err(|error| {
+                RunnerError::StartFailed(format!("close precompile request pipe: {error}"))
+            })?;
+            let response = read_precompile_response_async(&mut stdout)
+                .await
+                .map_err(|error| {
+                    RunnerError::StartFailed(format!("read precompile response: {error:#}"))
+                })?;
+            let status = child.child_mut().wait().await.map_err(|error| {
+                RunnerError::StartFailed(format!("wait for precompile worker: {error}"))
+            })?;
+            Ok::<_, RunnerError>((response, status))
+        };
+
+        match timeout_at(deadline, exchange).await {
+            Ok(Ok((response, status))) => {
+                child.disarm();
+                if !status.success() {
+                    // A valid child failure is framed before it exits nonzero;
+                    // preserve that bounded diagnostic rather than reducing it
+                    // to a platform-specific exit status.
+                    return Err(match validate_precompile_response(&request, &response) {
+                        Err(error) => map_precompile_error(&options.wasm_path, error),
+                        Ok(_) => RunnerError::StartFailed(format!(
+                            "precompile worker exited with unexpected status {status}"
+                        )),
+                    });
+                }
+                Ok((request, response))
+            }
+            Ok(Err(error)) => {
+                child.kill_and_reap("precompile worker protocol failure");
+                Err(error)
+            }
+            Err(_) => {
+                child.kill_and_reap("precompile worker preparation deadline elapsed");
+                Err(RunnerError::PreparationTimedOut(
+                    "component precompile worker exceeded the preparation deadline".to_string(),
+                ))
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl ComponentPrecompiler for ChildComponentPrecompiler {
+    async fn prepare(
+        &self,
+        executor: &WorkflowExecutor,
+        options: &LaunchOptions,
+    ) -> Result<PreparedWorkflow> {
+        let (request, response) = self.exchange(options).await?;
+        let source_digest = validate_precompile_response(&request, &response)
+            .map_err(|error| map_precompile_error(&options.wasm_path, error))?
+            .source_digest();
+        validate_expected_workflow_checksum(options, source_digest)?;
+        // SAFETY: `response` was read from the private stdout pipe of the
+        // exact worker command spawned above; that command's internal mode is
+        // the component-host protocol writer. The protocol validation checks
+        // its nonce, digest, and engine fingerprint before Wasmtime sees it.
+        let component = unsafe {
+            deserialize_trusted_precompiled_component(executor.engine(), &request, &response)
+        }
+        .map_err(|error| map_precompile_error(&options.wasm_path, error))?;
+        let workflow = executor
+            .prepare_precompiled(component)
+            .await
+            .map_err(|error| {
+                RunnerError::StartFailed(format!("link precompiled workflow: {error:#}"))
+            })?;
+        Ok(workflow)
+    }
+
+    fn child_occupancy(&self) -> Option<PrecompileChildOccupancy> {
+        let held = self
+            .child_limit
+            .saturating_sub(self.child_permits.available_permits());
+        let slots = self
+            .child_slots
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let now = Instant::now();
+        let oldest = slots.values().min_by_key(|entry| entry.started_at);
+        Some(PrecompileChildOccupancy {
+            limit: u64::try_from(self.child_limit).unwrap_or(u64::MAX),
+            held: u64::try_from(held).unwrap_or(u64::MAX),
+            retired: u64::try_from(slots.values().filter(|entry| entry.retired).count())
+                .unwrap_or(u64::MAX),
+            oldest_held_ms: oldest
+                .map(|entry| now.saturating_duration_since(entry.started_at).as_millis() as u64),
+        })
+    }
+}
+
+/// Test-only protocol-compatible precompiler.
+///
+/// Environment integration tests run as a libtest binary rather than the
+/// server binary that owns `--internal-precompile-component`. They opt into
+/// this implementation explicitly; production construction always uses
+/// [`ChildComponentPrecompiler`]. Keeping this behind the database-test
+/// feature avoids a hidden in-process fallback in deployed hosts.
+#[cfg(feature = "db-integration-tests")]
+struct InProcessTestComponentPrecompiler;
+
+#[cfg(feature = "db-integration-tests")]
+#[async_trait]
+impl ComponentPrecompiler for InProcessTestComponentPrecompiler {
+    async fn prepare(
+        &self,
+        executor: &WorkflowExecutor,
+        options: &LaunchOptions,
+    ) -> Result<PreparedWorkflow> {
+        let request = PrecompileRequest::for_artifact(precompile_nonce()?, &options.wasm_path)
+            .map_err(|error| {
+                RunnerError::StartFailed(format!("build test precompile request: {error:#}"))
+            })?;
+        let worker_request = request.clone();
+        let response = tokio::task::spawn_blocking(move || {
+            runtara_component_host::precompile::precompile_artifact(&worker_request)
+                .map(PrecompileResponse::Success)
+        })
+        .await
+        .map_err(|error| RunnerError::Other(format!("test precompile worker panicked: {error}")))?
+        .map_err(|error| map_precompile_error(&options.wasm_path, error))?;
+        let source_digest = validate_precompile_response(&request, &response)
+            .map_err(|error| map_precompile_error(&options.wasm_path, error))?
+            .source_digest();
+        validate_expected_workflow_checksum(options, source_digest)?;
+        // SAFETY: this test helper invokes the same component-host precompile
+        // function in-process and immediately wraps its exact output in the
+        // protocol response used by production.
+        let component = unsafe {
+            deserialize_trusted_precompiled_component(executor.engine(), &request, &response)
+        }
+        .map_err(|error| map_precompile_error(&options.wasm_path, error))?;
+        let workflow = executor
+            .prepare_precompiled(component)
+            .await
+            .map_err(|error| {
+                RunnerError::StartFailed(format!("link test precompiled workflow: {error:#}"))
+            })?;
+        Ok(workflow)
+    }
+}
+
+/// Owns a child process until it either exits normally or a detached reaper
+/// observes the result after timeout/cancellation. Its `Drop` is deliberately
+/// kill-safe: cancelling a dispatcher task cannot leave a compiler child
+/// behind just because the future was dropped mid-pipe exchange.
+struct ManagedPrecompileChild {
+    child: Option<Child>,
+    permit: Option<OwnedSemaphorePermit>,
+    retired_children: Arc<AtomicU64>,
+    slots: PrecompileChildRegistry,
+    slot_key: String,
+}
+
+impl ManagedPrecompileChild {
+    fn new(
+        child: Child,
+        permit: OwnedSemaphorePermit,
+        retired_children: Arc<AtomicU64>,
+        slots: PrecompileChildRegistry,
+        slot_key: String,
+    ) -> Self {
+        Self {
+            child: Some(child),
+            permit: Some(permit),
+            retired_children,
+            slots,
+            slot_key,
+        }
+    }
+
+    fn child_mut(&mut self) -> &mut Child {
+        self.child
+            .as_mut()
+            .expect("managed precompile child is present")
+    }
+
+    fn disarm(&mut self) {
+        self.child.take();
+        self.permit.take();
+        self.remove_slot();
+    }
+
+    fn remove_slot(&self) {
+        self.slots
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&self.slot_key);
+    }
+
+    fn kill_and_reap(&mut self, reason: &'static str) {
+        let Some(mut child) = self.child.take() else {
+            return;
+        };
+        let Some(permit) = self.permit.take() else {
+            return;
+        };
+        if let Err(error) = child.start_kill() {
+            warn!(error = %error, "Could not signal timed-out precompile child; reaper will still wait");
+        }
+        let retired_children = Arc::clone(&self.retired_children);
+        if let Some(slot) = self
+            .slots
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get_mut(&self.slot_key)
+        {
+            slot.retired = true;
+        }
+        let slots = Arc::clone(&self.slots);
+        let slot_key = self.slot_key.clone();
+        let retired = retired_children.fetch_add(1, Ordering::SeqCst) + 1;
+        warn!(
+            retired_precompile_children = retired,
+            reason, "Detached a timed-out precompile child for reaping"
+        );
+        let reaper = async move {
+            if let Err(error) = child.wait().await {
+                warn!(error = %error, "Could not reap terminated precompile child");
+            }
+            let remaining = retired_children
+                .fetch_sub(1, Ordering::SeqCst)
+                .saturating_sub(1);
+            debug!(
+                retired_precompile_children = remaining,
+                "Reaped detached precompile child"
+            );
+            slots
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&slot_key);
+            drop(permit);
+        };
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(reaper);
+        } else {
+            // A runtime shutdown can call Drop outside Tokio. The kill signal
+            // has already been delivered; dropping the permit avoids a leak in
+            // a process that is itself exiting.
+            drop(reaper);
+            self.retired_children.fetch_sub(1, Ordering::SeqCst);
+            self.remove_slot();
+        }
+    }
+}
+
+impl Drop for ManagedPrecompileChild {
+    fn drop(&mut self) {
+        // This path is reached when a caller cancels a preparation future.
+        // `kill_and_reap` is synchronous until its detached wait task, so it
+        // is safe to call from Drop and preserves the bounded child slot.
+        self.kill_and_reap("precompile future cancelled");
+    }
 }
 
 /// Turn a semaphore reading plus the slot map into an occupancy report.
@@ -140,7 +686,7 @@ struct RunSlot {
 fn compute_occupancy(
     limit: usize,
     available: usize,
-    slots: &HashMap<String, Instant>,
+    slots: &HashMap<String, RunSlotEntry>,
     now: Instant,
 ) -> RunnerOccupancy {
     // Deliberately not `slots.len()`. A permit is taken before its acquisition
@@ -148,17 +694,38 @@ fn compute_occupancy(
     // semaphore never does. The map's only job is answering "how old is the
     // oldest", where a momentarily missing entry costs nothing.
     let held = limit.saturating_sub(available);
-    let oldest = slots.iter().min_by_key(|(_, taken)| **taken);
+    let oldest = slots.values().min_by_key(|entry| entry.taken_at);
     RunnerOccupancy {
         limit: limit as u64,
         held: held as u64,
         oldest_held_ms: oldest
-            .map(|(_, taken)| now.saturating_duration_since(*taken).as_millis() as u64),
-        oldest_instance_id: oldest.map(|(id, _)| id.clone()),
+            .map(|entry| now.saturating_duration_since(entry.taken_at).as_millis() as u64),
+        oldest_instance_id: oldest.map(|entry| entry.instance_id.clone()),
         // Filled in by the caller, which owns the lifetime counters; this
         // function is about a single instant's occupancy.
         runs_started: 0,
         runs_finished: 0,
+    }
+}
+
+fn compute_preparation_occupancy(
+    limit: usize,
+    available: usize,
+    slots: &HashMap<String, PreparationSlotEntry>,
+    now: Instant,
+) -> PreparationOccupancy {
+    let held = limit.saturating_sub(available);
+    let oldest = slots.values().min_by_key(|entry| entry.taken_at);
+    PreparationOccupancy {
+        limit: limit as u64,
+        held: held as u64,
+        oldest_held_ms: oldest
+            .map(|entry| now.saturating_duration_since(entry.taken_at).as_millis() as u64),
+        oldest_instance_id: oldest.map(|entry| entry.instance_id.clone()),
+        precompile_child_limit: None,
+        precompile_child_held: None,
+        precompile_child_oldest_ms: None,
+        precompile_child_retired: None,
     }
 }
 
@@ -172,8 +739,18 @@ impl Drop for RunSlot {
             .registry
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        slots.remove(&self.instance_id);
+        slots.remove(&self.launch_id);
         self.finished.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+impl Drop for PreparationSlot {
+    fn drop(&mut self) {
+        let mut slots = self
+            .registry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        slots.remove(&self.slot_key);
     }
 }
 
@@ -190,10 +767,16 @@ impl EmbeddedWasmRunner {
         ));
         let run_limit = max_concurrent_runs();
         warn_if_run_bound_exceeds_memory(run_limit);
+        let preparation_limit = max_concurrent_preparations();
+        let precompiler = Arc::new(ChildComponentPrecompiler::new(preparation_limit));
         Ok(Self {
             config,
             core_http_url: None,
             limits: limits_from_env(),
+            preparation_permits: Arc::new(tokio::sync::Semaphore::new(preparation_limit)),
+            preparation_limit,
+            preparation_slots: Arc::new(Mutex::new(HashMap::new())),
+            precompiler,
             run_permits: Arc::new(tokio::sync::Semaphore::new(run_limit)),
             run_limit,
             run_slots: Arc::new(Mutex::new(HashMap::new())),
@@ -221,6 +804,19 @@ impl EmbeddedWasmRunner {
             ))
             .with_event_observer(observer),
         );
+        self
+    }
+
+    /// Use the protocol-compatible in-process precompiler in database-backed
+    /// integration tests.
+    ///
+    /// A libtest executable does not expose the server's hidden child-worker
+    /// subcommand, so tests opt into this explicitly. This method is not
+    /// compiled for production builds; deployed runners always use a killable
+    /// process boundary.
+    #[cfg(feature = "db-integration-tests")]
+    pub fn with_in_process_precompiler_for_tests(mut self) -> Self {
+        self.precompiler = Arc::new(InProcessTestComponentPrecompiler);
         self
     }
 
@@ -253,6 +849,7 @@ impl EmbeddedWasmRunner {
         stderr: Option<std::fs::File>,
         timeout: Duration,
         cancel: Option<CancelToken>,
+        prepared_input: Option<Vec<u8>>,
     ) -> WorkflowRunSpec {
         // Always attach the native runtime host. A HostImport-composed
         // artifact consumes it; a legacy composed artifact satisfies the
@@ -268,7 +865,7 @@ impl EmbeddedWasmRunner {
         // A guest that asks for its input through the host interface gets the
         // same bytes the launch already has, rather than a second read of what
         // was just written. Unset on wake/resume, so those still read the store.
-        .with_prepersisted_input(options.prepersisted_input.clone());
+        .with_prepersisted_input(prepared_input);
         // Share the run's cancel flag: it is how the host stops a guest that
         // woke from an interrupted sleep and ignored the cancel, without
         // routing the cancel through the guest's catchable error channel.
@@ -309,11 +906,115 @@ impl EmbeddedWasmRunner {
         })
     }
 
-    fn task_of(&self, instance_id: &str) -> Option<Arc<InstanceTask>> {
+    /// Load the exact durable envelope required by a queued preparation.
+    ///
+    /// Unlike the legacy synchronous runner path, a durable launch must not
+    /// silently invent `{}` when the instance or its committed input envelope
+    /// is absent. The dispatcher can then terminalize a malformed launch, and
+    /// a cancellable database timeout can safely return a valid one to queue.
+    async fn required_prepared_input(&self, options: &LaunchOptions) -> Result<Vec<u8>> {
+        if let Some(input) = options.prepersisted_input.clone() {
+            return Ok(input);
+        }
+        let instance = self
+            .persistence
+            .get_instance(&options.instance_id)
+            .await
+            .map_err(|error| RunnerError::StartFailed(format!("load instance input: {error}")))?
+            .ok_or_else(|| {
+                RunnerError::StartFailed(format!("instance {} not found", options.instance_id))
+            })?;
+        instance.input.ok_or_else(|| {
+            RunnerError::StartFailed(format!(
+                "instance {} has no persisted input envelope",
+                options.instance_id
+            ))
+        })
+    }
+
+    /// Take one independently bounded preparation slot without waiting.
+    fn try_take_preparation_slot(&self, options: &LaunchOptions) -> Result<PreparationSlot> {
+        let permit = Arc::clone(&self.preparation_permits)
+            .try_acquire_owned()
+            .map_err(|error| match error {
+                TryAcquireError::NoPermits => RunnerError::PreparationCapacityUnavailable,
+                TryAcquireError::Closed => {
+                    RunnerError::Other("preparation semaphore closed".to_string())
+                }
+            })?;
+        let slot_key = format!(
+            "{}:{}",
+            options.launch_id,
+            options.preparation_attempt.unwrap_or_default()
+        );
+        self.preparation_slots
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(
+                slot_key.clone(),
+                PreparationSlotEntry {
+                    instance_id: options.instance_id.clone(),
+                    taken_at: Instant::now(),
+                },
+            );
+        Ok(PreparationSlot {
+            _permit: permit,
+            slot_key,
+            registry: Arc::clone(&self.preparation_slots),
+        })
+    }
+
+    /// Prepare every operation that can block before a live guest permit is
+    /// acquired.
+    ///
+    /// Artifact filesystem work and Wasmtime compilation are performed by a
+    /// killable child process. The parent only links its verified response;
+    /// persisted-input reads remain async and are bounded by the same durable
+    /// preparation deadline. Per-run directory/stderr creation is deliberately
+    /// omitted for durable prepared launches: reopening either file in the
+    /// parent would reintroduce an unkillable filesystem operation before a
+    /// guest permit.
+    async fn prepare_embedded_launch(&self, options: &LaunchOptions) -> Result<PreparedLaunch> {
+        let preparation_slot = self.try_take_preparation_slot(options)?;
+        let workflow = self.precompiler.prepare(&self.executor, options).await?;
+        if options.requires_lifecycle_invoke
+            && !workflow.is_lifecycle_invoke(self.executor.engine())
+        {
+            return Err(RunnerError::StartFailed(
+                "generated workflow image does not export the current lifecycle invoke entrypoint"
+                    .to_string(),
+            ));
+        }
+
+        // This is a cancellable database operation, so it observes the same
+        // absolute preparation lease deadline as the dispatcher. Missing or
+        // malformed durable input is a real launch error, never a synthetic
+        // `{}` fallback that could hide a stranded instance.
+        let input = if let Some(deadline) = options.preparation_deadline {
+            tokio::time::timeout_at(deadline, self.required_prepared_input(options))
+                .await
+                .map_err(|_| {
+                    RunnerError::PreparationTimedOut("loading persisted input".to_string())
+                })??
+        } else {
+            self.required_prepared_input(options).await?
+        };
+
+        Ok(PreparedLaunch::new(
+            &options.launch_id,
+            EmbeddedPreparedLaunch {
+                _preparation_slot: preparation_slot,
+                workflow,
+                input,
+            },
+        ))
+    }
+
+    fn task_of(&self, launch_id: &str) -> Option<Arc<InstanceTask>> {
         self.tasks
             .lock()
             .expect("embedded runner task registry poisoned")
-            .get(instance_id)
+            .get(launch_id)
             .cloned()
     }
 }
@@ -361,6 +1062,110 @@ fn max_concurrent_runs() -> usize {
                 .unwrap_or(4)
         })
         .clamp(1, 1024)
+}
+
+/// How many artifact preparations may execute concurrently in this process.
+///
+/// Component compilation is CPU-heavy and may include bounded filesystem and
+/// database work. It is intentionally not coupled to `RUNTARA_MAX_CONCURRENT_RUNS`:
+/// one slow artifact must never borrow all live guest permits. One worker per
+/// available core is the conservative default; an explicit setting is capped
+/// to keep a typo from turning a preparation burst into a compiler stampede.
+fn max_concurrent_preparations() -> usize {
+    std::env::var("RUNTARA_PREPARATION_CONCURRENCY")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|count| *count > 0)
+        .unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map(|count| count.get())
+                .unwrap_or(1)
+        })
+        .clamp(1, 64)
+}
+
+/// Maximum live or still-reaping precompile children.
+///
+/// This includes a deliberately small bounded replacement budget. When a
+/// child is stuck in a kernel operation that cannot acknowledge a kill
+/// immediately, its permit remains occupied in the detached reaper; the hard
+/// cap turns repeated failures into durable backpressure rather than an
+/// unbounded process or memory storm.
+///
+/// Wasmtime compilation can use substantially more memory than the 64 MiB
+/// source / 128 MiB serialized protocol caps, so reserve a conservative 768
+/// MiB per child and never spend more than half of detected host memory on
+/// these helper processes. Hosts whose memory cannot be determined use a
+/// single child by default.
+fn max_concurrent_precompile_children(preparation_limit: usize) -> usize {
+    const CHILD_WORKING_SET_BUDGET_BYTES: u64 = 768 * 1024 * 1024;
+    let host_cap = host_memory_bytes()
+        .map(|total| {
+            usize::try_from((total / 2) / CHILD_WORKING_SET_BUDGET_BYTES)
+                .unwrap_or(usize::MAX)
+                .max(1)
+        })
+        .unwrap_or(1);
+    let requested = std::env::var("RUNTARA_PRECOMPILE_CHILD_CONCURRENCY")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|count| *count > 0)
+        .unwrap_or_else(|| preparation_limit.saturating_add(1));
+    requested.min(host_cap).clamp(1, 4)
+}
+
+/// Default ceiling for callers outside the durable queue.
+///
+/// Durable launches always supply the deadline derived from their
+/// `preparing` lease. Keeping a finite fallback preserves the same killable
+/// boundary for a direct caller that asks the runner to prepare explicitly.
+const DEFAULT_PRECOMPILER_TIMEOUT: Duration = Duration::from_secs(60);
+
+fn precompile_nonce() -> Result<[u8; PRECOMPILE_NONCE_BYTES]> {
+    let mut nonce = [0_u8; PRECOMPILE_NONCE_BYTES];
+    getrandom::fill(&mut nonce).map_err(|error| {
+        RunnerError::StartFailed(format!("generate precompile nonce entropy: {error}"))
+    })?;
+    Ok(nonce)
+}
+
+fn hex_digest(digest: [u8; PRECOMPILE_NONCE_BYTES]) -> String {
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn map_precompile_error(wasm_path: &Path, error: anyhow::Error) -> RunnerError {
+    if error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
+    }) {
+        RunnerError::BinaryNotFound(wasm_path.display().to_string())
+    } else {
+        RunnerError::StartFailed(format!("precompile workflow component: {error:#}"))
+    }
+}
+
+/// Match the child-read digest to the immutable direct-workflow metadata.
+///
+/// Generic components intentionally have no required checksum and keep their
+/// established ABI. Generated direct workflows cannot take that fallback:
+/// their image metadata is the source-of-truth identity and a changed file is
+/// terminalized before it reaches a guest permit.
+fn validate_expected_workflow_checksum(
+    options: &LaunchOptions,
+    actual: [u8; PRECOMPILE_NONCE_BYTES],
+) -> Result<()> {
+    let Some(expected) = options.expected_workflow_checksum.as_deref() else {
+        return Ok(());
+    };
+    let expected = expected.strip_prefix("sha256:").unwrap_or(expected);
+    let actual = hex_digest(actual);
+    if expected.len() != actual.len() || !expected.eq_ignore_ascii_case(&actual) {
+        return Err(RunnerError::StartFailed(format!(
+            "generated workflow artifact digest does not match immutable image metadata (expected {expected}, got {actual})"
+        )));
+    }
+    Ok(())
 }
 
 /// Roughly what one live guest costs in resident memory.
@@ -730,6 +1535,26 @@ impl Runner for EmbeddedWasmRunner {
         Some(occupancy)
     }
 
+    fn preparation_occupancy(&self) -> Option<PreparationOccupancy> {
+        let slots = self
+            .preparation_slots
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut occupancy = compute_preparation_occupancy(
+            self.preparation_limit,
+            self.preparation_permits.available_permits(),
+            &slots,
+            Instant::now(),
+        );
+        if let Some(children) = self.precompiler.child_occupancy() {
+            occupancy.precompile_child_limit = Some(children.limit);
+            occupancy.precompile_child_held = Some(children.held);
+            occupancy.precompile_child_oldest_ms = children.oldest_held_ms;
+            occupancy.precompile_child_retired = Some(children.retired);
+        }
+        Some(occupancy)
+    }
+
     async fn run(
         &self,
         options: &LaunchOptions,
@@ -748,6 +1573,17 @@ impl Runner for EmbeddedWasmRunner {
             .load_instance_pre(&wasm_path)
             .await
             .map_err(|e| RunnerError::StartFailed(format!("{e:#}")))?;
+        if options.requires_lifecycle_invoke
+            && !runtara_component_host::lifecycle::exports_lifecycle_invoke(
+                &instance_pre,
+                self.executor.engine(),
+            )
+        {
+            return Err(RunnerError::StartFailed(
+                "generated workflow image does not export the current lifecycle invoke entrypoint"
+                    .to_string(),
+            ));
+        }
 
         // Dual-ABI dispatch: an invoke-shaped artifact runs through the
         // in-band entry (input fetched from persistence — the enriched
@@ -765,7 +1601,14 @@ impl Runner for EmbeddedWasmRunner {
                 .executor
                 .execute_invoke(
                     &instance_pre,
-                    self.run_spec(options, env, None, options.timeout, cancel_token),
+                    self.run_spec(
+                        options,
+                        env,
+                        None,
+                        options.timeout,
+                        cancel_token,
+                        Some(input.clone()),
+                    ),
                     input,
                 )
                 .await;
@@ -794,7 +1637,14 @@ impl Runner for EmbeddedWasmRunner {
                 .executor
                 .execute(
                     &pre,
-                    self.run_spec(options, env, None, options.timeout, cancel_token),
+                    self.run_spec(
+                        options,
+                        env,
+                        None,
+                        options.timeout,
+                        cancel_token,
+                        options.prepersisted_input.clone(),
+                    ),
                 )
                 .await;
             (metrics_of(&run), exit_to_result(&run.exit))
@@ -848,35 +1698,67 @@ impl Runner for EmbeddedWasmRunner {
         }
     }
 
-    async fn launch_detached(&self, options: &LaunchOptions) -> Result<RunnerHandle> {
-        let wasm_path = options.wasm_path.clone();
-        if !wasm_path.exists() {
-            return Err(RunnerError::BinaryNotFound(wasm_path.display().to_string()));
-        }
+    async fn try_prepare_launch(&self, options: &LaunchOptions) -> Result<PreparedLaunch> {
+        self.prepare_embedded_launch(options).await
+    }
 
-        common::ensure_run_dir(
-            &self.config.data_dir,
-            &options.tenant_id,
-            &options.instance_id,
-        )
-        .await?;
-        let run_dir = common::run_dir(
-            &self.config.data_dir,
-            &options.tenant_id,
-            &options.instance_id,
-        );
-        let log_path = run_dir.join("stderr.log");
-        let stderr_file = match std::fs::File::create(&log_path) {
-            Ok(f) => Some(f),
-            Err(e) => {
-                warn!(
-                    instance_id = %options.instance_id,
-                    error = %e,
-                    path = %log_path.display(),
-                    "Failed to create stderr log file"
-                );
-                None
-            }
+    async fn launch_detached(&self, options: &LaunchOptions) -> Result<RunnerHandle> {
+        let prepared = self.try_prepare_launch(options).await?;
+        self.try_launch_prepared_detached(options, prepared).await
+    }
+
+    async fn try_launch_prepared_detached(
+        &self,
+        options: &LaunchOptions,
+        prepared: PreparedLaunch,
+    ) -> Result<RunnerHandle> {
+        if prepared.launch_id() != options.launch_id {
+            return Err(RunnerError::StartFailed(
+                "prepared launch does not match the requested generation".to_string(),
+            ));
+        }
+        let EmbeddedPreparedLaunch {
+            _preparation_slot,
+            workflow,
+            input,
+        } = prepared.take()?;
+
+        // The child compiler already read, hashed, compiled, and returned the
+        // exact serialized component held by `workflow`; no parent artifact
+        // reread is permitted at this boundary. Releasing preparation before
+        // the run permit preserves the strict separation between compiler
+        // pressure and active guest capacity.
+        drop(_preparation_slot);
+
+        // Capacity is a durable-dispatch decision, never a reason to park a
+        // request, trigger worker, or wake worker on a semaphore waiter. Take
+        // it before allocating per-run state so an unavailable runner leaves
+        // neither a task-registry entry nor a run directory behind.
+        let permit =
+            Arc::clone(&self.run_permits)
+                .try_acquire_owned()
+                .map_err(|error| match error {
+                    TryAcquireError::NoPermits => RunnerError::CapacityUnavailable,
+                    TryAcquireError::Closed => {
+                        RunnerError::Other("run semaphore closed".to_string())
+                    }
+                })?;
+        self.run_slots
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(
+                options.launch_id.clone(),
+                RunSlotEntry {
+                    instance_id: options.instance_id.clone(),
+                    taken_at: Instant::now(),
+                },
+            );
+        self.runs_started.fetch_add(1, Ordering::Relaxed);
+        let run_slot = RunSlot {
+            _permit: permit,
+            launch_id: options.launch_id.clone(),
+            registry: Arc::clone(&self.run_slots),
+            finished: Arc::clone(&self.runs_finished),
         };
 
         let env = self.merged_env(options);
@@ -889,198 +1771,180 @@ impl Runner for EmbeddedWasmRunner {
         self.tasks
             .lock()
             .expect("embedded runner task registry poisoned")
-            .insert(options.instance_id.clone(), Arc::clone(&task));
+            .insert(options.launch_id.clone(), Arc::clone(&task));
+        // Construct this before `tokio::spawn`, not inside the task body. A
+        // runtime shutdown can drop an unpolled future immediately after the
+        // map insertion; moving the guard into that future still retires the
+        // exact map entry in its Drop implementation.
+        let completion = TaskCompletionGuard {
+            task: Arc::clone(&task),
+            registry: Arc::clone(&self.tasks),
+            launch_id: options.launch_id.clone(),
+        };
 
         let metrics = Arc::new(tokio::sync::Mutex::new(ContainerMetrics::default()));
 
-        // Timeout is enforced by the container monitor via `stop()`, exactly
-        // as it is for the detached CLI runner (which spawns with no timeout
-        // of its own). MAX keeps the internal rings cancel-only.
-        let spec = self.run_spec(options, env, stderr_file, Duration::MAX, Some(cancel));
+        // The monitor is defense in depth, not the only deadline owner. The
+        // embedded component host needs the same finite active deadline so
+        // its epoch/watchdog rings cover guest work after the start gate
+        // opens. `Duration::MAX` overflows its monotonic HTTP deadline and
+        // lets an otherwise healthy gated run panic before it can park.
+        let spec = self.run_spec(
+            options,
+            env,
+            // Durable prepared launches intentionally do not create a
+            // per-run stderr file in the parent. See `prepare_embedded_launch`:
+            // a blocked filesystem operation must never retain a preparation
+            // or guest slot.
+            None,
+            options.timeout,
+            Some(cancel),
+            Some(input.clone()),
+        );
 
         let executor = Arc::clone(&self.executor);
         let persistence = Arc::clone(&self.persistence);
         let metrics_for_task = Arc::clone(&metrics);
         let task_for_run = Arc::clone(&task);
-        let registry = Arc::clone(&self.tasks);
         let instance_id = options.instance_id.clone();
-        // See `LaunchOptions::prepersisted_input`: set only by the first-start
-        // path, with the bytes it has just written. A wake or resume leaves it
-        // None and still reads the stored envelope below.
-        let prepersisted_input = options.prepersisted_input.clone();
-        // Take the slot BEFORE spawning, so what is bounded is the number of
-        // runs outstanding rather than the number executing. Acquiring inside
-        // the task bounds neither: every caller still gets a task immediately
-        // and only then queues, so each one holds its spec, its input bytes and
-        // its handles for as long as the queue is long. Waking a large parked
-        // population is exactly that shape - the wake scheduler's own limit
-        // frees as soon as the task is spawned, so it launches as fast as it
-        // can read batches - and 20k queued runs cost about a gigabyte, which
-        // killed the process the in-task acquire was added to protect.
-        //
-        // The caller waits here instead. The instance is already registered and
-        // durable, so this delays the run rather than losing it, and it gives
-        // the wake scheduler and trigger worker the backpressure their own
-        // concurrency limits are supposed to express.
-        let permit = Arc::clone(&self.run_permits)
-            .acquire_owned()
-            .await
-            .expect("run semaphore closed");
-        // Stamp the acquisition before the task is spawned, so the age covers
-        // the whole time the permit is held rather than starting once the task
-        // happens to be scheduled.
-        self.run_slots
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(options.instance_id.clone(), Instant::now());
-        self.runs_started.fetch_add(1, Ordering::Relaxed);
-        let run_slot = RunSlot {
-            _permit: permit,
-            instance_id: options.instance_id.clone(),
-            registry: Arc::clone(&self.run_slots),
-            finished: Arc::clone(&self.runs_finished),
-        };
+        let launch_id = options.launch_id.clone();
+        let start_gate = options.start_gate.clone();
+        let start_confirmation = start_gate.as_ref().map(|gate| {
+            Arc::new(GateWorkflowStartConfirmation { gate: gate.clone() })
+                as Arc<dyn WorkflowStartConfirmation>
+        });
+        // Durable dispatchers promote the matching Core instance in the same
+        // transaction that changes their queue row to `running`, before they
+        // open `start_gate`. Direct callers retain the historical runner-side
+        // promotion below.
+        let supervisor_owns_lifecycle = start_gate.is_some();
+        // The run slot was already claimed without waiting before any per-run
+        // allocation. It moves into the task so every completion/error/panic
+        // returns capacity and retires its occupancy timestamp together.
         tokio::spawn(async move {
             let _run_slot = run_slot;
-            match executor.load_instance_pre(&wasm_path).await {
-                Ok(instance_pre) => {
-                    if runtara_component_host::lifecycle::exports_lifecycle_invoke(
-                        &instance_pre,
-                        executor.engine(),
-                    ) {
-                        // Invoke-shaped artifact: input is the enriched stored
-                        // envelope, terminal result in-band. The first-start
-                        // path hands those bytes over directly rather than
-                        // making this read back what it just wrote; every other
-                        // path goes to the store, so a woken instance still gets
-                        // its real input and never a relaunch placeholder.
-                        let input = match resolve_run_input(
-                            persistence.as_ref(),
-                            &instance_id,
-                            prepersisted_input,
-                        )
-                        .await
-                        {
-                            Ok(Some(input)) => input,
-                            Ok(None) => {
-                                error!(instance_id = %instance_id, "Instance not found for invoke launch");
-                                b"{}".to_vec()
-                            }
-                            Err(e) => {
-                                error!(instance_id = %instance_id, error = %e, "Failed to load instance input");
-                                b"{}".to_vec()
-                            }
-                        };
-                        // Ensure the run executes as `running`. The first-run
-                        // launch also sets this after `launch_detached` returns,
-                        // but a wake-scheduler relaunch (`wake_instance`) does
-                        // NOT — and a guest that completes while still marked
-                        // `suspended` would have its `if_running`-guarded
-                        // terminal event silently dropped. Set it here so BOTH
-                        // paths run as `running` before the guest starts.
-                        mark_running(persistence.as_ref(), &instance_id).await;
-                        let run = executor.execute_invoke(&instance_pre, spec, input).await;
-                        {
-                            let mut guard = metrics_for_task.lock().await;
-                            *guard = invoke_metrics_of(&run);
-                        }
-                        use runtara_component_host::InvokeExit;
-                        match &run.exit {
-                            InvokeExit::Completed(_) => {
-                                info!(instance_id = %instance_id, "Embedded workflow run completed");
-                            }
-                            InvokeExit::Suspended(wakes) => {
-                                info!(instance_id = %instance_id, ?wakes, "Embedded workflow run suspended");
-                                // Store-freeing durable sleep: the guest exited
-                                // with a timed wake instead of blocking; park it
-                                // so the wake scheduler relaunches at the
-                                // deadline. (A deadline-less on-resume was
-                                // already recorded suspended by its ack.)
-                                park_invoke_suspend(persistence.as_ref(), &instance_id, wakes)
-                                    .await;
-                            }
-                            InvokeExit::Failed(_) => {
-                                warn!(instance_id = %instance_id, "Embedded workflow run returned error");
-                            }
-                            InvokeExit::Trapped { reason } => {
-                                error!(instance_id = %instance_id, reason = %reason, "Embedded workflow run failed");
-                            }
-                            InvokeExit::Timeout => {
-                                warn!(instance_id = %instance_id, "Embedded workflow run timed out");
-                            }
-                            InvokeExit::Cancelled => {
-                                warn!(instance_id = %instance_id, "Embedded workflow run cancelled");
-                            }
-                        }
-                        // A park is not an ending — the wake scheduler owns it
-                        // from here (and resolves a pending cancel itself).
-                        if !matches!(&run.exit, InvokeExit::Suspended(_)) {
-                            enforce_unacked_cancel(&persistence, &instance_id).await;
-                        }
-                    } else {
-                        match runtara_component_host::WorkflowExecutor::load(&executor, &wasm_path)
-                            .await
-                        {
-                            Ok(pre) => {
-                                // Same reason the invoke branch does it: the
-                                // guest must be `running` before it starts, or
-                                // a terminal event it reports is dropped by the
-                                // `if_running` guard. Doing it on both branches
-                                // is what lets the launching caller stop
-                                // stamping it a second time after the fact.
-                                mark_running(persistence.as_ref(), &instance_id).await;
-                                let run = executor.execute(&pre, spec).await;
-                                {
-                                    let mut guard = metrics_for_task.lock().await;
-                                    *guard = metrics_of(&run);
-                                }
-                                match &run.exit {
-                                    WorkflowExit::Completed => {
-                                        info!(instance_id = %instance_id, "Embedded workflow run completed");
-                                    }
-                                    WorkflowExit::GuestError => {
-                                        // Failure details were reported to runtara-core
-                                        // by the SDK before run() returned.
-                                        warn!(instance_id = %instance_id, "Embedded workflow run returned error");
-                                    }
-                                    WorkflowExit::Failed { reason } => {
-                                        error!(instance_id = %instance_id, reason = %reason, "Embedded workflow run failed");
-                                    }
-                                    WorkflowExit::Timeout => {
-                                        warn!(instance_id = %instance_id, "Embedded workflow run timed out");
-                                    }
-                                    WorkflowExit::Cancelled => {
-                                        warn!(instance_id = %instance_id, "Embedded workflow run cancelled");
-                                    }
-                                }
-                                enforce_unacked_cancel(&persistence, &instance_id).await;
-                            }
-                            Err(e) => {
-                                error!(
-                                    instance_id = %instance_id,
-                                    error = format!("{e:#}"),
-                                    "Failed to load workflow component"
-                                );
-                            }
-                        }
+            let _completion = completion;
+            if let Some(gate) = start_gate {
+                // The durable dispatcher may open the in-memory gate once it
+                // owns the running generation. Do not clear the durable
+                // marker here: Store/WASI setup below can still pause or
+                // crash. Component host confirms exactly before
+                // `instantiate_async`, the first guest-controlled boundary.
+                match gate.wait().await {
+                    StartGateOutcome::Opened => {}
+                    StartGateOutcome::Cancelled
+                    | StartGateOutcome::TimedOut
+                    | StartGateOutcome::ConfirmationFailed => {
+                        info!(
+                            instance_id = %instance_id,
+                            launch_id = %launch_id,
+                            "Detached launch gate did not permit guest execution"
+                        );
+                        return;
                     }
                 }
-                Err(e) => {
-                    error!(
-                        instance_id = %instance_id,
-                        error = format!("{e:#}"),
-                        "Failed to load workflow component"
-                    );
-                }
             }
-            task_for_run.finished.store(true, Ordering::SeqCst);
-            // Self-cleanup keeps the registry leak-free even when the monitor
-            // takes the timeout path and never calls collect_result.
-            registry
-                .lock()
-                .expect("embedded runner task registry poisoned")
-                .remove(&instance_id);
-            task_for_run.done.notify_waiters();
+            // A stop can win in the small interval after the dispatcher has
+            // durably promoted this generation but before it opens the gate.
+            // `Runner::stop` cannot hold the supervisor's in-memory gate, so
+            // re-check the task-local cancellation fence here. This keeps a
+            // cancelled handoff from loading (let alone invoking) guest code
+            // if the supervisor subsequently opens its gate.
+            if task_for_run.cancel.load(Ordering::SeqCst) {
+                info!(
+                    instance_id = %instance_id,
+                    launch_id = %launch_id,
+                    "Detached launch was cancelled before guest execution"
+                );
+                return;
+            }
+            if workflow.is_lifecycle_invoke(executor.engine()) {
+                // The verified component and persisted input were both prepared
+                // before the run permit. Only guest invocation remains after
+                // the durable gate confirmation.
+                if !supervisor_owns_lifecycle {
+                    mark_running(persistence.as_ref(), &instance_id).await;
+                }
+                let run = executor
+                    .execute_invoke_with_start_confirmation(
+                        workflow.instance_pre(),
+                        spec,
+                        input,
+                        start_confirmation.clone(),
+                    )
+                    .await;
+                {
+                    let mut guard = metrics_for_task.lock().await;
+                    *guard = invoke_metrics_of(&run);
+                }
+                use runtara_component_host::InvokeExit;
+                match &run.exit {
+                    InvokeExit::Completed(_) => {
+                        info!(instance_id = %instance_id, "Embedded workflow run completed");
+                    }
+                    InvokeExit::Suspended(wakes) => {
+                        info!(instance_id = %instance_id, ?wakes, "Embedded workflow run suspended");
+                        // Store-freeing durable sleep: the guest exited with a
+                        // timed wake instead of blocking; park it so the wake
+                        // scheduler relaunches at the deadline.
+                        park_invoke_suspend(persistence.as_ref(), &instance_id, wakes).await;
+                    }
+                    InvokeExit::Failed(_) => {
+                        warn!(instance_id = %instance_id, "Embedded workflow run returned error");
+                    }
+                    InvokeExit::Trapped { reason } => {
+                        error!(instance_id = %instance_id, reason = %reason, "Embedded workflow run failed");
+                    }
+                    InvokeExit::Timeout => {
+                        warn!(instance_id = %instance_id, "Embedded workflow run timed out");
+                    }
+                    InvokeExit::Cancelled => {
+                        warn!(instance_id = %instance_id, "Embedded workflow run cancelled");
+                    }
+                }
+                // A park is not an ending — the wake scheduler owns it from
+                // here (and resolves a pending cancel itself).
+                if !matches!(&run.exit, InvokeExit::Suspended(_)) {
+                    enforce_unacked_cancel(&persistence, &instance_id).await;
+                }
+            } else if let Some(pre) = workflow.command() {
+                // Generic non-workflow components retain their established
+                // wasi:cli/run ABI. Generated direct workflows were rejected
+                // during preparation if they lack lifecycle.invoke.
+                if !supervisor_owns_lifecycle {
+                    mark_running(persistence.as_ref(), &instance_id).await;
+                }
+                let run = executor
+                    .execute_with_start_confirmation(pre, spec, start_confirmation.clone())
+                    .await;
+                {
+                    let mut guard = metrics_for_task.lock().await;
+                    *guard = metrics_of(&run);
+                }
+                match &run.exit {
+                    WorkflowExit::Completed => {
+                        info!(instance_id = %instance_id, "Embedded workflow run completed");
+                    }
+                    WorkflowExit::GuestError => {
+                        warn!(instance_id = %instance_id, "Embedded workflow run returned error");
+                    }
+                    WorkflowExit::Failed { reason } => {
+                        error!(instance_id = %instance_id, reason = %reason, "Embedded workflow run failed");
+                    }
+                    WorkflowExit::Timeout => {
+                        warn!(instance_id = %instance_id, "Embedded workflow run timed out");
+                    }
+                    WorkflowExit::Cancelled => {
+                        warn!(instance_id = %instance_id, "Embedded workflow run cancelled");
+                    }
+                }
+                enforce_unacked_cancel(&persistence, &instance_id).await;
+            } else {
+                error!(
+                    instance_id = %instance_id,
+                    "Prepared generic component has no wasi:cli/run entrypoint"
+                );
+            }
         });
 
         info!(
@@ -1090,7 +1954,8 @@ impl Runner for EmbeddedWasmRunner {
         );
 
         Ok(RunnerHandle {
-            handle_id: format!("wasm_{}", options.instance_id),
+            launch_id: options.launch_id.clone(),
+            handle_id: format!("wasm_{}", options.launch_id),
             instance_id: options.instance_id.clone(),
             tenant_id: options.tenant_id.clone(),
             started_at: chrono::Utc::now(),
@@ -1098,8 +1963,15 @@ impl Runner for EmbeddedWasmRunner {
         })
     }
 
+    async fn try_launch_detached(&self, options: &LaunchOptions) -> Result<RunnerHandle> {
+        // `launch_detached` itself now uses `try_acquire_owned`, so retaining
+        // this explicit trait entry point makes durable-dispatch intent clear
+        // while guaranteeing it never puts the dispatcher on a permit waiter.
+        self.launch_detached(options).await
+    }
+
     async fn is_running(&self, handle: &RunnerHandle) -> bool {
-        match self.task_of(&handle.instance_id) {
+        match self.task_of(&handle.launch_id) {
             Some(task) => !task.finished.load(Ordering::SeqCst),
             None => false,
         }
@@ -1107,7 +1979,7 @@ impl Runner for EmbeddedWasmRunner {
 
     async fn wait_for_exit(&self, handle: &RunnerHandle, poll_interval: Duration) {
         loop {
-            let Some(task) = self.task_of(&handle.instance_id) else {
+            let Some(task) = self.task_of(&handle.launch_id) else {
                 return;
             };
             if task.finished.load(Ordering::SeqCst) {
@@ -1123,8 +1995,8 @@ impl Runner for EmbeddedWasmRunner {
     }
 
     async fn stop(&self, handle: &RunnerHandle) -> Result<()> {
-        if let Some(task) = self.task_of(&handle.instance_id) {
-            info!(instance_id = %handle.instance_id, "Cancelling embedded workflow run");
+        if let Some(task) = self.task_of(&handle.launch_id) {
+            info!(instance_id = %handle.instance_id, launch_id = %handle.launch_id, "Cancelling embedded workflow run");
             task.cancel.store(true, Ordering::SeqCst);
         }
         Ok(())
@@ -1140,6 +2012,7 @@ impl Runner for EmbeddedWasmRunner {
             &self.config.data_dir,
             &handle.tenant_id,
             &handle.instance_id,
+            &handle.launch_id,
         )
         .await;
 
@@ -1155,8 +2028,12 @@ impl Runner for EmbeddedWasmRunner {
 
 #[cfg(test)]
 mod tests {
-    use super::{RunSlot, compute_occupancy};
+    use super::{
+        InstanceTask, RunSlot, RunSlotEntry, TaskCompletionGuard, TaskRegistry, compute_occupancy,
+        remove_task_if_current,
+    };
     use std::collections::HashMap;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
@@ -1183,7 +2060,13 @@ mod tests {
     fn held_comes_from_the_semaphore_not_the_slot_map() {
         let now = Instant::now();
         let mut slots = HashMap::new();
-        slots.insert("only-one-recorded".to_string(), now);
+        slots.insert(
+            "launch-1".to_string(),
+            RunSlotEntry {
+                instance_id: "only-one-recorded".to_string(),
+                taken_at: now,
+            },
+        );
 
         // Eight permits gone, but only one has been stamped yet.
         let occ = compute_occupancy(8, 0, &slots, now);
@@ -1205,9 +2088,27 @@ mod tests {
     fn age_belongs_to_the_oldest_holder() {
         let now = Instant::now();
         let mut slots = HashMap::new();
-        slots.insert("recent".to_string(), now - Duration::from_secs(2));
-        slots.insert("ancient".to_string(), now - Duration::from_secs(2880));
-        slots.insert("middling".to_string(), now - Duration::from_secs(45));
+        slots.insert(
+            "launch-recent".to_string(),
+            RunSlotEntry {
+                instance_id: "recent".to_string(),
+                taken_at: now - Duration::from_secs(2),
+            },
+        );
+        slots.insert(
+            "launch-ancient".to_string(),
+            RunSlotEntry {
+                instance_id: "ancient".to_string(),
+                taken_at: now - Duration::from_secs(2880),
+            },
+        );
+        slots.insert(
+            "launch-middling".to_string(),
+            RunSlotEntry {
+                instance_id: "middling".to_string(),
+                taken_at: now - Duration::from_secs(45),
+            },
+        );
 
         let occ = compute_occupancy(8, 5, &slots, now);
         assert_eq!(occ.held, 3);
@@ -1238,18 +2139,22 @@ mod tests {
     #[tokio::test]
     async fn dropping_a_slot_releases_the_permit_and_forgets_its_age() {
         let permits = Arc::new(tokio::sync::Semaphore::new(2));
-        let registry: Arc<Mutex<HashMap<String, Instant>>> = Arc::new(Mutex::new(HashMap::new()));
+        let registry: Arc<Mutex<HashMap<String, RunSlotEntry>>> =
+            Arc::new(Mutex::new(HashMap::new()));
         let finished = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
         {
             let permit = Arc::clone(&permits).acquire_owned().await.expect("acquire");
-            registry
-                .lock()
-                .expect("registry")
-                .insert("inst-1".to_string(), Instant::now());
+            registry.lock().expect("registry").insert(
+                "launch-1".to_string(),
+                RunSlotEntry {
+                    instance_id: "inst-1".to_string(),
+                    taken_at: Instant::now(),
+                },
+            );
             let _slot = RunSlot {
                 _permit: permit,
-                instance_id: "inst-1".to_string(),
+                launch_id: "launch-1".to_string(),
                 registry: Arc::clone(&registry),
                 finished: Arc::clone(&finished),
             };
@@ -1282,17 +2187,21 @@ mod tests {
     #[tokio::test]
     async fn a_panicking_run_still_retires_its_slot() {
         let permits = Arc::new(tokio::sync::Semaphore::new(1));
-        let registry: Arc<Mutex<HashMap<String, Instant>>> = Arc::new(Mutex::new(HashMap::new()));
+        let registry: Arc<Mutex<HashMap<String, RunSlotEntry>>> =
+            Arc::new(Mutex::new(HashMap::new()));
         let finished = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
         let permit = Arc::clone(&permits).acquire_owned().await.expect("acquire");
-        registry
-            .lock()
-            .expect("registry")
-            .insert("doomed".to_string(), Instant::now());
+        registry.lock().expect("registry").insert(
+            "launch-doomed".to_string(),
+            RunSlotEntry {
+                instance_id: "doomed".to_string(),
+                taken_at: Instant::now(),
+            },
+        );
         let slot = RunSlot {
             _permit: permit,
-            instance_id: "doomed".to_string(),
+            launch_id: "launch-doomed".to_string(),
             registry: Arc::clone(&registry),
             finished: Arc::clone(&finished),
         };
@@ -1315,6 +2224,103 @@ mod tests {
             finished.load(std::sync::atomic::Ordering::Relaxed),
             1,
             "a run that panicked still finished, and must be counted as such"
+        );
+    }
+
+    #[test]
+    fn stale_task_cleanup_cannot_remove_a_replacement_generation() {
+        let registry: TaskRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let old = Arc::new(InstanceTask {
+            cancel: Arc::new(AtomicBool::new(false)),
+            finished: AtomicBool::new(false),
+            done: tokio::sync::Notify::new(),
+        });
+        let replacement = Arc::new(InstanceTask {
+            cancel: Arc::new(AtomicBool::new(false)),
+            finished: AtomicBool::new(false),
+            done: tokio::sync::Notify::new(),
+        });
+
+        registry
+            .lock()
+            .expect("registry")
+            .insert("launch-current".to_string(), Arc::clone(&replacement));
+
+        // This is the stop-then-immediate-resume race: an old task's deferred
+        // cleanup reaches the map after a newer attempt owns the same logical
+        // slot. Pointer comparison must leave the replacement visible.
+        remove_task_if_current(&registry, "launch-current", &old);
+
+        let current = registry
+            .lock()
+            .expect("registry")
+            .get("launch-current")
+            .cloned()
+            .expect("replacement remains registered");
+        assert!(Arc::ptr_eq(&current, &replacement));
+    }
+
+    #[tokio::test]
+    async fn panicking_task_still_retires_its_runner_handle() {
+        let registry: TaskRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let task = Arc::new(InstanceTask {
+            cancel: Arc::new(AtomicBool::new(false)),
+            finished: AtomicBool::new(false),
+            done: tokio::sync::Notify::new(),
+        });
+        registry
+            .lock()
+            .expect("registry")
+            .insert("launch-doomed".to_string(), Arc::clone(&task));
+        let guard = TaskCompletionGuard {
+            task: Arc::clone(&task),
+            registry: Arc::clone(&registry),
+            launch_id: "launch-doomed".to_string(),
+        };
+
+        let join = tokio::spawn(async move {
+            let _guard = guard;
+            panic!("runner task panicked before its manual cleanup tail");
+        });
+        assert!(join.await.is_err(), "test task must panic");
+        assert!(task.finished.load(Ordering::SeqCst));
+        assert!(
+            registry.lock().expect("registry").is_empty(),
+            "RAII cleanup must retire the exact task entry during unwind"
+        );
+    }
+
+    #[test]
+    fn unpolled_task_future_still_retires_its_runner_handle() {
+        let registry: TaskRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let task = Arc::new(InstanceTask {
+            cancel: Arc::new(AtomicBool::new(false)),
+            finished: AtomicBool::new(false),
+            done: tokio::sync::Notify::new(),
+        });
+        registry
+            .lock()
+            .expect("registry")
+            .insert("launch-never-polled".to_string(), Arc::clone(&task));
+        // This mirrors production: construct the guard before `tokio::spawn`
+        // moves it into the task future. Dropping that future before its first
+        // poll is what runtime shutdown does for a just-spawned task.
+        let completion = TaskCompletionGuard {
+            task: Arc::clone(&task),
+            registry: Arc::clone(&registry),
+            launch_id: "launch-never-polled".to_string(),
+        };
+        let never_polled = async move {
+            let _completion = completion;
+            std::future::pending::<()>().await;
+        };
+
+        drop(never_polled);
+
+        assert!(task.finished.load(Ordering::SeqCst));
+        assert!(
+            registry.lock().expect("registry").is_empty(),
+            "dropping an unpolled task future must retire the exact task entry"
         );
     }
 

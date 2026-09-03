@@ -23,7 +23,9 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use runtara_dsl::agent_meta::{AgentCatalog, AgentInfo};
+use runtara_dsl::agent_meta::{
+    AgentCatalog, AgentInfo, is_certified_non_suspending_workflow_agent,
+};
 
 /// Per-tenant staging dir for published workflow-agents.
 pub fn staging_dir(tenant_id: &str) -> PathBuf {
@@ -131,6 +133,12 @@ pub fn stage(
     composed_wasm: &std::path::Path,
     info: &AgentInfo,
 ) -> std::io::Result<(PathBuf, PathBuf)> {
+    if !is_certified_non_suspending_workflow_agent(info) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "workflow-agent metadata lacks the required non-suspending:1 certification",
+        ));
+    }
     let dir = staging_dir(tenant_id);
     std::fs::create_dir_all(&dir)?;
     let snake = slug.replace('-', "_");

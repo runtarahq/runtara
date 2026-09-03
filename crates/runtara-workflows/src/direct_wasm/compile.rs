@@ -42,6 +42,7 @@ mod embed_workflow;
 mod error_step;
 mod log;
 mod mapping;
+mod retry_park;
 mod split;
 mod split_parallel;
 mod split_retry;
@@ -103,6 +104,7 @@ use super::static_data::{
 };
 use super::support::{
     DirectWorkflowSupportReport, analyze_direct_wasm_support_with_child_workflows,
+    analyze_workflow_agent_safety,
 };
 
 /// Direct workflow artifact ABI version (`wasi:cli/run` export shape).
@@ -117,7 +119,7 @@ pub const DIRECT_WORKFLOW_SUPPORT_SECTION: &str = "runtara.direct_workflow.suppo
 /// Custom section containing direct artifact ABI metadata JSON.
 pub const DIRECT_WORKFLOW_ABI_SECTION: &str = "runtara.direct_workflow.abi";
 /// Version for `artifact-metadata.json` emitted beside direct artifacts.
-pub const DIRECT_WORKFLOW_ARTIFACT_METADATA_VERSION: u32 = 2;
+pub const DIRECT_WORKFLOW_ARTIFACT_METADATA_VERSION: u32 = 4;
 /// Sidecar filename containing direct artifact dependency/provenance metadata.
 pub const DIRECT_WORKFLOW_ARTIFACT_METADATA_FILENAME: &str = "artifact-metadata.json";
 
@@ -433,6 +435,15 @@ const DIRECT_PSPLIT_ROUND_CURSOR_LOCAL: u32 = 124;
 /// Set when a retry round fired at least one backoff timer — drives the
 /// round-loop exit (0 => every item settled, stop).
 const DIRECT_PSPLIT_TIMERS_FIRED_LOCAL: u32 = 125;
+
+/// Scratch used only while converting a retry backoff into a lifecycle wake.
+/// The state is an 8-byte absolute deadline, kept separate from the failed
+/// attempt envelope so a replay can reconstruct its retry decision without
+/// re-running the attempt. These are trailing locals to avoid shifting any
+/// existing hand-assigned local indices.
+const DIRECT_RETRY_PARK_STATE_PTR_LOCAL: u32 = 126;
+const DIRECT_RETRY_PARK_STATE_LEN_LOCAL: u32 = 127;
+const DIRECT_RETRY_PARK_DEADLINE_MS_LOCAL: u32 = 128;
 
 /// Per-item slot for the parallel window's concurrent-retry state machine
 /// (§3.4): `{ state:u32, attempts:u32, input_ptr:u32, input_len:u32, _pad:u64,
@@ -889,7 +900,7 @@ const DIRECT_COMPILE_STACK_SIZE: usize = 256 * 1024 * 1024;
 /// Accepts exactly the graphs passed by [`super::support::analyze_direct_wasm_support`];
 /// anything else is a hard [`DirectCompileError::Unsupported`] carrying the
 /// per-feature report. The emitted component-format artifact is a stable
-/// direct pipeline artifact with a canonical `wasi:cli/run` export, stdlib
+/// direct pipeline artifact with a canonical `lifecycle.invoke` export, stdlib
 /// JSON calls, and runtime completion calls.
 ///
 /// Runs on a dedicated thread with an explicit [`DIRECT_COMPILE_STACK_SIZE`]
@@ -898,7 +909,12 @@ const DIRECT_COMPILE_STACK_SIZE: usize = 256 * 1024 * 1024;
 pub fn compile_direct_workflow(
     input: DirectCompilationInput,
 ) -> Result<DirectCompilationResult, DirectCompileError> {
-    compile_direct_workflow_with_abi(input, workflow_abi_from_env(), omit_runtime_from_env())
+    ensure_supported_production_workflow_abi()?;
+    compile_direct_workflow_with_abi(
+        input,
+        super::component::WorkflowAbi::InvokeHostImports,
+        omit_runtime_from_env(),
+    )
 }
 
 /// A stable tag for the lowering options the direct compiler is currently
@@ -910,10 +926,10 @@ pub fn compile_direct_workflow(
 /// lowering default silently leaves every already-compiled workflow on the old
 /// shape, because nothing else in the key changed.
 ///
-/// Store-freeing sleep used to appear here. It is no longer a toggle — a
-/// durable `Delay` always parks — so it cannot vary between two artifacts and
-/// has nothing to contribute to cache identity. Dropping it also changes the
-/// tag string, which is what retires images compiled under the old lowering.
+/// Store-freeing sleep used to be a duration-sensitive optional lowering. A
+/// durable `Delay` now always parks, including dynamic or one-millisecond
+/// waits. Its explicit lowering epoch retires artifacts that were compiled
+/// while short waits could retain a runner.
 ///
 /// Older images have no tag at all, which reads as a miss and rebuilds once.
 pub fn direct_lowering_tag() -> String {
@@ -927,8 +943,9 @@ pub fn direct_lowering_tag() -> String {
     // their run permits until the execution timeout, and recompiling reported
     // success without rebuilding anything.
     format!(
-        "abi={},omit_runtime={}",
-        workflow_abi_tag(workflow_abi_from_env()),
+        "abi={}-v{},durable-delay-parking=v1,omit_runtime={}",
+        workflow_abi_tag(super::component::WorkflowAbi::InvokeHostImports),
+        DIRECT_WORKFLOW_INVOKE_ABI_VERSION,
         omit_runtime_from_env()
     )
 }
@@ -962,38 +979,41 @@ fn omit_runtime_from_raw(raw: Option<&str>) -> bool {
     matches!(raw, Some("1") | Some("true"))
 }
 
-/// Export shape for production compiles, from `RUNTARA_DIRECT_WORKFLOW_ABI` —
-/// the rollback lever mirroring `RUNTARA_DIRECT_RUNTIME_BINDING`.
+/// Reject the removed direct-workflow ABI switch.
 ///
-/// Default (unset or anything else): the invoke export. `cli-run` reverts new
-/// compiles to the legacy `wasi:cli/run` shape, which the runner executes
-/// fully — set it on the server and recompile for a same-day escape hatch.
-fn workflow_abi_from_env() -> super::component::WorkflowAbi {
-    workflow_abi_from_raw(std::env::var("RUNTARA_DIRECT_WORKFLOW_ABI").ok().as_deref())
-}
-
-fn workflow_abi_from_raw(raw: Option<&str>) -> super::component::WorkflowAbi {
-    match raw {
-        Some("cli-run") => super::component::WorkflowAbi::CliRunHttp,
-        Some("invoke") | None => super::component::WorkflowAbi::default(),
-        // Unknown values are LOUD, not a silent default: a typo'd lever on an
-        // older binary silently compiling the wrong ABI shape is exactly the
-        // failure mode this lever is meant to protect against.
-        Some(other) => {
-            tracing::warn!(
-                value = other,
-                "unknown RUNTARA_DIRECT_WORKFLOW_ABI value; using the default invoke ABI \
-                 (known values: unset|invoke, cli-run)"
-            );
-            super::component::WorkflowAbi::default()
-        }
+/// `wasi:cli/run` cannot return a durable suspend outcome, so a workflow
+/// waiting for a human signal retained its runner slot. It is not a safe
+/// rollback mode: production direct workflows are always emitted with
+/// `lifecycle.invoke`. Explicit ABI construction remains available for compiler
+/// differential tests and artifact migration tooling, but an environment must
+/// never silently select the legacy shape for a production compile.
+fn ensure_supported_production_workflow_abi() -> Result<(), DirectCompileError> {
+    match std::env::var("RUNTARA_DIRECT_WORKFLOW_ABI") {
+        Err(std::env::VarError::NotPresent) => ensure_supported_production_workflow_abi_raw(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(DirectCompileError::Component(
+            "RUNTARA_DIRECT_WORKFLOW_ABI is not valid Unicode; direct workflows must use lifecycle.invoke".to_string(),
+        )),
+        Ok(value) => ensure_supported_production_workflow_abi_raw(Some(&value)),
     }
 }
 
-/// [`compile_direct_workflow`] with an explicit [`super::component::WorkflowAbi`]
-/// — the flag-gated invoke-export path (Phase 3 of the agent/workflow
-/// unification). The default entry keeps the legacy
-/// `wasi:cli/run` shape untouched.
+fn ensure_supported_production_workflow_abi_raw(
+    raw: Option<&str>,
+) -> Result<(), DirectCompileError> {
+    match raw {
+        None | Some("") | Some("invoke") => Ok(()),
+        Some(value) => Err(DirectCompileError::Component(format!(
+            "RUNTARA_DIRECT_WORKFLOW_ABI={value:?} is unsupported: direct workflows must use lifecycle.invoke; rebuild or republish legacy artifacts"
+        ))),
+    }
+}
+
+/// [`compile_direct_workflow`] with an explicit [`super::component::WorkflowAbi`].
+///
+/// Production callers use [`compile_direct_workflow`], which always emits the
+/// lifecycle invoke ABI. This lower-level entry remains for compiler
+/// differential tests and artifact migration tooling, including the retired
+/// `wasi:cli/run` reference shape.
 pub fn compile_direct_workflow_with_abi(
     input: DirectCompilationInput,
     abi: super::component::WorkflowAbi,
@@ -1049,6 +1069,8 @@ fn compile_direct_workflow_inner(
             report: Box::new(support_report),
         });
     }
+    let workflow_agent_safety =
+        analyze_workflow_agent_safety(&input.execution_graph, &input.child_workflows);
     let child_workflow_metadata =
         resolve_direct_child_workflow_metadata(&manifest, &input.child_workflows)?;
 
@@ -1061,19 +1083,12 @@ fn compile_direct_workflow_inner(
     // a workflow that would call runtime keeps the import.
     let needs_runtime = manifest.feature_summary.needs_runtime(input.track_events);
     let omit_runtime = match abi {
-        // Workflow-as-agent: a PURE workflow (nothing durable, delaying,
-        // waiting, logging, or sub-agent) omits the runtime entirely — the
-        // fully self-contained agent shape. A workflow that DOES need the
-        // runtime keeps the import (HostImport binding): composed into a
-        // parent, the interface bubbles up and is satisfied by the parent
-        // instance's runtime host, so checkpoints/sleeps/events work — this is
-        // what lets ANY workflow, durable ones included, publish as an agent.
-        // Its terminal complete/fail are suppressed either way (the caller
-        // owns instance lifecycle; see
-        // `DirectCoreFunctionIndices::report_terminal_status`). Durable
-        // semantics under a parent are BLOCKING (a Delay/Wait blocks inside
-        // the capability invoke); a graph-level `durable: false` opts a
-        // workflow out of durability wholesale to get the pure shape back.
+        // A production publish runs the static workflow-agent safety gate
+        // before it reaches this lower-level compiler. It accepts only graphs
+        // with no wait/sleep/retry/pause path, so the resulting capability is
+        // synchronous and omits the runtime. This branch remains permissive
+        // for compiler differential tests and migration tooling; callers must
+        // not treat that as a production workflow-agent authorization.
         super::component::WorkflowAbi::AgentCapabilities => !needs_runtime,
         super::component::WorkflowAbi::InvokeHostImports => {
             omit_runtime_requested && !needs_runtime
@@ -1160,6 +1175,9 @@ fn compile_direct_workflow_inner(
         support_report_checksum: &support_report_checksum,
         workflow_logic_checksum: &wasm_checksum,
         workflow_logic_size: wasm.len(),
+        direct_abi_version: workflow_abi_version(abi),
+        entry_abi: workflow_abi_tag(abi),
+        workflow_agent_safety: &workflow_agent_safety,
         component_artifacts: &component_artifacts,
         child_workflows: &child_workflow_metadata,
     });
@@ -1194,6 +1212,14 @@ fn compile_direct_workflow_inner(
         omit_runtime,
         parallel_pools,
     })
+}
+
+fn workflow_abi_version(abi: super::component::WorkflowAbi) -> u32 {
+    match abi {
+        super::component::WorkflowAbi::CliRunHttp => DIRECT_WORKFLOW_ABI_VERSION,
+        super::component::WorkflowAbi::InvokeHostImports
+        | super::component::WorkflowAbi::AgentCapabilities => DIRECT_WORKFLOW_INVOKE_ABI_VERSION,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

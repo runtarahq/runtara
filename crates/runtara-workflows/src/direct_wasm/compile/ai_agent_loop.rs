@@ -635,11 +635,11 @@ pub(super) fn emit_ai_agent_loop_plan(
                 let tool_capability = static_data
                     .agent_capability_id(*agent_id)
                     .expect("AiAgent tool has a static capability id");
-                // Inject the tool step's own timeout into the model-provided
-                // arguments so the dispatched call is bounded independently of
-                // the AiAgent turnTimeout. Only when the tool step set one;
-                // otherwise the tool capability's own default applies. The
-                // merge overwrites DIRECT_AI_TOOL_ARGS in place.
+                // Compatibility path for decoded legacy manifests. Supported
+                // compiler output always leaves this unset: Agent `timeout` is
+                // rejected before compilation rather than treated as a
+                // best-effort tool-call deadline. The merge overwrites
+                // DIRECT_AI_TOOL_ARGS in place only for a legacy manifest.
                 if let Some(ms) = timeout_ms {
                     body.instruction(&Instruction::LocalGet(DIRECT_AI_TOOL_ARGS_PTR_LOCAL));
                     body.instruction(&Instruction::LocalGet(DIRECT_AI_TOOL_ARGS_LEN_LOCAL));

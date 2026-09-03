@@ -246,10 +246,8 @@ pub(super) enum DirectAiToolPlan {
         /// per-CALL checkpoint scope `{ai_step}.tool.{label}.{call}` when the
         /// target is a workflow-agent.
         label: String,
-        /// The tool Agent step's own `timeout` (ms), injected as `timeout_ms`
-        /// into the LLM-provided arguments so the dispatched call is bounded
-        /// independently of the AiAgent turnTimeout. `None` leaves the tool
-        /// capability's own default in effect.
+        /// Legacy tool Agent timeout. Supported artifacts always leave this
+        /// unset because Agent per-step timeouts are rejected before compile.
         timeout_ms: Option<u64>,
     },
     /// Run a composed child workflow with the LLM-provided arguments as its input

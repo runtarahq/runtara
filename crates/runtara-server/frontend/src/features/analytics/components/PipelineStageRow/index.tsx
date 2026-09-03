@@ -1,6 +1,7 @@
 import { ArrowDown } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import {
+  DEFAULT_STUCK_AFTER_MS,
   formatAge,
   formatCount,
   formatRate,
@@ -24,6 +25,8 @@ interface PipelineStageRowProps {
   /// reddening all six would cry wolf on a system doing exactly what it should.
   pipelineActive: boolean;
   isChokepoint: boolean;
+  /** Server policy carried by the snapshot; falls back during rolling deploys. */
+  stuckAfterMs?: number;
 }
 
 const SEVERITY_STROKE: Record<string, string> = {
@@ -53,13 +56,22 @@ export function PipelineStageRow({
   inflow,
   pipelineActive,
   isChokepoint,
+  stuckAfterMs = DEFAULT_STUCK_AFTER_MS,
 }: PipelineStageRowProps) {
   const pct = utilisation(stage);
   const severity = severityOf(stage);
   const bounded = stage.limit !== null;
   const path = sparklinePath(history, stage.limit);
-  const stuck = isNotDraining(stage);
+  const stuck = isNotDraining(stage, stuckAfterMs);
   const age = formatAge(stage.oldestAgeMs);
+  const capacityRejections = stage.capacityRejections ?? null;
+  const reapingPrecompileChildren = stage.reapingPrecompileChildren ?? null;
+  const topWorkflows = stage.topWorkflows ?? [];
+  const workflowAttribution = topWorkflows
+    .map(
+      (workflow) => `${workflow.workflowId} (${formatCount(workflow.count)})`
+    )
+    .join(', ');
 
   return (
     <div
@@ -182,6 +194,34 @@ export function PipelineStageRow({
         {age && (
           <span className="mt-1 block tabular-nums text-muted-foreground">
             {age} oldest
+          </span>
+        )}
+        {capacityRejections !== null && capacityRejections > 0 && (
+          <span
+            className="mt-1 block tabular-nums text-amber-600 dark:text-amber-400"
+            data-testid={`pipeline-capacity-rejections-${stage.key}`}
+          >
+            {formatCount(capacityRejections)} capacity{' '}
+            {capacityRejections === 1 ? 'retry' : 'retries'}
+          </span>
+        )}
+        {reapingPrecompileChildren !== null &&
+          reapingPrecompileChildren > 0 && (
+            <span
+              className="mt-1 block tabular-nums text-amber-600 dark:text-amber-400"
+              data-testid={`pipeline-reaping-precompile-children-${stage.key}`}
+            >
+              {formatCount(reapingPrecompileChildren)} child{' '}
+              {reapingPrecompileChildren === 1 ? 'reaping' : 'children reaping'}
+            </span>
+          )}
+        {workflowAttribution && (
+          <span
+            className="mt-1 block truncate text-muted-foreground"
+            title={`Top workflows: ${workflowAttribution}`}
+            data-testid={`pipeline-workflow-attribution-${stage.key}`}
+          >
+            top: {workflowAttribution}
           </span>
         )}
       </div>

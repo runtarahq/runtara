@@ -4710,6 +4710,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "bytes",
+ "getrandom 0.3.4",
  "http",
  "http-body-util",
  "hyper",
@@ -4723,12 +4724,15 @@ dependencies = [
  "runtara-workflow-wit",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "tokio",
  "tracing",
+ "wasmparser 0.247.0",
  "wasmtime",
  "wasmtime-wasi",
  "wasmtime-wasi-http",
+ "wat",
 ]
 
 [[package]]
@@ -4807,6 +4811,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "futures",
+ "getrandom 0.3.4",
  "runtara-component-host",
  "runtara-core",
  "serde",

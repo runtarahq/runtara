@@ -1,10 +1,37 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+use std::ffi::{OsStr, OsString};
+
+use runtara_component_host::precompile::PRECOMPILE_WORKER_ARGUMENT;
 use sqlx::postgres::PgPoolOptions;
+
+fn internal_precompile_component_requested(mut args: impl Iterator<Item = OsString>) -> bool {
+    let _program = args.next();
+    matches!(args.next().as_deref(), Some(argument) if argument == OsStr::new(PRECOMPILE_WORKER_ARGUMENT))
+        && args.next().is_none()
+}
+
+fn run_internal_precompile_component() -> Result<(), Box<dyn std::error::Error>> {
+    let stdin = std::io::stdin();
+    let stdout = std::io::stdout();
+    let mut reader = stdin.lock();
+    let mut writer = stdout.lock();
+    if let Err(error) =
+        runtara_component_host::precompile::run_precompile_worker(&mut reader, &mut writer)
+    {
+        eprintln!("internal component precompiler failed: {error:#}");
+        return Err(error.into());
+    }
+    Ok(())
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if internal_precompile_component_requested(std::env::args_os()) {
+        return run_internal_precompile_component();
+    }
+
     dotenvy::dotenv().ok();
 
     // The server's primary database: workflows, connections, API keys, triggers.
@@ -53,4 +80,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     runtara_server::start(pool).await
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsString;
+
+    use super::{PRECOMPILE_WORKER_ARGUMENT, internal_precompile_component_requested};
+
+    #[test]
+    fn internal_precompile_mode_requires_the_exact_private_argument() {
+        assert!(internal_precompile_component_requested(
+            ["runtara-server", PRECOMPILE_WORKER_ARGUMENT]
+                .into_iter()
+                .map(OsString::from),
+        ));
+        assert!(!internal_precompile_component_requested(
+            ["runtara-server", PRECOMPILE_WORKER_ARGUMENT, "extra"]
+                .into_iter()
+                .map(OsString::from),
+        ));
+        assert!(!internal_precompile_component_requested(
+            ["runtara-server", "--normal-server-option"]
+                .into_iter()
+                .map(OsString::from),
+        ));
+    }
 }

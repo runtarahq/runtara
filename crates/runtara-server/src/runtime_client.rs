@@ -12,7 +12,9 @@ use std::sync::Arc;
 
 use crate::environment_client::{EnvironmentClient, EnvironmentError};
 use crate::runtime_types::{ListInstancesOptions, StartInstanceOptions};
+use runtara_environment::execution_timeout::{ExecutionTimeoutPolicy, ExecutionTimeoutSeconds};
 use runtara_environment::handlers::EnvironmentHandlerState;
+use runtara_environment::launch_queue::SINGLE_INSTANCE_LAUNCH_ENV;
 use serde_json::Value;
 
 // Re-export types from the SDK for use by other modules
@@ -38,6 +40,9 @@ pub enum RuntimeError {
     #[error("Image not found: {0}")]
     ImageNotFound(String),
 
+    #[error("single-instance workflow already has active work")]
+    SingleInstanceActive,
+
     #[error("Instance not found: {0}")]
     InstanceNotFound(String),
 
@@ -49,6 +54,9 @@ pub enum RuntimeError {
 
     #[error("SDK error: {0}")]
     SdkError(String),
+
+    #[error("Invalid execution timeout: {0}")]
+    InvalidExecutionTimeout(String),
 }
 
 /// Result of a workflow execution
@@ -104,160 +112,22 @@ pub enum TerminalOutcome {
     Suspended,
 }
 
-/// Configuration for the runtime client
+/// Configuration for the runtime client.
+///
+/// It deliberately contains the same policy that Environment receives at
+/// startup. A server must not choose one timeout while saving a workflow and a
+/// different one after that workflow wakes.
 #[derive(Debug, Clone)]
 pub struct RuntimeClientConfig {
-    /// The execution timeout applied to a workflow instance when the caller
-    /// names none — in effect, the default for a workflow definition's own
-    /// `executionTimeoutSeconds`.
-    ///
-    /// This terminates work rather than merely bounding a wait. It travels as
-    /// `StartInstanceOptions::timeout_seconds`, which runtara-environment's
-    /// container monitor enforces by killing the instance and recording it
-    /// `failed` with `termination_reason = "timeout"`, and it bounds
-    /// [`RuntimeClient::wait_for_completion`], which cancels the instance when
-    /// it elapses.
-    pub default_timeout_secs: u32,
-}
-
-/// The execution timeout used when neither the caller nor the environment names
-/// one. Note that runtara-environment carries its own, longer fallback for
-/// requests that omit a timeout entirely (`RUNTARA_DEFAULT_INSTANCE_TIMEOUT_SECS`,
-/// 3600s); the server always sends a value, so this is the one that applies to
-/// anything the server starts.
-const DEFAULT_EXECUTION_TIMEOUT_SECS: u32 = 300;
-
-/// The server's name for that timeout, in the unit it is actually kept in.
-const EXECUTION_TIMEOUT_SECS_ENV: &str = "RUNTARA_DEFAULT_EXECUTION_TIMEOUT_SECS";
-
-/// The name this setting used to share with the SDK's per-request HTTP timeout
-/// (`HttpSdkConfig::from_env`), which is milliseconds and means something else
-/// entirely. Still read, because a deployment that set it was getting a longer
-/// execution timeout, and silently reverting that on upgrade would start killing
-/// workflows at five minutes. See [`resolve_execution_timeout`].
-const LEGACY_EXECUTION_TIMEOUT_MS_ENV: &str = "RUNTARA_REQUEST_TIMEOUT_MS";
-
-/// The timeout [`RuntimeClientConfig::from_env`] settled on, plus anything the
-/// operator needs told about how it got there.
-#[derive(Debug, PartialEq, Eq)]
-struct ExecutionTimeout {
-    secs: u32,
-    /// A deprecated name still in use, or a value that could not be honoured.
-    warning: Option<String>,
-}
-
-/// Decide the default execution timeout from the two variables that can name it.
-///
-/// Split out of the env read so precedence and the millisecond conversion are
-/// covered directly; [`RuntimeClientConfig::from_env`] is tested separately for
-/// the binding between the two, since the parameters are interchangeable by type
-/// and swapping them would be invisible here.
-///
-/// The deprecated variable is converted the way it always was — truncating
-/// integer division by 1000 — so an existing deployment keeps the exact timeout
-/// it had. That conversion is why the warning quotes both numbers: a value chosen
-/// as a millisecond request timeout rarely reads as a sensible number of seconds,
-/// and under 1000 it truncates to none at all.
-fn resolve_execution_timeout(
-    configured_secs: Option<String>,
-    legacy_ms: Option<String>,
-) -> ExecutionTimeout {
-    // A value under the current name is the operator's declared intent, so a bad
-    // one is reported rather than quietly handed back to the deprecated name.
-    match configured_secs.as_deref().map(str::parse::<u32>) {
-        Some(Ok(0)) => {
-            return ExecutionTimeout {
-                secs: DEFAULT_EXECUTION_TIMEOUT_SECS,
-                warning: Some(format!(
-                    "{EXECUTION_TIMEOUT_SECS_ENV}=0 would kill every workflow the instant it \
-                     started, so it is ignored and the {DEFAULT_EXECUTION_TIMEOUT_SECS}s default \
-                     applies. Set a positive number of seconds."
-                )),
-            };
-        }
-        Some(Ok(secs)) => {
-            return ExecutionTimeout {
-                secs,
-                warning: None,
-            };
-        }
-        Some(Err(_)) => {
-            let value = configured_secs.unwrap_or_default();
-            return ExecutionTimeout {
-                secs: DEFAULT_EXECUTION_TIMEOUT_SECS,
-                warning: Some(format!(
-                    "{EXECUTION_TIMEOUT_SECS_ENV}={value:?} is not a whole number of seconds, so \
-                     the {DEFAULT_EXECUTION_TIMEOUT_SECS}s default applies. Note this is seconds, \
-                     not milliseconds, and carries no unit suffix."
-                )),
-            };
-        }
-        None => {}
-    }
-
-    let Some(ms) = legacy_ms
-        .as_deref()
-        .and_then(|value| value.parse::<u32>().ok())
-    else {
-        return ExecutionTimeout {
-            secs: DEFAULT_EXECUTION_TIMEOUT_SECS,
-            warning: None,
-        };
-    };
-
-    let secs = ms / 1000;
-    let mut warning = format!(
-        "{LEGACY_EXECUTION_TIMEOUT_MS_ENV} is deprecated as a server setting. It is the \
-         runtara-sdk per-request HTTP timeout, and the server read the same name for something \
-         unrelated: the execution timeout a workflow instance is killed at when it names none of \
-         its own. Its {ms}ms is being taken as {secs}s for that, in place of the \
-         {DEFAULT_EXECUTION_TIMEOUT_SECS}s default. Set {EXECUTION_TIMEOUT_SECS_ENV} to the \
-         seconds you want, and unset {LEGACY_EXECUTION_TIMEOUT_MS_ENV} from this process's \
-         environment."
-    );
-    if secs == 0 {
-        warning.push_str(&format!(
-            " {ms}ms truncates to zero seconds, so every workflow is now killed the instant it \
-             starts — set {EXECUTION_TIMEOUT_SECS_ENV} before this server serves traffic."
-        ));
-    }
-
-    ExecutionTimeout {
-        secs,
-        warning: Some(warning),
-    }
+    /// The bounded active-execution timeout policy.
+    pub execution_timeout_policy: ExecutionTimeoutPolicy,
 }
 
 impl RuntimeClientConfig {
-    /// Create configuration from environment variables.
-    ///
-    /// There is no address to read any more: the client talks to the embedded
-    /// environment directly, so whether a runtime exists is decided by whether
-    /// the embedded runtime started, not by a variable.
-    ///
-    /// `RUNTARA_DEFAULT_EXECUTION_TIMEOUT_SECS` names the default execution
-    /// timeout, in seconds. `RUNTARA_REQUEST_TIMEOUT_MS` is still honoured when
-    /// it does not, and warns; see [`resolve_execution_timeout`].
-    pub fn from_env() -> Self {
-        let resolved = resolve_execution_timeout(
-            std::env::var(EXECUTION_TIMEOUT_SECS_ENV).ok(),
-            std::env::var(LEGACY_EXECUTION_TIMEOUT_MS_ENV).ok(),
-        );
-
-        if let Some(warning) = resolved.warning {
-            warn!("{warning}");
-        }
-
-        // Logged unconditionally: the failure this setting invites is a value in
-        // the wrong unit, which looks like nothing at all until workflows start
-        // being killed early or living for days.
-        info!(
-            default_execution_timeout_secs = resolved.secs,
-            "Resolved default workflow execution timeout"
-        );
-
+    /// Build a client configuration from the already-validated process policy.
+    pub const fn new(execution_timeout_policy: ExecutionTimeoutPolicy) -> Self {
         Self {
-            default_timeout_secs: resolved.secs,
+            execution_timeout_policy,
         }
     }
 }
@@ -340,6 +210,19 @@ impl RuntimeClient {
         }
     }
 
+    /// Resolve an optional workflow timeout through the one process-wide
+    /// policy. ExecutionEngine calls this before both sync and async starts so
+    /// a stored definition cannot bypass a stricter deployment maximum.
+    pub fn resolve_execution_timeout(
+        &self,
+        timeout: Option<ExecutionTimeoutSeconds>,
+    ) -> Result<ExecutionTimeoutSeconds, RuntimeError> {
+        self.config
+            .execution_timeout_policy
+            .resolve(timeout)
+            .map_err(|error| RuntimeError::InvalidExecutionTimeout(error.to_string()))
+    }
+
     /// Start a workflow instance
     ///
     /// # Arguments
@@ -348,20 +231,22 @@ impl RuntimeClient {
     /// * `workflow_id` - The workflow identifier (for tracing context)
     /// * `instance_id` - Optional custom instance ID
     /// * `input` - Input data for the workflow
-    /// * `timeout_secs` - Optional timeout in seconds
+    /// * `timeout` - Optional validated active-execution deadline
+    /// * `single_instance` - Enforce the durable workflow-wide launch lease
     ///
     /// # Returns
     /// The instance ID of the started workflow
     #[allow(clippy::too_many_arguments)]
-    pub async fn start_instance(
+    pub(crate) async fn start_instance(
         &self,
         image_id: &str,
         tenant_id: &str,
         workflow_id: &str,
         instance_id: Option<String>,
         input: Option<Value>,
-        timeout_secs: Option<u32>,
+        timeout: Option<ExecutionTimeoutSeconds>,
         debug: bool,
+        single_instance: bool,
     ) -> Result<StartInstanceOutcome, RuntimeError> {
         let sdk = &self.client;
 
@@ -382,9 +267,11 @@ impl RuntimeClient {
             options = options.with_input(inp);
         }
 
-        // Always pass a timeout to runtara to avoid SDK's internal default (which may be too short)
-        let effective_timeout = timeout_secs.unwrap_or(self.config.default_timeout_secs);
-        options = options.with_timeout(effective_timeout);
+        // Always pass a timeout to Environment. It owns the same policy, but
+        // resolving it here keeps the synchronous observer and the active
+        // runner on exactly the same deadline.
+        let effective_timeout = self.resolve_execution_timeout(timeout)?;
+        options = options.with_timeout(effective_timeout.as_secs());
 
         // Pass OpenTelemetry configuration for distributed tracing (if enabled)
         if trace_context::is_otel_enabled() {
@@ -434,9 +321,13 @@ impl RuntimeClient {
         if debug {
             options = options.with_env_var("DEBUG_MODE", "true");
         }
+        if single_instance {
+            options = options.with_env_var(SINGLE_INSTANCE_LAUNCH_ENV, "true");
+        }
 
         let result = sdk.start_instance(options).await.map_err(|e| match e {
             EnvironmentError::ImageNotFound(message) => RuntimeError::ImageNotFound(message),
+            EnvironmentError::SingleInstanceActive => RuntimeError::SingleInstanceActive,
             other => RuntimeError::StartFailed(other.to_string()),
         })?;
 
@@ -481,19 +372,17 @@ impl RuntimeClient {
     /// # Arguments
     /// * `instance_id` - The instance to wait for
     /// * `poll_interval_ms` - How often to check status (default 10ms)
-    /// * `timeout_secs` - Maximum time to wait (default from config)
+    /// * `timeout` - Maximum time to wait (default from the shared policy)
     pub async fn wait_for_completion(
         &self,
         instance_id: &str,
         poll_interval_ms: Option<u64>,
-        timeout_secs: Option<u32>,
+        timeout: Option<ExecutionTimeoutSeconds>,
     ) -> Result<ExecutionOutput, RuntimeError> {
         let sdk = &self.client;
 
         let poll_interval = std::time::Duration::from_millis(poll_interval_ms.unwrap_or(10));
-        let timeout = std::time::Duration::from_secs(
-            timeout_secs.unwrap_or(self.config.default_timeout_secs) as u64,
-        );
+        let timeout = self.resolve_execution_timeout(timeout)?.as_duration();
         let start_time = std::time::Instant::now();
 
         loop {
@@ -606,36 +495,6 @@ impl RuntimeClient {
 
             tokio::time::sleep(poll_interval).await;
         }
-    }
-
-    /// Execute a workflow synchronously (start and wait for completion)
-    ///
-    /// This is a convenience method that combines `start_instance` and `wait_for_completion`.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn execute_sync(
-        &self,
-        image_id: &str,
-        tenant_id: &str,
-        workflow_id: &str,
-        instance_id: Option<String>,
-        input: Option<Value>,
-        timeout_secs: Option<u32>,
-        debug: bool,
-    ) -> Result<ExecutionOutput, RuntimeError> {
-        let start = self
-            .start_instance(
-                image_id,
-                tenant_id,
-                workflow_id,
-                instance_id,
-                input,
-                timeout_secs,
-                debug,
-            )
-            .await?;
-
-        self.wait_for_completion(&start.instance_id, None, timeout_secs)
-            .await
     }
 
     /// Stop a running workflow instance
@@ -1138,152 +997,12 @@ mod classify_observed_status_tests {
 #[cfg(test)]
 mod execution_timeout_tests {
     use super::*;
-    use crate::test_env::{ENV_MUTEX, EnvGuard};
-
-    /// The point of the rename: a timeout measured in seconds is named in
-    /// seconds, and nothing divides it.
-    #[test]
-    fn the_seconds_variable_is_taken_at_face_value() {
-        let resolved = resolve_execution_timeout(Some("900".to_string()), None);
-
-        assert_eq!(resolved.secs, 900);
-        assert_eq!(resolved.warning, None);
-    }
 
     #[test]
-    fn neither_variable_leaves_the_default() {
-        let resolved = resolve_execution_timeout(None, None);
+    fn runtime_client_config_carries_the_policy_unchanged() {
+        let policy = ExecutionTimeoutPolicy::new(120, 300).unwrap();
+        let config = RuntimeClientConfig::new(policy);
 
-        assert_eq!(resolved.secs, DEFAULT_EXECUTION_TIMEOUT_SECS);
-        assert_eq!(resolved.warning, None);
-    }
-
-    /// Zero is not "no limit" here — it is a kill deadline in the past, so every
-    /// instance dies the moment it starts. The current name has no deployments
-    /// to preserve, so it is refused outright rather than honoured, matching
-    /// `default_instance_timeout` in runtara-environment.
-    #[test]
-    fn a_zero_second_timeout_is_refused() {
-        let resolved = resolve_execution_timeout(Some("0".to_string()), None);
-
-        assert_eq!(resolved.secs, DEFAULT_EXECUTION_TIMEOUT_SECS);
-        let warning = resolved.warning.expect("zero is reported");
-        assert!(warning.contains(EXECUTION_TIMEOUT_SECS_ENV), "{warning}");
-    }
-
-    /// The realistic migration slip is copying the millisecond value across, or
-    /// writing a unit suffix. Neither parses, and both are worth naming: the
-    /// operator believes they have set the timeout.
-    #[test]
-    fn an_unparseable_seconds_value_is_reported_not_silently_defaulted() {
-        let resolved = resolve_execution_timeout(Some("900s".to_string()), None);
-
-        assert_eq!(resolved.secs, DEFAULT_EXECUTION_TIMEOUT_SECS);
-        let warning = resolved.warning.expect("a bad value is reported");
-        assert!(warning.contains("900s"), "{warning}");
-        assert!(warning.contains("seconds"), "{warning}");
-    }
-
-    /// A typo under the current name must not hand control back to the
-    /// deprecated one: the operator has migrated, so the typo is the thing to
-    /// fix, and a deprecation notice telling them to set a variable they already
-    /// set would send them looking in the wrong place.
-    #[test]
-    fn a_typo_under_the_current_name_does_not_fall_back_to_the_deprecated_one() {
-        let resolved =
-            resolve_execution_timeout(Some("900s".to_string()), Some("3600000".to_string()));
-
-        assert_eq!(resolved.secs, DEFAULT_EXECUTION_TIMEOUT_SECS);
-        let warning = resolved.warning.expect("the typo is reported");
-        assert!(
-            !warning.contains(LEGACY_EXECUTION_TIMEOUT_MS_ENV),
-            "the deprecated name is not the advice here: {warning}"
-        );
-    }
-
-    /// The fallback the deprecation exists for: a deployment that raised the
-    /// timeout through the old name keeps the same timeout after the upgrade.
-    /// Reverting it to 300s here would start killing every workflow that runs
-    /// past five minutes, which is exactly the silent change a rename must not
-    /// make.
-    #[test]
-    fn the_deprecated_variable_still_sets_the_same_timeout() {
-        let resolved = resolve_execution_timeout(None, Some("3600000".to_string()));
-
-        assert_eq!(resolved.secs, 3600);
-        let warning = resolved.warning.expect("the old name warns");
-        assert!(
-            warning.contains(LEGACY_EXECUTION_TIMEOUT_MS_ENV),
-            "{warning}"
-        );
-        assert!(warning.contains(EXECUTION_TIMEOUT_SECS_ENV), "{warning}");
-        // Both numbers, because the whole trap is that they are not the same
-        // number in the same unit.
-        assert!(warning.contains("3600000ms"), "{warning}");
-        assert!(warning.contains("3600s"), "{warning}");
-    }
-
-    /// The collision itself: the same value means one thing to the SDK and
-    /// another here, so whichever name wins has to be the one that decides.
-    #[test]
-    fn the_seconds_variable_wins_over_the_deprecated_one() {
-        let resolved =
-            resolve_execution_timeout(Some("120".to_string()), Some("3600000".to_string()));
-
-        assert_eq!(resolved.secs, 120);
-        assert_eq!(
-            resolved.warning, None,
-            "a migrated deployment is not nagged about a variable it no longer relies on"
-        );
-    }
-
-    /// A sub-second request timeout is a reasonable SDK setting and a lethal
-    /// server one: it truncates to a zero-second kill deadline. Honoured rather
-    /// than clamped — clamping would change the behaviour of the deployments the
-    /// fallback exists to preserve — but said out loud, since no operator picked
-    /// it on purpose.
-    #[test]
-    fn a_sub_second_deprecated_value_truncates_and_says_so() {
-        let resolved = resolve_execution_timeout(None, Some("500".to_string()));
-
-        assert_eq!(resolved.secs, 0);
-        let warning = resolved.warning.expect("the old name warns");
-        assert!(warning.contains("truncates to zero seconds"), "{warning}");
-    }
-
-    /// The binding [`resolve_execution_timeout`] cannot check for itself: its two
-    /// parameters are both `Option<String>`, so swapping them at the call site
-    /// would leave every test above passing while the server read milliseconds as
-    /// seconds — the exact defect this change exists to remove. The numbers here
-    /// are chosen so a swap cannot produce them.
-    #[tokio::test]
-    async fn from_env_binds_each_variable_to_its_own_unit() {
-        let _lock = ENV_MUTEX.lock().await;
-
-        let mut guard = EnvGuard::new();
-        guard.set(EXECUTION_TIMEOUT_SECS_ENV, "120");
-        guard.set(LEGACY_EXECUTION_TIMEOUT_MS_ENV, "3600000");
-        assert_eq!(
-            RuntimeClientConfig::from_env().default_timeout_secs,
-            120,
-            "the seconds variable is read as seconds, and wins"
-        );
-
-        let mut guard = EnvGuard::new();
-        guard.remove(EXECUTION_TIMEOUT_SECS_ENV);
-        guard.set(LEGACY_EXECUTION_TIMEOUT_MS_ENV, "600000");
-        assert_eq!(
-            RuntimeClientConfig::from_env().default_timeout_secs,
-            600,
-            "the deprecated variable is read as milliseconds"
-        );
-
-        let mut guard = EnvGuard::new();
-        guard.remove(EXECUTION_TIMEOUT_SECS_ENV);
-        guard.remove(LEGACY_EXECUTION_TIMEOUT_MS_ENV);
-        assert_eq!(
-            RuntimeClientConfig::from_env().default_timeout_secs,
-            DEFAULT_EXECUTION_TIMEOUT_SECS
-        );
+        assert_eq!(config.execution_timeout_policy, policy);
     }
 }

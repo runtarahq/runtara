@@ -101,8 +101,8 @@ async fn create_instance_image(pool: &PgPool, instance_id: &str, image_id: &str,
 async fn create_container_registry(pool: &PgPool, instance_id: &str, tenant_id: &str) {
     sqlx::query(
         r#"
-        INSERT INTO container_registry (container_id, instance_id, tenant_id, binary_path, started_at)
-        VALUES ($1, $2, $3, '/usr/bin/test', NOW())
+        INSERT INTO container_registry (container_id, launch_id, instance_id, tenant_id, binary_path, started_at)
+        VALUES ($1, $1, $2, $3, '/usr/bin/test', NOW())
         ON CONFLICT (instance_id) DO NOTHING
         "#,
     )

@@ -17,6 +17,13 @@ export interface PipelineRates {
   steps: number | null;
 }
 
+/** A bounded workflow contributor for one durable launch stage. */
+export interface PipelineWorkflowAttribution {
+  workflowId: string;
+  count: number;
+  oldestAgeMs: number | null;
+}
+
 export interface PipelineStage {
   key: string;
   label: string;
@@ -27,10 +34,25 @@ export interface PipelineStage {
   used: number | null;
   oldestAgeMs: number | null;
   inflowKey: string;
+  /**
+   * Current queued launches whose latest dispatcher result was an exhausted
+   * runner. Omitted by older servers and inapplicable stages.
+   */
+  capacityRejections?: number | null;
+  /** Timed-out precompile children still awaiting the bounded reaper. */
+  reapingPrecompileChildren?: number | null;
+  /** Highest-count workflow contributors, capped server-side. */
+  topWorkflows?: PipelineWorkflowAttribution[];
 }
 
 export interface PipelineSnapshot {
   capturedAt: string;
+  /**
+   * Server policy for the "not draining" callout. Optional during a rolling
+   * upgrade so a newer console can still render a snapshot from an older
+   * server with the documented fallback.
+   */
+  stuckAfterMs?: number;
   windowMs: number;
   /** `null` on the first tick after start, when there is no window yet. */
   rates: PipelineRates | null;
@@ -42,6 +64,11 @@ export const CHOKE_THRESHOLD = 80;
 
 /** How long a full stage may hold its oldest item before that is remarkable. */
 export const DEFAULT_STUCK_AFTER_MS = 5 * 60 * 1000;
+
+/** The server policy carried by a snapshot, with a safe rollout fallback. */
+export function snapshotStuckAfterMs(snapshot: PipelineSnapshot): number {
+  return snapshot.stuckAfterMs ?? DEFAULT_STUCK_AFTER_MS;
+}
 
 export type StageSeverity = 'unknown' | 'ok' | 'warn' | 'bad';
 
@@ -64,19 +91,39 @@ export function severityOf(stage: PipelineStage): StageSeverity {
   return 'ok';
 }
 
-/// Is this stage full and holding work that is not moving?
+/// Is this stage holding observable work that is not moving?
 ///
-/// Both halves are required. Full alone is not a fault — a stage pinned at its
-/// bound while recycling every few seconds is a system working as hard as it
-/// can. Old alone is not either, since a stage with headroom is nobody's
-/// constraint however long its oldest item has sat.
+/// A bounded capacity stage needs to be full and old: capacity in use alone is
+/// normal. An old durable launch generation is different: it has already been
+/// admitted, so even one that is queued for too long is a real blocked
+/// condition. The queue borrows the admission limit for occupancy display, but
+/// must not borrow its "full" requirement for that diagnosis.
 export function isNotDraining(
   stage: PipelineStage,
   stuckAfterMs: number = DEFAULT_STUCK_AFTER_MS
 ): boolean {
+  if (
+    stage.used === null ||
+    stage.used === 0 ||
+    stage.oldestAgeMs === null ||
+    stage.oldestAgeMs < stuckAfterMs
+  ) {
+    return false;
+  }
+  // These are terminal outcome counters, not work waiting to make progress.
+  // Their oldest retained row can legitimately be days old; labelling that
+  // history "not draining" would hide the actionable live stages in noise.
+  if (stage.key === 'launchExpired' || stage.key === 'launchCancelled') {
+    return false;
+  }
+  if (stage.key === 'launchQueued' || stage.key === 'launchPreparing')
+    return true;
   const pct = utilisation(stage);
-  if (pct === null || pct < 99) return false;
-  return stage.oldestAgeMs !== null && stage.oldestAgeMs >= stuckAfterMs;
+  // An unbounded queue cannot be the capacity chokepoint by itself, but an old
+  // queued generation is still a real blocked condition and must be called
+  // out. `findChokepoint` keeps launchQueued out of candidates explicitly:
+  // that row describes the evidence, not necessarily the downstream limit.
+  return pct === null || pct >= 99;
 }
 
 /// The stage actually constraining the pipeline, or `null` if none is.
@@ -105,6 +152,11 @@ export function findChokepoint(
   let bestScore = -1;
 
   for (const stage of stages) {
+    // The launch queue shows what is stuck, but it inherits the admission
+    // ceiling solely for occupancy context. It must not be chosen as the
+    // capacity constraint just because an old row received the stuck bonus.
+    if (stage.key === 'launchQueued' || stage.key === 'launchPreparing')
+      continue;
     const pct = utilisation(stage);
     if (pct === null) continue;
     const score = pct + (isNotDraining(stage, stuckAfterMs) ? 1000 : 0);
