@@ -13,7 +13,7 @@
 # it proves: that the gate actually calls the counters at all.
 #
 # Asserts:
-#   * the snapshot endpoint reports durable launch stages, in pipeline order
+#   * the snapshot endpoint reports all seven stages, in pipeline order
 #   * every bound is a real knob name an operator can act on
 #   * the run-permit stage carries a bound read from the live runner
 #   * driving executions moves offered/accepted, proving the gate is wired
@@ -104,42 +104,6 @@ expect_true() {
 }
 
 pipeline() { curl -sS "${API}/analytics/pipeline"; }
-
-# Seed durable launch rows after Environment has applied its migrations. The
-# dispatcher cannot consume the queued fixtures because their available_at is
-# deliberately in the future; this makes the sampler's state/age/attribution
-# assertion deterministic without faking its database reader.
-seed_launch_telemetry() {
-    psql_quiet -d "${TEST_DB_RUNTIME}" -c "
-        INSERT INTO images (image_id, tenant_id, name, binary_path, metadata)
-        VALUES
-            ('pipeline-analytics-image', '${TENANT}', 'expense-approval:1', '/tmp/pipeline-analytics.wasm',
-             '{\"workflow\": {\"workflowId\": \"expense-approval\"}}'::jsonb),
-            ('pipeline-analytics-image-alt', '${TENANT}', 'invoice-sync:1', '/tmp/pipeline-analytics-alt.wasm',
-             '{\"workflow\": {\"workflowId\": \"invoice-sync\"}}'::jsonb);
-
-        INSERT INTO instances (instance_id, tenant_id, status, created_at, finished_at)
-        VALUES
-            ('pipeline-launch-queued-a', '${TENANT}', 'pending', NOW() - INTERVAL '20 seconds', NULL),
-            ('pipeline-launch-queued-b', '${TENANT}', 'pending', NOW() - INTERVAL '12 seconds', NULL),
-            ('pipeline-launch-leased', '${TENANT}', 'pending', NOW() - INTERVAL '15 seconds', NULL),
-            ('pipeline-launch-starting', '${TENANT}', 'pending', NOW() - INTERVAL '10 seconds', NULL),
-            ('pipeline-launch-running', '${TENANT}', 'running', NOW() - INTERVAL '9 seconds', NULL),
-            ('pipeline-launch-expired', '${TENANT}', 'failed', NOW() - INTERVAL '40 seconds', NOW() - INTERVAL '30 seconds'),
-            ('pipeline-launch-cancelled', '${TENANT}', 'cancelled', NOW() - INTERVAL '25 seconds', NOW() - INTERVAL '8 seconds');
-
-        INSERT INTO instance_launches
-            (launch_id, instance_id, tenant_id, image_id, kind, state, available_at, deadline_at, lease_owner, lease_expires_at, last_error, created_at, updated_at)
-        VALUES
-            ('pipeline-launch-queued-a', 'pipeline-launch-queued-a', '${TENANT}', 'pipeline-analytics-image', 'start', 'queued', NOW() + INTERVAL '10 minutes', NOW() + INTERVAL '1 hour', NULL, NULL, 'runner_capacity_unavailable', NOW() - INTERVAL '20 seconds', NOW() - INTERVAL '20 seconds'),
-            ('pipeline-launch-queued-b', 'pipeline-launch-queued-b', '${TENANT}', 'pipeline-analytics-image-alt', 'start', 'queued', NOW() + INTERVAL '10 minutes', NOW() + INTERVAL '1 hour', NULL, NULL, NULL, NOW() - INTERVAL '12 seconds', NOW() - INTERVAL '12 seconds'),
-            ('pipeline-launch-leased', 'pipeline-launch-leased', '${TENANT}', 'pipeline-analytics-image', 'start', 'leased', NOW(), NOW() + INTERVAL '1 hour', 'test-dispatcher', NOW() + INTERVAL '10 minutes', NULL, NOW() - INTERVAL '15 seconds', NOW() - INTERVAL '15 seconds'),
-            ('pipeline-launch-starting', 'pipeline-launch-starting', '${TENANT}', 'pipeline-analytics-image', 'start', 'starting', NOW(), NOW() + INTERVAL '1 hour', 'test-dispatcher', NOW() + INTERVAL '10 minutes', NULL, NOW() - INTERVAL '10 seconds', NOW() - INTERVAL '10 seconds'),
-            ('pipeline-launch-running', 'pipeline-launch-running', '${TENANT}', 'pipeline-analytics-image', 'start', 'running', NOW(), NOW() + INTERVAL '1 hour', NULL, NULL, NULL, NOW() - INTERVAL '9 seconds', NOW() - INTERVAL '9 seconds'),
-            ('pipeline-launch-expired', 'pipeline-launch-expired', '${TENANT}', 'pipeline-analytics-image', 'start', 'failed', NOW(), NOW() - INTERVAL '1 second', NULL, NULL, 'launch_queue_timeout', NOW() - INTERVAL '40 seconds', NOW() - INTERVAL '30 seconds'),
-            ('pipeline-launch-cancelled', 'pipeline-launch-cancelled', '${TENANT}', 'pipeline-analytics-image', 'start', 'cancelled', NOW(), NOW() + INTERVAL '1 hour', NULL, NULL, NULL, NOW() - INTERVAL '25 seconds', NOW() - INTERVAL '8 seconds');
-    " >/dev/null
-}
 
 api_post() {
     local path="$1" body="$2" timeout="${3:-60}"
@@ -277,9 +241,9 @@ fi
 echo "  First snapshot after ~${i}s"
 
 print_step "1. The snapshot is the pipeline, in order"
-expect_eq "stage count" "11" "$(echo "${SNAPSHOT}" | jq -r '.data.stages | length')"
+expect_eq "stage count" "7" "$(echo "${SNAPSHOT}" | jq -r '.data.stages | length')"
 expect_eq "stage keys in pipeline order" \
-  "admission triggerQueue triggerWorkers launchQueued launchLeased launchStarting runPermits launchRunning launchExpired launchCancelled parked" \
+  "admission triggerQueue triggerWorkers pendingStarts runPermits executing parked" \
   "$(echo "${SNAPSHOT}" | jq -r '[.data.stages[].key] | join(" ")')"
 expect_eq "server stuck policy is carried in milliseconds" "7000" \
   "$(echo "${SNAPSHOT}" | jq -r '.data.stuckAfterMs')"
@@ -303,43 +267,12 @@ expect_true "run permit occupancy is readable" \
   "$(echo "${SNAPSHOT}" | jq -r '(.data.stages[] | select(.key=="runPermits") | .used) != null')"
 
 print_step "4. Unbounded stages report no limit rather than inventing one"
-for key in triggerQueue launchLeased launchStarting launchExpired launchCancelled parked; do
+for key in triggerQueue executing parked; do
     expect_eq "${key} has no ceiling" "null" \
       "$(echo "${SNAPSHOT}" | jq -r ".data.stages[] | select(.key==\"${key}\") | .limit")"
 done
 
-print_step "5. Durable launch telemetry names the actual blocked stage"
-seed_launch_telemetry
-LAUNCH_SNAPSHOT=""
-for _ in $(seq 1 12); do
-    sleep 1
-    LAUNCH_SNAPSHOT="$(pipeline)"
-    if [ "$(echo "${LAUNCH_SNAPSHOT}" | jq -r '.data.stages[] | select(.key=="launchQueued") | .used')" = "2" ]; then
-        break
-    fi
-done
-expect_eq "queued durable launches" "2" \
-  "$(echo "${LAUNCH_SNAPSHOT}" | jq -r '.data.stages[] | select(.key=="launchQueued") | .used')"
-expect_eq "leased durable launches" "1" \
-  "$(echo "${LAUNCH_SNAPSHOT}" | jq -r '.data.stages[] | select(.key=="launchLeased") | .used')"
-expect_eq "starting durable launches" "1" \
-  "$(echo "${LAUNCH_SNAPSHOT}" | jq -r '.data.stages[] | select(.key=="launchStarting") | .used')"
-expect_eq "running durable launches" "1" \
-  "$(echo "${LAUNCH_SNAPSHOT}" | jq -r '.data.stages[] | select(.key=="launchRunning") | .used')"
-expect_eq "expired durable launches" "1" \
-  "$(echo "${LAUNCH_SNAPSHOT}" | jq -r '.data.stages[] | select(.key=="launchExpired") | .used')"
-expect_eq "cancelled durable launches" "1" \
-  "$(echo "${LAUNCH_SNAPSHOT}" | jq -r '.data.stages[] | select(.key=="launchCancelled") | .used')"
-expect_eq "current capacity retries" "1" \
-  "$(echo "${LAUNCH_SNAPSHOT}" | jq -r '.data.stages[] | select(.key=="launchQueued") | .capacityRejections')"
-expect_eq "top queued workflow attribution" "expense-approval" \
-  "$(echo "${LAUNCH_SNAPSHOT}" | jq -r '.data.stages[] | select(.key=="launchQueued") | .topWorkflows[0].workflowId')"
-expect_true "queued durable age is reported" \
-  "$(echo "${LAUNCH_SNAPSHOT}" | jq -r '(.data.stages[] | select(.key=="launchQueued") | .oldestAgeMs) > 0')"
-expect_true "parked stays outside launch-state counts" \
-  "$(echo "${LAUNCH_SNAPSHOT}" | jq -r '(.data.stages[] | select(.key=="parked") | .used) != 7')"
-
-print_step "6. Driving real executions moves the gate's counters"
+print_step "5. Driving real executions moves the gate's counters"
 # The piece no unit test here reaches: that check_concurrency_gate actually
 # calls the counters on the live path. A made-up workflow id would be rejected
 # before the gate, so this uses a real compiled one.
@@ -437,7 +370,7 @@ curl -sS --max-time 4 -H 'Accept: text/event-stream' \
 
 FIRST_FRAME="$(grep -m1 '^data:' "${STREAM_OUT}" | sed 's/^data: *//')"
 expect_true "the first frame arrives and is a snapshot" \
-  "$(echo "${FIRST_FRAME}" | jq -r '(.stages | length) == 11 and .stuckAfterMs == 7000' 2>/dev/null || echo false)"
+  "$(echo "${FIRST_FRAME}" | jq -r '(.stages | length) == 7 and .stuckAfterMs == 7000' 2>/dev/null || echo false)"
 
 print_step "9. The stream keeps delivering"
 FRAME_COUNT="$(grep -c '^data:' "${STREAM_OUT}" || true)"

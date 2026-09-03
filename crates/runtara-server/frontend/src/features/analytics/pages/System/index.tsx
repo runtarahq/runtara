@@ -24,10 +24,6 @@ export function System() {
   } = useSystemAnalytics();
 
   const pipeline = usePipelineStream();
-  // Preserve the successful render guard inside the stage-map callback. TypeScript
-  // deliberately does not retain a property narrowing across that closure,
-  // while the snapshot itself stays stable for this render.
-  const pipelineSnapshot = pipeline.snapshot;
 
   const handleRefresh = () => {
     refetchSystem();
@@ -76,34 +72,36 @@ export function System() {
             <span className="text-[11px] tabular-nums text-muted-foreground">
               {pipeline.connected
                 ? 'live'
-                : pipelineSnapshot
+                : pipeline.snapshot
                   ? 'polling'
                   : 'connecting…'}
             </span>
           </div>
 
-          {pipelineSnapshot ? (
+          {pipeline.snapshot ? (
             <div className="space-y-3">
-              <PipelineRates rates={pipelineSnapshot.rates} />
+              <PipelineRates rates={pipeline.snapshot.rates} />
               <div className="space-y-1.5">
-                {pipelineSnapshot.stages.map((stage) => (
+                {pipeline.snapshot.stages.map((stage) => (
                   <PipelineStageRow
                     key={stage.key}
                     stage={stage}
                     history={pipeline.history[stage.key] ?? []}
                     inflow={
-                      pipelineSnapshot.rates
+                      pipeline.snapshot?.rates
                         ? ((
-                            pipelineSnapshot.rates as unknown as Record<
+                            pipeline.snapshot.rates as unknown as Record<
                               string,
                               number | null
                             >
                           )[stage.inflowKey] ?? null)
                         : null
                     }
-                    pipelineActive={(pipelineSnapshot.rates?.offered ?? 0) > 0}
+                    pipelineActive={
+                      (pipeline.snapshot?.rates?.offered ?? 0) > 0
+                    }
                     isChokepoint={pipeline.chokepointKey === stage.key}
-                    stuckAfterMs={pipelineSnapshot.stuckAfterMs}
+                    stuckAfterMs={pipeline.snapshot.stuckAfterMs}
                   />
                 ))}
               </div>

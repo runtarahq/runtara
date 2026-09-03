@@ -44,29 +44,12 @@ pub struct PipelineRatesDto {
     pub steps: Option<f64>,
 }
 
-/// A bounded contributor attribution for one durable launch stage.
-///
-/// The runtime database owns image provenance but not workflow display names,
-/// so this intentionally carries the stable workflow identifier. The sampler
-/// returns only the highest-count contributors; it must not turn a tenant with
-/// many workflows into an unbounded analytics payload or a high-cardinality
-/// metric dimension.
-#[derive(Debug, Clone, Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct PipelineWorkflowAttributionDto {
-    /// Stable workflow identifier recovered from the image metadata.
-    pub workflow_id: String,
-    /// Number of launch generations attributed to this workflow in the stage.
-    pub count: u64,
-    /// Age of this contributor's oldest relevant launch, in milliseconds.
-    pub oldest_age_ms: Option<u64>,
-}
-
 /// One stage of the pipeline at one instant.
 #[derive(Debug, Clone, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct PipelineStageDto {
-    /// Stable identifier for an execution-pipeline stage.
+    /// Stable identifier: `admission`, `triggerQueue`, `triggerWorkers`,
+    /// `pendingStarts`, `runPermits`, `executing`, `parked`.
     pub key: String,
     /// Human-readable stage name.
     pub label: String,
@@ -84,18 +67,6 @@ pub struct PipelineStageDto {
     pub oldest_age_ms: Option<u64>,
     /// Which rate feeds this stage, naming a field of [`PipelineRatesDto`].
     pub inflow_key: String,
-    /// Number of queued rows whose most recent dispatcher result was a runner
-    /// capacity rejection.
-    ///
-    /// Present only on the durable launch-queue stage. It is a current
-    /// diagnosis count, not an unbounded lifetime metric: rows leave it once
-    /// they start, expire, park, or reach a terminal outcome.
-    pub capacity_rejections: Option<u64>,
-    /// Highest-count workflows contributing to this durable launch stage.
-    ///
-    /// Empty for non-launch stages and when the stage has no rows. The list is
-    /// deliberately bounded by the sampler rather than by the HTTP response.
-    pub top_workflows: Vec<PipelineWorkflowAttributionDto>,
 }
 
 /// The pipeline at one instant.

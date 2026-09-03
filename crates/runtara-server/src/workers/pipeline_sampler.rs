@@ -8,8 +8,8 @@
 //! handler that reads the world per request.
 //!
 //! Two cadences, because one of the readings is not like the others. The
-//! durable launch-state reading is index-bounded by the live handoff set and
-//! is sampled on the fast tick; the parked count is a database scan whose cost grows with the
+//! pending-start reading is index-bounded by admission and is sampled on the
+//! fast tick; the parked count is a database scan whose cost grows with the
 //! table, so it runs on its own slow tick and its last value is carried between
 //! them — see [`SLOW_TICK`].
 
@@ -19,9 +19,7 @@ use std::time::{Duration, Instant};
 use chrono::Utc;
 use tokio::sync::broadcast;
 
-use crate::api::dto::pipeline::{
-    PipelineRatesDto, PipelineSnapshotDto, PipelineStageDto, PipelineWorkflowAttributionDto,
-};
+use crate::api::dto::pipeline::{PipelineRatesDto, PipelineSnapshotDto, PipelineStageDto};
 use crate::workers::pipeline_gauges::{
     PipelineGauges, PipelineRates, PipelineTotals, TriggerPermits, rates_between,
 };
@@ -78,10 +76,10 @@ pub struct PipelineReading {
     pub trigger_limit: Option<u64>,
     /// Trigger-worker slots in use.
     pub trigger_used: Option<u64>,
-    /// The durable state of launch generations. `None` means the runtime
-    /// database could not be read; an empty value means it was read and had no
-    /// matching launch rows.
-    pub launches: Option<LaunchTelemetryReading>,
+    /// Durable starts that have not reached `running` yet.
+    pub pending_starts: Option<u64>,
+    /// Age of the oldest durable start that has not reached `running` yet.
+    pub pending_oldest_ms: Option<u64>,
     /// Run-permit bound.
     pub run_limit: Option<u64>,
     /// Run permits held.
@@ -90,58 +88,6 @@ pub struct PipelineReading {
     pub run_oldest_ms: Option<u64>,
     /// Instances suspended awaiting a wake or a signal.
     pub parked: Option<u64>,
-}
-
-/// The bounded per-workflow portion of one launch-state reading.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct LaunchWorkflowReading {
-    /// Stable workflow id from the runtime image metadata.
-    pub workflow_id: String,
-    /// Number of matching launch rows.
-    pub count: u64,
-    /// Age of this workflow's oldest launch in the stage.
-    pub oldest_age_ms: Option<u64>,
-}
-
-impl From<LaunchWorkflowReading> for PipelineWorkflowAttributionDto {
-    fn from(value: LaunchWorkflowReading) -> Self {
-        Self {
-            workflow_id: value.workflow_id,
-            count: value.count,
-            oldest_age_ms: value.oldest_age_ms,
-        }
-    }
-}
-
-/// Count, oldest age, and bounded attribution for one durable launch state.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct LaunchStageReading {
-    /// Number of launch rows in this state.
-    pub count: u64,
-    /// Age of the oldest matching generation, measured from its state-relevant
-    /// timestamp (created for live handoffs, updated for terminal outcomes).
-    pub oldest_age_ms: Option<u64>,
-    /// Highest-count contributing workflows, capped by the sampler query.
-    pub top_workflows: Vec<LaunchWorkflowReading>,
-}
-
-/// Durable launch-state telemetry read from `instance_launches`.
-///
-/// `expired` is the explicit terminal queue outcome: rows whose state is
-/// `failed` and whose last error is `launch_queue_timeout`. It is intentionally
-/// distinct from arbitrary workflow failures.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct LaunchTelemetryReading {
-    pub queued: LaunchStageReading,
-    pub leased: LaunchStageReading,
-    pub starting: LaunchStageReading,
-    pub running: LaunchStageReading,
-    pub expired: LaunchStageReading,
-    pub cancelled: LaunchStageReading,
-    /// Current active generations last returned by the runner because all
-    /// capacity was held. This is an actionable current condition rather than
-    /// a process-local counter that disappears at restart.
-    pub capacity_rejections: u64,
 }
 
 /// Turn one tick's readings into the wire snapshot.
@@ -175,110 +121,76 @@ fn build_snapshot_with_stuck_after(
     window_ms: u64,
     stuck_after: Duration,
 ) -> PipelineSnapshotDto {
-    let launches = reading.launches.as_ref();
     let stages = vec![
-        ordinary_stage(
-            "admission",
-            "Admission",
-            Some("MAX_CONCURRENT_EXECUTIONS"),
-            reading.admission_limit,
-            reading.admission_used,
-            None,
-            "offered",
-        ),
-        ordinary_stage(
-            "triggerQueue",
-            "Trigger queue",
-            Some("waiting for a worker"),
+        PipelineStageDto {
+            key: "admission".to_string(),
+            label: "Admission".to_string(),
+            knob: Some("MAX_CONCURRENT_EXECUTIONS".to_string()),
+            limit: reading.admission_limit,
+            used: reading.admission_used,
+            oldest_age_ms: None,
+            inflow_key: "offered".to_string(),
+        },
+        PipelineStageDto {
+            key: "triggerQueue".to_string(),
+            label: "Trigger queue".to_string(),
+            knob: Some("waiting for a worker".to_string()),
             // Unbounded on purpose: the stream has no ceiling this process
             // enforces, and inventing one would make a consumer render a
             // percentage of a limit that does not exist.
-            None,
-            reading.queue_depth,
-            reading.queue_oldest_ms,
-            "accepted",
-        ),
-        ordinary_stage(
-            "triggerWorkers",
-            "Trigger workers",
-            Some("RUNTARA_TRIGGER_CONCURRENCY"),
-            reading.trigger_limit,
-            reading.trigger_used,
-            None,
-            "accepted",
-        ),
-        launch_stage(
-            "launchQueued",
-            "Launch queue",
-            Some("counts toward MAX_CONCURRENT_EXECUTIONS until handoff"),
-            reading.admission_limit,
-            launches.map(|value| &value.queued),
-            launches.map(|value| value.capacity_rejections),
-            "accepted",
-        ),
-        launch_stage(
-            "launchLeased",
-            "Dispatcher lease",
-            Some("recoverable dispatcher ownership"),
-            None,
-            launches.map(|value| &value.leased),
-            None,
-            "accepted",
-        ),
-        launch_stage(
-            "launchStarting",
-            "Starting",
-            Some("runner handoff in progress"),
-            None,
-            launches.map(|value| &value.starting),
-            None,
-            "started",
-        ),
-        ordinary_stage(
-            "runPermits",
-            "Concurrent runs",
-            Some("RUNTARA_MAX_CONCURRENT_RUNS"),
-            reading.run_limit,
-            reading.run_used,
-            reading.run_oldest_ms,
-            "started",
-        ),
-        launch_stage(
-            "launchRunning",
-            "Running now",
-            Some("durable generation handed to runner"),
-            reading.run_limit,
-            launches.map(|value| &value.running),
-            None,
-            "started",
-        ),
-        launch_stage(
-            "launchExpired",
-            "Queue expired",
-            Some("launch_queue_timeout"),
-            None,
-            launches.map(|value| &value.expired),
-            None,
-            "finished",
-        ),
-        launch_stage(
-            "launchCancelled",
-            "Cancelled before start",
-            Some("cancelled durable launch"),
-            None,
-            launches.map(|value| &value.cancelled),
-            None,
-            "finished",
-        ),
-        ordinary_stage(
-            "parked",
-            "Parked",
-            Some("awaiting wake or signal"),
-            None,
-            reading.parked,
-            None,
-            "finished",
-        ),
+            limit: None,
+            used: reading.queue_depth,
+            oldest_age_ms: reading.queue_oldest_ms,
+            inflow_key: "accepted".to_string(),
+        },
+        PipelineStageDto {
+            key: "triggerWorkers".to_string(),
+            label: "Trigger workers".to_string(),
+            knob: Some("RUNTARA_TRIGGER_CONCURRENCY".to_string()),
+            limit: reading.trigger_limit,
+            used: reading.trigger_used,
+            oldest_age_ms: None,
+            inflow_key: "accepted".to_string(),
+        },
+        PipelineStageDto {
+            key: "pendingStarts".to_string(),
+            label: "Pending starts".to_string(),
+            // Pending starts share admission capacity with running instances;
+            // showing that cap makes a full, old pending population visible as
+            // a not-draining stage without inventing a separate limit.
+            knob: Some("counts against MAX_CONCURRENT_EXECUTIONS".to_string()),
+            limit: reading.admission_limit,
+            used: reading.pending_starts,
+            oldest_age_ms: reading.pending_oldest_ms,
+            inflow_key: "accepted".to_string(),
+        },
+        PipelineStageDto {
+            key: "runPermits".to_string(),
+            label: "Concurrent runs".to_string(),
+            knob: Some("RUNTARA_MAX_CONCURRENT_RUNS".to_string()),
+            limit: reading.run_limit,
+            used: reading.run_used,
+            oldest_age_ms: reading.run_oldest_ms,
+            inflow_key: "started".to_string(),
+        },
+        PipelineStageDto {
+            key: "executing".to_string(),
+            label: "Running now".to_string(),
+            knob: Some("started, not yet finished".to_string()),
+            limit: None,
+            used: reading.run_used,
+            oldest_age_ms: reading.run_oldest_ms,
+            inflow_key: "started".to_string(),
+        },
+        PipelineStageDto {
+            key: "parked".to_string(),
+            label: "Parked".to_string(),
+            knob: Some("awaiting wake or signal".to_string()),
+            limit: None,
+            used: reading.parked,
+            oldest_age_ms: None,
+            inflow_key: "finished".to_string(),
+        },
     ];
 
     PipelineSnapshotDto {
@@ -294,59 +206,6 @@ fn build_snapshot_with_stuck_after(
             steps: r.steps,
         }),
         stages,
-    }
-}
-
-fn ordinary_stage(
-    key: &str,
-    label: &str,
-    knob: Option<&str>,
-    limit: Option<u64>,
-    used: Option<u64>,
-    oldest_age_ms: Option<u64>,
-    inflow_key: &str,
-) -> PipelineStageDto {
-    PipelineStageDto {
-        key: key.to_string(),
-        label: label.to_string(),
-        knob: knob.map(str::to_string),
-        limit,
-        used,
-        oldest_age_ms,
-        inflow_key: inflow_key.to_string(),
-        capacity_rejections: None,
-        top_workflows: Vec::new(),
-    }
-}
-
-fn launch_stage(
-    key: &str,
-    label: &str,
-    knob: Option<&str>,
-    limit: Option<u64>,
-    reading: Option<&LaunchStageReading>,
-    capacity_rejections: Option<u64>,
-    inflow_key: &str,
-) -> PipelineStageDto {
-    PipelineStageDto {
-        key: key.to_string(),
-        label: label.to_string(),
-        knob: knob.map(str::to_string),
-        limit,
-        used: reading.map(|value| value.count),
-        oldest_age_ms: reading.and_then(|value| value.oldest_age_ms),
-        inflow_key: inflow_key.to_string(),
-        capacity_rejections,
-        top_workflows: reading
-            .map(|value| {
-                value
-                    .top_workflows
-                    .iter()
-                    .cloned()
-                    .map(PipelineWorkflowAttributionDto::from)
-                    .collect()
-            })
-            .unwrap_or_default(),
     }
 }
 
@@ -425,8 +284,7 @@ pub struct SamplerInputs {
     pub valkey: Option<redis::aio::ConnectionManager>,
     /// Trigger stream key and consumer group.
     pub stream: Option<(String, String)>,
-    /// The **runtime** database pool, for durable launch-state and parked
-    /// counts.
+    /// The **runtime** database pool, for the pending-start and parked counts.
     ///
     /// Not the server pool: `instances` lives in the runtime database, and
     /// pointing this at the server one makes every parked count fail silently
@@ -481,14 +339,17 @@ pub async fn run(
             };
         }
 
-        // `instances.status = pending` was only a symptom: it could describe
-        // a queued handoff, a lease held by a dead dispatcher, or a legacy row
-        // with no launch owner at all. Read the durable generation state
-        // instead, including its queue deadline outcome and the workflows
-        // responsible for the current backlog.
-        let launches = match inputs.pool.as_ref() {
-            Some(pool) => count_launch_telemetry(pool, &inputs.tenant_id).await,
-            None => None,
+        // Pending starts are admission-bounded, and the partial
+        // `(tenant_id, created_at) WHERE status = 'pending'` index lets this
+        // answer both the exact count and oldest age without scanning parked or
+        // terminal history. Unlike parked, this is the short-lived handoff
+        // whose latency has to be visible as it happens.
+        let (pending_starts, pending_oldest_ms) = match inputs.pool.as_ref() {
+            Some(pool) => match count_pending_starts(pool, &inputs.tenant_id).await {
+                Some((count, oldest)) => (Some(count), oldest),
+                None => (None, None),
+            },
+            None => (None, None),
         };
 
         let occupancy = inputs.runner.as_ref().and_then(|r| r.occupancy());
@@ -547,7 +408,8 @@ pub async fn run(
             queue_oldest_ms: backlog.and_then(|b| b.oldest_pending_ms),
             trigger_limit,
             trigger_used,
-            launches,
+            pending_starts,
+            pending_oldest_ms,
             run_limit: occupancy.as_ref().map(|o| o.limit),
             run_used: occupancy.as_ref().map(|o| o.held),
             run_oldest_ms: occupancy.as_ref().and_then(|o| o.oldest_held_ms),
@@ -560,201 +422,51 @@ pub async fn run(
     }
 }
 
-/// Maximum number of workflows attributed to each durable launch stage.
+/// Count durable starts that have not yet become running, and age the oldest.
 ///
-/// Attribution is a drill-down clue, not a metric label. Keeping it bounded
-/// prevents a tenant with many published workflows from expanding every
-/// one-second analytics response without limit.
-const TOP_LAUNCH_WORKFLOWS: i64 = 3;
-
-/// Read the actual durable launch generations used by the dispatcher.
-///
-/// A pending Core instance is no longer sufficient evidence of a blocked
-/// start: a modern launch has exactly one row in `instance_launches`, while a
-/// pending row without one is a legacy/malformed condition handled by startup
-/// recovery. This query reads only the small actionable state set; `parked`
-/// remains deliberately separate in [`count_parked`].
-async fn count_launch_telemetry(
-    pool: &sqlx::PgPool,
-    tenant_id: &str,
-) -> Option<LaunchTelemetryReading> {
+/// The matching partial index is deliberately part of the Core schema: this
+/// runs every [`FAST_TICK`], so a sequential scan of a large terminal history
+/// would make the observation system its own source of backpressure.
+async fn count_pending_starts(pool: &sqlx::PgPool, tenant_id: &str) -> Option<(u64, Option<u64>)> {
     let started = Instant::now();
-    let summary = sqlx::query_as::<_, (String, i64, Option<i64>, i64)>(
+    let result = sqlx::query_as::<_, (i64, Option<i64>)>(
         r#"
-        WITH relevant AS (
-            SELECT
-                CASE
-                    WHEN state = 'failed' AND last_error = 'launch_queue_timeout'
-                        THEN 'expired'
-                    ELSE state
-                END AS stage,
-                CASE
-                    WHEN state IN ('queued', 'leased', 'starting', 'running') THEN created_at
-                    ELSE updated_at
-                END AS age_from,
-                last_error
-            FROM instance_launches
-            WHERE tenant_id = $1
-              AND (
-                    state IN ('queued', 'leased', 'starting', 'running', 'cancelled')
-                    OR (state = 'failed' AND last_error = 'launch_queue_timeout')
-              )
-        )
         SELECT
-            stage,
             COUNT(*)::BIGINT,
             CASE
-                WHEN MIN(age_from) IS NULL THEN NULL
+                WHEN MIN(created_at) IS NULL THEN NULL
                 ELSE GREATEST(
                     0::BIGINT,
-                    (EXTRACT(EPOCH FROM CURRENT_TIMESTAMP - MIN(age_from)) * 1000)::BIGINT
+                    (EXTRACT(EPOCH FROM CURRENT_TIMESTAMP - MIN(created_at)) * 1000)::BIGINT
                 )
-            END AS oldest_age_ms,
-            COUNT(*) FILTER (
-                WHERE stage = 'queued' AND last_error = 'runner_capacity_unavailable'
-            )::BIGINT AS capacity_rejections
-        FROM relevant
-        GROUP BY stage
+            END
+        FROM instances
+        WHERE tenant_id = $1 AND status = 'pending'
         "#,
     )
     .bind(tenant_id)
-    .fetch_all(pool)
+    .fetch_one(pool)
     .await;
 
-    let summary = match summary {
-        Ok(rows) => rows,
-        Err(error) => {
-            tracing::warn!(error = %error, "pipeline sampler could not count durable launches");
-            return None;
+    match result {
+        Ok((count, oldest_age_ms)) => {
+            let elapsed = started.elapsed();
+            if elapsed > Duration::from_millis(200) {
+                tracing::warn!(
+                    elapsed_ms = elapsed.as_millis() as u64,
+                    count,
+                    "pending-start count is slow; verify idx_instances_pending_tenant_created"
+                );
+            }
+            Some((
+                count.max(0) as u64,
+                oldest_age_ms.map(|age| age.max(0) as u64),
+            ))
         }
-    };
-
-    let attribution = sqlx::query_as::<_, (String, String, i64, Option<i64>)>(
-        r#"
-        WITH relevant AS (
-            SELECT
-                launch.image_id,
-                CASE
-                    WHEN launch.state = 'failed'
-                        AND launch.last_error = 'launch_queue_timeout' THEN 'expired'
-                    ELSE launch.state
-                END AS stage,
-                CASE
-                    WHEN launch.state IN ('queued', 'leased', 'starting', 'running')
-                        THEN launch.created_at
-                    ELSE launch.updated_at
-                END AS age_from
-            FROM instance_launches AS launch
-            WHERE launch.tenant_id = $1
-              AND (
-                    launch.state IN ('queued', 'leased', 'starting', 'running', 'cancelled')
-                    OR (
-                        launch.state = 'failed'
-                        AND launch.last_error = 'launch_queue_timeout'
-                    )
-              )
-        ), grouped AS (
-            SELECT
-                relevant.stage,
-                COALESCE(
-                    NULLIF(images.metadata #>> '{workflow,workflowId}', ''),
-                    NULLIF(SPLIT_PART(images.name, ':', 1), ''),
-                    'unknown'
-                ) AS workflow_id,
-                COUNT(*)::BIGINT AS count,
-                CASE
-                    WHEN MIN(relevant.age_from) IS NULL THEN NULL
-                    ELSE GREATEST(
-                        0::BIGINT,
-                        (EXTRACT(EPOCH FROM CURRENT_TIMESTAMP - MIN(relevant.age_from)) * 1000)::BIGINT
-                    )
-                END AS oldest_age_ms
-            FROM relevant
-            JOIN images ON images.image_id = relevant.image_id
-            GROUP BY relevant.stage, workflow_id
-        ), ranked AS (
-            SELECT
-                stage,
-                workflow_id,
-                count,
-                oldest_age_ms,
-                ROW_NUMBER() OVER (
-                    PARTITION BY stage
-                    ORDER BY count DESC, oldest_age_ms DESC NULLS LAST, workflow_id ASC
-                ) AS rank
-            FROM grouped
-        )
-        SELECT stage, workflow_id, count, oldest_age_ms
-        FROM ranked
-        WHERE rank <= $2
-        ORDER BY stage, count DESC, oldest_age_ms DESC NULLS LAST, workflow_id ASC
-        "#,
-    )
-    .bind(tenant_id)
-    .bind(TOP_LAUNCH_WORKFLOWS)
-    .fetch_all(pool)
-    .await;
-
-    let attribution = match attribution {
-        Ok(rows) => rows,
-        Err(error) => {
-            // Counts are still useful, but hiding attribution after a query
-            // failure would make the response look complete. Treat the whole
-            // durable-launch reading as unavailable and leave the old snapshot
-            // shape stable with `used: null` on every launch stage.
-            tracing::warn!(error = %error, "pipeline sampler could not attribute durable launches");
-            return None;
+        Err(e) => {
+            tracing::warn!(error = %e, "pipeline sampler could not count pending starts");
+            None
         }
-    };
-
-    let mut telemetry = LaunchTelemetryReading::default();
-    for (stage, count, oldest_age_ms, capacity_rejections) in summary {
-        let Some(target) = launch_stage_reading_mut(&mut telemetry, &stage) else {
-            tracing::warn!(
-                stage,
-                "pipeline sampler ignored unknown durable launch state"
-            );
-            continue;
-        };
-        target.count = u64::try_from(count).unwrap_or(0);
-        target.oldest_age_ms = oldest_age_ms.map(|age| u64::try_from(age).unwrap_or(0));
-        if stage == "queued" {
-            telemetry.capacity_rejections = u64::try_from(capacity_rejections).unwrap_or(0);
-        }
-    }
-    for (stage, workflow_id, count, oldest_age_ms) in attribution {
-        let Some(target) = launch_stage_reading_mut(&mut telemetry, &stage) else {
-            continue;
-        };
-        target.top_workflows.push(LaunchWorkflowReading {
-            workflow_id,
-            count: u64::try_from(count).unwrap_or(0),
-            oldest_age_ms: oldest_age_ms.map(|age| u64::try_from(age).unwrap_or(0)),
-        });
-    }
-
-    let elapsed = started.elapsed();
-    if elapsed > Duration::from_millis(200) {
-        tracing::warn!(
-            elapsed_ms = elapsed.as_millis() as u64,
-            "durable launch telemetry is slow; verify idx_instance_launches_pipeline_tenant_state"
-        );
-    }
-    Some(telemetry)
-}
-
-fn launch_stage_reading_mut<'a>(
-    telemetry: &'a mut LaunchTelemetryReading,
-    stage: &str,
-) -> Option<&'a mut LaunchStageReading> {
-    match stage {
-        "queued" => Some(&mut telemetry.queued),
-        "leased" => Some(&mut telemetry.leased),
-        "starting" => Some(&mut telemetry.starting),
-        "running" => Some(&mut telemetry.running),
-        "expired" => Some(&mut telemetry.expired),
-        "cancelled" => Some(&mut telemetry.cancelled),
-        _ => None,
     }
 }
 
@@ -810,43 +522,8 @@ mod tests {
             queue_oldest_ms: Some(200),
             trigger_limit: Some(32),
             trigger_used: Some(9),
-            launches: Some(LaunchTelemetryReading {
-                queued: LaunchStageReading {
-                    count: 6,
-                    oldest_age_ms: Some(2_700),
-                    top_workflows: vec![LaunchWorkflowReading {
-                        workflow_id: "workflow-queued".to_string(),
-                        count: 4,
-                        oldest_age_ms: Some(2_700),
-                    }],
-                },
-                leased: LaunchStageReading {
-                    count: 2,
-                    oldest_age_ms: Some(1_800),
-                    ..LaunchStageReading::default()
-                },
-                starting: LaunchStageReading {
-                    count: 1,
-                    oldest_age_ms: Some(800),
-                    ..LaunchStageReading::default()
-                },
-                running: LaunchStageReading {
-                    count: 11,
-                    oldest_age_ms: Some(2_700),
-                    ..LaunchStageReading::default()
-                },
-                expired: LaunchStageReading {
-                    count: 3,
-                    oldest_age_ms: Some(12_000),
-                    ..LaunchStageReading::default()
-                },
-                cancelled: LaunchStageReading {
-                    count: 5,
-                    oldest_age_ms: Some(500),
-                    ..LaunchStageReading::default()
-                },
-                capacity_rejections: 5,
-            }),
+            pending_starts: Some(6),
+            pending_oldest_ms: Some(2_700),
             run_limit: Some(16),
             run_used: Some(11),
             run_oldest_ms: Some(2700),
@@ -869,29 +546,22 @@ mod tests {
                 "admission",
                 "triggerQueue",
                 "triggerWorkers",
-                "launchQueued",
-                "launchLeased",
-                "launchStarting",
+                "pendingStarts",
                 "runPermits",
-                "launchRunning",
-                "launchExpired",
-                "launchCancelled",
+                "executing",
                 "parked"
             ]
         );
-        let queued = &snap.stages[3];
+        let pending = &snap.stages[3];
         assert_eq!(
-            queued.knob.as_deref(),
-            Some("counts toward MAX_CONCURRENT_EXECUTIONS until handoff")
+            pending.knob.as_deref(),
+            Some("counts against MAX_CONCURRENT_EXECUTIONS")
         );
-        assert_eq!(queued.limit, Some(2048));
-        assert_eq!(queued.used, Some(6));
-        assert_eq!(queued.oldest_age_ms, Some(2_700));
-        assert_eq!(queued.capacity_rejections, Some(5));
-        assert_eq!(queued.top_workflows.len(), 1);
-        assert_eq!(queued.top_workflows[0].workflow_id, "workflow-queued");
+        assert_eq!(pending.limit, Some(2048));
+        assert_eq!(pending.used, Some(6));
+        assert_eq!(pending.oldest_age_ms, Some(2_700));
 
-        let run = &snap.stages[6];
+        let run = &snap.stages[4];
         assert_eq!(run.knob.as_deref(), Some("RUNTARA_MAX_CONCURRENT_RUNS"));
         assert_eq!(run.limit, Some(16));
         assert_eq!(run.used, Some(11));
@@ -906,24 +576,11 @@ mod tests {
     #[test]
     fn stages_without_a_ceiling_report_none() {
         let snap = build_snapshot(&reading(), None, 0);
-        for key in [
-            "triggerQueue",
-            "launchLeased",
-            "launchStarting",
-            "launchExpired",
-            "launchCancelled",
-            "parked",
-        ] {
+        for key in ["triggerQueue", "executing", "parked"] {
             let stage = snap.stages.iter().find(|s| s.key == key).expect(key);
             assert_eq!(stage.limit, None, "{key} has no bound to be a fraction of");
         }
-        for key in [
-            "admission",
-            "triggerWorkers",
-            "launchQueued",
-            "runPermits",
-            "launchRunning",
-        ] {
+        for key in ["admission", "triggerWorkers", "pendingStarts", "runPermits"] {
             let stage = snap.stages.iter().find(|s| s.key == key).expect(key);
             assert!(stage.limit.is_some(), "{key} is bounded and must say so");
         }
@@ -941,17 +598,16 @@ mod tests {
             ..PipelineReading::default()
         };
         let snap = build_snapshot(&blind, None, 0);
-        assert_eq!(snap.stages.len(), 11, "the pipeline shape stays stable");
+        assert_eq!(snap.stages.len(), 7, "the pipeline still has seven stages");
 
         let queue = &snap.stages[1];
         assert_eq!(
             queue.used, None,
             "unreadable must be absent, never zero — zero would read as an empty queue"
         );
-        let queued = &snap.stages[3];
-        assert_eq!(queued.used, None);
-        assert_eq!(queued.oldest_age_ms, None);
-        assert_eq!(queued.capacity_rejections, None);
+        let pending = &snap.stages[3];
+        assert_eq!(pending.used, None);
+        assert_eq!(pending.oldest_age_ms, None);
         let parked = snap.stages.last().expect("parked");
         assert_eq!(parked.used, None);
     }
@@ -1023,11 +679,9 @@ mod tests {
         assert!(json.get("capturedAt").is_some());
         assert!(json.get("stuckAfterMs").is_some());
         assert!(json.get("windowMs").is_some());
-        let stage = &json["stages"][7];
+        let stage = &json["stages"][4];
         assert!(stage.get("oldestAgeMs").is_some());
         assert!(stage.get("inflowKey").is_some());
-        assert!(stage.get("capacityRejections").is_some());
-        assert!(stage.get("topWorkflows").is_some());
         assert_eq!(stage["inflowKey"], "started");
     }
 
@@ -1052,7 +706,7 @@ mod tests {
         let mut rx = feed.subscribe();
         feed.publish(snap);
         let received = rx.recv().await.expect("a subscriber receives");
-        assert_eq!(received.stages.len(), 11);
+        assert_eq!(received.stages.len(), 7);
     }
 
     /// A slow subscriber must not hold up the others.
@@ -1090,7 +744,7 @@ mod tests {
         let latest = PipelineLatest::default();
         assert!(latest.get().is_none());
         latest.set(Arc::new(build_snapshot(&reading(), None, 0)));
-        assert_eq!(latest.get().expect("stored").stages.len(), 11);
+        assert_eq!(latest.get().expect("stored").stages.len(), 7);
     }
 
     /// The stuck threshold must be configurable and sanely defaulted.

@@ -64,13 +64,6 @@ export function PipelineStageRow({
   const path = sparklinePath(history, stage.limit);
   const stuck = isNotDraining(stage, stuckAfterMs);
   const age = formatAge(stage.oldestAgeMs);
-  const capacityRejections = stage.capacityRejections ?? null;
-  const topWorkflows = stage.topWorkflows ?? [];
-  const workflowAttribution = topWorkflows
-    .map(
-      (workflow) => `${workflow.workflowId} (${formatCount(workflow.count)})`
-    )
-    .join(', ');
 
   return (
     <div
@@ -193,24 +186,6 @@ export function PipelineStageRow({
         {age && (
           <span className="mt-1 block tabular-nums text-muted-foreground">
             {age} oldest
-          </span>
-        )}
-        {capacityRejections !== null && capacityRejections > 0 && (
-          <span
-            className="mt-1 block tabular-nums text-amber-600 dark:text-amber-400"
-            data-testid={`pipeline-capacity-rejections-${stage.key}`}
-          >
-            {formatCount(capacityRejections)} capacity{' '}
-            {capacityRejections === 1 ? 'retry' : 'retries'}
-          </span>
-        )}
-        {workflowAttribution && (
-          <span
-            className="mt-1 block truncate text-muted-foreground"
-            title={`Top workflows: ${workflowAttribution}`}
-            data-testid={`pipeline-workflow-attribution-${stage.key}`}
-          >
-            top: {workflowAttribution}
           </span>
         )}
       </div>
