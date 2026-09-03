@@ -18,8 +18,7 @@ use runtara_workflows::direct_wasm::{
     DIRECT_SHARED_COMPONENT_REQUIREMENTS, DirectArtifactMetadata, DirectCompilationInput,
     DirectCompileError, RuntimeBinding, WorkflowAbi, compile_direct_workflow,
     compile_direct_workflow_composed, compile_direct_workflow_composed_configured,
-    compile_direct_workflow_composed_with_binding, compose_direct_workflow,
-    emit_direct_component_artifacts_with_binding,
+    compose_direct_workflow, emit_direct_component_artifacts_with_binding,
 };
 use runtara_workflows::{
     CompilationInput, DirectWorkflowCompileOptions, ExecutionGraph, WorkflowCompilerMode,
@@ -218,22 +217,22 @@ const FANOUT_DIAMOND_NO_FINISH: &str = r#"{
     "start": {
       "stepType": "Agent", "id": "start", "name": "Start",
       "agentId": "utils", "capabilityId": "random-double",
-      "maxRetries": 1, "retryDelay": 1000
+      "maxRetries": 0, "retryDelay": 1000
     },
     "left": {
       "stepType": "Agent", "id": "left", "name": "Left",
       "agentId": "utils", "capabilityId": "random-double",
-      "maxRetries": 1, "retryDelay": 1000
+      "maxRetries": 0, "retryDelay": 1000
     },
     "right": {
       "stepType": "Agent", "id": "right", "name": "Right",
       "agentId": "utils", "capabilityId": "random-double",
-      "maxRetries": 1, "retryDelay": 1000
+      "maxRetries": 0, "retryDelay": 1000
     },
     "join": {
       "stepType": "Agent", "id": "join", "name": "Join",
       "agentId": "utils", "capabilityId": "random-double",
-      "maxRetries": 1, "retryDelay": 1000
+      "maxRetries": 0, "retryDelay": 1000
     }
   },
   "entryPoint": "start",
@@ -271,26 +270,31 @@ const FANOUT_CROSS_BRANCH_REFERENCE: &str = r#"{
     "hit": {
       "stepType": "Agent", "id": "hit", "name": "Hit",
       "agentId": "utils", "capabilityId": "return-input",
+      "maxRetries": 0,
       "inputMapping": {"value": {"valueType": "immediate", "value": "H"}}
     },
     "gate": {
       "stepType": "Agent", "id": "gate", "name": "Gate",
       "agentId": "utils", "capabilityId": "return-input",
+      "maxRetries": 0,
       "inputMapping": {"value": {"valueType": "immediate", "value": "G"}}
     },
     "left": {
       "stepType": "Agent", "id": "left", "name": "Left",
       "agentId": "utils", "capabilityId": "return-input",
+      "maxRetries": 0,
       "inputMapping": {"value": {"valueType": "immediate", "value": "L"}}
     },
     "right": {
       "stepType": "Agent", "id": "right", "name": "Right",
       "agentId": "utils", "capabilityId": "return-input",
+      "maxRetries": 0,
       "inputMapping": {"value": {"valueType": "immediate", "value": "R"}}
     },
     "after_left": {
       "stepType": "Agent", "id": "after_left", "name": "After Left",
       "agentId": "utils", "capabilityId": "return-input",
+      "maxRetries": 0,
       "inputMapping": {"value": {"valueType": "reference", "value": "steps.right.outputs"}}
     },
     "finish": {
@@ -334,6 +338,7 @@ struct RuntimeEvent {
     payload_json: Value,
 }
 
+#[allow(dead_code)]
 #[derive(Debug)]
 struct SleepRequest {
     checkpoint_id: String,
@@ -1881,6 +1886,35 @@ fn non_durable_graph_json(graph_json: &str) -> String {
     serde_json::to_string(&graph).expect("graph serializes")
 }
 
+fn assert_direct_rejects_non_durable_delay(workflow_id: &str, graph_json: &str) {
+    let graph: ExecutionGraph = serde_json::from_str(graph_json).expect("fixture parses");
+    let temp = tempfile::tempdir().expect("tempdir");
+
+    let error = compile_direct_workflow(DirectCompilationInput {
+        workflow_id: workflow_id.to_string(),
+        version: 1,
+        source_checksum: None,
+        execution_graph: graph,
+        child_workflows: vec![],
+        output_dir: temp.path().to_path_buf(),
+        track_events: false,
+        agent_catalog: None,
+        agent_slug: None,
+    })
+    .expect_err("a non-durable Delay must be rejected before it can hold a runner");
+
+    let DirectCompileError::Unsupported { report } = error else {
+        panic!("expected a direct-support rejection, got {error:?}");
+    };
+    assert!(
+        report
+            .unsupported
+            .iter()
+            .any(|feature| feature.feature == "non-durable-delay"),
+        "missing non-durable-delay diagnostic: {report:?}"
+    );
+}
+
 #[test]
 fn direct_compile_entry_returns_native_result_shape_when_components_available() {
     let components_dir = direct_e2e_components_dir();
@@ -3132,29 +3166,11 @@ fn direct_wasm_execute_while_iteration_context_and_variables() {
 }
 
 #[test]
-fn direct_wasm_execute_while_timeout_fails_with_timeout_error() {
-    let components_dir = direct_e2e_components_dir();
-
-    // The 50ms per-iteration body delay drives the loop past its 10ms timeout, so
-    // the While step fails with the static WHILE_TIMEOUT payload. Generated Rust
-    // parses but does not enforce the timeout; this proves direct mode honors the
-    // documented "if exceeded, step fails" behavior at runtime.
-    let result = run_direct_workflow_expect_failure(
-        &components_dir,
-        "direct-wasm-execute-while-timeout",
-        WHILE_TIMEOUT,
-        br#"{}"#,
-    );
-
-    assert_eq!(
-        result.error_json,
-        serde_json::json!({
-            "code": "WHILE_TIMEOUT",
-            "message": "While step exceeded its configured timeout",
-            "category": "timeout",
-            "severity": "error"
-        })
-    );
+fn direct_wasm_rejects_non_durable_while_timeout_before_runner_launch() {
+    // This fixture intentionally combines a loop timeout with a non-durable
+    // Delay. It must fail at compile time rather than retain a runner while the
+    // loop clock is running.
+    assert_direct_rejects_non_durable_delay("direct-wasm-while-timeout", WHILE_TIMEOUT);
 }
 
 #[test]
@@ -4728,32 +4744,15 @@ fn direct_wasm_compile_single_shot_ai_agent_gate_checks_on_error_handler() {
 }
 
 #[test]
-fn direct_wasm_execute_split_timeout_fails_with_timeout_error() {
-    let components_dir = direct_e2e_components_dir();
-
-    // The 50ms per-item body delay drives the sequential Split past its 10ms
-    // timeout, so the Split fails hard with the static SPLIT_TIMEOUT payload
-    // before processing all items.
-    let result = run_direct_workflow_expect_failure(
-        &components_dir,
-        "direct-wasm-execute-split-timeout",
-        SPLIT_TIMEOUT,
-        br#"{"items":[{"v":1},{"v":2},{"v":3}]}"#,
-    );
-
-    assert_eq!(
-        result.error_json,
-        serde_json::json!({
-            "code": "SPLIT_TIMEOUT",
-            "message": "Split step exceeded its configured timeout",
-            "category": "timeout",
-            "severity": "error"
-        })
-    );
+fn direct_wasm_rejects_non_durable_split_timeout_before_runner_launch() {
+    // This fixture intentionally combines a Split timeout with a non-durable
+    // Delay. It must fail at compile time rather than retain a runner while the
+    // per-item work waits.
+    assert_direct_rejects_non_durable_delay("direct-wasm-split-timeout", SPLIT_TIMEOUT);
 }
 
 #[test]
-fn direct_wasm_execute_durable_delay_reports_sleep_and_completion() {
+fn direct_wasm_execute_durable_delay_parks_and_completes() {
     let components_dir = direct_e2e_components_dir();
 
     let result = run_direct_workflow_with_events(
@@ -4764,17 +4763,22 @@ fn direct_wasm_execute_durable_delay_reports_sleep_and_completion() {
     );
 
     assert_eq!(result.output_json, serde_json::json!({ "waited": 0 }));
-    assert_eq!(result.sleeps.len(), 1);
-    let sleep = &result.sleeps[0];
-    assert_eq!(sleep.checkpoint_id, "delay");
-    assert_eq!(sleep.duration_ms, 0);
-    assert!(sleep.state.is_empty());
-    // No GUEST-side `checkpoint` call: a blocking delay reaches persistence only
-    // through the sleep. The checkpoint itself is still written — production
-    // `handle_sleep` saves one before sleeping, and the mock now does too — so
-    // this asserts the shape of the call the guest made, not that the sleep left
-    // nothing behind.
-    assert!(result.checkpoints.is_empty());
+    assert!(
+        result.sleeps.is_empty(),
+        "lifecycle invoke must park a durable delay instead of blocking: {:?}",
+        result.sleeps
+    );
+    let parked_deadlines: Vec<_> = result
+        .checkpoints
+        .iter()
+        .filter(|checkpoint| checkpoint.checkpoint_id == "delay" && checkpoint.state.len() == 8)
+        .collect();
+    assert_eq!(
+        parked_deadlines.len(),
+        1,
+        "the parked delay must persist one absolute deadline: {:?}",
+        result.checkpoints
+    );
 }
 
 /// A diamond fan-out whose two branches are pure SYNC (Delay) steps used to PANIC
@@ -4783,7 +4787,8 @@ fn direct_wasm_execute_durable_delay_reports_sleep_and_completion() {
 /// builtins) for a fan-out with no agent to overlap, but those builtins are imported
 /// only when a concurrent branch pool has ≥1 agent. It now linearises. This proves
 /// the fix at runtime AND the diamond's stated invariant — BOTH branches execute:
-/// all three durable Delays (entry + branch_a + branch_b) fire, then it completes.
+/// all three durable Delays (entry + branch_a + branch_b) park and relaunch, then it
+/// completes.
 #[test]
 fn direct_wasm_execute_sync_parallel_branches_diamond_runs_both_branches() {
     let components_dir = direct_e2e_components_dir();
@@ -4799,47 +4804,32 @@ fn direct_wasm_execute_sync_parallel_branches_diamond_runs_both_branches() {
     // Completed (Finish ran), so the fan-out reconverged.
     assert_eq!(result.output_json, serde_json::json!({ "merged": true }));
 
-    // Every branch's durable Delay checkpointed — both branches executed, not just one.
-    let mut sleep_ids: Vec<&str> = result
-        .sleeps
-        .iter()
-        .map(|sleep| sleep.checkpoint_id.as_str())
-        .collect();
-    sleep_ids.sort_unstable();
-    assert_eq!(
-        sleep_ids,
-        vec!["branch_a", "branch_b", "entry"],
-        "both branch Delays plus the entry Delay must fire; got {:?}",
+    assert!(
+        result.sleeps.is_empty(),
+        "lifecycle invoke must not block any branch delay: {:?}",
         result.sleeps
     );
-    let branch_durations: std::collections::BTreeMap<&str, u64> = result
-        .sleeps
+    // Every branch's durable Delay persisted a deadline — both branches executed,
+    // not just one.
+    let mut parked_ids: Vec<&str> = result
+        .checkpoints
         .iter()
-        .map(|sleep| (sleep.checkpoint_id.as_str(), sleep.duration_ms))
+        .filter(|checkpoint| checkpoint.state.len() == 8)
+        .map(|checkpoint| checkpoint.checkpoint_id.as_str())
         .collect();
-    assert_eq!(branch_durations.get("branch_a"), Some(&300));
-    assert_eq!(branch_durations.get("branch_b"), Some(&300));
-    assert_eq!(branch_durations.get("entry"), Some(&10));
+    parked_ids.sort_unstable();
+    assert_eq!(
+        parked_ids,
+        vec!["branch_a", "branch_b", "entry"],
+        "both branch Delays plus the entry Delay must park; got {:?}",
+        result.checkpoints
+    );
 }
 
 #[test]
-fn direct_wasm_execute_non_durable_delay_reports_completion_without_sleep() {
-    let components_dir = direct_e2e_components_dir();
+fn direct_wasm_rejects_non_durable_delay_before_runner_launch() {
     let graph_json = non_durable_graph_json(DELAY_DYNAMIC);
-
-    let result = run_direct_workflow_with_events(
-        &components_dir,
-        "direct-wasm-execute-delay-non-durable",
-        &graph_json,
-        br#"{"waitTime":0}"#,
-    );
-
-    assert_eq!(result.output_json, serde_json::json!({ "waited": 0 }));
-    assert!(
-        result.sleeps.is_empty(),
-        "non-durable Delay should not call runtime durable sleep"
-    );
-    assert!(result.checkpoints.is_empty());
+    assert_direct_rejects_non_durable_delay("direct-wasm-execute-delay-non-durable", &graph_json);
 }
 
 // A [WaitForSignal -> durable Delay -> Finish] workflow whose signal was
@@ -4880,27 +4870,38 @@ fn direct_wasm_execute_wait_delay_finish_resumes_after_drain() {
         "run 1 wait must have read the delivered signal"
     );
 
-    // The wait persisted exactly one 8-byte absolute-deadline checkpoint under
-    // its deterministic signal id (the timeout-drift fix). Pre-fix, the wait
-    // emitted no checkpoint at all.
-    let deadline: Vec<_> = first
+    // The wait and the following durable Delay each persist one 8-byte absolute
+    // deadline. The invocation harness relaunches after the delay's park, so both
+    // checkpoint saves are observable in this completed capture.
+    let deadline_ids: Vec<_> = first
         .checkpoints
         .iter()
         .filter(|cp| cp.state.len() == 8)
+        .map(|cp| cp.checkpoint_id.as_str())
         .collect();
     assert_eq!(
-        deadline.len(),
-        1,
-        "run 1 should persist one 8-byte wait deadline checkpoint; saw: {:?}",
+        deadline_ids.len(),
+        2,
+        "run 1 should persist wait and delay deadlines; saw: {:?}",
         first.checkpoints
     );
     assert!(
-        deadline[0].checkpoint_id.ends_with("/wait"),
-        "deadline checkpoint must be keyed by the wait's deterministic signal id, got: {}",
-        deadline[0].checkpoint_id
+        deadline_ids.iter().any(|id| id.ends_with("/wait")),
+        "one deadline must be keyed by the wait's deterministic signal id, got: {:?}",
+        deadline_ids
+    );
+    assert!(
+        deadline_ids.contains(&"delay"),
+        "one deadline must be keyed by the durable Delay, got: {:?}",
+        deadline_ids
+    );
+    assert!(
+        first.sleeps.is_empty(),
+        "the durable Delay must park rather than block: {:?}",
+        first.sleeps
     );
 
-    // The durable state a resume would find committed: the wait deadline.
+    // The durable state a resume would find committed: both deadlines.
     let preloaded: Vec<(String, Vec<u8>)> = first
         .checkpoints
         .iter()
@@ -4932,7 +4933,7 @@ fn direct_wasm_execute_wait_delay_finish_resumes_after_drain() {
         second.custom_signal_polls >= 1,
         "resume must re-poll and re-read the retained signal"
     );
-    // The deadline was read from its checkpoint, not recomputed and re-saved.
+    // The deadlines were read from their checkpoints, not recomputed and re-saved.
     assert!(
         second.checkpoints.iter().all(|cp| cp.state.len() != 8),
         "resume must hit the preloaded deadline checkpoint, not re-save one: {:?}",
@@ -5432,7 +5433,8 @@ fn direct_wasm_execute_edge_condition_priority_and_default_reports_completion() 
 //
 // Replaces the behavioral half of the deleted A/B parity suite: every fixture
 // listed here is composed and run end-to-end under wasmtime, and we assert it
-// reaches its expected terminal outcome (completes / fails / sleeps). Pure
+// reaches its expected terminal outcome (completes / fails). Durable-delay
+// fixtures complete after the invoke harness relaunches their parked execution. Pure
 // control-flow fixtures are driven with a minimal input; the exact branch
 // taken doesn't matter — only that the workflow reaches the expected terminus.
 // Gated on the same prerequisites as the rest of this file
@@ -5448,10 +5450,8 @@ fn direct_wasm_execute_edge_condition_priority_and_default_reports_completion() 
 enum ExpectedOutcome {
     /// Reaches a Finish step and POSTs `/completed`.
     Completes,
-    /// Returns a failed `wasi:cli/run` result and POSTs `/failed`.
+    /// Records `/failed` and exits with a failed invocation outcome.
     Fails,
-    /// Durable Delay: POSTs `/sleep` and then completes.
-    Sleeps,
 }
 
 /// Run one execution-smoke fixture end-to-end: read it, compile → compose →
@@ -5473,7 +5473,6 @@ fn run_smoke_case(fixture: &str, input: &[u8], expect: ExpectedOutcome) {
     let verdict = match expect {
         ExpectedOutcome::Completes => captured.status_success && captured.output_json.is_some(),
         ExpectedOutcome::Fails => !captured.status_success && captured.error_json.is_some(),
-        ExpectedOutcome::Sleeps => captured.status_success && !captured.sleeps.is_empty(),
     };
     assert!(
         verdict,
@@ -5528,7 +5527,7 @@ execution_smoke_cases! {
     // Transform-agent fixtures (split_*, while_*, log_*, transform_workflow)
     // now execute too — their map-fields input mappings were corrected to the
     // current `source_data` + `mappings` schema. See the section below.
-    // --- Fails: explicit error / timeout ----------------------------------
+    // --- Fails: explicit error --------------------------------------------
     error_direct_simple => br#"{"requestId":"r1"}"#, Fails,
     // Conditional-routed Error fixtures; inputs steer each to its Error branch
     // (these also exercise the passthrough->return-input composite fix).
@@ -5536,16 +5535,17 @@ execution_smoke_cases! {
     error_transient => br#"{"success":false}"#, Fails,
     error_with_context => br#"{"orderId":"o-1","amount":5000}"#, Fails,
     error_all_categories => br#"{"errorType":"transient"}"#, Fails,
-    while_timeout => br#"{}"#, Fails,
-    split_timeout => br#"{"items":[1,2,3],"item":1}"#, Fails,
-    // --- Sleeps: durable delay --------------------------------------------
-    delay_simple => br#"{}"#, Sleeps,
-    delay_dynamic => br#"{"waitTime":5}"#, Sleeps,
+    // `while_timeout` and `split_timeout` deliberately include non-durable
+    // Delays; their explicit compile-rejection tests live above rather than
+    // letting them reach this execution battery.
+    // --- Durable delays park, relaunch, then complete ---------------------
+    delay_simple => br#"{}"#, Completes,
+    delay_dynamic => br#"{"waitTime":5}"#, Completes,
     // Diamond fan-out whose branches are all SYNC (Delay) steps — zero agents to
     // overlap, so it linearises instead of reaching for the concurrent wavefront.
     // Regression guard: this used to PANIC at compile ("parallel-branch compiles
     // import the waitable builtins"); now it compiles and runs end-to-end.
-    parallel_branches_sync_diamond => br#"{}"#, Sleeps,
+    parallel_branches_sync_diamond => br#"{}"#, Completes,
     // --- transform-agent fixtures (map-fields), now on the corrected schema --
     // These drive their subgraphs/loops through `transform/map-fields`; with
     // the input mappings fixed to `source_data` + `mappings` they execute.
@@ -5586,13 +5586,6 @@ fn stderr_tail(stderr: &str) -> String {
     trimmed[start..].replace('\n', " | ")
 }
 
-// ===========================================================================
-// Embedded execution — runtara-component-host's WorkflowExecutor instead of
-// the wasmtime CLI process. Same in-process compile path, same hermetic core
-// stub; proves the composed component behaves identically under the embedded
-// engine before the runner migration switches over to it.
-// ===========================================================================
-
 fn embedded_executor() -> &'static runtara_component_host::WorkflowExecutor {
     static EXECUTOR: std::sync::OnceLock<runtara_component_host::WorkflowExecutor> =
         std::sync::OnceLock::new();
@@ -5603,236 +5596,6 @@ fn embedded_executor() -> &'static runtara_component_host::WorkflowExecutor {
         runtara_component_host::spawn_epoch_ticker(Arc::clone(&engine));
         runtara_component_host::WorkflowExecutor::new(engine).expect("build workflow executor")
     })
-}
-
-fn run_direct_workflow_embedded(
-    components_dir: &Path,
-    workflow_id: &str,
-    graph_json: &str,
-    workflow_input: &[u8],
-) -> CapturedRun {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let graph: ExecutionGraph = serde_json::from_str(graph_json).expect("fixture parses");
-    // This section A/Bs the SAME artifact between the embedded executor and
-    // the wasmtime CLI, so it pins the legacy Composed binding — the only
-    // shape the CLI can run.
-    let compiled = compile_direct_workflow_composed_with_binding(
-        DirectCompilationInput {
-            workflow_id: workflow_id.to_string(),
-            version: 1,
-            source_checksum: None,
-            execution_graph: graph,
-            child_workflows: vec![],
-            output_dir: temp.path().to_path_buf(),
-            track_events: false,
-            agent_catalog: None,
-            agent_slug: None,
-        },
-        components_dir,
-        RuntimeBinding::Composed,
-    )
-    .expect("direct composed compile");
-
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
-    let addr = listener.local_addr().expect("local_addr");
-    let (capture_tx, capture_rx) = mpsc::channel::<CapturedMessage>();
-    let (stop_tx, stop_rx) = mpsc::channel::<()>();
-    let input_arc = Arc::new(workflow_input.to_vec());
-    let server_state = Arc::new(ServerState::default());
-    let server_state_for_assertions = server_state.clone();
-    let server_handle =
-        thread::spawn(move || serve(listener, capture_tx, server_state, stop_rx, input_arc));
-
-    // Same env contract the CLI variant passes via --env flags.
-    let mut env = HashMap::new();
-    env.insert("RUNTARA_HTTP_URL".to_string(), format!("http://{addr}"));
-    env.insert(
-        "RUNTARA_HTTP_PROXY_URL".to_string(),
-        format!("http://{addr}/llm-proxy"),
-    );
-    env.insert(
-        "RUNTARA_OBJECT_MODEL_URL".to_string(),
-        format!("http://{addr}/object-model"),
-    );
-    env.insert(
-        "CONNECTION_SERVICE_URL".to_string(),
-        format!("http://{addr}"),
-    );
-    env.insert("RUNTARA_SERVER_ADDR".to_string(), addr.to_string());
-    env.insert("RUNTARA_INSTANCE_ID".to_string(), workflow_id.to_string());
-    env.insert(
-        "RUNTARA_TENANT_ID".to_string(),
-        "direct-wasm-execute".to_string(),
-    );
-    env.insert("RUST_LOG".to_string(), "warn".to_string());
-
-    let executor = embedded_executor();
-    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
-    let result = runtime.block_on(async {
-        let pre = executor
-            .load(&compiled.wasm_path)
-            .await
-            .expect("load composed workflow component");
-        executor
-            .execute(
-                &pre,
-                runtara_component_host::WorkflowRunSpec {
-                    env,
-                    stderr: None,
-                    timeout: Duration::from_secs(120),
-                    cancel: None,
-                    limits: runtara_component_host::WorkflowLimits::default(),
-                    runtime: None,
-                },
-            )
-            .await
-    });
-
-    let _ = stop_tx.send(());
-    let _ = server_handle.join();
-
-    let mut output_json = None;
-    let mut error_json = None;
-    let mut events = Vec::new();
-    let mut sleeps = Vec::new();
-    let mut checkpoints = Vec::new();
-    for message in capture_rx.try_iter() {
-        match message {
-            CapturedMessage::Completed(completed) => output_json = Some(completed.output_json),
-            CapturedMessage::Failed(failed) => error_json = Some(failed.error_json),
-            CapturedMessage::Event(event) => events.push(event),
-            CapturedMessage::Sleep(sleep) => sleeps.push(sleep),
-            CapturedMessage::Checkpoint(checkpoint) => checkpoints.push(checkpoint),
-        }
-    }
-    let llm_requests = server_state_for_assertions
-        .llm_requests
-        .lock()
-        .expect("llm_requests lock")
-        .clone();
-    let connection_metadata_requests = server_state_for_assertions
-        .connection_metadata_requests
-        .lock()
-        .expect("connection metadata requests lock")
-        .clone();
-    let sql_requests = server_state_for_assertions
-        .sql_requests
-        .lock()
-        .expect("sql_requests lock")
-        .clone();
-    let custom_signal_polls = *server_state_for_assertions
-        .custom_signal_polls
-        .lock()
-        .expect("custom_signal_polls lock");
-    let slow_item_arrivals = server_state_for_assertions
-        .slow_item_arrivals
-        .lock()
-        .expect("slow_item_arrivals lock")
-        .clone();
-    let stderr = match &result.exit {
-        runtara_component_host::WorkflowExit::Failed { reason } => reason.clone(),
-        _ => String::new(),
-    };
-    CapturedRun {
-        output_json,
-        error_json,
-        events,
-        sleeps,
-        checkpoints,
-        llm_requests,
-        connection_metadata_requests,
-        sql_requests,
-        custom_signal_polls,
-        slow_item_arrivals,
-        status_success: matches!(result.exit, runtara_component_host::WorkflowExit::Completed),
-        stderr,
-        memory_peak_bytes: Some(result.memory_peak_bytes),
-    }
-}
-
-#[test]
-fn embedded_execute_finish_passthrough_reports_completion() {
-    let components_dir = direct_e2e_components_dir();
-
-    let captured = run_direct_workflow_embedded(
-        &components_dir,
-        "embedded-finish-passthrough",
-        SIMPLE_PASSTHROUGH,
-        br#"{"input":"direct-finish"}"#,
-    );
-
-    assert!(
-        captured.status_success,
-        "embedded run failed: {}",
-        captured.stderr
-    );
-    assert_eq!(
-        captured.output_json,
-        Some(serde_json::json!({ "result": "direct-finish" }))
-    );
-    assert!(captured.error_json.is_none());
-}
-
-#[test]
-fn embedded_execute_error_workflow_reports_failure() {
-    let components_dir = direct_e2e_components_dir();
-
-    let captured = run_direct_workflow_embedded(
-        &components_dir,
-        "embedded-error",
-        ERROR_DIRECT_SIMPLE,
-        br#"{"requestId":"req-123"}"#,
-    );
-
-    assert!(
-        !captured.status_success,
-        "Error workflow must surface a failed run result"
-    );
-    assert!(
-        captured.output_json.is_none(),
-        "Error workflow must not POST /completed"
-    );
-    assert_eq!(
-        captured.error_json,
-        Some(serde_json::json!({
-            "stepId": "fail",
-            "stepName": "Fail Fast",
-            "category": "permanent",
-            "code": "DIRECT_FAILURE",
-            "message": "Direct workflow failure",
-            "severity": "critical",
-            "context": {
-                "requestId": "req-123",
-                "reason": "fixture"
-            }
-        }))
-    );
-}
-
-#[test]
-fn embedded_execute_is_repeatable_across_runs() {
-    let components_dir = direct_e2e_components_dir();
-
-    // Two full runs back to back: each gets a fresh Store from the shared
-    // executor, so state must not leak between instances.
-    for round in 0..2 {
-        let captured = run_direct_workflow_embedded(
-            &components_dir,
-            &format!("embedded-repeat-{round}"),
-            SIMPLE_PASSTHROUGH,
-            br#"{"input":"direct-finish"}"#,
-        );
-        assert!(
-            captured.status_success,
-            "round {round} failed: {}",
-            captured.stderr
-        );
-        assert_eq!(
-            captured.output_json,
-            Some(serde_json::json!({ "result": "direct-finish" })),
-            "round {round} output mismatch"
-        );
-    }
 }
 
 // ===========================================================================
@@ -6939,6 +6702,49 @@ fn direct_wasm_execute_invoke_abi_returns_completed_outcome_in_band() {
 }
 
 #[test]
+fn direct_wasm_execute_invoke_abi_is_repeatable_across_runs() {
+    let components_dir = direct_e2e_components_dir();
+    let compiled =
+        compile_invoke_abi_artifact(&components_dir, "invoke-abi-repeatable", SIMPLE_PASSTHROUGH);
+    let executor = embedded_executor();
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let pre = runtime.block_on(executor.load_instance_pre(&compiled.wasm_path));
+    let pre = pre.expect("load invoke-shaped workflow component");
+
+    // `execute_invoke` must create a new Store for every execution even when
+    // the compiled component is reused across instances.
+    for round in 0..2 {
+        let host = Arc::new(RecordingRuntimeHost::new(b"{}"));
+        let run = runtime.block_on(executor.execute_invoke(
+            &pre,
+            runtara_component_host::WorkflowRunSpec {
+                env: HashMap::new(),
+                stderr: None,
+                timeout: Duration::from_secs(60),
+                cancel: None,
+                limits: runtara_component_host::WorkflowLimits::default(),
+                runtime: Some(host.clone()),
+            },
+            br#"{"input":"direct-finish"}"#.to_vec(),
+        ));
+        let output = match run.exit {
+            runtara_component_host::InvokeExit::Completed(output) => output,
+            other => panic!("round {round} must complete, got {other:?}"),
+        };
+        assert_eq!(
+            serde_json::from_slice::<Value>(&output).expect("output is JSON"),
+            serde_json::json!({ "result": "direct-finish" }),
+            "round {round} output mismatch"
+        );
+        assert_eq!(
+            host.completed.lock().unwrap().clone(),
+            Some(output),
+            "round {round} must report its own completion"
+        );
+    }
+}
+
+#[test]
 fn direct_wasm_execute_invoke_abi_returns_error_info_in_band() {
     let components_dir = direct_e2e_components_dir();
     let compiled =
@@ -7062,11 +6868,11 @@ fn direct_wasm_execute_invoke_abi_runs_durable_agent_step() {
     assert_eq!(output_json, serde_json::json!({ "result": "invoke-agent" }));
 }
 
-/// Durable per-item delays inside a Split get PER-ITERATION sleep-checkpoint
+/// Durable per-item delays inside a Split get PER-ITERATION park-checkpoint
 /// keys (`{step}::{index}`) — without the loop-index fold every iteration
 /// collides on one key, the hazard flagged (and deferred) by the unify plan.
 /// Top-level durable delays keep the bare step id (asserted by the existing
-/// delay tests' `checkpoint_id == "delay"` expectations).
+/// delay tests' parked-checkpoint expectations).
 #[test]
 fn direct_wasm_execute_split_durable_delay_keys_are_per_iteration() {
     let components_dir = direct_e2e_components_dir();
@@ -7129,15 +6935,22 @@ fn direct_wasm_execute_split_durable_delay_keys_are_per_iteration() {
     );
     let result = captured;
 
-    let sleep_keys: Vec<&str> = result
-        .sleeps
+    assert!(
+        result.sleeps.is_empty(),
+        "per-item durable delays must park rather than block: {:?}",
+        result.sleeps
+    );
+    let mut parked_keys: Vec<&str> = result
+        .checkpoints
         .iter()
-        .map(|sleep| sleep.checkpoint_id.as_str())
+        .filter(|checkpoint| checkpoint.state.len() == 8)
+        .map(|checkpoint| checkpoint.checkpoint_id.as_str())
         .collect();
+    parked_keys.sort_unstable();
     assert_eq!(
-        sleep_keys,
+        parked_keys,
         vec!["tick::0", "tick::1"],
-        "per-item durable delays must not collide on one sleep key"
+        "per-item durable delays must not collide on one park key"
     );
 }
 

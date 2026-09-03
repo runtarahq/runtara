@@ -50,6 +50,13 @@ impl Runner for MockRunner {
         unimplemented!("MockRunner::launch_detached not needed for heartbeat monitor tests")
     }
 
+    async fn try_launch_detached(
+        &self,
+        options: &LaunchOptions,
+    ) -> runtara_environment::runner::Result<RunnerHandle> {
+        self.launch_detached(options).await
+    }
+
     async fn is_running(&self, _handle: &RunnerHandle) -> bool {
         false
     }

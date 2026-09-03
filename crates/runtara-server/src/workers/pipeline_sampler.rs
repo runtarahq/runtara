@@ -251,14 +251,16 @@ fn build_snapshot_with_stuck_after(
             "accepted",
         ),
         precompile_child_stage(
-            "precompileChildren",
-            "Precompile children",
-            Some("RUNTARA_PRECOMPILE_CHILD_CONCURRENCY"),
-            reading.precompile_child_limit,
-            reading.precompile_child_used,
-            reading.precompile_child_oldest_ms,
+            ordinary_stage(
+                "precompileChildren",
+                "Precompile children",
+                Some("RUNTARA_PRECOMPILE_CHILD_CONCURRENCY"),
+                reading.precompile_child_limit,
+                reading.precompile_child_used,
+                reading.precompile_child_oldest_ms,
+                "accepted",
+            ),
             reading.precompile_child_retired,
-            "accepted",
         ),
         launch_stage(
             "launchLeased",
@@ -365,16 +367,9 @@ fn ordinary_stage(
 }
 
 fn precompile_child_stage(
-    key: &str,
-    label: &str,
-    knob: Option<&str>,
-    limit: Option<u64>,
-    used: Option<u64>,
-    oldest_age_ms: Option<u64>,
+    mut stage: PipelineStageDto,
     reaping_precompile_children: Option<u64>,
-    inflow_key: &str,
 ) -> PipelineStageDto {
-    let mut stage = ordinary_stage(key, label, knob, limit, used, oldest_age_ms, inflow_key);
     stage.reaping_precompile_children = reaping_precompile_children;
     stage
 }
