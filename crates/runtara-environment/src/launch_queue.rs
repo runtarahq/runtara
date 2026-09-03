@@ -19,6 +19,14 @@ pub const LAUNCH_QUEUE_TIMEOUT: &str = "launch_queue_timeout";
 /// Stable detail recorded when a dispatcher found the runner full.
 pub const RUNNER_CAPACITY_UNAVAILABLE: &str = "runner_capacity_unavailable";
 
+/// Stable detail recorded when bounded artifact/component preparation outlived
+/// its dispatcher lease. The launch is retried from the durable queue rather
+/// than leaving an unbounded compiler task associated with a runner permit.
+pub const PREPARATION_TIMEOUT: &str = "preparation_timeout";
+
+/// Stable detail recorded when every independent preparation worker is busy.
+pub const PREPARATION_CAPACITY_UNAVAILABLE: &str = "preparation_capacity_unavailable";
+
 /// Stable refusal detail for a trigger whose workflow already has active work.
 pub const SINGLE_INSTANCE_ACTIVE: &str = "single_instance_active";
 
@@ -76,6 +84,12 @@ impl LaunchKind {
 pub enum LaunchState {
     /// The launch is durable and eligible for dispatcher claim at `available_at`.
     Queued,
+    /// A dispatcher owns bounded artifact validation and component preparation.
+    ///
+    /// This state deliberately precedes a runner permit. A slow compiler or
+    /// artifact read therefore consumes only the independent preparation pool,
+    /// never a live guest slot.
+    Preparing,
     /// One dispatcher owns a short, recoverable claim.
     Leased,
     /// The dispatcher has acquired capacity and is installing launch ownership.
@@ -97,6 +111,7 @@ impl LaunchState {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Queued => "queued",
+            Self::Preparing => "preparing",
             Self::Leased => "leased",
             Self::Starting => "starting",
             Self::Running => "running",
@@ -111,7 +126,7 @@ impl LaunchState {
     pub const fn is_active(self) -> bool {
         matches!(
             self,
-            Self::Queued | Self::Leased | Self::Starting | Self::Running
+            Self::Queued | Self::Preparing | Self::Leased | Self::Starting | Self::Running
         )
     }
 
@@ -129,6 +144,7 @@ impl LaunchState {
     fn from_db(value: String) -> Result<Self, LaunchQueueError> {
         match value.as_str() {
             "queued" => Ok(Self::Queued),
+            "preparing" => Ok(Self::Preparing),
             "leased" => Ok(Self::Leased),
             "starting" => Ok(Self::Starting),
             "running" => Ok(Self::Running),
@@ -438,7 +454,7 @@ impl LaunchRepository {
             SELECT {LAUNCH_COLUMNS}
             FROM instance_launches
             WHERE instance_id = $1
-              AND state IN ('queued', 'leased', 'starting', 'running')
+              AND state IN ('queued', 'preparing', 'leased', 'starting', 'running')
             LIMIT 1
             "#
         );
@@ -590,7 +606,7 @@ impl LaunchRepository {
             SELECT {LAUNCH_COLUMNS}
             FROM instance_launches
             WHERE instance_id = $1
-              AND state IN ('queued', 'leased', 'starting', 'running')
+              AND state IN ('queued', 'preparing', 'leased', 'starting', 'running')
             LIMIT 1
             "#
         );
@@ -745,7 +761,7 @@ impl LaunchRepository {
             SELECT {LAUNCH_COLUMNS}
             FROM instance_launches
             WHERE instance_id = $1
-              AND state IN ('queued', 'leased', 'starting', 'running')
+              AND state IN ('queued', 'preparing', 'leased', 'starting', 'running')
             LIMIT 1
             "#
         );
@@ -764,7 +780,7 @@ impl LaunchRepository {
     /// launch generation together. If the host dies after Core records the
     /// outcome but before the generation is released, this bounded scan makes
     /// the durable Core state authoritative again. A `suspended` instance is
-    /// reconciled only from `running`: a queued/leased/starting resume or wake
+    /// reconciled only from `running`: a queued/preparing/leased/starting resume or wake
     /// legitimately remains `suspended` until the start gate opens.
     pub async fn reconcile_released_instances(
         &self,
@@ -782,7 +798,7 @@ impl LaunchRepository {
                 JOIN instances AS core_instance
                   ON core_instance.instance_id = launch.instance_id
                  AND core_instance.tenant_id = launch.tenant_id
-                WHERE launch.state IN ('queued', 'leased', 'starting', 'running')
+                WHERE launch.state IN ('queued', 'preparing', 'leased', 'starting', 'running')
                   AND (
                         core_instance.status IN ('completed', 'failed', 'cancelled')
                         OR (
@@ -870,6 +886,171 @@ impl LaunchRepository {
         )
     }
 
+    /// Claim ready launches for bounded pre-run preparation.
+    ///
+    /// A preparation claim never holds a guest/run permit. It owns only a
+    /// short durable lease and the runner's independently bounded preparation
+    /// slot, so compiling a malformed or slow component cannot fill the live
+    /// execution pool. Like ordinary claims, this is database-time based and
+    /// uses `SKIP LOCKED` across dispatcher processes.
+    pub async fn claim_ready_for_preparation(
+        &self,
+        lease_owner: &str,
+        lease_for: Duration,
+        limit: usize,
+    ) -> Result<Vec<Launch>, LaunchQueueError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        if lease_for.is_zero() {
+            return Err(LaunchQueueError::ZeroLeaseDuration);
+        }
+        let lease_us = duration_to_micros(lease_for, "preparation_lease_for")?;
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let query = format!(
+            r#"
+            WITH claimable AS (
+                SELECT launch_id
+                FROM instance_launches
+                WHERE state = 'queued'
+                  AND available_at <= NOW()
+                  AND deadline_at > NOW()
+                ORDER BY available_at, created_at, launch_id
+                FOR UPDATE SKIP LOCKED
+                LIMIT $3
+            )
+            UPDATE instance_launches AS launch
+            SET state = 'preparing',
+                lease_owner = $1,
+                lease_expires_at = NOW() + ($2 * INTERVAL '1 microsecond'),
+                attempt_count = launch.attempt_count + 1,
+                updated_at = NOW()
+            FROM claimable
+            WHERE launch.launch_id = claimable.launch_id
+            RETURNING {LAUNCH_RETURNING_COLUMNS}
+            "#
+        );
+        rows_to_launches(
+            sqlx::query_as::<_, LaunchRow>(&query)
+                .bind(lease_owner)
+                .bind(lease_us)
+                .bind(limit)
+                .fetch_all(&self.pool)
+                .await?,
+        )
+    }
+
+    /// Return expired preparation claims to the ready queue.
+    ///
+    /// The background compile/read task may still be unwinding when this
+    /// transition commits. Its killable child is reaped outside the parent
+    /// preparation token, and a late task cannot promote because
+    /// [`Self::promote_prepared`] fences on the claim incarnation as well as
+    /// this owner and lease.
+    pub async fn recover_expired_preparations(
+        &self,
+        retry_after: Duration,
+        limit: usize,
+    ) -> Result<Vec<Launch>, LaunchQueueError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let retry_after_us = duration_to_micros(retry_after, "preparation_retry_after")?;
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let mut tx = self.pool.begin().await?;
+        let select = format!(
+            r#"
+            SELECT {LAUNCH_COLUMNS}
+            FROM instance_launches
+            WHERE state = 'preparing'
+              AND lease_expires_at <= clock_timestamp()
+              AND deadline_at > clock_timestamp()
+            ORDER BY lease_expires_at, created_at, launch_id
+            FOR UPDATE SKIP LOCKED
+            LIMIT $1
+            "#
+        );
+        let expired = sqlx::query_as::<_, LaunchRow>(&select)
+            .bind(limit)
+            .fetch_all(&mut *tx)
+            .await?;
+        if expired.is_empty() {
+            tx.commit().await?;
+            return Ok(Vec::new());
+        }
+
+        let ids: Vec<String> = expired.iter().map(|row| row.launch_id.clone()).collect();
+        let update = format!(
+            r#"
+            UPDATE instance_launches
+            SET state = 'queued',
+                available_at = NOW() + ($2 * INTERVAL '1 microsecond'),
+                lease_owner = NULL,
+                lease_expires_at = NULL,
+                start_gate_deadline_at = NULL,
+                last_error = $3,
+                updated_at = NOW()
+            WHERE launch_id = ANY($1)
+              AND state = 'preparing'
+            RETURNING {LAUNCH_COLUMNS}
+            "#
+        );
+        let recovered = sqlx::query_as::<_, LaunchRow>(&update)
+            .bind(&ids)
+            .bind(retry_after_us)
+            .bind(PREPARATION_TIMEOUT)
+            .fetch_all(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        rows_to_launches(recovered)
+    }
+
+    /// Promote a completed preparation back to a short handoff lease.
+    ///
+    /// The caller still owns the `preparing` lease while it has an opaque
+    /// prepared artifact. This one conditional update proves cancellation,
+    /// expiry, or another dispatcher's recovery did not win before the
+    /// runner can be asked for a guest permit. `preparation_attempt` is the
+    /// claim incarnation returned by [`Self::claim_ready_for_preparation`];
+    /// it prevents a late compiler from promoting a newer same-owner claim.
+    pub async fn promote_prepared(
+        &self,
+        launch_id: &str,
+        lease_owner: &str,
+        preparation_attempt: i32,
+        handoff_lease_for: Duration,
+    ) -> Result<Option<Launch>, LaunchQueueError> {
+        if handoff_lease_for.is_zero() {
+            return Err(LaunchQueueError::ZeroLeaseDuration);
+        }
+        let handoff_lease_us = duration_to_micros(handoff_lease_for, "handoff_lease_for")?;
+        let query = format!(
+            r#"
+            UPDATE instance_launches
+            SET state = 'leased',
+                lease_expires_at = NOW() + ($4 * INTERVAL '1 microsecond'),
+                last_error = NULL,
+                updated_at = NOW()
+            WHERE launch_id = $1
+              AND state = 'preparing'
+              AND lease_owner = $2
+              AND attempt_count = $3
+              AND lease_expires_at > clock_timestamp()
+              AND deadline_at > clock_timestamp()
+            RETURNING {LAUNCH_COLUMNS}
+            "#
+        );
+        sqlx::query_as::<_, LaunchRow>(&query)
+            .bind(launch_id)
+            .bind(lease_owner)
+            .bind(preparation_attempt)
+            .bind(handoff_lease_us)
+            .fetch_optional(&self.pool)
+            .await?
+            .map(Launch::try_from)
+            .transpose()
+    }
+
     /// Requeue bounded handoffs whose dispatcher died before it opened the
     /// generation's start gate.
     ///
@@ -894,8 +1075,8 @@ impl LaunchRepository {
                     state = 'leased'
                     OR (state = 'starting' AND start_gate_deadline_at IS NOT NULL)
                 )
-              AND lease_expires_at <= NOW()
-              AND deadline_at > NOW()
+              AND lease_expires_at <= clock_timestamp()
+              AND deadline_at > clock_timestamp()
             ORDER BY lease_expires_at, created_at, launch_id
             FOR UPDATE SKIP LOCKED
             LIMIT $1
@@ -941,11 +1122,14 @@ impl LaunchRepository {
     /// A dispatcher calls this after nonblocking capacity acquisition.  A
     /// cancellation that won while it was acquiring capacity changes the row
     /// first, so this conditional update returns `None` and the dispatcher
-    /// must release the permit without starting a guest.
+    /// must release the permit without starting a guest. The claim incarnation
+    /// is also required so a stale same-owner dispatcher cannot advance a
+    /// re-claimed generation.
     pub async fn begin_start(
         &self,
         launch_id: &str,
         lease_owner: &str,
+        attempt_count: i32,
     ) -> Result<Option<Launch>, LaunchQueueError> {
         let query = format!(
             r#"
@@ -959,14 +1143,16 @@ impl LaunchRepository {
             WHERE launch_id = $1
               AND state = 'leased'
               AND lease_owner = $2
-              AND lease_expires_at > NOW()
-              AND deadline_at > NOW()
+              AND attempt_count = $3
+              AND lease_expires_at > clock_timestamp()
+              AND deadline_at > clock_timestamp()
             RETURNING {LAUNCH_COLUMNS}
             "#
         );
         sqlx::query_as::<_, LaunchRow>(&query)
             .bind(launch_id)
             .bind(lease_owner)
+            .bind(attempt_count)
             .fetch_optional(&self.pool)
             .await?
             .map(Launch::try_from)
@@ -984,6 +1170,7 @@ impl LaunchRepository {
         &self,
         launch_id: &str,
         lease_owner: &str,
+        attempt_count: i32,
     ) -> Result<Option<Launch>, LaunchQueueError> {
         let mut tx = self.pool.begin().await?;
         let query = format!(
@@ -996,14 +1183,16 @@ impl LaunchRepository {
             WHERE launch_id = $1
               AND state = 'starting'
               AND lease_owner = $2
-              AND lease_expires_at > NOW()
-              AND deadline_at > NOW()
+              AND attempt_count = $3
+              AND lease_expires_at > clock_timestamp()
+              AND deadline_at > clock_timestamp()
             RETURNING {LAUNCH_COLUMNS}
             "#
         );
         let running = sqlx::query_as::<_, LaunchRow>(&query)
             .bind(launch_id)
             .bind(lease_owner)
+            .bind(attempt_count)
             .fetch_optional(&mut *tx)
             .await?;
         let Some(running) = running else {
@@ -1056,43 +1245,161 @@ impl LaunchRepository {
     /// The generation remains marked with its durable gate deadline after
     /// [`Self::mark_running`] so a process loss before guest work begins is
     /// still distinguishable from normal execution. This conditional update
-    /// removes that recovery marker only while the same running generation is
-    /// still within its gate deadline; the dispatcher calls it immediately
-    /// before [`crate::runner::StartGate::open`].
+    /// removes that recovery marker only while the same running incarnation is
+    /// still within its gate deadline; the runner calls it at the component
+    /// host's immediate pre-instantiation boundary.
     pub async fn confirm_gate_open(
         &self,
         launch_id: &str,
+        attempt_count: i32,
     ) -> Result<Option<Launch>, LaunchQueueError> {
         let query = format!(
             r#"
-            UPDATE instance_launches
+            -- Materialize the row lock before reading a real timestamp.
+            -- A plain UPDATE may evaluate its WHERE predicate while scanning,
+            -- then wait on a concurrent row lock; that would preserve an
+            -- already-expired timestamp value despite using the volatile
+            -- clock. The second materialized CTE evaluates the timestamp only
+            -- after the lock CTE completes, so the outer UPDATE cannot inspect
+            -- either deadline until the row lock has been acquired.
+            WITH locked(locked_launch_id) AS MATERIALIZED (
+                SELECT locked_source.launch_id
+                FROM instance_launches AS locked_source
+                WHERE locked_source.launch_id = $1
+                FOR UPDATE
+            ), checked(locked_launch_id, checked_at) AS MATERIALIZED (
+                SELECT locked.locked_launch_id, clock_timestamp()
+                FROM locked
+            )
+            UPDATE instance_launches AS launch
             SET start_gate_deadline_at = NULL,
                 updated_at = NOW()
-            WHERE launch_id = $1
-              AND state = 'running'
-              AND start_gate_deadline_at > NOW()
-              AND deadline_at > NOW()
+            FROM checked
+            WHERE launch.launch_id = checked.locked_launch_id
+              AND launch.state = 'running'
+              AND launch.attempt_count = $2
+              AND launch.start_gate_deadline_at > checked.checked_at
+              AND launch.deadline_at > checked.checked_at
             RETURNING {LAUNCH_COLUMNS}
             "#
         );
         sqlx::query_as::<_, LaunchRow>(&query)
             .bind(launch_id)
+            .bind(attempt_count)
             .fetch_optional(&self.pool)
             .await?
             .map(Launch::try_from)
             .transpose()
     }
 
+    /// Read back an ambiguous start-gate confirmation by its exact durable
+    /// incarnation.
+    ///
+    /// PostgreSQL can commit an `UPDATE` even when the caller loses the
+    /// response.  The runner must distinguish that harmless transport failure
+    /// from a confirmation that did not commit: only the former may enter
+    /// guest code with a cleared marker.
+    pub async fn is_gate_confirmed(
+        &self,
+        launch_id: &str,
+        attempt_count: i32,
+    ) -> Result<bool, LaunchQueueError> {
+        let confirmed: Option<bool> = sqlx::query_scalar(
+            r#"
+            SELECT state = 'running'
+               AND attempt_count = $2
+               AND start_gate_deadline_at IS NULL
+            FROM instance_launches
+            WHERE launch_id = $1
+            "#,
+        )
+        .bind(launch_id)
+        .bind(attempt_count)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(confirmed.unwrap_or(false))
+    }
+
+    /// Fail a `running` generation which never crossed its durable start
+    /// gate.
+    ///
+    /// This is deliberately fenced by `attempt_count`: a previous monitor
+    /// must never terminalize an instance after lease recovery gave the same
+    /// launch id to a new runner attempt. The queue and Core updates commit
+    /// together, so the admission release observer runs only after both are
+    /// durable.
+    pub async fn fail_unconfirmed_running(
+        &self,
+        launch_id: &str,
+        attempt_count: i32,
+        error: &str,
+    ) -> Result<Option<Launch>, LaunchQueueError> {
+        let mut tx = self.pool.begin().await?;
+        let query = format!(
+            r#"
+            UPDATE instance_launches
+            SET state = 'failed',
+                lease_owner = NULL,
+                lease_expires_at = NULL,
+                start_gate_deadline_at = NULL,
+                last_error = $3,
+                updated_at = NOW()
+            WHERE launch_id = $1
+              AND state = 'running'
+              AND attempt_count = $2
+              AND start_gate_deadline_at IS NOT NULL
+            RETURNING {LAUNCH_COLUMNS}
+            "#
+        );
+        let failed = sqlx::query_as::<_, LaunchRow>(&query)
+            .bind(launch_id)
+            .bind(attempt_count)
+            .bind(error)
+            .fetch_optional(&mut *tx)
+            .await?;
+        let Some(failed) = failed else {
+            tx.commit().await?;
+            return Ok(None);
+        };
+
+        let updated = sqlx::query(
+            r#"
+            UPDATE instances
+            SET status = 'failed',
+                finished_at = NOW(),
+                sleep_until = NULL,
+                termination_reason = 'start_gate_failed',
+                error = $2
+            WHERE instance_id = $1
+              AND status = 'running'
+            "#,
+        )
+        .bind(&failed.instance_id)
+        .bind(error)
+        .execute(&mut *tx)
+        .await?;
+        if updated.rows_affected() != 1 {
+            return Err(LaunchQueueError::InstanceNoLongerRunning {
+                launch_id: failed.launch_id,
+            });
+        }
+
+        tx.commit().await?;
+        Ok(Some(failed.try_into()?))
+    }
+
     /// Return a dispatcher-owned pre-run launch to the ready queue.
     ///
     /// This is deliberately narrower than a generic retry transition: it only
-    /// accepts a still-owned lease or start handoff. In particular, it cannot
-    /// resurrect a generation after cancellation or a terminal monitor result
-    /// has won the race.
+    /// accepts a still-owned lease or start handoff with the exact claimed
+    /// incarnation. In particular, it cannot resurrect a generation after
+    /// cancellation, recovery by the same dispatcher owner, or a terminal
+    /// monitor result has won the race.
     pub async fn requeue_owned(
         &self,
         launch_id: &str,
         lease_owner: &str,
+        attempt_count: i32,
         retry_after: Duration,
         last_error: Option<&str>,
     ) -> Result<Option<Launch>, LaunchQueueError> {
@@ -1101,22 +1408,25 @@ impl LaunchRepository {
             r#"
             UPDATE instance_launches
             SET state = 'queued',
-                available_at = NOW() + ($3 * INTERVAL '1 microsecond'),
+                available_at = NOW() + ($4 * INTERVAL '1 microsecond'),
                 lease_owner = NULL,
                 lease_expires_at = NULL,
                 start_gate_deadline_at = NULL,
-                last_error = $4,
+                last_error = $5,
                 updated_at = NOW()
             WHERE launch_id = $1
-              AND state IN ('leased', 'starting')
               AND lease_owner = $2
-              AND deadline_at > NOW()
+              AND attempt_count = $3
+              AND state IN ('preparing', 'leased', 'starting')
+              AND lease_expires_at > clock_timestamp()
+              AND deadline_at > clock_timestamp()
             RETURNING {LAUNCH_COLUMNS}
             "#
         );
         sqlx::query_as::<_, LaunchRow>(&query)
             .bind(launch_id)
             .bind(lease_owner)
+            .bind(attempt_count)
             .bind(retry_after_us)
             .bind(last_error)
             .fetch_optional(&self.pool)
@@ -1135,6 +1445,7 @@ impl LaunchRepository {
         &self,
         launch_id: &str,
         lease_owner: &str,
+        attempt_count: i32,
         error: &str,
     ) -> Result<Option<Launch>, LaunchQueueError> {
         let mut tx = self.pool.begin().await?;
@@ -1145,17 +1456,21 @@ impl LaunchRepository {
                 lease_owner = NULL,
                 lease_expires_at = NULL,
                 start_gate_deadline_at = NULL,
-                last_error = $3,
+                last_error = $4,
                 updated_at = NOW()
             WHERE launch_id = $1
-              AND state IN ('leased', 'starting')
               AND lease_owner = $2
+              AND attempt_count = $3
+              AND state IN ('preparing', 'leased', 'starting')
+              AND lease_expires_at > clock_timestamp()
+              AND deadline_at > clock_timestamp()
             RETURNING {LAUNCH_COLUMNS}
             "#
         );
         let failed = sqlx::query_as::<_, LaunchRow>(&update)
             .bind(launch_id)
             .bind(lease_owner)
+            .bind(attempt_count)
             .bind(error)
             .fetch_optional(&mut *tx)
             .await?;
@@ -1266,7 +1581,7 @@ impl LaunchRepository {
                 last_error = $3,
                 updated_at = NOW()
             WHERE launch_id = $1
-              AND state IN ('queued', 'leased', 'starting', 'running')
+              AND state IN ('queued', 'preparing', 'leased', 'starting', 'running')
             RETURNING {LAUNCH_COLUMNS}
             "#
         );
@@ -1298,16 +1613,16 @@ impl LaunchRepository {
             SELECT {LAUNCH_COLUMNS}
             FROM instance_launches
             WHERE (
-                    state IN ('queued', 'leased')
+                    state IN ('queued', 'preparing', 'leased')
                     OR (state = 'starting' AND start_gate_deadline_at IS NOT NULL)
                 )
-              AND deadline_at <= NOW()
+              AND deadline_at <= clock_timestamp()
               OR (
                     state = 'running'
                     AND start_gate_deadline_at IS NOT NULL
                     AND (
-                        start_gate_deadline_at <= NOW()
-                        OR deadline_at <= NOW()
+                        start_gate_deadline_at <= clock_timestamp()
+                        OR deadline_at <= clock_timestamp()
                     )
                 )
             ORDER BY deadline_at, created_at, launch_id
@@ -1338,16 +1653,16 @@ impl LaunchRepository {
             WHERE launch_id = ANY($1)
               AND (
                     (
-                        state IN ('queued', 'leased')
+                        state IN ('queued', 'preparing', 'leased')
                         OR (state = 'starting' AND start_gate_deadline_at IS NOT NULL)
                     )
-                    AND deadline_at <= NOW()
+                    AND deadline_at <= clock_timestamp()
                     OR (
                         state = 'running'
                         AND start_gate_deadline_at IS NOT NULL
                         AND (
-                            start_gate_deadline_at <= NOW()
-                            OR deadline_at <= NOW()
+                            start_gate_deadline_at <= clock_timestamp()
+                            OR deadline_at <= clock_timestamp()
                         )
                     )
                 )
@@ -1414,7 +1729,7 @@ impl LaunchRepository {
                 updated_at = NOW()
             WHERE launch_id = $1
               AND (
-                    state IN ('queued', 'leased')
+                    state IN ('queued', 'preparing', 'leased')
                     OR (state IN ('starting', 'running') AND start_gate_deadline_at IS NOT NULL)
                 )
             RETURNING {LAUNCH_COLUMNS}
@@ -1576,7 +1891,7 @@ async fn has_active_workflow_launch(
             FROM instance_launches
             WHERE tenant_id = $1
               AND workflow_id = $2
-              AND state IN ('queued', 'leased', 'starting', 'running')
+              AND state IN ('queued', 'preparing', 'leased', 'starting', 'running')
         )
         "#,
     )

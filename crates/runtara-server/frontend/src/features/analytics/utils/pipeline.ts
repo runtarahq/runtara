@@ -39,6 +39,8 @@ export interface PipelineStage {
    * runner. Omitted by older servers and inapplicable stages.
    */
   capacityRejections?: number | null;
+  /** Timed-out precompile children still awaiting the bounded reaper. */
+  reapingPrecompileChildren?: number | null;
   /** Highest-count workflow contributors, capped server-side. */
   topWorkflows?: PipelineWorkflowAttribution[];
 }
@@ -114,7 +116,7 @@ export function isNotDraining(
   if (stage.key === 'launchExpired' || stage.key === 'launchCancelled') {
     return false;
   }
-  if (stage.key === 'launchQueued') return true;
+  if (stage.key === 'launchQueued' || stage.key === 'launchPreparing') return true;
   const pct = utilisation(stage);
   // An unbounded queue cannot be the capacity chokepoint by itself, but an old
   // queued generation is still a real blocked condition and must be called
@@ -152,7 +154,7 @@ export function findChokepoint(
     // The launch queue shows what is stuck, but it inherits the admission
     // ceiling solely for occupancy context. It must not be chosen as the
     // capacity constraint just because an old row received the stuck bonus.
-    if (stage.key === 'launchQueued') continue;
+    if (stage.key === 'launchQueued' || stage.key === 'launchPreparing') continue;
     const pct = utilisation(stage);
     if (pct === null) continue;
     const score = pct + (isNotDraining(stage, stuckAfterMs) ? 1000 : 0);

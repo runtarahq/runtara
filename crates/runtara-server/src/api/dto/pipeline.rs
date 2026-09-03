@@ -91,6 +91,12 @@ pub struct PipelineStageDto {
     /// diagnosis count, not an unbounded lifetime metric: rows leave it once
     /// they start, expire, park, or reach a terminal outcome.
     pub capacity_rejections: Option<u64>,
+    /// Timed-out precompile children still retained by the bounded reaper.
+    ///
+    /// Present only on the precompile-child stage. It distinguishes ordinary
+    /// busy compilation from a child blocked in kernel I/O after its durable
+    /// preparation lease elapsed.
+    pub reaping_precompile_children: Option<u64>,
     /// Highest-count workflows contributing to this durable launch stage.
     ///
     /// Empty for non-launch stages and when the stage has no rows. The list is

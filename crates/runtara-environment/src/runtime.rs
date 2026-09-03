@@ -988,7 +988,7 @@ where
                     SELECT 1
                     FROM instance_launches launch
                     WHERE launch.instance_id = i.instance_id
-                      AND launch.state IN ('queued', 'leased', 'starting', 'running')
+                      AND launch.state IN ('queued', 'preparing', 'leased', 'starting', 'running')
               )
         )
         UPDATE instances i
@@ -1248,6 +1248,7 @@ mod tests {
         let unbound = crate::test_support::unique_id("pending-start-recovery-unbound");
         let bound = crate::test_support::unique_id("pending-start-recovery-bound");
         let registered = crate::test_support::unique_id("pending-start-recovery-registered");
+        let preparing = crate::test_support::unique_id("pending-start-recovery-preparing");
         let fresh = crate::test_support::unique_id("pending-start-recovery-fresh");
         let old = chrono::Utc::now() - chrono::Duration::hours(2);
         let cutoff = chrono::Utc::now() - chrono::Duration::hours(1);
@@ -1265,7 +1266,7 @@ mod tests {
         .await
         .expect("insert image");
 
-        for instance_id in [&unbound, &bound, &registered] {
+        for instance_id in [&unbound, &bound, &registered, &preparing] {
             sqlx::query(
                 r#"
                 INSERT INTO instances (instance_id, tenant_id, status, created_at)
@@ -1291,7 +1292,7 @@ mod tests {
         .await
         .expect("insert fresh pending instance");
 
-        for instance_id in [&bound, &registered] {
+        for instance_id in [&bound, &registered, &preparing] {
             sqlx::query(
                 r#"
                 INSERT INTO instance_images (instance_id, image_id, tenant_id, created_at)
@@ -1306,6 +1307,29 @@ mod tests {
             .await
             .expect("bind image to pending instance");
         }
+        sqlx::query(
+            r#"
+            INSERT INTO instance_launches (
+                launch_id, instance_id, tenant_id, image_id, kind, state,
+                available_at, deadline_at, lease_owner, lease_expires_at,
+                attempt_count, created_at, updated_at
+            ) VALUES (
+                $1, $2, $3, $4, 'start', 'preparing',
+                $5, $6, 'preparation-worker', $6, 1, $5, $5
+            )
+            "#,
+        )
+        .bind(crate::test_support::unique_id(
+            "pending-start-recovery-preparing-launch",
+        ))
+        .bind(&preparing)
+        .bind(&tenant_id)
+        .bind(&image_id)
+        .bind(old)
+        .bind(old + chrono::Duration::hours(3))
+        .execute(&mut *tx)
+        .await
+        .expect("insert active preparation launch");
         sqlx::query(
             r#"
             INSERT INTO container_registry (
@@ -1341,6 +1365,7 @@ mod tests {
             unbound.clone(),
             bound.clone(),
             registered.clone(),
+            preparing.clone(),
             fresh.clone(),
         ])
         .fetch_all(&mut *tx)
@@ -1373,6 +1398,11 @@ mod tests {
         assert_eq!(registered_status, "pending");
         assert!(registered_error.is_none());
         assert!(registered_reason.is_none());
+
+        let (_, preparing_status, preparing_error, preparing_reason) = state(&preparing);
+        assert_eq!(preparing_status, "pending");
+        assert!(preparing_error.is_none());
+        assert!(preparing_reason.is_none());
 
         let (_, fresh_status, fresh_error, fresh_reason) = state(&fresh);
         assert_eq!(fresh_status, "pending");

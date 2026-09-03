@@ -132,6 +132,40 @@ impl ContainerRegistry {
         Ok(removed)
     }
 
+    /// Remove a runner record only if the exact physical handle still owns
+    /// the row.
+    ///
+    /// A durable launch id can be retried after a pre-guest recovery, so it
+    /// is not by itself a sufficient fence for a monitor that already has a
+    /// stale handle. Callers that possess the handle id must use this stronger
+    /// form before changing paired durable state.
+    pub async fn cleanup_handle(
+        &self,
+        instance_id: &str,
+        launch_id: &str,
+        container_id: &str,
+    ) -> Result<bool> {
+        let result = sqlx::query(
+            "DELETE FROM container_registry \
+             WHERE instance_id = $1 AND launch_id = $2 AND container_id = $3",
+        )
+        .bind(instance_id)
+        .bind(launch_id)
+        .bind(container_id)
+        .execute(&self.pool)
+        .await?;
+
+        let removed = result.rows_affected() == 1;
+        tracing::debug!(
+            instance_id = %instance_id,
+            launch_id = %launch_id,
+            container_id = %container_id,
+            removed = removed,
+            "Handle-guarded container cleanup"
+        );
+        Ok(removed)
+    }
+
     /// Drop a container's registry entry, once it has reached a terminal state.
     pub async fn cleanup(&self, instance_id: &str) -> Result<()> {
         sqlx::query("DELETE FROM container_registry WHERE instance_id = $1")

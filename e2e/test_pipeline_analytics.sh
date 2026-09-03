@@ -122,6 +122,7 @@ seed_launch_telemetry() {
         VALUES
             ('pipeline-launch-queued-a', '${TENANT}', 'pending', NOW() - INTERVAL '20 seconds', NULL),
             ('pipeline-launch-queued-b', '${TENANT}', 'pending', NOW() - INTERVAL '12 seconds', NULL),
+            ('pipeline-launch-preparing', '${TENANT}', 'pending', NOW() - INTERVAL '18 seconds', NULL),
             ('pipeline-launch-leased', '${TENANT}', 'pending', NOW() - INTERVAL '15 seconds', NULL),
             ('pipeline-launch-starting', '${TENANT}', 'pending', NOW() - INTERVAL '10 seconds', NULL),
             ('pipeline-launch-running', '${TENANT}', 'running', NOW() - INTERVAL '9 seconds', NULL),
@@ -133,6 +134,7 @@ seed_launch_telemetry() {
         VALUES
             ('pipeline-launch-queued-a', 'pipeline-launch-queued-a', '${TENANT}', 'pipeline-analytics-image', 'start', 'queued', NOW() + INTERVAL '10 minutes', NOW() + INTERVAL '1 hour', NULL, NULL, 'runner_capacity_unavailable', NOW() - INTERVAL '20 seconds', NOW() - INTERVAL '20 seconds'),
             ('pipeline-launch-queued-b', 'pipeline-launch-queued-b', '${TENANT}', 'pipeline-analytics-image-alt', 'start', 'queued', NOW() + INTERVAL '10 minutes', NOW() + INTERVAL '1 hour', NULL, NULL, NULL, NOW() - INTERVAL '12 seconds', NOW() - INTERVAL '12 seconds'),
+            ('pipeline-launch-preparing', 'pipeline-launch-preparing', '${TENANT}', 'pipeline-analytics-image', 'start', 'preparing', NOW(), NOW() + INTERVAL '1 hour', 'test-preparer', NOW() + INTERVAL '10 minutes', NULL, NOW() - INTERVAL '18 seconds', NOW() - INTERVAL '18 seconds'),
             ('pipeline-launch-leased', 'pipeline-launch-leased', '${TENANT}', 'pipeline-analytics-image', 'start', 'leased', NOW(), NOW() + INTERVAL '1 hour', 'test-dispatcher', NOW() + INTERVAL '10 minutes', NULL, NOW() - INTERVAL '15 seconds', NOW() - INTERVAL '15 seconds'),
             ('pipeline-launch-starting', 'pipeline-launch-starting', '${TENANT}', 'pipeline-analytics-image', 'start', 'starting', NOW(), NOW() + INTERVAL '1 hour', 'test-dispatcher', NOW() + INTERVAL '10 minutes', NULL, NOW() - INTERVAL '10 seconds', NOW() - INTERVAL '10 seconds'),
             ('pipeline-launch-running', 'pipeline-launch-running', '${TENANT}', 'pipeline-analytics-image', 'start', 'running', NOW(), NOW() + INTERVAL '1 hour', NULL, NULL, NULL, NOW() - INTERVAL '9 seconds', NOW() - INTERVAL '9 seconds'),
@@ -277,9 +279,9 @@ fi
 echo "  First snapshot after ~${i}s"
 
 print_step "1. The snapshot is the pipeline, in order"
-expect_eq "stage count" "11" "$(echo "${SNAPSHOT}" | jq -r '.data.stages | length')"
+expect_eq "stage count" "14" "$(echo "${SNAPSHOT}" | jq -r '.data.stages | length')"
 expect_eq "stage keys in pipeline order" \
-  "admission triggerQueue triggerWorkers launchQueued launchLeased launchStarting runPermits launchRunning launchExpired launchCancelled parked" \
+  "admission triggerQueue triggerWorkers launchQueued launchPreparing preparationWorkers precompileChildren launchLeased launchStarting runPermits launchRunning launchExpired launchCancelled parked" \
   "$(echo "${SNAPSHOT}" | jq -r '[.data.stages[].key] | join(" ")')"
 expect_eq "server stuck policy is carried in milliseconds" "7000" \
   "$(echo "${SNAPSHOT}" | jq -r '.data.stuckAfterMs')"
@@ -291,6 +293,10 @@ expect_eq "trigger worker knob" "RUNTARA_TRIGGER_CONCURRENCY" \
   "$(echo "${SNAPSHOT}" | jq -r '.data.stages[] | select(.key=="triggerWorkers") | .knob')"
 expect_eq "run permit knob" "RUNTARA_MAX_CONCURRENT_RUNS" \
   "$(echo "${SNAPSHOT}" | jq -r '.data.stages[] | select(.key=="runPermits") | .knob')"
+expect_eq "preparation worker knob" "RUNTARA_PREPARATION_CONCURRENCY" \
+  "$(echo "${SNAPSHOT}" | jq -r '.data.stages[] | select(.key=="preparationWorkers") | .knob')"
+expect_eq "precompile child knob" "RUNTARA_PRECOMPILE_CHILD_CONCURRENCY" \
+  "$(echo "${SNAPSHOT}" | jq -r '.data.stages[] | select(.key=="precompileChildren") | .knob')"
 
 print_step "3. The run-permit bound comes from the live runner"
 # Not a constant echoed back: the runner reports the semaphore it actually
@@ -301,9 +307,15 @@ expect_true "run permit limit is a positive number" \
 echo "    runner reports a bound of ${RUN_LIMIT}"
 expect_true "run permit occupancy is readable" \
   "$(echo "${SNAPSHOT}" | jq -r '(.data.stages[] | select(.key=="runPermits") | .used) != null')"
+expect_true "preparation worker occupancy is readable" \
+  "$(echo "${SNAPSHOT}" | jq -r '(.data.stages[] | select(.key=="preparationWorkers") | .used) != null')"
+expect_true "precompile child occupancy is readable" \
+  "$(echo "${SNAPSHOT}" | jq -r '(.data.stages[] | select(.key=="precompileChildren") | .used) != null')"
+expect_true "precompile child reaper diagnostic is readable" \
+  "$(echo "${SNAPSHOT}" | jq -r '(.data.stages[] | select(.key=="precompileChildren") | .reapingPrecompileChildren) != null')"
 
 print_step "4. Unbounded stages report no limit rather than inventing one"
-for key in triggerQueue launchLeased launchStarting launchExpired launchCancelled parked; do
+for key in triggerQueue launchPreparing launchLeased launchStarting launchExpired launchCancelled parked; do
     expect_eq "${key} has no ceiling" "null" \
       "$(echo "${SNAPSHOT}" | jq -r ".data.stages[] | select(.key==\"${key}\") | .limit")"
 done
@@ -320,6 +332,8 @@ for _ in $(seq 1 12); do
 done
 expect_eq "queued durable launches" "2" \
   "$(echo "${LAUNCH_SNAPSHOT}" | jq -r '.data.stages[] | select(.key=="launchQueued") | .used')"
+expect_eq "preparing durable launches" "1" \
+  "$(echo "${LAUNCH_SNAPSHOT}" | jq -r '.data.stages[] | select(.key=="launchPreparing") | .used')"
 expect_eq "leased durable launches" "1" \
   "$(echo "${LAUNCH_SNAPSHOT}" | jq -r '.data.stages[] | select(.key=="launchLeased") | .used')"
 expect_eq "starting durable launches" "1" \
@@ -336,6 +350,8 @@ expect_eq "top queued workflow attribution" "expense-approval" \
   "$(echo "${LAUNCH_SNAPSHOT}" | jq -r '.data.stages[] | select(.key=="launchQueued") | .topWorkflows[0].workflowId')"
 expect_true "queued durable age is reported" \
   "$(echo "${LAUNCH_SNAPSHOT}" | jq -r '(.data.stages[] | select(.key=="launchQueued") | .oldestAgeMs) > 0')"
+expect_true "preparing durable age is reported" \
+  "$(echo "${LAUNCH_SNAPSHOT}" | jq -r '(.data.stages[] | select(.key=="launchPreparing") | .oldestAgeMs) > 0')"
 expect_true "parked stays outside launch-state counts" \
   "$(echo "${LAUNCH_SNAPSHOT}" | jq -r '(.data.stages[] | select(.key=="parked") | .used) != 7')"
 

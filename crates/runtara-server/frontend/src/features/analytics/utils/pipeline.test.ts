@@ -136,6 +136,16 @@ describe('isNotDraining', () => {
     expect(findChokepoint([queue])).toBeNull();
   });
 
+  it('calls out an old preparation lease without mistaking it for its worker bound', () => {
+    const preparing = stage({
+      key: 'launchPreparing',
+      used: 1,
+      oldestAgeMs: 2_880_000,
+    });
+    expect(isNotDraining(preparing)).toBe(true);
+    expect(findChokepoint([preparing])).toBeNull();
+  });
+
   it('does not call retained terminal launch history not draining', () => {
     expect(
       isNotDraining(

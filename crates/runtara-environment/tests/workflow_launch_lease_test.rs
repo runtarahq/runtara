@@ -78,39 +78,40 @@ async fn claim_initial(
     }
 }
 
-async fn mark_running_without_gate_confirmation(repository: &LaunchRepository, launch_id: &str) {
+async fn mark_running_without_gate_confirmation(
+    repository: &LaunchRepository,
+    launch_id: &str,
+) -> i32 {
     let owner = "workflow-launch-lease-test";
     let claimed = repository
         .claim_ready(owner, Duration::from_secs(60), 16)
         .await
         .expect("launch must be claimable");
-    assert!(
-        claimed.iter().any(|launch| launch.launch_id == launch_id),
-        "target launch must be claimed"
-    );
+    let claimed_launch = claimed
+        .iter()
+        .find(|launch| launch.launch_id == launch_id)
+        .expect("target launch must be claimed");
     assert!(
         repository
-            .begin_start(launch_id, owner)
+            .begin_start(launch_id, owner, claimed_launch.attempt_count)
             .await
             .expect("start transition must succeed")
             .is_some(),
         "claimed launch must enter the start gate"
     );
-    assert!(
-        repository
-            .mark_running(launch_id, owner)
-            .await
-            .expect("running transition must succeed")
-            .is_some(),
-        "start-gated launch must promote to running"
-    );
+    let running = repository
+        .mark_running(launch_id, owner, claimed_launch.attempt_count)
+        .await
+        .expect("running transition must succeed")
+        .expect("start-gated launch must promote to running");
+    running.attempt_count
 }
 
 async fn promote_running(repository: &LaunchRepository, launch_id: &str) {
-    mark_running_without_gate_confirmation(repository, launch_id).await;
+    let attempt_count = mark_running_without_gate_confirmation(repository, launch_id).await;
     assert!(
         repository
-            .confirm_gate_open(launch_id)
+            .confirm_gate_open(launch_id, attempt_count)
             .await
             .expect("gate confirmation must succeed")
             .is_some(),
@@ -125,7 +126,7 @@ async fn active_scope_count(pool: &PgPool, fixture: &ScopeFixture) -> i64 {
         FROM instance_launches
         WHERE tenant_id = $1
           AND workflow_id = $2
-          AND state IN ('queued', 'leased', 'starting', 'running')
+          AND state IN ('queued', 'preparing', 'leased', 'starting', 'running')
         "#,
     )
     .bind(&fixture.tenant_id)
@@ -416,10 +417,11 @@ async fn unconfirmed_running_gate_expires_and_confirmation_removes_its_marker() 
     assert_eq!(active_scope_count(&context.pool, &fixture).await, 0);
 
     let confirmed = claim_initial(&repository, &fixture, true).await;
-    mark_running_without_gate_confirmation(&repository, &confirmed.launch_id).await;
+    let confirmed_attempt =
+        mark_running_without_gate_confirmation(&repository, &confirmed.launch_id).await;
     assert!(
         repository
-            .confirm_gate_open(&confirmed.launch_id)
+            .confirm_gate_open(&confirmed.launch_id, confirmed_attempt)
             .await
             .expect("gate confirmation must succeed")
             .is_some()

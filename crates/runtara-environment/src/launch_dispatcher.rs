@@ -5,28 +5,33 @@
 //! Requests, trigger workers, and the wake scheduler write an
 //! [`crate::launch_queue::Launch`] before returning. This worker is the only
 //! Environment path that hands those generations to a runner. In particular,
-//! it uses [`crate::runner::Runner::try_launch_detached`], so a full runner
-//! returns work to PostgreSQL instead of accumulating in-memory permit waiters.
+//! it uses a bounded preparation phase followed by
+//! [`crate::runner::Runner::try_launch_prepared_detached`], so slow artifact
+//! work cannot consume a live guest permit or accumulate in-memory waiters.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::Utc;
-use runtara_core::persistence::{CompleteInstanceParams, Persistence};
+use runtara_core::persistence::Persistence;
 use sqlx::PgPool;
-use tokio::sync::{Notify, RwLock};
+use tokio::sync::{Notify, RwLock, Semaphore, TryAcquireError};
+use tokio::time::{Instant, timeout_at};
 use tracing::{debug, error, info, warn};
 
 use crate::container_registry::{ContainerInfo, ContainerRegistry};
 use crate::db;
 use crate::execution_timeout::ExecutionTimeoutPolicy;
 use crate::handlers::{DrainController, spawn_container_monitor};
-use crate::image_registry::{Image, ImageRegistry, require_current_workflow_entrypoint};
+use crate::image_registry::{Image, ImageRegistry};
 use crate::launch_queue::{
-    LAUNCH_QUEUE_TIMEOUT, Launch, LaunchKind, LaunchRepository, RUNNER_CAPACITY_UNAVAILABLE,
+    LAUNCH_QUEUE_TIMEOUT, Launch, LaunchKind, LaunchRepository, PREPARATION_CAPACITY_UNAVAILABLE,
+    PREPARATION_TIMEOUT, RUNNER_CAPACITY_UNAVAILABLE,
 };
-use crate::runner::{LaunchOptions, Runner, RunnerError, StartGate, StartGateConfirmation};
+use crate::runner::{
+    LaunchOptions, PreparedLaunch, Runner, RunnerError, StartGate, StartGateConfirmation,
+};
 
 /// Maximum time a newly accepted launch may remain unhanded to a runner.
 ///
@@ -34,6 +39,12 @@ use crate::runner::{LaunchOptions, Runner, RunnerError, StartGate, StartGateConf
 /// bounds a full or unhealthy runner so a durable request cannot occupy
 /// admission indefinitely merely because no process is making progress.
 pub const DEFAULT_LAUNCH_QUEUE_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// A cleanup write must never retain a bounded local preparation worker
+/// forever when PostgreSQL or its pool is unhealthy. The durable lease remains
+/// the source of truth after this short local budget elapses, so recovery can
+/// safely retry from another dispatcher.
+const PREPARATION_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The observer notified after a launch releases its admission reservation.
 ///
@@ -136,8 +147,37 @@ pub struct LaunchDispatcherConfig {
     pub batch_size: usize,
     /// Recoverable ownership interval for a dispatcher claim.
     pub lease_duration: Duration,
+    /// Recoverable ownership interval for bounded pre-run preparation.
+    pub preparation_lease_duration: Duration,
+    /// Maximum number of local workers that can perform Core/image reads and
+    /// artifact preparation before asking the runner for its own prep slot.
+    pub preparation_worker_limit: usize,
+    /// Delay before retrying a launch whose preparation pool is currently full
+    /// or whose preparation lease elapsed.
+    pub preparation_retry_delay: Duration,
     /// Delay before retrying a launch when the runner is currently full.
     pub capacity_retry_delay: Duration,
+}
+
+/// Why a detached preparation worker stopped waiting for its runner future.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PreparationClaimWatch {
+    /// Cancellation, expiry recovery, or a newer incarnation changed the
+    /// durable row. Dropping the runner future kills/reaps any child worker.
+    Revoked,
+    /// The database-owned preparation lease reached its local safety margin.
+    Deadline,
+}
+
+/// Result of racing a cancellable preparation phase with its durable claim.
+///
+/// The race is deliberately scoped to the phase that owns the pending future.
+/// Callers match it only after that scope ends, so dropping a cancelled child
+/// compiler never waits behind a later database cleanup operation.
+enum PreparationRace<T> {
+    Finished(T),
+    Revoked,
+    Deadline,
 }
 
 impl Default for LaunchDispatcherConfig {
@@ -146,6 +186,9 @@ impl Default for LaunchDispatcherConfig {
             poll_interval: Duration::from_millis(250),
             batch_size: 32,
             lease_duration: Duration::from_secs(60),
+            preparation_lease_duration: Duration::from_secs(60),
+            preparation_worker_limit: 32,
+            preparation_retry_delay: Duration::from_millis(250),
             capacity_retry_delay: Duration::from_millis(250),
         }
     }
@@ -160,12 +203,17 @@ impl Default for LaunchDispatcherConfig {
 struct DurableStartGateConfirmation {
     repository: LaunchRepository,
     launch_id: String,
+    attempt_count: i32,
 }
 
 #[async_trait]
 impl StartGateConfirmation for DurableStartGateConfirmation {
     async fn confirm(&self) -> std::result::Result<(), RunnerError> {
-        match self.repository.confirm_gate_open(&self.launch_id).await {
+        match self
+            .repository
+            .confirm_gate_open(&self.launch_id, self.attempt_count)
+            .await
+        {
             Ok(Some(_)) => Ok(()),
             Ok(None) => {
                 warn!(
@@ -177,14 +225,50 @@ impl StartGateConfirmation for DurableStartGateConfirmation {
                 ))
             }
             Err(error) => {
-                error!(
-                    launch_id = %self.launch_id,
-                    error = %error,
-                    "Runner could not durably confirm start-gate handoff"
-                );
-                Err(RunnerError::StartFailed(format!(
-                    "could not durably confirm start-gate handoff: {error}"
-                )))
+                // A connection can disappear after PostgreSQL committed the
+                // conditional update. Read the exact incarnation back before
+                // declaring the runner failed: treating that ambiguity as a
+                // failure would leave a cleared marker with no guest, while
+                // treating an uncommitted write as success would start a
+                // guest after recovery became legal.
+                match self
+                    .repository
+                    .is_gate_confirmed(&self.launch_id, self.attempt_count)
+                    .await
+                {
+                    Ok(true) => {
+                        warn!(
+                            launch_id = %self.launch_id,
+                            attempt_count = self.attempt_count,
+                            error = %error,
+                            "Start-gate confirmation response was lost after durable commit"
+                        );
+                        Ok(())
+                    }
+                    Ok(false) => {
+                        error!(
+                            launch_id = %self.launch_id,
+                            attempt_count = self.attempt_count,
+                            error = %error,
+                            "Runner could not durably confirm start-gate handoff"
+                        );
+                        Err(RunnerError::StartFailed(format!(
+                            "could not durably confirm start-gate handoff: {error}"
+                        )))
+                    }
+                    Err(read_error) => {
+                        error!(
+                            launch_id = %self.launch_id,
+                            attempt_count = self.attempt_count,
+                            error = %error,
+                            read_error = %read_error,
+                            "Could not determine whether start-gate confirmation committed"
+                        );
+                        Err(RunnerError::StartFailed(format!(
+                            "could not confirm or read back start-gate handoff: {error}"
+                        )))
+                    }
+                }
             }
         }
     }
@@ -198,11 +282,35 @@ pub struct LaunchDispatcher {
     image_registry: ImageRegistry,
     execution_timeout_policy: ExecutionTimeoutPolicy,
     config: LaunchDispatcherConfig,
+    /// Bounds local detached preparation workers before they can take the
+    /// runner's own preparation permit. This includes the Core/image reads in
+    /// [`Self::options_for`], so one slow database cannot stall queue expiry
+    /// scans or create an unbounded task backlog.
+    preparation_workers: Arc<Semaphore>,
     owner: String,
     wake: Arc<Notify>,
     shutdown: Arc<Notify>,
     drain: DrainController,
     lifecycle_observers: LaunchLifecycleObservers,
+}
+
+impl Clone for LaunchDispatcher {
+    fn clone(&self) -> Self {
+        Self {
+            pool: self.pool.clone(),
+            persistence: self.persistence.clone(),
+            runner: self.runner.clone(),
+            image_registry: ImageRegistry::new(self.pool.clone()),
+            execution_timeout_policy: self.execution_timeout_policy,
+            config: self.config.clone(),
+            preparation_workers: self.preparation_workers.clone(),
+            owner: self.owner.clone(),
+            wake: self.wake.clone(),
+            shutdown: self.shutdown.clone(),
+            drain: self.drain.clone(),
+            lifecycle_observers: self.lifecycle_observers.clone(),
+        }
+    }
 }
 
 impl LaunchDispatcher {
@@ -214,13 +322,15 @@ impl LaunchDispatcher {
         wake: Arc<Notify>,
         lifecycle_observers: LaunchLifecycleObservers,
     ) -> Self {
+        let config = LaunchDispatcherConfig::default();
         Self {
             image_registry: ImageRegistry::new(pool.clone()),
             pool,
             persistence,
             runner,
             execution_timeout_policy: ExecutionTimeoutPolicy::default(),
-            config: LaunchDispatcherConfig::default(),
+            preparation_workers: Arc::new(Semaphore::new(config.preparation_worker_limit)),
+            config,
             owner: format!("launch-dispatcher-{}", uuid::Uuid::new_v4()),
             wake,
             shutdown: Arc::new(Notify::new()),
@@ -243,6 +353,7 @@ impl LaunchDispatcher {
 
     /// Replace dispatcher scheduling parameters.
     pub fn with_config(mut self, config: LaunchDispatcherConfig) -> Self {
+        self.preparation_workers = Arc::new(Semaphore::new(config.preparation_worker_limit));
         self.config = config;
         self
     }
@@ -307,6 +418,18 @@ impl LaunchDispatcher {
             self.lifecycle_observers
                 .notify_released(&expired, LAUNCH_QUEUE_TIMEOUT);
         }
+        let recovered_preparations = repository
+            .recover_expired_preparations(
+                self.config.preparation_retry_delay,
+                self.config.batch_size,
+            )
+            .await?;
+        if !recovered_preparations.is_empty() {
+            debug!(
+                count = recovered_preparations.len(),
+                "Recovered expired launch preparation leases"
+            );
+        }
         let recovered = repository
             .recover_expired_leases(self.config.batch_size)
             .await?;
@@ -321,47 +444,341 @@ impl LaunchDispatcher {
             return Ok(0);
         }
 
+        // `options_for` has Core/image database reads before the runner can
+        // acquire its own preparation permit. Bound those detached workers
+        // here as well, otherwise a slow database could grow an unbounded
+        // preparation backlog while this scan keeps claiming queue rows.
+        let local_capacity = self.preparation_workers.available_permits();
+        let runner_capacity = self
+            .runner
+            .preparation_occupancy()
+            .map(|occupancy| {
+                usize::try_from(occupancy.limit.saturating_sub(occupancy.held))
+                    .unwrap_or(usize::MAX)
+            })
+            .unwrap_or(self.config.batch_size);
+        let claim_limit = self
+            .config
+            .batch_size
+            .min(local_capacity)
+            .min(runner_capacity);
         let launches = repository
-            .claim_ready(
+            .claim_ready_for_preparation(
                 &self.owner,
-                self.config.lease_duration,
-                self.config.batch_size,
+                self.config.preparation_lease_duration,
+                claim_limit,
             )
             .await?;
         let claimed = launches.len();
         for launch in launches {
-            if let Err(error) = self.dispatch_claimed(launch).await {
-                error!(error = %error, "Launch dispatcher could not process claimed launch");
-            }
+            let worker_slot = match Arc::clone(&self.preparation_workers).try_acquire_owned() {
+                Ok(slot) => slot,
+                Err(TryAcquireError::NoPermits) => {
+                    // Another caller ran a scan concurrently after the
+                    // capacity snapshot. The durable row has already been
+                    // claimed, so return exactly this incarnation to queue.
+                    self.requeue_owned_bounded(
+                        &repository,
+                        &launch,
+                        self.config.preparation_retry_delay,
+                        Some(PREPARATION_CAPACITY_UNAVAILABLE),
+                    )
+                    .await?;
+                    continue;
+                }
+                Err(TryAcquireError::Closed) => {
+                    return Err(anyhow::anyhow!(
+                        "launch preparation worker semaphore closed"
+                    ));
+                }
+            };
+            let dispatcher = self.clone();
+            tokio::spawn(async move {
+                // Hold this through the Core/image read, runner preparation,
+                // and promotion/handoff. It is intentionally independent
+                // from the runner's own preparation permit.
+                let _worker_slot = worker_slot;
+                if let Err(error) = dispatcher.prepare_claimed(launch).await {
+                    error!(error = %error, "Launch dispatcher could not process preparation claim");
+                }
+                dispatcher.wake.notify_one();
+            });
         }
         Ok(claimed)
     }
 
-    async fn dispatch_claimed(&self, launch: Launch) -> anyhow::Result<()> {
+    /// Run the bounded pre-run phase for one durable claim, then hand its
+    /// opaque token to the short start-gated phase.
+    async fn prepare_claimed(&self, launch: Launch) -> anyhow::Result<()> {
+        let repository = LaunchRepository::new(self.pool.clone());
         if self.drain.is_draining() {
-            let repository = LaunchRepository::new(self.pool.clone());
-            let _ = repository
-                .requeue_owned(
-                    &launch.launch_id,
-                    &self.owner,
-                    Duration::ZERO,
-                    Some("environment_draining"),
-                )
-                .await?;
+            self.requeue_owned_bounded(
+                &repository,
+                &launch,
+                Duration::ZERO,
+                Some("environment_draining"),
+            )
+            .await?;
             return Ok(());
         }
 
-        let mut options = match self.options_for(&launch).await {
-            Ok(options) => options,
-            Err(message) => {
+        let Some(preparation_deadline) = self.preparation_deadline(&launch) else {
+            self.requeue_owned_bounded(
+                &repository,
+                &launch,
+                self.config.preparation_retry_delay,
+                Some(PREPARATION_TIMEOUT),
+            )
+            .await?;
+            return Ok(());
+        };
+
+        // Start observing ownership before the first Core/image read. A
+        // cancellation or lease recovery must be able to abort *all* work in
+        // this worker, not merely the child compiler that starts afterwards.
+        // Keep both pinned futures in this narrow scope so they are dropped
+        // before the durable requeue/fail transaction below. In particular,
+        // dropping a child preparation future runs its kill-and-reap guard
+        // before a potentially stalled database cleanup is awaited.
+        let options_outcome = {
+            let options = timeout_at(
+                preparation_deadline,
+                self.options_for(&launch, Some(preparation_deadline)),
+            );
+            tokio::pin!(options);
+            let claim_watch =
+                self.watch_preparation_claim(&repository, &launch, preparation_deadline);
+            tokio::pin!(claim_watch);
+            tokio::select! {
+                result = &mut options => match result {
+                    Ok(Ok(options)) => PreparationRace::Finished(Ok(options)),
+                    Ok(Err(message)) => PreparationRace::Finished(Err(message)),
+                    Err(_) => PreparationRace::Deadline,
+                },
+                watch = &mut claim_watch => match watch {
+                    PreparationClaimWatch::Revoked => PreparationRace::Revoked,
+                    PreparationClaimWatch::Deadline => PreparationRace::Deadline,
+                },
+            }
+        };
+        let mut options = match options_outcome {
+            PreparationRace::Finished(Ok(options)) => options,
+            PreparationRace::Finished(Err(message)) => {
                 self.fail_before_runner(&launch, &message).await?;
+                return Ok(());
+            }
+            PreparationRace::Revoked => {
+                debug!(
+                    launch_id = %launch.launch_id,
+                    attempt_count = launch.attempt_count,
+                    "Durable preparation ownership was cancelled or recovered during option lookup"
+                );
+                return Ok(());
+            }
+            PreparationRace::Deadline => {
+                self.requeue_owned_bounded(
+                    &repository,
+                    &launch,
+                    self.config.preparation_retry_delay,
+                    Some(PREPARATION_TIMEOUT),
+                )
+                .await?;
                 return Ok(());
             }
         };
 
+        // Run the entire runner preparation against the same absolute lease
+        // and concurrently watch its durable claim. A cancellation or lease
+        // recovery drops this future, which in turn kills/reaps the child
+        // compiler rather than letting it consume preparation capacity until
+        // the original lease happens to expire.
+        let preparation_outcome = {
+            let preparation = self.runner.try_prepare_launch(&options);
+            tokio::pin!(preparation);
+            let claim_watch =
+                self.watch_preparation_claim(&repository, &launch, preparation_deadline);
+            tokio::pin!(claim_watch);
+            tokio::select! {
+                result = &mut preparation => PreparationRace::Finished(result),
+                watch = &mut claim_watch => {
+                    match watch {
+                        PreparationClaimWatch::Revoked => {
+                            PreparationRace::Revoked
+                        }
+                        PreparationClaimWatch::Deadline => {
+                            PreparationRace::Deadline
+                        }
+                    }
+                }
+            }
+        };
+
+        // The selection scope above is intentionally over: on a revoked or
+        // elapsed claim the runner future (and therefore its child compiler)
+        // has been dropped before we await any durable cleanup.
+        let preparation_result = match preparation_outcome {
+            PreparationRace::Finished(result) => result,
+            PreparationRace::Revoked => {
+                debug!(
+                    launch_id = %launch.launch_id,
+                    attempt_count = launch.attempt_count,
+                    "Durable preparation ownership was cancelled or recovered; child work was dropped"
+                );
+                return Ok(());
+            }
+            PreparationRace::Deadline => {
+                self.requeue_owned_bounded(
+                    &repository,
+                    &launch,
+                    self.config.preparation_retry_delay,
+                    Some(PREPARATION_TIMEOUT),
+                )
+                .await?;
+                return Ok(());
+            }
+        };
+
+        // A synchronous parent deserialize/link cannot be force-cancelled,
+        // but it is a bounded post-child operation (the protocol caps the
+        // serialized component) with no source I/O or compilation. Do not
+        // promote it if that finite operation returned after its lease.
+        if Instant::now() >= preparation_deadline {
+            drop(preparation_result);
+            self.requeue_owned_bounded(
+                &repository,
+                &launch,
+                self.config.preparation_retry_delay,
+                Some(PREPARATION_TIMEOUT),
+            )
+            .await?;
+            return Ok(());
+        }
+
+        let prepared = match preparation_result {
+            Ok(prepared) => prepared,
+            Err(RunnerError::PreparationCapacityUnavailable) => {
+                self.requeue_owned_bounded(
+                    &repository,
+                    &launch,
+                    self.config.preparation_retry_delay,
+                    Some(PREPARATION_CAPACITY_UNAVAILABLE),
+                )
+                .await?;
+                return Ok(());
+            }
+            Err(RunnerError::PreparationTimedOut(_)) => {
+                self.requeue_owned_bounded(
+                    &repository,
+                    &launch,
+                    self.config.preparation_retry_delay,
+                    Some(PREPARATION_TIMEOUT),
+                )
+                .await?;
+                return Ok(());
+            }
+            Err(error) => {
+                self.fail_before_runner(&launch, &format!("launch preparation failed: {error}"))
+                    .await?;
+                return Ok(());
+            }
+        };
+
+        let promoted = tokio::time::timeout_at(
+            preparation_deadline,
+            repository.promote_prepared(
+                &launch.launch_id,
+                &self.owner,
+                launch.attempt_count,
+                self.config.lease_duration,
+            ),
+        )
+        .await;
+        let Some(leased) = (match promoted {
+            Ok(Ok(leased)) => leased,
+            Ok(Err(error)) => return Err(error.into()),
+            Err(_) => {
+                self.requeue_owned_bounded(
+                    &repository,
+                    &launch,
+                    self.config.preparation_retry_delay,
+                    Some(PREPARATION_TIMEOUT),
+                )
+                .await?;
+                return Ok(());
+            }
+        }) else {
+            debug!(
+                launch_id = %launch.launch_id,
+                attempt_count = launch.attempt_count,
+                "Prepared launch lost its durable incarnation before runner handoff"
+            );
+            return Ok(());
+        };
+        // The preparation token is tied to the original claim and is consumed
+        // exactly once. `promote_prepared` above is the durable fence that
+        // prevents a recovered same-owner attempt from receiving stale work.
+        // The following registry/Core handoff is bounded by the renewed lease
+        // rather than the elapsed preparation lease, so a stalled pool cannot
+        // retain the local preparation worker indefinitely.
+        let Some(handoff_deadline) = self.handoff_deadline(&leased) else {
+            // `promote_prepared` may already have committed a lease even if
+            // its response arrived too late for a useful local deadline. Do
+            // not clear that lease speculatively: its ordinary expiry scan is
+            // the single recovery owner, and dropping `prepared` here returns
+            // the local preparation token immediately.
+            debug!(
+                launch_id = %launch.launch_id,
+                attempt_count = launch.attempt_count,
+                "Prepared handoff has no remaining durable lease; leaving it for lease recovery"
+            );
+            return Ok(());
+        };
+        match tokio::time::timeout_at(
+            handoff_deadline,
+            self.dispatch_prepared(leased, &mut options, prepared),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => {
+                // `dispatch_prepared` may have committed `begin_start` or
+                // handed a closed gate to a runner just as this future was
+                // cancelled. Requeueing that row here could clear the marker
+                // underneath an old runner task. Drop the opaque prepared
+                // token and let the durable lease/start-gate recovery scan
+                // make the next attempt only after the current generation is
+                // conclusively expired.
+                warn!(
+                    launch_id = %launch.launch_id,
+                    attempt_count = launch.attempt_count,
+                    "Prepared handoff exceeded its lease; leaving generation for durable recovery"
+                );
+                Ok(())
+            }
+        }
+    }
+
+    /// Perform the short start-gated handoff after preparation was durably
+    /// promoted from `preparing` to `leased`.
+    async fn dispatch_prepared(
+        &self,
+        launch: Launch,
+        options: &mut LaunchOptions,
+        prepared: PreparedLaunch,
+    ) -> anyhow::Result<()> {
         let repository = LaunchRepository::new(self.pool.clone());
+        if self.drain.is_draining() {
+            self.requeue_owned_bounded(
+                &repository,
+                &launch,
+                Duration::ZERO,
+                Some("environment_draining"),
+            )
+            .await?;
+            return Ok(());
+        }
         let Some(starting) = repository
-            .begin_start(&launch.launch_id, &self.owner)
+            .begin_start(&launch.launch_id, &self.owner, launch.attempt_count)
             .await?
         else {
             debug!(launch_id = %launch.launch_id, "Launch was cancelled or expired before runner handoff");
@@ -375,11 +792,16 @@ impl LaunchDispatcher {
             Arc::new(DurableStartGateConfirmation {
                 repository: repository.clone(),
                 launch_id: launch.launch_id.clone(),
+                attempt_count: starting.attempt_count,
             }),
         );
         options.start_gate = Some(gate.clone());
 
-        match self.runner.try_launch_detached(&options).await {
+        match self
+            .runner
+            .try_launch_prepared_detached(options, prepared)
+            .await
+        {
             Ok(handle) => {
                 let registry = ContainerRegistry::new(self.pool.clone());
                 let container = ContainerInfo {
@@ -409,11 +831,11 @@ impl LaunchDispatcher {
                     return Ok(());
                 }
 
-                match repository
-                    .mark_running(&launch.launch_id, &self.owner)
+                let running = match repository
+                    .mark_running(&launch.launch_id, &self.owner, launch.attempt_count)
                     .await
                 {
-                    Ok(Some(_running)) => {}
+                    Ok(Some(running)) => running,
                     Ok(None) => {
                         // A cancellation, deadline, or recovery won before
                         // this owner could atomically promote Core. The gate is
@@ -448,7 +870,7 @@ impl LaunchDispatcher {
                         }
                         return Ok(());
                     }
-                }
+                };
 
                 // Spawn the generation-owned watchdog before opening the
                 // gate. The monitor waits for the runner's own durable
@@ -463,7 +885,7 @@ impl LaunchDispatcher {
                     options.timeout,
                     self.drain.clone(),
                     self.lifecycle_observers.clone(),
-                    Some(gate.clone()),
+                    Some((gate.clone(), running.attempt_count)),
                 );
                 if !gate.open() {
                     // Queue expiry, cancellation, or the durable gate
@@ -478,15 +900,14 @@ impl LaunchDispatcher {
                         .await?;
                 }
             }
-            Err(RunnerError::CapacityUnavailable) => {
-                let _ = repository
-                    .requeue_owned(
-                        &launch.launch_id,
-                        &self.owner,
-                        self.config.capacity_retry_delay,
-                        Some(RUNNER_CAPACITY_UNAVAILABLE),
-                    )
-                    .await?;
+            Err(RunnerError::CapacityUnavailable | RunnerError::PreparationCapacityUnavailable) => {
+                self.requeue_owned_bounded(
+                    &repository,
+                    &launch,
+                    self.config.capacity_retry_delay,
+                    Some(RUNNER_CAPACITY_UNAVAILABLE),
+                )
+                .await?;
             }
             Err(error) => {
                 self.fail_before_runner(&launch, &format!("runner launch failed: {error}"))
@@ -498,10 +919,28 @@ impl LaunchDispatcher {
 
     async fn fail_before_runner(&self, launch: &Launch, message: &str) -> anyhow::Result<()> {
         let repository = LaunchRepository::new(self.pool.clone());
-        if let Some(failed) = repository
-            .fail_before_runner(&launch.launch_id, &self.owner, message)
-            .await?
+        let terminal = match tokio::time::timeout(
+            PREPARATION_CLEANUP_TIMEOUT,
+            repository.fail_before_runner(
+                &launch.launch_id,
+                &self.owner,
+                launch.attempt_count,
+                message,
+            ),
+        )
+        .await
         {
+            Ok(result) => result?,
+            Err(_) => {
+                warn!(
+                    launch_id = %launch.launch_id,
+                    attempt_count = launch.attempt_count,
+                    "Timed out terminalizing pre-run launch; durable lease recovery will retry"
+                );
+                return Ok(());
+            }
+        };
+        if let Some(failed) = terminal {
             warn!(
                 launch_id = %failed.launch_id,
                 instance_id = %failed.instance_id,
@@ -510,6 +949,43 @@ impl LaunchDispatcher {
             );
             self.lifecycle_observers
                 .notify_released(&failed, "launch_failed");
+        }
+        Ok(())
+    }
+
+    /// Return one durable claim to queue without allowing an unhealthy
+    /// database cleanup to retain a local preparation worker. A timeout is
+    /// intentionally non-terminal: the exact owner/attempt fence remains in
+    /// PostgreSQL and the ordinary expiry scan will recover it.
+    async fn requeue_owned_bounded(
+        &self,
+        repository: &LaunchRepository,
+        launch: &Launch,
+        retry_after: Duration,
+        last_error: Option<&str>,
+    ) -> anyhow::Result<()> {
+        match tokio::time::timeout(
+            PREPARATION_CLEANUP_TIMEOUT,
+            repository.requeue_owned(
+                &launch.launch_id,
+                &self.owner,
+                launch.attempt_count,
+                retry_after,
+                last_error,
+            ),
+        )
+        .await
+        {
+            Ok(result) => {
+                let _ = result?;
+            }
+            Err(_) => {
+                warn!(
+                    launch_id = %launch.launch_id,
+                    attempt_count = launch.attempt_count,
+                    "Timed out requeueing pre-run launch; durable lease recovery will retry"
+                );
+            }
         }
         Ok(())
     }
@@ -531,6 +1007,81 @@ impl LaunchDispatcher {
             .saturating_sub(Duration::from_millis(100))
     }
 
+    /// Map the database-owned preparation lease to a local absolute deadline.
+    ///
+    /// This is intentionally a little earlier than the database deadline: a
+    /// cancelled async Core/image read must yield before recovery can give the
+    /// generation to a later attempt. The killable compiler child receives the
+    /// same deadline and is detached to a bounded reaper if it cannot exit
+    /// immediately.
+    fn preparation_deadline(&self, preparing: &Launch) -> Option<Instant> {
+        let lease_expires_at = preparing.lease_expires_at?;
+        let remaining = lease_expires_at
+            .signed_duration_since(Utc::now())
+            .to_std()
+            .unwrap_or(Duration::ZERO)
+            .saturating_sub(Duration::from_millis(100));
+        (!remaining.is_zero()).then(|| Instant::now() + remaining)
+    }
+
+    /// Keep an in-flight child responsive to cancellation and lease recovery.
+    ///
+    /// `cancel_before_start` changes the durable row, but cannot directly
+    /// reach an in-process child. This bounded watcher observes that durable
+    /// fact; dropping the competing runner preparation future invokes the
+    /// child's kill-and-reap guard immediately instead of waiting for the
+    /// full lease. At most `preparation_worker_limit` watchers exist.
+    async fn watch_preparation_claim(
+        &self,
+        repository: &LaunchRepository,
+        launch: &Launch,
+        deadline: Instant,
+    ) -> PreparationClaimWatch {
+        const CLAIM_WATCH_INTERVAL: Duration = Duration::from_millis(200);
+
+        loop {
+            match tokio::time::timeout_at(deadline, repository.get(&launch.launch_id)).await {
+                Ok(Ok(Some(current)))
+                    if current.state == crate::launch_queue::LaunchState::Preparing
+                        && current.lease_owner.as_deref() == Some(self.owner.as_str())
+                        && current.attempt_count == launch.attempt_count => {}
+                Ok(Ok(_)) => return PreparationClaimWatch::Revoked,
+                Ok(Err(error)) => {
+                    // A transient read failure must not turn a valid child
+                    // into a false terminal failure. The outer deadline still
+                    // bounds this loop, and a later read will observe cancel
+                    // or recovery.
+                    debug!(
+                        launch_id = %launch.launch_id,
+                        attempt_count = launch.attempt_count,
+                        error = %error,
+                        "Could not poll durable preparation ownership"
+                    );
+                }
+                Err(_) => return PreparationClaimWatch::Deadline,
+            }
+
+            if tokio::time::timeout_at(deadline, tokio::time::sleep(CLAIM_WATCH_INTERVAL))
+                .await
+                .is_err()
+            {
+                return PreparationClaimWatch::Deadline;
+            }
+        }
+    }
+
+    /// Convert the renewed handoff lease to a local bound for registry/Core
+    /// work after preparation has completed.
+    fn handoff_deadline(&self, leased: &Launch) -> Option<Instant> {
+        let lease_expires_at = leased.lease_expires_at?;
+        let remaining = lease_expires_at
+            .signed_duration_since(Utc::now())
+            .to_std()
+            .unwrap_or(Duration::ZERO)
+            .saturating_sub(Duration::from_millis(100));
+        (!remaining.is_zero()).then(|| Instant::now() + remaining)
+    }
+
     /// Cancel/stop an accepted but still-closed handoff and remove only its
     /// generation-scoped registry row.
     async fn stop_unopened_handoff(
@@ -540,14 +1091,29 @@ impl LaunchDispatcher {
         gate: &StartGate,
     ) {
         gate.cancel();
-        if let Err(error) = self.runner.stop(handle).await {
-            warn!(launch_id = %handle.launch_id, error = %error, "Failed to stop unopened launch handoff");
+        let cleanup_deadline = Instant::now() + PREPARATION_CLEANUP_TIMEOUT;
+        match timeout_at(cleanup_deadline, self.runner.stop(handle)).await {
+            Ok(Err(error)) => {
+                warn!(launch_id = %handle.launch_id, error = %error, "Failed to stop unopened launch handoff");
+            }
+            Err(_) => {
+                warn!(launch_id = %handle.launch_id, "Timed out stopping unopened launch handoff; durable gate/lease recovery remains authoritative");
+            }
+            Ok(Ok(_)) => {}
         }
-        if let Err(error) = registry
-            .cleanup_generation(&handle.instance_id, &handle.launch_id)
-            .await
+        match timeout_at(
+            cleanup_deadline,
+            registry.cleanup_handle(&handle.instance_id, &handle.launch_id, &handle.handle_id),
+        )
+        .await
         {
-            warn!(launch_id = %handle.launch_id, error = %error, "Failed to remove registry row for unopened launch handoff");
+            Ok(Err(error)) => {
+                warn!(launch_id = %handle.launch_id, error = %error, "Failed to remove registry row for unopened launch handoff");
+            }
+            Err(_) => {
+                warn!(launch_id = %handle.launch_id, "Timed out removing registry row for unopened launch handoff; restart recovery will reconcile it");
+            }
+            Ok(Ok(_)) => {}
         }
     }
 
@@ -555,41 +1121,40 @@ impl LaunchDispatcher {
     /// promoted but before the gate allowed guest code to execute.
     async fn fail_after_start_gate(&self, launch: &Launch, message: &str) -> anyhow::Result<()> {
         let repository = LaunchRepository::new(self.pool.clone());
-        let applied = self
-            .persistence
-            .complete_instance(
-                CompleteInstanceParams::new(&launch.instance_id, "failed")
-                    .if_running()
-                    .with_error(message),
-            )
-            .await
-            .unwrap_or_else(|error| {
-                warn!(launch_id = %launch.launch_id, error = %error, "Could not fail unopened running handoff in Core");
-                false
-            });
-        if !applied {
-            // A concurrent stop or monitor may have terminalized Core first.
-            // It owns the matching queue release; do not overwrite that
-            // outcome simply because this gate lost its race.
-            return Ok(());
-        }
-        let terminal = repository
-            .mark_terminal(
-                &launch.launch_id,
-                crate::launch_queue::LaunchState::Failed,
-                Some(message),
-            )
-            .await?;
+        let terminal = match tokio::time::timeout(
+            PREPARATION_CLEANUP_TIMEOUT,
+            repository.fail_unconfirmed_running(&launch.launch_id, launch.attempt_count, message),
+        )
+        .await
+        {
+            Ok(result) => result?,
+            Err(_) => {
+                warn!(
+                    launch_id = %launch.launch_id,
+                    attempt_count = launch.attempt_count,
+                    "Timed out terminalizing unopened running handoff; durable gate recovery will retry"
+                );
+                return Ok(());
+            }
+        };
         if let Some(failed) = terminal {
             self.lifecycle_observers
                 .notify_released(&failed, "launch_failed");
         } else {
-            warn!(launch_id = %launch.launch_id, "Unopened running handoff could not be terminalized; generation supervisor must reconcile it");
+            debug!(
+                launch_id = %launch.launch_id,
+                attempt_count = launch.attempt_count,
+                "Unopened running handoff was already recovered or terminalized"
+            );
         }
         Ok(())
     }
 
-    async fn options_for(&self, launch: &Launch) -> std::result::Result<LaunchOptions, String> {
+    async fn options_for(
+        &self,
+        launch: &Launch,
+        preparation_deadline: Option<Instant>,
+    ) -> std::result::Result<LaunchOptions, String> {
         let instance = self
             .persistence
             .get_instance(&launch.instance_id)
@@ -625,9 +1190,19 @@ impl LaunchDispatcher {
             .map_err(|error| format!("failed to read image: {error}"))?
             .ok_or_else(|| "launch image no longer exists".to_string())?;
         self.validate_image(&image, launch)?;
-        require_current_workflow_entrypoint(&image)
-            .await
-            .map_err(|error| error.to_string())?;
+        let expected_workflow_checksum = if image.requires_lifecycle_invoke() {
+            Some(
+                image
+                    .workflow_binary_checksum()
+                    .ok_or_else(|| {
+                        "generated workflow image is missing its immutable binary checksum"
+                            .to_string()
+                    })?
+                    .to_string(),
+            )
+        } else {
+            None
+        };
         let stored_timeout = db::get_instance_timeout_seconds(&self.pool, &launch.instance_id)
             .await
             .map_err(|error| format!("failed to read persisted execution timeout: {error}"))?;
@@ -636,17 +1211,23 @@ impl LaunchDispatcher {
             .resolve_persisted(stored_timeout)
             .map_err(|error| format!("invalid persisted execution timeout: {error}"))?
             .as_duration();
-        let input = match instance.input.as_deref() {
-            Some(bytes) => serde_json::from_slice(bytes)
-                .map_err(|error| format!("invalid persisted instance input: {error}"))?,
-            None => serde_json::json!({}),
-        };
+        let input_bytes = instance
+            .input
+            .as_deref()
+            .ok_or_else(|| "durable instance has no persisted input envelope".to_string())?;
+        let input = serde_json::from_slice(input_bytes)
+            .map_err(|error| format!("invalid persisted instance input: {error}"))?;
 
+        let requires_lifecycle_invoke = image.requires_lifecycle_invoke();
         Ok(LaunchOptions {
             launch_id: launch.launch_id.clone(),
             instance_id: launch.instance_id.clone(),
             tenant_id: launch.tenant_id.clone(),
             wasm_path: image.binary_path.into(),
+            requires_lifecycle_invoke,
+            expected_workflow_checksum,
+            preparation_attempt: Some(launch.attempt_count),
+            preparation_deadline,
             input,
             timeout,
             checkpoint_id: instance.checkpoint_id,
@@ -662,9 +1243,9 @@ impl LaunchDispatcher {
         if image.tenant_id != launch.tenant_id {
             return Err("launch image tenant no longer matches instance".to_string());
         }
-        if !std::path::Path::new(&image.binary_path).is_file() {
-            return Err(format!("image '{}' artifact not found", image.image_id));
-        }
+        // The killable precompiler owns all artifact filesystem inspection,
+        // including a missing file. Keeping it out of the dispatcher means a
+        // wedged mount cannot stall queue expiry/recovery on this worker.
         Ok(())
     }
 }

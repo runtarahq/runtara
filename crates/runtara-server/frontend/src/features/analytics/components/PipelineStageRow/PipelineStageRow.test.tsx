@@ -177,6 +177,30 @@ describe('PipelineStageRow', () => {
     expect(screen.getByText('not draining')).toBeInTheDocument();
   });
 
+  it('makes a timed-out precompile child awaiting reaping visible', () => {
+    render(
+      <PipelineStageRow
+        stage={stage({
+          key: 'precompileChildren',
+          label: 'Precompile children',
+          limit: 2,
+          used: 1,
+          oldestAgeMs: 20_000,
+          reapingPrecompileChildren: 1,
+        })}
+        history={Array(30).fill(1)}
+        inflow={0}
+        pipelineActive
+        isChokepoint={false}
+      />
+    );
+
+    expect(screen.getByText('1 child reaping')).toBeInTheDocument();
+    expect(
+      screen.getByTestId('pipeline-reaping-precompile-children-precompileChildren')
+    ).toBeInTheDocument();
+  });
+
   it('marks the chokepoint in the DOM so it can be asserted on', () => {
     const { container } = render(
       <PipelineStageRow

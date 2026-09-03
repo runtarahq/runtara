@@ -41,7 +41,7 @@ async fn fixture(context: &TestContext) -> LaunchFixture {
             &instance_id,
             &image_id,
             &tenant_id,
-            None,
+            Some(br#"{}"#),
             None,
             None,
         )
@@ -183,14 +183,14 @@ async fn launch_is_idempotent_and_parking_releases_the_active_generation() {
     assert_eq!(claimed[0].attempt_count, 1);
     assert!(
         repository
-            .begin_start(&first.launch_id, "dispatcher-a")
+            .begin_start(&first.launch_id, "dispatcher-a", claimed[0].attempt_count)
             .await
             .expect("start transition must succeed")
             .is_some()
     );
     assert!(
         repository
-            .mark_running(&first.launch_id, "dispatcher-a")
+            .mark_running(&first.launch_id, "dispatcher-a", claimed[0].attempt_count)
             .await
             .expect("running transition must succeed")
             .is_some()
@@ -292,7 +292,7 @@ async fn expired_dispatcher_leases_are_recovered_once_and_reclaimed() {
     // claim; no guest could have crossed into execution under the old owner.
     assert!(
         repository
-            .begin_start(&launch_id, "dispatcher-b")
+            .begin_start(&launch_id, "dispatcher-b", reclaimed[0].attempt_count)
             .await
             .expect("starting transition must succeed")
             .is_some()
@@ -333,13 +333,18 @@ async fn expired_dispatcher_leases_are_recovered_once_and_reclaimed() {
         ))
         .await
         .expect("legacy-shaped launch must enqueue");
-    repository
+    let legacy_claimed = repository
         .claim_ready("legacy-dispatcher", Duration::from_secs(60), 2)
         .await
         .expect("legacy-shaped launch must claim");
+    let legacy_attempt = legacy_claimed
+        .iter()
+        .find(|launch| launch.launch_id == legacy_id)
+        .expect("legacy-shaped launch must be claimed")
+        .attempt_count;
     assert!(
         repository
-            .begin_start(&legacy_id, "legacy-dispatcher")
+            .begin_start(&legacy_id, "legacy-dispatcher", legacy_attempt)
             .await
             .expect("test setup start must succeed")
             .is_some()
@@ -372,6 +377,300 @@ async fn expired_dispatcher_leases_are_recovered_once_and_reclaimed() {
             .expect("legacy-shaped launch must remain")
             .state,
         LaunchState::Starting
+    );
+
+    context.cleanup().await;
+}
+
+#[tokio::test]
+async fn expired_preparation_incarnation_cannot_mutate_a_reclaimed_same_owner_launch() {
+    let context = TestContext::new().await.expect("test database must start");
+    let fixture = fixture(&context).await;
+    let repository = LaunchRepository::new(context.pool.clone());
+    let launch_id = Uuid::new_v4().to_string();
+    let owner = "preparation-owner";
+
+    repository
+        .enqueue(request(
+            &fixture,
+            &launch_id,
+            LaunchKind::Start,
+            Duration::from_secs(60),
+        ))
+        .await
+        .expect("launch must enqueue");
+    let first = repository
+        .claim_ready_for_preparation(owner, Duration::from_secs(60), 1)
+        .await
+        .expect("preparation claim must succeed")
+        .pop()
+        .expect("one preparation launch must be claimed");
+    assert_eq!(first.state, LaunchState::Preparing);
+
+    sqlx::query(
+        "UPDATE instance_launches \
+         SET lease_expires_at = clock_timestamp() - INTERVAL '1 second' \
+         WHERE launch_id = $1",
+    )
+    .bind(&launch_id)
+    .execute(&context.pool)
+    .await
+    .expect("test preparation lease must be expirable");
+
+    // An expired compiler may complete after recovery starts. Neither a
+    // success, capacity retry, nor hard failure from that old incarnation may
+    // mutate the row, even though this dispatcher owner will be reused.
+    assert!(
+        repository
+            .promote_prepared(
+                &launch_id,
+                owner,
+                first.attempt_count,
+                Duration::from_secs(30)
+            )
+            .await
+            .expect("stale promotion check must succeed")
+            .is_none()
+    );
+    assert!(
+        repository
+            .requeue_owned(
+                &launch_id,
+                owner,
+                first.attempt_count,
+                Duration::ZERO,
+                Some("stale_capacity"),
+            )
+            .await
+            .expect("stale requeue check must succeed")
+            .is_none()
+    );
+    assert!(
+        repository
+            .fail_before_runner(&launch_id, owner, first.attempt_count, "stale_failure")
+            .await
+            .expect("stale failure check must succeed")
+            .is_none()
+    );
+
+    let recovered = repository
+        .recover_expired_preparations(Duration::ZERO, 1)
+        .await
+        .expect("expired preparation must recover");
+    assert_eq!(recovered.len(), 1);
+    assert_eq!(recovered[0].state, LaunchState::Queued);
+
+    let second = repository
+        .claim_ready_for_preparation(owner, Duration::from_secs(60), 1)
+        .await
+        .expect("same owner may reclaim with a fresh incarnation")
+        .pop()
+        .expect("reclaimed preparation must exist");
+    assert!(second.attempt_count > first.attempt_count);
+    assert_eq!(second.state, LaunchState::Preparing);
+
+    assert!(
+        repository
+            .promote_prepared(
+                &launch_id,
+                owner,
+                first.attempt_count,
+                Duration::from_secs(30)
+            )
+            .await
+            .expect("old completion after same-owner reclaim must be harmless")
+            .is_none()
+    );
+    assert!(
+        repository
+            .requeue_owned(
+                &launch_id,
+                owner,
+                first.attempt_count,
+                Duration::ZERO,
+                Some("stale_capacity"),
+            )
+            .await
+            .expect("old retry after same-owner reclaim must be harmless")
+            .is_none()
+    );
+    assert!(
+        repository
+            .fail_before_runner(&launch_id, owner, first.attempt_count, "stale_failure")
+            .await
+            .expect("old failure after same-owner reclaim must be harmless")
+            .is_none()
+    );
+    assert_eq!(
+        repository
+            .get(&launch_id)
+            .await
+            .expect("launch must remain readable")
+            .expect("launch must remain present")
+            .attempt_count,
+        second.attempt_count,
+        "only the fresh preparation incarnation remains authoritative"
+    );
+
+    context.cleanup().await;
+}
+
+#[tokio::test]
+async fn gate_confirmation_is_fenced_by_attempt_and_real_database_time() {
+    let context = TestContext::new().await.expect("test database must start");
+    let fixture = fixture(&context).await;
+    let repository = LaunchRepository::new(context.pool.clone());
+    let launch_id = Uuid::new_v4().to_string();
+    let owner = "gate-owner";
+
+    repository
+        .enqueue(request(
+            &fixture,
+            &launch_id,
+            LaunchKind::Start,
+            Duration::from_secs(60),
+        ))
+        .await
+        .expect("launch must enqueue");
+    let claimed = repository
+        .claim_ready(owner, Duration::from_secs(60), 1)
+        .await
+        .expect("launch must claim")
+        .pop()
+        .expect("one launch must claim");
+    repository
+        .begin_start(&launch_id, owner, claimed.attempt_count)
+        .await
+        .expect("start transition must succeed")
+        .expect("launch must enter starting");
+    let running = repository
+        .mark_running(&launch_id, owner, claimed.attempt_count)
+        .await
+        .expect("running transition must succeed")
+        .expect("launch must become running");
+
+    // Model a later recovery incarnation. An old runner must not clear that
+    // later attempt's durable marker or terminalize its Core instance.
+    let later_attempt = running.attempt_count + 1;
+    sqlx::query(
+        r#"
+        UPDATE instance_launches
+        SET attempt_count = $2,
+            start_gate_deadline_at = clock_timestamp() + INTERVAL '30 seconds'
+        WHERE launch_id = $1
+        "#,
+    )
+    .bind(&launch_id)
+    .bind(later_attempt)
+    .execute(&context.pool)
+    .await
+    .expect("test later attempt must be writable");
+    assert!(
+        repository
+            .confirm_gate_open(&launch_id, running.attempt_count)
+            .await
+            .expect("stale confirmation query must succeed")
+            .is_none(),
+        "an old runner cannot clear a newer attempt's marker"
+    );
+    assert!(
+        repository
+            .fail_unconfirmed_running(
+                &launch_id,
+                running.attempt_count,
+                "stale monitor must not win",
+            )
+            .await
+            .expect("stale terminalization query must succeed")
+            .is_none(),
+        "an old monitor cannot terminalize a newer attempt"
+    );
+    let later_marker_is_present: bool = sqlx::query_scalar(
+        "SELECT start_gate_deadline_at IS NOT NULL FROM instance_launches WHERE launch_id = $1",
+    )
+    .bind(&launch_id)
+    .fetch_one(&context.pool)
+    .await
+    .expect("launch must remain readable");
+    assert!(
+        later_marker_is_present,
+        "the later attempt remains recoverably marked"
+    );
+    assert!(
+        repository
+            .confirm_gate_open(&launch_id, later_attempt)
+            .await
+            .expect("current confirmation query must succeed")
+            .is_some(),
+        "the matching attempt may clear its own marker"
+    );
+
+    // Hold the row lock until after its marker deadline. PostgreSQL `NOW()`
+    // is transaction-stable, so this regression specifically proves the
+    // confirmation predicate uses real `clock_timestamp()` after lock wait.
+    sqlx::query(
+        "UPDATE instance_launches \
+         SET start_gate_deadline_at = clock_timestamp() + INTERVAL '500 milliseconds' \
+         WHERE launch_id = $1",
+    )
+    .bind(&launch_id)
+    .execute(&context.pool)
+    .await
+    .expect("test short gate deadline must be writable");
+    let mut transaction = context
+        .pool
+        .begin()
+        .await
+        .expect("lock transaction must begin");
+    sqlx::query("SELECT launch_id FROM instance_launches WHERE launch_id = $1 FOR UPDATE")
+        .bind(&launch_id)
+        .execute(&mut *transaction)
+        .await
+        .expect("test row lock must succeed");
+    let delayed_confirmation = {
+        let repository = repository.clone();
+        let launch_id = launch_id.clone();
+        tokio::spawn(async move {
+            repository
+                .confirm_gate_open(&launch_id, later_attempt)
+                .await
+        })
+    };
+    // Do not rely on scheduling the spawned query before the sleep below: it
+    // must actually be waiting on this row lock. The test database is single
+    // threaded here, and PostgreSQL exposes a blocked UPDATE as a Lock wait.
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let blocked: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) \
+                 FROM pg_stat_activity \
+                 WHERE datname = current_database() \
+                   AND wait_event_type = 'Lock' \
+                   AND query LIKE '%UPDATE instance_launches%'",
+            )
+            .fetch_one(&context.pool)
+            .await
+            .expect("observe blocked confirmation query");
+            if blocked > 0 {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("confirmation query must block on the test row lock");
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    transaction
+        .commit()
+        .await
+        .expect("test row lock must release");
+    assert!(
+        delayed_confirmation
+            .await
+            .expect("confirmation task must not panic")
+            .expect("confirmation query must succeed")
+            .is_none(),
+        "a confirmation blocked past its marker deadline must not clear it"
     );
 
     context.cleanup().await;
@@ -464,13 +763,17 @@ async fn expiry_and_pre_start_cancellation_terminalize_the_matching_instance() {
         ))
         .await
         .expect("starting launch must enqueue");
-    repository
+    let starting_claimed = repository
         .claim_ready("dispatcher-gated", Duration::from_secs(60), 1)
         .await
         .expect("starting launch must claim");
     assert!(
         repository
-            .begin_start(&starting_id, "dispatcher-gated")
+            .begin_start(
+                &starting_id,
+                "dispatcher-gated",
+                starting_claimed[0].attempt_count,
+            )
             .await
             .expect("starting transition must succeed")
             .is_some()
@@ -656,20 +959,26 @@ async fn dispatcher_hands_off_a_durable_row_without_a_runner_waiter() {
             .expect("dispatch scan must succeed"),
         1
     );
-    assert_eq!(
-        runner.launch_count(),
-        1,
-        "one durable generation was handed off"
-    );
-    assert_eq!(
-        repository
-            .get(&launch_id)
-            .await
-            .expect("launch read must succeed")
-            .expect("launch must exist")
-            .state,
-        LaunchState::Running
-    );
+    // Preparation deliberately runs in a bounded detached worker so a slow
+    // compile cannot stall the dispatcher/reaper loop. Wait for its durable
+    // handoff rather than assuming `dispatch_once` synchronously reaches a
+    // runner permit.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let state = repository
+                .get(&launch_id)
+                .await
+                .expect("launch read must succeed")
+                .expect("launch must exist")
+                .state;
+            if runner.launch_count() == 1 && state == LaunchState::Running {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("one durable generation must be handed off without an in-memory waiter");
 
     // End the detached mock so the background monitor cannot outlive this
     // test. The database cleanup below removes the generation after the task

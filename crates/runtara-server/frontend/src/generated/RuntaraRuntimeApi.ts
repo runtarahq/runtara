@@ -457,16 +457,14 @@ export interface AgentStep {
    */
   retryDelay?: number | null;
   /**
-   * Step timeout in milliseconds, per attempt.
+   * Legacy per-step timeout in milliseconds.
    *
-   * Bounds the capability's **outbound HTTP call**, not in-guest compute: the
-   * emitter injects it as `timeout_ms` into the capability input, and the
-   * server proxy honors that when the capability accepts a `timeout_ms`
-   * input (e.g. the `http` agent, AI chat). A running invoke cannot be
-   * preempted in the synchronous component model, so it never fails the step
-   * purely on elapsed wall-clock, and capabilities that don't read
-   * `timeout_ms` ignore it (validation warns with W071). Split, While, and
-   * WaitForSignal timeouts are enforced as true deadlines.
+   * This field remains parseable so saved legacy definitions receive a
+   * structured validation error, but new workflows must not use it: a
+   * running capability invocation cannot be interrupted by the synchronous
+   * component host. Use a capability's documented input (for example,
+   * `timeout_ms`) only when that capability itself owns the timeout. Split,
+   * While, and WaitForSignal have enforced workflow-level step deadlines.
    * @format int64
    * @min 0
    */
@@ -622,8 +620,10 @@ export interface AiAgentConfig {
    * `maxIterations` (which bounds the *number* of turns). Enforced at the
    * outbound-HTTP layer: the emitter injects it into the LLM invoke and the
    * server proxy honors it, so it bounds the model call rather than
-   * preempting in-guest compute. Per-tool-call timeouts come from each
-   * tool's own Agent step `timeout`, independently of this value.
+   * preempting in-guest compute. It does not apply to Agent tools: their
+   * per-step `timeout` field is unsupported because a running tool invoke
+   * cannot be interrupted. A tool capability may instead expose its own
+   * documented timeout input.
    * @format int64
    * @min 0
    */
@@ -2005,11 +2005,12 @@ export interface EmbedWorkflowStep {
    */
   retryDelay?: number | null;
   /**
-   * Step timeout in milliseconds.
+   * Legacy per-step timeout in milliseconds.
    *
-   * **Not enforced** — no deadline exists for a running child workflow, so
-   * this value is accepted and ignored (validation warns with W071).
-   * Split, While, and WaitForSignal timeouts are enforced.
+   * This field remains parseable so saved legacy definitions receive a
+   * structured validation error, but new workflows must not use it: an
+   * inline child invocation cannot be interrupted. Split, While, and
+   * WaitForSignal have enforced workflow-level step deadlines.
    * @format int64
    * @min 0
    */
@@ -3391,6 +3392,16 @@ export interface PipelineStageDto {
    * @min 0
    */
   oldestAgeMs?: number | null;
+  /**
+   * Timed-out precompile children still retained by the bounded reaper.
+   *
+   * Present only on the precompile-child stage. It distinguishes ordinary
+   * busy compilation from a child blocked in kernel I/O after its durable
+   * preparation lease elapsed.
+   * @format int64
+   * @min 0
+   */
+  reapingPrecompileChildren?: number | null;
   /**
    * Highest-count workflows contributing to this durable launch stage.
    *
@@ -6465,13 +6476,12 @@ export interface ApiConfig<SecurityDataType = unknown>
   format?: ResponseType;
 }
 
-export enum ContentType {
-  Json = "application/json",
-  JsonApi = "application/vnd.api+json",
-  FormData = "multipart/form-data",
-  UrlEncoded = "application/x-www-form-urlencoded",
-  Text = "text/plain",
-}
+export type ContentType =
+  | "application/json"
+  | "application/vnd.api+json"
+  | "multipart/form-data"
+  | "application/x-www-form-urlencoded"
+  | "text/plain";
 
 export class HttpClient<SecurityDataType = unknown> {
   public instance: AxiosInstance;
@@ -6568,7 +6578,7 @@ export class HttpClient<SecurityDataType = unknown> {
     const responseFormat = format || this.format || undefined;
 
     if (
-      type === ContentType.FormData &&
+      type === "multipart/form-data" &&
       body &&
       body !== null &&
       typeof body === "object"
@@ -6577,7 +6587,7 @@ export class HttpClient<SecurityDataType = unknown> {
     }
 
     if (
-      type === ContentType.Text &&
+      type === "text/plain" &&
       body &&
       body !== null &&
       typeof body !== "string"
@@ -6714,7 +6724,7 @@ export class Api<
         method: "POST",
         query: query,
         body: data,
-        type: ContentType.Json,
+        type: "application/json",
         format: "json",
         ...params,
       }),
@@ -6817,7 +6827,7 @@ export class Api<
         method: "POST",
         body: data,
         secure: true,
-        type: ContentType.Json,
+        type: "application/json",
         format: "json",
         ...params,
       }),
@@ -6884,7 +6894,7 @@ export class Api<
         path: `/api/runtime/connections`,
         method: "POST",
         body: data,
-        type: ContentType.Json,
+        type: "application/json",
         format: "json",
         ...params,
       }),
@@ -7013,7 +7023,7 @@ export class Api<
         path: `/api/runtime/connections/${id}`,
         method: "PUT",
         body: data,
-        type: ContentType.Json,
+        type: "application/json",
         format: "json",
         ...params,
       }),
@@ -7170,7 +7180,7 @@ export class Api<
         path: `/api/runtime/connections/${id}/resources`,
         method: "POST",
         body: data,
-        type: ContentType.Json,
+        type: "application/json",
         format: "json",
         ...params,
       }),
@@ -7214,7 +7224,7 @@ export class Api<
       }),
 
     /**
-     * @description When a trigger is found for the given trigger_id: 1. Looks up the trigger in invocation_trigger table 2. Validates trigger is active 3. Publishes a TriggerEvent to the trigger stream for async execution 4. Returns instance_id for tracking Returns 404 if trigger is not found. Accepts ANY HTTP method (GET, POST, PUT, DELETE, PATCH, etc.) Body is optional and can be any content type including multipart/form-data
+     * @description When a trigger is found for the given trigger_id: 1. Looks up the trigger in invocation_trigger table 2. Validates trigger is active 3. Commits a TriggerEvent plus admission reservation to the durable outbox 4. Returns instance_id for tracking Returns 404 if trigger is not found. Accepts ANY HTTP method (GET, POST, PUT, DELETE, PATCH, etc.) Body is optional and can be any content type including multipart/form-data
      *
      * @tags Event Capture
      * @name CaptureHttpEvent
@@ -7422,7 +7432,7 @@ export class Api<
         query: query,
         body: data,
         secure: true,
-        type: ContentType.Json,
+        type: "application/json",
         format: "json",
         ...params,
       }),
@@ -7483,7 +7493,7 @@ export class Api<
         method: "POST",
         query: query,
         body: data,
-        type: ContentType.Json,
+        type: "application/json",
         format: "json",
         ...params,
       }),
@@ -7510,7 +7520,7 @@ export class Api<
         method: "POST",
         query: query,
         body: data,
-        type: ContentType.Json,
+        type: "application/json",
         ...params,
       }),
 
@@ -7536,7 +7546,7 @@ export class Api<
         method: "POST",
         query: query,
         body: data,
-        type: ContentType.Json,
+        type: "application/json",
         format: "json",
         ...params,
       }),
@@ -7647,7 +7657,7 @@ export class Api<
         query: query,
         body: data,
         secure: true,
-        type: ContentType.Json,
+        type: "application/json",
         format: "json",
         ...params,
       }),
@@ -7676,7 +7686,7 @@ export class Api<
         query: query,
         body: data,
         secure: true,
-        type: ContentType.Json,
+        type: "application/json",
         format: "json",
         ...params,
       }),
@@ -7705,7 +7715,7 @@ export class Api<
         query: query,
         body: data,
         secure: true,
-        type: ContentType.Json,
+        type: "application/json",
         format: "json",
         ...params,
       }),
@@ -7762,7 +7772,7 @@ export class Api<
         query: query,
         body: data,
         secure: true,
-        type: ContentType.Json,
+        type: "application/json",
         format: "json",
         ...params,
       }),
@@ -7850,7 +7860,7 @@ export class Api<
         query: query,
         body: data,
         secure: true,
-        type: ContentType.Json,
+        type: "application/json",
         format: "json",
         ...params,
       }),
@@ -7925,7 +7935,7 @@ export class Api<
         method: "PUT",
         query: query,
         body: data,
-        type: ContentType.Json,
+        type: "application/json",
         format: "json",
         ...params,
       }),
@@ -7975,7 +7985,7 @@ export class Api<
         method: "POST",
         query: query,
         body: data,
-        type: ContentType.Json,
+        type: "application/json",
         format: "json",
         ...params,
       }),
@@ -8001,7 +8011,7 @@ export class Api<
         method: "POST",
         query: query,
         body: data,
-        type: ContentType.Json,
+        type: "application/json",
         format: "json",
         ...params,
       }),
@@ -8027,7 +8037,7 @@ export class Api<
         method: "POST",
         query: query,
         body: data,
-        type: ContentType.Json,
+        type: "application/json",
         format: "json",
         ...params,
       }),
@@ -8053,7 +8063,7 @@ export class Api<
         method: "POST",
         query: query,
         body: data,
-        type: ContentType.Json,
+        type: "application/json",
         format: "json",
         ...params,
       }),
@@ -8099,7 +8109,7 @@ export class Api<
         path: `/api/runtime/reports/${reportId}/blocks/${blockId}/workflow-actions/${actionId}/execute`,
         method: "POST",
         body: data,
-        type: ContentType.Json,
+        type: "application/json",
         format: "json",
         ...params,
       }),
@@ -8121,7 +8131,7 @@ export class Api<
         path: `/api/runtime/reports/${reportId}/edit`,
         method: "POST",
         body: data,
-        type: ContentType.Json,
+        type: "application/json",
         format: "json",
         ...params,
       }),
@@ -8270,7 +8280,7 @@ export class Api<
         path: `/api/runtime/triggers`,
         method: "POST",
         body: data,
-        type: ContentType.Json,
+        type: "application/json",
         format: "json",
         ...params,
       }),
@@ -8308,7 +8318,7 @@ export class Api<
         path: `/api/runtime/triggers/${id}`,
         method: "PUT",
         body: data,
-        type: ContentType.Json,
+        type: "application/json",
         format: "json",
         ...params,
       }),
@@ -8381,7 +8391,7 @@ export class Api<
         path: `/api/runtime/workflows/create`,
         method: "POST",
         body: data,
-        type: ContentType.Json,
+        type: "application/json",
         format: "json",
         ...params,
       }),
@@ -8418,7 +8428,7 @@ export class Api<
         path: `/api/runtime/workflows/folders/rename`,
         method: "PUT",
         body: data,
-        type: ContentType.Json,
+        type: "application/json",
         format: "json",
         ...params,
       }),
@@ -8436,7 +8446,7 @@ export class Api<
         path: `/api/runtime/workflows/graph/validate`,
         method: "POST",
         body: data,
-        type: ContentType.Json,
+        type: "application/json",
         ...params,
       }),
 
@@ -8582,7 +8592,7 @@ export class Api<
         path: `/api/runtime/workflows/${id}/chat`,
         method: "POST",
         body: data,
-        type: ContentType.Json,
+        type: "application/json",
         ...params,
       }),
 
@@ -8603,7 +8613,7 @@ export class Api<
         path: `/api/runtime/workflows/${id}/chat/start`,
         method: "POST",
         body: data,
-        type: ContentType.Json,
+        type: "application/json",
         ...params,
       }),
 
@@ -8624,7 +8634,7 @@ export class Api<
         path: `/api/runtime/workflows/${id}/clone`,
         method: "POST",
         body: data,
-        type: ContentType.Json,
+        type: "application/json",
         format: "json",
         ...params,
       }),
@@ -8670,7 +8680,7 @@ export class Api<
         method: "POST",
         query: query,
         body: data,
-        type: ContentType.Json,
+        type: "application/json",
         format: "json",
         ...params,
       }),
@@ -8692,7 +8702,7 @@ export class Api<
         path: `/api/runtime/workflows/${id}/move`,
         method: "PUT",
         body: data,
-        type: ContentType.Json,
+        type: "application/json",
         format: "json",
         ...params,
       }),
@@ -8730,7 +8740,7 @@ export class Api<
         path: `/api/runtime/workflows/${id}/schedule`,
         method: "POST",
         body: data,
-        type: ContentType.Json,
+        type: "application/json",
         ...params,
       }),
 
@@ -8751,7 +8761,7 @@ export class Api<
         path: `/api/runtime/workflows/${id}/slug`,
         method: "PUT",
         body: data,
-        type: ContentType.Json,
+        type: "application/json",
         format: "json",
         ...params,
       }),
@@ -8773,7 +8783,7 @@ export class Api<
         path: `/api/runtime/workflows/${id}/update`,
         method: "POST",
         body: data,
-        type: ContentType.Json,
+        type: "application/json",
         format: "json",
         ...params,
       }),
@@ -8900,7 +8910,7 @@ export class Api<
         path: `/api/runtime/workflows/${id}/versions/${version}/track-events`,
         method: "PUT",
         body: data,
-        type: ContentType.Json,
+        type: "application/json",
         format: "json",
         ...params,
       }),

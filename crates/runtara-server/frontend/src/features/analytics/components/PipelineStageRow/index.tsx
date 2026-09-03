@@ -65,6 +65,7 @@ export function PipelineStageRow({
   const stuck = isNotDraining(stage, stuckAfterMs);
   const age = formatAge(stage.oldestAgeMs);
   const capacityRejections = stage.capacityRejections ?? null;
+  const reapingPrecompileChildren = stage.reapingPrecompileChildren ?? null;
   const topWorkflows = stage.topWorkflows ?? [];
   const workflowAttribution = topWorkflows
     .map(
@@ -204,6 +205,16 @@ export function PipelineStageRow({
             {capacityRejections === 1 ? 'retry' : 'retries'}
           </span>
         )}
+        {reapingPrecompileChildren !== null &&
+          reapingPrecompileChildren > 0 && (
+            <span
+              className="mt-1 block tabular-nums text-amber-600 dark:text-amber-400"
+              data-testid={`pipeline-reaping-precompile-children-${stage.key}`}
+            >
+              {formatCount(reapingPrecompileChildren)} child{' '}
+              {reapingPrecompileChildren === 1 ? 'reaping' : 'children reaping'}
+            </span>
+          )}
         {workflowAttribution && (
           <span
             className="mt-1 block truncate text-muted-foreground"

@@ -48,6 +48,19 @@ impl Image {
             .and_then(|metadata| metadata.get("workflow"))
             .is_some_and(serde_json::Value::is_object)
     }
+
+    /// Immutable SHA-256 identity recorded for a generated direct workflow.
+    ///
+    /// Generic components deliberately have no such requirement. A workflow
+    /// envelope without this value is treated as an unsupported legacy image
+    /// by durable preparation instead of falling back to `wasi:cli/run`.
+    pub fn workflow_binary_checksum(&self) -> Option<&str> {
+        self.metadata
+            .as_ref()?
+            .pointer("/workflow/binaryChecksum")?
+            .as_str()
+            .filter(|checksum| !checksum.is_empty())
+    }
 }
 
 /// Reject a compiled workflow image that does not export the current lifecycle

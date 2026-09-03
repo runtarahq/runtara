@@ -82,6 +82,21 @@ pub struct PipelineReading {
     /// database could not be read; an empty value means it was read and had no
     /// matching launch rows.
     pub launches: Option<LaunchTelemetryReading>,
+    /// Independently bounded artifact/component preparation workers.
+    pub preparation_limit: Option<u64>,
+    /// Preparation workers currently held by a launch read/compile/link task.
+    pub preparation_used: Option<u64>,
+    /// Age of the longest-held preparation worker.
+    pub preparation_oldest_ms: Option<u64>,
+    /// Bound for killable component-precompile child processes, including
+    /// children detached to the bounded reaper after a deadline.
+    pub precompile_child_limit: Option<u64>,
+    /// Live or reaping child processes holding that bound.
+    pub precompile_child_used: Option<u64>,
+    /// Age of the oldest live/reaping child process.
+    pub precompile_child_oldest_ms: Option<u64>,
+    /// Timed-out precompile children still held by the bounded reaper.
+    pub precompile_child_retired: Option<u64>,
     /// Run-permit bound.
     pub run_limit: Option<u64>,
     /// Run permits held.
@@ -133,6 +148,7 @@ pub struct LaunchStageReading {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LaunchTelemetryReading {
     pub queued: LaunchStageReading,
+    pub preparing: LaunchStageReading,
     pub leased: LaunchStageReading,
     pub starting: LaunchStageReading,
     pub running: LaunchStageReading,
@@ -214,6 +230,34 @@ fn build_snapshot_with_stuck_after(
             reading.admission_limit,
             launches.map(|value| &value.queued),
             launches.map(|value| value.capacity_rejections),
+            "accepted",
+        ),
+        launch_stage(
+            "launchPreparing",
+            "Preparing",
+            Some("artifact and component preparation"),
+            None,
+            launches.map(|value| &value.preparing),
+            None,
+            "accepted",
+        ),
+        ordinary_stage(
+            "preparationWorkers",
+            "Preparation workers",
+            Some("RUNTARA_PREPARATION_CONCURRENCY"),
+            reading.preparation_limit,
+            reading.preparation_used,
+            reading.preparation_oldest_ms,
+            "accepted",
+        ),
+        precompile_child_stage(
+            "precompileChildren",
+            "Precompile children",
+            Some("RUNTARA_PRECOMPILE_CHILD_CONCURRENCY"),
+            reading.precompile_child_limit,
+            reading.precompile_child_used,
+            reading.precompile_child_oldest_ms,
+            reading.precompile_child_retired,
             "accepted",
         ),
         launch_stage(
@@ -315,8 +359,24 @@ fn ordinary_stage(
         oldest_age_ms,
         inflow_key: inflow_key.to_string(),
         capacity_rejections: None,
+        reaping_precompile_children: None,
         top_workflows: Vec::new(),
     }
+}
+
+fn precompile_child_stage(
+    key: &str,
+    label: &str,
+    knob: Option<&str>,
+    limit: Option<u64>,
+    used: Option<u64>,
+    oldest_age_ms: Option<u64>,
+    reaping_precompile_children: Option<u64>,
+    inflow_key: &str,
+) -> PipelineStageDto {
+    let mut stage = ordinary_stage(key, label, knob, limit, used, oldest_age_ms, inflow_key);
+    stage.reaping_precompile_children = reaping_precompile_children;
+    stage
 }
 
 fn launch_stage(
@@ -337,6 +397,7 @@ fn launch_stage(
         oldest_age_ms: reading.and_then(|value| value.oldest_age_ms),
         inflow_key: inflow_key.to_string(),
         capacity_rejections,
+        reaping_precompile_children: None,
         top_workflows: reading
             .map(|value| {
                 value
@@ -492,6 +553,10 @@ pub async fn run(
         };
 
         let occupancy = inputs.runner.as_ref().and_then(|r| r.occupancy());
+        let preparation_occupancy = inputs
+            .runner
+            .as_ref()
+            .and_then(|runner| runner.preparation_occupancy());
         let (trigger_limit, trigger_used) = match inputs.trigger_permits.occupancy() {
             Some((limit, used)) => (Some(limit), Some(used)),
             None => (None, None),
@@ -548,6 +613,23 @@ pub async fn run(
             trigger_limit,
             trigger_used,
             launches,
+            preparation_limit: preparation_occupancy.as_ref().map(|value| value.limit),
+            preparation_used: preparation_occupancy.as_ref().map(|value| value.held),
+            preparation_oldest_ms: preparation_occupancy
+                .as_ref()
+                .and_then(|value| value.oldest_held_ms),
+            precompile_child_limit: preparation_occupancy
+                .as_ref()
+                .and_then(|value| value.precompile_child_limit),
+            precompile_child_used: preparation_occupancy
+                .as_ref()
+                .and_then(|value| value.precompile_child_held),
+            precompile_child_oldest_ms: preparation_occupancy
+                .as_ref()
+                .and_then(|value| value.precompile_child_oldest_ms),
+            precompile_child_retired: preparation_occupancy
+                .as_ref()
+                .and_then(|value| value.precompile_child_retired),
             run_limit: occupancy.as_ref().map(|o| o.limit),
             run_used: occupancy.as_ref().map(|o| o.held),
             run_oldest_ms: occupancy.as_ref().and_then(|o| o.oldest_held_ms),
@@ -589,14 +671,14 @@ async fn count_launch_telemetry(
                     ELSE state
                 END AS stage,
                 CASE
-                    WHEN state IN ('queued', 'leased', 'starting', 'running') THEN created_at
+                    WHEN state IN ('queued', 'preparing', 'leased', 'starting', 'running') THEN created_at
                     ELSE updated_at
                 END AS age_from,
                 last_error
             FROM instance_launches
             WHERE tenant_id = $1
               AND (
-                    state IN ('queued', 'leased', 'starting', 'running', 'cancelled')
+                    state IN ('queued', 'preparing', 'leased', 'starting', 'running', 'cancelled')
                     OR (state = 'failed' AND last_error = 'launch_queue_timeout')
               )
         )
@@ -611,7 +693,11 @@ async fn count_launch_telemetry(
                 )
             END AS oldest_age_ms,
             COUNT(*) FILTER (
-                WHERE stage = 'queued' AND last_error = 'runner_capacity_unavailable'
+                WHERE stage = 'queued'
+                  AND last_error IN (
+                      'runner_capacity_unavailable',
+                      'preparation_capacity_unavailable'
+                  )
             )::BIGINT AS capacity_rejections
         FROM relevant
         GROUP BY stage
@@ -640,14 +726,14 @@ async fn count_launch_telemetry(
                     ELSE launch.state
                 END AS stage,
                 CASE
-                    WHEN launch.state IN ('queued', 'leased', 'starting', 'running')
+                WHEN launch.state IN ('queued', 'preparing', 'leased', 'starting', 'running')
                         THEN launch.created_at
                     ELSE launch.updated_at
                 END AS age_from
             FROM instance_launches AS launch
             WHERE launch.tenant_id = $1
               AND (
-                    launch.state IN ('queued', 'leased', 'starting', 'running', 'cancelled')
+                    launch.state IN ('queued', 'preparing', 'leased', 'starting', 'running', 'cancelled')
                     OR (
                         launch.state = 'failed'
                         AND launch.last_error = 'launch_queue_timeout'
@@ -749,6 +835,7 @@ fn launch_stage_reading_mut<'a>(
 ) -> Option<&'a mut LaunchStageReading> {
     match stage {
         "queued" => Some(&mut telemetry.queued),
+        "preparing" => Some(&mut telemetry.preparing),
         "leased" => Some(&mut telemetry.leased),
         "starting" => Some(&mut telemetry.starting),
         "running" => Some(&mut telemetry.running),
@@ -820,6 +907,15 @@ mod tests {
                         oldest_age_ms: Some(2_700),
                     }],
                 },
+                preparing: LaunchStageReading {
+                    count: 3,
+                    oldest_age_ms: Some(2_100),
+                    top_workflows: vec![LaunchWorkflowReading {
+                        workflow_id: "workflow-preparing".to_string(),
+                        count: 2,
+                        oldest_age_ms: Some(2_100),
+                    }],
+                },
                 leased: LaunchStageReading {
                     count: 2,
                     oldest_age_ms: Some(1_800),
@@ -847,6 +943,13 @@ mod tests {
                 },
                 capacity_rejections: 5,
             }),
+            preparation_limit: Some(4),
+            preparation_used: Some(2),
+            preparation_oldest_ms: Some(2_100),
+            precompile_child_limit: Some(3),
+            precompile_child_used: Some(1),
+            precompile_child_oldest_ms: Some(7_200),
+            precompile_child_retired: Some(1),
             run_limit: Some(16),
             run_used: Some(11),
             run_oldest_ms: Some(2700),
@@ -870,6 +973,9 @@ mod tests {
                 "triggerQueue",
                 "triggerWorkers",
                 "launchQueued",
+                "launchPreparing",
+                "preparationWorkers",
+                "precompileChildren",
                 "launchLeased",
                 "launchStarting",
                 "runPermits",
@@ -891,7 +997,31 @@ mod tests {
         assert_eq!(queued.top_workflows.len(), 1);
         assert_eq!(queued.top_workflows[0].workflow_id, "workflow-queued");
 
-        let run = &snap.stages[6];
+        let preparing = &snap.stages[4];
+        assert_eq!(preparing.used, Some(3));
+        assert_eq!(preparing.oldest_age_ms, Some(2_100));
+        assert_eq!(preparing.top_workflows[0].workflow_id, "workflow-preparing");
+
+        let preparation_workers = &snap.stages[5];
+        assert_eq!(
+            preparation_workers.knob.as_deref(),
+            Some("RUNTARA_PREPARATION_CONCURRENCY")
+        );
+        assert_eq!(preparation_workers.limit, Some(4));
+        assert_eq!(preparation_workers.used, Some(2));
+        assert_eq!(preparation_workers.oldest_age_ms, Some(2_100));
+
+        let precompile_children = &snap.stages[6];
+        assert_eq!(
+            precompile_children.knob.as_deref(),
+            Some("RUNTARA_PRECOMPILE_CHILD_CONCURRENCY")
+        );
+        assert_eq!(precompile_children.limit, Some(3));
+        assert_eq!(precompile_children.used, Some(1));
+        assert_eq!(precompile_children.oldest_age_ms, Some(7_200));
+        assert_eq!(precompile_children.reaping_precompile_children, Some(1));
+
+        let run = &snap.stages[9];
         assert_eq!(run.knob.as_deref(), Some("RUNTARA_MAX_CONCURRENT_RUNS"));
         assert_eq!(run.limit, Some(16));
         assert_eq!(run.used, Some(11));
@@ -908,6 +1038,7 @@ mod tests {
         let snap = build_snapshot(&reading(), None, 0);
         for key in [
             "triggerQueue",
+            "launchPreparing",
             "launchLeased",
             "launchStarting",
             "launchExpired",
@@ -921,6 +1052,8 @@ mod tests {
             "admission",
             "triggerWorkers",
             "launchQueued",
+            "preparationWorkers",
+            "precompileChildren",
             "runPermits",
             "launchRunning",
         ] {
@@ -941,7 +1074,7 @@ mod tests {
             ..PipelineReading::default()
         };
         let snap = build_snapshot(&blind, None, 0);
-        assert_eq!(snap.stages.len(), 11, "the pipeline shape stays stable");
+        assert_eq!(snap.stages.len(), 14, "the pipeline shape stays stable");
 
         let queue = &snap.stages[1];
         assert_eq!(
@@ -1023,7 +1156,7 @@ mod tests {
         assert!(json.get("capturedAt").is_some());
         assert!(json.get("stuckAfterMs").is_some());
         assert!(json.get("windowMs").is_some());
-        let stage = &json["stages"][7];
+        let stage = &json["stages"][9];
         assert!(stage.get("oldestAgeMs").is_some());
         assert!(stage.get("inflowKey").is_some());
         assert!(stage.get("capacityRejections").is_some());
@@ -1052,7 +1185,7 @@ mod tests {
         let mut rx = feed.subscribe();
         feed.publish(snap);
         let received = rx.recv().await.expect("a subscriber receives");
-        assert_eq!(received.stages.len(), 11);
+        assert_eq!(received.stages.len(), 14);
     }
 
     /// A slow subscriber must not hold up the others.
@@ -1090,7 +1223,7 @@ mod tests {
         let latest = PipelineLatest::default();
         assert!(latest.get().is_none());
         latest.set(Arc::new(build_snapshot(&reading(), None, 0)));
-        assert_eq!(latest.get().expect("stored").stages.len(), 11);
+        assert_eq!(latest.get().expect("stored").stages.len(), 14);
     }
 
     /// The stuck threshold must be configurable and sanely defaulted.

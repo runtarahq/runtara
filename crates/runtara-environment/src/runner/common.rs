@@ -13,7 +13,6 @@ use std::time::Duration;
 
 use serde_json::Value;
 use tokio::fs;
-use tracing::debug;
 
 use runtara_core::persistence::Persistence;
 
@@ -138,19 +137,6 @@ pub(crate) fn launch_run_dir(
     launch_id: &str,
 ) -> PathBuf {
     run_dir(data_dir, tenant_id, instance_id).join(launch_id)
-}
-
-/// Create the run directory for stderr capture.
-pub(crate) async fn ensure_run_dir(
-    data_dir: &Path,
-    tenant_id: &str,
-    instance_id: &str,
-    launch_id: &str,
-) -> Result<()> {
-    let dir = launch_run_dir(data_dir, tenant_id, instance_id, launch_id);
-    fs::create_dir_all(&dir).await?;
-    debug!(instance_id = %instance_id, launch_id = %launch_id, "Run directory created");
-    Ok(())
 }
 
 /// Load output from runtara-core persistence.

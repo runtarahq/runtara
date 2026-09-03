@@ -7,6 +7,7 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::any::Any;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -40,6 +41,22 @@ pub enum RunnerError {
     #[error("Runner capacity unavailable")]
     CapacityUnavailable,
 
+    /// No independently bounded preparation capacity is available right now.
+    ///
+    /// Preparation (artifact validation, component compilation, and linking)
+    /// must never wait while holding a run permit. Durable dispatchers return
+    /// this condition to PostgreSQL and retry it there instead of accumulating
+    /// local compiler waiters.
+    #[error("Preparation capacity unavailable")]
+    PreparationCapacityUnavailable,
+
+    /// A cancellable preparation operation exceeded its durable lease-derived
+    /// deadline. The dispatcher returns this incarnation to the durable queue
+    /// rather than treating a slow database/filesystem operation as a guest
+    /// execution failure.
+    #[error("Preparation timed out: {0}")]
+    PreparationTimedOut(String),
+
     /// Process exited with non-zero code.
     #[error("Exit code {exit_code}: {stderr}")]
     ExitCode {
@@ -69,6 +86,70 @@ pub enum RunnerError {
 /// Result type for runner operations.
 pub type Result<T> = std::result::Result<T, RunnerError>;
 
+/// Opaque result of preparing a launch before a runner permit is acquired.
+///
+/// The production runner stores a verified, linked component in this token.
+/// Keeping the payload private means the durable dispatcher can carry it
+/// between the preparation and start-gated handoff phases without learning
+/// about wasmtime types. The token is deliberately consumed by
+/// [`Runner::try_launch_prepared_detached`]: a failed handoff drops its
+/// preparation reservation rather than retaining an unbounded in-memory
+/// cache of compiled artifacts.
+pub struct PreparedLaunch {
+    launch_id: String,
+    payload: Box<dyn Any + Send + Sync>,
+}
+
+impl std::fmt::Debug for PreparedLaunch {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PreparedLaunch")
+            .field("launch_id", &self.launch_id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PreparedLaunch {
+    /// Build a passthrough token for runners whose preparation is a no-op.
+    pub fn passthrough(launch_id: impl Into<String>) -> Self {
+        Self {
+            launch_id: launch_id.into(),
+            payload: Box::new(()),
+        }
+    }
+
+    /// Wrap an implementation-specific prepared artifact.
+    pub(crate) fn new<T>(launch_id: impl Into<String>, payload: T) -> Self
+    where
+        T: Any + Send + Sync,
+    {
+        Self {
+            launch_id: launch_id.into(),
+            payload: Box::new(payload),
+        }
+    }
+
+    /// Identifier this preparation belongs to.
+    pub fn launch_id(&self) -> &str {
+        &self.launch_id
+    }
+
+    /// Take an implementation-specific payload back out of this token.
+    pub(crate) fn take<T>(self) -> Result<T>
+    where
+        T: Any + Send + Sync,
+    {
+        self.payload
+            .downcast::<T>()
+            .map(|payload| *payload)
+            .map_err(|_| {
+                RunnerError::StartFailed(
+                    "prepared launch was passed to a different runner implementation".to_string(),
+                )
+            })
+    }
+}
+
 /// Result of waiting for a supervisor-owned launch gate.
 ///
 /// A detached runner may reserve a bounded run slot before its owner has
@@ -96,7 +177,7 @@ pub enum StartGateOutcome {
 ///
 /// The dispatcher can open an in-memory [`StartGate`] after it records the
 /// running generation, but that is not permission to load guest code. The
-/// runner invokes this hook immediately before guest preparation. A process
+/// runner invokes this hook immediately before guest instantiation. A process
 /// loss before that point therefore leaves the durable gate marker intact for
 /// recovery.
 #[async_trait]
@@ -268,9 +349,15 @@ impl StartGate {
             }
         };
         if should_confirm {
-            let outcome = match confirmation.confirm().await {
-                Ok(()) => StartGateOutcome::Opened,
-                Err(_) => StartGateOutcome::ConfirmationFailed,
+            // Confirmation performs a database round trip. It must share the
+            // handoff's absolute deadline: otherwise a stalled pool or
+            // network can leave a detached runner holding a scarce run slot
+            // forever after the durable generation is eligible for recovery.
+            let outcome = match tokio::time::timeout_at(self.deadline, confirmation.confirm()).await
+            {
+                Ok(Ok(())) => StartGateOutcome::Opened,
+                Ok(Err(_)) => StartGateOutcome::ConfirmationFailed,
+                Err(_) => StartGateOutcome::TimedOut,
             };
             self.confirmation_updates.send_replace(Some(outcome));
         }
@@ -302,6 +389,13 @@ impl StartGate {
                     }
                 }
                 _ = tokio::time::sleep_until(self.deadline) => {
+                    // `select!` may choose the timer when the sender's
+                    // `Opened` update became ready in the same poll. Read
+                    // once more before declaring the durable handoff lost;
+                    // otherwise a monitor could stop a just-confirmed guest.
+                    if let Some(outcome) = *updates.borrow_and_update() {
+                        return outcome;
+                    }
                     return StartGateOutcome::TimedOut;
                 }
             }
@@ -344,6 +438,31 @@ pub struct LaunchOptions {
     pub tenant_id: String,
     /// Path to the image's composed `workflow.wasm`.
     pub wasm_path: std::path::PathBuf,
+    /// Whether this image was classified as a generated direct workflow.
+    ///
+    /// Such images must export the current lifecycle entrypoint. Generic
+    /// agent components keep their established ABI and therefore leave this
+    /// false; classifying by metadata rather than by `wasi:cli/run` preserves
+    /// that compatibility while rejecting retired generated workflows.
+    pub requires_lifecycle_invoke: bool,
+    /// Immutable source checksum for a generated direct workflow image.
+    ///
+    /// The killable precompiler calculates a digest of the bytes it read and
+    /// the runner compares it to this value before deserializing its output.
+    /// Generic agent components leave it unset and retain their established
+    /// ABI compatibility.
+    pub expected_workflow_checksum: Option<String>,
+    /// Durable preparation claim incarnation, when this came from the launch
+    /// queue. It distinguishes an old timed-out compiler from a later claim
+    /// with the same launch id and dispatcher owner.
+    pub preparation_attempt: Option<i32>,
+    /// Absolute local deadline derived from the durable preparation lease.
+    ///
+    /// Cancellable Core/database/filesystem futures must observe this. Native
+    /// blocking compiler/file tasks intentionally retain their preparation
+    /// permit until they really end; cancelling only their join handle would
+    /// falsely free capacity while they still consume host resources.
+    pub preparation_deadline: Option<tokio::time::Instant>,
     /// Input data for the instance
     pub input: Value,
     /// Execution timeout
@@ -456,6 +575,38 @@ pub struct RunnerOccupancy {
     pub runs_finished: u64,
 }
 
+/// How much of the runner's independent pre-run preparation pool is occupied.
+///
+/// Preparation includes child-owned artifact reads/hashing/compilation,
+/// parent-side linking, and the persisted-input read. It is intentionally
+/// distinct from [`RunnerOccupancy`]: a wedged compiler should be visible and
+/// bounded without making the host look as though guests are executing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparationOccupancy {
+    /// Concurrency bound for preparation work.
+    pub limit: u64,
+    /// Preparation permits currently held.
+    pub held: u64,
+    /// Age of the longest-held preparation permit, if any.
+    pub oldest_held_ms: Option<u64>,
+    /// Instance holding that longest-lived preparation permit.
+    pub oldest_instance_id: Option<String>,
+    /// Bound for live and still-reaping killable precompile child processes.
+    ///
+    /// This is intentionally separate from `limit`: a timed-out preparation
+    /// gives its parent permit back immediately, while a child blocked in
+    /// kernel I/O retains this bounded slot until the reaper observes exit.
+    pub precompile_child_limit: Option<u64>,
+    /// Live or reaping child processes consuming that bound.
+    pub precompile_child_held: Option<u64>,
+    /// Age of the oldest live or reaping precompile child.
+    pub precompile_child_oldest_ms: Option<u64>,
+    /// Subset of `precompile_child_held` that timed out and are awaiting the
+    /// detached reaper. A nonzero value is an actionable host-health signal,
+    /// not ordinary preparation throughput.
+    pub precompile_child_retired: Option<u64>,
+}
+
 /// Trait for instance runners.
 ///
 /// Runners are responsible for launching and managing workflow guests.
@@ -492,6 +643,39 @@ pub trait Runner: Send + Sync {
     /// that intentionally await capacity.
     async fn try_launch_detached(&self, options: &LaunchOptions) -> Result<RunnerHandle>;
 
+    /// Prepare an artifact without acquiring a live guest permit.
+    ///
+    /// Production runners use this for child-owned artifact identity
+    /// validation/compilation, parent-side linking, and persisted-input reads.
+    /// Durable embedded launches deliberately do not create run directories or
+    /// stderr files here: a parent-side filesystem operation can wedge outside
+    /// the killable child boundary. The default preserves simple runners and
+    /// tests that have no preparation phase; durable dispatchers still carry
+    /// the token through the same state-machine fence.
+    async fn try_prepare_launch(&self, options: &LaunchOptions) -> Result<PreparedLaunch> {
+        Ok(PreparedLaunch::passthrough(&options.launch_id))
+    }
+
+    /// Acquire a run permit and start a previously prepared launch.
+    ///
+    /// Implementations must consume `prepared`; dropping it releases any
+    /// preparation reservation on every stale/cancel/error path. The default
+    /// deliberately delegates to the existing nonblocking launch path for
+    /// runners whose preparation token is a no-op.
+    async fn try_launch_prepared_detached(
+        &self,
+        options: &LaunchOptions,
+        prepared: PreparedLaunch,
+    ) -> Result<RunnerHandle> {
+        if prepared.launch_id() != options.launch_id {
+            return Err(RunnerError::StartFailed(
+                "prepared launch does not match the requested generation".to_string(),
+            ));
+        }
+        drop(prepared);
+        self.try_launch_detached(options).await
+    }
+
     /// Check if an instance is still running.
     async fn is_running(&self, handle: &RunnerHandle) -> bool;
 
@@ -514,6 +698,15 @@ pub trait Runner: Send + Sync {
     /// to zero is how a dashboard invents an idle system that is actually
     /// unobserved.
     fn occupancy(&self) -> Option<RunnerOccupancy> {
+        None
+    }
+
+    /// Current occupancy of the independently bounded preparation pool.
+    ///
+    /// `None` means this runner does not expose a preparation pool. It is not
+    /// treated as idle by the pipeline; callers may use their batch bound as
+    /// conservative fallback capacity for compatibility runners.
+    fn preparation_occupancy(&self) -> Option<PreparationOccupancy> {
         None
     }
 
@@ -547,6 +740,15 @@ mod start_gate_tests {
         async fn confirm(&self) -> Result<()> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
+        }
+    }
+
+    struct NeverResolvingConfirmation;
+
+    #[async_trait::async_trait]
+    impl StartGateConfirmation for NeverResolvingConfirmation {
+        async fn confirm(&self) -> Result<()> {
+            std::future::pending::<Result<()>>().await
         }
     }
 
@@ -607,6 +809,27 @@ mod start_gate_tests {
         assert_eq!(
             monitor.await.expect("monitor must not panic"),
             StartGateOutcome::Opened
+        );
+    }
+
+    #[tokio::test]
+    async fn stalled_confirmation_expires_for_runner_and_monitor() {
+        let gate = StartGate::new(Duration::from_millis(20))
+            .with_confirmation(Arc::new(NeverResolvingConfirmation));
+        assert!(gate.open());
+
+        let monitor_gate = gate.clone();
+        let monitor =
+            tokio::spawn(async move { monitor_gate.wait_for_runner_confirmation().await });
+
+        let outcome = tokio::time::timeout(Duration::from_secs(1), gate.wait_and_confirm())
+            .await
+            .expect("stalled durable confirmation must respect gate deadline");
+        assert_eq!(outcome, StartGateOutcome::TimedOut);
+        assert_eq!(
+            monitor.await.expect("monitor must not panic"),
+            StartGateOutcome::TimedOut,
+            "the monitor must not remain behind a stalled confirmation"
         );
     }
 }

@@ -126,6 +126,11 @@ pub struct EnvironmentHandlerState {
 /// Default request timeout for database operations (30 seconds).
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// A monitor that already knows guest execution never started must not become
+/// another unbounded waiter when PostgreSQL is unhealthy. The durable marked
+/// generation remains recoverable by the expiry scan after this local budget.
+const START_GATE_MONITOR_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Resolve the default standalone-Environment execution timeout.
 ///
 /// Production callers should use
@@ -881,7 +886,11 @@ pub async fn handle_stop_instance(
 
     // Clean up container registry
     let _ = container_registry
-        .cleanup_generation(&request.instance_id, &container.launch_id)
+        .cleanup_handle(
+            &request.instance_id,
+            &container.launch_id,
+            &handle.handle_id,
+        )
         .await;
 
     info!("Instance stopped successfully");
@@ -1118,13 +1127,14 @@ pub fn spawn_container_monitor(
     lifecycle_observers: LaunchLifecycleObservers,
     // A durable dispatcher installs the monitor before it opens this gate.
     // The active execution timeout begins only once guest execution is
-    // allowed; a closed gate is bounded by its separate handoff lease.
-    start_gate: Option<StartGate>,
+    // allowed; a closed gate is bounded by its separate handoff lease. The
+    // durable attempt fences cleanup when a recovered launch reuses its id.
+    start_gate: Option<(StartGate, i32)>,
 ) {
     let instance_id = handle.instance_id.clone();
 
     tokio::spawn(async move {
-        if let Some(gate) = start_gate {
+        if let Some((gate, attempt_count)) = start_gate {
             // The runner, not this monitor, performs the durable confirmation
             // immediately before guest preparation. Waiting for that result
             // prevents monitor ownership from clearing a recoverable marker.
@@ -1133,12 +1143,154 @@ pub fn spawn_container_monitor(
                 StartGateOutcome::Cancelled
                 | StartGateOutcome::TimedOut
                 | StartGateOutcome::ConfirmationFailed => {
-                    debug!(
+                    warn!(
                         instance_id = %instance_id,
                         launch_id = %handle.launch_id,
-                        "Start gate did not permit monitor to begin active execution"
+                        attempt_count,
+                        "Start gate did not permit guest execution; terminalizing exact handoff"
                     );
-                    return;
+                    let repository = LaunchRepository::new(pool.clone());
+                    let terminal = match tokio::time::timeout(
+                        START_GATE_MONITOR_CLEANUP_TIMEOUT,
+                        repository.fail_unconfirmed_running(
+                            &handle.launch_id,
+                            attempt_count,
+                            "runner did not durably cross start gate",
+                        ),
+                    )
+                    .await
+                    {
+                        Ok(result) => result,
+                        Err(_) => {
+                            warn!(
+                                instance_id = %instance_id,
+                                launch_id = %handle.launch_id,
+                                attempt_count,
+                                "Timed out terminalizing failed start-gate handoff; durable expiry will recover it"
+                            );
+                            return;
+                        }
+                    };
+                    match terminal {
+                        Ok(Some(failed)) => {
+                            // The conditional queue/Core transaction won
+                            // before we touch the runner registry. A
+                            // confirmation that committed just as its
+                            // response was lost clears the marker, making
+                            // this update return `None` instead of killing a
+                            // live guest.
+                            match tokio::time::timeout(
+                                START_GATE_MONITOR_CLEANUP_TIMEOUT,
+                                runner.stop(&handle),
+                            )
+                            .await
+                            {
+                                Ok(Err(error)) => {
+                                    warn!(
+                                        instance_id = %instance_id,
+                                        launch_id = %handle.launch_id,
+                                        error = %error,
+                                        "Failed to stop runner after failed start-gate confirmation"
+                                    );
+                                }
+                                Err(_) => {
+                                    warn!(
+                                        instance_id = %instance_id,
+                                        launch_id = %handle.launch_id,
+                                        "Timed out stopping failed start-gate runner; closed gate/lease recovery remains authoritative"
+                                    );
+                                }
+                                Ok(Ok(())) => {}
+                            }
+                            let registry = ContainerRegistry::new(pool.clone());
+                            match tokio::time::timeout(
+                                START_GATE_MONITOR_CLEANUP_TIMEOUT,
+                                registry.cleanup_handle(
+                                    &instance_id,
+                                    &handle.launch_id,
+                                    &handle.handle_id,
+                                ),
+                            )
+                            .await
+                            {
+                                Ok(Err(error)) => {
+                                    warn!(
+                                        instance_id = %instance_id,
+                                        launch_id = %handle.launch_id,
+                                        error = %error,
+                                        "Could not remove failed start-gate runner registry row"
+                                    );
+                                }
+                                Err(_) => {
+                                    warn!(
+                                        instance_id = %instance_id,
+                                        launch_id = %handle.launch_id,
+                                        "Timed out removing failed start-gate registry row; restart recovery will reconcile it"
+                                    );
+                                }
+                                Ok(Ok(_)) => {}
+                            }
+                            lifecycle_observers.notify_released(&failed, "start_gate_failed");
+                            return;
+                        }
+                        Ok(None) => {
+                            match tokio::time::timeout(
+                                START_GATE_MONITOR_CLEANUP_TIMEOUT,
+                                repository.is_gate_confirmed(&handle.launch_id, attempt_count),
+                            )
+                            .await
+                            {
+                                Err(_) => {
+                                    warn!(
+                                        instance_id = %instance_id,
+                                        launch_id = %handle.launch_id,
+                                        attempt_count,
+                                        "Timed out reading failed start-gate handoff; retaining registry for durable recovery"
+                                    );
+                                    return;
+                                }
+                                Ok(Ok(true)) => {
+                                    // Confirmation won the exact marker race.
+                                    // Continue into the normal monitor path.
+                                    warn!(
+                                        instance_id = %instance_id,
+                                        launch_id = %handle.launch_id,
+                                        attempt_count,
+                                        "Start gate was confirmed while monitor observed its deadline"
+                                    );
+                                }
+                                Ok(Ok(false)) => {
+                                    debug!(
+                                        instance_id = %instance_id,
+                                        launch_id = %handle.launch_id,
+                                        attempt_count,
+                                        "Failed start-gate handoff was already recovered or terminalized"
+                                    );
+                                    return;
+                                }
+                                Ok(Err(error)) => {
+                                    warn!(
+                                        instance_id = %instance_id,
+                                        launch_id = %handle.launch_id,
+                                        attempt_count,
+                                        error = %error,
+                                        "Could not read failed start-gate handoff; retaining registry for recovery"
+                                    );
+                                    return;
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            warn!(
+                                instance_id = %instance_id,
+                                launch_id = %handle.launch_id,
+                                attempt_count,
+                                error = %error,
+                                "Could not terminalize failed start-gate handoff; retaining registry for recovery"
+                            );
+                            return;
+                        }
+                    }
                 }
             }
         }
@@ -1233,7 +1385,7 @@ pub fn spawn_container_monitor(
                 // stale monitor would have used to throw away the row of the
                 // run that replaced it.
                 let is_stale_monitor = match container_registry
-                    .cleanup_generation(&instance_id, &handle.launch_id)
+                    .cleanup_handle(&instance_id, &handle.launch_id, &handle.handle_id)
                     .await
                 {
                     Ok(owned) => !owned,
@@ -1406,7 +1558,7 @@ pub fn spawn_container_monitor(
                 // Clean up container registry, but only the row this monitor
                 // registered: a resume may have replaced it with a live run.
                 let _ = container_registry
-                    .cleanup_generation(&instance_id, &handle.launch_id)
+                    .cleanup_handle(&instance_id, &handle.launch_id, &handle.handle_id)
                     .await;
 
                 release_launch_after_monitor(
