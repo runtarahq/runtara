@@ -907,7 +907,7 @@ impl ExecutionEngine {
         let enqueued = self
             .enqueue_trigger_event(req.tenant_id, event, idempotency_key)
             .await
-            .map_err(|error| {
+            .inspect_err(|error| {
                 if let ExecutionError::EntitlementDenied(denial) = &error {
                     crate::product_events::emit_quota_exceeded(
                         &self.events,
@@ -918,7 +918,6 @@ impl ExecutionEngine {
                         denial,
                     );
                 }
-                error
             })?;
 
         // A retry carrying an HTTP idempotency key can find a request whose
