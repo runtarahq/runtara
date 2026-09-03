@@ -181,7 +181,7 @@ impl EnvironmentClient {
 
     /// Start a new instance.
     #[instrument(skip(self, options), fields(image_id = %options.image_id, tenant_id = %options.tenant_id))]
-    pub async fn start_instance(
+    pub(crate) async fn start_instance(
         &self,
         options: crate::runtime_types::StartInstanceOptions,
     ) -> Result<StartInstanceResult> {

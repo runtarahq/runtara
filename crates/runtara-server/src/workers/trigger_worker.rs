@@ -25,6 +25,10 @@ use crate::valkey::stream::{StreamAcker, StreamConsumer};
 use crate::workers::execution_engine::{DetachedExecution, ExecutionEngine, ExecutionError};
 use crate::workers::execution_outbox::{DurableLaunchClaim, ExecutionOutbox};
 
+/// Stable terminal reason for a stream entry that predates durable source
+/// admission, or was written by a producer that bypassed it.
+const MISSING_DURABLE_REQUEST_ID: &str = "missing_durable_request_id";
+
 /// Result of processing a trigger event
 #[derive(Debug)]
 enum ProcessResult {
@@ -644,6 +648,24 @@ async fn process_trigger_event(
     handoff_owner: &str,
     event: &TriggerEvent,
 ) -> ProcessResult {
+    // The stream is only a delivery mechanism. A launch is authorized by the
+    // durable source request it carries, not by the presence of an arbitrary
+    // stream entry. Deserialize old entries so they can be ACKed, but never
+    // let them bypass source admission, its deadline, or handoff ownership.
+    let source_request_id = match durable_source_request_id(event) {
+        Ok(request_id) => request_id,
+        Err(rejection) => {
+            warn!(
+                instance_id = %event.instance_id,
+                tenant_id = %event.tenant_id,
+                workflow_id = %event.workflow_id,
+                reason = MISSING_DURABLE_REQUEST_ID,
+                "Rejecting trigger event without durable source request ID"
+            );
+            return rejection;
+        }
+    };
+
     let single_instance = match event.trigger_id() {
         Some(trigger_id) => match engine.get_trigger_single_instance(trigger_id).await {
             Ok(Some(enabled)) => enabled,
@@ -667,44 +689,40 @@ async fn process_trigger_event(
     // A durable source record remains subject to its absolute deadline even
     // after XADD. Claim the final cross-database handoff before Environment
     // can create an instance, otherwise an old PEL entry could start long
-    // after its intake request timed out. Older stream entries predate this
-    // contract and have no request ID, so retain their compatible path.
-    let source_request_id = match event.request_id {
-        Some(request_id) => match outbox
-            .claim_for_launch(
-                request_id,
-                &event.tenant_id,
-                &event.instance_id,
-                handoff_owner,
-            )
-            .await
-        {
-            Ok(DurableLaunchClaim::Claimed) => Some(request_id),
-            Ok(DurableLaunchClaim::AlreadyAccepted) => {
-                return ProcessResult::Deduplicated;
-            }
-            Ok(DurableLaunchClaim::InProgress) => {
-                return ProcessResult::HandoffInProgress(
-                    "another worker owns the durable launch handoff".to_string(),
-                );
-            }
-            Ok(DurableLaunchClaim::Expired) => {
-                return ProcessResult::PermanentFailure(
-                    "durable execution request expired before launch handoff".to_string(),
-                );
-            }
-            Ok(DurableLaunchClaim::Rejected) => {
-                return ProcessResult::PermanentFailure(
-                    "durable execution request is no longer launchable".to_string(),
-                );
-            }
-            Err(error) => {
-                return ProcessResult::HandoffInProgress(format!(
-                    "failed to claim durable launch handoff: {error}"
-                ));
-            }
-        },
-        None => None,
+    // after its intake request timed out.
+    match outbox
+        .claim_for_launch(
+            source_request_id,
+            &event.tenant_id,
+            &event.instance_id,
+            handoff_owner,
+        )
+        .await
+    {
+        Ok(DurableLaunchClaim::Claimed) => {}
+        Ok(DurableLaunchClaim::AlreadyAccepted) => {
+            return ProcessResult::Deduplicated;
+        }
+        Ok(DurableLaunchClaim::InProgress) => {
+            return ProcessResult::HandoffInProgress(
+                "another worker owns the durable launch handoff".to_string(),
+            );
+        }
+        Ok(DurableLaunchClaim::Expired) => {
+            return ProcessResult::PermanentFailure(
+                "durable execution request expired before launch handoff".to_string(),
+            );
+        }
+        Ok(DurableLaunchClaim::Rejected) => {
+            return ProcessResult::PermanentFailure(
+                "durable execution request is no longer launchable".to_string(),
+            );
+        }
+        Err(error) => {
+            return ProcessResult::HandoffInProgress(format!(
+                "failed to claim durable launch handoff: {error}"
+            ));
+        }
     };
 
     // Launch instance via runtara-environment (fire-and-forget). The guarded
@@ -723,27 +741,25 @@ async fn process_trigger_event(
                     trigger_type = %event.trigger_type(),
                     "Skipping execution: single_instance workflow already has active or starting work"
                 );
-                if let Some(request_id) = source_request_id {
-                    match outbox
-                        .terminalize_launch_claim(
-                            request_id,
-                            handoff_owner,
-                            "single_instance_active",
-                        )
-                        .await
-                    {
-                        Ok(true) => {}
-                        Ok(false) => {
-                            return ProcessResult::HandoffInProgress(
-                                "lost durable launch handoff while recording single-instance skip"
-                                    .to_string(),
-                            );
-                        }
-                        Err(error) => {
-                            return ProcessResult::HandoffInProgress(format!(
-                                "failed to record single-instance skip: {error}"
-                            ));
-                        }
+                match outbox
+                    .terminalize_launch_claim(
+                        source_request_id,
+                        handoff_owner,
+                        "single_instance_active",
+                    )
+                    .await
+                {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        return ProcessResult::HandoffInProgress(
+                            "lost durable launch handoff while recording single-instance skip"
+                                .to_string(),
+                        );
+                    }
+                    Err(error) => {
+                        return ProcessResult::HandoffInProgress(format!(
+                            "failed to record single-instance skip: {error}"
+                        ));
                     }
                 }
                 return ProcessResult::Success;
@@ -756,9 +772,7 @@ async fn process_trigger_event(
 
     match launch {
         Ok(DetachedExecution::Started(started_instance_id)) => {
-            if let Some(request_id) = source_request_id
-                && !mark_source_launch_accepted(outbox, request_id, handoff_owner).await
-            {
+            if !mark_source_launch_accepted(outbox, source_request_id, handoff_owner).await {
                 return ProcessResult::HandoffInProgress(
                     "Environment accepted start but source handoff confirmation is pending"
                         .to_string(),
@@ -772,9 +786,7 @@ async fn process_trigger_event(
             ProcessResult::Success
         }
         Ok(DetachedExecution::Deduplicated(instance_id)) => {
-            if let Some(request_id) = source_request_id
-                && !mark_source_launch_accepted(outbox, request_id, handoff_owner).await
-            {
+            if !mark_source_launch_accepted(outbox, source_request_id, handoff_owner).await {
                 return ProcessResult::HandoffInProgress(
                     "Environment deduplicated start but source handoff confirmation is pending"
                         .to_string(),
@@ -792,14 +804,13 @@ async fn process_trigger_event(
             version,
             compilation_queued,
         }) => {
-            if let Some(request_id) = source_request_id
-                && !release_source_launch_claim(
-                    outbox,
-                    request_id,
-                    handoff_owner,
-                    "workflow_not_compiled",
-                )
-                .await
+            if !release_source_launch_claim(
+                outbox,
+                source_request_id,
+                handoff_owner,
+                "workflow_not_compiled",
+            )
+            .await
             {
                 return ProcessResult::HandoffInProgress(
                     "source launch handoff retry state is pending".to_string(),
@@ -820,14 +831,13 @@ async fn process_trigger_event(
             ))
         }
         Err(e @ ExecutionError::WorkflowNotRunnable { .. }) => {
-            if let Some(request_id) = source_request_id
-                && !terminalize_source_launch_claim(
-                    outbox,
-                    request_id,
-                    handoff_owner,
-                    "workflow_not_runnable",
-                )
-                .await
+            if !terminalize_source_launch_claim(
+                outbox,
+                source_request_id,
+                handoff_owner,
+                "workflow_not_runnable",
+            )
+            .await
             {
                 return ProcessResult::HandoffInProgress(
                     "source terminalization is pending for unrunnable workflow".to_string(),
@@ -842,14 +852,13 @@ async fn process_trigger_event(
             ProcessResult::NotRunnable(e.to_string())
         }
         Err(e) => {
-            if let Some(request_id) = source_request_id
-                && !terminalize_source_launch_claim(
-                    outbox,
-                    request_id,
-                    handoff_owner,
-                    "environment_launch_failed",
-                )
-                .await
+            if !terminalize_source_launch_claim(
+                outbox,
+                source_request_id,
+                handoff_owner,
+                "environment_launch_failed",
+            )
+            .await
             {
                 return ProcessResult::HandoffInProgress(
                     "source terminalization is pending after launch failure".to_string(),
@@ -864,6 +873,12 @@ async fn process_trigger_event(
             ProcessResult::PermanentFailure(format!("Failed to start instance: {}", e))
         }
     }
+}
+
+fn durable_source_request_id(event: &TriggerEvent) -> Result<Uuid, ProcessResult> {
+    event
+        .request_id
+        .ok_or_else(|| ProcessResult::PermanentFailure(MISSING_DURABLE_REQUEST_ID.to_string()))
 }
 
 async fn mark_source_launch_accepted(
@@ -1035,6 +1050,48 @@ mod tests {
         assert_eq!(trigger.workflow_id, "workflow-abc");
         assert_eq!(trigger.version, Some(1));
         assert_eq!(trigger.trigger_type(), "http_api");
+    }
+
+    #[test]
+    fn trigger_event_without_durable_request_id_is_rejected_before_launch() {
+        let event = TriggerEvent::http_api(
+            "inst-legacy".to_string(),
+            "tenant-1".to_string(),
+            "workflow-abc".to_string(),
+            Some(1),
+            serde_json::json!({}),
+            false,
+            None,
+            false,
+        );
+
+        match durable_source_request_id(&event) {
+            Err(ProcessResult::PermanentFailure(reason)) => {
+                assert_eq!(reason, MISSING_DURABLE_REQUEST_ID);
+            }
+            other => panic!("expected permanent missing-ID rejection, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn trigger_event_with_durable_request_id_is_launchable() {
+        let request_id = Uuid::new_v4();
+        let mut event = TriggerEvent::http_api(
+            "inst-current".to_string(),
+            "tenant-1".to_string(),
+            "workflow-abc".to_string(),
+            Some(1),
+            serde_json::json!({}),
+            false,
+            None,
+            false,
+        );
+        event.request_id = Some(request_id);
+
+        match durable_source_request_id(&event) {
+            Ok(actual_request_id) => assert_eq!(actual_request_id, request_id),
+            other => panic!("expected durable request ID, got {other:?}"),
+        }
     }
 
     #[test]

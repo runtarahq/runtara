@@ -11,8 +11,11 @@ use uuid::Uuid;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TriggerEvent {
     /// Durable source-request identity, set by the execution-outbox relay.
-    /// Older stream entries did not carry it, so leave the field optional for
-    /// backward-compatible replay while P0.1 wires it into launch ownership.
+    ///
+    /// It remains optional only so the worker can deserialize and terminally
+    /// acknowledge pre-outbox stream entries. Such entries are never allowed
+    /// to launch: a current execution must carry this identity through the
+    /// durable admission and handoff boundary.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_id: Option<Uuid>,
 

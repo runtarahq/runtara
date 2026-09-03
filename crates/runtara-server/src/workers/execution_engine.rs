@@ -1076,7 +1076,7 @@ impl ExecutionEngine {
     /// The instance will run on the runtara-environment server.
     /// Use `get_instance_status` to poll for completion.
     #[instrument(skip(self, event), fields(instance_id = %event.instance_id, workflow_id = %event.workflow_id))]
-    pub async fn execute_detached(
+    pub(in crate::workers) async fn execute_detached(
         &self,
         event: &TriggerEvent,
     ) -> Result<DetachedExecution, ExecutionError> {

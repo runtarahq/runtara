@@ -237,7 +237,7 @@ impl RuntimeClient {
     /// # Returns
     /// The instance ID of the started workflow
     #[allow(clippy::too_many_arguments)]
-    pub async fn start_instance(
+    pub(crate) async fn start_instance(
         &self,
         image_id: &str,
         tenant_id: &str,
@@ -495,37 +495,6 @@ impl RuntimeClient {
 
             tokio::time::sleep(poll_interval).await;
         }
-    }
-
-    /// Execute a workflow synchronously (start and wait for completion)
-    ///
-    /// This is a convenience method that combines `start_instance` and `wait_for_completion`.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn execute_sync(
-        &self,
-        image_id: &str,
-        tenant_id: &str,
-        workflow_id: &str,
-        instance_id: Option<String>,
-        input: Option<Value>,
-        timeout: Option<ExecutionTimeoutSeconds>,
-        debug: bool,
-    ) -> Result<ExecutionOutput, RuntimeError> {
-        let start = self
-            .start_instance(
-                image_id,
-                tenant_id,
-                workflow_id,
-                instance_id,
-                input,
-                timeout,
-                debug,
-                false,
-            )
-            .await?;
-
-        self.wait_for_completion(&start.instance_id, None, timeout)
-            .await
     }
 
     /// Stop a running workflow instance

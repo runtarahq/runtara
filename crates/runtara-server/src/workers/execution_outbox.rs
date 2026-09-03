@@ -424,9 +424,9 @@ impl ExecutionOutbox {
     /// source deadline: database time checks the deadline in the same update
     /// that records this worker's short handoff lease.
     ///
-    /// Legacy stream entries have no `request_id` and intentionally bypass
-    /// this method; all newly accepted server sources include one in the JSON
-    /// event data.
+    /// The trigger worker rejects and ACKs legacy stream entries without a
+    /// `request_id`; every launchable server source therefore reaches this
+    /// durable fence.
     pub async fn claim_for_launch(
         &self,
         request_id: Uuid,
