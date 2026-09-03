@@ -992,8 +992,8 @@ fn direct_compile_emits_fanout_inside_conditional_branch() {
             "cond": {"id": "cond", "stepType": "Conditional", "condition": {"type": "operation", "op": "EQ", "arguments": [{"value": "x", "valueType": "immediate"}, {"value": "y", "valueType": "immediate"}]}},
             "hit": {"id": "hit", "stepType": "Agent", "agentId": "utils", "capabilityId": "get-current-iso-datetime", "inputMapping": {}},
             "miss_gate": {"id": "miss_gate", "stepType": "Agent", "agentId": "utils", "capabilityId": "get-current-iso-datetime", "inputMapping": {}},
-            "b": {"id": "b", "stepType": "Agent", "agentId": "utils", "capabilityId": "get-current-iso-datetime", "inputMapping": {}},
-            "c": {"id": "c", "stepType": "Agent", "agentId": "utils", "capabilityId": "get-current-iso-datetime", "inputMapping": {}},
+            "b": {"id": "b", "stepType": "Agent", "agentId": "utils", "capabilityId": "get-current-iso-datetime", "maxRetries": 0, "inputMapping": {}},
+            "c": {"id": "c", "stepType": "Agent", "agentId": "utils", "capabilityId": "get-current-iso-datetime", "maxRetries": 0, "inputMapping": {}},
             "join": {"id": "join", "stepType": "Agent", "agentId": "utils", "capabilityId": "get-current-iso-datetime", "inputMapping": {}},
             "finish": {"id": "finish", "stepType": "Finish", "inputMapping": {"out": {"value": "ok", "valueType": "immediate"}}}
           }
@@ -6665,6 +6665,161 @@ fn direct_core_lowers_durable_agent_retry_loop() {
     assert!(
         saw_checkpoint_signal_after_checkpoint,
         "successful retry checkpoint should handle pending lifecycle signals"
+    );
+}
+
+#[test]
+fn direct_core_lifecycle_agent_retry_parks_without_sleeping() {
+    use super::super::component::WorkflowAbi;
+
+    let graph = durable_agent_retry_graph();
+    let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
+    let manifest_json = manifest.to_canonical_json().expect("manifest json");
+    let core_config = DirectCoreConfig::new(&manifest, &manifest_json, false)
+        .expect("core config")
+        .with_abi(WorkflowAbi::InvokeHostImports);
+    let (resolve, world) = build_direct_component_resolve_configured(
+        &manifest.feature_summary.agent_ids,
+        WorkflowAbi::InvokeHostImports,
+        false,
+        None,
+        &std::collections::BTreeMap::new(),
+        false,
+    )
+    .expect("invoke resolve");
+    let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
+        .validate_all(&core)
+        .expect("lifecycle retry core module validates");
+
+    let mut next_function_index = 0;
+    let mut get_checkpoint_index = None;
+    let mut checkpoint_index = None;
+    let mut now_ms_index = None;
+    let mut blocking_sleep_index = None;
+    let mut durable_sleep_index = None;
+    let mut durable_sleep_checkpoint_index = None;
+    let mut retry_sleep_key_index = None;
+    for payload in Parser::new(0).parse_all(&core) {
+        if let Payload::ImportSection(reader) = payload.expect("core wasm payload") {
+            for import in reader.into_imports() {
+                let import = import.expect("core import");
+                if !matches!(import.ty, TypeRef::Func(_)) {
+                    continue;
+                }
+                match (import.module, import.name) {
+                    (module, "get-checkpoint")
+                        if module.contains("runtara:workflow-runtime/runtime") =>
+                    {
+                        get_checkpoint_index = Some(next_function_index);
+                    }
+                    (module, "checkpoint")
+                        if module.contains("runtara:workflow-runtime/runtime") =>
+                    {
+                        checkpoint_index = Some(next_function_index);
+                    }
+                    (module, "now-ms") if module.contains("runtara:workflow-runtime/runtime") => {
+                        now_ms_index = Some(next_function_index);
+                    }
+                    (module, "blocking-sleep")
+                        if module.contains("runtara:workflow-runtime/runtime") =>
+                    {
+                        blocking_sleep_index = Some(next_function_index);
+                    }
+                    (module, "durable-sleep")
+                        if module.contains("runtara:workflow-runtime/runtime") =>
+                    {
+                        durable_sleep_index = Some(next_function_index);
+                    }
+                    (module, "durable-sleep-checkpoint")
+                        if module.contains("runtara:workflow-runtime/runtime") =>
+                    {
+                        durable_sleep_checkpoint_index = Some(next_function_index);
+                    }
+                    (module, "agent-retry-sleep-key")
+                        if module.contains("runtara:workflow-stdlib/json") =>
+                    {
+                        retry_sleep_key_index = Some(next_function_index);
+                    }
+                    _ => {}
+                }
+                next_function_index += 1;
+            }
+        }
+    }
+
+    let mut saw_get_checkpoint = false;
+    let mut saw_checkpoint = false;
+    let mut saw_now_ms = false;
+    let mut saw_retry_sleep_key = false;
+    let mut saw_blocking_sleep = false;
+    let mut saw_durable_sleep = false;
+    let mut saw_durable_sleep_checkpoint = false;
+    let mut code_body_index = 0;
+    for payload in Parser::new(0).parse_all(&core) {
+        if let Payload::CodeSectionEntry(body) = payload.expect("core wasm payload") {
+            if code_body_index == 0 {
+                for operator in body.get_operators_reader().expect("operators") {
+                    match operator.expect("operator") {
+                        Operator::Call { function_index }
+                            if Some(function_index) == get_checkpoint_index =>
+                        {
+                            saw_get_checkpoint = true;
+                        }
+                        Operator::Call { function_index }
+                            if Some(function_index) == checkpoint_index =>
+                        {
+                            saw_checkpoint = true;
+                        }
+                        Operator::Call { function_index }
+                            if Some(function_index) == now_ms_index =>
+                        {
+                            saw_now_ms = true;
+                        }
+                        Operator::Call { function_index }
+                            if Some(function_index) == retry_sleep_key_index =>
+                        {
+                            saw_retry_sleep_key = true;
+                        }
+                        Operator::Call { function_index }
+                            if Some(function_index) == blocking_sleep_index =>
+                        {
+                            saw_blocking_sleep = true;
+                        }
+                        Operator::Call { function_index }
+                            if Some(function_index) == durable_sleep_index =>
+                        {
+                            saw_durable_sleep = true;
+                        }
+                        Operator::Call { function_index }
+                            if Some(function_index) == durable_sleep_checkpoint_index =>
+                        {
+                            saw_durable_sleep_checkpoint = true;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            code_body_index += 1;
+        }
+    }
+
+    assert!(
+        saw_get_checkpoint,
+        "retry path must replay checkpointed state"
+    );
+    assert!(
+        saw_checkpoint,
+        "retry path must persist failure/deadline state"
+    );
+    assert!(saw_now_ms, "retry path must mint an absolute deadline");
+    assert!(
+        saw_retry_sleep_key,
+        "retry path must use the next attempt's keyed deadline"
+    );
+    assert!(
+        !saw_blocking_sleep && !saw_durable_sleep && !saw_durable_sleep_checkpoint,
+        "lifecycle retry lowering must park instead of holding the runner in any sleep host call"
     );
 }
 

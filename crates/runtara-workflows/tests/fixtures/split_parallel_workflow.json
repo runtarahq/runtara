@@ -22,6 +22,7 @@
             "id": "transform",
             "agentId": "transform",
             "capabilityId": "map-fields",
+            "maxRetries": 0,
             "inputMapping": {
               "source_data": {
                 "valueType": "reference",

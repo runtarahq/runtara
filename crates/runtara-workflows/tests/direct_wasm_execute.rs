@@ -16,9 +16,10 @@ use std::time::{Duration, Instant};
 use base64::Engine;
 use runtara_workflows::direct_wasm::{
     DIRECT_SHARED_COMPONENT_REQUIREMENTS, DirectArtifactMetadata, DirectCompilationInput,
-    RuntimeBinding, WorkflowAbi, compile_direct_workflow, compile_direct_workflow_composed,
-    compile_direct_workflow_composed_configured, compile_direct_workflow_composed_with_binding,
-    compose_direct_workflow, emit_direct_component_artifacts_with_binding,
+    DirectCompileError, RuntimeBinding, WorkflowAbi, compile_direct_workflow,
+    compile_direct_workflow_composed, compile_direct_workflow_composed_configured,
+    compile_direct_workflow_composed_with_binding, compose_direct_workflow,
+    emit_direct_component_artifacts_with_binding,
 };
 use runtara_workflows::{
     CompilationInput, DirectWorkflowCompileOptions, ExecutionGraph, WorkflowCompilerMode,
@@ -6551,6 +6552,36 @@ fn compile_invoke_abi_artifact_full(
     result
 }
 
+fn compile_invoke_abi_artifact_with_children(
+    components_dir: &Path,
+    workflow_id: &str,
+    graph_json: &str,
+    child_workflows: Vec<runtara_workflows::compile::ChildWorkflowInput>,
+) -> runtara_workflows::direct_wasm::DirectCompilationResult {
+    let graph: ExecutionGraph = serde_json::from_str(graph_json).expect("parent fixture parses");
+    let temp = tempfile::tempdir().expect("tempdir");
+    let result = compile_direct_workflow_composed_configured(
+        DirectCompilationInput {
+            workflow_id: workflow_id.to_string(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: graph,
+            child_workflows,
+            output_dir: temp.path().to_path_buf(),
+            track_events: false,
+            agent_catalog: None,
+            agent_slug: None,
+        },
+        components_dir,
+        RuntimeBinding::HostImport,
+        runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
+        false,
+    )
+    .expect("child invoke-abi compile+compose succeeds");
+    std::mem::forget(temp);
+    result
+}
+
 /// A pure, non-durable workflow — a single Finish echoing the input, no
 /// runtime-requiring feature. The degenerate agent case.
 const PURE_PASSTHROUGH: &str = r#"{
@@ -7156,6 +7187,162 @@ fn store_freeing_delay_fixture(duration_ms: Option<u64>) -> String {
     )
 }
 
+/// A one-step HTTP Agent whose first rate-limited result must be replayed from
+/// its per-attempt checkpoint. `retryDelay` deliberately differs from the
+/// scripted `retry-after-ms`, proving the parked deadline follows rate-limit
+/// policy rather than an arbitrary in-run sleep.
+fn lifecycle_retry_http_graph() -> String {
+    serde_json::json!({
+        "name": "Lifecycle Retry Park",
+        "durable": true,
+        "rateLimitBudgetMs": 60_000,
+        "steps": {
+            "fetch": {
+                "stepType": "Agent",
+                "id": "fetch",
+                "agentId": "http",
+                "capabilityId": "http-request",
+                "durable": true,
+                "maxRetries": 1,
+                "retryDelay": 1,
+                "inputMapping": {
+                    "method": {"valueType": "immediate", "value": "GET"},
+                    "url": {"valueType": "reference", "value": "data.url"}
+                }
+            },
+            "finish": {
+                "stepType": "Finish",
+                "id": "finish",
+                "inputMapping": {
+                    "status": {"valueType": "reference", "value": "steps.fetch.outputs.status_code"}
+                }
+            }
+        },
+        "entryPoint": "fetch",
+        "executionPlan": [{"fromStep": "fetch", "toStep": "finish"}],
+        "variables": {},
+        "inputSchema": {},
+        "outputSchema": {}
+    })
+    .to_string()
+}
+
+fn lifecycle_retry_split_graph() -> String {
+    serde_json::json!({
+        "name": "Lifecycle Split Retry Park",
+        "durable": true,
+        "steps": {
+            "split": {
+                "stepType": "Split",
+                "id": "split",
+                "config": {
+                    "value": {"valueType": "immediate", "value": [1]},
+                    "sequential": true,
+                    "maxRetries": 1,
+                    "retryDelay": 5_000
+                },
+                "subgraph": {
+                    "entryPoint": "temporary_failure",
+                    "steps": {
+                        "temporary_failure": {
+                            "stepType": "Error",
+                            "id": "temporary_failure",
+                            "category": "transient",
+                            "code": "ITEM_TEMPORARY",
+                            "message": "retry this item",
+                            "severity": "error"
+                        }
+                    },
+                    "executionPlan": [],
+                    "variables": {},
+                    "inputSchema": {},
+                    "outputSchema": {}
+                }
+            },
+            "finish": {"stepType": "Finish", "id": "finish"}
+        },
+        "entryPoint": "split",
+        "executionPlan": [{"fromStep": "split", "toStep": "finish"}],
+        "variables": {},
+        "inputSchema": {},
+        "outputSchema": {}
+    })
+    .to_string()
+}
+
+const LIFECYCLE_RETRY_EMBED_PARENT: &str = r#"{
+  "name": "Lifecycle Embed Retry Park",
+  "durable": true,
+  "steps": {
+    "call_child": {
+      "stepType": "EmbedWorkflow",
+      "id": "call_child",
+      "childWorkflowId": "retry-child",
+      "childVersion": "latest",
+      "maxRetries": 1,
+      "retryDelay": 5000
+    },
+    "finish": { "stepType": "Finish", "id": "finish" }
+  },
+  "entryPoint": "call_child",
+  "executionPlan": [{ "fromStep": "call_child", "toStep": "finish" }],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}"#;
+
+const LIFECYCLE_RETRY_EMBED_CHILD: &str = r#"{
+  "name": "Lifecycle Embed Retry Child",
+  "steps": {
+    "temporary_failure": {
+      "stepType": "Error",
+      "id": "temporary_failure",
+      "category": "transient",
+      "code": "CHILD_TEMPORARY",
+      "message": "retry the child",
+      "severity": "error"
+    }
+  },
+  "entryPoint": "temporary_failure",
+  "executionPlan": [],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}"#;
+
+fn spawn_retry_http_proxy(
+    response_bodies: Vec<Vec<u8>>,
+) -> (
+    String,
+    Arc<std::sync::atomic::AtomicU32>,
+    thread::JoinHandle<()>,
+) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind retry proxy");
+    let url = format!(
+        "http://{}",
+        listener.local_addr().expect("retry proxy addr")
+    );
+    let hits = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let stub_hits = hits.clone();
+    let handle = thread::spawn(move || {
+        for body in response_bodies {
+            let (mut stream, _) = listener.accept().expect("retry proxy request");
+            let mut request = [0u8; 8192];
+            let _ = stream.read(&mut request);
+            stub_hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                body.len()
+            );
+            stream
+                .write_all(headers.as_bytes())
+                .expect("retry proxy headers");
+            stream.write_all(&body).expect("retry proxy body");
+        }
+    });
+    (url, hits, handle)
+}
+
 /// Checkpoint-persisting runtime host: unlike [`RecordingRuntimeHost`] its
 /// checkpoint map survives across `execute_invoke` calls (share one `Arc`), so
 /// a store-freeing suspend that checkpoints its deadline on the first invoke
@@ -7193,6 +7380,9 @@ struct CheckpointingRuntimeHost {
     /// is the defect this captures: an error the lowering returned without ever
     /// reporting it.
     failed: Mutex<Option<Vec<u8>>>,
+    /// A lifecycle signal that becomes visible on the next explicit poll. Retry
+    /// parks use this after a due wake, before issuing their next attempt.
+    pending_signal: std::sync::atomic::AtomicBool,
 }
 
 impl CheckpointingRuntimeHost {
@@ -7208,6 +7398,7 @@ impl CheckpointingRuntimeHost {
             any_signal: Mutex::new(None),
             sleep_error: Mutex::new(None),
             failed: Mutex::new(None),
+            pending_signal: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -7263,6 +7454,11 @@ impl CheckpointingRuntimeHost {
     fn deliver_signal_any(&self, payload: &[u8]) {
         *self.any_signal.lock().unwrap() = Some(payload.to_vec());
     }
+
+    fn request_signal(&self) {
+        self.pending_signal
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 #[async_trait::async_trait]
@@ -7297,7 +7493,9 @@ impl runtara_component_host::runtime_host::RuntimeHost for CheckpointingRuntimeH
         Ok(false)
     }
     async fn check_signals(&self) -> Result<bool, String> {
-        Ok(false)
+        Ok(self
+            .pending_signal
+            .load(std::sync::atomic::Ordering::SeqCst))
     }
     async fn poll_custom_signal(&self, checkpoint_id: String) -> Result<Option<Vec<u8>>, String> {
         // Non-destructive read (mirrors the wait-replay fix): a resumed wait
@@ -7397,6 +7595,15 @@ fn run_invoke_once(
     host: Arc<dyn runtara_component_host::runtime_host::RuntimeHost>,
     input: Vec<u8>,
 ) -> runtara_component_host::InvokeExit {
+    run_invoke_once_with_env(wasm_path, host, input, HashMap::new())
+}
+
+fn run_invoke_once_with_env(
+    wasm_path: &Path,
+    host: Arc<dyn runtara_component_host::runtime_host::RuntimeHost>,
+    input: Vec<u8>,
+    env: HashMap<String, String>,
+) -> runtara_component_host::InvokeExit {
     let executor = embedded_executor();
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
     runtime
@@ -7409,7 +7616,7 @@ fn run_invoke_once(
                 .execute_invoke(
                     &pre,
                     runtara_component_host::WorkflowRunSpec {
-                        env: HashMap::new(),
+                        env,
                         stderr: None,
                         timeout: Duration::from_secs(60),
                         cancel: None,
@@ -7587,6 +7794,277 @@ fn direct_wasm_execute_invoke_one_millisecond_delay_parks_then_resumes_once() {
         serde_json::from_slice::<Value>(legs[1].output()).expect("output is JSON"),
         expected
     );
+}
+
+/// A rate-limited Agent retry persists both a failure envelope and an absolute
+/// next-attempt deadline. An early restart must re-park on that same deadline
+/// without repeating the HTTP call; the due wake performs exactly one retry.
+#[test]
+fn direct_wasm_execute_invoke_rate_limited_agent_retry_parks_and_replays_once() {
+    let components_dir = direct_e2e_components_dir();
+    let (proxy_url, hits, proxy) = spawn_retry_http_proxy(vec![
+        br#"{"status":429,"headers":{"retry-after-ms":"5000"},"body":{"error":"rate limited"}}"#
+            .to_vec(),
+        br#"{"status":200,"headers":{},"body":{"ok":true}}"#.to_vec(),
+    ]);
+    let artifact = compile_invoke_abi_artifact(
+        &components_dir,
+        "invoke-rate-limited-agent-retry-park",
+        &lifecycle_retry_http_graph(),
+    );
+    let input = serde_json::to_vec(&serde_json::json!({ "url": format!("{proxy_url}/item") }))
+        .expect("retry input");
+    let mut env = HashMap::new();
+    env.insert("RUNTARA_HTTP_PROXY_URL".to_string(), proxy_url);
+    let host = Arc::new(CheckpointingRuntimeHost::new(&input));
+
+    let first = run_invoke_once_with_env(
+        &artifact.wasm_path,
+        host.clone(),
+        input.clone(),
+        env.clone(),
+    );
+    let deadline = match first {
+        runtara_component_host::InvokeExit::Suspended(wakes) => match wakes.as_slice() {
+            [runtara_component_host::lifecycle::WorkflowWake::At(deadline)] => *deadline,
+            other => panic!("rate-limited retry must park on one timed wake, got {other:?}"),
+        },
+        other => panic!("rate-limited retry must park, got {other:?}"),
+    };
+    assert_eq!(
+        hits.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the first 429 is the only call before a due wake"
+    );
+    let checkpoints = host.checkpoints.lock().unwrap();
+    assert!(
+        checkpoints.keys().any(|key| key.contains("::attempt::1")),
+        "failed attempt envelope must be checkpointed: {checkpoints:?}"
+    );
+    assert!(
+        checkpoints
+            .iter()
+            .any(|(key, state)| key.contains("::retry_sleep::2") && state.len() == 8),
+        "next-attempt key must contain exactly one absolute u64 deadline: {checkpoints:?}"
+    );
+    drop(checkpoints);
+    assert!(
+        host.sleeps.lock().unwrap().is_empty(),
+        "lifecycle retry parking must not call durable-sleep-checkpoint"
+    );
+
+    // A manual/early restart must preserve the existing absolute deadline and
+    // must not re-invoke the failed attempt while it is still parked.
+    // The guest accepts up to one second of database/host clock skew, so pin
+    // farther away than that tolerance to prove an operator's early resume
+    // cannot consume the retry.
+    host.pin_clock_before(deadline, 2_000);
+    let early = run_invoke_once_with_env(
+        &artifact.wasm_path,
+        host.clone(),
+        input.clone(),
+        env.clone(),
+    );
+    match early {
+        runtara_component_host::InvokeExit::Suspended(wakes) => assert_eq!(
+            wakes,
+            vec![runtara_component_host::lifecycle::WorkflowWake::At(
+                deadline
+            )],
+            "early restart must retain the original retry deadline"
+        ),
+        other => panic!("early retry restart must re-park, got {other:?}"),
+    }
+    assert_eq!(
+        hits.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "early restart must replay the checkpointed failure, not call upstream again"
+    );
+
+    *host.pinned_clock_ms.lock().unwrap() = None;
+    host.advance_clock_past(deadline);
+    let completed = run_invoke_once_with_env(&artifact.wasm_path, host.clone(), input, env);
+    let output = match completed {
+        runtara_component_host::InvokeExit::Completed(output) => output,
+        other => panic!("due retry wake must complete after the scripted success, got {other:?}"),
+    };
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output).expect("retry output JSON"),
+        serde_json::json!({ "status": 200 })
+    );
+    assert_eq!(
+        hits.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "the due wake must issue exactly one retry"
+    );
+    assert!(
+        host.sleeps.lock().unwrap().is_empty(),
+        "no lifecycle retry leg may hold the runner in a durable sleep"
+    );
+    proxy.join().expect("retry proxy joins");
+}
+
+/// Whole-Split retries park in the lifecycle ABI as well. This exercises the
+/// sequential Split path specifically; concurrent item retries are rejected at
+/// compile time because they would need independent wake continuations.
+#[test]
+fn direct_wasm_execute_invoke_sequential_split_retry_parks_before_second_attempt() {
+    let components_dir = direct_e2e_components_dir();
+    let artifact = compile_invoke_abi_artifact(
+        &components_dir,
+        "invoke-sequential-split-retry-park",
+        &lifecycle_retry_split_graph(),
+    );
+    let input = br#"{}"#.to_vec();
+    let host = Arc::new(CheckpointingRuntimeHost::new(&input));
+
+    let first = run_invoke_once(&artifact.wasm_path, host.clone(), input.clone());
+    let deadline = match first {
+        runtara_component_host::InvokeExit::Suspended(wakes) => match wakes.as_slice() {
+            [runtara_component_host::lifecycle::WorkflowWake::At(deadline)] => *deadline,
+            other => panic!("sequential Split retry must park on one timed wake, got {other:?}"),
+        },
+        other => panic!("sequential Split retry must park, got {other:?}"),
+    };
+    let checkpoints = host.checkpoints.lock().unwrap();
+    assert!(
+        checkpoints.keys().any(|key| key.contains("::attempt::1")),
+        "failed Split attempt must be checkpointed: {checkpoints:?}"
+    );
+    assert!(
+        checkpoints
+            .iter()
+            .any(|(key, state)| key.contains("::retry_sleep::2") && state.len() == 8),
+        "Split retry wake must persist an absolute deadline: {checkpoints:?}"
+    );
+    drop(checkpoints);
+    assert!(
+        host.sleeps.lock().unwrap().is_empty(),
+        "sequential Split retry must not hold a runner in durable sleep"
+    );
+
+    host.advance_clock_past(deadline);
+    assert!(
+        matches!(
+            run_invoke_once(&artifact.wasm_path, host.clone(), input),
+            runtara_component_host::InvokeExit::Failed(_)
+        ),
+        "the due retry should execute its second transient failure and terminate"
+    );
+    assert!(
+        host.sleeps.lock().unwrap().is_empty(),
+        "the due Split retry must still avoid durable sleep"
+    );
+}
+
+/// EmbedWorkflow retries use the same per-attempt envelope plus absolute wake
+/// protocol, so a failed child does not keep the parent's runner allocated.
+#[test]
+fn direct_wasm_execute_invoke_embed_workflow_retry_parks_before_second_attempt() {
+    let components_dir = direct_e2e_components_dir();
+    let child: ExecutionGraph =
+        serde_json::from_str(LIFECYCLE_RETRY_EMBED_CHILD).expect("child graph parses");
+    let artifact = compile_invoke_abi_artifact_with_children(
+        &components_dir,
+        "invoke-embed-workflow-retry-park",
+        LIFECYCLE_RETRY_EMBED_PARENT,
+        vec![runtara_workflows::compile::ChildWorkflowInput {
+            step_id: "call_child".to_string(),
+            workflow_id: "retry-child".to_string(),
+            version_requested: "latest".to_string(),
+            version_resolved: 1,
+            execution_graph: child,
+        }],
+    );
+    let input = br#"{}"#.to_vec();
+    let host = Arc::new(CheckpointingRuntimeHost::new(&input));
+
+    let first = run_invoke_once(&artifact.wasm_path, host.clone(), input.clone());
+    let deadline = match first {
+        runtara_component_host::InvokeExit::Suspended(wakes) => match wakes.as_slice() {
+            [runtara_component_host::lifecycle::WorkflowWake::At(deadline)] => *deadline,
+            other => panic!("EmbedWorkflow retry must park on one timed wake, got {other:?}"),
+        },
+        other => panic!("EmbedWorkflow retry must park, got {other:?}"),
+    };
+    let checkpoints = host.checkpoints.lock().unwrap();
+    assert!(
+        checkpoints.keys().any(|key| key.contains("::attempt::1")),
+        "failed child attempt must be checkpointed: {checkpoints:?}"
+    );
+    assert!(
+        checkpoints
+            .iter()
+            .any(|(key, state)| key.contains("::retry_sleep::2") && state.len() == 8),
+        "EmbedWorkflow retry wake must persist an absolute deadline: {checkpoints:?}"
+    );
+    drop(checkpoints);
+    assert!(
+        host.sleeps.lock().unwrap().is_empty(),
+        "EmbedWorkflow retry must not hold a runner in durable sleep"
+    );
+
+    host.advance_clock_past(deadline);
+    assert!(
+        matches!(
+            run_invoke_once(&artifact.wasm_path, host.clone(), input),
+            runtara_component_host::InvokeExit::Failed(_)
+        ),
+        "the due child retry should execute its second transient failure and terminate"
+    );
+    assert!(
+        host.sleeps.lock().unwrap().is_empty(),
+        "the due EmbedWorkflow retry must still avoid durable sleep"
+    );
+}
+
+/// A cancellation/pause signal delivered while a retry is parked is observed
+/// before its due wake can issue another upstream call.
+#[test]
+fn direct_wasm_execute_invoke_retry_park_observes_signal_before_retrying() {
+    let components_dir = direct_e2e_components_dir();
+    let (proxy_url, hits, proxy) = spawn_retry_http_proxy(vec![
+        br#"{"status":429,"headers":{"retry-after-ms":"5000"},"body":{"error":"rate limited"}}"#
+            .to_vec(),
+    ]);
+    let artifact = compile_invoke_abi_artifact(
+        &components_dir,
+        "invoke-retry-park-signal",
+        &lifecycle_retry_http_graph(),
+    );
+    let input = serde_json::to_vec(&serde_json::json!({ "url": format!("{proxy_url}/item") }))
+        .expect("retry input");
+    let mut env = HashMap::new();
+    env.insert("RUNTARA_HTTP_PROXY_URL".to_string(), proxy_url);
+    let host = Arc::new(CheckpointingRuntimeHost::new(&input));
+
+    let first = run_invoke_once_with_env(
+        &artifact.wasm_path,
+        host.clone(),
+        input.clone(),
+        env.clone(),
+    );
+    let deadline = match first {
+        runtara_component_host::InvokeExit::Suspended(wakes) => match wakes.as_slice() {
+            [runtara_component_host::lifecycle::WorkflowWake::At(deadline)] => *deadline,
+            other => panic!("rate-limited retry must park on one timed wake, got {other:?}"),
+        },
+        other => panic!("rate-limited retry must park, got {other:?}"),
+    };
+
+    host.request_signal();
+    host.advance_clock_past(deadline);
+    let signalled = run_invoke_once_with_env(&artifact.wasm_path, host.clone(), input, env);
+    assert!(
+        matches!(signalled, runtara_component_host::InvokeExit::Suspended(_)),
+        "a pending lifecycle signal must stop before the retry attempt, got {signalled:?}"
+    );
+    assert_eq!(
+        hits.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "a signal during the park must prevent the second upstream call"
+    );
+    proxy.join().expect("retry proxy joins");
 }
 
 /// A dynamic durable Delay must always park under the invoke ABI. The duration
@@ -10664,6 +11142,35 @@ fn parallel_http_split_graph(url: &str, parallelism: u32) -> String {
     )
 }
 
+/// Retrying items need independent durable wake state. The current parallel
+/// Split lowering cannot preserve that state, so compiling one is a stable
+/// rejection rather than an in-run blocking-timer fallback.
+fn assert_parallel_retry_backoff_rejected(workflow_id: &str, graph: ExecutionGraph) {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let error = compile_direct_workflow(DirectCompilationInput {
+        workflow_id: workflow_id.to_string(),
+        version: 1,
+        source_checksum: None,
+        execution_graph: graph,
+        child_workflows: vec![],
+        output_dir: temp.path().to_path_buf(),
+        track_events: false,
+        agent_catalog: None,
+        agent_slug: None,
+    })
+    .expect_err("parallel retry/backoff must be rejected before composition");
+    let DirectCompileError::Unsupported { report } = error else {
+        panic!("expected direct support rejection, got {error:?}");
+    };
+    assert!(
+        report
+            .unsupported
+            .iter()
+            .any(|feature| feature.feature == "parallel-retry-backoff"),
+        "missing parallel-retry-backoff diagnostic: {report:?}"
+    );
+}
+
 /// A single-Agent diamond `start → {b, c} → finish` whose two branches each hit
 /// the mock `/slow-item` endpoint (Phase 4a). The branches run concurrently
 /// in one waitable-set window; the merge
@@ -11828,478 +12335,54 @@ fn direct_wasm_execute_parallel_split_pause_mid_window_resumes() {
     let _ = stub.join();
 }
 
-/// Rate-limited upstreams inside a parallel window: every item's FIRST call
-/// (the four speculative launches) answers 429 + retry-after; assemble then
-/// classifies each memoized failure as rate-limited, takes the keyed backoff
-/// sleep, re-invokes, and succeeds. Proves the memo slots preserve the full
-/// error-info (retry_after_ms included), the per-item retry machinery engages
-/// per item, and nothing fails or double-fires.
+/// A durable parallel Split with retried items is rejected before it can mint
+/// concurrent in-run timers. The sequential lowering remains the supported
+/// durable retry path.
 #[test]
-fn direct_wasm_execute_parallel_split_durable_rate_limited_items_retry_and_succeed() {
-    let _timing_guard = PARALLEL_TIMING_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let components_dir = direct_e2e_components_dir();
-
-    // Proxy stub: the first `ITEMS` requests are 429 (rate limited, with a
-    // retry-after-ms header the http agent folds into error-info); later
-    // requests answer 200. The parallel window launches all four attempt-1
-    // calls before any retry can arrive, so count-based scripting is exact.
-    const ITEMS: u32 = 4;
-    let hits = Arc::new(std::sync::atomic::AtomicU32::new(0));
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind rate-limit stub");
-    let stub_url = format!("http://{}", listener.local_addr().expect("stub addr"));
-    let (stub_stop_tx, stub_stop_rx) = mpsc::channel::<()>();
-    listener.set_nonblocking(true).expect("nonblocking");
-    let stub_hits = hits.clone();
-    let stub = thread::spawn(move || {
-        loop {
-            if stub_stop_rx.try_recv().is_ok() {
-                return;
-            }
-            match listener.accept() {
-                Ok((mut stream, _)) => {
-                    stream.set_nonblocking(false).ok();
-                    let hits = stub_hits.clone();
-                    thread::spawn(move || {
-                        use std::io::{Read, Write};
-                        let mut buf = [0u8; 8192];
-                        let _ = stream.read(&mut buf);
-                        let n = hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                        // Keep attempt-1 calls in flight briefly so the four
-                        // launches genuinely overlap before any 429 lands.
-                        thread::sleep(Duration::from_millis(100));
-                        let body = if n < ITEMS {
-                            // Proxy envelope for an upstream 429. The agent
-                            // reads retry-after-ms from the RESPONSE headers.
-                            br#"{"status":429,"headers":{"retry-after-ms":"50"},"body":{"error":"rate limited"}}"#.to_vec()
-                        } else {
-                            br#"{"status":200,"headers":{},"body":{"ok":true}}"#.to_vec()
-                        };
-                        let response = format!(
-                            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
-                            body.len()
-                        );
-                        let _ = stream.write_all(response.as_bytes());
-                        let _ = stream.write_all(&body);
-                    });
-                }
-                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    thread::sleep(Duration::from_millis(5));
-                }
-                Err(_) => return,
-            }
-        }
-    });
-
-    // Default agent retry policy (maxRetries absent => effective default) on
-    // a durable graph: the memoized 429 is consumed by the DURABLE per-attempt
-    // retry branch — the most intricate memo path.
-    let graph = parallel_http_split_graph(&stub_url, ITEMS);
-    let mut graph: Value = serde_json::from_str(&graph).expect("graph json");
+fn direct_wasm_rejects_parallel_split_durable_rate_limited_retries() {
+    let mut graph: Value = serde_json::from_str(&parallel_http_split_graph("http://127.0.0.1", 4))
+        .expect("graph json");
     graph["steps"]["split"]["subgraph"]["steps"]["fetch"]
         .as_object_mut()
         .expect("fetch step")
         .remove("maxRetries");
-    let graph: ExecutionGraph = serde_json::from_value(graph).expect("graph parses");
-    let temp = tempfile::tempdir().expect("tempdir");
-    let compiled = compile_direct_workflow_composed(
-        DirectCompilationInput {
-            workflow_id: "parallel-rate-limited".to_string(),
-            version: 1,
-            source_checksum: None,
-            execution_graph: graph,
-            child_workflows: vec![],
-            output_dir: temp.path().to_path_buf(),
-            track_events: false,
-            agent_catalog: None,
-            agent_slug: None,
-        },
-        &components_dir,
-    )
-    .expect("parallel rate-limited split compiles");
-
-    let host = Arc::new(PersistingRuntimeHost::new(b"{}"));
-    let executor = embedded_executor();
-    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
-    let mut env = HashMap::new();
-    env.insert("RUNTARA_HTTP_PROXY_URL".to_string(), stub_url.clone());
-    let result = runtime.block_on(async {
-        let pre = executor
-            .load_instance_pre(&compiled.wasm_path)
-            .await
-            .expect("load parallel artifact");
-        executor
-            .execute_invoke(
-                &pre,
-                runtara_component_host::WorkflowRunSpec {
-                    env,
-                    stderr: None,
-                    timeout: Duration::from_secs(60),
-                    cancel: None,
-                    limits: runtara_component_host::WorkflowLimits::default(),
-                    runtime: Some(host.clone()),
-                },
-                br#"{"data":{"items":[1,2,3,4]}}"#.to_vec(),
-            )
-            .await
-    });
-
-    let output = match result.exit {
-        runtara_component_host::InvokeExit::Completed(output) => output,
-        other => panic!("rate-limited items must retry and complete, got {other:?}"),
-    };
-    assert!(
-        host.failed.lock().unwrap().is_none(),
-        "429s within the retry budget must never fail the workflow"
+    assert_parallel_retry_backoff_rejected(
+        "parallel-rate-limited",
+        serde_json::from_value(graph).expect("graph parses"),
     );
-    let output: Value = serde_json::from_slice(&output).expect("output json");
-    let results = output["results"].as_array().expect("split results");
-    assert_eq!(results.len(), ITEMS as usize);
-    for result in results {
-        assert_eq!(result["status"], 200, "item result: {result}");
-    }
-    assert_eq!(
-        hits.load(std::sync::atomic::Ordering::SeqCst),
-        2 * ITEMS,
-        "each item must call exactly twice: the launched 429 + one retry"
-    );
-    // DURABLE concurrent backoff (§3.4): each item's failed attempt-1 is
-    // persisted under its `::attempt::1` checkpoint (so a resume never
-    // re-fires it), and the backoff is a concurrent TIMER subtask — NOT the
-    // blocking `durable-sleep-checkpoint` the sequential path used. So: one
-    // attempt-1 checkpoint per item, and zero durable sleeps.
-    let attempt_writes = host
-        .checkpoint_writes
-        .lock()
-        .unwrap()
-        .iter()
-        .filter(|id| id.contains("::attempt::1"))
-        .count();
-    assert_eq!(
-        attempt_writes, ITEMS as usize,
-        "one per-attempt checkpoint per rate-limited item (durable replay guard)"
-    );
-    assert!(
-        host.sleep_ids.lock().unwrap().is_empty(),
-        "durable in-window backoff is a timer subtask, not a durable sleep: {:?}",
-        host.sleep_ids.lock().unwrap()
-    );
-
-    let _ = stub_stop_tx.send(());
-    let _ = stub.join();
 }
 
-/// NON-DURABLE rate-limited items: the retry BACKOFFS overlap. Every item's
-/// first call answers 429 + retry-after; the window classifies each failure,
-/// fires the backoff as a CONCURRENT timer subtask, drains the timers
-/// together, and re-invokes concurrently — so all four backoffs run in one
-/// window instead of serializing. Asserts correctness (2 calls/item, correct
-/// output) AND overlap (the four retry requests arrive within one backoff
-/// span, not four sequential think+backoff cycles).
+/// Retry backoff is rejected for non-durable parallel Split items too: the
+/// prior timer-subtask lowering held an invocation while it waited.
 #[test]
-fn direct_wasm_execute_parallel_split_concurrent_backoff_overlaps() {
-    let _timing_guard = PARALLEL_TIMING_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let components_dir = direct_e2e_components_dir();
-
-    const ITEMS: u32 = 4;
-    const THINK: Duration = Duration::from_millis(120);
-    // Records (hit_index, arrival_instant) so the test can isolate the retry
-    // (attempt-2) requests and measure how tightly they cluster.
-    let arrivals: Arc<Mutex<Vec<(u32, Instant)>>> = Arc::new(Mutex::new(Vec::new()));
-    let hits = Arc::new(std::sync::atomic::AtomicU32::new(0));
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind stub");
-    let stub_url = format!("http://{}", listener.local_addr().expect("stub addr"));
-    let (stub_stop_tx, stub_stop_rx) = mpsc::channel::<()>();
-    listener.set_nonblocking(true).expect("nonblocking");
-    let stub_hits = hits.clone();
-    let stub_arrivals = arrivals.clone();
-    let stub = thread::spawn(move || {
-        loop {
-            if stub_stop_rx.try_recv().is_ok() {
-                return;
-            }
-            match listener.accept() {
-                Ok((mut stream, _)) => {
-                    stream.set_nonblocking(false).ok();
-                    let hits = stub_hits.clone();
-                    let arrivals = stub_arrivals.clone();
-                    thread::spawn(move || {
-                        use std::io::{Read, Write};
-                        let mut buf = [0u8; 8192];
-                        let _ = stream.read(&mut buf);
-                        let n = hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                        arrivals.lock().unwrap().push((n, Instant::now()));
-                        thread::sleep(THINK);
-                        let body = if n < ITEMS {
-                            br#"{"status":429,"headers":{"retry-after-ms":"40"},"body":{"error":"rate limited"}}"#.to_vec()
-                        } else {
-                            br#"{"status":200,"headers":{},"body":{"ok":true}}"#.to_vec()
-                        };
-                        let response = format!(
-                            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
-                            body.len()
-                        );
-                        let _ = stream.write_all(response.as_bytes());
-                        let _ = stream.write_all(&body);
-                    });
-                }
-                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    thread::sleep(Duration::from_millis(5));
-                }
-                Err(_) => return,
-            }
-        }
-    });
-
-    // NON-durable graph => the agent is non-durable => the window owns the
-    // retry backoff (concurrent timer subtasks).
-    let graph = parallel_http_split_graph(&stub_url, ITEMS);
-    let mut graph: Value = serde_json::from_str(&graph).expect("graph json");
+fn direct_wasm_rejects_non_durable_parallel_split_retries() {
+    let mut graph: Value = serde_json::from_str(&parallel_http_split_graph("http://127.0.0.1", 4))
+        .expect("graph json");
     graph["durable"] = Value::Bool(false);
     graph["steps"]["split"]["subgraph"]["steps"]["fetch"]
         .as_object_mut()
         .expect("fetch step")
         .remove("maxRetries");
-    let graph: ExecutionGraph = serde_json::from_value(graph).expect("graph parses");
-    let temp = tempfile::tempdir().expect("tempdir");
-    let compiled = compile_direct_workflow_composed(
-        DirectCompilationInput {
-            workflow_id: "parallel-concurrent-backoff".to_string(),
-            version: 1,
-            source_checksum: None,
-            execution_graph: graph,
-            child_workflows: vec![],
-            output_dir: temp.path().to_path_buf(),
-            track_events: false,
-            agent_catalog: None,
-            agent_slug: None,
-        },
-        &components_dir,
-    )
-    .expect("non-durable concurrent-backoff split compiles");
-
-    let host = Arc::new(PersistingRuntimeHost::new(b"{}"));
-    let executor = embedded_executor();
-    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
-    let mut env = HashMap::new();
-    env.insert("RUNTARA_HTTP_PROXY_URL".to_string(), stub_url.clone());
-    let result = runtime.block_on(async {
-        let pre = executor
-            .load_instance_pre(&compiled.wasm_path)
-            .await
-            .expect("load parallel artifact");
-        executor
-            .execute_invoke(
-                &pre,
-                runtara_component_host::WorkflowRunSpec {
-                    env,
-                    stderr: None,
-                    timeout: Duration::from_secs(60),
-                    cancel: None,
-                    limits: runtara_component_host::WorkflowLimits::default(),
-                    runtime: Some(host.clone()),
-                },
-                br#"{"data":{"items":[1,2,3,4]}}"#.to_vec(),
-            )
-            .await
-    });
-
-    let output = match result.exit {
-        runtara_component_host::InvokeExit::Completed(output) => output,
-        other => panic!("concurrent-backoff items must retry and complete, got {other:?}"),
-    };
-    assert!(host.failed.lock().unwrap().is_none());
-    let output: Value = serde_json::from_slice(&output).expect("output json");
-    let results = output["results"].as_array().expect("split results");
-    assert_eq!(results.len(), ITEMS as usize);
-    for result in results {
-        assert_eq!(result["status"], 200, "item result: {result}");
-    }
-    assert_eq!(
-        hits.load(std::sync::atomic::Ordering::SeqCst),
-        2 * ITEMS,
-        "each item calls exactly twice: the 429 + one retry"
+    assert_parallel_retry_backoff_rejected(
+        "parallel-concurrent-backoff",
+        serde_json::from_value(graph).expect("graph parses"),
     );
-
-    // Overlap proof: the ITEMS retry requests (hit indices >= ITEMS) must all
-    // arrive within a SINGLE backoff+think span, not four sequential cycles.
-    let arrivals = arrivals.lock().unwrap();
-    let retry_arrivals: Vec<Instant> = arrivals
-        .iter()
-        .filter(|(n, _)| *n >= ITEMS)
-        .map(|(_, t)| *t)
-        .collect();
-    assert_eq!(
-        retry_arrivals.len(),
-        ITEMS as usize,
-        "every item must retry"
-    );
-    let span = retry_arrivals
-        .iter()
-        .max()
-        .zip(retry_arrivals.iter().min())
-        .map(|(max, min)| max.duration_since(*min))
-        .expect("retry arrival span");
-    eprintln!(
-        "[concurrent-backoff] retry-arrival-span={}ms (sequential would be ~{}ms)",
-        span.as_millis(),
-        (THINK.as_millis() + 40) * (ITEMS as u128 - 1)
-    );
-    // Concurrent: all retries fire within one backoff round. Sequential would
-    // span (ITEMS-1) * (think + backoff) ≈ 480ms. One think-time is a
-    // load-robust ceiling for the concurrent case.
-    assert!(
-        span < THINK,
-        "retry backoffs failed to overlap: span {span:?} (>= one think-time)"
-    );
-
-    let _ = stub_stop_tx.send(());
-    let _ = stub.join();
 }
 
-/// DURABLE concurrent backoff — replay never double-fires. A first run of a
-/// durable rate-limited split (429→retry→200) settles every item and
-/// checkpoints the step results. A second run with the SAME checkpoint store
-/// (a resume) HITs every item's step checkpoint at launch and completes with
-/// the same outputs and ZERO new upstream calls — the per-attempt + step
-/// checkpoints prevent re-firing any agent call.
+/// A replay-oriented durable parallel retry is also rejected at compile time;
+/// the compiler must not quietly retain a path that sleeps inside a runner.
 #[test]
-fn direct_wasm_execute_parallel_split_durable_backoff_replay_no_double_fire() {
-    let components_dir = direct_e2e_components_dir();
-    const ITEMS: u32 = 4;
-    let hits = Arc::new(std::sync::atomic::AtomicU32::new(0));
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind stub");
-    let stub_url = format!("http://{}", listener.local_addr().expect("stub addr"));
-    let (stub_stop_tx, stub_stop_rx) = mpsc::channel::<()>();
-    listener.set_nonblocking(true).expect("nonblocking");
-    let stub_hits = hits.clone();
-    let stub = thread::spawn(move || {
-        loop {
-            if stub_stop_rx.try_recv().is_ok() {
-                return;
-            }
-            match listener.accept() {
-                Ok((mut stream, _)) => {
-                    stream.set_nonblocking(false).ok();
-                    let hits = stub_hits.clone();
-                    thread::spawn(move || {
-                        use std::io::{Read, Write};
-                        let mut buf = [0u8; 8192];
-                        let _ = stream.read(&mut buf);
-                        let n = hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                        thread::sleep(Duration::from_millis(60));
-                        let body = if n < ITEMS {
-                            br#"{"status":429,"headers":{"retry-after-ms":"40"},"body":{"error":"rl"}}"#.to_vec()
-                        } else {
-                            br#"{"status":200,"headers":{},"body":{"ok":true}}"#.to_vec()
-                        };
-                        let response = format!(
-                            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
-                            body.len()
-                        );
-                        let _ = stream.write_all(response.as_bytes());
-                        let _ = stream.write_all(&body);
-                    });
-                }
-                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    thread::sleep(Duration::from_millis(5));
-                }
-                Err(_) => return,
-            }
-        }
-    });
-
-    // DURABLE (graph default) rate-limited parallel split.
-    let graph = parallel_http_split_graph(&stub_url, ITEMS);
-    let mut graph: Value = serde_json::from_str(&graph).expect("graph json");
+fn direct_wasm_rejects_parallel_split_durable_retry_replay_shape() {
+    let mut graph: Value = serde_json::from_str(&parallel_http_split_graph("http://127.0.0.1", 4))
+        .expect("graph json");
     graph["steps"]["split"]["subgraph"]["steps"]["fetch"]
         .as_object_mut()
         .expect("fetch step")
         .remove("maxRetries");
-    let graph: ExecutionGraph = serde_json::from_value(graph).expect("graph parses");
-    let temp = tempfile::tempdir().expect("tempdir");
-    let compiled = compile_direct_workflow_composed(
-        DirectCompilationInput {
-            workflow_id: "durable-backoff-replay".to_string(),
-            version: 1,
-            source_checksum: None,
-            execution_graph: graph,
-            child_workflows: vec![],
-            output_dir: temp.path().to_path_buf(),
-            track_events: false,
-            agent_catalog: None,
-            agent_slug: None,
-        },
-        &components_dir,
-    )
-    .expect("durable concurrent-backoff split compiles");
-
-    // The SAME host across both runs — its checkpoint store persists, exactly
-    // as the real persistence layer does across a resume.
-    let host = Arc::new(PersistingRuntimeHost::new(b"{}"));
-    let executor = embedded_executor();
-    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
-    let mut env = HashMap::new();
-    env.insert("RUNTARA_HTTP_PROXY_URL".to_string(), stub_url.clone());
-    let run = |host: Arc<PersistingRuntimeHost>| {
-        let env = env.clone();
-        runtime.block_on(async {
-            let pre = executor
-                .load_instance_pre(&compiled.wasm_path)
-                .await
-                .expect("load parallel artifact");
-            executor
-                .execute_invoke(
-                    &pre,
-                    runtara_component_host::WorkflowRunSpec {
-                        env,
-                        stderr: None,
-                        timeout: Duration::from_secs(60),
-                        cancel: None,
-                        limits: runtara_component_host::WorkflowLimits::default(),
-                        runtime: Some(host),
-                    },
-                    br#"{"data":{"items":[1,2,3,4]}}"#.to_vec(),
-                )
-                .await
-        })
-    };
-
-    // Run 1: 429→retry→200 for every item; 2 calls/item.
-    let first = run(host.clone());
-    let out1 = match first.exit {
-        runtara_component_host::InvokeExit::Completed(o) => {
-            serde_json::from_slice::<Value>(&o).expect("json")
-        }
-        other => panic!("first run must complete, got {other:?}"),
-    };
-    for r in out1["results"].as_array().expect("results") {
-        assert_eq!(r["status"], 200);
-    }
-    let hits_after_first = hits.load(std::sync::atomic::Ordering::SeqCst);
-    assert_eq!(hits_after_first, 2 * ITEMS, "run 1: 2 calls per item");
-
-    // Run 2 (resume): every item's step checkpoint HITs at launch — the agent
-    // is never re-invoked, and the output is identical.
-    let second = run(host.clone());
-    let out2 = match second.exit {
-        runtara_component_host::InvokeExit::Completed(o) => {
-            serde_json::from_slice::<Value>(&o).expect("json")
-        }
-        other => panic!("resumed run must complete, got {other:?}"),
-    };
-    assert_eq!(out2, out1, "resume must reproduce the exact output");
-    assert_eq!(
-        hits.load(std::sync::atomic::Ordering::SeqCst),
-        hits_after_first,
-        "resume must re-fire ZERO agent calls (step checkpoints replay)"
+    assert_parallel_retry_backoff_rejected(
+        "durable-backoff-replay",
+        serde_json::from_value(graph).expect("graph parses"),
     );
-
-    let _ = stub_stop_tx.send(());
-    let _ = stub.join();
 }
 
 /// Chained durable Delays — the shape of the workflow in the SYN-606 report

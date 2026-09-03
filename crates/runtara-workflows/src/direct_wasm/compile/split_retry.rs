@@ -16,6 +16,7 @@ use super::abi::{
     load_retptr_list, push_retptr_arg, push_retptr_i64_load, push_retptr_u8_load,
     push_segment_args, return_if_retptr_error,
 };
+use super::retry_park::emit_retry_park_until_deadline;
 use super::{
     DIRECT_RESULT_OPTION_U64_TAG_OFFSET, DIRECT_RESULT_OPTION_U64_VALUE_OFFSET,
     DIRECT_RET_BOOL_OK_OFFSET, DIRECT_RET_U64_OK_OFFSET, DIRECT_SPLIT_RATE_LIMIT_WAIT_TOTAL_LOCAL,
@@ -138,6 +139,41 @@ pub(super) fn emit_split_retry_before_attempt(
         emit_split_record_retry_attempt(body, indices, cache_key_ptr_local, cache_key_len_local);
     }
     body.instruction(&Instruction::End);
+}
+
+/// Park a lifecycle-ABI Split retry until the absolute next-attempt deadline.
+/// The caller has already checkpointed the failed whole-Split attempt under a
+/// separate result key, so a relaunch can replay its retry decision without
+/// re-running the items that produced that failure.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn emit_split_retry_park(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    cache_key_ptr_local: u32,
+    cache_key_len_local: u32,
+    max_retries: u32,
+    retry_delay_ms: u64,
+) {
+    emit_split_retry_delay(body, indices, max_retries, retry_delay_ms);
+    emit_split_record_retry_attempt(body, indices, cache_key_ptr_local, cache_key_len_local);
+    body.instruction(&Instruction::LocalGet(cache_key_ptr_local));
+    body.instruction(&Instruction::LocalGet(cache_key_len_local));
+    body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_RETRY_ATTEMPT_LOCAL));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.stdlib_retry_sleep_key));
+    return_if_retptr_error(body, indices);
+    load_retptr_list(
+        body,
+        DIRECT_SPLIT_RETRY_SLEEP_KEY_PTR_LOCAL,
+        DIRECT_SPLIT_RETRY_SLEEP_KEY_LEN_LOCAL,
+    );
+    emit_retry_park_until_deadline(
+        body,
+        indices,
+        DIRECT_SPLIT_RETRY_SLEEP_KEY_PTR_LOCAL,
+        DIRECT_SPLIT_RETRY_SLEEP_KEY_LEN_LOCAL,
+        DIRECT_SPLIT_RETRY_SLEEP_MS_LOCAL,
+    );
 }
 
 fn emit_split_retry_delay(

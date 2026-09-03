@@ -28,7 +28,7 @@ use super::agent_io::{emit_agent_cache_key, emit_agent_scope_input};
 use super::agent_retry::{
     emit_agent_advance_retry_attempt, emit_agent_attempt_decode, emit_agent_capture_retry_sleep,
     emit_agent_record_retry_attempt, emit_agent_retry_condition, emit_agent_retry_delay,
-    emit_agent_retry_error_info, emit_agent_retry_sleep,
+    emit_agent_retry_error_info, emit_agent_retry_park, emit_agent_retry_sleep,
 };
 use super::checkpoint::{emit_checkpoint_lookup, emit_checkpoint_save};
 use super::debug::{
@@ -439,7 +439,33 @@ pub(super) fn emit_agent_plan(
         emit_agent_retry_condition(body, max_retries, retry_delay_ms, rate_limit_budget_ms);
         body.instruction(&Instruction::If(BlockType::Empty));
         emit_agent_advance_retry_attempt(body);
-        if durable_checkpoint {
+        if durable_checkpoint
+            && indices.abi == crate::direct_wasm::component::WorkflowAbi::InvokeHostImports
+        {
+            // A lifecycle invocation must never hold its Store across backoff.
+            // Recompute the delay for checkpoint-replayed failures as well: if a
+            // process died after persisting the failure envelope but before it
+            // scheduled the wake, this is the first pass that can mint it.
+            emit_agent_retry_delay(
+                body,
+                indices,
+                max_retries,
+                retry_delay_ms,
+                rate_limit_budget_ms,
+            );
+            // Retry audit is keyed by attempt number and upserts in core, so it
+            // remains idempotent across a crash/replay. Recording before the
+            // park also makes the impending retry visible while it is queued.
+            emit_agent_record_retry_attempt(
+                body,
+                indices,
+                route_ptr_local,
+                route_len_local,
+                DIRECT_AGENT_RETRY_ERROR_PTR_LOCAL,
+                DIRECT_AGENT_RETRY_ERROR_LEN_LOCAL,
+            );
+            emit_agent_retry_park(body, indices, route_ptr_local, route_len_local);
+        } else if durable_checkpoint {
             // A replayed (HIT) attempt already slept its backoff and recorded its
             // audit row on the original run; skip both. Core `handle_sleep`
             // re-sleeps the full duration on replay, so this gate — not the sleep

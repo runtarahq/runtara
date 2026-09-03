@@ -17,8 +17,10 @@ use super::abi::{
     load_retptr_list, push_retptr_arg, push_retptr_i32_load, push_retptr_i64_load,
     push_retptr_u8_load, push_segment_args, return_if_retptr_error,
 };
+use super::retry_park::emit_retry_park_until_deadline;
 use super::{
-    DIRECT_AGENT_ATTEMPT_ERR_FLAG_LOCAL, DIRECT_AGENT_RATE_LIMIT_WAIT_TOTAL_LOCAL,
+    DIRECT_AGENT_ATTEMPT_ERR_FLAG_LOCAL, DIRECT_AGENT_ATTEMPT_KEY_LEN_LOCAL,
+    DIRECT_AGENT_ATTEMPT_KEY_PTR_LOCAL, DIRECT_AGENT_RATE_LIMIT_WAIT_TOTAL_LOCAL,
     DIRECT_AGENT_RATE_LIMITED_LOCAL, DIRECT_AGENT_RESULT_ERR_ATTRIBUTES_LEN_OFFSET,
     DIRECT_AGENT_RESULT_ERR_ATTRIBUTES_PTR_OFFSET, DIRECT_AGENT_RESULT_ERR_ATTRIBUTES_TAG_OFFSET,
     DIRECT_AGENT_RESULT_ERR_CATEGORY_LEN_OFFSET, DIRECT_AGENT_RESULT_ERR_CATEGORY_PTR_OFFSET,
@@ -156,6 +158,39 @@ pub(super) fn emit_agent_retry_sleep(
     }));
     return_if_retptr_error(body, indices);
     body.instruction(&Instruction::End);
+}
+
+/// Convert a lifecycle-ABI durable Agent retry into a store-freeing timed
+/// suspension. Every retry, including an ordinary transient error without a
+/// `retry-after`, gets a distinct per-attempt key so a restart can recover the
+/// absolute deadline instead of sleeping a fresh relative duration.
+pub(super) fn emit_agent_retry_park(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    cache_key_ptr_local: u32,
+    cache_key_len_local: u32,
+) {
+    body.instruction(&Instruction::LocalGet(cache_key_ptr_local));
+    body.instruction(&Instruction::LocalGet(cache_key_len_local));
+    body.instruction(&Instruction::LocalGet(DIRECT_AGENT_RETRY_ATTEMPT_LOCAL));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.stdlib_agent_retry_sleep_key));
+    return_if_retptr_error(body, indices);
+    // The per-attempt result key is dead once the failure envelope has been
+    // decoded, so reuse these scratch locals rather than clobbering the error
+    // payload used by retry audit/failure routing.
+    load_retptr_list(
+        body,
+        DIRECT_AGENT_ATTEMPT_KEY_PTR_LOCAL,
+        DIRECT_AGENT_ATTEMPT_KEY_LEN_LOCAL,
+    );
+    emit_retry_park_until_deadline(
+        body,
+        indices,
+        DIRECT_AGENT_ATTEMPT_KEY_PTR_LOCAL,
+        DIRECT_AGENT_ATTEMPT_KEY_LEN_LOCAL,
+        DIRECT_AGENT_RETRY_SLEEP_MS_LOCAL,
+    );
 }
 
 pub(super) fn emit_agent_record_retry_attempt(

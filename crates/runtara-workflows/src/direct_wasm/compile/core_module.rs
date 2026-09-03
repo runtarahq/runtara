@@ -636,6 +636,11 @@ const CANONICAL_LOCAL_GROUPS: &[(u32, ValType)] = &[
     // parallel-Split scratch (DIRECT_PSPLIT_*);
     // 124-125 are the concurrent-retry-round cursor + timers-fired flag.
     (22, ValType::I32),
+    // 126-127 hold a retry park checkpoint's state pointer/length. 128 is
+    // its absolute deadline. Appending preserves every existing absolute
+    // DIRECT_* local index across all ABI parameter foldings.
+    (2, ValType::I32),
+    (1, ValType::I64),
 ];
 
 /// Drop `n` leading local slots from `groups`, splitting (never merging) the

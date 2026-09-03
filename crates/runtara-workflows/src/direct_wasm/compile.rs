@@ -42,6 +42,7 @@ mod embed_workflow;
 mod error_step;
 mod log;
 mod mapping;
+mod retry_park;
 mod split;
 mod split_parallel;
 mod split_retry;
@@ -434,6 +435,15 @@ const DIRECT_PSPLIT_ROUND_CURSOR_LOCAL: u32 = 124;
 /// Set when a retry round fired at least one backoff timer — drives the
 /// round-loop exit (0 => every item settled, stop).
 const DIRECT_PSPLIT_TIMERS_FIRED_LOCAL: u32 = 125;
+
+/// Scratch used only while converting a retry backoff into a lifecycle wake.
+/// The state is an 8-byte absolute deadline, kept separate from the failed
+/// attempt envelope so a replay can reconstruct its retry decision without
+/// re-running the attempt. These are trailing locals to avoid shifting any
+/// existing hand-assigned local indices.
+const DIRECT_RETRY_PARK_STATE_PTR_LOCAL: u32 = 126;
+const DIRECT_RETRY_PARK_STATE_LEN_LOCAL: u32 = 127;
+const DIRECT_RETRY_PARK_DEADLINE_MS_LOCAL: u32 = 128;
 
 /// Per-item slot for the parallel window's concurrent-retry state machine
 /// (§3.4): `{ state:u32, attempts:u32, input_ptr:u32, input_len:u32, _pad:u64,

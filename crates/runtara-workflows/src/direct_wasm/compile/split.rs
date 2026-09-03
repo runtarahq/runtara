@@ -27,7 +27,7 @@ use super::embed_workflow::emit_embed_workflow_child_error_and_continue;
 use super::mapping::emit_build_source;
 use super::split_retry::{
     emit_split_advance_retry_attempt, emit_split_retry_before_attempt, emit_split_retry_condition,
-    emit_split_retry_error_info,
+    emit_split_retry_error_info, emit_split_retry_park,
 };
 use super::step_error::{
     emit_step_error_and_continue, pop_step_error_frame, push_step_error_frame,
@@ -453,6 +453,12 @@ pub(super) fn emit_split_plan(
     }
 
     let retry_enabled = max_retries > 0;
+    // A lifecycle invocation can release its runner while a retry is due. The
+    // retry loop below checkpoints a failed whole-Split attempt before it
+    // schedules that wake, so a restart replays the error decision rather than
+    // the items that already ran.
+    let lifecycle_retry_park =
+        durable && indices.abi == crate::direct_wasm::component::WorkflowAbi::InvokeHostImports;
     let fresh_failure_target = if retry_enabled {
         Some(DirectFailureTarget::SplitRetry { branch_depth: 0 })
     } else {
@@ -469,16 +475,57 @@ pub(super) fn emit_split_plan(
         body.instruction(&Instruction::Loop(BlockType::Empty));
         body.instruction(&Instruction::I32Const(0));
         body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_RETRY_ERROR_FLAG_LOCAL));
-        emit_split_retry_before_attempt(
-            body,
-            indices,
-            static_data,
-            durable,
-            route_ptr_local,
-            route_len_local,
-            max_retries,
-            retry_delay_ms,
-        );
+        if lifecycle_retry_park {
+            // `route` is shared scratch and can have been clobbered by a nested
+            // item plan. Rebuild the Split scope for every attempt before
+            // deriving its result key.
+            body.instruction(&Instruction::I32Const(split_id as i32));
+            body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_PARENT_SOURCE_PTR_LOCAL));
+            body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_PARENT_SOURCE_LEN_LOCAL));
+            push_retptr_arg(body);
+            body.instruction(&Instruction::Call(indices.stdlib_split_cache_key));
+            return_if_retptr_error(body, indices);
+            load_retptr_list(body, route_ptr_local, route_len_local);
+
+            // Reuse the existing distinct `::attempt::<N>` namespace for the
+            // whole-Split error envelope. The next attempt's `::retry_sleep`
+            // key remains exclusively an eight-byte deadline.
+            body.instruction(&Instruction::LocalGet(route_ptr_local));
+            body.instruction(&Instruction::LocalGet(route_len_local));
+            body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_RETRY_ATTEMPT_LOCAL));
+            push_retptr_arg(body);
+            body.instruction(&Instruction::Call(indices.stdlib_agent_attempt_result_key));
+            return_if_retptr_error(body, indices);
+            load_retptr_list(
+                body,
+                DIRECT_SPLIT_RETRY_SLEEP_KEY_PTR_LOCAL,
+                DIRECT_SPLIT_RETRY_SLEEP_KEY_LEN_LOCAL,
+            );
+            emit_checkpoint_lookup(
+                body,
+                indices,
+                DIRECT_SPLIT_RETRY_SLEEP_KEY_PTR_LOCAL,
+                DIRECT_SPLIT_RETRY_SLEEP_KEY_LEN_LOCAL,
+                DIRECT_SPLIT_RETRY_ERROR_PTR_LOCAL,
+                DIRECT_SPLIT_RETRY_ERROR_LEN_LOCAL,
+            );
+            // HIT: this attempt already produced a retryable workflow error.
+            // Let the common retry state machine below classify and schedule it.
+            body.instruction(&Instruction::I32Const(1));
+            body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_RETRY_ERROR_FLAG_LOCAL));
+            body.instruction(&Instruction::Else);
+        } else {
+            emit_split_retry_before_attempt(
+                body,
+                indices,
+                static_data,
+                durable,
+                route_ptr_local,
+                route_len_local,
+                max_retries,
+                retry_delay_ms,
+            );
+        }
         body.instruction(&Instruction::Block(BlockType::Empty));
     }
 
@@ -899,9 +946,25 @@ pub(super) fn emit_split_plan(
         // loop (so a retryable failure re-iterates the loop), then close the
         // loop and the retry-outer block.
         body.instruction(&Instruction::End);
+        if lifecycle_retry_park {
+            // Close the per-attempt checkpoint lookup. Its HIT arm has already
+            // restored the failed envelope; its MISS arm has just finished the
+            // attempt body inside the inner block closed above.
+            body.instruction(&Instruction::End);
+        }
+        let retry_park = if lifecycle_retry_park {
+            Some(SplitRetryPark {
+                split_id,
+                route_ptr_local,
+                route_len_local,
+            })
+        } else {
+            None
+        };
         emit_split_retry_after_attempt(
             body,
             indices,
+            retry_park,
             max_retries,
             retry_delay_ms,
             failure_target,
@@ -1065,9 +1128,17 @@ fn emit_split_durable_output_from_result(
     load_retptr_list(body, steps_ptr_local, steps_len_local);
 }
 
+#[derive(Clone, Copy)]
+struct SplitRetryPark {
+    split_id: u32,
+    route_ptr_local: u32,
+    route_len_local: u32,
+}
+
 fn emit_split_retry_after_attempt(
     body: &mut WasmFunction,
     indices: &DirectCoreFunctionIndices,
+    retry_park: Option<SplitRetryPark>,
     max_retries: u32,
     retry_delay_ms: u64,
     failure_target: Option<DirectFailureTarget>,
@@ -1075,10 +1146,42 @@ fn emit_split_retry_after_attempt(
 ) {
     body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_RETRY_ERROR_FLAG_LOCAL));
     body.instruction(&Instruction::If(BlockType::Empty));
+    if retry_park.is_some() {
+        // This is deliberately before classification and parking. A crash at
+        // either later point will reload the same error envelope, never replay
+        // the failed items that produced it.
+        emit_checkpoint_save(
+            body,
+            indices,
+            DIRECT_SPLIT_RETRY_SLEEP_KEY_PTR_LOCAL,
+            DIRECT_SPLIT_RETRY_SLEEP_KEY_LEN_LOCAL,
+            DIRECT_SPLIT_RETRY_ERROR_PTR_LOCAL,
+            DIRECT_SPLIT_RETRY_ERROR_LEN_LOCAL,
+        );
+    }
     emit_split_retry_error_info(body, indices);
     emit_split_retry_condition(body, max_retries, retry_delay_ms);
     body.instruction(&Instruction::If(BlockType::Empty));
     emit_split_advance_retry_attempt(body);
+    if let Some(retry_park) = retry_park {
+        // A nested item plan may have used the shared route scratch, so restore
+        // the Split scope before deriving the next attempt's deadline key.
+        body.instruction(&Instruction::I32Const(retry_park.split_id as i32));
+        body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_PARENT_SOURCE_PTR_LOCAL));
+        body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_PARENT_SOURCE_LEN_LOCAL));
+        push_retptr_arg(body);
+        body.instruction(&Instruction::Call(indices.stdlib_split_cache_key));
+        return_if_retptr_error(body, indices);
+        load_retptr_list(body, retry_park.route_ptr_local, retry_park.route_len_local);
+        emit_split_retry_park(
+            body,
+            indices,
+            retry_park.route_ptr_local,
+            retry_park.route_len_local,
+            max_retries,
+            retry_delay_ms,
+        );
+    }
     body.instruction(&Instruction::Br(2));
     body.instruction(&Instruction::End);
     if let Some(failure_target) = failure_target {
