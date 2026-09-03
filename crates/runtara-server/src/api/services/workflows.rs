@@ -103,6 +103,19 @@ fn validate_execution_graph_name(definition: &Value) -> Result<(), ServiceError>
     Ok(())
 }
 
+/// Validate the finite active-execution deadline before a definition is
+/// persisted. This is deliberately separate from DSL deserialization so all
+/// save/import routes reject legacy string coercions and values that the
+/// runtime would later refuse to launch.
+fn validate_execution_timeout(definition: &Value) -> Result<(), ServiceError> {
+    crate::config::execution_timeout_policy()
+        .timeout_from_definition(definition)
+        .map(|_| ())
+        .map_err(|error| {
+            ServiceError::ValidationError(format!("Invalid executionTimeoutSeconds: {error}"))
+        })
+}
+
 fn json_value_kind(value: &Value) -> &'static str {
     match value {
         Value::Null => "null",
@@ -529,6 +542,7 @@ impl WorkflowService {
         }
 
         validate_execution_graph_name(&definition)?;
+        validate_execution_timeout(&definition)?;
 
         // Validate description length if present
         if let Some(description) = definition.get("description").and_then(|v| v.as_str())
@@ -808,6 +822,7 @@ impl WorkflowService {
         }
 
         validate_execution_graph_name(&definition)?;
+        validate_execution_timeout(&definition)?;
 
         // Validate description length if present
         if let Some(description) = definition.get("description").and_then(|v| v.as_str())
@@ -1631,6 +1646,39 @@ mod tests {
         let v = serde_json::json!({"name": "a".repeat(256)});
         let err = validate_execution_graph_name(&v).unwrap_err();
         assert!(err.to_string().contains("255"), "got: {err}");
+    }
+
+    #[test]
+    fn execution_timeout_validation_accepts_omitted_or_bounded_seconds() {
+        assert!(validate_execution_timeout(&serde_json::json!({ "name": "test" })).is_ok());
+        assert!(
+            validate_execution_timeout(&serde_json::json!({
+                "name": "test",
+                "executionTimeoutSeconds": 300,
+            }))
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn execution_timeout_validation_rejects_invalid_legacy_values_at_save_time() {
+        for invalid in [
+            serde_json::json!(0),
+            serde_json::json!(-1),
+            serde_json::json!(3601),
+            serde_json::json!("300"),
+            serde_json::json!(1.5),
+        ] {
+            let err = validate_execution_timeout(&serde_json::json!({
+                "name": "test",
+                "executionTimeoutSeconds": invalid,
+            }))
+            .unwrap_err();
+            assert!(
+                err.to_string().contains("executionTimeoutSeconds"),
+                "unexpected error: {err}"
+            );
+        }
     }
 
     // =========================================================================

@@ -42,6 +42,7 @@ use crate::workers::runtara_dto::{
     runtara_info_to_dto, runtara_info_to_execution_with_metadata,
     runtara_instance_to_dto_with_info,
 };
+use runtara_environment::execution_timeout::ExecutionTimeoutSeconds;
 use runtara_workflows::input_validation::validate_workflow_start_inputs;
 
 /// Recover workflow identity from an artifact-qualified runtime image name.
@@ -378,7 +379,7 @@ type StartingWorkflows = Arc<Mutex<HashSet<(String, String)>>>;
 /// row with an older artifact during a toggle or recompile.
 struct ReadyLaunch {
     image_id: String,
-    execution_timeout_seconds: Option<i32>,
+    execution_timeout: Option<ExecutionTimeoutSeconds>,
     track_events: bool,
 }
 
@@ -829,7 +830,7 @@ impl ExecutionEngine {
         // with the ID of another while a toggle is recompiling.
         let ReadyLaunch {
             image_id,
-            execution_timeout_seconds: execution_timeout,
+            execution_timeout,
             track_events,
         } = self
             .wait_for_compilation_blocking(req.tenant_id, req.workflow_id, version)
@@ -865,6 +866,10 @@ impl ExecutionEngine {
                 .properties(serde_json::json!({ "version": version, "sync": true })),
         );
 
+        let execution_timeout = runtime_client
+            .resolve_execution_timeout(execution_timeout)
+            .map_err(|error| ExecutionError::ValidationError(error.to_string()))?;
+
         // 6. Start via the runtime client, then wait for completion. Do not
         // use RuntimeClient::execute_sync here: its combined return value
         // hides the accepted start, so a run that later times out would never
@@ -876,7 +881,7 @@ impl ExecutionEngine {
                 req.workflow_id,
                 None, // auto-generate instance id
                 Some(validated_inputs),
-                execution_timeout.map(|s| s as u32),
+                Some(execution_timeout),
                 false,
             )
             .await
@@ -884,11 +889,7 @@ impl ExecutionEngine {
             Ok(start) => {
                 record_new_runtime_start(&self.gauges, track_events, start.deduplicated);
                 runtime_client
-                    .wait_for_completion(
-                        &start.instance_id,
-                        None,
-                        execution_timeout.map(|s| s as u32),
-                    )
+                    .wait_for_completion(&start.instance_id, None, Some(execution_timeout))
                     .await
             }
             Err(error) => Err(error),
@@ -1164,10 +1165,9 @@ impl ExecutionEngine {
         let (version, ready) = self
             .ensure_compiled(&event.tenant_id, &event.workflow_id, event.version)
             .await?;
-        let execution_timeout_secs = ready
-            .execution_timeout_seconds
-            .map(|secs| secs as u32)
-            .unwrap_or(3600); // Default 1 hour timeout
+        let execution_timeout = runtime_client
+            .resolve_execution_timeout(ready.execution_timeout)
+            .map_err(|error| ExecutionError::ValidationError(error.to_string()))?;
         let track_events = ready.track_events;
         let image_id = ready.image_id;
 
@@ -1183,7 +1183,7 @@ impl ExecutionEngine {
                 &event.workflow_id,
                 Some(event.instance_id.clone()),
                 Some(workflow_input),
-                Some(execution_timeout_secs),
+                Some(execution_timeout),
                 event.debug,
             )
             .await
@@ -2187,7 +2187,7 @@ impl ExecutionEngine {
 
         if let CompilationStatus::Ready {
             registered_image_id,
-            execution_timeout_seconds,
+            execution_timeout,
             track_events,
             ..
         } = status
@@ -2196,7 +2196,7 @@ impl ExecutionEngine {
                 version,
                 ReadyLaunch {
                     image_id: registered_image_id,
-                    execution_timeout_seconds,
+                    execution_timeout,
                     track_events,
                 },
             ));
@@ -2322,14 +2322,14 @@ impl ExecutionEngine {
             })?;
         if let CompilationStatus::Ready {
             registered_image_id,
-            execution_timeout_seconds,
+            execution_timeout,
             track_events,
             ..
         } = status
         {
             return Ok(ReadyLaunch {
                 image_id: registered_image_id,
-                execution_timeout_seconds,
+                execution_timeout,
                 track_events,
             });
         }
@@ -2446,12 +2446,12 @@ impl ExecutionEngine {
         match status_after {
             CompilationStatus::Ready {
                 registered_image_id,
-                execution_timeout_seconds,
+                execution_timeout,
                 track_events,
                 ..
             } => Ok(ReadyLaunch {
                 image_id: registered_image_id,
-                execution_timeout_seconds,
+                execution_timeout,
                 track_events,
             }),
             // The compilation we waited on recorded why it failed; report that

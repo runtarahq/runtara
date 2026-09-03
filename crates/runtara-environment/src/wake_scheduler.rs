@@ -24,7 +24,8 @@ use tracing::{debug, error, info, warn};
 
 use crate::container_registry::{ContainerInfo, ContainerRegistry};
 use crate::db;
-use crate::handlers::{DrainController, default_instance_timeout, spawn_container_monitor};
+use crate::execution_timeout::ExecutionTimeoutPolicy;
+use crate::handlers::{DrainController, spawn_container_monitor};
 use crate::image_registry::ImageRegistry;
 use crate::runner::{LaunchOptions, Runner};
 
@@ -121,6 +122,7 @@ pub struct WakeScheduler {
     runner: Arc<dyn Runner>,
     image_registry: ImageRegistry,
     config: WakeSchedulerConfig,
+    execution_timeout_policy: ExecutionTimeoutPolicy,
     shutdown: Arc<Notify>,
     drain: DrainController,
 }
@@ -155,6 +157,7 @@ impl WakeScheduler {
             runner,
             image_registry,
             config,
+            execution_timeout_policy: ExecutionTimeoutPolicy::default(),
             shutdown: Arc::new(Notify::new()),
             drain: DrainController::new(),
         }
@@ -164,6 +167,13 @@ impl WakeScheduler {
     /// observe the same drain state.
     pub fn with_drain(mut self, drain: DrainController) -> Self {
         self.drain = drain;
+        self
+    }
+
+    /// Set the policy used to validate persisted timeouts before a durable
+    /// instance is relaunched.
+    pub fn with_execution_timeout_policy(mut self, policy: ExecutionTimeoutPolicy) -> Self {
+        self.execution_timeout_policy = policy;
         self
     }
 
@@ -465,15 +475,34 @@ impl WakeScheduler {
 
         let wasm_path = std::path::PathBuf::from(&image.binary_path);
 
-        // Honor the per-instance timeout persisted at first launch so a workflow
-        // that durably sleeps longer than the old hardcoded 300s isn't force-killed
-        // on relaunch; fall back to the configured default when none was persisted.
-        let timeout = db::get_instance_timeout_seconds(&self.pool, &instance.instance_id)
-            .await
-            .ok()
-            .flatten()
-            .map(|s| Duration::from_secs(s as u64))
-            .unwrap_or_else(default_instance_timeout);
+        // Honor the same bounded timeout persisted at first launch. Do not
+        // cast a corrupt signed row to `u64`: refusing the wake is safer than
+        // relaunching it with an effectively unbounded deadline.
+        let stored_timeout =
+            db::get_instance_timeout_seconds(&self.pool, &instance.instance_id).await?;
+        let timeout = match self
+            .execution_timeout_policy
+            .resolve_persisted(stored_timeout)
+        {
+            Ok(timeout) => timeout.as_duration(),
+            Err(error) => {
+                let message = format!(
+                    "invalid persisted execution timeout for instance '{}': {error}",
+                    instance.instance_id
+                );
+                warn!(instance_id = %instance.instance_id, error = %message, "Failing wake with invalid execution timeout");
+                self.persistence
+                    .complete_instance(
+                        runtara_core::persistence::CompleteInstanceParams::new(
+                            &instance.instance_id,
+                            "failed",
+                        )
+                        .with_error(&message),
+                    )
+                    .await?;
+                return Ok(());
+            }
+        };
 
         // Build launch options with restored env
         let options = LaunchOptions {
@@ -528,7 +557,10 @@ impl WakeScheduler {
                     tenant_id: instance.tenant_id.clone(),
                     binary_path: image.binary_path.clone(),
                     started_at: handle.started_at,
-                    timeout_seconds: Some(options.timeout.as_secs() as i64),
+                    timeout_seconds: Some(
+                        i64::try_from(options.timeout.as_secs())
+                            .expect("bounded execution timeout fits in database integer"),
+                    ),
                 };
                 if let Err(e) = container_registry.register(&container_info).await {
                     warn!(error = %e, "Failed to register container (instance still running)");

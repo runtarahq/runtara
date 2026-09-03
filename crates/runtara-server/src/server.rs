@@ -819,6 +819,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     let commit = env!("BUILD_COMMIT");
 
     let tenant_id = server_config.tenant_id.clone();
+    let execution_timeout_policy = server_config.execution_timeout_policy;
     config::init(server_config);
 
     // Create a root span with global context that will be included in all logs
@@ -1284,9 +1285,12 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     // Migrations are run automatically via runtara_environment::migrations::run()
 
     // Start embedded Runtara servers (using dedicated database)
-    let embedded_runtara = match embedded_runtara::maybe_start_embedded(Some(
-        workers::step_counter::StepCounter::new(Arc::clone(&pipeline_gauges)),
-    ))
+    let embedded_runtara = match embedded_runtara::maybe_start_embedded(
+        execution_timeout_policy,
+        Some(workers::step_counter::StepCounter::new(Arc::clone(
+            &pipeline_gauges,
+        ))),
+    )
     .await
     {
         Ok(Some(runtara)) => {
@@ -1317,7 +1321,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     let runtime_client: Option<Arc<RuntimeClient>> = match embedded_runtara.as_ref() {
         Some(runtara) => Some(Arc::new(RuntimeClient::new(
             runtara.environment_state(),
-            runtime_client::RuntimeClientConfig::from_env(),
+            runtime_client::RuntimeClientConfig::new(execution_timeout_policy),
         ))),
         None => {
             println!("⚠ Embedded Runtara disabled - runtime client disabled");

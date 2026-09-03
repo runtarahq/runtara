@@ -18,6 +18,7 @@ use runtara_core::persistence::{CompleteInstanceParams, Persistence};
 use crate::container_registry::{ContainerInfo, ContainerRegistry};
 use crate::db;
 use crate::error::Result;
+use crate::execution_timeout::ExecutionTimeoutPolicy;
 use crate::image_registry::{ImageBuilder, ImageRegistry};
 use crate::runner::{LaunchOptions, Runner, RunnerHandle};
 
@@ -107,6 +108,8 @@ pub struct EnvironmentHandlerState {
     pub data_dir: PathBuf,
     /// Request timeout for database operations.
     pub request_timeout: Duration,
+    /// Bounded active-execution timeout policy shared with the server.
+    pub execution_timeout_policy: ExecutionTimeoutPolicy,
     /// Drain signal observed by container monitors and workers.
     pub drain: DrainController,
 }
@@ -114,24 +117,17 @@ pub struct EnvironmentHandlerState {
 /// Default request timeout for database operations (30 seconds).
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Fallback per-instance execution timeout when no value is persisted and the
-/// caller supplies none (1 hour). Generous by design: the timeout is a safety
-/// net for stuck guests, not the completion mechanism — workflows that finish
-/// report completion immediately via the SDK. Override with
-/// `RUNTARA_DEFAULT_INSTANCE_TIMEOUT_SECS`.
-const FALLBACK_INSTANCE_TIMEOUT_SECS: u64 = 3600;
-
-/// Resolve the default per-instance execution timeout, honoring
-/// `RUNTARA_DEFAULT_INSTANCE_TIMEOUT_SECS` and falling back to
-/// [`FALLBACK_INSTANCE_TIMEOUT_SECS`]. Used for first launch when the request
-/// omits a timeout, and on wake/resume when no per-instance value was persisted.
+/// Resolve the default standalone-Environment execution timeout.
+///
+/// Production callers should use
+/// [`EnvironmentHandlerState::execution_timeout_policy`] instead: the embedded
+/// server injects one policy into initial starts, resumes, and wakes. This
+/// wrapper remains for external callers that instantiate a standalone
+/// Environment without a policy override.
 pub fn default_instance_timeout() -> Duration {
-    let secs = std::env::var("RUNTARA_DEFAULT_INSTANCE_TIMEOUT_SECS")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .filter(|&s| s > 0)
-        .unwrap_or(FALLBACK_INSTANCE_TIMEOUT_SECS);
-    Duration::from_secs(secs)
+    ExecutionTimeoutPolicy::default()
+        .default_timeout()
+        .as_duration()
 }
 
 impl EnvironmentHandlerState {
@@ -160,6 +156,7 @@ impl EnvironmentHandlerState {
             core_addr,
             data_dir: ensure_absolute_path(data_dir),
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
+            execution_timeout_policy: ExecutionTimeoutPolicy::default(),
             drain: DrainController::new(),
         }
     }
@@ -167,6 +164,12 @@ impl EnvironmentHandlerState {
     /// Set the request timeout for database operations.
     pub fn with_request_timeout(mut self, timeout: Duration) -> Self {
         self.request_timeout = timeout;
+        self
+    }
+
+    /// Set the bounded active-execution timeout policy.
+    pub fn with_execution_timeout_policy(mut self, policy: ExecutionTimeoutPolicy) -> Self {
+        self.execution_timeout_policy = policy;
         self
     }
 
@@ -572,13 +575,17 @@ pub async fn handle_start_instance(
         Some(&request.env)
     };
 
-    // Resolve the effective execution timeout once, so the value persisted for
-    // wake/resume matches the one the monitor enforces on this first run.
-    let timeout = Duration::from_secs(
-        request
-            .timeout_seconds
-            .unwrap_or(default_instance_timeout().as_secs()),
-    );
+    // Resolve the effective execution timeout once, before claiming an
+    // instance. A malformed direct Environment request must not leave a
+    // pending row behind, and the value persisted for wake/resume must match
+    // the bounded monitor deadline from this first run.
+    let timeout = state
+        .execution_timeout_policy
+        .resolve_raw(request.timeout_seconds)
+        .map_err(|error| {
+            crate::error::Error::InvalidRequest(format!("invalid execution timeout: {error}"))
+        })?
+        .as_duration();
 
     // Claim the instance ID and bind its immutable image in one transaction.
     // A pending row without an image is not launchable or recoverable, and it
@@ -655,7 +662,10 @@ pub async fn handle_start_instance(
                 tenant_id: request.tenant_id,
                 binary_path: image.binary_path,
                 started_at: handle.started_at,
-                timeout_seconds: Some(timeout.as_secs() as i64),
+                timeout_seconds: Some(
+                    i64::try_from(timeout.as_secs())
+                        .expect("bounded execution timeout fits in database integer"),
+                ),
             };
             if let Err(e) = container_registry.register(&container_info).await {
                 warn!(error = %e, "Failed to register container (instance still running)");
@@ -928,15 +938,34 @@ pub async fn handle_resume_instance(
     // Every image is wasm now, so always read binary directly.
     let wasm_path = PathBuf::from(&image.binary_path);
 
-    // Honor the per-instance timeout persisted at first launch so a long replay
-    // isn't force-killed by a hardcoded default; fall back to the configured
-    // default for instances predating the persisted value.
-    let timeout = db::get_instance_timeout_seconds(&state.pool, &request.instance_id)
-        .await
-        .ok()
-        .flatten()
-        .map(|s| Duration::from_secs(s as u64))
-        .unwrap_or_else(default_instance_timeout);
+    // Honor the bounded timeout persisted at first launch. Old corrupt rows
+    // fail closed rather than narrowing a signed database value into an
+    // effectively unbounded Duration on resume.
+    let stored_timeout =
+        db::get_instance_timeout_seconds(&state.pool, &request.instance_id).await?;
+    let timeout = match state
+        .execution_timeout_policy
+        .resolve_persisted(stored_timeout)
+    {
+        Ok(timeout) => timeout.as_duration(),
+        Err(error) => {
+            let message = format!(
+                "invalid persisted execution timeout for instance '{}': {error}",
+                request.instance_id
+            );
+            warn!(instance_id = %request.instance_id, error = %message, "Refusing resume with invalid execution timeout");
+            state
+                .persistence
+                .complete_instance(
+                    CompleteInstanceParams::new(&request.instance_id, "failed").with_error(&message),
+                )
+                .await?;
+            return Ok(ResumeInstanceResponse {
+                success: false,
+                error: Some(message),
+            });
+        }
+    };
 
     // Build launch options with checkpoint and restored env
     let options = LaunchOptions {
@@ -1012,7 +1041,10 @@ pub async fn handle_resume_instance(
                 tenant_id: instance.tenant_id,
                 binary_path: image.binary_path,
                 started_at: handle.started_at,
-                timeout_seconds: Some(timeout.as_secs() as i64),
+                timeout_seconds: Some(
+                    i64::try_from(timeout.as_secs())
+                        .expect("bounded execution timeout fits in database integer"),
+                ),
             };
             if let Err(e) = container_registry.register(&container_info).await {
                 warn!(error = %e, "Failed to register container");

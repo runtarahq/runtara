@@ -49,6 +49,7 @@ use tracing::{debug, error, info, warn};
 use crate::cleanup_worker::{CleanupWorker, CleanupWorkerConfig};
 use crate::container_registry::ContainerRegistry;
 use crate::db_cleanup_worker::{DbCleanupWorker, DbCleanupWorkerConfig};
+use crate::execution_timeout::ExecutionTimeoutPolicy;
 use crate::handlers::{DrainController, EnvironmentHandlerState};
 use crate::heartbeat_monitor::{HeartbeatMonitor, HeartbeatMonitorConfig};
 use crate::image_cleanup_worker::{ImageCleanupWorker, ImageCleanupWorkerConfig};
@@ -131,6 +132,7 @@ pub struct EnvironmentRuntimeBuilder {
     wake_concurrency: usize,
     wake_claim_lease: Duration,
     request_timeout: Duration,
+    execution_timeout_policy: ExecutionTimeoutPolicy,
     cleanup_poll_interval: Duration,
     cleanup_max_age: Duration,
     heartbeat_poll_interval: Duration,
@@ -152,6 +154,7 @@ impl Default for EnvironmentRuntimeBuilder {
             wake_concurrency: wake_concurrency_from_env(),
             wake_claim_lease: wake_claim_lease_from_env(),
             request_timeout: Duration::from_secs(30),
+            execution_timeout_policy: ExecutionTimeoutPolicy::default(),
             cleanup_poll_interval: Duration::from_secs(3600), // 1 hour
             cleanup_max_age: Duration::from_secs(3 * 24 * 3600), // 3 days
             heartbeat_poll_interval: Duration::from_secs(30), // 30 seconds
@@ -240,6 +243,16 @@ impl EnvironmentRuntimeBuilder {
         self
     }
 
+    /// Set the bounded active-execution timeout policy.
+    ///
+    /// The same policy must be supplied to the caller that starts instances so
+    /// new starts, resumes, and scheduler wakes persist and enforce one
+    /// deadline contract.
+    pub fn execution_timeout_policy(mut self, policy: ExecutionTimeoutPolicy) -> Self {
+        self.execution_timeout_policy = policy;
+        self
+    }
+
     /// Set the cleanup worker poll interval.
     ///
     /// Default: 1 hour
@@ -312,6 +325,7 @@ impl EnvironmentRuntimeBuilder {
             wake_concurrency: self.wake_concurrency,
             wake_claim_lease: self.wake_claim_lease,
             request_timeout: self.request_timeout,
+            execution_timeout_policy: self.execution_timeout_policy,
             cleanup_poll_interval: self.cleanup_poll_interval,
             cleanup_max_age: self.cleanup_max_age,
             heartbeat_poll_interval: self.heartbeat_poll_interval,
@@ -334,6 +348,7 @@ pub struct EnvironmentRuntimeConfig {
     wake_concurrency: usize,
     wake_claim_lease: Duration,
     request_timeout: Duration,
+    execution_timeout_policy: ExecutionTimeoutPolicy,
     cleanup_poll_interval: Duration,
     cleanup_max_age: Duration,
     heartbeat_poll_interval: Duration,
@@ -364,6 +379,7 @@ impl EnvironmentRuntimeConfig {
                 self.data_dir.clone(),
             )
             .with_request_timeout(self.request_timeout)
+            .with_execution_timeout_policy(self.execution_timeout_policy)
             .with_drain(drain.clone()),
         );
 
@@ -401,6 +417,7 @@ impl EnvironmentRuntimeConfig {
             self.runner.clone(),
             wake_config,
         )
+        .with_execution_timeout_policy(self.execution_timeout_policy)
         .with_drain(drain.clone());
 
         let wake_shutdown = wake_scheduler.shutdown_handle();
