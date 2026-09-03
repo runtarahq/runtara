@@ -15,10 +15,9 @@
 #      published child through the catalog overlay, composition finds its
 #      .wasm through the extra search dir, and execution returns the child's
 #      output through standard agent-output shaping.
-#   4. DURABLE — a DURABLE child (Delay step) also publishes and runs inside a
-#      parent: it keeps the runtime import (satisfied by the parent instance's
-#      runtime), its terminal complete is suppressed, and the parent finishes
-#      with the right output.
+#   4. SAFETY GATE — a workflow that can wait, sleep, retry, or pause is
+#      refused before an agent artifact is staged. The workflow-agent ABI is
+#      synchronous; durable work stays a top-level or embedded workflow.
 #
 # Prerequisites: Postgres + docker (isolated Valkey) and the agent / shared
 # workflow components in target/wasm32-wasip2/release
@@ -309,7 +308,7 @@ execute_and_assert "${PARENT_ID}" '{"data":{"msg":"hello-live"}}' \
     '{"childEcho":"hello-live","childMarker":"from-child"}' "parent→child"
 
 #-------------------------------------------------------------------------
-print_step "4. DURABLE child: publish + parent invoke..."
+print_step "4. Safety gate: a sleeping workflow is refused as an agent..."
 RESP=$(api_post /workflows/create '{"name":"Durable Delay Echo","description":"parity e2e","slug":"durable-delay-echo"}')
 DURABLE_ID=$(echo "${RESP}" | jq -r '.data.id // empty')
 [ -n "${DURABLE_ID}" ] || { print_error "durable child create failed: ${RESP}"; exit 1; }
@@ -337,218 +336,31 @@ RESP=$(api_post "/workflows/${DURABLE_ID}/update" "{\"executionGraph\": ${DURABL
 [ "$(echo "${RESP}" | jq -r '.success // false')" = "true" ] \
     || { print_error "durable child update failed: ${RESP}"; exit 1; }
 RESP=$(api_post "/workflows/${DURABLE_ID}/publish-agent" "" 900)
-[ "$(echo "${RESP}" | jq -r '.success // false')" = "true" ] \
-    || { print_error "durable publish-agent failed: ${RESP}"; tail -40 "${TEST_LOG}"; exit 1; }
-echo "  durable child published ✓"
-
-DURABLE_PARENT_GRAPH='{
-  "name": "Parent Of Durable Echo",
-  "steps": {
-    "call": {
-      "stepType": "Agent",
-      "id": "call",
-      "agentId": "durable-delay-echo",
-      "capabilityId": "run",
-      "inputMapping": { "value": { "valueType": "reference", "value": "data.msg" } }
-    },
-    "finish": {
-      "stepType": "Finish",
-      "id": "finish",
-      "inputMapping": { "childEcho": { "valueType": "reference", "value": "steps.call.outputs.echo" } }
-    }
-  },
-  "entryPoint": "call",
-  "executionPlan": [{ "fromStep": "call", "toStep": "finish" }],
-  "variables": {},
-  "inputSchema": { "msg": { "type": "string", "required": true } },
-  "outputSchema": {}
-}'
-DURABLE_PARENT_ID=$(create_and_compile "Parent Of Durable Echo" "${DURABLE_PARENT_GRAPH}")
-execute_and_assert "${DURABLE_PARENT_ID}" '{"data":{"msg":"durable-live"}}' \
-    '{"childEcho":"durable-live"}' "parent→durable-child"
-
-#-------------------------------------------------------------------------
-print_step "5. Checkpoint namespacing: Split over a durable child with a same-named step..."
-# The child's internal Delay step is deliberately named `call` — the SAME id
-# as the parent's Agent step. Without per-site namespacing all three Split
-# iterations would collide on one bare `call` sleep checkpoint.
-RESP=$(api_post /workflows/create '{"name":"NS Delay Echo","description":"parity e2e","slug":"ns-delay-echo"}')
-NS_CHILD_ID=$(echo "${RESP}" | jq -r '.data.id // empty')
-[ -n "${NS_CHILD_ID}" ] || { print_error "ns child create failed: ${RESP}"; exit 1; }
-NS_CHILD_GRAPH='{
-  "name": "NS Delay Echo",
-  "steps": {
-    "call": {
-      "stepType": "Delay",
-      "id": "call",
-      "durationMs": { "valueType": "immediate", "value": 30 }
-    },
-    "finish": {
-      "stepType": "Finish",
-      "id": "finish",
-      "inputMapping": { "echo": { "valueType": "reference", "value": "data.value" } }
-    }
-  },
-  "entryPoint": "call",
-  "executionPlan": [ { "fromStep": "call", "toStep": "finish" } ],
-  "variables": {},
-  "inputSchema": { "value": { "type": "string", "required": true } },
-  "outputSchema": {}
-}'
-RESP=$(api_post "/workflows/${NS_CHILD_ID}/update" "{\"executionGraph\": ${NS_CHILD_GRAPH}}")
-[ "$(echo "${RESP}" | jq -r '.success // false')" = "true" ] \
-    || { print_error "ns child update failed: ${RESP}"; exit 1; }
-RESP=$(api_post "/workflows/${NS_CHILD_ID}/publish-agent" "" 900)
-[ "$(echo "${RESP}" | jq -r '.success // false')" = "true" ] \
-    || { print_error "ns child publish failed: ${RESP}"; tail -40 "${TEST_LOG}"; exit 1; }
-NS_META="${TEST_DATA_DIR}/workflow-agents/${TENANT}/runtara_agent_ns_delay_echo.meta.json"
-jq -e '.capabilities[0].tags | index("checkpoint-scope:1")' "${NS_META}" >/dev/null \
-    || { print_error "published meta lacks the checkpoint-scope marker: $(cat "${NS_META}")"; exit 1; }
-echo "  ns child published with checkpoint-scope marker ✓"
-
-NS_PARENT_GRAPH='{
-  "name": "NS Split Parent",
-  "durable": true,
-  "steps": {
-    "split": {
-      "stepType": "Split",
-      "id": "split",
-      "config": { "value": { "valueType": "reference", "value": "data.items" } },
-      "subgraph": {
-        "name": "Body",
-        "entryPoint": "call",
-        "steps": {
-          "call": {
-            "stepType": "Agent",
-            "id": "call",
-            "agentId": "ns-delay-echo",
-            "capabilityId": "run",
-            "inputMapping": { "value": { "valueType": "reference", "value": "item.v" } }
-          },
-          "finish": {
-            "stepType": "Finish",
-            "id": "finish",
-            "inputMapping": { "echo": { "valueType": "reference", "value": "steps.call.outputs.echo" } }
-          }
-        },
-        "executionPlan": [ { "fromStep": "call", "toStep": "finish" } ]
-      }
-    },
-    "finish": {
-      "stepType": "Finish",
-      "id": "finish",
-      "inputMapping": { "results": { "valueType": "reference", "value": "steps.split.outputs" } }
-    }
-  },
-  "entryPoint": "split",
-  "executionPlan": [ { "fromStep": "split", "toStep": "finish" } ],
-  "variables": {},
-  "inputSchema": { "items": { "type": "array", "required": true } },
-  "outputSchema": {}
-}'
-NS_PARENT_ID=$(create_and_compile "NS Split Parent" "${NS_PARENT_GRAPH}")
-RESP=$(api_post "/workflows/${NS_PARENT_ID}/execute" '{"inputs":{"data":{"items":[{"v":"a"},{"v":"b"},{"v":"c"}]}}}')
-NS_INSTANCE=$(echo "${RESP}" | jq -r '.data.instanceId // empty')
-[ -n "${NS_INSTANCE}" ] || { print_error "ns parent execute failed: ${RESP}"; exit 1; }
-NS_STATUS=""
-for _ in {1..90}; do
-    RESP=$(curl -sS "${API}/workflows/instances/${NS_INSTANCE}")
-    NS_STATUS=$(echo "${RESP}" | jq -r '.data.status // .status // empty')
-    case "${NS_STATUS}" in completed|failed|crashed|stopped) break ;; esac
-    sleep 2
-done
-[ "${NS_STATUS}" = "completed" ] \
-    || { print_error "ns split parent ended '${NS_STATUS}': $(echo "${RESP}" | jq -c '.data.error // empty')"; tail -40 "${TEST_LOG}"; exit 1; }
-echo "  split over durable child completed ✓"
-
-# The stored checkpoint ids must be per-invocation-site scoped: one child
-# sleep key per Split iteration, and NEVER the bare legacy `call`.
-ENV_API="http://127.0.0.1:${TEST_ENV_HTTP_PORT}/api/v1"
-CKPT_IDS=$(curl -sS "${ENV_API}/instances/${NS_INSTANCE}/checkpoints?limit=500" | jq -r '.checkpoints[].checkpoint_id')
-[ -n "${CKPT_IDS}" ] || { print_error "no checkpoints recorded for ${NS_INSTANCE}"; exit 1; }
-for i in 0 1 2; do
-    echo "${CKPT_IDS}" | grep -q "::call\[${i}\]::call$" \
-        || { print_error "missing scoped child sleep key for iteration ${i}; got:"$'\n'"${CKPT_IDS}"; exit 1; }
-done
-if echo "${CKPT_IDS}" | grep -qx "call"; then
-    print_error "bare legacy 'call' checkpoint id present — namespacing not applied:"$'\n'"${CKPT_IDS}"
-    exit 1
-fi
-echo "  three per-site scoped child sleep keys, no bare legacy key ✓"
-
-#-------------------------------------------------------------------------
-print_step "6. Stale-artifact gate: durable child without the marker fails parent compile..."
-# Simulate an artifact published before checkpoint namespacing by stripping
-# the marker tag from the staged sidecar, then compiling a fresh parent.
-jq '(.capabilities[0].tags) |= map(select(. != "checkpoint-scope:1"))' "${NS_META}" > "${NS_META}.tmp" \
-    && mv "${NS_META}.tmp" "${NS_META}"
-GATE_PARENT_GRAPH='{
-  "name": "Gate Parent",
-  "steps": {
-    "call": {
-      "stepType": "Agent",
-      "id": "call",
-      "agentId": "ns-delay-echo",
-      "capabilityId": "run",
-      "inputMapping": { "value": { "valueType": "immediate", "value": "x" } }
-    },
-    "finish": {
-      "stepType": "Finish",
-      "id": "finish",
-      "inputMapping": { "echo": { "valueType": "reference", "value": "steps.call.outputs.echo" } }
-    }
-  },
-  "entryPoint": "call",
-  "executionPlan": [{ "fromStep": "call", "toStep": "finish" }],
-  "variables": {},
-  "inputSchema": {},
-  "outputSchema": {}
-}'
-RESP=$(api_post /workflows/create '{"name":"Gate Parent","description":"parity e2e"}')
-GATE_PARENT_ID=$(echo "${RESP}" | jq -r '.data.id // empty')
-[ -n "${GATE_PARENT_ID}" ] || { print_error "gate parent create failed: ${RESP}"; exit 1; }
-RESP=$(api_post "/workflows/${GATE_PARENT_ID}/update" "{\"executionGraph\": ${GATE_PARENT_GRAPH}}")
-[ "$(echo "${RESP}" | jq -r '.success // false')" = "true" ] \
-    || { print_error "gate parent update failed: ${RESP}"; exit 1; }
-GATE_VERSION=$(curl -sS "${API}/workflows/${GATE_PARENT_ID}/versions" \
-    | jq -r '[.data[]?.version // .data[]?.versionNumber // empty] | max // 1')
-RESP=$(api_post "/workflows/${GATE_PARENT_ID}/versions/${GATE_VERSION}/compile" '{}' 900)
 [ "$(echo "${RESP}" | jq -r '.success // false')" = "false" ] \
-    || { print_error "compile against a STALE durable artifact must fail, got: ${RESP}"; exit 1; }
-echo "${RESP}" | jq -r '[.. | strings] | join(" ")' | grep -q "predates checkpoint namespacing" \
-    || { print_error "gate error must mention the stale artifact: ${RESP}"; exit 1; }
-echo "  stale durable artifact rejected with republish error ✓"
-
-# Republish heals it: the fresh meta carries the marker and the same parent compiles.
-RESP=$(api_post "/workflows/${NS_CHILD_ID}/publish-agent" "" 900)
-[ "$(echo "${RESP}" | jq -r '.success // false')" = "true" ] \
-    || { print_error "ns child republish failed: ${RESP}"; exit 1; }
-RESP=$(api_post "/workflows/${GATE_PARENT_ID}/versions/${GATE_VERSION}/compile" '{}' 900)
-[ "$(echo "${RESP}" | jq -r '.success // false')" = "true" ] \
-    || { print_error "republish must heal the gate: ${RESP}"; tail -40 "${TEST_LOG}"; exit 1; }
-echo "  republish heals the gate ✓"
+    || { print_error "a durable workflow must not publish as an agent: ${RESP}"; exit 1; }
+PUBLISH_ERROR=$(echo "${RESP}" | jq -r '[.. | strings] | join(" ")')
+echo "${PUBLISH_ERROR}" | grep -q "may suspend or sleep" \
+    || { print_error "rejection must explain the synchronous agent boundary: ${RESP}"; exit 1; }
+echo "${PUBLISH_ERROR}" | grep -q "Delay/delay" \
+    || { print_error "rejection must identify the Delay path: ${RESP}"; exit 1; }
+echo "  sleeping workflow refused before agent publication ✓"
 
 #-------------------------------------------------------------------------
-print_step "7. Signal-id scoping: discover the per-site id and signal a waiting child..."
-# A composed child that WAITS: the signal id must carry the invocation-site
-# scope, be discoverable via pending-input, and be addressable via the
-# public signals API — the full external round-trip on a scoped id.
-RESP=$(api_post /workflows/create '{"name":"Live Approve","description":"parity e2e","slug":"live-approve"}')
-SIG_CHILD_ID=$(echo "${RESP}" | jq -r '.data.id // empty')
-[ -n "${SIG_CHILD_ID}" ] || { print_error "sig child create failed: ${RESP}"; exit 1; }
-SIG_CHILD_GRAPH='{
-  "name": "Live Approve",
+print_step "5. Safety gate: a waiting workflow is refused as an agent..."
+RESP=$(api_post /workflows/create '{"name":"Waiting Approval","description":"parity e2e","slug":"waiting-approval"}')
+WAITING_ID=$(echo "${RESP}" | jq -r '.data.id // empty')
+[ -n "${WAITING_ID}" ] || { print_error "waiting workflow create failed: ${RESP}"; exit 1; }
+WAITING_GRAPH='{
+  "name": "Waiting Approval",
   "steps": {
     "approve": {
       "stepType": "WaitForSignal",
       "id": "approve",
-      "pollIntervalMs": 500,
-      "timeoutMs": { "valueType": "immediate", "value": 120000 }
+      "pollIntervalMs": 500
     },
     "finish": {
       "stepType": "Finish",
-      "id": "finish",
-      "inputMapping": { "decision": { "valueType": "reference", "value": "steps.approve.outputs.decision" } }
+      "id": "finish"
     }
   },
   "entryPoint": "approve",
@@ -557,75 +369,28 @@ SIG_CHILD_GRAPH='{
   "inputSchema": {},
   "outputSchema": {}
 }'
-RESP=$(api_post "/workflows/${SIG_CHILD_ID}/update" "{\"executionGraph\": ${SIG_CHILD_GRAPH}}")
-[ "$(echo "${RESP}" | jq -r '.success // false')" = "true" ] \
-    || { print_error "sig child update failed: ${RESP}"; exit 1; }
-RESP=$(api_post "/workflows/${SIG_CHILD_ID}/publish-agent" "" 900)
-[ "$(echo "${RESP}" | jq -r '.success // false')" = "true" ] \
-    || { print_error "sig child publish failed: ${RESP}"; tail -40 "${TEST_LOG}"; exit 1; }
-
-SIG_PARENT_GRAPH='{
-  "name": "Sig Parent Live",
-  "steps": {
-    "call": {
-      "stepType": "Agent",
-      "id": "call",
-      "agentId": "live-approve",
-      "capabilityId": "run",
-      "inputMapping": {}
-    },
-    "finish": {
-      "stepType": "Finish",
-      "id": "finish",
-      "inputMapping": { "decision": { "valueType": "reference", "value": "steps.call.outputs.decision" } }
-    }
-  },
-  "entryPoint": "call",
-  "executionPlan": [{ "fromStep": "call", "toStep": "finish" }],
-  "variables": {},
-  "inputSchema": {},
-  "outputSchema": {}
-}'
-SIG_PARENT_ID=$(create_and_compile "Sig Parent Live" "${SIG_PARENT_GRAPH}")
-RESP=$(api_post "/workflows/${SIG_PARENT_ID}/execute" '{"inputs":{"data":{}}}')
-SIG_INSTANCE=$(echo "${RESP}" | jq -r '.data.instanceId // empty')
-[ -n "${SIG_INSTANCE}" ] || { print_error "sig parent execute failed: ${RESP}"; exit 1; }
-
-# Discover the scoped signal id from the pending-input listing.
-SIGNAL_ID=""
-for _ in {1..45}; do
-    RESP=$(curl -sS "${API}/workflows/${SIG_PARENT_ID}/instances/${SIG_INSTANCE}/pending-input")
-    SIGNAL_ID=$(echo "${RESP}" | jq -r '.data.pendingInputs[0].signalId // empty')
-    [ -n "${SIGNAL_ID}" ] && break
-    sleep 2
-done
-[ -n "${SIGNAL_ID}" ] || { print_error "no pending input surfaced: ${RESP}"; tail -40 "${TEST_LOG}"; exit 1; }
-case "${SIGNAL_ID}" in
-    *"::call::approve"*) ;;
-    *) print_error "signal id must carry the invocation-site scope, got '${SIGNAL_ID}'"; exit 1 ;;
-esac
-echo "  scoped signal id discovered: ${SIGNAL_ID} ✓"
-
-# Address it through the public signals API — opaque round-trip.
-RESP=$(api_post "/signals/${SIG_INSTANCE}" "{\"signalId\": \"${SIGNAL_ID}\", \"payload\": {\"decision\": \"approved-live\"}}")
-[ "$(echo "${RESP}" | jq -r '.success // false')" = "true" ] \
-    || { print_error "signal submit failed: ${RESP}"; exit 1; }
-SIG_STATUS=""
-for _ in {1..45}; do
-    RESP=$(curl -sS "${API}/workflows/instances/${SIG_INSTANCE}")
-    SIG_STATUS=$(echo "${RESP}" | jq -r '.data.status // .status // empty')
-    case "${SIG_STATUS}" in completed|failed|crashed|stopped) break ;; esac
-    sleep 2
-done
-[ "${SIG_STATUS}" = "completed" ] \
-    || { print_error "signaled parent ended '${SIG_STATUS}': $(echo "${RESP}" | jq -c '.data.error // empty')"; tail -40 "${TEST_LOG}"; exit 1; }
-OUT=$(echo "${RESP}" | jq -r '.data.outputs.decision // empty')
-[ "${OUT}" = "approved-live" ] \
-    || { print_error "signal payload did not flow through, got: $(echo "${RESP}" | jq -c '.data.outputs')"; exit 1; }
-echo "  scoped signal delivered, payload flowed to output ✓"
-
+RESP=$(api_post "/workflows/${WAITING_ID}/update" "{\"executionGraph\": ${WAITING_GRAPH}}")
+if [ "$(echo "${RESP}" | jq -r '.success // false')" != "true" ]; then
+    print_error "waiting workflow update failed: ${RESP}"
+    exit 1
+fi
+RESP=$(api_post "/workflows/${WAITING_ID}/publish-agent" "" 900)
+if [ "$(echo "${RESP}" | jq -r '.success // false')" != "false" ]; then
+    print_error "a waiting workflow must not publish as an agent: ${RESP}"
+    exit 1
+fi
+PUBLISH_ERROR=$(echo "${RESP}" | jq -r '[.. | strings] | join(" ")')
+echo "${PUBLISH_ERROR}" | grep -q "may suspend or sleep" || {
+    print_error "waiting rejection must explain the synchronous agent boundary: ${RESP}"
+    exit 1
+}
+echo "${PUBLISH_ERROR}" | grep -q "WaitForSignal/wait-for-signal" || {
+    print_error "rejection must identify the WaitForSignal path: ${RESP}"
+    exit 1
+}
+echo "  waiting workflow refused before agent publication ✓"
 #-------------------------------------------------------------------------
-print_step "8. Multi-site discovery: second wait on the same step id stays discoverable..."
+print_step "6. Embedded waits: second wait on the same step id stays discoverable..."
 # Two EMBEDS of one wait-child (events ON). After site 1's wait completes, a
 # step_debug_end with the bare child step id exists — the pending-input
 # listing must still surface site 2's open wait (it matches resolved waits
@@ -700,10 +465,10 @@ EMB_INSTANCE=$(echo "${RESP}" | jq -r '.data.instanceId // empty')
 
 # Discover a site's open signal id (by site marker) via pending-input.
 discover_signal() {
-    local marker="$1" found=""
+    local instance="$1" marker="$2" found=""
     for _ in {1..45}; do
         local resp
-        resp=$(curl -sS "${API}/workflows/${EMB_PARENT_ID}/instances/${EMB_INSTANCE}/pending-input")
+        resp=$(curl -sS "${API}/workflows/${EMB_PARENT_ID}/instances/${instance}/pending-input")
         found=$(echo "${resp}" | jq -r --arg m "${marker}" \
             '.data.pendingInputs[]?.signalId // empty | select(contains($m))' | head -1)
         [ -n "${found}" ] && { echo "${found}"; return 0; }
@@ -713,7 +478,7 @@ discover_signal() {
     return 1
 }
 
-SIG1=$(discover_signal "::embed1::approve") || { tail -40 "${TEST_LOG}"; exit 1; }
+SIG1=$(discover_signal "${EMB_INSTANCE}" "::embed1::approve") || { tail -40 "${TEST_LOG}"; exit 1; }
 RESP=$(api_post "/signals/${EMB_INSTANCE}" "{\"signalId\": \"${SIG1}\", \"payload\": {\"decision\": \"first-ok\"}}")
 [ "$(echo "${RESP}" | jq -r '.success // false')" = "true" ] \
     || { print_error "site-1 signal submit failed: ${RESP}"; exit 1; }
@@ -721,7 +486,7 @@ echo "  site 1 discovered + signaled (${SIG1}) ✓"
 
 # THE regression: after site 1 completed (its step_debug_end recorded under
 # the bare step id "approve"), site 2's open wait must STILL be listed.
-SIG2=$(discover_signal "::embed2::approve") || { tail -40 "${TEST_LOG}"; exit 1; }
+SIG2=$(discover_signal "${EMB_INSTANCE}" "::embed2::approve") || { tail -40 "${TEST_LOG}"; exit 1; }
 RESP=$(api_post "/signals/${EMB_INSTANCE}" "{\"signalId\": \"${SIG2}\", \"payload\": {\"decision\": \"second-ok\"}}")
 [ "$(echo "${RESP}" | jq -r '.success // false')" = "true" ] \
     || { print_error "site-2 signal submit failed: ${RESP}"; exit 1; }
@@ -742,50 +507,61 @@ OUT=$(echo "${RESP}" | jq -cS '.data.outputs')
 echo "  both sites resolved with their own payloads ✓"
 
 #-------------------------------------------------------------------------
-print_step "9. Pause during a composed child's wait: suspend, resume, signal, complete..."
-# Before the suspend-sentinel fix, pausing an instance blocked inside a
-# composed workflow-agent's WaitForSignal FAILED it ("failed to parse Agent
-# output"); the suspend now crosses the composition boundary.
-RESP=$(api_post "/workflows/${SIG_PARENT_ID}/execute" '{"inputs":{"data":{}}}')
+print_step "7. Pause during an embedded child's wait: suspend, resume, signal, complete..."
+# Durable work remains supported through EmbedWorkflow; pausing the parent
+# must suspend the instance rather than consuming a runner slot.
+RESP=$(api_post "/workflows/${EMB_PARENT_ID}/execute" '{"inputs":{"data":{}}}')
 PAUSE_INSTANCE=$(echo "${RESP}" | jq -r '.data.instanceId // empty')
 [ -n "${PAUSE_INSTANCE}" ] || { print_error "pause-target execute failed: ${RESP}"; exit 1; }
 
-# Let the composed child reach its wait (its pending-input event surfaces).
-PAUSE_SIG=""
-for _ in {1..45}; do
-    RESP=$(curl -sS "${API}/workflows/${SIG_PARENT_ID}/instances/${PAUSE_INSTANCE}/pending-input")
-    PAUSE_SIG=$(echo "${RESP}" | jq -r '.data.pendingInputs[0].signalId // empty')
-    [ -n "${PAUSE_SIG}" ] && break
-    sleep 2
-done
-[ -n "${PAUSE_SIG}" ] || { print_error "wait never surfaced before pause: ${RESP}"; exit 1; }
+PAUSE_SIG=$(discover_signal "${PAUSE_INSTANCE}" "::embed1::approve") || {
+    tail -40 "${TEST_LOG}"
+    exit 1
+}
 
 RESP=$(api_post "/workflows/instances/${PAUSE_INSTANCE}/pause" "")
-[ "$(echo "${RESP}" | jq -r '.success // false')" = "true" ] \
-    || { print_error "pause request failed: ${RESP}"; exit 1; }
+if [ "$(echo "${RESP}" | jq -r '.success // false')" != "true" ]; then
+    print_error "pause request failed: ${RESP}"
+    exit 1
+fi
 PAUSE_STATUS=""
 for _ in {1..45}; do
     RESP=$(curl -sS "${API}/workflows/instances/${PAUSE_INSTANCE}")
     PAUSE_STATUS=$(echo "${RESP}" | jq -r '.data.status // .status // empty')
-    case "${PAUSE_STATUS}" in paused|suspended) break ;; esac
-    case "${PAUSE_STATUS}" in failed|crashed|stopped|completed)
-        print_error "pause mid-composed-wait must suspend, instance ended '${PAUSE_STATUS}': $(echo "${RESP}" | jq -c '.data.error // empty')"
-        tail -40 "${TEST_LOG}"
-        exit 1 ;;
+    case "${PAUSE_STATUS}" in
+        paused|suspended) break ;;
+        failed|crashed|stopped|completed)
+            print_error "pause mid-embedded-wait must suspend, instance ended '${PAUSE_STATUS}': $(echo "${RESP}" | jq -c '.data.error // empty')"
+            tail -40 "${TEST_LOG}"
+            exit 1 ;;
     esac
     sleep 2
 done
 case "${PAUSE_STATUS}" in
-    paused|suspended) echo "  instance ${PAUSE_STATUS} while composed child waited ✓" ;;
+    paused|suspended) echo "  instance ${PAUSE_STATUS} while embedded child waited ✓" ;;
     *) print_error "instance never paused (last status '${PAUSE_STATUS}')"; tail -40 "${TEST_LOG}"; exit 1 ;;
 esac
 
 RESP=$(api_post "/workflows/instances/${PAUSE_INSTANCE}/resume" "")
-[ "$(echo "${RESP}" | jq -r '.success // false')" = "true" ] \
-    || { print_error "resume request failed: ${RESP}"; exit 1; }
+if [ "$(echo "${RESP}" | jq -r '.success // false')" != "true" ]; then
+    print_error "resume request failed: ${RESP}"
+    exit 1
+fi
 RESP=$(api_post "/signals/${PAUSE_INSTANCE}" "{\"signalId\": \"${PAUSE_SIG}\", \"payload\": {\"decision\": \"resumed-live\"}}")
-[ "$(echo "${RESP}" | jq -r '.success // false')" = "true" ] \
-    || { print_error "post-resume signal submit failed: ${RESP}"; exit 1; }
+if [ "$(echo "${RESP}" | jq -r '.success // false')" != "true" ]; then
+    print_error "post-resume first signal submit failed: ${RESP}"
+    exit 1
+fi
+PAUSE_SIG2=$(discover_signal "${PAUSE_INSTANCE}" "::embed2::approve") || {
+    tail -40 "${TEST_LOG}"
+    exit 1
+}
+RESP=$(api_post "/signals/${PAUSE_INSTANCE}" "{\"signalId\": \"${PAUSE_SIG2}\", \"payload\": {\"decision\": \"second-after-resume\"}}")
+if [ "$(echo "${RESP}" | jq -r '.success // false')" != "true" ]; then
+    print_error "post-resume second signal submit failed: ${RESP}"
+    exit 1
+fi
+
 PAUSE_STATUS=""
 for _ in {1..60}; do
     RESP=$(curl -sS "${API}/workflows/instances/${PAUSE_INSTANCE}")
@@ -793,11 +569,16 @@ for _ in {1..60}; do
     case "${PAUSE_STATUS}" in completed|failed|crashed|stopped) break ;; esac
     sleep 2
 done
-[ "${PAUSE_STATUS}" = "completed" ] \
-    || { print_error "resumed instance ended '${PAUSE_STATUS}': $(echo "${RESP}" | jq -c '.data.error // empty')"; tail -40 "${TEST_LOG}"; exit 1; }
-OUT=$(echo "${RESP}" | jq -r '.data.outputs.decision // empty')
-[ "${OUT}" = "resumed-live" ] \
-    || { print_error "post-resume payload did not flow through: $(echo "${RESP}" | jq -c '.data.outputs')"; exit 1; }
-echo "  resumed, signaled, completed with the post-resume payload ✓"
+[ "${PAUSE_STATUS}" = "completed" ] || {
+    print_error "resumed instance ended '${PAUSE_STATUS}': $(echo "${RESP}" | jq -c '.data.error // empty')"
+    tail -40 "${TEST_LOG}"
+    exit 1
+}
+OUT=$(echo "${RESP}" | jq -cS '.data.outputs')
+[ "${OUT}" = '{"first":"resumed-live","second":"second-after-resume"}' ] || {
+    print_error "post-resume payload routing broken, got: ${OUT}"
+    exit 1
+}
+echo "  resumed, signaled twice, and completed with both embedded outputs ✓"
 
-print_success "workflow<>agent parity: slug + publish + parent invoke + durable child + checkpoint namespacing + stale-artifact gate + scoped signals + multi-site discovery + pause-through-composition, all green"
+print_success "workflow<>agent parity: slug + synchronous publish + parent invoke + suspend-capable-agent rejection + embedded signal discovery + pause/resume, all green"
