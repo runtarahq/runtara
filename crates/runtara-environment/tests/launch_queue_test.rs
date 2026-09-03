@@ -7,11 +7,14 @@ mod common;
 use std::{sync::Arc, time::Duration};
 
 use common::TestContext;
+use runtara_core::persistence::PostgresPersistence;
+use runtara_environment::runner::{MockRunner, Runner, RunnerHandle};
 use runtara_environment::{
     db,
+    launch_dispatcher::LaunchDispatcher,
     launch_queue::{
-        CancelOutcome, EnqueueOutcome, EnqueueRequest, LAUNCH_QUEUE_TIMEOUT, LaunchKind,
-        LaunchRepository, LaunchState,
+        CancelOutcome, EnqueueOutcome, EnqueueRequest, InitialLaunchOutcome, InitialLaunchRequest,
+        LAUNCH_QUEUE_TIMEOUT, LaunchKind, LaunchQueueError, LaunchRepository, LaunchState,
     },
 };
 use sqlx::PgPool;
@@ -395,6 +398,168 @@ async fn enqueue_requires_the_bound_image_and_matching_pre_launch_state() {
             .await,
         Err(runtara_environment::launch_queue::LaunchQueueError::InvalidLaunchTarget { .. })
     ));
+
+    context.cleanup().await;
+}
+
+#[tokio::test]
+async fn initial_claim_never_commits_a_pending_instance_without_its_launch() {
+    let context = TestContext::new().await.expect("test database must start");
+    let tenant_id = format!("initial-launch-{}", Uuid::new_v4());
+    let image_id = context
+        .create_test_image(&tenant_id, "initial-launch")
+        .await
+        .to_string();
+    let repository = LaunchRepository::new(context.pool.clone());
+    let instance_id = Uuid::new_v4().to_string();
+    let launch_id = Uuid::new_v4().to_string();
+    let request = InitialLaunchRequest {
+        launch: EnqueueRequest::immediate(
+            &launch_id,
+            &instance_id,
+            &tenant_id,
+            &image_id,
+            LaunchKind::Start,
+            Duration::from_secs(60),
+        ),
+        input: Some(br#"{"amount":42}"#.to_vec()),
+        env: Some(
+            [("MODE".to_string(), "test".to_string())]
+                .into_iter()
+                .collect(),
+        ),
+        timeout_seconds: Some(30),
+    };
+
+    let queued = repository
+        .claim_initial(request.clone())
+        .await
+        .expect("initial claim must commit");
+    assert!(matches!(
+        queued,
+        InitialLaunchOutcome::Enqueued(ref launch)
+            if launch.launch_id == launch_id && launch.state == LaunchState::Queued
+    ));
+    assert_eq!(
+        instance_result(&context.pool, &instance_id).await.0,
+        "pending",
+        "the queue row and Core instance must be visible together"
+    );
+    assert_eq!(
+        db::get_instance_image_id(&context.pool, &instance_id)
+            .await
+            .expect("image binding read must succeed"),
+        Some(image_id.clone())
+    );
+
+    let replay = repository
+        .claim_initial(request)
+        .await
+        .expect("idempotent initial claim must succeed");
+    assert!(matches!(
+        replay,
+        InitialLaunchOutcome::ExistingLaunch(ref launch) if launch.launch_id == launch_id
+    ));
+
+    let invalid_instance = Uuid::new_v4().to_string();
+    let invalid = InitialLaunchRequest {
+        launch: EnqueueRequest::immediate(
+            Uuid::new_v4().to_string(),
+            &invalid_instance,
+            &tenant_id,
+            "missing-image",
+            LaunchKind::Start,
+            Duration::from_secs(60),
+        ),
+        input: None,
+        env: None,
+        timeout_seconds: Some(30),
+    };
+    assert!(matches!(
+        repository.claim_initial(invalid).await,
+        Err(LaunchQueueError::InvalidLaunchTarget { .. })
+    ));
+    let missing: Option<(String,)> =
+        sqlx::query_as("SELECT instance_id FROM instances WHERE instance_id = $1")
+            .bind(&invalid_instance)
+            .fetch_optional(&context.pool)
+            .await
+            .expect("invalid initial claim lookup must succeed");
+    assert!(
+        missing.is_none(),
+        "a rejected image must roll back the pending instance insertion"
+    );
+
+    context.cleanup().await;
+}
+
+#[tokio::test]
+async fn dispatcher_hands_off_a_durable_row_without_a_runner_waiter() {
+    let context = TestContext::new().await.expect("test database must start");
+    let fixture = fixture(&context).await;
+    // TestContext's image points at this path; a mock runner accepts any file,
+    // while dispatcher preflight still verifies that the durable artifact exists.
+    std::fs::write(context.data_dir.join("test_binary"), b"mock workflow")
+        .expect("test artifact must be writable");
+    let repository = LaunchRepository::new(context.pool.clone());
+    let launch_id = Uuid::new_v4().to_string();
+    repository
+        .enqueue(request(
+            &fixture,
+            &launch_id,
+            LaunchKind::Start,
+            Duration::from_secs(60),
+        ))
+        .await
+        .expect("queue row must be inserted");
+
+    let runner = Arc::new(MockRunner::never_completing());
+    let dispatcher = LaunchDispatcher::new(
+        context.pool.clone(),
+        Arc::new(PostgresPersistence::new(context.pool.clone())),
+        runner.clone(),
+        Arc::new(tokio::sync::Notify::new()),
+        Default::default(),
+    );
+    assert_eq!(
+        dispatcher
+            .dispatch_once()
+            .await
+            .expect("dispatch scan must succeed"),
+        1
+    );
+    assert_eq!(
+        runner.launch_count(),
+        1,
+        "one durable generation was handed off"
+    );
+    assert_eq!(
+        repository
+            .get(&launch_id)
+            .await
+            .expect("launch read must succeed")
+            .expect("launch must exist")
+            .state,
+        LaunchState::Running
+    );
+
+    // End the detached mock so the background monitor cannot outlive this
+    // test. The database cleanup below removes the generation after the task
+    // observes the stop.
+    let options = runner
+        .last_launch()
+        .expect("runner launch must be recorded");
+    runner
+        .stop(&RunnerHandle {
+            launch_id: options.launch_id.clone(),
+            handle_id: format!("mock_{}", &options.launch_id[..8]),
+            instance_id: options.instance_id,
+            tenant_id: options.tenant_id,
+            started_at: chrono::Utc::now(),
+            metrics: None,
+        })
+        .await
+        .expect("mock runner stop must succeed");
 
     context.cleanup().await;
 }

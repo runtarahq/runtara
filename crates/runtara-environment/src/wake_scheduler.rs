@@ -15,19 +15,20 @@
 use runtara_core::instance_handlers::{
     InstanceHandlerState, SignalAck, SignalType, handle_signal_ack,
 };
-use runtara_core::persistence::Persistence;
+use runtara_core::persistence::{CompleteInstanceParams, Persistence};
 use sqlx::PgPool;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Notify;
 use tracing::{debug, error, info, warn};
 
-use crate::container_registry::{ContainerInfo, ContainerRegistry};
 use crate::db;
-use crate::execution_timeout::ExecutionTimeoutPolicy;
-use crate::handlers::{DrainController, spawn_container_monitor};
-use crate::image_registry::{ImageRegistry, require_current_workflow_entrypoint};
-use crate::runner::{LaunchOptions, Runner};
+use crate::handlers::DrainController;
+use crate::launch_dispatcher::{DEFAULT_LAUNCH_QUEUE_TIMEOUT, LaunchLifecycleObservers};
+use crate::launch_queue::{
+    EnqueueOutcome, EnqueueRequest, LaunchKind, LaunchQueueError, LaunchRepository,
+};
+use crate::runner::Runner;
 
 /// Wake scheduler configuration.
 #[derive(Debug, Clone)]
@@ -119,12 +120,14 @@ pub struct WakeScheduler {
     pool: PgPool,
     /// Core persistence layer for querying sleeping instances.
     persistence: Arc<dyn Persistence>,
-    runner: Arc<dyn Runner>,
-    image_registry: ImageRegistry,
+    /// Retained in the constructor until all embedding callers have migrated
+    /// to the dispatcher-only wake contract. Wakes never call it directly.
+    _runner: Arc<dyn Runner>,
     config: WakeSchedulerConfig,
-    execution_timeout_policy: ExecutionTimeoutPolicy,
     shutdown: Arc<Notify>,
     drain: DrainController,
+    launch_notifier: Arc<Notify>,
+    lifecycle_observers: LaunchLifecycleObservers,
 }
 
 impl WakeScheduler {
@@ -138,7 +141,6 @@ impl WakeScheduler {
         runner: Arc<dyn Runner>,
         config: WakeSchedulerConfig,
     ) -> Self {
-        let image_registry = ImageRegistry::new(pool.clone());
         let pool_max = pool.options().get_max_connections() as usize;
         let mut config = config;
         let bounded = concurrency_within_pool(config.concurrency, pool_max);
@@ -154,12 +156,12 @@ impl WakeScheduler {
         Self {
             pool,
             persistence,
-            runner,
-            image_registry,
+            _runner: runner,
             config,
-            execution_timeout_policy: ExecutionTimeoutPolicy::default(),
             shutdown: Arc::new(Notify::new()),
             drain: DrainController::new(),
+            launch_notifier: Arc::new(Notify::new()),
+            lifecycle_observers: LaunchLifecycleObservers::default(),
         }
     }
 
@@ -170,10 +172,14 @@ impl WakeScheduler {
         self
     }
 
-    /// Set the policy used to validate persisted timeouts before a durable
-    /// instance is relaunched.
-    pub fn with_execution_timeout_policy(mut self, policy: ExecutionTimeoutPolicy) -> Self {
-        self.execution_timeout_policy = policy;
+    /// Attach the shared dispatcher notification and lifecycle observer holder.
+    pub fn with_launch_control(
+        mut self,
+        launch_notifier: Arc<Notify>,
+        lifecycle_observers: LaunchLifecycleObservers,
+    ) -> Self {
+        self.launch_notifier = launch_notifier;
+        self.lifecycle_observers = lifecycle_observers;
         self
     }
 
@@ -430,8 +436,12 @@ impl WakeScheduler {
         result
     }
 
-    /// Relaunch a claimed instance. See [`WakeScheduler::wake_instance`] for
-    /// the claim-release contract wrapping this.
+    /// Queue a claimed instance for durable runner handoff.
+    ///
+    /// See [`WakeScheduler::wake_instance`] for the claim-release contract
+    /// wrapping this. The scheduler intentionally does not call a runner: a
+    /// full runner is dispatcher work, not a reason to leave wake tasks parked
+    /// on in-memory permits.
     async fn wake_claimed_instance(
         &self,
         instance: &runtara_core::persistence::InstanceRecord,
@@ -441,103 +451,6 @@ impl WakeScheduler {
             checkpoint_id = ?instance.checkpoint_id,
             "Waking instance"
         );
-
-        // Instances suspended mid-step during a graceful drain may have no
-        // checkpoint at all. The workflow model is replay-from-start with
-        // checkpoints as a result cache, so relaunching without one is
-        // valid — completed durable steps replay from cache, the rest
-        // re-execute.
-        let checkpoint_id = instance.checkpoint_id.clone();
-        if checkpoint_id.is_none() {
-            info!(
-                instance_id = %instance.instance_id,
-                "No checkpoint recorded; relaunching from the start"
-            );
-        }
-
-        // Look up image_id and stored env from instance_images table
-        let (image_id, stored_env) =
-            db::get_instance_image_with_env(&self.pool, &instance.instance_id)
-                .await?
-                .ok_or_else(|| {
-                    crate::error::Error::Other(format!(
-                        "No image association found for instance '{}'",
-                        instance.instance_id
-                    ))
-                })?;
-
-        // Get the image to find its wasm artifact
-        let image = self
-            .image_registry
-            .get(&image_id)
-            .await?
-            .ok_or_else(|| crate::error::Error::ImageNotFound(image_id.clone()))?;
-
-        if let Err(error) = require_current_workflow_entrypoint(&image).await {
-            let message = error.to_string();
-            warn!(
-                instance_id = %instance.instance_id,
-                image_id = %image_id,
-                error = %message,
-                "Failing wake for workflow image without lifecycle.invoke"
-            );
-            self.persistence
-                .complete_instance(
-                    runtara_core::persistence::CompleteInstanceParams::new(
-                        &instance.instance_id,
-                        "failed",
-                    )
-                    .with_error(&message),
-                )
-                .await?;
-            return Ok(());
-        }
-
-        let wasm_path = std::path::PathBuf::from(&image.binary_path);
-
-        // Honor the same bounded timeout persisted at first launch. Do not
-        // cast a corrupt signed row to `u64`: refusing the wake is safer than
-        // relaunching it with an effectively unbounded deadline.
-        let stored_timeout =
-            db::get_instance_timeout_seconds(&self.pool, &instance.instance_id).await?;
-        let timeout = match self
-            .execution_timeout_policy
-            .resolve_persisted(stored_timeout)
-        {
-            Ok(timeout) => timeout.as_duration(),
-            Err(error) => {
-                let message = format!(
-                    "invalid persisted execution timeout for instance '{}': {error}",
-                    instance.instance_id
-                );
-                warn!(instance_id = %instance.instance_id, error = %message, "Failing wake with invalid execution timeout");
-                self.persistence
-                    .complete_instance(
-                        runtara_core::persistence::CompleteInstanceParams::new(
-                            &instance.instance_id,
-                            "failed",
-                        )
-                        .with_error(&message),
-                    )
-                    .await?;
-                return Ok(());
-            }
-        };
-
-        // Build launch options with restored env
-        let options = LaunchOptions {
-            launch_id: uuid::Uuid::new_v4().to_string(),
-            instance_id: instance.instance_id.clone(),
-            tenant_id: instance.tenant_id.clone(),
-            wasm_path,
-            input: serde_json::json!({}), // Input was already consumed on first run
-            timeout,
-            checkpoint_id,
-            // A wake must re-read the stored envelope: the input built here
-            // is a relaunch placeholder, not the instance's real input.
-            prepersisted_input: None,
-            env: stored_env, // Restore env from initial launch
-        };
 
         // The instance is already claimed: `claim_sleeping_instances_due`
         // cleared `sleep_until` on exactly the rows it returned, which is what
@@ -558,61 +471,86 @@ impl WakeScheduler {
                 "Cancel signal pending at wake time; cancelling instead of relaunching"
             );
             self.cancel_without_launch(&instance.instance_id).await?;
+            self.lifecycle_observers.notify_instance_released(
+                instance.tenant_id.clone(),
+                instance.instance_id.clone(),
+                "cancelled",
+            );
             return Ok(());
         }
 
-        // Launch the instance
-        match self.runner.launch_detached(&options).await {
-            Ok(handle) => {
+        let image_id = match db::get_instance_image_with_env(&self.pool, &instance.instance_id)
+            .await?
+        {
+            Some((image_id, _)) => image_id,
+            None => {
+                let message = "Instance has no associated image";
+                warn!(instance_id = %instance.instance_id, "Failing wake without image association");
+                self.persistence
+                    .complete_instance(
+                        CompleteInstanceParams::new(&instance.instance_id, "failed")
+                            .with_error(message),
+                    )
+                    .await?;
+                self.lifecycle_observers.notify_instance_released(
+                    instance.tenant_id.clone(),
+                    instance.instance_id.clone(),
+                    "launch_failed",
+                );
+                return Ok(());
+            }
+        };
+
+        let repository = LaunchRepository::new(self.pool.clone());
+        let request = EnqueueRequest::immediate(
+            uuid::Uuid::new_v4().to_string(),
+            instance.instance_id.clone(),
+            instance.tenant_id.clone(),
+            image_id,
+            LaunchKind::Wake,
+            DEFAULT_LAUNCH_QUEUE_TIMEOUT,
+        );
+        match repository.enqueue(request).await {
+            Ok(EnqueueOutcome::Enqueued(launch)) | Ok(EnqueueOutcome::Existing(launch)) => {
+                // The core wake claim is no longer needed once a durable launch
+                // generation owns this handoff. If this clear is interrupted,
+                // another scan only observes the same active generation and
+                // cannot start a duplicate guest.
+                if let Err(error) = self
+                    .persistence
+                    .clear_instance_sleep(&instance.instance_id)
+                    .await
+                {
+                    warn!(instance_id = %instance.instance_id, error = %error, "Failed to clear wake claim after queuing launch");
+                }
+                self.launch_notifier.notify_one();
                 info!(
                     instance_id = %instance.instance_id,
-                    handle_id = %handle.handle_id,
-                    "Instance woken successfully"
+                    launch_id = %launch.launch_id,
+                    "Wake durably queued for dispatcher"
                 );
-
-                // Register in container registry
-                let container_registry = ContainerRegistry::new(self.pool.clone());
-                let container_info = ContainerInfo {
-                    container_id: handle.handle_id.clone(),
-                    launch_id: handle.launch_id.clone(),
-                    instance_id: instance.instance_id.clone(),
-                    tenant_id: instance.tenant_id.clone(),
-                    binary_path: image.binary_path.clone(),
-                    started_at: handle.started_at,
-                    timeout_seconds: Some(
-                        i64::try_from(options.timeout.as_secs())
-                            .expect("bounded execution timeout fits in database integer"),
-                    ),
-                };
-                if let Err(e) = container_registry.register(&container_info).await {
-                    warn!(error = %e, "Failed to register container (instance still running)");
-                }
-
-                // sleep_until was already cleared atomically by the claim above.
-
-                // Spawn background task to monitor container
-                spawn_container_monitor(
-                    self.pool.clone(),
-                    self.runner.clone(),
-                    handle,
-                    self.persistence.clone(),
-                    options.timeout,
-                    self.drain.clone(),
-                );
+                Ok(())
             }
-            Err(e) => {
-                warn!(
-                    instance_id = %instance.instance_id,
-                    error = %e,
-                    "Failed to wake instance"
+            Err(LaunchQueueError::InvalidLaunchTarget { .. }) => {
+                let message = "Wake has no valid tenant-scoped image binding";
+                warn!(instance_id = %instance.instance_id, "Failing wake with invalid image binding");
+                self.persistence
+                    .complete_instance(
+                        CompleteInstanceParams::new(&instance.instance_id, "failed")
+                            .with_error(message),
+                    )
+                    .await?;
+                self.lifecycle_observers.notify_instance_released(
+                    instance.tenant_id.clone(),
+                    instance.instance_id.clone(),
+                    "launch_failed",
                 );
-                // The launch never started; the caller re-stamps sleep_until so
-                // the wake scan re-selects this instance on a later poll.
-                return Err(e.into());
+                Ok(())
             }
+            Err(error) => Err(crate::error::Error::Other(format!(
+                "Failed to enqueue durable wake: {error}"
+            ))),
         }
-
-        Ok(())
     }
 }
 

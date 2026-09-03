@@ -137,6 +137,18 @@ impl EmbeddedRuntara {
         Arc::clone(self.environment.state())
     }
 
+    /// Handle for installing the server's admission-release observer after
+    /// Environment has started.
+    ///
+    /// The execution engine/outbox is built later in server startup, so this
+    /// forwards Environment's shared holder rather than requiring a startup
+    /// order inversion.
+    pub fn launch_lifecycle_observers(
+        &self,
+    ) -> runtara_environment::launch_dispatcher::LaunchLifecycleObservers {
+        self.environment.launch_lifecycle_observers()
+    }
+
     /// Get the address where runtara-core is listening.
     pub fn core_addr(&self) -> SocketAddr {
         self.core.bind_addr()

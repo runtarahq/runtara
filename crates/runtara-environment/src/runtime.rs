@@ -53,6 +53,7 @@ use crate::execution_timeout::ExecutionTimeoutPolicy;
 use crate::handlers::{DrainController, EnvironmentHandlerState};
 use crate::heartbeat_monitor::{HeartbeatMonitor, HeartbeatMonitorConfig};
 use crate::image_cleanup_worker::{ImageCleanupWorker, ImageCleanupWorkerConfig};
+use crate::launch_dispatcher::{LaunchDispatcher, LaunchLifecycleObservers};
 use crate::runner::Runner;
 use crate::wake_scheduler::{WakeScheduler, WakeSchedulerConfig, default_wake_concurrency};
 
@@ -360,14 +361,15 @@ pub struct EnvironmentRuntimeConfig {
 impl EnvironmentRuntimeConfig {
     /// Start the runtime, spawning the HTTP server and wake scheduler tasks.
     pub async fn start(self) -> Result<EnvironmentRuntime> {
-        // Capture this before any recovery work. It scopes pending-start
-        // recovery to records that predate this process, even if another
-        // actor writes while startup recovery is still in progress.
+        // Scope legacy-pending recovery to rows that predate this process. New
+        // starts atomically create a queue row with their instance, so this
+        // can never race a valid modern request.
         let pending_start_cutoff = chrono::Utc::now();
-
         // Create shared drain controller so workers and the container monitor
         // all observe the same state.
         let drain = DrainController::new();
+        let launch_notifier = Arc::new(Notify::new());
+        let lifecycle_observers = LaunchLifecycleObservers::default();
 
         // Create handler state
         let state = Arc::new(
@@ -380,7 +382,8 @@ impl EnvironmentRuntimeConfig {
             )
             .with_request_timeout(self.request_timeout)
             .with_execution_timeout_policy(self.execution_timeout_policy)
-            .with_drain(drain.clone()),
+            .with_drain(drain.clone())
+            .with_launch_control(launch_notifier.clone(), lifecycle_observers.clone()),
         );
 
         // Recover orphaned containers from previous Environment run
@@ -389,15 +392,8 @@ impl EnvironmentRuntimeConfig {
             warn!(error = %e, "Failed to recover orphaned containers");
         }
 
-        // A start reserves the Core row and binds its image before it waits for
-        // the runner's admission permit. If this process was interrupted in
-        // that window, it left a `pending` row with no live launcher to own it.
-        // Do this once, before any local worker can begin a fresh start: a
-        // pending row is otherwise a perfectly valid representation of a
-        // request waiting for a busy runner, so an age-based background sweep
-        // would be unsafe.
         if let Err(e) = fail_interrupted_pending_starts(&self.pool, pending_start_cutoff).await {
-            warn!(error = %e, "Failed to recover interrupted pending starts");
+            warn!(error = %e, "Failed to recover legacy pending starts without a durable launch");
         }
 
         // Create wake scheduler
@@ -417,13 +413,30 @@ impl EnvironmentRuntimeConfig {
             self.runner.clone(),
             wake_config,
         )
-        .with_execution_timeout_policy(self.execution_timeout_policy)
-        .with_drain(drain.clone());
+        .with_drain(drain.clone())
+        .with_launch_control(launch_notifier.clone(), lifecycle_observers.clone());
 
         let wake_shutdown = wake_scheduler.shutdown_handle();
 
         let wake_handle = tokio::spawn(async move {
             wake_scheduler.run().await;
+        });
+
+        // Only this worker hands a generation to a runner. Sources commit a
+        // queue row then notify it, and a periodic scan recovers notifications
+        // lost across process interruption.
+        let launch_dispatcher = LaunchDispatcher::new(
+            self.pool.clone(),
+            self.persistence.clone(),
+            self.runner.clone(),
+            launch_notifier,
+            lifecycle_observers.clone(),
+        )
+        .with_execution_timeout_policy(self.execution_timeout_policy)
+        .with_drain(drain.clone());
+        let launch_dispatcher_shutdown = launch_dispatcher.shutdown_handle();
+        let launch_dispatcher_handle = tokio::spawn(async move {
+            launch_dispatcher.run().await;
         });
 
         // Create cleanup worker. Config loads from env (so operators can tune
@@ -488,10 +501,12 @@ impl EnvironmentRuntimeConfig {
 
         Ok(EnvironmentRuntime {
             wake_handle,
+            launch_dispatcher_handle,
             cleanup_handle,
             heartbeat_handle,
             db_cleanup_handle,
             wake_shutdown,
+            launch_dispatcher_shutdown,
             cleanup_shutdown,
             heartbeat_shutdown,
             db_cleanup_shutdown,
@@ -499,6 +514,7 @@ impl EnvironmentRuntimeConfig {
             image_cleanup_shutdown,
             state,
             drain,
+            lifecycle_observers,
         })
     }
 }
@@ -516,10 +532,12 @@ impl EnvironmentRuntimeConfig {
 /// Call [`shutdown`](Self::shutdown) for graceful termination.
 pub struct EnvironmentRuntime {
     wake_handle: JoinHandle<()>,
+    launch_dispatcher_handle: JoinHandle<()>,
     cleanup_handle: JoinHandle<()>,
     heartbeat_handle: JoinHandle<()>,
     db_cleanup_handle: JoinHandle<()>,
     wake_shutdown: Arc<Notify>,
+    launch_dispatcher_shutdown: Arc<Notify>,
     cleanup_shutdown: Arc<Notify>,
     heartbeat_shutdown: Arc<Notify>,
     db_cleanup_shutdown: Arc<Notify>,
@@ -527,6 +545,7 @@ pub struct EnvironmentRuntime {
     image_cleanup_shutdown: Arc<Notify>,
     state: Arc<EnvironmentHandlerState>,
     drain: DrainController,
+    lifecycle_observers: LaunchLifecycleObservers,
 }
 
 impl EnvironmentRuntime {
@@ -546,6 +565,15 @@ impl EnvironmentRuntime {
         self.drain.clone()
     }
 
+    /// Return the post-start-installable server admission lifecycle hook.
+    ///
+    /// The server starts Environment before it constructs its execution
+    /// engine/outbox. It can obtain this holder afterwards and install an
+    /// observer without changing that startup order.
+    pub fn launch_lifecycle_observers(&self) -> LaunchLifecycleObservers {
+        self.lifecycle_observers.clone()
+    }
+
     /// Graceful drain of active runners.
     ///
     /// Flips the drain flag (pausing heartbeat scans and steering the
@@ -562,6 +590,10 @@ impl EnvironmentRuntime {
     pub async fn drain(&self, grace: Duration) -> Result<()> {
         self.drain.set();
         info!(grace_secs = grace.as_secs(), "EnvironmentRuntime draining");
+
+        // Stop dispatch before taking the active-run snapshot. Queued rows
+        // remain durable and will be reclaimed on the next runtime start.
+        self.launch_dispatcher_shutdown.notify_one();
 
         // Stop the wake scheduler before the snapshot below, and give it a
         // moment to finish the batch it is on. The snapshot is what decides who
@@ -747,6 +779,9 @@ impl EnvironmentRuntime {
         // Signal wake scheduler shutdown
         self.wake_shutdown.notify_one();
 
+        // Signal durable launch dispatcher shutdown
+        self.launch_dispatcher_shutdown.notify_one();
+
         // Signal cleanup worker shutdown
         self.cleanup_shutdown.notify_one();
 
@@ -762,6 +797,10 @@ impl EnvironmentRuntime {
         // Wait for wake scheduler
         if let Err(e) = self.wake_handle.await {
             error!("Wake scheduler task panicked: {}", e);
+        }
+
+        if let Err(e) = self.launch_dispatcher_handle.await {
+            error!("Launch dispatcher task panicked: {}", e);
         }
 
         // Wait for cleanup worker
@@ -791,6 +830,7 @@ impl EnvironmentRuntime {
     /// Check if the runtime is still running.
     pub fn is_running(&self) -> bool {
         !self.wake_handle.is_finished()
+            && !self.launch_dispatcher_handle.is_finished()
             && !self.cleanup_handle.is_finished()
             && !self.heartbeat_handle.is_finished()
             && !self.db_cleanup_handle.is_finished()
@@ -910,19 +950,12 @@ async fn recover_orphaned_containers(pool: &PgPool, persistence: &dyn Persistenc
     Ok(())
 }
 
-/// Terminalize starts that were left pending by a previous Environment process.
+/// Terminalize legacy starts left pending without a durable queue generation.
 ///
-/// The embedded runner acquires its global run permit before it spawns the
-/// guest or returns a handle for `container_registry`. Consequently an
-/// image-bound `pending` row without a registry entry is normal only while the
-/// current process is blocked waiting for that permit. At startup there is no
-/// such local caller yet: every matching row was interrupted before its runner
-/// registration completed and has no recovery owner.
-///
-/// This intentionally runs only during startup of the single-host embedded
-/// runtime. It is not an age-based liveness reaper; a valid pending start can
-/// wait as long as the runner is saturated. A multi-host deployment needs a
-/// durable launch owner/lease before another host can make this decision.
+/// A modern accepted start has one active `instance_launches` row and is never
+/// a candidate, even if it waited through a process restart. This narrow
+/// startup repair exists only for rows created before the queue migration (or
+/// malformed rows written outside the atomic initial-claim transaction).
 ///
 /// The status predicate on the `UPDATE` is a final guard. It makes a row that
 /// advanced concurrently a no-op rather than overwriting a live transition.
@@ -950,6 +983,12 @@ where
                     SELECT 1
                     FROM container_registry cr
                     WHERE cr.instance_id = i.instance_id
+              )
+              AND NOT EXISTS (
+                    SELECT 1
+                    FROM instance_launches launch
+                    WHERE launch.instance_id = i.instance_id
+                      AND launch.state IN ('queued', 'leased', 'starting', 'running')
               )
         )
         UPDATE instances i

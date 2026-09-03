@@ -171,6 +171,9 @@ pub mod db;
 /// Durable queue state and transactions for runner launch generations.
 pub mod launch_queue;
 
+/// Background dispatcher for durable runner launch generations.
+pub mod launch_dispatcher;
+
 /// Error types for Environment operations.
 pub mod error;
 

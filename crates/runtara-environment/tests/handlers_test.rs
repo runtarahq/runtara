@@ -16,6 +16,8 @@ use runtara_environment::handlers::{
     spawn_container_monitor,
 };
 use runtara_environment::image_registry::ImageRegistry;
+use runtara_environment::launch_dispatcher::LaunchLifecycleObservers;
+use runtara_environment::launch_queue::{LaunchKind, LaunchRepository, LaunchState};
 use runtara_environment::runner::MockRunner;
 use runtara_environment::runner::{LaunchOptions, Runner, RunnerHandle};
 use sqlx::PgPool;
@@ -69,6 +71,17 @@ fn test_artifact_path() -> String {
         .expect("the running test binary must have a path")
         .to_string_lossy()
         .into_owned()
+}
+
+async fn active_launch(
+    pool: &PgPool,
+    instance_id: &str,
+) -> runtara_environment::launch_queue::Launch {
+    LaunchRepository::new(pool.clone())
+        .get_active_for_instance(instance_id)
+        .await
+        .expect("active launch query must succeed")
+        .expect("instance must have one active durable launch")
 }
 
 /// Clean up test data
@@ -338,6 +351,12 @@ async fn test_start_instance_success() {
         .unwrap()
         .unwrap();
     assert_eq!(instance.tenant_id, "test-tenant");
+    assert_eq!(instance.status, "pending");
+    assert_eq!(
+        active_launch(&pool, &response.instance_id).await.state,
+        LaunchState::Queued,
+        "request acceptance must be durable before a runner is touched"
+    );
 
     cleanup(&pool, Some(&response.instance_id), Some(&image_id)).await;
 }
@@ -434,12 +453,20 @@ async fn test_start_instance_replay_is_deduplicated_without_second_launch() {
     assert!(replay.success, "replay failed: {:?}", replay.error);
     assert!(replay.deduplicated);
     assert_eq!(replay.instance_id, instance_id);
-    assert_eq!(runner.launch_count(), 1, "replay launched a second process");
+    assert_eq!(
+        runner.launch_count(),
+        0,
+        "source handlers never launch directly"
+    );
+    assert_eq!(
+        active_launch(&pool, &instance_id).await.state,
+        LaunchState::Queued
+    );
 
     cleanup(&pool, Some(&instance_id), Some(&image_id)).await;
 }
 
-/// A first start hands the runner the same bytes it just stored.
+/// A first start commits the enriched envelope before it is dispatched.
 ///
 /// The stored envelope is *enriched* (image variable defaults merged, system
 /// variables stripped), so the guest must receive that, not the raw request
@@ -505,13 +532,14 @@ async fn test_start_instance_hands_runner_the_stored_input() {
         .input
         .expect("input should have been stored");
 
-    let launched = runner
-        .last_launch()
-        .expect("runner should have been launched");
     assert_eq!(
-        launched.prepersisted_input.as_deref(),
-        Some(stored.as_slice()),
-        "the runner must get exactly the bytes that were persisted"
+        runner.launch_count(),
+        0,
+        "start handler must only enqueue work"
+    );
+    assert_eq!(
+        active_launch(&pool, &instance_id).await.kind,
+        LaunchKind::Start
     );
 
     let handed: serde_json::Value = serde_json::from_slice(&stored).unwrap();
@@ -524,7 +552,7 @@ async fn test_start_instance_hands_runner_the_stored_input() {
     cleanup(&pool, Some(&instance_id), Some(&image_id)).await;
 }
 
-/// A resume must NOT carry prepersisted input.
+/// A resume is accepted as a durable handoff before a runner reads input.
 ///
 /// Its request input is a relaunch placeholder, so the runner has to go back to
 /// the store for the instance's real envelope. Setting this field on the resume
@@ -574,12 +602,14 @@ async fn test_resume_instance_does_not_prepersist_placeholder_input() {
     .unwrap();
     assert!(resumed.success, "resume failed: {:?}", resumed.error);
 
-    let launched = runner
-        .last_launch()
-        .expect("runner should have been launched");
-    assert!(
-        launched.prepersisted_input.is_none(),
-        "a resume must re-read the stored envelope, not carry its placeholder input"
+    assert_eq!(
+        runner.launch_count(),
+        0,
+        "resume handler must only enqueue work"
+    );
+    assert_eq!(
+        active_launch(&pool, &instance_id).await.kind,
+        LaunchKind::Resume
     );
 
     cleanup(&pool, Some(&instance_id), Some(&image_id)).await;
@@ -651,7 +681,11 @@ async fn test_start_instance_replay_is_deduplicated_after_artifact_disappears() 
     );
     assert!(replay.deduplicated);
     assert_eq!(replay.instance_id, instance_id);
-    assert_eq!(runner.launch_count(), 1, "replay launched a second process");
+    assert_eq!(
+        runner.launch_count(),
+        0,
+        "replay must not launch from the source handler"
+    );
 
     cleanup(&pool, Some(&instance_id), Some(&image_id)).await;
 }
@@ -1166,12 +1200,16 @@ async fn test_resume_instance_success() {
 
     assert!(response.success, "Error: {:?}", response.error);
 
-    // Verify instance status was updated to running
+    // The dispatcher, not the request path, promotes the instance to running.
     let instance = db::get_instance(&pool, &instance_id)
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(instance.status, "running");
+    assert_eq!(instance.status, "suspended");
+    assert_eq!(
+        active_launch(&pool, &instance_id).await.kind,
+        LaunchKind::Resume
+    );
 
     cleanup(&pool, Some(&instance_id), Some(&image_id)).await;
 }
@@ -1560,6 +1598,7 @@ async fn test_spawn_container_monitor_timeout_enforcement() {
         persistence.clone(),
         Duration::from_millis(100),
         DrainController::new(),
+        LaunchLifecycleObservers::default(),
     );
 
     // Poll for the terminal status instead of sleeping a fixed budget. The
@@ -1657,6 +1696,7 @@ async fn test_spawn_container_monitor_no_timeout_on_quick_completion() {
         persistence.clone(),
         Duration::from_secs(10),
         DrainController::new(),
+        LaunchLifecycleObservers::default(),
     );
 
     // Wait for the container to complete (10ms delay + buffer)
@@ -1745,6 +1785,7 @@ async fn test_spawn_container_monitor_timeout_race_condition() {
         persistence.clone(),
         Duration::from_millis(200),
         DrainController::new(),
+        LaunchLifecycleObservers::default(),
     );
 
     // Simulate Core marking instance as "completed" BEFORE timeout fires
@@ -2017,6 +2058,13 @@ impl Runner for ParksBeforeReturningRunner {
         })
     }
 
+    async fn try_launch_detached(
+        &self,
+        options: &LaunchOptions,
+    ) -> runtara_environment::runner::Result<RunnerHandle> {
+        self.launch_detached(options).await
+    }
+
     // Keep the monitor spawned by `handle_start_instance` from concluding
     // anything during the test; the assertion is about the status write.
     async fn is_running(&self, _handle: &RunnerHandle) -> bool {
@@ -2043,14 +2091,7 @@ impl Runner for ParksBeforeReturningRunner {
     }
 }
 
-/// Launching must not resurrect a run that already parked.
-///
-/// Regression: `handle_start_instance` stamped `running` unconditionally after
-/// `launch_detached` returned. Because a detached launch returns as soon as the
-/// run is spawned, a workflow that parks immediately was already `suspended` —
-/// so the write flipped it back to `running` (clearing `termination_reason`
-/// along the way) with no process behind it, and the container monitor failed
-/// it as `crashed` one poll later. Measured at ~0.02% of parks under load.
+/// Start acceptance does not let a runner race the durable queue claim.
 #[tokio::test]
 async fn test_launch_does_not_resurrect_a_run_that_already_parked() {
     skip_if_no_db!();
@@ -2103,15 +2144,11 @@ async fn test_launch_does_not_resurrect_a_run_that_already_parked() {
         .unwrap()
         .expect("instance must exist");
 
+    assert_eq!(instance.status, "pending");
     assert_eq!(
-        instance.status, "suspended",
-        "a run that parked before launch returned must stay parked, not be \
-         flipped back to running"
-    );
-    assert_eq!(
-        instance.termination_reason.as_deref(),
-        Some("waiting_signal"),
-        "the park marker must survive launch bookkeeping"
+        active_launch(&pool, &response.instance_id).await.state,
+        LaunchState::Queued,
+        "the source must commit a launch row before a runner can observe it"
     );
 }
 

@@ -7,7 +7,7 @@
 //! one bounded handoff to a runner.  The queue is the durable replacement for
 //! waiting on a runner semaphore in a request, trigger, or wake task.
 
-use std::time::Duration;
+use std::{collections::HashMap, time::Duration};
 
 use chrono::{DateTime, Utc};
 use sqlx::{FromRow, PgPool};
@@ -15,6 +15,9 @@ use thiserror::Error;
 
 /// Stable failure detail written when a launch exceeds its queue deadline.
 pub const LAUNCH_QUEUE_TIMEOUT: &str = "launch_queue_timeout";
+
+/// Stable detail recorded when a dispatcher found the runner full.
+pub const RUNNER_CAPACITY_UNAVAILABLE: &str = "runner_capacity_unavailable";
 
 const LAUNCH_COLUMNS: &str = "launch_id, instance_id, tenant_id, image_id, kind, state, \
     available_at, deadline_at, lease_owner, lease_expires_at, attempt_count, \
@@ -183,6 +186,38 @@ pub struct EnqueueRequest {
     pub queue_timeout: Duration,
 }
 
+/// Atomic initial-instance claim plus its first durable launch generation.
+///
+/// A first start must not insert an `instances` row in one transaction and a
+/// queue row in another: a crash between those writes recreates the stranded
+/// `pending` state this queue replaces.
+#[derive(Debug, Clone)]
+pub struct InitialLaunchRequest {
+    /// The first physical launch generation. Its kind must be [`LaunchKind::Start`].
+    pub launch: EnqueueRequest,
+    /// Enriched input persisted on the durable Core instance.
+    pub input: Option<Vec<u8>>,
+    /// Optional custom environment persisted with the image binding.
+    pub env: Option<HashMap<String, String>>,
+    /// Bounded active-execution timeout persisted with the image binding.
+    pub timeout_seconds: Option<i64>,
+}
+
+/// Result of atomically claiming an initial instance and launch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InitialLaunchOutcome {
+    /// A new Core instance, image binding, and queued launch were committed together.
+    Enqueued(Launch),
+    /// Another transaction already owns the instance's live launch generation.
+    ExistingLaunch(Launch),
+    /// The instance ID predates this request but has no live launch generation.
+    ///
+    /// Callers must inspect the existing durable instance rather than treating
+    /// this as a successful start. This keeps an old malformed `pending` row
+    /// visible instead of silently reporting it as queued.
+    ExistingInstance,
+}
+
 impl EnqueueRequest {
     /// Build a launch that is claimable immediately.
     pub fn immediate(
@@ -259,6 +294,9 @@ pub enum LaunchQueueError {
         /// Generation the caller attempted to enqueue.
         launch_id: String,
     },
+    /// An atomic first-launch request used a resume/wake kind.
+    #[error("an initial instance claim must use a start launch")]
+    InitialLaunchRequiresStart,
     /// A queue transition found an instance outside its matching pre-start state.
     #[error("launch {launch_id} no longer has a cancellable instance")]
     InstanceNoLongerPreStart {
@@ -307,6 +345,119 @@ impl LaunchRepository {
             .await?
             .map(Launch::try_from)
             .transpose()
+    }
+
+    /// Atomically create a pending Core instance, bind its image, and enqueue
+    /// its first generation.
+    ///
+    /// The transaction is deliberately owned here instead of composing
+    /// `claim_instance_with_image` with [`Self::enqueue`]. A process loss
+    /// between those two calls would leave an image-bound `pending` instance
+    /// with no queue row or launcher, which is exactly the capacity leak this
+    /// queue is meant to remove.
+    pub async fn claim_initial(
+        &self,
+        request: InitialLaunchRequest,
+    ) -> Result<InitialLaunchOutcome, LaunchQueueError> {
+        if request.launch.kind != LaunchKind::Start {
+            return Err(LaunchQueueError::InitialLaunchRequiresStart);
+        }
+        let available_after_us =
+            duration_to_micros(request.launch.available_after, "available_after")?;
+        let queue_timeout_us = duration_to_micros(request.launch.queue_timeout, "queue_timeout")?;
+        let env = request
+            .env
+            .filter(|values| !values.is_empty())
+            .map(|values| serde_json::to_value(values).unwrap_or_default());
+        let active = format!(
+            r#"
+            SELECT {LAUNCH_COLUMNS}
+            FROM instance_launches
+            WHERE instance_id = $1
+              AND state IN ('queued', 'leased', 'starting', 'running')
+            LIMIT 1
+            "#
+        );
+        let insert_launch = format!(
+            r#"
+            INSERT INTO instance_launches (
+                launch_id, instance_id, tenant_id, image_id, kind, state,
+                available_at, deadline_at
+            )
+            VALUES (
+                $1, $2, $3, $4, 'start', 'queued',
+                NOW() + ($5 * INTERVAL '1 microsecond'),
+                NOW() + ($6 * INTERVAL '1 microsecond')
+            )
+            RETURNING {LAUNCH_COLUMNS}
+            "#
+        );
+
+        let mut tx = self.pool.begin().await?;
+        let claimed: Option<String> = sqlx::query_scalar(
+            r#"
+            INSERT INTO instances
+                (instance_id, tenant_id, definition_version, status, created_at, input)
+            VALUES ($1, $2, 1, 'pending', NOW(), $3)
+            ON CONFLICT (instance_id) DO NOTHING
+            RETURNING instance_id
+            "#,
+        )
+        .bind(&request.launch.instance_id)
+        .bind(&request.launch.tenant_id)
+        .bind(request.input.as_deref())
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        if claimed.is_none() {
+            let existing = sqlx::query_as::<_, LaunchRow>(&active)
+                .bind(&request.launch.instance_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+            tx.commit().await?;
+            return match existing {
+                Some(launch) => Ok(InitialLaunchOutcome::ExistingLaunch(launch.try_into()?)),
+                None => Ok(InitialLaunchOutcome::ExistingInstance),
+            };
+        }
+
+        // Bind only an image owned by the same tenant. The `RETURNING` result
+        // makes a missing or cross-tenant image abort the surrounding instance
+        // insert rather than leaving a launchable-looking `pending` row.
+        let image_bound: Option<String> = sqlx::query_scalar(
+            r#"
+            INSERT INTO instance_images
+                (instance_id, image_id, tenant_id, env, timeout_seconds, created_at)
+            SELECT $1, image_id, $3, $4, $5, NOW()
+            FROM images
+            WHERE image_id = $2 AND tenant_id = $3
+            RETURNING instance_id
+            "#,
+        )
+        .bind(&request.launch.instance_id)
+        .bind(&request.launch.image_id)
+        .bind(&request.launch.tenant_id)
+        .bind(env)
+        .bind(request.timeout_seconds)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if image_bound.is_none() {
+            return Err(LaunchQueueError::InvalidLaunchTarget {
+                launch_id: request.launch.launch_id,
+            });
+        }
+
+        let launch = sqlx::query_as::<_, LaunchRow>(&insert_launch)
+            .bind(&request.launch.launch_id)
+            .bind(&request.launch.instance_id)
+            .bind(&request.launch.tenant_id)
+            .bind(&request.launch.image_id)
+            .bind(available_after_us)
+            .bind(queue_timeout_us)
+            .fetch_one(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(InitialLaunchOutcome::Enqueued(launch.try_into()?))
     }
 
     /// Insert a durable row or return its existing idempotent/active winner.
@@ -440,6 +591,32 @@ impl LaunchRepository {
         }
 
         Err(LaunchQueueError::EnqueueConflictRetryExhausted)
+    }
+
+    /// Read the one live launch generation for an instance, if it has one.
+    ///
+    /// This is used by cancellation paths that receive an instance ID rather
+    /// than a generation ID. The partial unique index makes the result
+    /// unambiguous.
+    pub async fn get_active_for_instance(
+        &self,
+        instance_id: &str,
+    ) -> Result<Option<Launch>, LaunchQueueError> {
+        let query = format!(
+            r#"
+            SELECT {LAUNCH_COLUMNS}
+            FROM instance_launches
+            WHERE instance_id = $1
+              AND state IN ('queued', 'leased', 'starting', 'running')
+            LIMIT 1
+            "#
+        );
+        sqlx::query_as::<_, LaunchRow>(&query)
+            .bind(instance_id)
+            .fetch_optional(&self.pool)
+            .await?
+            .map(Launch::try_from)
+            .transpose()
     }
 
     /// Claim a bounded ready batch for one dispatcher.
@@ -613,6 +790,111 @@ impl LaunchRepository {
             .transpose()
     }
 
+    /// Return a dispatcher-owned pre-run launch to the ready queue.
+    ///
+    /// This is deliberately narrower than a generic retry transition: it only
+    /// accepts a still-owned lease or start handoff. In particular, it cannot
+    /// resurrect a generation after cancellation or a terminal monitor result
+    /// has won the race.
+    pub async fn requeue_owned(
+        &self,
+        launch_id: &str,
+        lease_owner: &str,
+        retry_after: Duration,
+        last_error: Option<&str>,
+    ) -> Result<Option<Launch>, LaunchQueueError> {
+        let retry_after_us = duration_to_micros(retry_after, "retry_after")?;
+        let query = format!(
+            r#"
+            UPDATE instance_launches
+            SET state = 'queued',
+                available_at = NOW() + ($3 * INTERVAL '1 microsecond'),
+                lease_owner = NULL,
+                lease_expires_at = NULL,
+                last_error = $4,
+                updated_at = NOW()
+            WHERE launch_id = $1
+              AND state IN ('leased', 'starting')
+              AND lease_owner = $2
+              AND deadline_at > NOW()
+            RETURNING {LAUNCH_COLUMNS}
+            "#
+        );
+        sqlx::query_as::<_, LaunchRow>(&query)
+            .bind(launch_id)
+            .bind(lease_owner)
+            .bind(retry_after_us)
+            .bind(last_error)
+            .fetch_optional(&self.pool)
+            .await?
+            .map(Launch::try_from)
+            .transpose()
+    }
+
+    /// Fail a dispatcher-owned launch before a runner has accepted it.
+    ///
+    /// The queue and Core updates commit together. This is the counterpart to
+    /// [`Self::cancel_before_start`]: a missing artifact, unsupported ABI, or
+    /// other pre-run error must not leave an admission-consuming `pending` or
+    /// `suspended` instance behind once its launch has been terminalized.
+    pub async fn fail_before_runner(
+        &self,
+        launch_id: &str,
+        lease_owner: &str,
+        error: &str,
+    ) -> Result<Option<Launch>, LaunchQueueError> {
+        let mut tx = self.pool.begin().await?;
+        let update = format!(
+            r#"
+            UPDATE instance_launches
+            SET state = 'failed',
+                lease_owner = NULL,
+                lease_expires_at = NULL,
+                last_error = $3,
+                updated_at = NOW()
+            WHERE launch_id = $1
+              AND state IN ('leased', 'starting')
+              AND lease_owner = $2
+            RETURNING {LAUNCH_COLUMNS}
+            "#
+        );
+        let failed = sqlx::query_as::<_, LaunchRow>(&update)
+            .bind(launch_id)
+            .bind(lease_owner)
+            .bind(error)
+            .fetch_optional(&mut *tx)
+            .await?;
+        let Some(failed) = failed else {
+            tx.commit().await?;
+            return Ok(None);
+        };
+
+        let updated = sqlx::query(
+            r#"
+            UPDATE instances
+            SET status = 'failed',
+                finished_at = NOW(),
+                sleep_until = NULL,
+                termination_reason = 'crashed',
+                error = $2
+            WHERE instance_id = $1
+              AND status IN ('pending', 'suspended')
+            "#,
+        )
+        .bind(&failed.instance_id)
+        .bind(error)
+        .execute(&mut *tx)
+        .await?;
+        if updated.rows_affected() != 1 {
+            return Err(LaunchQueueError::InstanceNoLongerPreStart {
+                launch_id: failed.launch_id,
+            });
+        }
+
+        tx.commit().await?;
+        Ok(Some(failed.try_into()?))
+    }
+
     /// Atomically release a running generation after its durable instance parks.
     ///
     /// This is intentionally terminal for the launch but not the instance,
@@ -630,7 +912,7 @@ impl LaunchRepository {
                 lease_expires_at = NULL,
                 updated_at = NOW()
             WHERE launch_id = $1
-              AND state = 'running'
+              AND state IN ('starting', 'running')
             RETURNING {LAUNCH_COLUMNS}
             "#
         );
@@ -650,7 +932,7 @@ impl LaunchRepository {
                 finished_at = NULL,
                 termination_reason = NULL
             WHERE instance_id = $1
-              AND status = 'running'
+              AND status IN ('running', 'suspended')
             "#,
         )
         .bind(&suspended.instance_id)
