@@ -604,62 +604,51 @@ async fn process_trigger_event(
     engine: Arc<ExecutionEngine>,
     event: &TriggerEvent,
 ) -> ProcessResult {
-    // Check single_instance constraint if this event has a trigger_id
-    if let Some(trigger_id) = event.trigger_id() {
-        match engine.get_trigger_single_instance(trigger_id).await {
-            Ok(Some(true)) => {
-                // single_instance is enabled - check for running instances
-                match engine
-                    .has_running_instance(&event.tenant_id, &event.workflow_id)
-                    .await
-                {
-                    Ok(true) => {
-                        // Instance already running - skip silently
-                        info!(
-                            instance_id = %event.instance_id,
-                            workflow_id = %event.workflow_id,
-                            trigger_id = %trigger_id,
-                            trigger_type = %event.trigger_type(),
-                            "Skipping execution: single_instance enabled and instance already running"
-                        );
-                        return ProcessResult::Success;
-                    }
-                    Ok(false) => {
-                        // No running instance - proceed with execution
-                    }
-                    Err(e) => {
-                        // Failed to check - log warning but proceed (fail-open)
-                        warn!(
-                            instance_id = %event.instance_id,
-                            workflow_id = %event.workflow_id,
-                            error = %e,
-                            "Failed to check running instances, proceeding with execution"
-                        );
-                    }
-                }
-            }
-            Ok(Some(false)) | Ok(None) => {
-                // single_instance not enabled or trigger not found - proceed
-            }
+    let single_instance = match event.trigger_id() {
+        Some(trigger_id) => match engine.get_trigger_single_instance(trigger_id).await {
+            Ok(Some(enabled)) => enabled,
+            Ok(None) => false,
             Err(e) => {
-                // Failed to get trigger - log warning but proceed (fail-open)
+                // Preserve the trigger-config lookup's established fail-open
+                // behavior. The guarded engine path below still protects the
+                // normal enabled case from local check-then-start races.
                 warn!(
                     instance_id = %event.instance_id,
                     trigger_id = %trigger_id,
                     error = %e,
                     "Failed to get trigger config, proceeding with execution"
                 );
+                false
             }
-        }
-    }
+        },
+        None => false,
+    };
 
-    // Launch instance via runtara-environment (fire-and-forget)
-    // The runtara-environment server will:
-    // - Execute the workflow in a container
-    // - Track status (running, completed, failed, cancelled)
-    // - Collect results
-    // All execution data is queried directly from runtara-environment via the Management SDK.
-    match engine.execute_detached(event).await {
+    // Launch instance via runtara-environment (fire-and-forget). The guarded
+    // branch atomically reserves the short start handoff, then treats only
+    // runtime `pending` and `running` instances as active. A suspended
+    // approval has no runner slot or single-instance lease, so it never
+    // blocks the next trigger.
+    let launch = if single_instance {
+        match engine.execute_single_instance_detached(event).await {
+            Ok(Some(launch)) => Ok(launch),
+            Ok(None) => {
+                info!(
+                    instance_id = %event.instance_id,
+                    workflow_id = %event.workflow_id,
+                    trigger_id = ?event.trigger_id(),
+                    trigger_type = %event.trigger_type(),
+                    "Skipping execution: single_instance workflow already has active or starting work"
+                );
+                return ProcessResult::Success;
+            }
+            Err(error) => Err(error),
+        }
+    } else {
+        engine.execute_detached(event).await
+    };
+
+    match launch {
         Ok(DetachedExecution::Started(started_instance_id)) => {
             info!(
                 instance_id = %event.instance_id,

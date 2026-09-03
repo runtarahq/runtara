@@ -10,7 +10,7 @@
 //! `ExecutionEngine::queue`, `ExecutionEngine::run_sync`, and the various
 //! status / lifecycle helpers.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -369,8 +369,13 @@ pub struct ExecutionEngine {
 /// per tick.
 const CONCURRENCY_COUNT_TTL: Duration = Duration::from_millis(500);
 
-/// Workflows currently being launched, keyed by `(tenant_id, workflow_id)`.
-type StartingWorkflows = Arc<Mutex<HashSet<(String, String)>>>;
+/// Workflows currently being handed to Environment, keyed by
+/// `(tenant_id, workflow_id)`.
+///
+/// The count matters: more than one ordinary trigger may be starting the same
+/// workflow, and releasing one of those starts must not make a still-pending
+/// sibling invisible to a `single_instance` trigger.
+type StartingWorkflows = Arc<Mutex<HashMap<(String, String), usize>>>;
 
 /// One verified compilation result, carried unchanged to `start_instance`.
 ///
@@ -387,12 +392,14 @@ struct ReadyLaunch {
 ///
 /// Scoped to the process rather than the database because a Runtara server owns
 /// its tenant: one process per tenant, so "this process" and "this tenant's
-/// runtime" are the same boundary. If several replicas were ever to share a
-/// tenant database, this would have to become a database-level lock — the set
-/// cannot see a reservation made in another process.
+/// runtime" are the same boundary. It lasts only until Environment has
+/// durably created the pending instance; after that the runtime's `pending` or
+/// `running` status is the cross-process source of truth. If several replicas
+/// were ever to share a tenant database, the short handoff lock would have to
+/// become a database-level lock too.
 fn starting_workflows() -> &'static StartingWorkflows {
     static STARTING: std::sync::OnceLock<StartingWorkflows> = std::sync::OnceLock::new();
-    STARTING.get_or_init(|| Arc::new(Mutex::new(HashSet::new())))
+    STARTING.get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
 }
 
 /// Admissions still unaccounted for after a fresh count landed.
@@ -405,6 +412,15 @@ fn starting_workflows() -> &'static StartingWorkflows {
 /// fresh one.
 fn retained_reservations(subsumed: u64, current: u64) -> u64 {
     current.saturating_sub(subsumed.min(current))
+}
+
+/// Runtime states that own a workflow-wide `single_instance` slot.
+///
+/// `Suspended` is intentionally absent: a durable approval has parked its
+/// guest and is no longer active work, regardless of how many approvals a
+/// tenant retains.
+fn single_instance_active_statuses() -> [InstanceStatus; 2] {
+    [InstanceStatus::Pending, InstanceStatus::Running]
 }
 
 impl ExecutionEngine {
@@ -1028,14 +1044,78 @@ impl ExecutionEngine {
         &self,
         event: &TriggerEvent,
     ) -> Result<DetachedExecution, ExecutionError> {
-        // Mark workflow as starting (for single_instance race condition prevention)
         let workflow_key = (event.tenant_id.clone(), event.workflow_id.clone());
-        {
-            let mut starting = self.starting_workflows.lock().await;
-            starting.insert(workflow_key.clone());
+        self.reserve_workflow_start(&workflow_key).await;
+        self.execute_detached_with_reservation(event, workflow_key)
+            .await
+    }
+
+    /// Atomically enforce `single_instance` while handing a start to
+    /// Environment.
+    ///
+    /// A successful Environment start has already durably inserted an
+    /// instance in `pending` before it returns. The short in-process
+    /// reservation therefore only bridges the check/start gap; it is released
+    /// immediately after that response rather than held for an arbitrary grace
+    /// period. From then on, `pending` and `running` are active, while a
+    /// `suspended` approval is intentionally not.
+    ///
+    /// `None` means another active or in-flight instance already owns the
+    /// workflow-wide single-instance slot. The caller should ACK the trigger
+    /// as a deliberate skip.
+    pub(crate) async fn execute_single_instance_detached(
+        &self,
+        event: &TriggerEvent,
+    ) -> Result<Option<DetachedExecution>, ExecutionError> {
+        let workflow_key = (event.tenant_id.clone(), event.workflow_id.clone());
+        if !self.try_reserve_workflow_start(&workflow_key).await {
+            return Ok(None);
         }
 
-        // Execute and clean up starting_workflows on completion (success or error)
+        match self
+            .has_runtime_active_instance(&event.tenant_id, &event.workflow_id)
+            .await
+        {
+            Ok(true) => {
+                self.release_workflow_start(&workflow_key).await;
+                Ok(None)
+            }
+            Ok(false) => Ok(Some(
+                self.execute_detached_with_reservation(event, workflow_key)
+                    .await?,
+            )),
+            Err(error) => {
+                // Preserve the established fail-open contract for a temporary
+                // runtime read failure, but keep the reservation while the
+                // start request is in flight so local workers still cannot
+                // race each other into two launches.
+                warn!(
+                    instance_id = %event.instance_id,
+                    workflow_id = %event.workflow_id,
+                    error = %error,
+                    "Failed to check active single_instance workflow; proceeding with the guarded start"
+                );
+                Ok(Some(
+                    self.execute_detached_with_reservation(event, workflow_key)
+                        .await?,
+                ))
+            }
+        }
+    }
+
+    /// Run a start while `workflow_key` is already represented in
+    /// [`Self::starting_workflows`]. Every caller must transfer ownership of
+    /// exactly one reservation to this method.
+    async fn execute_detached_with_reservation(
+        &self,
+        event: &TriggerEvent,
+        workflow_key: (String, String),
+    ) -> Result<DetachedExecution, ExecutionError> {
+        // Execute and release the short handoff reservation on every result.
+        // Environment persists `pending` before it answers a successful start,
+        // so there is no post-response gap that needs a timer-based grace
+        // period. Keeping one would make a parked approval look active after
+        // it had already released every real resource.
         let result = self.execute_detached_inner(event).await;
 
         // Product analytics: an async execution started. No user context survives into the
@@ -1133,16 +1213,7 @@ impl ExecutionEngine {
             });
         }
 
-        // Keep the workflow in starting_workflows for a grace period to prevent race conditions
-        // This ensures the database record has time to be created before we allow another instance
-        let starting_workflows = self.starting_workflows.clone();
-        let key = workflow_key.clone();
-        tokio::spawn(async move {
-            // Wait for DB record creation (execution typically takes 100-500ms to register)
-            tokio::time::sleep(Duration::from_millis(1000)).await;
-            let mut starting = starting_workflows.lock().await;
-            starting.remove(&key);
-        });
+        self.release_workflow_start(&workflow_key).await;
 
         result
     }
@@ -1296,26 +1367,53 @@ impl ExecutionEngine {
         Ok(result.map(|r| r.single_instance))
     }
 
-    /// Check if there's a running instance of a workflow.
+    /// Reserve one in-process start handoff for a workflow.
+    async fn reserve_workflow_start(&self, workflow_key: &(String, String)) {
+        let mut starting = self.starting_workflows.lock().await;
+        *starting.entry(workflow_key.clone()).or_default() += 1;
+    }
+
+    /// Reserve a workflow only when no other local start handoff owns it.
     ///
-    /// Returns `true` if at least one running instance exists for the workflow.
-    /// Used for `single_instance` trigger enforcement.
+    /// This is the atomic half of `single_instance`: checking the runtime and
+    /// reserving in separate trigger workers would otherwise leave a
+    /// check-then-start window where both workers see an empty runtime.
+    async fn try_reserve_workflow_start(&self, workflow_key: &(String, String)) -> bool {
+        let mut starting = self.starting_workflows.lock().await;
+        if starting.contains_key(workflow_key) {
+            return false;
+        }
+        starting.insert(workflow_key.clone(), 1);
+        true
+    }
+
+    /// Release exactly one start handoff reservation.
+    async fn release_workflow_start(&self, workflow_key: &(String, String)) {
+        let mut starting = self.starting_workflows.lock().await;
+        match starting.get_mut(workflow_key) {
+            Some(count) if *count > 1 => *count -= 1,
+            Some(_) => {
+                starting.remove(workflow_key);
+            }
+            // An idempotent cleanup path may observe an already-released
+            // reservation. It is harmless: Runtime status is authoritative
+            // after the handoff has completed.
+            None => {}
+        }
+    }
+
+    /// Is there an active runtime instance for the workflow?
     ///
-    /// Checks both:
-    /// 1. In-memory `starting_workflows` set (for instances being launched)
-    /// 2. Runtara Management SDK for running instances
-    pub async fn has_running_instance(
+    /// `single_instance` is workflow-wide, so this deliberately sees work
+    /// started by any source, not merely the trigger that enabled it. An
+    /// instance is active only while it is `pending` or `running`; durable
+    /// `suspended` approvals are intentionally excluded and can scale without
+    /// consuming this gate.
+    async fn has_runtime_active_instance(
         &self,
         tenant_id: &str,
         workflow_id: &str,
     ) -> Result<bool, ExecutionError> {
-        {
-            let starting = self.starting_workflows.lock().await;
-            if starting.contains(&(tenant_id.to_string(), workflow_id.to_string())) {
-                return Ok(true);
-            }
-        }
-
         let runtime_client = match self.runtime_client.as_ref() {
             Some(client) => client,
             None => {
@@ -1328,7 +1426,8 @@ impl ExecutionEngine {
             .list_instances_with_options(
                 ListInstancesOptions::new()
                     .with_image_name_prefix(format!("{}:", workflow_id))
-                    .with_status(InstanceStatus::Running)
+                    .with_tenant_id(tenant_id)
+                    .with_statuses(single_instance_active_statuses())
                     .with_limit(1),
             )
             .await
@@ -2593,16 +2692,104 @@ mod tests {
             format!("tenant-{}", uuid::Uuid::new_v4()),
             "workflow-a".to_string(),
         );
-        first.starting_workflows.lock().await.insert(key.clone());
+        first.reserve_workflow_start(&key).await;
 
         assert!(
-            second.starting_workflows.lock().await.contains(&key),
+            second.starting_workflows.lock().await.contains_key(&key),
             "a workflow reserved through one engine must be visible to another; \
              a set per engine lets two workers each launch a single_instance \
              workflow believing nothing is running"
         );
 
-        first.starting_workflows.lock().await.remove(&key);
+        first.release_workflow_start(&key).await;
+    }
+
+    /// A `single_instance` trigger needs one atomic handoff reservation around
+    /// the runtime check and start call. A separate "check then insert" lets
+    /// two workers both observe no active instance and launch duplicates.
+    #[tokio::test]
+    async fn single_instance_handoff_reservation_is_atomic() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://unused/unused")
+            .expect("lazy pool");
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let engine = ExecutionEngine::new(
+            pool.clone(),
+            Arc::new(WorkflowRepository::new(pool)),
+            None,
+            None,
+            None,
+            ProductEventSink::new(tx),
+            crate::workers::pipeline_gauges::PipelineGauges::new(),
+        );
+        let key = (
+            format!("tenant-{}", uuid::Uuid::new_v4()),
+            "workflow-a".to_string(),
+        );
+
+        assert!(engine.try_reserve_workflow_start(&key).await);
+        assert!(
+            !engine.try_reserve_workflow_start(&key).await,
+            "the second worker must see the first handoff before either reaches Environment"
+        );
+
+        engine.release_workflow_start(&key).await;
+        assert!(
+            engine.try_reserve_workflow_start(&key).await,
+            "a released handoff must not permanently block a workflow"
+        );
+        engine.release_workflow_start(&key).await;
+    }
+
+    /// Concurrent ordinary starts are reference-counted. Releasing the first
+    /// must not remove the second's handoff reservation early.
+    #[tokio::test]
+    async fn start_handoff_reservations_are_reference_counted() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://unused/unused")
+            .expect("lazy pool");
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let engine = ExecutionEngine::new(
+            pool.clone(),
+            Arc::new(WorkflowRepository::new(pool)),
+            None,
+            None,
+            None,
+            ProductEventSink::new(tx),
+            crate::workers::pipeline_gauges::PipelineGauges::new(),
+        );
+        let key = (
+            format!("tenant-{}", uuid::Uuid::new_v4()),
+            "workflow-a".to_string(),
+        );
+
+        engine.reserve_workflow_start(&key).await;
+        engine.reserve_workflow_start(&key).await;
+        engine.release_workflow_start(&key).await;
+        assert!(
+            engine.starting_workflows.lock().await.contains_key(&key),
+            "one pending start still owns the handoff after its sibling returns"
+        );
+        engine.release_workflow_start(&key).await;
+        assert!(
+            !engine.starting_workflows.lock().await.contains_key(&key),
+            "the last handoff release frees the workflow"
+        );
+    }
+
+    #[test]
+    fn single_instance_activity_excludes_parked_approvals() {
+        let options = ListInstancesOptions::new().with_statuses(single_instance_active_statuses());
+        assert_eq!(
+            options.statuses,
+            vec![InstanceStatus::Pending, InstanceStatus::Running],
+            "single_instance must include starts that have not reached running yet, \
+             but never treat a suspended approval as active"
+        );
+        assert!(
+            !options.statuses.contains(&InstanceStatus::Suspended),
+            "a parked approval has no active single-instance lease"
+        );
     }
 
     /// The gate must answer from memory, never from a query.
