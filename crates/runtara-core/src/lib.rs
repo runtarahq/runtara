@@ -150,6 +150,12 @@
 //! - [`persistence`]: Database persistence layer for instances, checkpoints, events, signals
 //! - [`error`]: Error types with RPC error code mapping
 //! - [`instance_handlers`]: Instance protocol request handlers
+//! - [`migrations`]: The Postgres migrator, for hosts that own schema setup
+//!
+//! Everything else is an implementation detail. The SQL dialect, the shared
+//! operation macros, and the OTLP metrics recorder are private: they exist to
+//! serve the four modules above, and nothing outside this crate reached for
+//! them.
 
 #![deny(missing_docs)]
 
@@ -169,7 +175,10 @@ pub mod migrations;
 pub mod persistence;
 
 /// OpenTelemetry metrics for workflow execution state.
-pub mod observability;
+///
+/// Internal: the persistence layer emits these as instances reach a terminal
+/// state. Hosts own their own meter provider.
+mod observability;
 
 /// Error types for Core operations with RPC error code mapping.
 pub mod error;

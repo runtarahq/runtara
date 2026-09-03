@@ -44,22 +44,8 @@ impl Dialect for PostgresDialect {
     fn enum_cast(kind: EnumKind) -> &'static str {
         match kind {
             EnumKind::InstanceStatus => "::instance_status",
-            EnumKind::SignalType => "::signal_type",
             EnumKind::TerminationReason => "::termination_reason",
-            EnumKind::InstanceEventType => "::instance_event_type",
         }
-    }
-
-    fn json_text(col: &str, key: &str) -> String {
-        format!("convert_from({col}, 'UTF8')::jsonb->>'{key}'")
-    }
-
-    fn payload_ilike(col: &str, arg_placeholder: &str) -> String {
-        format!("convert_from({col}, 'UTF8') ILIKE '%' || {arg_placeholder} || '%'")
-    }
-
-    fn in_list(col: &str, _count: usize, start_idx: usize) -> String {
-        format!("{col} = ANY(${start_idx})")
     }
 
     fn duration_ms(a: &str, b: &str) -> String {
@@ -384,26 +370,6 @@ mod tests {
         assert_eq!(
             PostgresDialect::enum_cast(EnumKind::InstanceStatus),
             "::instance_status"
-        );
-        assert_eq!(
-            PostgresDialect::enum_cast(EnumKind::InstanceEventType),
-            "::instance_event_type"
-        );
-    }
-
-    #[test]
-    fn json_text_uses_jsonb_text_operator() {
-        assert_eq!(
-            PostgresDialect::json_text("payload", "scope_id"),
-            "convert_from(payload, 'UTF8')::jsonb->>'scope_id'"
-        );
-    }
-
-    #[test]
-    fn in_list_uses_any_with_single_bind() {
-        assert_eq!(
-            PostgresDialect::in_list("instance_id", 5, 1),
-            "instance_id = ANY($1)"
         );
     }
 

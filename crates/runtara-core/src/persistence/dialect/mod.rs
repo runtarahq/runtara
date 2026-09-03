@@ -19,12 +19,8 @@ pub use self::postgres::PostgresDialect;
 pub enum EnumKind {
     /// `instances.status` — pending/running/suspended/completed/failed/cancelled.
     InstanceStatus,
-    /// `pending_signals.signal_type` — cancel/pause/resume/custom.
-    SignalType,
     /// `instances.termination_reason` — normal/oom/timeout/etc.
     TerminationReason,
-    /// `instance_events.event_type` — custom/started/completed/etc.
-    InstanceEventType,
 }
 
 /// SQL-dialect abstraction for the persistence layer.
@@ -78,28 +74,6 @@ pub trait Dialect: Send + Sync + 'static {
     /// bound RFC3339 value and `CURRENT_TIMESTAMP` already line up on both
     /// sides of a `sleep_until <= now` predicate with no wrapping function.
     fn normalize_timestamp(expr: &str) -> String;
-
-    /// SQL expression extracting a JSON text field from a `BYTEA` payload
-    /// column: `convert_from({col}, 'UTF8')::jsonb->>'{key}'`. Payloads are
-    /// stored as raw bytes, so they must be decoded to text and parsed as
-    /// `jsonb` before `->>` can reach a key.
-    fn json_text(col: &str, key: &str) -> String;
-
-    /// SQL expression for a substring search on a `BYTEA` payload column
-    /// bound against `arg_placeholder`.
-    ///
-    /// Built on `ILIKE`, so
-    /// [`super::super::ListEventsFilter::payload_contains`] matches
-    /// case-insensitively.
-    fn payload_ilike(col: &str, arg_placeholder: &str) -> String;
-
-    /// SQL fragment implementing `col IN (...)` against `count` bound values.
-    ///
-    /// Renders `{col} = ANY({placeholder(start_idx)})`: Postgres takes the
-    /// whole list as one array bind, so `count` leaves the generated text
-    /// unchanged and the caller binds a single `Vec<T>` rather than fanning
-    /// out one placeholder per element.
-    fn in_list(col: &str, count: usize, start_idx: usize) -> String;
 
     /// SQL expression returning milliseconds between two timestamp columns
     /// (`a - b`): `(EXTRACT(EPOCH FROM ({a} - {b})) * 1000)::bigint`. The

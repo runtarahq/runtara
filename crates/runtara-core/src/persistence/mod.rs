@@ -2,8 +2,8 @@
 //!
 //! This module defines the persistence abstraction and backend implementations.
 
-pub mod common;
-pub mod dialect;
+pub(crate) mod common;
+pub(crate) mod dialect;
 pub mod postgres;
 
 pub use self::postgres::PostgresPersistence;

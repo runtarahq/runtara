@@ -4775,8 +4775,6 @@ dependencies = [
  "async-trait",
  "chrono",
  "opentelemetry",
- "opentelemetry-otlp",
- "opentelemetry_sdk",
  "serde",
  "serde_json",
  "sqlx",
@@ -4785,7 +4783,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
- "tracing-subscriber",
  "uuid",
 ]
 

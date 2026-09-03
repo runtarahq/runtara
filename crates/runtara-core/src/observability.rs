@@ -1,36 +1,36 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! OpenTelemetry metrics for durable workflow execution.
+//!
+//! Recorded from the persistence layer as instances reach a terminal state.
+//! The host owns the global meter provider; core only emits.
 
 use std::sync::OnceLock;
-use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use opentelemetry::KeyValue;
 use opentelemetry::global;
 use opentelemetry::metrics::{Counter, Histogram, Meter};
-use opentelemetry_sdk::Resource;
-use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
 
 static WORKFLOW_METRICS: OnceLock<WorkflowMetrics> = OnceLock::new();
 
 /// Execution fields collected from the persisted instance row.
 #[derive(Debug, Clone)]
-pub struct InstanceCompletionMetrics {
+pub(crate) struct InstanceCompletionMetrics {
     /// Tenant identifier for the invocation.
-    pub tenant_id: String,
+    pub(crate) tenant_id: String,
     /// Terminal status: completed, failed, or cancelled.
-    pub status: String,
+    pub(crate) status: String,
     /// Optional terminal reason such as timeout or heartbeat_timeout.
-    pub termination_reason: Option<String>,
+    pub(crate) termination_reason: Option<String>,
     /// When execution began.
-    pub started_at: Option<DateTime<Utc>>,
+    pub(crate) started_at: Option<DateTime<Utc>>,
     /// When execution reached a terminal state.
-    pub finished_at: Option<DateTime<Utc>>,
+    pub(crate) finished_at: Option<DateTime<Utc>>,
     /// Peak memory collected by the runner cgroup.
-    pub memory_peak_bytes: Option<u64>,
+    pub(crate) memory_peak_bytes: Option<u64>,
     /// CPU usage collected by the runner cgroup.
-    pub cpu_usage_usec: Option<u64>,
+    pub(crate) cpu_usage_usec: Option<u64>,
 }
 
 impl InstanceCompletionMetrics {
@@ -83,64 +83,13 @@ impl WorkflowMetrics {
     }
 }
 
-/// Initialize the OTLP metrics exporter for standalone runtara-core or
-/// runtara-environment processes. Embedded runtara-server initializes its own
-/// global OpenTelemetry provider before Core starts, so callers should not use
-/// this from that path.
-pub fn init_metrics_telemetry(
-    default_service_name: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    if is_otel_disabled() {
-        return Ok(());
-    }
-
-    let service_name = std::env::var("OTEL_SERVICE_NAME")
-        .or_else(|_| std::env::var("DD_SERVICE"))
-        .unwrap_or_else(|_| default_service_name.to_string());
-    let service_version = std::env::var("OTEL_SERVICE_VERSION")
-        .or_else(|_| std::env::var("DD_VERSION"))
-        .unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_string());
-    let environment = std::env::var("OTEL_DEPLOYMENT_ENVIRONMENT")
-        .or_else(|_| std::env::var("DD_ENV"))
-        .unwrap_or_else(|_| "development".to_string());
-
-    let resource = Resource::builder()
-        .with_service_name(service_name)
-        .with_attributes([
-            KeyValue::new("service.version", service_version),
-            KeyValue::new("deployment.environment.name", environment),
-        ])
-        .build();
-
-    let metrics_exporter = opentelemetry_otlp::MetricExporter::builder()
-        .with_tonic()
-        .build()?;
-    let metrics_reader = PeriodicReader::builder(metrics_exporter)
-        .with_interval(Duration::from_secs(60))
-        .build();
-
-    let meter_provider = SdkMeterProvider::builder()
-        .with_reader(metrics_reader)
-        .with_resource(resource)
-        .build();
-
-    global::set_meter_provider(meter_provider);
-    Ok(())
-}
-
-fn is_otel_disabled() -> bool {
-    std::env::var("OTEL_SDK_DISABLED")
-        .map(|value| value.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
-}
-
 /// Match the terminal statuses used by the analytics tenant metrics query.
-pub fn is_recorded_terminal_status(status: &str) -> bool {
+pub(crate) fn is_recorded_terminal_status(status: &str) -> bool {
     matches!(status, "completed" | "failed" | "cancelled")
 }
 
 /// Record count and duration for a terminal workflow invocation.
-pub fn record_instance_completion(metric: &InstanceCompletionMetrics) {
+pub(crate) fn record_instance_completion(metric: &InstanceCompletionMetrics) {
     if !is_recorded_terminal_status(&metric.status) {
         return;
     }
@@ -160,7 +109,7 @@ pub fn record_instance_completion(metric: &InstanceCompletionMetrics) {
 }
 
 /// Record resource metrics collected after process exit.
-pub fn record_instance_resources(metric: &InstanceCompletionMetrics) {
+pub(crate) fn record_instance_resources(metric: &InstanceCompletionMetrics) {
     if !is_recorded_terminal_status(&metric.status) {
         return;
     }

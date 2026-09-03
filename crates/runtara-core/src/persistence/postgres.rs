@@ -6,7 +6,6 @@
 
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
-use uuid::Uuid;
 
 use crate::error::CoreError;
 use crate::observability::{
@@ -179,15 +178,11 @@ crate::persistence::common::ops::impl_retention_ops!(
 // Remaining Instance Operations (pre-shared — migrated in later phases)
 // ============================================================================
 
-/// UUID used for self-registered instances (no image/definition).
-/// This is a well-known UUID that indicates the instance registered itself.
-pub const SELF_REGISTERED_DEFINITION_ID: Uuid = Uuid::from_u128(0);
-
 /// Update execution metrics for an instance.
 ///
 /// Stores cgroup-collected resource usage metrics (memory, CPU) after container execution.
 /// Only updates if metrics are not already set (first writer wins).
-pub async fn update_instance_metrics(
+async fn update_instance_metrics(
     pool: &PgPool,
     instance_id: &str,
     memory_peak_bytes: Option<u64>,
@@ -243,7 +238,7 @@ async fn update_metrics_returning_status(
 ///
 /// Stores stderr from container execution for debugging/logging purposes.
 /// Only updates if stderr is not already set (first writer wins).
-pub async fn update_instance_stderr(
+async fn update_instance_stderr(
     pool: &PgPool,
     instance_id: &str,
     stderr: &str,
@@ -298,25 +293,22 @@ pub async fn load_latest_checkpoint(
 
 /// Retry attempt record from the database.
 /// These are stored in the checkpoints table with is_retry_attempt = true.
+///
+/// Test-only: nothing in production reads the retry audit trail back. It
+/// exists so `save_retry_attempt`'s upsert-in-place behaviour can be asserted,
+/// so it is gated to match the `tests` module that uses it.
+#[cfg(all(test, feature = "db-integration-tests"))]
 #[derive(Debug, Clone, sqlx::FromRow)]
-pub struct RetryAttemptRecord {
-    /// Database primary key.
-    pub id: i64,
-    /// Instance this retry attempt belongs to.
-    pub instance_id: String,
-    /// Base checkpoint identifier (the durable function's cache key).
-    pub checkpoint_id: String,
+struct RetryAttemptRecord {
     /// Retry attempt number (1-indexed).
     pub attempt_number: i32,
     /// Error message from this attempt.
     pub error_message: Option<String>,
-    /// When the retry attempt was recorded.
-    pub created_at: DateTime<Utc>,
 }
 
 /// Save a retry attempt record for audit trail.
 /// Retry attempts are stored in the checkpoints table with a unique checkpoint_id.
-pub async fn save_retry_attempt(
+async fn save_retry_attempt(
     pool: &PgPool,
     instance_id: &str,
     checkpoint_id: &str,
@@ -350,9 +342,9 @@ pub async fn save_retry_attempt(
     Ok(())
 }
 
-/// Load retry history for a checkpoint (for debugging/audit).
-/// Returns all retry attempts for the given base checkpoint_id.
-pub async fn load_retry_history(
+/// Load retry history for a checkpoint. Test-only; see `RetryAttemptRecord`.
+#[cfg(all(test, feature = "db-integration-tests"))]
+async fn load_retry_history(
     pool: &PgPool,
     instance_id: &str,
     checkpoint_id: &str,
@@ -361,7 +353,7 @@ pub async fn load_retry_history(
 
     let records = sqlx::query_as::<_, RetryAttemptRecord>(
         r#"
-        SELECT id, instance_id, checkpoint_id, attempt_number, error_message, created_at
+        SELECT attempt_number, error_message
         FROM checkpoints
         WHERE instance_id = $1
           AND checkpoint_id LIKE $2
@@ -382,7 +374,7 @@ pub async fn load_retry_history(
 // ============================================================================
 
 /// Insert an instance event.
-pub async fn insert_event(pool: &PgPool, event: &EventRecord) -> Result<(), CoreError> {
+async fn insert_event(pool: &PgPool, event: &EventRecord) -> Result<(), CoreError> {
     sqlx::query(
         r#"
         INSERT INTO instance_events (instance_id, event_type, checkpoint_id, payload, created_at, subtype)
@@ -413,7 +405,7 @@ pub async fn insert_event(pool: &PgPool, event: &EventRecord) -> Result<(), Core
 
 /// Insert or update a pending signal.
 /// Uses ON CONFLICT to replace existing signal for the same instance.
-pub async fn insert_signal(
+async fn insert_signal(
     pool: &PgPool,
     instance_id: &str,
     signal_type: &str,
@@ -446,7 +438,7 @@ pub async fn insert_signal(
 }
 
 /// Insert or update a pending custom signal scoped to a checkpoint.
-pub async fn insert_custom_signal(
+async fn insert_custom_signal(
     pool: &PgPool,
     instance_id: &str,
     checkpoint_id: &str,
@@ -857,6 +849,7 @@ impl Persistence for PostgresPersistence {
 
 #[cfg(all(test, feature = "db-integration-tests"))]
 mod tests {
+    use uuid::Uuid;
     /// Concurrent claimers of the same due batch must never both get a row.
     ///
     /// This is the invariant the wake scheduler leans on once it polls back to
