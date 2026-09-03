@@ -297,7 +297,10 @@ mod tests {
         })
         .await;
 
-        let error = execute(envelope(&url, 500), None)
+        // This test exercises the header-only size rejection, not deadline
+        // enforcement. Leave enough local scheduling margin for the server
+        // task to accept and reply before the request reaches that check.
+        let error = execute(envelope(&url, 5_000), None)
             .await
             .expect_err("a declared oversize body must be rejected");
         assert_eq!(error, response_too_large(MAX_RESPONSE_BODY_BYTES));
