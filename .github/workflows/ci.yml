@@ -11,6 +11,13 @@ on:
     branches:
       - main
 
+# Supersede in-flight runs for the same ref. Without this, every push to a
+# branch left its predecessor running to completion, burning runner minutes and
+# (worse) cache-write slots against the repo's 10 GB budget.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 # Default-deny: every job reads source via actions/checkout. No job needs
 # to write to issues, PRs, releases, packages, etc. Per-job overrides go
 # at the job level if ever required.
@@ -20,6 +27,14 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   SQLX_OFFLINE: "true"
+  # Full DWARF costs ~25% of compile wall-clock and inflates the target dir from
+  # 19 GB to 54 GB (measured, `--workspace --all-targets --features GATE_FEATURES`).
+  # rust-cache then compresses ~900 MB per job instead of ~320 MB, and ten of those
+  # blow the 10 GB per-repo cache cap, which is what evicted the build and lint
+  # caches on every run. line-tables-only keeps file/line in panics and backtraces
+  # and only drops the variable-level DWARF a debugger would attach for. Set here
+  # rather than in [profile.dev] so local builds keep full debug info.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
   # Every marker feature that gates a [[test]] target via required-features,
   # plus embed-ui. Used by the lint and build jobs so `--all-targets` really
   # means all targets. Static value — no workflow-context interpolation.
@@ -85,8 +100,14 @@ jobs:
       - name: Setup Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          cache: true
-          cache-workspaces: ". -> target"
+          cache: false
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Only main writes. PR runs read main's cache and never add to the
+          # 10 GB per-repo budget — the churn that was evicting these caches
+          # into partial matches ("full match: false") on nearly every run.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -95,24 +116,10 @@ jobs:
           cache: npm
           cache-dependency-path: crates/runtara-server/frontend/package-lock.json
 
-      - name: Add Cargo bin to PATH
-        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-
-      - name: Cache wasm-pack binary
-        id: cache-wasm-pack
-        uses: actions/cache@v4
+      - name: Install wasm-pack (prebuilt)
+        uses: taiki-e/install-action@v2
         with:
-          path: ~/.cargo/bin/wasm-pack
-          key: wasm-pack-${{ runner.os }}-${{ env.ImageOS }}-${{ runner.arch }}-${{ env.WASM_PACK_VERSION }}
-
-      - name: Install wasm-pack
-        run: |
-          if command -v wasm-pack >/dev/null 2>&1 \
-            && wasm-pack --version | grep -q "wasm-pack ${WASM_PACK_VERSION}"; then
-            echo "wasm-pack ${WASM_PACK_VERSION} already installed"
-          else
-            cargo install wasm-pack --version "$WASM_PACK_VERSION" --locked --force
-          fi
+          tool: wasm-pack@${{ env.WASM_PACK_VERSION }}
 
       - name: Build frontend (embedded UI)
         working-directory: crates/runtara-server/frontend
@@ -144,8 +151,14 @@ jobs:
       - name: Setup Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          cache: true
-          cache-workspaces: ". -> target"
+          cache: false
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Only main writes. PR runs read main's cache and never add to the
+          # 10 GB per-repo budget — the churn that was evicting these caches
+          # into partial matches ("full match: false") on nearly every run.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Download frontend (embedded UI)
         uses: actions/download-artifact@v4
@@ -178,8 +191,14 @@ jobs:
       - name: Setup Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          cache: true
-          cache-workspaces: ". -> target"
+          cache: false
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Only main writes. PR runs read main's cache and never add to the
+          # 10 GB per-repo budget — the churn that was evicting these caches
+          # into partial matches ("full match: false") on nearly every run.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Download frontend (embedded UI)
         uses: actions/download-artifact@v4
@@ -192,18 +211,8 @@ jobs:
           cargo build --workspace --all-targets \
             --features "$GATE_FEATURES"
 
-      - name: Save build cache
-        uses: actions/cache/save@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ github.sha }}
-
   test-sdk:
     runs-on: ubuntu-latest
-    needs: build
 
     steps:
       - uses: actions/checkout@v4
@@ -212,22 +221,28 @@ jobs:
 
       - name: Setup Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
-
-      - name: Restore build cache
-        uses: actions/cache/restore@v4
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ github.sha }}
+          cache: false
+
+      # Under resolver v2 a `-p <crate> --features …` invocation resolves features
+      # over that crate's subgraph, which differs from the workspace-wide
+      # resolution `build` uses. Verified: this job rebuilt 80 third-party crates
+      # (wasmtime, cranelift, sqlx, openssl) straight after restoring a 1.3 GB
+      # target dir `build` had produced minutes earlier in the same run. A cache
+      # keyed on the build job's resolution can never serve these jobs, so each
+      # keeps its own job-scoped key instead.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Only main writes. PR runs read main's cache and never add to the
+          # 10 GB per-repo budget — the churn that was evicting these caches
+          # into partial matches ("full match: false") on nearly every run.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Run runtara-sdk tests
         run: cargo test -p runtara-sdk
 
   test-workflows:
     runs-on: ubuntu-latest
-    needs: build
 
     steps:
       - uses: actions/checkout@v4
@@ -236,22 +251,28 @@ jobs:
 
       - name: Setup Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
-
-      - name: Restore build cache
-        uses: actions/cache/restore@v4
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ github.sha }}
+          cache: false
+
+      # Under resolver v2 a `-p <crate> --features …` invocation resolves features
+      # over that crate's subgraph, which differs from the workspace-wide
+      # resolution `build` uses. Verified: this job rebuilt 80 third-party crates
+      # (wasmtime, cranelift, sqlx, openssl) straight after restoring a 1.3 GB
+      # target dir `build` had produced minutes earlier in the same run. A cache
+      # keyed on the build job's resolution can never serve these jobs, so each
+      # keeps its own job-scoped key instead.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Only main writes. PR runs read main's cache and never add to the
+          # 10 GB per-repo budget — the churn that was evicting these caches
+          # into partial matches ("full match: false") on nearly every run.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Run runtara-workflows tests
         run: cargo test -p runtara-workflows
 
   test-core:
     runs-on: ubuntu-latest
-    needs: build
 
     services:
       postgres:
@@ -275,15 +296,22 @@ jobs:
 
       - name: Setup Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
-
-      - name: Restore build cache
-        uses: actions/cache/restore@v4
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ github.sha }}
+          cache: false
+
+      # Under resolver v2 a `-p <crate> --features …` invocation resolves features
+      # over that crate's subgraph, which differs from the workspace-wide
+      # resolution `build` uses. Verified: this job rebuilt 80 third-party crates
+      # (wasmtime, cranelift, sqlx, openssl) straight after restoring a 1.3 GB
+      # target dir `build` had produced minutes earlier in the same run. A cache
+      # keyed on the build job's resolution can never serve these jobs, so each
+      # keeps its own job-scoped key instead.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Only main writes. PR runs read main's cache and never add to the
+          # 10 GB per-repo budget — the churn that was evicting these caches
+          # into partial matches ("full match: false") on nearly every run.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Run runtara-core tests
         env:
@@ -292,7 +320,6 @@ jobs:
 
   test-server:
     runs-on: ubuntu-latest
-    needs: build
 
     services:
       postgres:
@@ -325,15 +352,22 @@ jobs:
 
       - name: Setup Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
-
-      - name: Restore build cache
-        uses: actions/cache/restore@v4
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ github.sha }}
+          cache: false
+
+      # Under resolver v2 a `-p <crate> --features …` invocation resolves features
+      # over that crate's subgraph, which differs from the workspace-wide
+      # resolution `build` uses. Verified: this job rebuilt 80 third-party crates
+      # (wasmtime, cranelift, sqlx, openssl) straight after restoring a 1.3 GB
+      # target dir `build` had produced minutes earlier in the same run. A cache
+      # keyed on the build job's resolution can never serve these jobs, so each
+      # keeps its own job-scoped key instead.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Only main writes. PR runs read main's cache and never add to the
+          # 10 GB per-repo budget — the churn that was evicting these caches
+          # into partial matches ("full match: false") on nearly every run.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # The service container creates only POSTGRES_DB. The runtime schema needs
       # a database of its own — see the note on TEST_RUNTARA_DATABASE_URL below.
@@ -373,7 +407,6 @@ jobs:
 
   test-environment:
     runs-on: ubuntu-latest
-    needs: build
 
     services:
       postgres:
@@ -397,15 +430,22 @@ jobs:
 
       - name: Setup Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
-
-      - name: Restore build cache
-        uses: actions/cache/restore@v4
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ github.sha }}
+          cache: false
+
+      # Under resolver v2 a `-p <crate> --features …` invocation resolves features
+      # over that crate's subgraph, which differs from the workspace-wide
+      # resolution `build` uses. Verified: this job rebuilt 80 third-party crates
+      # (wasmtime, cranelift, sqlx, openssl) straight after restoring a 1.3 GB
+      # target dir `build` had produced minutes earlier in the same run. A cache
+      # keyed on the build job's resolution can never serve these jobs, so each
+      # keeps its own job-scoped key instead.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Only main writes. PR runs read main's cache and never add to the
+          # 10 GB per-repo budget — the churn that was evicting these caches
+          # into partial matches ("full match: false") on nearly every run.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Run runtara-environment tests
         env:
@@ -432,7 +472,6 @@ jobs:
   # Service-bound integration targets stay in their own jobs below.
   test-units:
     runs-on: ubuntu-latest
-    needs: build
 
     steps:
       - uses: actions/checkout@v4
@@ -441,15 +480,22 @@ jobs:
 
       - name: Setup Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
-
-      - name: Restore build cache
-        uses: actions/cache/restore@v4
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ github.sha }}
+          cache: false
+
+      # Under resolver v2 a `-p <crate> --features …` invocation resolves features
+      # over that crate's subgraph, which differs from the workspace-wide
+      # resolution `build` uses. Verified: this job rebuilt 80 third-party crates
+      # (wasmtime, cranelift, sqlx, openssl) straight after restoring a 1.3 GB
+      # target dir `build` had produced minutes earlier in the same run. A cache
+      # keyed on the build job's resolution can never serve these jobs, so each
+      # keeps its own job-scoped key instead.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Only main writes. PR runs read main's cache and never add to the
+          # 10 GB per-repo budget — the churn that was evicting these caches
+          # into partial matches ("full match: false") on nearly every run.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # Every crate's lib target, workspace-wide, one cargo invocation.
       - name: Run all workspace unit tests
@@ -474,7 +520,6 @@ jobs:
   # because the suites share container ports and the connection tables.
   test-connections:
     runs-on: ubuntu-latest
-    needs: build
 
     steps:
       - uses: actions/checkout@v4
@@ -483,15 +528,22 @@ jobs:
 
       - name: Setup Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
-
-      - name: Restore build cache
-        uses: actions/cache/restore@v4
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ github.sha }}
+          cache: false
+
+      # Under resolver v2 a `-p <crate> --features …` invocation resolves features
+      # over that crate's subgraph, which differs from the workspace-wide
+      # resolution `build` uses. Verified: this job rebuilt 80 third-party crates
+      # (wasmtime, cranelift, sqlx, openssl) straight after restoring a 1.3 GB
+      # target dir `build` had produced minutes earlier in the same run. A cache
+      # keyed on the build job's resolution can never serve these jobs, so each
+      # keeps its own job-scoped key instead.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Only main writes. PR runs read main's cache and never add to the
+          # 10 GB per-repo budget — the churn that was evicting these caches
+          # into partial matches ("full match: false") on nearly every run.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Run runtara-connections tests
         run: cargo test -p runtara-connections -- --test-threads=1
@@ -507,41 +559,17 @@ jobs:
         with:
           submodules: true
 
-      - name: Add Cargo bin to PATH
-        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-
-      - name: Cache wit-deps binary
-        id: cache-wit-deps
-        uses: actions/cache@v4
+      # These were `cargo install`-from-source behind an actions/cache of the
+      # built binary. Both caches are only a few MB, which made them the first
+      # things evicted once the repo went over its 10 GB budget — so the fallback
+      # ran on nearly every run: 89s for wit-deps plus 128s for wasm-tools, on the
+      # wit-package -> components-build critical path. Prebuilt downloads are a
+      # few seconds and cannot be evicted. install-action falls back to
+      # cargo-binstall, then to a source build, for anything it has no binary for.
+      - name: Install WIT tooling (prebuilt)
+        uses: taiki-e/install-action@v2
         with:
-          path: ~/.cargo/bin/wit-deps
-          key: wit-deps-${{ runner.os }}-${{ runner.arch }}-${{ env.WIT_DEPS_VERSION }}
-
-      - name: Install wit-deps
-        if: steps.cache-wit-deps.outputs.cache-hit != 'true'
-        run: |
-          if command -v wit-deps >/dev/null 2>&1; then
-            echo "wit-deps already installed"
-          else
-            cargo install wit-deps-cli --version "$WIT_DEPS_VERSION" --locked
-          fi
-
-      - name: Cache wasm-tools binary
-        id: cache-wasm-tools
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/bin/wasm-tools
-          key: wasm-tools-${{ runner.os }}-${{ runner.arch }}-${{ env.WASM_TOOLS_VERSION }}
-
-      - name: Install wasm-tools
-        if: steps.cache-wasm-tools.outputs.cache-hit != 'true'
-        run: |
-          if command -v wasm-tools >/dev/null 2>&1 \
-            && wasm-tools --version | grep -q "wasm-tools ${WASM_TOOLS_VERSION}"; then
-            echo "wasm-tools ${WASM_TOOLS_VERSION} already installed"
-          else
-            cargo install wasm-tools --version "$WASM_TOOLS_VERSION" --locked
-          fi
+          tool: wasm-tools@${{ env.WASM_TOOLS_VERSION }},wit-deps-cli@${{ env.WIT_DEPS_VERSION }}
 
       - name: Lock and resolve WIT dependencies
         working-directory: crates/runtara-agent-wit
@@ -567,8 +595,14 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           target: wasm32-wasip2
-          cache: true
-          cache-workspaces: ". -> target"
+          cache: false
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Only main writes. PR runs read main's cache and never add to the
+          # 10 GB per-repo budget — the churn that was evicting these caches
+          # into partial matches ("full match: false") on nearly every run.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Build all agent components + emit sidecar meta.json
         env:

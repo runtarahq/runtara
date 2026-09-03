@@ -19,6 +19,13 @@ permissions:
   contents: write
   packages: write
 
+# Serialise releases for a given ref. Deliberately NOT cancel-in-progress:
+# interrupting a run mid-publish can leave a partial GitHub Release or a GHCR
+# manifest referencing images that were never pushed. Queue instead.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
@@ -26,12 +33,112 @@ env:
   WASM_PACK_VERSION: "0.13.1"
 
 jobs:
+  # Built once and shared, exactly as ci.yml's frontend-embed job does. Was
+  # inside every bundle job (~128s x 3 platforms), even though the output is
+  # identical across them.
+  #
+  # Carries dist/ AND src/wasm/validation/ on purpose: runtara-server's build.rs
+  # re-derives the validation-WASM fingerprint and, if it disagrees, shells out to
+  # wasm-pack and re-runs `npm run build` itself. Shipping the fingerprint keeps
+  # the consumers on the up-to-date path, so they need neither Node nor wasm-pack.
+  frontend:
+    name: Build Frontend
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-frontend
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: crates/runtara-server/frontend/.node-version
+          cache: npm
+          cache-dependency-path: crates/runtara-server/frontend/package-lock.json
+
+      - name: Install wasm-pack (prebuilt)
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack@${{ env.WASM_PACK_VERSION }}
+
+      - name: Build frontend
+        working-directory: crates/runtara-server/frontend
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+
+      - name: Upload frontend
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-frontend
+          path: |
+            crates/runtara-server/frontend/dist/
+            crates/runtara-server/frontend/src/wasm/validation/
+          if-no-files-found: error
+          retention-days: 1
+
+  # The agent/workflow components target wasm32-wasip2, so one build serves all
+  # three platforms. Previously this ran *after* the server build inside each
+  # bundle job — 114s of components plus 160s of emit-meta on the critical path,
+  # despite depending on nothing the server build produces.
+  #
+  # emit-meta is the expensive half: it compiles all 27 agent crates a second time
+  # for the host target to read their macro-emitted metadata.
+  components:
+    name: Build WASM Components
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: wasm32-wasip2
+          cache: false
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-components
+
+      - name: Build agent components + emit sidecar meta.json
+        env:
+          RUNTARA_NO_INSTALL_TOOLS: "1"
+        run: scripts/build-agent-components.sh
+
+      - name: Verify every component + meta.json is present
+        run: |
+          expected=$(ls -d crates/agents/runtara-agent-*/ | wc -l)
+          wasm_count=$(find target/wasm32-wasip2/release -maxdepth 1 -name 'runtara_agent_*.wasm' | wc -l)
+          meta_count=$(find target/wasm32-wasip2/release -maxdepth 1 -name 'runtara_agent_*.meta.json' | wc -l)
+          echo "expected=$expected wasm=$wasm_count meta=$meta_count"
+          test "$wasm_count" -eq "$expected"
+          test "$meta_count" -eq "$expected"
+
+      - name: Upload WASM components
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-components
+          path: |
+            target/wasm32-wasip2/release/*.wasm
+            target/wasm32-wasip2/release/*.meta.json
+          if-no-files-found: error
+          retention-days: 1
+
   bundle:
     name: Build Bundle (${{ matrix.os }}-${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
-    env:
-      CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER: sccache
-      SCCACHE_GHA_ENABLED: "true"
+    needs: [frontend, components]
     strategy:
       fail-fast: false
       matrix:
@@ -71,39 +178,40 @@ jobs:
       - name: Setup Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          cache-bin: false
+          cache: false
 
-      - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.10
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      # Replaces sccache, which was contributing nothing. It was wired as
+      # CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER — that only wraps the 52 workspace
+      # crates, never the 761 dependencies where 388s of this build goes — and the
+      # few entries it did write were evicted by the repo's over-budget Actions
+      # cache before the next release could read them. Its own post-step
+      # --show-stats reported "Cache hits 0 ... hit rate 0.00 %" on every release,
+      # having spent 17.5s writing them. rust-cache is the mechanism ci.yml already
+      # uses, is predictable in size, and covers exactly that dependency phase.
+      - uses: Swatinem/rust-cache@v2
         with:
-          node-version-file: crates/runtara-server/frontend/.node-version
-          cache: npm
-          cache-dependency-path: crates/runtara-server/frontend/package-lock.json
+          shared-key: release-bundle-${{ matrix.os }}-${{ matrix.arch }}
 
-      - name: Add Cargo bin to PATH
-        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-
-      - name: Cache wasm-pack binary
-        id: cache-wasm-pack
-        uses: actions/cache@v4
+      # Node and wasm-pack are gone from this job: the frontend arrives prebuilt,
+      # fingerprint included, so build.rs stays on its up-to-date path.
+      - name: Download frontend
+        uses: actions/download-artifact@v4
         with:
-          path: ~/.cargo/bin/wasm-pack
-          key: wasm-pack-${{ runner.os }}-${{ env.ImageOS }}-${{ runner.arch }}-${{ env.WASM_PACK_VERSION }}
+          name: release-frontend
+          path: crates/runtara-server/frontend
 
-      - name: Install wasm-pack
-        run: |
-          if command -v wasm-pack >/dev/null 2>&1 \
-            && wasm-pack --version | grep -q "wasm-pack ${WASM_PACK_VERSION}"; then
-            echo "wasm-pack ${WASM_PACK_VERSION} already installed"
-          else
-            cargo install wasm-pack --version "$WASM_PACK_VERSION" --locked --force
-          fi
+      - name: Download WASM components
+        uses: actions/download-artifact@v4
+        with:
+          name: release-components
+          path: target/wasm32-wasip2/release
 
       - name: Build bundle
-        run: ./scripts/build-bundle.sh --output-dir target/bundle --version "${{ steps.get_version.outputs.version }}"
+        run: |
+          ./scripts/build-bundle.sh \
+            --skip-frontend --skip-components \
+            --output-dir target/bundle \
+            --version "${{ steps.get_version.outputs.version }}"
 
       # The bundle's agent-component gate lives in
       # scripts/build-bundle.sh, which invokes scripts/build-agent-components.sh
