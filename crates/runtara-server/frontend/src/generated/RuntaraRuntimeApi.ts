@@ -3277,7 +3277,8 @@ export interface PipelineRatesDto {
    */
   denied: number;
   /**
-   * Guests that stopped running, including those that parked themselves.
+   * Runs that stopped, including those that parked themselves to await a
+   * wake or a signal.
    * @format double
    */
   finished: number;
@@ -3347,7 +3348,7 @@ export interface PipelineStageDto {
   inflowKey: string;
   /**
    * Stable identifier: `admission`, `triggerQueue`, `triggerWorkers`,
-   * `runPermits`, `executing`, `parked`.
+   * `pendingStarts`, `runPermits`, `executing`, `parked`.
    */
   key: string;
   /**

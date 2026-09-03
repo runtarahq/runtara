@@ -7,11 +7,11 @@
 //! database query. That is the whole reason a sampler exists rather than a
 //! handler that reads the world per request.
 //!
-//! Two cadences, because one of the readings is not like the others. Everything
-//! on the fast tick is an atomic load or a single Valkey round trip. The parked
-//! count is a database scan whose cost grows with the table, so it runs on its
-//! own slow tick and its last value is carried between them — see
-//! [`SLOW_TICK`].
+//! Two cadences, because one of the readings is not like the others. The
+//! pending-start reading is index-bounded by admission and is sampled on the
+//! fast tick; the parked count is a database scan whose cost grows with the
+//! table, so it runs on its own slow tick and its last value is carried between
+//! them — see [`SLOW_TICK`].
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -70,6 +70,10 @@ pub struct PipelineReading {
     pub trigger_limit: Option<u64>,
     /// Trigger-worker slots in use.
     pub trigger_used: Option<u64>,
+    /// Durable starts that have not reached `running` yet.
+    pub pending_starts: Option<u64>,
+    /// Age of the oldest durable start that has not reached `running` yet.
+    pub pending_oldest_ms: Option<u64>,
     /// Run-permit bound.
     pub run_limit: Option<u64>,
     /// Run permits held.
@@ -126,6 +130,18 @@ pub fn build_snapshot(
             limit: reading.trigger_limit,
             used: reading.trigger_used,
             oldest_age_ms: None,
+            inflow_key: "accepted".to_string(),
+        },
+        PipelineStageDto {
+            key: "pendingStarts".to_string(),
+            label: "Pending starts".to_string(),
+            // Pending starts share admission capacity with running instances;
+            // showing that cap makes a full, old pending population visible as
+            // a not-draining stage without inventing a separate limit.
+            knob: Some("counts against MAX_CONCURRENT_EXECUTIONS".to_string()),
+            limit: reading.admission_limit,
+            used: reading.pending_starts,
+            oldest_age_ms: reading.pending_oldest_ms,
             inflow_key: "accepted".to_string(),
         },
         PipelineStageDto {
@@ -247,7 +263,7 @@ pub struct SamplerInputs {
     pub valkey: Option<redis::aio::ConnectionManager>,
     /// Trigger stream key and consumer group.
     pub stream: Option<(String, String)>,
-    /// The **runtime** database pool, for the parked count.
+    /// The **runtime** database pool, for the pending-start and parked counts.
     ///
     /// Not the server pool: `instances` lives in the runtime database, and
     /// pointing this at the server one makes every parked count fail silently
@@ -301,6 +317,19 @@ pub async fn run(
                 None => None,
             };
         }
+
+        // Pending starts are admission-bounded, and the partial
+        // `(tenant_id, created_at) WHERE status = 'pending'` index lets this
+        // answer both the exact count and oldest age without scanning parked or
+        // terminal history. Unlike parked, this is the short-lived handoff
+        // whose latency has to be visible as it happens.
+        let (pending_starts, pending_oldest_ms) = match inputs.pool.as_ref() {
+            Some(pool) => match count_pending_starts(pool, &inputs.tenant_id).await {
+                Some((count, oldest)) => (Some(count), oldest),
+                None => (None, None),
+            },
+            None => (None, None),
+        };
 
         let occupancy = inputs.runner.as_ref().and_then(|r| r.occupancy());
         let (trigger_limit, trigger_used) = match inputs.trigger_permits.occupancy() {
@@ -358,6 +387,8 @@ pub async fn run(
             queue_oldest_ms: backlog.and_then(|b| b.oldest_pending_ms),
             trigger_limit,
             trigger_used,
+            pending_starts,
+            pending_oldest_ms,
             run_limit: occupancy.as_ref().map(|o| o.limit),
             run_used: occupancy.as_ref().map(|o| o.held),
             run_oldest_ms: occupancy.as_ref().and_then(|o| o.oldest_held_ms),
@@ -367,6 +398,54 @@ pub async fn run(
         let snapshot = Arc::new(build_snapshot(&reading, rates, window_ms));
         latest.set(Arc::clone(&snapshot));
         feed.publish(snapshot);
+    }
+}
+
+/// Count durable starts that have not yet become running, and age the oldest.
+///
+/// The matching partial index is deliberately part of the Core schema: this
+/// runs every [`FAST_TICK`], so a sequential scan of a large terminal history
+/// would make the observation system its own source of backpressure.
+async fn count_pending_starts(pool: &sqlx::PgPool, tenant_id: &str) -> Option<(u64, Option<u64>)> {
+    let started = Instant::now();
+    let result = sqlx::query_as::<_, (i64, Option<i64>)>(
+        r#"
+        SELECT
+            COUNT(*)::BIGINT,
+            CASE
+                WHEN MIN(created_at) IS NULL THEN NULL
+                ELSE GREATEST(
+                    0::BIGINT,
+                    (EXTRACT(EPOCH FROM CURRENT_TIMESTAMP - MIN(created_at)) * 1000)::BIGINT
+                )
+            END
+        FROM instances
+        WHERE tenant_id = $1 AND status = 'pending'
+        "#,
+    )
+    .bind(tenant_id)
+    .fetch_one(pool)
+    .await;
+
+    match result {
+        Ok((count, oldest_age_ms)) => {
+            let elapsed = started.elapsed();
+            if elapsed > Duration::from_millis(200) {
+                tracing::warn!(
+                    elapsed_ms = elapsed.as_millis() as u64,
+                    count,
+                    "pending-start count is slow; verify idx_instances_pending_tenant_created"
+                );
+            }
+            Some((
+                count.max(0) as u64,
+                oldest_age_ms.map(|age| age.max(0) as u64),
+            ))
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "pipeline sampler could not count pending starts");
+            None
+        }
     }
 }
 
@@ -422,6 +501,8 @@ mod tests {
             queue_oldest_ms: Some(200),
             trigger_limit: Some(32),
             trigger_used: Some(9),
+            pending_starts: Some(6),
+            pending_oldest_ms: Some(2_700),
             run_limit: Some(16),
             run_used: Some(11),
             run_oldest_ms: Some(2700),
@@ -444,12 +525,22 @@ mod tests {
                 "admission",
                 "triggerQueue",
                 "triggerWorkers",
+                "pendingStarts",
                 "runPermits",
                 "executing",
                 "parked"
             ]
         );
-        let run = &snap.stages[3];
+        let pending = &snap.stages[3];
+        assert_eq!(
+            pending.knob.as_deref(),
+            Some("counts against MAX_CONCURRENT_EXECUTIONS")
+        );
+        assert_eq!(pending.limit, Some(2048));
+        assert_eq!(pending.used, Some(6));
+        assert_eq!(pending.oldest_age_ms, Some(2_700));
+
+        let run = &snap.stages[4];
         assert_eq!(run.knob.as_deref(), Some("RUNTARA_MAX_CONCURRENT_RUNS"));
         assert_eq!(run.limit, Some(16));
         assert_eq!(run.used, Some(11));
@@ -468,7 +559,7 @@ mod tests {
             let stage = snap.stages.iter().find(|s| s.key == key).expect(key);
             assert_eq!(stage.limit, None, "{key} has no bound to be a fraction of");
         }
-        for key in ["admission", "triggerWorkers", "runPermits"] {
+        for key in ["admission", "triggerWorkers", "pendingStarts", "runPermits"] {
             let stage = snap.stages.iter().find(|s| s.key == key).expect(key);
             assert!(stage.limit.is_some(), "{key} is bounded and must say so");
         }
@@ -486,13 +577,16 @@ mod tests {
             ..PipelineReading::default()
         };
         let snap = build_snapshot(&blind, None, 0);
-        assert_eq!(snap.stages.len(), 6, "the pipeline still has six stages");
+        assert_eq!(snap.stages.len(), 7, "the pipeline still has seven stages");
 
         let queue = &snap.stages[1];
         assert_eq!(
             queue.used, None,
             "unreadable must be absent, never zero — zero would read as an empty queue"
         );
+        let pending = &snap.stages[3];
+        assert_eq!(pending.used, None);
+        assert_eq!(pending.oldest_age_ms, None);
         let parked = snap.stages.last().expect("parked");
         assert_eq!(parked.used, None);
     }
@@ -563,7 +657,7 @@ mod tests {
         let json = serde_json::to_value(&snap).expect("serialise");
         assert!(json.get("capturedAt").is_some());
         assert!(json.get("windowMs").is_some());
-        let stage = &json["stages"][3];
+        let stage = &json["stages"][4];
         assert!(stage.get("oldestAgeMs").is_some());
         assert!(stage.get("inflowKey").is_some());
         assert_eq!(stage["inflowKey"], "started");
@@ -579,7 +673,7 @@ mod tests {
         let mut rx = feed.subscribe();
         feed.publish(snap);
         let received = rx.recv().await.expect("a subscriber receives");
-        assert_eq!(received.stages.len(), 6);
+        assert_eq!(received.stages.len(), 7);
     }
 
     /// A slow subscriber must not hold up the others.
@@ -617,7 +711,7 @@ mod tests {
         let latest = PipelineLatest::default();
         assert!(latest.get().is_none());
         latest.set(Arc::new(build_snapshot(&reading(), None, 0)));
-        assert_eq!(latest.get().expect("stored").stages.len(), 6);
+        assert_eq!(latest.get().expect("stored").stages.len(), 7);
     }
 
     /// The stuck threshold must be configurable and sanely defaulted.

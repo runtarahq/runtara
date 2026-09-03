@@ -156,9 +156,10 @@ pub async fn get_instance_full(
     .await
 }
 
-// Instance write operations (create, update, complete, metrics, stderr) are now
-// delegated to the Core Persistence trait. Only read operations with JOINs remain
-// in this module (Environment needs JOINs for image_name, metrics, heartbeats).
+// Ordinary instance state transitions (update, complete, metrics and stderr)
+// are delegated to the Core Persistence trait. The atomic start claim below is
+// the narrow exception: it must write Core's instance row and Environment's
+// image binding as one database transaction. Join reads remain here too.
 
 /// Options for listing instances.
 #[derive(Debug, Clone, Default)]
@@ -353,6 +354,71 @@ pub async fn health_check(pool: &PgPool) -> Result<bool, sqlx::Error> {
 // ============================================================================
 // Instance Images
 // ============================================================================
+
+/// Atomically claim a new instance ID and associate it with its launch image.
+///
+/// A fresh instance starts out as `pending`, but that is only a valid durable
+/// state once its immutable image association has been recorded too.  Keeping
+/// the two writes in one transaction prevents a database error between them
+/// from leaving an unlaunchable pending row that still consumes admission
+/// capacity.
+///
+/// Returns `Ok(true)` when this call claimed the ID and persisted the image
+/// association. `Ok(false)` means another request already owns the instance
+/// ID; no association is changed on that path so the caller can perform its
+/// normal idempotency check.
+pub async fn claim_instance_with_image(
+    pool: &PgPool,
+    instance_id: &str,
+    image_id: &str,
+    tenant_id: &str,
+    input: Option<&[u8]>,
+    env: Option<&std::collections::HashMap<String, String>>,
+    timeout_seconds: Option<i64>,
+) -> Result<bool, sqlx::Error> {
+    let env_json = env
+        .filter(|e| !e.is_empty())
+        .map(|e| serde_json::to_value(e).unwrap_or_default());
+
+    let mut tx = pool.begin().await?;
+    let claimed = sqlx::query(
+        r#"
+        INSERT INTO instances
+            (instance_id, tenant_id, definition_version, status, created_at, input)
+        VALUES ($1, $2, 1, 'pending', NOW(), $3)
+        ON CONFLICT (instance_id) DO NOTHING
+        "#,
+    )
+    .bind(instance_id)
+    .bind(tenant_id)
+    .bind(input)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected()
+        == 1;
+
+    if !claimed {
+        tx.commit().await?;
+        return Ok(false);
+    }
+
+    sqlx::query(
+        r#"
+        INSERT INTO instance_images (instance_id, image_id, tenant_id, env, timeout_seconds, created_at)
+        VALUES ($1, $2, $3, $4, $5, NOW())
+        "#,
+    )
+    .bind(instance_id)
+    .bind(image_id)
+    .bind(tenant_id)
+    .bind(env_json)
+    .bind(timeout_seconds)
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+    Ok(true)
+}
 
 /// Associate an instance with an image and store custom env vars.
 ///

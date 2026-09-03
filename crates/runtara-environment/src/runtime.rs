@@ -345,6 +345,11 @@ pub struct EnvironmentRuntimeConfig {
 impl EnvironmentRuntimeConfig {
     /// Start the runtime, spawning the HTTP server and wake scheduler tasks.
     pub async fn start(self) -> Result<EnvironmentRuntime> {
+        // Capture this before any recovery work. It scopes pending-start
+        // recovery to records that predate this process, even if another
+        // actor writes while startup recovery is still in progress.
+        let pending_start_cutoff = chrono::Utc::now();
+
         // Create shared drain controller so workers and the container monitor
         // all observe the same state.
         let drain = DrainController::new();
@@ -366,6 +371,17 @@ impl EnvironmentRuntimeConfig {
         // This handles containers that were running when Environment restarted
         if let Err(e) = recover_orphaned_containers(&self.pool, self.persistence.as_ref()).await {
             warn!(error = %e, "Failed to recover orphaned containers");
+        }
+
+        // A start reserves the Core row and binds its image before it waits for
+        // the runner's admission permit. If this process was interrupted in
+        // that window, it left a `pending` row with no live launcher to own it.
+        // Do this once, before any local worker can begin a fresh start: a
+        // pending row is otherwise a perfectly valid representation of a
+        // request waiting for a busy runner, so an age-based background sweep
+        // would be unsafe.
+        if let Err(e) = fail_interrupted_pending_starts(&self.pool, pending_start_cutoff).await {
+            warn!(error = %e, "Failed to recover interrupted pending starts");
         }
 
         // Create wake scheduler
@@ -876,6 +892,86 @@ async fn recover_orphaned_containers(pool: &PgPool, persistence: &dyn Persistenc
     Ok(())
 }
 
+/// Terminalize starts that were left pending by a previous Environment process.
+///
+/// The embedded runner acquires its global run permit before it spawns the
+/// guest or returns a handle for `container_registry`. Consequently an
+/// image-bound `pending` row without a registry entry is normal only while the
+/// current process is blocked waiting for that permit. At startup there is no
+/// such local caller yet: every matching row was interrupted before its runner
+/// registration completed and has no recovery owner.
+///
+/// This intentionally runs only during startup of the single-host embedded
+/// runtime. It is not an age-based liveness reaper; a valid pending start can
+/// wait as long as the runner is saturated. A multi-host deployment needs a
+/// durable launch owner/lease before another host can make this decision.
+///
+/// The status predicate on the `UPDATE` is a final guard. It makes a row that
+/// advanced concurrently a no-op rather than overwriting a live transition.
+async fn fail_interrupted_pending_starts<'e, E>(
+    executor: E,
+    started_before: chrono::DateTime<chrono::Utc>,
+) -> Result<()>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    let rows: Vec<(bool,)> = sqlx::query_as(
+        r#"
+        WITH candidates AS (
+            SELECT
+                i.instance_id,
+                EXISTS (
+                    SELECT 1
+                    FROM instance_images ii
+                    WHERE ii.instance_id = i.instance_id
+                ) AS has_image
+            FROM instances i
+            WHERE i.status = 'pending'
+              AND i.created_at < $1
+              AND NOT EXISTS (
+                    SELECT 1
+                    FROM container_registry cr
+                    WHERE cr.instance_id = i.instance_id
+              )
+        )
+        UPDATE instances i
+        SET status = 'failed',
+            finished_at = NOW(),
+            sleep_until = NULL,
+            termination_reason = 'environment_restart',
+            error = CASE
+                WHEN candidates.has_image THEN
+                    'Instance start was interrupted before runner launch'
+                ELSE
+                    'Instance start was interrupted before an image was bound'
+            END
+        FROM candidates
+        WHERE i.instance_id = candidates.instance_id
+          AND i.status = 'pending'
+        RETURNING candidates.has_image
+        "#,
+    )
+    .bind(started_before)
+    .fetch_all(executor)
+    .await?;
+
+    if rows.is_empty() {
+        debug!("No interrupted pending starts to recover");
+        return Ok(());
+    }
+
+    let image_bound = rows.iter().filter(|(has_image,)| *has_image).count();
+    let image_less = rows.len() - image_bound;
+    warn!(
+        image_bound,
+        image_less,
+        total = rows.len(),
+        "Terminalized pending starts interrupted before runner registration"
+    );
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1077,6 +1173,153 @@ mod tests {
         let builder = EnvironmentRuntimeBuilder::new().wake_batch_size(1000);
 
         assert_eq!(builder.wake_batch_size, 1000);
+    }
+
+    /// The pending-start scan is deliberately scoped to entries that predate
+    /// this runtime. This test uses an old timestamp so its transaction cannot
+    /// interfere with other feature-gated unit tests that may be starting a
+    /// current instance against the shared test database.
+    #[cfg(feature = "db-integration-tests")]
+    #[tokio::test]
+    async fn startup_recovery_fails_only_old_pending_starts_without_a_runner() {
+        let pool = crate::test_support::pool().await;
+        let mut tx = pool.begin().await.expect("begin test transaction");
+
+        let tenant_id = crate::test_support::unique_id("pending-start-recovery-tenant");
+        let image_id = crate::test_support::unique_id("pending-start-recovery-image");
+        let image_name = crate::test_support::unique_id("pending-start-recovery-name");
+        let unbound = crate::test_support::unique_id("pending-start-recovery-unbound");
+        let bound = crate::test_support::unique_id("pending-start-recovery-bound");
+        let registered = crate::test_support::unique_id("pending-start-recovery-registered");
+        let fresh = crate::test_support::unique_id("pending-start-recovery-fresh");
+        let old = chrono::Utc::now() - chrono::Duration::hours(2);
+        let cutoff = chrono::Utc::now() - chrono::Duration::hours(1);
+
+        sqlx::query(
+            r#"
+            INSERT INTO images (image_id, tenant_id, name, binary_path)
+            VALUES ($1, $2, $3, '/test/pending-start-recovery.wasm')
+            "#,
+        )
+        .bind(&image_id)
+        .bind(&tenant_id)
+        .bind(&image_name)
+        .execute(&mut *tx)
+        .await
+        .expect("insert image");
+
+        for instance_id in [&unbound, &bound, &registered] {
+            sqlx::query(
+                r#"
+                INSERT INTO instances (instance_id, tenant_id, status, created_at)
+                VALUES ($1, $2, 'pending', $3)
+                "#,
+            )
+            .bind(instance_id)
+            .bind(&tenant_id)
+            .bind(old)
+            .execute(&mut *tx)
+            .await
+            .expect("insert old pending instance");
+        }
+        sqlx::query(
+            r#"
+            INSERT INTO instances (instance_id, tenant_id, status, created_at)
+            VALUES ($1, $2, 'pending', NOW())
+            "#,
+        )
+        .bind(&fresh)
+        .bind(&tenant_id)
+        .execute(&mut *tx)
+        .await
+        .expect("insert fresh pending instance");
+
+        for instance_id in [&bound, &registered] {
+            sqlx::query(
+                r#"
+                INSERT INTO instance_images (instance_id, image_id, tenant_id, created_at)
+                VALUES ($1, $2, $3, $4)
+                "#,
+            )
+            .bind(instance_id)
+            .bind(&image_id)
+            .bind(&tenant_id)
+            .bind(old)
+            .execute(&mut *tx)
+            .await
+            .expect("bind image to pending instance");
+        }
+        sqlx::query(
+            r#"
+            INSERT INTO container_registry (
+                container_id, instance_id, tenant_id, binary_path, started_at
+            ) VALUES ($1, $2, $3, '/test/pending-start-recovery.wasm', $4)
+            "#,
+        )
+        .bind(crate::test_support::unique_id(
+            "pending-start-recovery-container",
+        ))
+        .bind(&registered)
+        .bind(&tenant_id)
+        .bind(old)
+        .execute(&mut *tx)
+        .await
+        .expect("register live pending start");
+
+        fail_interrupted_pending_starts(&mut *tx, cutoff)
+            .await
+            .expect("recover interrupted pending starts");
+
+        let states: Vec<(String, String, Option<String>, Option<String>)> = sqlx::query_as(
+            r#"
+            SELECT instance_id, status::TEXT, error, termination_reason::TEXT
+            FROM instances
+            WHERE instance_id = ANY($1)
+            "#,
+        )
+        .bind(vec![
+            unbound.clone(),
+            bound.clone(),
+            registered.clone(),
+            fresh.clone(),
+        ])
+        .fetch_all(&mut *tx)
+        .await
+        .expect("read recovered states");
+        let state = |instance_id: &str| {
+            states
+                .iter()
+                .find(|(id, _, _, _)| id == instance_id)
+                .expect("seeded instance must exist")
+        };
+
+        let (_, unbound_status, unbound_error, unbound_reason) = state(&unbound);
+        assert_eq!(unbound_status, "failed");
+        assert_eq!(
+            unbound_error.as_deref(),
+            Some("Instance start was interrupted before an image was bound")
+        );
+        assert_eq!(unbound_reason.as_deref(), Some("environment_restart"));
+
+        let (_, bound_status, bound_error, bound_reason) = state(&bound);
+        assert_eq!(bound_status, "failed");
+        assert_eq!(
+            bound_error.as_deref(),
+            Some("Instance start was interrupted before runner launch")
+        );
+        assert_eq!(bound_reason.as_deref(), Some("environment_restart"));
+
+        let (_, registered_status, registered_error, registered_reason) = state(&registered);
+        assert_eq!(registered_status, "pending");
+        assert!(registered_error.is_none());
+        assert!(registered_reason.is_none());
+
+        let (_, fresh_status, fresh_error, fresh_reason) = state(&fresh);
+        assert_eq!(fresh_status, "pending");
+        assert!(fresh_error.is_none());
+        assert!(fresh_reason.is_none());
+
+        tx.rollback().await.expect("roll back test transaction");
     }
 
     #[test]

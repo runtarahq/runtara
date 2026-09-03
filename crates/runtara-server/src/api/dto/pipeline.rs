@@ -49,7 +49,7 @@ pub struct PipelineRatesDto {
 #[serde(rename_all = "camelCase")]
 pub struct PipelineStageDto {
     /// Stable identifier: `admission`, `triggerQueue`, `triggerWorkers`,
-    /// `runPermits`, `executing`, `parked`.
+    /// `pendingStarts`, `runPermits`, `executing`, `parked`.
     pub key: String,
     /// Human-readable stage name.
     pub label: String,

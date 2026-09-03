@@ -708,6 +708,129 @@ async fn test_start_instance_missing_artifact_does_not_reserve_instance_id() {
     cleanup(&pool, Some(&instance_id), Some(&image_id)).await;
 }
 
+/// An image-association failure must roll back the fresh instance claim.
+///
+/// The image is valid at request validation time, so this deliberately fails
+/// only the later `instance_images` write. That is the historical gap: the
+/// core row had already been inserted as `pending`, then association failed
+/// and left an unlaunchable record that consumed admission capacity forever.
+#[tokio::test]
+async fn test_start_instance_association_failure_does_not_leave_unbound_pending_instance() {
+    skip_if_no_db!();
+    let pool = get_test_pool().await;
+
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let runner = Arc::new(MockRunner::never_completing());
+    let persistence = Arc::new(PostgresPersistence::new(pool.clone()));
+    let state = EnvironmentHandlerState::new(
+        pool.clone(),
+        persistence,
+        runner,
+        "127.0.0.1:8001".to_string(),
+        temp_dir.path().to_path_buf(),
+    );
+
+    let image_id = Uuid::new_v4().to_string();
+    sqlx::query(
+        r#"
+        INSERT INTO images (image_id, tenant_id, name, description, binary_path)
+        VALUES ($1, 'test-tenant', $2, 'desc', $3)
+        "#,
+    )
+    .bind(&image_id)
+    .bind(format!("test-image-association-failure-{image_id}"))
+    .bind(test_artifact_path())
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let instance_id = format!("association-failure-{}", Uuid::new_v4());
+    let injector_suffix = Uuid::new_v4().simple().to_string();
+    let function_name = format!("fail_instance_image_association_{injector_suffix}");
+    let trigger_name = format!("fail_instance_image_association_trigger_{injector_suffix}");
+
+    // This scoped trigger is an explicit failure injector. It only affects the
+    // generated ID for this test, so other database tests may keep running
+    // normally even if this target uses a shared PostgreSQL database.
+    sqlx::query(&format!(
+        r#"
+        CREATE FUNCTION {function_name}() RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+            IF NEW.instance_id = '{instance_id}' THEN
+                RAISE EXCEPTION 'injected instance image association failure';
+            END IF;
+            RETURN NEW;
+        END;
+        $$
+        "#,
+    ))
+    .execute(&pool)
+    .await
+    .expect("failed to install association-failure injector");
+    sqlx::query(&format!(
+        "CREATE TRIGGER {trigger_name} BEFORE INSERT ON instance_images \
+         FOR EACH ROW EXECUTE FUNCTION {function_name}()"
+    ))
+    .execute(&pool)
+    .await
+    .expect("failed to install association-failure trigger");
+
+    let request = || StartInstanceRequest {
+        image_id: image_id.clone(),
+        tenant_id: "test-tenant".to_string(),
+        instance_id: Some(instance_id.clone()),
+        input: Some(serde_json::json!({"attempt": 1})),
+        timeout_seconds: Some(60),
+        env: std::collections::HashMap::new(),
+    };
+
+    let failed = handle_start_instance(&state, request())
+        .await
+        .expect("the handler should report an association error in its response");
+    let after_failed_start = db::get_instance(&pool, &instance_id)
+        .await
+        .expect("failed to inspect instance after injected association failure");
+
+    // Remove the injector before asserting or retrying, so a test failure does
+    // not leave an unrelated global database object behind.
+    sqlx::query(&format!("DROP TRIGGER {trigger_name} ON instance_images"))
+        .execute(&pool)
+        .await
+        .expect("failed to remove association-failure trigger");
+    sqlx::query(&format!("DROP FUNCTION {function_name}()"))
+        .execute(&pool)
+        .await
+        .expect("failed to remove association-failure injector");
+
+    assert!(!failed.success);
+    assert!(!failed.deduplicated);
+    assert!(
+        after_failed_start.is_none(),
+        "a failed image association must roll back the pending claim rather than leave an unbound instance"
+    );
+
+    // At-least-once trigger delivery retries the same ID. A rolled-back claim
+    // must be available to retry, rather than returning the historical
+    // `Instance already exists` response for a poisoned pending row.
+    let retried = handle_start_instance(&state, request())
+        .await
+        .expect("retry should complete normally after the injector is removed");
+    assert!(retried.success, "retry failed: {:?}", retried.error);
+    assert!(!retried.deduplicated);
+    assert_eq!(retried.instance_id, instance_id);
+    assert_eq!(
+        db::get_instance_image_id(&pool, &instance_id)
+            .await
+            .expect("failed to inspect retry image association"),
+        Some(image_id.clone()),
+        "the successful retry must create the immutable image association"
+    );
+
+    cleanup(&pool, Some(&instance_id), Some(&image_id)).await;
+}
+
 #[tokio::test]
 async fn test_start_instance_rejects_same_id_for_different_image() {
     skip_if_no_db!();

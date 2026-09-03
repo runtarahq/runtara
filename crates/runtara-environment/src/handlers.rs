@@ -565,22 +565,35 @@ pub async fn handle_start_instance(
     let input_for_storage = enrich_input_for_storage(input.clone(), &image);
     let input_bytes = serde_json::to_vec(&input_for_storage).ok();
 
-    // Create instance record (with input and env for persistence across resume/wake)
+    // Persist custom environment for resume/wake.
     let env_for_db = if request.env.is_empty() {
         None
     } else {
         Some(&request.env)
     };
 
-    // Create instance in Core's table via Persistence trait. This doubles as the
-    // idempotency claim: ON CONFLICT DO NOTHING means a replay, or a concurrent
-    // retry that got there first, comes back as `false` rather than an error.
-    // The input rides along on that same statement rather than a follow-up
-    // UPDATE, so a launch writes the instance row exactly once.
-    let claimed = state
-        .persistence
-        .try_register_instance(&instance_id, &request.tenant_id, input_bytes.as_deref())
-        .await;
+    // Resolve the effective execution timeout once, so the value persisted for
+    // wake/resume matches the one the monitor enforces on this first run.
+    let timeout = Duration::from_secs(
+        request
+            .timeout_seconds
+            .unwrap_or(default_instance_timeout().as_secs()),
+    );
+
+    // Claim the instance ID and bind its immutable image in one transaction.
+    // A pending row without an image is not launchable or recoverable, and it
+    // still counts against admission, so an association failure must roll the
+    // whole claim back rather than leave that partial state behind.
+    let claimed = db::claim_instance_with_image(
+        &state.pool,
+        &instance_id,
+        &request.image_id,
+        &request.tenant_id,
+        input_bytes.as_deref(),
+        env_for_db,
+        Some(timeout.as_secs() as i64),
+    )
+    .await;
     if !matches!(claimed, Ok(true)) {
         // Either the id was already taken or the insert failed outright. If
         // another request reserved the same compatible ID, it owns the launch
@@ -597,7 +610,7 @@ pub async fn handle_start_instance(
             // up - `existing_start_response` already logged why it was rejected.
             Ok(_) => format!("Instance '{}' already exists", instance_id),
         };
-        error!(error = %e, "Failed to register instance via Persistence");
+        error!(error = %e, "Failed to claim instance and associate its image");
         return Ok(StartInstanceResponse {
             success: false,
             instance_id: String::new(),
@@ -609,35 +622,6 @@ pub async fn handle_start_instance(
     // The claim above persisted the input, so hand those same bytes to the
     // runner rather than making the launch read back what it just wrote.
     let prepersisted_input = input_bytes.clone();
-
-    // Resolve the effective execution timeout once, so the value persisted for
-    // wake/resume matches the one the monitor enforces on this first run.
-    let timeout = Duration::from_secs(
-        request
-            .timeout_seconds
-            .unwrap_or(default_instance_timeout().as_secs()),
-    );
-
-    // Associate instance with image in Environment's table (Environment-specific data).
-    // The timeout is persisted here so wake/resume can honor the same budget.
-    if let Err(e) = db::associate_instance_image(
-        &state.pool,
-        &instance_id,
-        &request.image_id,
-        &request.tenant_id,
-        env_for_db,
-        Some(timeout.as_secs() as i64),
-    )
-    .await
-    {
-        error!(error = %e, "Failed to associate instance with image");
-        return Ok(StartInstanceResponse {
-            success: false,
-            instance_id: String::new(),
-            deduplicated: false,
-            error: Some(format!("Failed to create instance: {}", e)),
-        });
-    }
 
     // Build launch options (using the shared image artifact)
     let options = LaunchOptions {
