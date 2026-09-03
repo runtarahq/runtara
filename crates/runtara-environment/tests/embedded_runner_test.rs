@@ -136,6 +136,21 @@ fn options(instance_id: &str, wasm_path: &Path) -> LaunchOptions {
     }
 }
 
+/// Durable preparation must read the same canonical input envelope that a
+/// production launch persists before it reaches the runner.
+async fn seed_detached_instance(harness: &Harness, instance_id: &str) {
+    const INPUT: &[u8] = br#"{\"data\":{},\"variables\":{}}"#;
+
+    assert!(
+        harness
+            .persistence
+            .try_register_instance(instance_id, "embedded-test", Some(INPUT))
+            .await
+            .expect("register detached instance"),
+        "the freshly generated test instance id must be claimed"
+    );
+}
+
 /// A durable confirmation held by the test to prove guest preparation cannot
 /// cross a merely opened in-memory start gate.
 struct BlockingGateConfirmation {
@@ -212,6 +227,7 @@ async fn launch_detached_completes_and_clears_registry() {
     let h = harness().await;
     let inst_id = unique("inst-detached");
     let wasm = write_component(h.dir.path(), "ok.wasm", RUN_OK_WAT);
+    seed_detached_instance(&h, inst_id.as_str()).await;
 
     let handle = h
         .runner
@@ -236,6 +252,7 @@ async fn stop_cancels_spinning_instance() {
     let h = harness().await;
     let inst_id = unique("inst-spin");
     let wasm = write_component(h.dir.path(), "spin.wasm", RUN_SPIN_WAT);
+    seed_detached_instance(&h, inst_id.as_str()).await;
 
     let handle = h
         .runner
@@ -269,6 +286,7 @@ async fn detached_gate_allows_preparation_but_blocks_guest_instantiation() {
     // reserves a scarce guest run permit; only guest instantiation remains
     // protected by the start gate.
     let wasm = write_component(h.dir.path(), "gated-spin.wasm", RUN_SPIN_WAT);
+    seed_detached_instance(&h, inst_id.as_str()).await;
     let confirmation_release = Arc::new(tokio::sync::Notify::new());
     let confirmation_calls = Arc::new(AtomicUsize::new(0));
     let gate = StartGate::new(Duration::from_secs(5)).with_confirmation(Arc::new(
