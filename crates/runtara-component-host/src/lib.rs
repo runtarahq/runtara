@@ -23,6 +23,7 @@ pub mod engine;
 pub(crate) mod host_io;
 pub mod host_state;
 pub mod lifecycle;
+pub mod precompile;
 pub mod registry;
 pub mod runtime_host;
 pub mod workflow;

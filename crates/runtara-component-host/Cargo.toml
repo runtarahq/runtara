@@ -71,6 +71,7 @@ wasmtime-wasi-http = "46"
 
 # Plumbing
 anyhow = "1"
+sha2 = { workspace = true }
 # host-io concurrent HTTP hop (route (b)). Same
 # hyper family wasmtime-wasi-http already pulls in.
 hyper = { version = "1", features = ["client", "http1"] }
@@ -91,7 +92,7 @@ http = "1"
 wasmparser = "0.247"
 # Already a transitive dep via wasmtime-wasi; declared for the workflow
 # executor's select!/sleep/spawn_blocking and the component-cache mutex.
-tokio = { version = "1", features = ["macros", "rt", "time", "sync"] }
+tokio = { version = "1", features = ["macros", "rt", "time", "sync", "io-util"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util"] }
