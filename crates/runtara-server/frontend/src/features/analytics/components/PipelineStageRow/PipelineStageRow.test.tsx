@@ -147,6 +147,36 @@ describe('PipelineStageRow', () => {
     expect(screen.getByText('not draining')).toBeInTheDocument();
   });
 
+  it('makes durable queue capacity retries and workflow attribution visible', () => {
+    render(
+      <PipelineStageRow
+        stage={stage({
+          key: 'launchQueued',
+          label: 'Launch queue',
+          limit: 64,
+          used: 6,
+          oldestAgeMs: 20_000,
+          capacityRejections: 3,
+          topWorkflows: [
+            { workflowId: 'expense-approval', count: 4, oldestAgeMs: 20_000 },
+            { workflowId: 'invoice-sync', count: 2, oldestAgeMs: 4_000 },
+          ],
+        })}
+        history={Array(30).fill(6)}
+        inflow={0}
+        pipelineActive
+        isChokepoint={false}
+        stuckAfterMs={10_000}
+      />
+    );
+
+    expect(screen.getByText('3 capacity retries')).toBeInTheDocument();
+    expect(
+      screen.getByTestId('pipeline-workflow-attribution-launchQueued')
+    ).toHaveTextContent('expense-approval (4), invoice-sync (2)');
+    expect(screen.getByText('not draining')).toBeInTheDocument();
+  });
+
   it('marks the chokepoint in the DOM so it can be asserted on', () => {
     const { container } = render(
       <PipelineStageRow

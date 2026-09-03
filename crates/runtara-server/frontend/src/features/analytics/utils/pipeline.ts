@@ -17,6 +17,13 @@ export interface PipelineRates {
   steps: number | null;
 }
 
+/** A bounded workflow contributor for one durable launch stage. */
+export interface PipelineWorkflowAttribution {
+  workflowId: string;
+  count: number;
+  oldestAgeMs: number | null;
+}
+
 export interface PipelineStage {
   key: string;
   label: string;
@@ -27,6 +34,13 @@ export interface PipelineStage {
   used: number | null;
   oldestAgeMs: number | null;
   inflowKey: string;
+  /**
+   * Current queued launches whose latest dispatcher result was an exhausted
+   * runner. Omitted by older servers and inapplicable stages.
+   */
+  capacityRejections?: number | null;
+  /** Highest-count workflow contributors, capped server-side. */
+  topWorkflows?: PipelineWorkflowAttribution[];
 }
 
 export interface PipelineSnapshot {
@@ -75,19 +89,38 @@ export function severityOf(stage: PipelineStage): StageSeverity {
   return 'ok';
 }
 
-/// Is this stage full and holding work that is not moving?
+/// Is this stage holding observable work that is not moving?
 ///
-/// Both halves are required. Full alone is not a fault — a stage pinned at its
-/// bound while recycling every few seconds is a system working as hard as it
-/// can. Old alone is not either, since a stage with headroom is nobody's
-/// constraint however long its oldest item has sat.
+/// A bounded capacity stage needs to be full and old: capacity in use alone is
+/// normal. An old durable launch generation is different: it has already been
+/// admitted, so even one that is queued for too long is a real blocked
+/// condition. The queue borrows the admission limit for occupancy display, but
+/// must not borrow its "full" requirement for that diagnosis.
 export function isNotDraining(
   stage: PipelineStage,
   stuckAfterMs: number = DEFAULT_STUCK_AFTER_MS
 ): boolean {
+  if (
+    stage.used === null ||
+    stage.used === 0 ||
+    stage.oldestAgeMs === null ||
+    stage.oldestAgeMs < stuckAfterMs
+  ) {
+    return false;
+  }
+  // These are terminal outcome counters, not work waiting to make progress.
+  // Their oldest retained row can legitimately be days old; labelling that
+  // history "not draining" would hide the actionable live stages in noise.
+  if (stage.key === 'launchExpired' || stage.key === 'launchCancelled') {
+    return false;
+  }
+  if (stage.key === 'launchQueued') return true;
   const pct = utilisation(stage);
-  if (pct === null || pct < 99) return false;
-  return stage.oldestAgeMs !== null && stage.oldestAgeMs >= stuckAfterMs;
+  // An unbounded queue cannot be the capacity chokepoint by itself, but an old
+  // queued generation is still a real blocked condition and must be called
+  // out. `findChokepoint` keeps launchQueued out of candidates explicitly:
+  // that row describes the evidence, not necessarily the downstream limit.
+  return pct === null || pct >= 99;
 }
 
 /// The stage actually constraining the pipeline, or `null` if none is.
@@ -116,6 +149,10 @@ export function findChokepoint(
   let bestScore = -1;
 
   for (const stage of stages) {
+    // The launch queue shows what is stuck, but it inherits the admission
+    // ceiling solely for occupancy context. It must not be chosen as the
+    // capacity constraint just because an old row received the stuck bonus.
+    if (stage.key === 'launchQueued') continue;
     const pct = utilisation(stage);
     if (pct === null) continue;
     const score = pct + (isNotDraining(stage, stuckAfterMs) ? 1000 : 0);

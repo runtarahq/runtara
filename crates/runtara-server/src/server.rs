@@ -353,6 +353,7 @@ use runtime_client::RuntimeClient;
             api::dto::pipeline::PipelineSnapshotDto,
             api::dto::pipeline::PipelineStageDto,
             api::dto::pipeline::PipelineRatesDto,
+            api::dto::pipeline::PipelineWorkflowAttributionDto,
             api::analytics::SystemAnalyticsData,
             api::analytics::MemoryInfo,
             api::analytics::DiskInfo,

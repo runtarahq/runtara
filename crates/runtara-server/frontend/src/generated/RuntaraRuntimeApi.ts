@@ -3354,12 +3354,20 @@ export interface PipelineSnapshotResponse {
 
 /** One stage of the pipeline at one instant. */
 export interface PipelineStageDto {
+  /**
+   * Number of queued rows whose most recent dispatcher result was a runner
+   * capacity rejection.
+   *
+   * Present only on the durable launch-queue stage. It is a current
+   * diagnosis count, not an unbounded lifetime metric: rows leave it once
+   * they start, expire, park, or reach a terminal outcome.
+   * @format int64
+   * @min 0
+   */
+  capacityRejections?: number | null;
   /** Which rate feeds this stage, naming a field of [`PipelineRatesDto`]. */
   inflowKey: string;
-  /**
-   * Stable identifier: `admission`, `triggerQueue`, `triggerWorkers`,
-   * `pendingStarts`, `runPermits`, `executing`, `parked`.
-   */
+  /** Stable identifier for an execution-pipeline stage. */
   key: string;
   /**
    * The setting that bounds this stage, shown verbatim so an operator can
@@ -3384,11 +3392,44 @@ export interface PipelineStageDto {
    */
   oldestAgeMs?: number | null;
   /**
+   * Highest-count workflows contributing to this durable launch stage.
+   *
+   * Empty for non-launch stages and when the stage has no rows. The list is
+   * deliberately bounded by the sampler rather than by the HTTP response.
+   */
+  topWorkflows: PipelineWorkflowAttributionDto[];
+  /**
    * Current occupancy, or `null` when the source could not be read.
    * @format int64
    * @min 0
    */
   used?: number | null;
+}
+
+/**
+ * A bounded contributor attribution for one durable launch stage.
+ *
+ * The runtime database owns image provenance but not workflow display names,
+ * so this intentionally carries the stable workflow identifier. The sampler
+ * returns only the highest-count contributors; it must not turn a tenant with
+ * many workflows into an unbounded analytics payload or a high-cardinality
+ * metric dimension.
+ */
+export interface PipelineWorkflowAttributionDto {
+  /**
+   * Number of launch generations attributed to this workflow in the stage.
+   * @format int64
+   * @min 0
+   */
+  count: number;
+  /**
+   * Age of this contributor's oldest relevant launch, in milliseconds.
+   * @format int64
+   * @min 0
+   */
+  oldestAgeMs?: number | null;
+  /** Stable workflow identifier recovered from the image metadata. */
+  workflowId: string;
 }
 
 /** Position coordinates for UI elements */
