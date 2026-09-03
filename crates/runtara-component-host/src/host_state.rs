@@ -13,11 +13,13 @@ use wasmtime_wasi_http::{
     WasiHttpCtx,
     p2::{
         HttpResult, WasiHttpCtxView, WasiHttpHooks, WasiHttpView,
+        bindings::http::types::ErrorCode,
         body::HyperOutgoingBody,
-        default_send_request,
         types::{HostFutureIncomingResponse, OutgoingRequestConfig},
     },
 };
+
+use crate::host_io::HostIoContext;
 
 /// Per-call context. One of these is built before each component invocation.
 /// Carries everything the host needs to know about the call but the component
@@ -117,7 +119,13 @@ impl WasiHttpHooks for HostHooks {
             request.headers_mut().remove(http::header::COOKIE);
         }
 
-        Ok(default_send_request(request, config))
+        // First-party agents use `runtara-http`, whose WASI backend enters
+        // through the host-io import. Leaving raw `wasi:http` enabled here
+        // would create an unbounded alternate path that can outlive the
+        // active execution deadline or buffer an arbitrary response. Reject
+        // it rather than silently applying a different policy.
+        let _ = (request, config);
+        Err(ErrorCode::HttpRequestDenied.into())
     }
 }
 
@@ -198,6 +206,10 @@ pub struct HostState {
     /// Memory/table caps for this call, enforced once the store installs it via
     /// `store.limiter(|s| &mut s.limiter)` (see `registry::instantiate`).
     pub limiter: GuestLimiter,
+    /// Absolute active-execution deadline used by host-io. `None` is valid
+    /// only for metadata/test stores, which still receive host-io's bounded
+    /// per-request default.
+    pub http_deadline: Option<tokio::time::Instant>,
     /// Set by the epoch deadline callback when it force-interrupts the guest.
     pub termination: Option<Termination>,
 }
@@ -239,8 +251,17 @@ impl HostState {
                 DEFAULT_GUEST_MEMORY_MAX_BYTES,
                 DEFAULT_GUEST_TABLE_MAX_ELEMENTS,
             ),
+            http_deadline: None,
             termination: None,
         }
+    }
+
+    /// Attach the enclosing active-execution deadline before the store is
+    /// instantiated. Host imports use it to make a request's deadline no
+    /// later than the run that owns it.
+    pub fn with_http_deadline(mut self, deadline: tokio::time::Instant) -> Self {
+        self.http_deadline = Some(deadline);
+        self
     }
 
     /// Override the per-call memory/table caps before the store is built.
@@ -249,6 +270,12 @@ impl HostState {
     pub fn set_limits(&mut self, max_memory_bytes: usize, max_table_elements: usize) {
         self.limiter.max_memory_bytes = max_memory_bytes;
         self.limiter.max_table_elements = max_table_elements;
+    }
+}
+
+impl HostIoContext for HostState {
+    fn http_deadline(&self) -> Option<tokio::time::Instant> {
+        self.http_deadline
     }
 }
 

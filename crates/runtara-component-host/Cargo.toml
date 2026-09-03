@@ -94,7 +94,7 @@ wasmparser = "0.247"
 tokio = { version = "1", features = ["macros", "rt", "time", "sync"] }
 
 [dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util"] }
 tempfile = "3"
 # Serialize small component-text fixtures to binary for lifecycle ABI tests.
 wat = "1"

@@ -279,7 +279,12 @@ impl ComponentDispatcherService {
             &self.env.object_model_url,
             &self.env.core_http_url,
         ));
-        let mut state = HostState::new(ctx);
+        // Capture the same active deadline that protects the component call.
+        // Host-io uses it as an absolute upper bound, so a guest cannot start
+        // a fresh 120-second HTTP timeout immediately before this interactive
+        // invocation's shorter watchdog expires.
+        let deadline = tokio::time::Instant::now() + self.test_timeout;
+        let mut state = HostState::new(ctx).with_http_deadline(deadline);
         state.set_limits(self.memory_max_bytes, DEFAULT_GUEST_TABLE_MAX_ELEMENTS);
         let (mut store, instance) = instantiate(&self.engine, &agent.pre, state).await?;
 

@@ -33,12 +33,13 @@ use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiVie
 use wasmtime_wasi_http::{
     WasiHttpCtx,
     p2::{
-        HttpResult, WasiHttpCtxView, WasiHttpHooks, WasiHttpView, body::HyperOutgoingBody,
-        default_send_request, types::HostFutureIncomingResponse, types::OutgoingRequestConfig,
+        HttpResult, WasiHttpCtxView, WasiHttpHooks, WasiHttpView, bindings::http::types::ErrorCode,
+        body::HyperOutgoingBody, types::HostFutureIncomingResponse, types::OutgoingRequestConfig,
     },
 };
 
 use crate::engine::EPOCH_TICK;
+use crate::host_io::{DEFAULT_HTTP_TIMEOUT, HostIoContext};
 
 /// Outgoing-body stream tuning, kept identical to the flags `WasmRunner`
 /// passes the wasmtime CLI (`--wasi http-outgoing-body-buffer-chunks=4096`,
@@ -164,9 +165,12 @@ impl WasiHttpHooks for WorkflowHooks {
         request: http::Request<HyperOutgoingBody>,
         config: OutgoingRequestConfig,
     ) -> HttpResult<HostFutureIncomingResponse> {
-        // Workflows talk to runtara-core / the LLM proxy directly with their
-        // own headers; pass through untouched for parity with the CLI runner.
-        Ok(default_send_request(request, config))
+        // Generated workflow and agent HTTP goes through `runtara:host-io`,
+        // where a single absolute deadline and response cap are enforced.
+        // The legacy raw wasi:http route must not remain as an ungoverned
+        // fallback: it would bypass both protections.
+        let _ = (request, config);
+        Err(ErrorCode::HttpRequestDenied.into())
     }
 
     fn outgoing_body_buffer_chunks(&mut self) -> usize {
@@ -184,6 +188,9 @@ pub struct WorkflowState {
     http: WasiHttpCtx,
     table: ResourceTable,
     hooks: WorkflowHooks,
+    /// The active execution deadline captured when this store was created.
+    /// Host-io caps every nested HTTP request by this absolute deadline.
+    http_deadline: tokio::time::Instant,
     limiter: WorkflowLimiter,
     termination: Option<Termination>,
     /// Present when the artifact imports the runtime interface (HostImport
@@ -191,6 +198,12 @@ pub struct WorkflowState {
     runtime: Option<Arc<dyn crate::runtime_host::RuntimeHost>>,
     connection_resolver:
         Result<Arc<dyn crate::connection_resolver_host::ConnectionResolverHost>, String>,
+}
+
+impl HostIoContext for WorkflowState {
+    fn http_deadline(&self) -> Option<tokio::time::Instant> {
+        Some(self.http_deadline)
+    }
 }
 
 impl WorkflowState {
@@ -389,11 +402,13 @@ impl WorkflowExecutor {
             None => None,
         };
 
+        let http_deadline = tokio::time::Instant::now() + spec.timeout;
         let state = WorkflowState {
             wasi: builder.build(),
             http: WasiHttpCtx::new(),
             table: ResourceTable::new(),
             hooks: WorkflowHooks,
+            http_deadline,
             limiter: WorkflowLimiter {
                 max_memory_bytes: spec.limits.max_memory_bytes,
                 max_table_elements: spec.limits.max_table_elements,
@@ -519,11 +534,13 @@ impl WorkflowExecutor {
             None => None,
         };
 
+        let http_deadline = tokio::time::Instant::now() + spec.timeout;
         let state = WorkflowState {
             wasi: builder.build(),
             http: WasiHttpCtx::new(),
             table: ResourceTable::new(),
             hooks: WorkflowHooks,
+            http_deadline,
             limiter: WorkflowLimiter {
                 max_memory_bytes: spec.limits.max_memory_bytes,
                 max_table_elements: spec.limits.max_table_elements,
@@ -677,6 +694,7 @@ impl WorkflowExecutor {
             http: WasiHttpCtx::new(),
             table: ResourceTable::new(),
             hooks: WorkflowHooks,
+            http_deadline: tokio::time::Instant::now() + DEFAULT_HTTP_TIMEOUT,
             limiter: WorkflowLimiter {
                 max_memory_bytes: limits.max_memory_bytes,
                 max_table_elements: limits.max_table_elements,
