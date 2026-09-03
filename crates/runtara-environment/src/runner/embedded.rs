@@ -366,7 +366,7 @@ impl ChildComponentPrecompiler {
                     RunnerError::Other("precompile child semaphore closed".to_string())
                 }
             })?;
-        let nonce = precompile_nonce();
+        let nonce = precompile_nonce()?;
         let child_slot_key = hex_digest(nonce);
         let request =
             PrecompileRequest::for_artifact(nonce, &options.wasm_path).map_err(|error| {
@@ -531,7 +531,7 @@ impl ComponentPrecompiler for InProcessTestComponentPrecompiler {
         executor: &WorkflowExecutor,
         options: &LaunchOptions,
     ) -> Result<PreparedWorkflow> {
-        let request = PrecompileRequest::for_artifact(precompile_nonce(), &options.wasm_path)
+        let request = PrecompileRequest::for_artifact(precompile_nonce()?, &options.wasm_path)
             .map_err(|error| {
                 RunnerError::StartFailed(format!("build test precompile request: {error:#}"))
             })?;
@@ -1121,11 +1121,12 @@ fn max_concurrent_precompile_children(preparation_limit: usize) -> usize {
 /// boundary for a direct caller that asks the runner to prepare explicitly.
 const DEFAULT_PRECOMPILER_TIMEOUT: Duration = Duration::from_secs(60);
 
-fn precompile_nonce() -> [u8; PRECOMPILE_NONCE_BYTES] {
-    let mut nonce = [0; PRECOMPILE_NONCE_BYTES];
-    nonce[..16].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
-    nonce[16..].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
-    nonce
+fn precompile_nonce() -> Result<[u8; PRECOMPILE_NONCE_BYTES]> {
+    let mut nonce = [0_u8; PRECOMPILE_NONCE_BYTES];
+    getrandom::fill(&mut nonce).map_err(|error| {
+        RunnerError::StartFailed(format!("generate precompile nonce entropy: {error}"))
+    })?;
+    Ok(nonce)
 }
 
 fn hex_digest(digest: [u8; PRECOMPILE_NONCE_BYTES]) -> String {

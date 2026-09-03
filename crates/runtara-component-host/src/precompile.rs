@@ -786,9 +786,17 @@ async fn read_header_async<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Frame
 }
 
 fn read_array<R: Read>(reader: &mut R) -> Result<[u8; PRECOMPILE_NONCE_BYTES]> {
-    let mut bytes = [0_u8; PRECOMPILE_NONCE_BYTES];
-    reader.read_exact(&mut bytes)?;
-    Ok(bytes)
+    let mut bytes = Vec::with_capacity(PRECOMPILE_NONCE_BYTES);
+    reader
+        .take(PRECOMPILE_NONCE_BYTES as u64)
+        .read_to_end(&mut bytes)?;
+    ensure!(
+        bytes.len() == PRECOMPILE_NONCE_BYTES,
+        "truncated precompile protocol fixed-size field"
+    );
+    Ok(bytes
+        .try_into()
+        .expect("fixed-size field length was checked above"))
 }
 
 fn read_vec<R: Read>(reader: &mut R, len: usize) -> Result<Vec<u8>> {
@@ -815,6 +823,12 @@ async fn read_vec_async<R: AsyncRead + Unpin>(reader: &mut R, len: usize) -> Res
 mod tests {
     use super::*;
 
+    fn test_nonce() -> [u8; PRECOMPILE_NONCE_BYTES] {
+        let mut nonce = [0_u8; PRECOMPILE_NONCE_BYTES];
+        getrandom::fill(&mut nonce).expect("obtain test nonce entropy");
+        nonce
+    }
+
     fn component_file() -> (tempfile::TempDir, PathBuf, Vec<u8>) {
         let dir = tempfile::tempdir().expect("temporary artifact directory");
         let path = dir.path().join("workflow.wasm");
@@ -825,11 +839,8 @@ mod tests {
 
     #[test]
     fn request_round_trip_preserves_path_and_nonce() {
-        let request = PrecompileRequest::for_artifact(
-            [7; PRECOMPILE_NONCE_BYTES],
-            "/tmp/runtara-workflow.wasm",
-        )
-        .expect("request");
+        let request = PrecompileRequest::for_artifact(test_nonce(), "/tmp/runtara-workflow.wasm")
+            .expect("request");
         let mut wire = Vec::new();
         write_precompile_request(&mut wire, &request).expect("write request");
         let actual = read_precompile_request(&mut wire.as_slice()).expect("read request");
@@ -871,11 +882,8 @@ mod tests {
 
     #[tokio::test]
     async fn async_protocol_round_trip_uses_bounded_pipe_io() {
-        let request = PrecompileRequest::for_artifact(
-            [5; PRECOMPILE_NONCE_BYTES],
-            "/tmp/runtara-workflow.wasm",
-        )
-        .expect("request");
+        let request = PrecompileRequest::for_artifact(test_nonce(), "/tmp/runtara-workflow.wasm")
+            .expect("request");
         let (mut writer, mut reader) = tokio::io::duplex(1024);
         let expected = request.clone();
         let writer = tokio::spawn(async move {
@@ -893,8 +901,7 @@ mod tests {
     #[test]
     fn worker_reads_hashes_precompiles_and_deserializes_a_component() {
         let (_dir, path, source) = component_file();
-        let request =
-            PrecompileRequest::for_artifact([9; PRECOMPILE_NONCE_BYTES], &path).expect("request");
+        let request = PrecompileRequest::for_artifact(test_nonce(), &path).expect("request");
         let mut input = Vec::new();
         write_precompile_request(&mut input, &request).expect("write request");
         let mut output = Vec::new();
@@ -914,8 +921,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("temporary artifact directory");
         let path = dir.path().join("invalid.wasm");
         std::fs::write(&path, [0, 1, 2]).expect("write invalid component");
-        let request =
-            PrecompileRequest::for_artifact([11; PRECOMPILE_NONCE_BYTES], &path).expect("request");
+        let request = PrecompileRequest::for_artifact(test_nonce(), &path).expect("request");
         let mut input = Vec::new();
         write_precompile_request(&mut input, &request).expect("write request");
         let mut output = Vec::new();

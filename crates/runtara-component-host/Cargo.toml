@@ -97,6 +97,7 @@ tokio = { version = "1", features = ["macros", "rt", "time", "sync", "io-util"] 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util"] }
 tempfile = "3"
+getrandom = "0.3"
 # Serialize small component-text fixtures to binary for lifecycle ABI tests.
 wat = "1"
 # Tests author minimal components in WAT; the `wat` feature lets

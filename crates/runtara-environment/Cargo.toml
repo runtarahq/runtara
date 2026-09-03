@@ -50,6 +50,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Utilities
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
+getrandom = "0.3"
 
 # Base64 for the wire-shaped payloads the management protocol reports.
 base64 = "0.22"

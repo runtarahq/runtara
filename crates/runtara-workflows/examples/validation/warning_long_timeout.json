@@ -4,17 +4,23 @@
     "entryPoint": "slow_process",
     "steps": {
         "slow_process": {
-            "stepType": "Agent",
+            "stepType": "Split",
             "id": "slow_process",
-            "agentId": "http",
-            "capabilityId": "request",
-            "timeout": 7200000,
-            "inputMapping": {
-                "url": {
-                    "valueType": "immediate",
-                    "value": "https://api.example.com/slow"
+            "config": {
+                "value": { "valueType": "immediate", "value": [1] },
+                "sequential": true,
+                "timeout": 7200000
+            },
+            "subgraph": {
+                "name": "Slow Process Item",
+                "entryPoint": "finish",
+                "steps": {
+                    "finish": {
+                        "stepType": "Finish",
+                        "id": "finish"
+                    }
                 },
-                "method": { "valueType": "immediate", "value": "POST" }
+                "executionPlan": []
             }
         },
         "finish": {
