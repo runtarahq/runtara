@@ -1,6 +1,6 @@
 # Throughput improvements
 
-Status: planning
+Status: implemented and verified locally. Changes are not pushed.
 
 ## Target invariants
 
@@ -15,27 +15,27 @@ Status: planning
 
 ## P0: eliminate system-blocking paths
 
-| ID | Gap | Proposed fix | Expected outcome |
-| --- | --- | --- | --- |
-| P0.1 | A full runner makes start, wake, and trigger work wait indefinitely for a permit | Add a durable `instance_launches` queue. Initial starts, resumes, and wakes atomically create a launch row and return `accepted / queued`. A bounded dispatcher is the only caller of the runner and uses non-blocking capacity acquisition. | Trigger and wake workers remain available while the runner is full. No unbounded in-memory semaphore waiters exist. |
-| P0.2 | A queued launch has no deadline or cancellation path | Give each launch a `launch_id`, state, `deadline_at`, `lease_expires_at`, `available_at`, retry count, and error. Queue expiry becomes `failed` with `launch_queue_timeout`; cancellation becomes `cancelled` and releases admission immediately. | Valid but starved work cannot occupy capacity forever. A generic `pending` age sweep is not needed. |
-| P0.3 | Admission can be bypassed or lost while trigger events are queued | Route every source (HTTP, event, cron, session, and so on) through one durable enqueue service. Commit the admission reservation and an outbox/request record together, then relay it to the worker stream. | The queue remains bounded even during publisher failures or a worker outage. |
-| P0.4 | A run can start before its registry, monitor, or state transition is reliably installed | Add a generation-owned launch supervisor. It acquires capacity, persists the generation and registry, arms a watchdog, and only then opens a start gate for the guest. Failure to register or mark running prevents guest execution. | Every active run has recoverable ownership and a deadline before it executes. |
-| P0.5 | Cleanup for an old attempt can affect an immediate resume | Carry `launch_id` through the runner handle, task map, registry, monitor, stop path, and cleanup. Use unique handle IDs such as `wasm_<launch_id>` and make every state write conditional on the generation. | An old attempt cannot unmonitor, stop, or delete a newer attempt. |
-| P0.6 | Legacy `wasi:cli/run` workflows retain runner slots while waiting | Retire `wasi:cli/run` as a direct-workflow ABI. Remove the legacy direct-workflow compiler switch and fallback. Require `lifecycle.invoke` at generated-workflow image registration and execution. Inventory and rebuild current images; unrebuildable artifacts fail before acquiring a runner with `unsupported_legacy_abi`. | Current-ABI approvals still park and free their runner slot; legacy workflow artifacts cannot block the pool. |
-| P0.7 | A workflow published as an agent, or a non-durable wait, can sleep inside its parent runner | Reject workflow-agent graphs that transitively contain a wait, delay, retry/backoff, pause, or breakpoint until a real suspending capability ABI exists. Reject non-durable waits. Make all supported top-level scheduled waits suspend, including short delays. | No hidden runner-held wait path remains. |
+| ID | Gap | Implemented fix | Expected outcome | Status |
+| --- | --- | --- | --- | --- |
+| P0.1 | A full runner makes start, wake, and trigger work wait indefinitely for a permit | Added durable `instance_launches`; starts, resumes, and wakes enqueue and return. A bounded dispatcher is the sole runner caller and uses non-blocking capacity acquisition. | Trigger and wake workers remain available while the runner is full. No unbounded in-memory semaphore waiters exist. | Landed locally |
+| P0.2 | A queued launch has no deadline or cancellation path | Launches carry a generation, deadline, lease, availability, retry count, and error. Expiry becomes `launch_queue_timeout`; cancellation is terminal and releases admission. | Valid but starved work cannot occupy capacity forever. A generic `pending` age sweep is not needed. | Landed locally |
+| P0.3 | Admission can be bypassed or lost while trigger events are queued | All intake paths use durable admission plus an idempotent outbox/request record, then a relay publishes it to the worker stream. | The queue remains bounded even during publisher failures or a worker outage. | Landed locally |
+| P0.4 | A run can start before its registry, monitor, or state transition is reliably installed | A generation-owned, start-gated handoff installs durable state and monitoring before guest instantiation. A failed registry or state transition keeps the gate closed. | Every active run has recoverable ownership and a deadline before it executes. | Landed locally |
+| P0.5 | Cleanup for an old attempt can affect an immediate resume | `launch_id`/attempt fencing now follows the runner handle, task map, registry, monitor, stop path, and durable state writes. | An old attempt cannot unmonitor, stop, or delete a newer attempt. | Landed locally |
+| P0.6 | Legacy `wasi:cli/run` workflows retain runner slots while waiting | Generated direct workflows require `lifecycle.invoke`; legacy `wasi:cli/run` direct artifacts fail before runner acquisition. Generic agent components retain their existing ABI. | Current-ABI approvals still park and free their runner slot; legacy workflow artifacts cannot block the pool. | Landed locally |
+| P0.7 | A workflow published as an agent, or a non-durable wait, can sleep inside its parent runner | Workflow-agent graphs with wait-like operations and non-durable waits are rejected; supported top-level scheduled waits suspend. | No hidden runner-held wait path remains. | Landed locally |
 
 ## P1: bound execution and make it operationally safe
 
-| ID | Gap | Proposed fix | Expected outcome |
-| --- | --- | --- | --- |
-| P1.1 | Retry and rate-limit backoff sleep inside a runner | Persist retry state and an absolute wake time, suspend the instance, then resume and consume the retry exactly once. Until this exists, cap retry-after and rate-limit budgets by the remaining active deadline. | A burst of rate limits parks work instead of consuming all runner slots. |
-| P1.2 | Agent and embedded-workflow step timeouts are advisory | First make unsupported per-step timeouts a validation error. Then add host-owned epoch/cancellation deadlines around isolated capability calls; do not use a dropped async future as a timeout. | A timeout is either enforced or rejected rather than silently treated as a hint. |
-| P1.3 | HTTP can hang after headers, and direct calls have no universal default | Apply one absolute deadline across connection, headers, and body collection; cap response-body size and caller timeout by policy. Route direct workflow HTTP through the same policy. | Slow or endless HTTP bodies cannot hold a runner indefinitely. |
-| P1.4 | Execution timeout defaults and validation disagree | Introduce one typed execution-policy configuration shared by save/import, sync start, async start, resume, wake, and Environment. Enforce server-side bounds and reject invalid values without narrowing casts. | No API request can create an effectively unbounded active run. |
-| P1.5 | Preparation, database, disk, or compile work can outlive the external monitor | Make the runner-owned watchdog cover preparation, component load, and guest execution. Bound database/filesystem operations and use a bounded compilation worker pool. | The external monitor becomes defense in depth rather than the only timeout. |
-| P1.6 | `single_instance` can race while a launch is being created | Hold a durable launch/active lease only through `queued -> leased -> starting -> running`. Release it atomically when the instance parks as `suspended`, and on terminal outcomes. | Duplicate concurrent launches are prevented without limiting parked approvals. |
-| P1.7 | Pipeline reports a symptom but cannot identify or act on it | Expose queued, leased, starting, active, expired, and cancelled launch counts; oldest age; capacity rejections; and the responsible workflow. Alert on full runners with no completion, expired leases, and queue age over policy. | Operators can identify and resolve the actual blocked stage. |
+| ID | Gap | Implemented fix | Expected outcome | Status |
+| --- | --- | --- | --- | --- |
+| P1.1 | Retry and rate-limit backoff sleep inside a runner | Retry state and an absolute wake time are durable; the instance suspends and resumes to consume the retry exactly once. | A burst of rate limits parks work instead of consuming all runner slots. | Landed locally |
+| P1.2 | Agent and embedded-workflow step timeouts are advisory | Unsupported per-step timeouts are rejected rather than accepted as advisory configuration. | A timeout is either enforced or rejected rather than silently treated as a hint. | Landed locally |
+| P1.3 | HTTP can hang after headers, and direct calls have no universal default | One absolute policy deadline covers connection, headers, and body collection; response size and caller timeout are capped. | Slow or endless HTTP bodies cannot hold a runner indefinitely. | Landed locally |
+| P1.4 | Execution timeout defaults and validation disagree | A typed execution policy is shared by validation and every launch/resume path, with server-side bounds. | No API request can create an effectively unbounded active run. | Landed locally |
+| P1.5 | Preparation, database, disk, or compile work can outlive the external monitor | Added durable `preparing` leases, bounded dispatcher/preparation pools, and a short-lived trusted child for artifact read, hash, and Wasmtime precompile. Cancellation/expiry kills and reaps that child; parent linking is bounded in-memory work before the gated handoff. | No disk or compile task can consume a run slot or indefinitely occupy preparation capacity. | Landed locally |
+| P1.6 | `single_instance` can race while a launch is being created | A durable workflow-scoped active lease covers `queued`, `preparing`, `leased`, `starting`, and `running`; it is released atomically at suspension and terminal outcomes. | Duplicate concurrent launches are prevented without limiting parked approvals. | Landed locally |
+| P1.7 | Pipeline reports a symptom but cannot identify or act on it | The pipeline reports durable stages, preparation/child-reaping occupancy, oldest age, capacity pressure, and workflow attribution. | Operators can identify and resolve the actual blocked stage. | Landed locally |
 
 ## Detailed implementation plans
 
@@ -367,23 +367,77 @@ The active budget starts only after the launch supervisor opens the run gate. A 
 
 ### P1.5 — Isolate preparation from runner permits
 
-**Approach.** Move component compilation, artifact validation, and expensive input preparation into a separately bounded preparation pool before a run-slot permit is acquired. The queue/dispatcher tracks this as a `preparing` phase with its own deadline and metrics. Once preparation yields a bounded, verified artifact, the supervisor obtains a runner permit and performs only short, deadline-bounded handoff work before opening the guest start gate.
+**Implemented approach.** A launch now enters durable `preparing` with an
+attempt-scoped lease before any component or input work. The dispatcher and
+runner each have bounded preparation pools; neither waits for a permit. An
+ownership watcher begins before the Core/image reads, so cancellation, lease
+recovery, or the preparation deadline drops in-flight option, input, and
+precompile work before a bounded cleanup attempt. A stale attempt cannot
+promote a token after another attempt has recovered the same launch.
 
-Apply explicit timeouts to database and filesystem operations. A blocking compiler task cannot always be force-killed safely in-process, so it must not hold a runner permit; the preparation pool is independently capped and its stalled work is visible.
+Artifact filesystem reads, SHA-256 calculation, and Wasmtime component
+precompilation run in a short-lived child of the trusted server executable,
+not in the runner process. The private pipe protocol binds a fresh nonce, the
+source digest, an engine fingerprint, and the serialized-artifact digest. It
+caps source components at 64 MiB and serialized artifacts at 128 MiB. Generated
+direct workflows also compare the source digest with immutable
+`workflow.binaryChecksum` metadata; generic agent components keep their
+existing ABI behavior. A deadline or cancellation kills and reaps the child;
+both live and reaping children have a separate, host-memory-aware bounded pool.
+
+The parent does not read the artifact, compile it, create a run directory, or
+open stderr files on the durable preparation path. It verifies the child
+response and performs the residual synchronous Wasmtime deserialize/link in
+memory, then stores the opaque result only in the launch token—never in the
+global component cache. This residual is size-capped, has no external I/O or
+compiler work, and occurs before any live-run permit is acquired. The renewed
+handoff lease bounds registry/Core work after promotion; an expired handoff is
+recovered by its durable state and closed start gate rather than being
+speculatively requeued.
+
+All error cleanup, including a failed gate monitor, has a small independent
+database-operation budget. If the database remains unavailable, the worker or
+monitor exits and the exact durable lease/gate recovery path remains the
+authority; it does not retain a preparation or runner slot.
 
 **Tests.**
 
-- Stall component loading, a database read, and a filesystem read separately; verify no runner permit is consumed and the preparation pool remains bounded.
-- Saturate preparation while runner capacity is available, then assert that the pipeline reports preparation saturation rather than falsely reporting runner starvation.
-- Verify an artifact that changes or disappears between preparation and handoff is rejected safely.
+- Stall component loading, a database read, and a filesystem read separately;
+  verify no runner permit is consumed and the preparation pool remains bounded.
+- Cancel or recover a claim during option lookup and child compilation; verify
+  that child work is killed/reaped before cleanup and cannot promote later.
+- Exercise the lock-at-deadline race and prove that confirmation obtains the
+  durable row lock before testing its deadline.
+- Saturate preparation while runner capacity is available, then assert that the
+  pipeline reports preparation saturation rather than falsely reporting runner
+  starvation.
+- Verify an artifact that changes or disappears between preparation and
+  handoff is rejected safely.
 
-**Corner cases.** A prepared artifact can be evicted, altered, or exceed a memory budget while waiting for a runner. Bind preparation to an image digest, give prepared results a short TTL, and cap both count and retained bytes. A shutdown must stop accepting new preparation without losing durable queue rows.
+**Corner cases.** A prepared artifact is not retained across launches: it dies
+with the generation-owned token, so a cancellation or stale attempt cannot
+create an unbounded native-artifact cache. The source/digest fence rejects an
+artifact altered during preparation. Shutdown stops new claims while leaving
+the durable row for lease recovery. A timeout after a runner handoff can leave
+an unopened gated task or exact registry row briefly, but its gate closes at
+the same durable lease deadline; it cannot invoke guest code or retain a
+preparation permit.
 
-**Risks and mitigations.** A separate pool adds queue stages and can shift, rather than eliminate, a bottleneck. Make its capacity/configuration explicit, publish stage-level metrics, and use bounded cached artifacts rather than an unbounded prepared-object map.
+**Risks and mitigations.** A separate pool adds queue stages and can shift,
+rather than eliminate, a bottleneck. Its capacity, aged work, child reaping,
+and precompile failures are visible in the pipeline. The only deliberately
+non-killable portion is the bounded, pure in-memory parent deserialize/link
+described above; isolating that too would require a separate managed linking
+boundary and is not needed to protect runner capacity.
 
 ### P1.6 — Correct `single_instance` semantics for parked approvals
 
-**Approach.** Replace the process-local start marker with a durable, trigger-scoped active-launch lease. The lease exists only while a matching trigger has a launch in `queued`, `leased`, `starting`, or `running`; use a partial unique index or dedicated key table to acquire it atomically. Release it in the same transition that parks an instance as `suspended`, and release it on every terminal outcome. A parked approval therefore has no active lease, admission reservation, or runner slot.
+**Implemented approach.** The process-local start marker is replaced with a
+durable workflow-scoped active-launch lease. The lease exists only while a
+matching launch is `queued`, `preparing`, `leased`, `starting`, or `running`;
+it is acquired atomically and released in the same transition that parks an
+instance as `suspended`, or reaches a terminal outcome. A parked approval
+therefore has no active lease, admission reservation, or runner slot.
 
 The key must preserve the existing `single_instance` scope deliberately. Today the server checks running instances for the workflow, including work started by another source; choose and document whether that workflow-wide behavior remains rather than accidentally weakening it to only flagged trigger events.
 
@@ -400,7 +454,13 @@ The key must preserve the existing `single_instance` scope deliberately. Today t
 
 ### P1.7 — Pipeline attribution, alerting, and recovery visibility
 
-**Approach.** Extend the pipeline API and sampler to report each durable launch stage (`queued`, `leased`, `preparing`, `starting`, `active`, `expired`, and `cancelled`), their counts, oldest age, capacity rejections, and aggregated workflow attribution. Drive the UI's stuck threshold from the server policy rather than a separate hard-coded value. Emit low-cardinality metrics for queue age, lease expiry, capacity saturation, and launch outcomes; use logs or drill-downs rather than instance-ID metric labels.
+**Implemented approach.** The pipeline API and sampler report durable launch
+stages (`queued`, `leased`, `preparing`, `starting`, `active`, `expired`, and
+`cancelled`), their counts and oldest age, runner/preparation capacity pressure,
+precompile-child and child-reaping occupancy, and bounded workflow attribution.
+The UI's stuck threshold comes from server policy rather than a separate
+hard-coded value. Metrics remain low-cardinality; instance-specific diagnosis
+uses logs or drill-downs.
 
 Keep `parked` separate and slow-sampled. It is a large, healthy population, not a queue symptom. Operators act through conditional cancel/retry operations against a `launch_id`, never broad cleanup/deletion.
 
@@ -437,7 +497,7 @@ Each gate needs a rollback that stops new dispatcher claims while preserving dur
 | Queue capacity | A durable admission bound plus a separate Environment-level pending-launch cap. |
 | Retry and rate-limit budget | Never exceed the remaining active execution deadline; reject oversized values. |
 | Workflow-as-agent waits | Reject until a versioned capability ABI can return a durable suspension outcome. |
-| `single_instance` scope | Preserve the current workflow-wide semantics unless product explicitly narrows it; only queued, leased, starting, and running work are active. |
+| `single_instance` scope | Preserve the current workflow-wide semantics unless product explicitly narrows it; only queued, preparing, leased, starting, and running work are active. |
 | Total workflow lifetime | Keep separate from active execution time. Parked approvals must remain exempt from runner, admission, and active-lease limits. |
 
 ## Acceptance tests
