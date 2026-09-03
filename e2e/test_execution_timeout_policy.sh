@@ -33,6 +33,7 @@ TEST_LOG="$(mktemp -t runtara_execution_timeout_e2e_XXXXXX)"
 SERVER_PID=""
 TENANT="execution_timeout_e2e"
 RUNTARA_SERVER_BIN="${RUNTARA_SERVER_BIN:-${PROJECT_ROOT}/target/debug/runtara-server}"
+RUNTARA_AGENT_COMPONENTS_DIR="${RUNTARA_AGENT_COMPONENTS_DIR:-${PROJECT_ROOT}/target/wasm32-wasip2/release}"
 SERVER_DB_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${TEST_DB}"
 API="http://127.0.0.1:${TEST_PORT_PUBLIC}/api/runtime"
 
@@ -69,6 +70,7 @@ start_server() {
     SERVER_PORT="${TEST_PORT_PUBLIC}" \
     INTERNAL_PORT="${TEST_PORT_INTERNAL}" \
     RUNTARA_EMBEDDED=false \
+    RUNTARA_AGENT_COMPONENTS_DIR="${RUNTARA_AGENT_COMPONENTS_DIR}" \
     RUNTARA_MCP_SESSION_STORE=local \
     RUNTARA_DEFAULT_EXECUTION_TIMEOUT_SECS=120 \
     RUNTARA_MAX_EXECUTION_TIMEOUT_SECS=300 \
@@ -110,6 +112,7 @@ echo 'E2E: typed execution-timeout save policy'
 echo '==============================================================='
 
 [ -x "${RUNTARA_SERVER_BIN}" ] || fail "missing ${RUNTARA_SERVER_BIN}; run cargo build -p runtara-server --bin runtara-server"
+[ -d "${RUNTARA_AGENT_COMPONENTS_DIR}" ] || fail "missing ${RUNTARA_AGENT_COMPONENTS_DIR}; run scripts/build-agent-components.sh"
 command -v jq >/dev/null 2>&1 || fail 'jq is required'
 
 step 'Creating isolated server database...'
