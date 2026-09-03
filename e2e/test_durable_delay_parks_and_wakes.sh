@@ -277,9 +277,10 @@ done
 print_success "Woken at its deadline and completed ✓"
 
 # ---------------------------------------------------------------------------
-# Case 2 — SHORT delay: must block, never park.
+# Case 2 — SHORT delay: it still suspends; all supported top-level waits are
+# durable so a burst of short delays cannot occupy every runner slot.
 # ---------------------------------------------------------------------------
-print_step "Case 2: ${SHORT_DELAY_MS}ms Delay (below threshold) must BLOCK..."
+print_step "Case 2: ${SHORT_DELAY_MS}ms Delay must PARK..."
 WF_SHORT=$(make_delay_workflow "delay-park-short" "${SHORT_DELAY_MS}")
 RESP=$(api_post "/workflows/${WF_SHORT}/execute" '{"inputs": {"data": {}}}')
 INST_SHORT=$(echo "${RESP}" | jq -r '.data.instanceId // empty')
@@ -300,12 +301,8 @@ while [ "$(date +%s)" -lt "${DEADLINE}" ]; do
     sleep 0.5
 done
 [ -n "${SHORT_DONE}" ] || { print_error "Short-delay instance never completed (status: $(instance_status "${INST_SHORT}"))"; exit 1; }
-[ -z "${SAW_SUSPENDED}" ] || { print_error "A below-threshold Delay parked; it must block in-process"; exit 1; }
-
-FINAL_SLEEP=$(psql_quiet -d "${TEST_DB_RUNTIME}" -c \
-    "SELECT COALESCE(sleep_until::text,'') FROM instances WHERE instance_id = '${INST_SHORT}'" | tr -d '[:space:]')
-[ -z "${FINAL_SLEEP}" ] || { print_error "A blocking Delay stamped sleep_until='${FINAL_SLEEP}'"; exit 1; }
-print_success "Blocked in-process and completed, never parked ✓"
+[ -n "${SAW_SUSPENDED}" ] || { print_error "A short top-level Delay never entered durable suspension"; exit 1; }
+print_success "Parked durably and completed after its wake ✓"
 
 echo
-print_success "SYN-619 verified: long Delay parks and is woken; short Delay blocks."
+print_success "Top-level Delays of every supported duration park and wake durably."
