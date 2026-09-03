@@ -98,6 +98,11 @@ path = "tests/image_registry_test.rs"
 required-features = ["db-integration-tests"]
 
 [[test]]
+name = "launch_queue_test"
+path = "tests/launch_queue_test.rs"
+required-features = ["db-integration-tests"]
+
+[[test]]
 name = "wake_scheduler_test"
 path = "tests/wake_scheduler_test.rs"
 required-features = ["db-integration-tests"]
