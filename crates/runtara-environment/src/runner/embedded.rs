@@ -950,10 +950,12 @@ impl Runner for EmbeddedWasmRunner {
 
         let metrics = Arc::new(tokio::sync::Mutex::new(ContainerMetrics::default()));
 
-        // Timeout is enforced by the container monitor via `stop()`, exactly
-        // as it is for the detached CLI runner (which spawns with no timeout
-        // of its own). MAX keeps the internal rings cancel-only.
-        let spec = self.run_spec(options, env, stderr_file, Duration::MAX, Some(cancel));
+        // The monitor is defense in depth, not the only deadline owner. The
+        // embedded component host needs the same finite active deadline so
+        // its epoch/watchdog rings cover guest work after the start gate
+        // opens. `Duration::MAX` overflows its monotonic HTTP deadline and
+        // lets an otherwise healthy gated run panic before it can park.
+        let spec = self.run_spec(options, env, stderr_file, options.timeout, Some(cancel));
 
         let executor = Arc::clone(&self.executor);
         let persistence = Arc::clone(&self.persistence);
