@@ -23,6 +23,7 @@ use crate::valkey::ValkeyConfig;
 use crate::valkey::client::ValkeyClient;
 use crate::valkey::stream::{StreamAcker, StreamConsumer};
 use crate::workers::execution_engine::{DetachedExecution, ExecutionEngine, ExecutionError};
+use crate::workers::execution_outbox::{DurableLaunchClaim, ExecutionOutbox};
 
 /// Result of processing a trigger event
 #[derive(Debug)]
@@ -40,6 +41,10 @@ enum ProcessResult {
     NotRunnable(String),
     /// Event should be retried later - DON'T ACK (stays in PEL)
     RetryLater(String),
+    /// A different trigger worker owns the durable Environment handoff. Keep
+    /// this PEL entry without applying the ordinary retry cap: its short lease
+    /// will either complete, expire and recover, or become an accepted launch.
+    HandoffInProgress(String),
 }
 
 /// Configuration for the trigger worker
@@ -181,6 +186,11 @@ pub async fn run(
         event_sink.clone(),
         Arc::clone(&gauges),
     ));
+    // The worker fences every new stream event against the server-owned
+    // deadline before it can ask Environment for a durable launch. This is a
+    // separate database from Environment, so source admission stays here
+    // until Environment's lifecycle observer releases it.
+    let outbox = Arc::new(ExecutionOutbox::new(pool.clone()));
 
     // Acknowledging through the consumer would hold its mutex across the XACK
     // round trip, serialising every event in a fanned-out batch on one lock.
@@ -220,8 +230,10 @@ pub async fn run(
                     let permits = Arc::clone(&event_permits);
                     let acker = acker.clone();
                     let engine = Arc::clone(&engine);
+                    let outbox = Arc::clone(&outbox);
                     let running_executions = Arc::clone(&running_executions);
                     let event_sink = event_sink.clone();
+                    let handoff_owner = worker_id.clone();
                     let max_retries = worker_config.max_retries;
                     tasks.spawn(async move {
                         let _permit = permits
@@ -231,6 +243,8 @@ pub async fn run(
                         process_event(
                             &acker,
                             &engine,
+                            outbox.as_ref(),
+                            &handoff_owner,
                             &entry_id,
                             &valkey_event,
                             &running_executions,
@@ -274,8 +288,10 @@ pub async fn run(
                     let permits = Arc::clone(&event_permits);
                     let acker = acker.clone();
                     let engine = Arc::clone(&engine);
+                    let outbox = Arc::clone(&outbox);
                     let running_executions = Arc::clone(&running_executions);
                     let event_sink = event_sink.clone();
+                    let handoff_owner = worker_id.clone();
                     let max_retries = worker_config.max_retries;
                     tasks.spawn(async move {
                         // Semaphore is never closed, so acquire cannot fail.
@@ -286,6 +302,8 @@ pub async fn run(
                         process_event(
                             &acker,
                             &engine,
+                            outbox.as_ref(),
+                            &handoff_owner,
                             &entry_id,
                             &valkey_event,
                             &running_executions,
@@ -363,6 +381,8 @@ pub fn trigger_concurrency() -> usize {
 async fn process_event(
     acker: &StreamAcker,
     engine: &Arc<ExecutionEngine>,
+    outbox: &ExecutionOutbox,
+    handoff_owner: &str,
     entry_id: &str,
     valkey_event: &crate::valkey::events::ValkeyEvent,
     _running_executions: &Arc<DashMap<Uuid, CancellationHandle>>,
@@ -407,7 +427,8 @@ async fn process_event(
     ];
 
     // Process the trigger event
-    let process_result = process_trigger_event(engine.clone(), &trigger_event).await;
+    let process_result =
+        process_trigger_event(engine.clone(), outbox, handoff_owner, &trigger_event).await;
 
     // Record metrics
     let duration = process_start.elapsed().as_secs_f64();
@@ -422,6 +443,7 @@ async fn process_event(
             ProcessResult::PermanentFailure(_) => "permanent_failure",
             ProcessResult::NotRunnable(_) => "not_runnable",
             ProcessResult::RetryLater(_) => "retry_later",
+            ProcessResult::HandoffInProgress(_) => "handoff_in_progress",
         };
         m.trigger_processing_duration.record(
             duration,
@@ -440,6 +462,10 @@ async fn process_event(
             }
             ProcessResult::RetryLater(_) => {
                 // Don't count as failed yet - it will be retried
+            }
+            ProcessResult::HandoffInProgress(_) => {
+                // The worker that owns the durable handoff will emit the
+                // terminal outcome. This delivery intentionally remains PEL.
             }
             ProcessResult::Success | ProcessResult::Deduplicated => {}
         }
@@ -574,6 +600,18 @@ async fn process_event(
                 // DON'T ACK - event stays in PEL for retry
             }
         }
+        ProcessResult::HandoffInProgress(ref reason) => {
+            warn!(
+                entry_id = %entry_id,
+                instance_id = %trigger_event.instance_id,
+                reason = %reason,
+                "Durable launch handoff is still owned elsewhere; retaining trigger event"
+            );
+            // Do not apply the generic retry cap here. A capped ACK could
+            // lose the only PEL copy while the other worker dies just before
+            // Environment records the launch; the short DB lease makes the
+            // next reclaim safe instead.
+        }
     }
 }
 
@@ -602,6 +640,8 @@ fn parse_trigger_event(
 /// - `ProcessResult::PermanentFailure` for other errors that won't benefit from retry
 async fn process_trigger_event(
     engine: Arc<ExecutionEngine>,
+    outbox: &ExecutionOutbox,
+    handoff_owner: &str,
     event: &TriggerEvent,
 ) -> ProcessResult {
     let single_instance = match event.trigger_id() {
@@ -624,6 +664,49 @@ async fn process_trigger_event(
         None => false,
     };
 
+    // A durable source record remains subject to its absolute deadline even
+    // after XADD. Claim the final cross-database handoff before Environment
+    // can create an instance, otherwise an old PEL entry could start long
+    // after its intake request timed out. Older stream entries predate this
+    // contract and have no request ID, so retain their compatible path.
+    let source_request_id = match event.request_id {
+        Some(request_id) => match outbox
+            .claim_for_launch(
+                request_id,
+                &event.tenant_id,
+                &event.instance_id,
+                handoff_owner,
+            )
+            .await
+        {
+            Ok(DurableLaunchClaim::Claimed) => Some(request_id),
+            Ok(DurableLaunchClaim::AlreadyAccepted) => {
+                return ProcessResult::Deduplicated;
+            }
+            Ok(DurableLaunchClaim::InProgress) => {
+                return ProcessResult::HandoffInProgress(
+                    "another worker owns the durable launch handoff".to_string(),
+                );
+            }
+            Ok(DurableLaunchClaim::Expired) => {
+                return ProcessResult::PermanentFailure(
+                    "durable execution request expired before launch handoff".to_string(),
+                );
+            }
+            Ok(DurableLaunchClaim::Rejected) => {
+                return ProcessResult::PermanentFailure(
+                    "durable execution request is no longer launchable".to_string(),
+                );
+            }
+            Err(error) => {
+                return ProcessResult::HandoffInProgress(format!(
+                    "failed to claim durable launch handoff: {error}"
+                ));
+            }
+        },
+        None => None,
+    };
+
     // Launch instance via runtara-environment (fire-and-forget). The guarded
     // branch atomically reserves the short start handoff, then treats only
     // runtime `pending` and `running` instances as active. A suspended
@@ -640,6 +723,29 @@ async fn process_trigger_event(
                     trigger_type = %event.trigger_type(),
                     "Skipping execution: single_instance workflow already has active or starting work"
                 );
+                if let Some(request_id) = source_request_id {
+                    match outbox
+                        .terminalize_launch_claim(
+                            request_id,
+                            handoff_owner,
+                            "single_instance_active",
+                        )
+                        .await
+                    {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            return ProcessResult::HandoffInProgress(
+                                "lost durable launch handoff while recording single-instance skip"
+                                    .to_string(),
+                            );
+                        }
+                        Err(error) => {
+                            return ProcessResult::HandoffInProgress(format!(
+                                "failed to record single-instance skip: {error}"
+                            ));
+                        }
+                    }
+                }
                 return ProcessResult::Success;
             }
             Err(error) => Err(error),
@@ -650,6 +756,14 @@ async fn process_trigger_event(
 
     match launch {
         Ok(DetachedExecution::Started(started_instance_id)) => {
+            if let Some(request_id) = source_request_id
+                && !mark_source_launch_accepted(outbox, request_id, handoff_owner).await
+            {
+                return ProcessResult::HandoffInProgress(
+                    "Environment accepted start but source handoff confirmation is pending"
+                        .to_string(),
+                );
+            }
             info!(
                 instance_id = %event.instance_id,
                 runtara_instance_id = %started_instance_id,
@@ -658,6 +772,14 @@ async fn process_trigger_event(
             ProcessResult::Success
         }
         Ok(DetachedExecution::Deduplicated(instance_id)) => {
+            if let Some(request_id) = source_request_id
+                && !mark_source_launch_accepted(outbox, request_id, handoff_owner).await
+            {
+                return ProcessResult::HandoffInProgress(
+                    "Environment deduplicated start but source handoff confirmation is pending"
+                        .to_string(),
+                );
+            }
             info!(
                 instance_id,
                 workflow_id = %event.workflow_id,
@@ -670,6 +792,19 @@ async fn process_trigger_event(
             version,
             compilation_queued,
         }) => {
+            if let Some(request_id) = source_request_id
+                && !release_source_launch_claim(
+                    outbox,
+                    request_id,
+                    handoff_owner,
+                    "workflow_not_compiled",
+                )
+                .await
+            {
+                return ProcessResult::HandoffInProgress(
+                    "source launch handoff retry state is pending".to_string(),
+                );
+            }
             // Workflow not compiled yet - this is retryable
             // Compilation has been queued (or was already pending)
             info!(
@@ -685,6 +820,19 @@ async fn process_trigger_event(
             ))
         }
         Err(e @ ExecutionError::WorkflowNotRunnable { .. }) => {
+            if let Some(request_id) = source_request_id
+                && !terminalize_source_launch_claim(
+                    outbox,
+                    request_id,
+                    handoff_owner,
+                    "workflow_not_runnable",
+                )
+                .await
+            {
+                return ProcessResult::HandoffInProgress(
+                    "source terminalization is pending for unrunnable workflow".to_string(),
+                );
+            }
             // Permanent, but the workflow needs editing rather than attention.
             warn!(
                 instance_id = %event.instance_id,
@@ -694,6 +842,19 @@ async fn process_trigger_event(
             ProcessResult::NotRunnable(e.to_string())
         }
         Err(e) => {
+            if let Some(request_id) = source_request_id
+                && !terminalize_source_launch_claim(
+                    outbox,
+                    request_id,
+                    handoff_owner,
+                    "environment_launch_failed",
+                )
+                .await
+            {
+                return ProcessResult::HandoffInProgress(
+                    "source terminalization is pending after launch failure".to_string(),
+                );
+            }
             // Other errors are permanent failures
             error!(
                 instance_id = %event.instance_id,
@@ -701,6 +862,59 @@ async fn process_trigger_event(
                 "Failed to start instance via runtara-environment"
             );
             ProcessResult::PermanentFailure(format!("Failed to start instance: {}", e))
+        }
+    }
+}
+
+async fn mark_source_launch_accepted(
+    outbox: &ExecutionOutbox,
+    request_id: Uuid,
+    handoff_owner: &str,
+) -> bool {
+    match outbox.mark_launch_accepted(request_id, handoff_owner).await {
+        Ok(true) => true,
+        Ok(false) => false,
+        Err(error) => {
+            warn!(request_id = %request_id, error = %error, "Failed to confirm durable launch handoff");
+            false
+        }
+    }
+}
+
+async fn release_source_launch_claim(
+    outbox: &ExecutionOutbox,
+    request_id: Uuid,
+    handoff_owner: &str,
+    reason: &str,
+) -> bool {
+    match outbox
+        .release_launch_claim(request_id, handoff_owner, reason)
+        .await
+    {
+        Ok(true) => true,
+        Ok(false) => false,
+        Err(error) => {
+            warn!(request_id = %request_id, error = %error, "Failed to release durable launch handoff");
+            false
+        }
+    }
+}
+
+async fn terminalize_source_launch_claim(
+    outbox: &ExecutionOutbox,
+    request_id: Uuid,
+    handoff_owner: &str,
+    reason: &str,
+) -> bool {
+    match outbox
+        .terminalize_launch_claim(request_id, handoff_owner, reason)
+        .await
+    {
+        Ok(true) => true,
+        Ok(false) => false,
+        Err(error) => {
+            warn!(request_id = %request_id, error = %error, "Failed to terminalize durable launch handoff");
+            false
         }
     }
 }

@@ -37,6 +37,9 @@ use crate::metrics::MetricsService;
 use crate::product_events::{ActorType, EventSource, EventType, ProductEvent, ProductEventSink};
 use crate::runtime_client::{RuntimeClient, RuntimeError};
 use crate::workers::CancellationHandle;
+use crate::workers::execution_outbox::{
+    EnqueuedExecution, ExecutionOutbox, ExecutionOutboxError, source_idempotency_key,
+};
 use crate::workers::runtara_dto::{
     ExecutionWithMetadata, enrich_pending_input, execution_statuses_to_runtara, parse_image_id,
     runtara_info_to_dto, runtara_info_to_execution_with_metadata,
@@ -200,6 +203,10 @@ pub struct QueueRequest<'a> {
     pub inputs: Value,
     pub debug: bool,
     pub correlation_id: Option<String>,
+    /// Optional stable source identity (for example an HTTP Idempotency-Key).
+    /// When absent the generated/caller-supplied instance ID remains the
+    /// idempotency identity for this one queue submission.
+    pub idempotency_key: Option<String>,
     pub trigger_source: TriggerSource,
     /// Optional caller-provided identity for idempotent queueing. Environment
     /// deduplicates starts by instance ID, so retries can safely republish the
@@ -320,7 +327,12 @@ pub struct ExecutionEngine {
     pool: PgPool,
     workflow_repo: Arc<WorkflowRepository>,
     runtime_client: Option<Arc<RuntimeClient>>,
+    /// Kept in the constructor while callers migrate; stream publishing is
+    /// owned by [`ExecutionOutbox`] and its relay, never by an intake source.
+    #[allow(dead_code)]
     trigger_stream: Option<Arc<TriggerStreamPublisher>>,
+    /// Durable source request + admission reservation writer.
+    outbox: ExecutionOutbox,
     #[allow(dead_code)] // Reserved for future in-memory cancellation tracking.
     running_executions: Option<Arc<DashMap<Uuid, CancellationHandle>>>,
     /// Tracks workflows currently starting (prevents single_instance races).
@@ -355,6 +367,11 @@ pub struct ExecutionEngine {
     /// count makes the database slower, which widens the window, which admits
     /// more of them.
     concurrency_refresh: Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// Serializes the in-process active-runtime decision with a durable
+    /// enqueue for one tenant. The database reservation remains authoritative
+    /// across processes/restarts; this prevents a local cached-count race
+    /// before the next background runtime refresh observes a launch.
+    concurrency_admission: Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// Monotonic counters for the execution pipeline.
     ///
     /// Read by the analytics sampler; written only from the gate below, where
@@ -436,16 +453,18 @@ impl ExecutionEngine {
         gauges: Arc<crate::workers::pipeline_gauges::PipelineGauges>,
     ) -> Self {
         Self {
-            pool,
+            pool: pool.clone(),
             workflow_repo,
             runtime_client,
             trigger_stream,
+            outbox: ExecutionOutbox::new(pool.clone()),
             running_executions,
             starting_workflows: Arc::clone(starting_workflows()),
             events,
             concurrency_counts: Arc::new(DashMap::new()),
             concurrency_reservations: Arc::new(DashMap::new()),
             concurrency_refresh: Arc::new(DashMap::new()),
+            concurrency_admission: Arc::new(DashMap::new()),
             gauges,
         }
     }
@@ -559,6 +578,38 @@ impl ExecutionEngine {
         )
     }
 
+    fn admission_lock_for(&self, tenant_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+        Arc::clone(
+            self.concurrency_admission
+                .entry(tenant_id.to_string())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .value(),
+        )
+    }
+
+    fn effective_concurrency_cap(&self) -> u64 {
+        let snapshot = crate::config::entitlements();
+        crate::middleware::entitlement::effective_limit(
+            crate::config::raw_max_concurrent_executions(),
+            snapshot.limits.max_concurrent_executions,
+        ) as u64
+    }
+
+    async fn concurrent_execution_decision(
+        &self,
+        tenant_id: &str,
+    ) -> Result<(), crate::entitlement_error::EntitlementDenial> {
+        let snapshot = crate::config::entitlements();
+        let cap = self.effective_concurrency_cap();
+        let active = self.active_execution_count(tenant_id, cap);
+        crate::middleware::entitlement::concurrent_executions_decision(
+            snapshot,
+            active,
+            crate::config::raw_max_concurrent_executions(),
+        )
+        .inspect_err(|denial| denial.audit_log(tenant_id))
+    }
+
     /// Enforce `maxConcurrentExecutions` at intake. Returns the
     /// `EntitlementDenial` to surface when the tenant's live active-instance
     /// count is at/over the effective cap; `Ok(())` otherwise.
@@ -582,7 +633,6 @@ impl ExecutionEngine {
         // Counted here rather than at either call site, so the identity
         // `offered == accepted + denied` cannot drift as call sites are added.
         self.gauges.record_offered();
-        let snapshot = crate::config::entitlements();
         // No early return when the tenant has no `maxConcurrentExecutions`:
         // the infra cap (`MAX_CONCURRENT_EXECUTIONS`, default cores x 32) has
         // to stand on its own, or an untiered deployment has no admission
@@ -598,17 +648,7 @@ impl ExecutionEngine {
         // Resolve the cap before counting so the count can stop there. The
         // gate only needs to know whether the cap is reached, and an unbounded
         // count gets slower exactly as a backlog builds.
-        let cap = crate::middleware::entitlement::effective_limit(
-            crate::config::raw_max_concurrent_executions(),
-            snapshot.limits.max_concurrent_executions,
-        ) as u64;
-        let active = self.active_execution_count(tenant_id, cap);
-        let decision = crate::middleware::entitlement::concurrent_executions_decision(
-            snapshot,
-            active,
-            crate::config::raw_max_concurrent_executions(),
-        )
-        .inspect_err(|denial| denial.audit_log(tenant_id));
+        let decision = self.concurrent_execution_decision(tenant_id).await;
 
         // Record the admission so the next caller sees it even though the
         // cached count still cannot.
@@ -623,6 +663,100 @@ impl ExecutionEngine {
             self.gauges.record_denied();
         }
         decision
+    }
+
+    /// The only asynchronous source admission path. It first returns an
+    /// existing idempotent request, then commits the source reservation and
+    /// outbox record before any relay touches Valkey.
+    ///
+    /// The returned request ID is carried by the relay in the stream entry and
+    /// is the handoff token for P0.1's launch queue. Stream delivery never
+    /// releases the source reservation: it remains held until the durable
+    /// launch parks, terminalizes, expires, or is cancelled.
+    pub async fn enqueue_trigger_event(
+        &self,
+        tenant_id: &str,
+        event: TriggerEvent,
+        idempotency_key: String,
+    ) -> Result<EnqueuedExecution, ExecutionError> {
+        if let Some(existing) = self
+            .outbox
+            .find_by_idempotency(tenant_id, &idempotency_key)
+            .await
+            .map_err(map_outbox_error)?
+        {
+            return Ok(existing);
+        }
+
+        let admission_lock = self.admission_lock_for(tenant_id);
+        let _admission_guard = admission_lock.lock().await;
+
+        // A waiter can have committed the same key while this task waited for
+        // the local active-count lock. Do not consume a second reservation.
+        if let Some(existing) = self
+            .outbox
+            .find_by_idempotency(tenant_id, &idempotency_key)
+            .await
+            .map_err(map_outbox_error)?
+        {
+            return Ok(existing);
+        }
+
+        self.gauges.record_offered();
+        if let Err(denial) = self.concurrent_execution_decision(tenant_id).await {
+            self.gauges.record_denied();
+            return Err(ExecutionError::EntitlementDenied(denial));
+        }
+
+        let cap = self.effective_concurrency_cap();
+        match self
+            .outbox
+            .enqueue(tenant_id, &event, &idempotency_key, cap)
+            .await
+        {
+            Ok(enqueued) if enqueued.duplicate => Ok(enqueued),
+            Ok(enqueued) => {
+                // Preserve the active-runtime gate's short handoff protection
+                // until the runtime count refresh subsumes this accepted
+                // request. The durable DB reservation independently protects
+                // a restart or a Valkey outage before relay delivery.
+                self.gauges.record_accepted();
+                self.reservations_for(tenant_id)
+                    .fetch_add(1, Ordering::SeqCst);
+                Ok(enqueued)
+            }
+            Err(ExecutionOutboxError::AdmissionFull { limit }) => {
+                self.gauges.record_denied();
+                let denial = crate::entitlement_error::EntitlementDenial::LimitExceeded {
+                    limit: "maxConcurrentExecutions",
+                    maximum: limit,
+                };
+                denial.audit_log(tenant_id);
+                Err(ExecutionError::EntitlementDenied(denial))
+            }
+            Err(error) => {
+                // The intake response is a refusal, not an accepted request;
+                // retain the pipeline identity while surfacing the real DB or
+                // validation failure to the caller.
+                self.gauges.record_denied();
+                Err(map_outbox_error(error))
+            }
+        }
+    }
+
+    /// Lifecycle hook for P0.1: release the durable source reservation once a
+    /// launch reaches a terminal/suspended handoff. It is idempotent so the
+    /// lifecycle callback and the crash-recovery reconciler can race safely.
+    pub async fn release_durable_admission_for_instance(
+        &self,
+        tenant_id: &str,
+        instance_id: &str,
+        reason: &str,
+    ) -> Result<bool, ExecutionError> {
+        self.outbox
+            .release_admission_for_instance(tenant_id, instance_id, reason)
+            .await
+            .map_err(map_outbox_error)
     }
 
     /// Check if the runtime client is available.
@@ -683,11 +817,12 @@ impl ExecutionEngine {
     // Async queuing
     // =========================================================================
 
-    /// Queue a workflow execution onto the Valkey trigger stream.
+    /// Queue a workflow execution through the durable source outbox.
     ///
     /// Validates the workflow exists, validates inputs against the workflow's
-    /// input schema (if non-empty), then publishes a `TriggerEvent` for the
-    /// trigger worker to pick up.
+    /// input schema (if non-empty), then commits a `TriggerEvent` and its
+    /// admission reservation before the relay publishes it for the trigger
+    /// worker to pick up.
     pub async fn queue(&self, req: QueueRequest<'_>) -> Result<QueuedExecution, ExecutionError> {
         // 1. Resolve version
         let version = self
@@ -717,21 +852,23 @@ impl ExecutionEngine {
         // request is not itself evidence that a run ever started.
         let track_events = workflow.track_events;
 
-        // 5. Require trigger stream
-        let trigger_stream = self.trigger_stream.as_ref().ok_or_else(|| {
-            ExecutionError::NotConnected(
-                "Valkey trigger stream not configured. Cannot queue execution.".to_string(),
-            )
-        })?;
-
-        // 6. Generate instance ID
+        // 5. Generate instance ID. It is also the durable idempotency identity
+        // for retries that originate from this queue request.
         let instance_id = req.instance_id.unwrap_or_else(Uuid::new_v4);
 
-        // 7. Build TriggerEvent appropriate to the source.
+        // 6. Build TriggerEvent appropriate to the source.
         //
         // Sessions, chat, webhooks, and cron-originated requests that go
         // through the engine share the `http_api` factory. Replay keeps its
         // own source metadata so runtime history can distinguish it.
+        let source_name = match &req.trigger_source {
+            TriggerSource::HttpApi => "http-api",
+            TriggerSource::Session => "session",
+            TriggerSource::Chat => "chat",
+            TriggerSource::Webhook => "webhook",
+            TriggerSource::Cron => "cron",
+            TriggerSource::Replay { .. } => "replay",
+        };
         let event = match req.trigger_source {
             TriggerSource::HttpApi
             | TriggerSource::Session
@@ -761,38 +898,45 @@ impl ExecutionEngine {
             ),
         };
 
-        // 7.5. Per-tenant maxConcurrentExecutions gate (SYN-433 Finding 1).
-        //
-        // Counts the tenant's actually-active instances (Running + Pending)
-        // from the runtime — the source of truth — and rejects when at/over
-        // the effective cap. See `check_concurrency_gate`.
-        self.check_concurrency_gate(req.tenant_id)
+        // 7. Atomically reserve admission + record the source request + write
+        // its relay outbox row. A Valkey outage now leaves a durable pending
+        // request instead of losing an already-accepted execution.
+        let idempotency_key = req
+            .idempotency_key
+            .unwrap_or_else(|| source_idempotency_key(source_name, &instance_id.to_string()));
+        let enqueued = self
+            .enqueue_trigger_event(req.tenant_id, event, idempotency_key)
             .await
-            .map_err(|denial| {
-                crate::product_events::emit_quota_exceeded(
-                    &self.events,
-                    ProductEvent::new(EventType::QuotaExceeded)
-                        .no_user_actor("execution_engine", ActorType::System)
-                        .resource(req.workflow_id, "workflow")
-                        .source(EventSource::Worker),
-                    &denial,
-                );
-                ExecutionError::EntitlementDenied(denial)
+            .map_err(|error| {
+                if let ExecutionError::EntitlementDenied(denial) = &error {
+                    crate::product_events::emit_quota_exceeded(
+                        &self.events,
+                        ProductEvent::new(EventType::QuotaExceeded)
+                            .no_user_actor("execution_engine", ActorType::System)
+                            .resource(req.workflow_id, "workflow")
+                            .source(EventSource::Worker),
+                        denial,
+                    );
+                }
+                error
             })?;
 
-        // 8. Publish to stream
-        trigger_stream
-            .publish(req.tenant_id, &event)
-            .await
-            .map_err(|e| {
-                ExecutionError::DatabaseError(format!("Failed to publish to trigger stream: {}", e))
-            })?;
+        // A retry carrying an HTTP idempotency key can find a request whose
+        // original instance ID differs from the freshly generated local UUID.
+        // Return the durable identity so clients can observe/cancel the
+        // execution they actually retried rather than a phantom UUID.
+        let instance_id = Uuid::parse_str(&enqueued.instance_id).map_err(|error| {
+            ExecutionError::DatabaseError(format!(
+                "durable execution request stored an invalid instance ID '{}': {error}",
+                enqueued.instance_id
+            ))
+        })?;
 
         info!(
             instance_id = %instance_id,
             workflow_id = %req.workflow_id,
             version = version,
-            "Published execution to trigger stream"
+            "Queued durable execution request"
         );
 
         Ok(QueuedExecution {
@@ -1667,6 +1811,7 @@ impl ExecutionEngine {
             inputs: validated_inputs,
             debug: false,
             correlation_id: None,
+            idempotency_key: None,
             trigger_source: TriggerSource::Replay {
                 original_instance_id: original_instance_id.to_string(),
             },
@@ -2565,6 +2710,23 @@ impl ExecutionEngine {
                 "Compilation for workflow '{}' version {} completed but binary not found.",
                 workflow_id, version
             ))),
+        }
+    }
+}
+
+fn map_outbox_error(error: ExecutionOutboxError) -> ExecutionError {
+    match error {
+        ExecutionOutboxError::AdmissionFull { limit } => ExecutionError::EntitlementDenied(
+            crate::entitlement_error::EntitlementDenial::LimitExceeded {
+                limit: "maxConcurrentExecutions",
+                maximum: limit,
+            },
+        ),
+        ExecutionOutboxError::InvalidIdempotencyKey | ExecutionOutboxError::TenantMismatch => {
+            ExecutionError::ValidationError(error.to_string())
+        }
+        ExecutionOutboxError::Serialization(_) | ExecutionOutboxError::Database(_) => {
+            ExecutionError::DatabaseError(error.to_string())
         }
     }
 }

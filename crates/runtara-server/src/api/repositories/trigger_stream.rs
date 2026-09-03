@@ -7,6 +7,7 @@
 
 use redis::AsyncCommands;
 use redis::aio::ConnectionManager;
+use uuid::Uuid;
 
 use crate::api::dto::trigger_event::TriggerEvent;
 use crate::valkey::ValkeyConfig;
@@ -40,6 +41,30 @@ impl TriggerStreamPublisher {
         tenant_id: &str,
         event: &TriggerEvent,
     ) -> Result<String, TriggerStreamError> {
+        self.publish_inner(tenant_id, event, None).await
+    }
+
+    /// Publish a durable outbox delivery with its stable request identity.
+    ///
+    /// The stream is intentionally at-least-once: a relay can die after
+    /// `XADD` and before its database delivery mark. Carrying `request_id`
+    /// lets operators correlate the duplicate while the existing instance ID
+    /// keeps the execution path idempotent.
+    pub async fn publish_with_request_id(
+        &self,
+        tenant_id: &str,
+        event: &TriggerEvent,
+        request_id: Uuid,
+    ) -> Result<String, TriggerStreamError> {
+        self.publish_inner(tenant_id, event, Some(request_id)).await
+    }
+
+    async fn publish_inner(
+        &self,
+        tenant_id: &str,
+        event: &TriggerEvent,
+        request_id: Option<Uuid>,
+    ) -> Result<String, TriggerStreamError> {
         // Serialize event to JSON
         let event_json = serde_json::to_string(event)
             .map_err(|e| TriggerStreamError::SerializationError(e.to_string()))?;
@@ -61,18 +86,24 @@ impl TriggerStreamPublisher {
         // (valkey/stream.rs) logs a warning when XAUTOCLAIM reports such entries,
         // so a sustained backlog is observable rather than silently dropping
         // trigger events with no signal.
+        let request_id = request_id.map(|id| id.to_string());
+        let mut fields = vec![
+            ("event_type", "trigger"),
+            ("trigger_type", event.trigger_type()),
+            ("instance_id", event.instance_id.as_str()),
+            ("workflow_id", event.workflow_id.as_str()),
+            ("data", event_json.as_str()),
+        ];
+        if let Some(request_id) = request_id.as_deref() {
+            fields.push(("request_id", request_id));
+        }
+
         let stream_id: String = redis_conn
             .xadd_maxlen(
                 &stream_key,
                 redis::streams::StreamMaxlen::Approx(self.config.trigger_stream_maxlen),
                 "*", // Auto-generate ID
-                &[
-                    ("event_type", "trigger"),
-                    ("trigger_type", event.trigger_type()),
-                    ("instance_id", &event.instance_id),
-                    ("workflow_id", &event.workflow_id),
-                    ("data", &event_json),
-                ],
+                &fields,
             )
             .await
             .map_err(|e| TriggerStreamError::RedisError(e.to_string()))?;

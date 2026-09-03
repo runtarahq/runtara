@@ -23,7 +23,6 @@ use crate::api::handlers::chat::{
     ChatEvent, chat_event_type, extract_message_from_outputs, make_event, parse_debug_event,
 };
 use crate::api::handlers::common::execution_error_response;
-use crate::api::repositories::trigger_stream::TriggerStreamPublisher;
 use crate::api::services::{session_queue, session_token};
 use crate::runtime_client::RuntimeClient;
 use crate::workers::execution_engine::{ExecutionEngine, QueueRequest, TriggerSource};
@@ -62,7 +61,6 @@ pub struct SubmitEventRequest {
 pub async fn create_session(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
-    State(trigger_stream): State<Option<Arc<TriggerStreamPublisher>>>,
     State(runtime_client): State<Option<Arc<RuntimeClient>>>,
     State(valkey_conn): State<Option<ConnectionManager>>,
     State(engine): State<Arc<ExecutionEngine>>,
@@ -73,13 +71,6 @@ pub async fn create_session(
         (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({"success": false, "message": "Runtime client not configured"})),
-        )
-    })?;
-
-    let trigger_stream = trigger_stream.ok_or_else(|| {
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"success": false, "message": "Trigger stream not configured"})),
         )
     })?;
 
@@ -140,6 +131,7 @@ pub async fn create_session(
             inputs,
             debug: false,
             correlation_id: None,
+            idempotency_key: None,
             trigger_source: TriggerSource::Session,
             instance_id: None,
         })
@@ -162,10 +154,9 @@ pub async fn create_session(
     }
 
     // Build SSE stream with session_created preamble + queue-drain bridge.
-    // `pool` and `trigger_stream` states are retained as configuration probes
-    // (presence validated above); queue operations go through `engine`.
+    // The execution itself is already durably accepted by `engine`; Valkey
+    // delivery is a relay concern rather than an intake precondition.
     let _ = pool;
-    let _ = trigger_stream;
     let stream = build_session_event_stream(SessionStreamParams {
         client: runtime_client,
         valkey,
@@ -236,7 +227,6 @@ pub async fn submit_event(
 pub async fn session_event_stream(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
-    State(trigger_stream): State<Option<Arc<TriggerStreamPublisher>>>,
     State(runtime_client): State<Option<Arc<RuntimeClient>>>,
     State(valkey_conn): State<Option<ConnectionManager>>,
     State(engine): State<Arc<ExecutionEngine>>,
@@ -246,13 +236,6 @@ pub async fn session_event_stream(
         (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({"success": false, "message": "Runtime client not configured"})),
-        )
-    })?;
-
-    let trigger_stream = trigger_stream.ok_or_else(|| {
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"success": false, "message": "Trigger stream not configured"})),
         )
     })?;
 
@@ -284,10 +267,9 @@ pub async fn session_event_stream(
     // Generate token for the response
     let token = session_token::sign(&tenant_id, &meta.workflow_id, &session_id).unwrap_or_default();
 
-    // `pool` / `trigger_stream` are kept as configuration probes (presence
-    // validated above); queue operations go through the shared engine.
+    // `pool` is retained for route/state compatibility; execution admission
+    // has already gone through the shared durable engine.
     let _ = pool;
-    let _ = trigger_stream;
     let stream = build_session_event_stream(SessionStreamParams {
         client: runtime_client,
         valkey,
@@ -560,6 +542,7 @@ async fn start_new_instance(
             inputs,
             debug: false,
             correlation_id: None,
+            idempotency_key: None,
             trigger_source: TriggerSource::Session,
             instance_id: None,
         })

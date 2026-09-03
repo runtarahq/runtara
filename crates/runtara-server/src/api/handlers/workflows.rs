@@ -9,7 +9,7 @@
 
 use axum::{
     extract::{Extension, Path, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::Json,
 };
 use serde::{Deserialize, Serialize};
@@ -1942,6 +1942,7 @@ pub async fn execute_workflow_handler(
     State(engine): State<Arc<ExecutionEngine>>,
     Path(workflow_id): Path<String>,
     Query(query): Query<ExecuteWorkflowQuery>,
+    headers: HeaderMap,
     Json(request): Json<ExecuteWorkflowRequest>,
 ) -> (StatusCode, Json<Value>) {
     // Parse and validate optional version query parameter
@@ -1974,6 +1975,12 @@ pub async fn execute_workflow_handler(
     };
 
     let debug = request.debug.unwrap_or(false);
+    let idempotency_key = headers
+        .get("idempotency-key")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| format!("http-api:{workflow_id}:{value}"));
 
     match engine
         .queue(QueueRequest {
@@ -1983,6 +1990,7 @@ pub async fn execute_workflow_handler(
             inputs: validated_inputs,
             debug,
             correlation_id: None,
+            idempotency_key,
             trigger_source: TriggerSource::HttpApi,
             instance_id: None,
         })

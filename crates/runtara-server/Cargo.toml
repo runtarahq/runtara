@@ -62,6 +62,11 @@ path = "tests/invocation_cleanup_test.rs"
 required-features = ["db-integration-tests"]
 
 [[test]]
+name = "execution_outbox_test"
+path = "tests/execution_outbox_test.rs"
+required-features = ["db-integration-tests"]
+
+[[test]]
 name = "object_model_connection_e2e"
 path = "tests/object_model_connection_e2e.rs"
 required-features = ["db-integration-tests"]

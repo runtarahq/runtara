@@ -488,6 +488,7 @@ async fn session_loop(
             inputs,
             debug: false,
             correlation_id: None,
+            idempotency_key: None,
             trigger_source: TriggerSource::Webhook,
             instance_id: deterministic_instance_id,
         })
@@ -773,6 +774,7 @@ async fn session_loop(
                                 inputs,
                                 debug: false,
                                 correlation_id: None,
+                                idempotency_key: None,
                                 trigger_source: TriggerSource::Webhook,
                                 instance_id: None,
                             }).await {

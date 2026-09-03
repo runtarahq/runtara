@@ -19,7 +19,6 @@ use tracing::{debug, error};
 use utoipa::ToSchema;
 
 use crate::api::handlers::common::execution_error_response;
-use crate::api::repositories::trigger_stream::TriggerStreamPublisher;
 use crate::runtime_client::RuntimeClient;
 use crate::workers::execution_engine::{ExecutionEngine, QueueRequest, TriggerSource};
 
@@ -159,7 +158,6 @@ pub(crate) enum ChatEvent {
 pub async fn chat_handler(
     org_id: crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
-    State(trigger_stream): State<Option<Arc<TriggerStreamPublisher>>>,
     State(runtime_client): State<Option<Arc<RuntimeClient>>>,
     State(engine): State<Arc<ExecutionEngine>>,
     Path(workflow_id): Path<String>,
@@ -178,7 +176,6 @@ pub async fn chat_handler(
     start_chat_stream(
         org_id,
         pool,
-        trigger_stream,
         runtime_client,
         engine,
         ChatStreamParams {
@@ -213,7 +210,6 @@ pub async fn chat_handler(
 pub async fn chat_start_handler(
     org_id: crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
-    State(trigger_stream): State<Option<Arc<TriggerStreamPublisher>>>,
     State(runtime_client): State<Option<Arc<RuntimeClient>>>,
     State(engine): State<Arc<ExecutionEngine>>,
     Path(workflow_id): Path<String>,
@@ -234,7 +230,6 @@ pub async fn chat_start_handler(
     start_chat_stream(
         org_id,
         pool,
-        trigger_stream,
         runtime_client,
         engine,
         ChatStreamParams {
@@ -259,7 +254,6 @@ struct ChatStreamParams {
 async fn start_chat_stream(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     pool: PgPool,
-    trigger_stream: Option<Arc<TriggerStreamPublisher>>,
     runtime_client: Option<Arc<RuntimeClient>>,
     engine: Arc<ExecutionEngine>,
     params: ChatStreamParams,
@@ -271,22 +265,15 @@ async fn start_chat_stream(
         )
     })?;
 
-    let trigger_stream = trigger_stream.ok_or_else(|| {
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"success": false, "message": "Trigger stream not configured"})),
-        )
-    })?;
-
     let inputs = json!({
         "data": params.data,
         "variables": params.variables,
     });
 
-    // Queue execution via the shared engine. `pool` and `trigger_stream`
-    // states are retained as configuration probes (presence validated above).
+    // Queue execution via the shared engine. Valkey delivery is intentionally
+    // not a precondition: the durable outbox owns retry while the relay is
+    // unavailable.
     let _ = pool;
-    let _ = trigger_stream;
     let result = engine
         .queue(QueueRequest {
             tenant_id: &tenant_id,
@@ -295,6 +282,7 @@ async fn start_chat_stream(
             inputs,
             debug: false,
             correlation_id: None,
+            idempotency_key: None,
             trigger_source: TriggerSource::Chat,
             instance_id: None,
         })
