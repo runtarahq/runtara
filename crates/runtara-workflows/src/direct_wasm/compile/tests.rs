@@ -887,6 +887,11 @@ fn direct_compile_emits_finish_only_artifact_without_rust_crate() {
     );
     assert_eq!(metadata.workflow_id, "simple/workflow");
     assert_eq!(metadata.workflow_version, 7);
+    assert_eq!(
+        metadata.direct_abi_version,
+        crate::direct_wasm::compile::DIRECT_WORKFLOW_INVOKE_ABI_VERSION
+    );
+    assert_eq!(metadata.entry_abi, "invoke");
     assert_eq!(metadata.source_checksum.as_deref(), Some("source-sha256"));
     assert_eq!(
         metadata.template_major_version,
@@ -10697,21 +10702,19 @@ fn runtime_binding_env_lever_defaults_host_import() {
 }
 
 #[test]
-fn workflow_abi_env_lever_defaults_invoke() {
-    use crate::direct_wasm::component::WorkflowAbi;
-    // Phase-5 default: the invoke export; only the literal "cli-run" reverts.
-    assert_eq!(
-        super::workflow_abi_from_raw(None),
-        WorkflowAbi::InvokeHostImports
+fn legacy_workflow_abi_env_setting_is_rejected() {
+    assert!(super::ensure_supported_production_workflow_abi_raw(None).is_ok());
+    assert!(super::ensure_supported_production_workflow_abi_raw(Some("")).is_ok());
+    assert!(super::ensure_supported_production_workflow_abi_raw(Some("invoke")).is_ok());
+
+    let error = super::ensure_supported_production_workflow_abi_raw(Some("cli-run"))
+        .expect_err("legacy workflow ABI must not be selectable in production");
+    assert!(
+        error.to_string().contains("unsupported"),
+        "unexpected error: {error}"
     );
-    assert_eq!(
-        super::workflow_abi_from_raw(Some("cli-run")),
-        WorkflowAbi::CliRunHttp
-    );
-    assert_eq!(
-        super::workflow_abi_from_raw(Some("invoke")),
-        WorkflowAbi::InvokeHostImports
-    );
+
+    assert!(super::ensure_supported_production_workflow_abi_raw(Some("other")).is_err());
 }
 
 #[test]
@@ -10855,7 +10858,7 @@ fn abi_is_part_of_the_lowering_tag() {
 
     let tag = super::direct_lowering_tag();
     assert!(
-        tag.contains("abi="),
+        tag.contains("abi=invoke-v2"),
         "the tag must name the ABI, or changing it cannot invalidate a cached image: {tag}"
     );
 }

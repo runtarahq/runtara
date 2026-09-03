@@ -86,6 +86,9 @@ tracing = "0.1"
 serde = { workspace = true }
 serde_json = { workspace = true }
 http = "1"
+# Fast, non-instantiating inspection of a workflow component's top-level
+# export shape before an Environment launch takes a runner permit.
+wasmparser = "0.247"
 # Already a transitive dep via wasmtime-wasi; declared for the workflow
 # executor's select!/sleep/spawn_blocking and the component-cache mutex.
 tokio = { version = "1", features = ["macros", "rt", "time", "sync"] }
@@ -93,6 +96,8 @@ tokio = { version = "1", features = ["macros", "rt", "time", "sync"] }
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 tempfile = "3"
+# Serialize small component-text fixtures to binary for lifecycle ABI tests.
+wat = "1"
 # Tests author minimal components in WAT; the `wat` feature lets
 # `Component::from_file` parse text-format components.
 wasmtime = { version = "46", default-features = false, features = ["wat"] }

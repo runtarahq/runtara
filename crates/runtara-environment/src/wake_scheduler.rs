@@ -26,7 +26,7 @@ use crate::container_registry::{ContainerInfo, ContainerRegistry};
 use crate::db;
 use crate::execution_timeout::ExecutionTimeoutPolicy;
 use crate::handlers::{DrainController, spawn_container_monitor};
-use crate::image_registry::ImageRegistry;
+use crate::image_registry::{ImageRegistry, require_current_workflow_entrypoint};
 use crate::runner::{LaunchOptions, Runner};
 
 /// Wake scheduler configuration.
@@ -472,6 +472,26 @@ impl WakeScheduler {
             .get(&image_id)
             .await?
             .ok_or_else(|| crate::error::Error::ImageNotFound(image_id.clone()))?;
+
+        if let Err(error) = require_current_workflow_entrypoint(&image).await {
+            let message = error.to_string();
+            warn!(
+                instance_id = %instance.instance_id,
+                image_id = %image_id,
+                error = %message,
+                "Failing wake for workflow image without lifecycle.invoke"
+            );
+            self.persistence
+                .complete_instance(
+                    runtara_core::persistence::CompleteInstanceParams::new(
+                        &instance.instance_id,
+                        "failed",
+                    )
+                    .with_error(&message),
+                )
+                .await?;
+            return Ok(());
+        }
 
         let wasm_path = std::path::PathBuf::from(&image.binary_path);
 

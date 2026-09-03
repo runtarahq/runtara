@@ -117,7 +117,7 @@ pub const DIRECT_WORKFLOW_SUPPORT_SECTION: &str = "runtara.direct_workflow.suppo
 /// Custom section containing direct artifact ABI metadata JSON.
 pub const DIRECT_WORKFLOW_ABI_SECTION: &str = "runtara.direct_workflow.abi";
 /// Version for `artifact-metadata.json` emitted beside direct artifacts.
-pub const DIRECT_WORKFLOW_ARTIFACT_METADATA_VERSION: u32 = 2;
+pub const DIRECT_WORKFLOW_ARTIFACT_METADATA_VERSION: u32 = 3;
 /// Sidecar filename containing direct artifact dependency/provenance metadata.
 pub const DIRECT_WORKFLOW_ARTIFACT_METADATA_FILENAME: &str = "artifact-metadata.json";
 
@@ -889,7 +889,7 @@ const DIRECT_COMPILE_STACK_SIZE: usize = 256 * 1024 * 1024;
 /// Accepts exactly the graphs passed by [`super::support::analyze_direct_wasm_support`];
 /// anything else is a hard [`DirectCompileError::Unsupported`] carrying the
 /// per-feature report. The emitted component-format artifact is a stable
-/// direct pipeline artifact with a canonical `wasi:cli/run` export, stdlib
+/// direct pipeline artifact with a canonical `lifecycle.invoke` export, stdlib
 /// JSON calls, and runtime completion calls.
 ///
 /// Runs on a dedicated thread with an explicit [`DIRECT_COMPILE_STACK_SIZE`]
@@ -898,7 +898,12 @@ const DIRECT_COMPILE_STACK_SIZE: usize = 256 * 1024 * 1024;
 pub fn compile_direct_workflow(
     input: DirectCompilationInput,
 ) -> Result<DirectCompilationResult, DirectCompileError> {
-    compile_direct_workflow_with_abi(input, workflow_abi_from_env(), omit_runtime_from_env())
+    ensure_supported_production_workflow_abi()?;
+    compile_direct_workflow_with_abi(
+        input,
+        super::component::WorkflowAbi::InvokeHostImports,
+        omit_runtime_from_env(),
+    )
 }
 
 /// A stable tag for the lowering options the direct compiler is currently
@@ -927,8 +932,9 @@ pub fn direct_lowering_tag() -> String {
     // their run permits until the execution timeout, and recompiling reported
     // success without rebuilding anything.
     format!(
-        "abi={},omit_runtime={}",
-        workflow_abi_tag(workflow_abi_from_env()),
+        "abi={}-v{},omit_runtime={}",
+        workflow_abi_tag(super::component::WorkflowAbi::InvokeHostImports),
+        DIRECT_WORKFLOW_INVOKE_ABI_VERSION,
         omit_runtime_from_env()
     )
 }
@@ -962,38 +968,41 @@ fn omit_runtime_from_raw(raw: Option<&str>) -> bool {
     matches!(raw, Some("1") | Some("true"))
 }
 
-/// Export shape for production compiles, from `RUNTARA_DIRECT_WORKFLOW_ABI` —
-/// the rollback lever mirroring `RUNTARA_DIRECT_RUNTIME_BINDING`.
+/// Reject the removed direct-workflow ABI switch.
 ///
-/// Default (unset or anything else): the invoke export. `cli-run` reverts new
-/// compiles to the legacy `wasi:cli/run` shape, which the runner executes
-/// fully — set it on the server and recompile for a same-day escape hatch.
-fn workflow_abi_from_env() -> super::component::WorkflowAbi {
-    workflow_abi_from_raw(std::env::var("RUNTARA_DIRECT_WORKFLOW_ABI").ok().as_deref())
-}
-
-fn workflow_abi_from_raw(raw: Option<&str>) -> super::component::WorkflowAbi {
-    match raw {
-        Some("cli-run") => super::component::WorkflowAbi::CliRunHttp,
-        Some("invoke") | None => super::component::WorkflowAbi::default(),
-        // Unknown values are LOUD, not a silent default: a typo'd lever on an
-        // older binary silently compiling the wrong ABI shape is exactly the
-        // failure mode this lever is meant to protect against.
-        Some(other) => {
-            tracing::warn!(
-                value = other,
-                "unknown RUNTARA_DIRECT_WORKFLOW_ABI value; using the default invoke ABI \
-                 (known values: unset|invoke, cli-run)"
-            );
-            super::component::WorkflowAbi::default()
-        }
+/// `wasi:cli/run` cannot return a durable suspend outcome, so a workflow
+/// waiting for a human signal retained its runner slot. It is not a safe
+/// rollback mode: production direct workflows are always emitted with
+/// `lifecycle.invoke`. Explicit ABI construction remains available for compiler
+/// differential tests and artifact migration tooling, but an environment must
+/// never silently select the legacy shape for a production compile.
+fn ensure_supported_production_workflow_abi() -> Result<(), DirectCompileError> {
+    match std::env::var("RUNTARA_DIRECT_WORKFLOW_ABI") {
+        Err(std::env::VarError::NotPresent) => ensure_supported_production_workflow_abi_raw(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(DirectCompileError::Component(
+            "RUNTARA_DIRECT_WORKFLOW_ABI is not valid Unicode; direct workflows must use lifecycle.invoke".to_string(),
+        )),
+        Ok(value) => ensure_supported_production_workflow_abi_raw(Some(&value)),
     }
 }
 
-/// [`compile_direct_workflow`] with an explicit [`super::component::WorkflowAbi`]
-/// — the flag-gated invoke-export path (Phase 3 of the agent/workflow
-/// unification). The default entry keeps the legacy
-/// `wasi:cli/run` shape untouched.
+fn ensure_supported_production_workflow_abi_raw(
+    raw: Option<&str>,
+) -> Result<(), DirectCompileError> {
+    match raw {
+        None | Some("") | Some("invoke") => Ok(()),
+        Some(value) => Err(DirectCompileError::Component(format!(
+            "RUNTARA_DIRECT_WORKFLOW_ABI={value:?} is unsupported: direct workflows must use lifecycle.invoke; rebuild or republish legacy artifacts"
+        ))),
+    }
+}
+
+/// [`compile_direct_workflow`] with an explicit [`super::component::WorkflowAbi`].
+///
+/// Production callers use [`compile_direct_workflow`], which always emits the
+/// lifecycle invoke ABI. This lower-level entry remains for compiler
+/// differential tests and artifact migration tooling, including the retired
+/// `wasi:cli/run` reference shape.
 pub fn compile_direct_workflow_with_abi(
     input: DirectCompilationInput,
     abi: super::component::WorkflowAbi,
@@ -1160,6 +1169,8 @@ fn compile_direct_workflow_inner(
         support_report_checksum: &support_report_checksum,
         workflow_logic_checksum: &wasm_checksum,
         workflow_logic_size: wasm.len(),
+        direct_abi_version: workflow_abi_version(abi),
+        entry_abi: workflow_abi_tag(abi),
         component_artifacts: &component_artifacts,
         child_workflows: &child_workflow_metadata,
     });
@@ -1194,6 +1205,14 @@ fn compile_direct_workflow_inner(
         omit_runtime,
         parallel_pools,
     })
+}
+
+fn workflow_abi_version(abi: super::component::WorkflowAbi) -> u32 {
+    match abi {
+        super::component::WorkflowAbi::CliRunHttp => DIRECT_WORKFLOW_ABI_VERSION,
+        super::component::WorkflowAbi::InvokeHostImports
+        | super::component::WorkflowAbi::AgentCapabilities => DIRECT_WORKFLOW_INVOKE_ABI_VERSION,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -231,6 +231,7 @@ fn workflow_image_metadata(
     });
 
     if let Some(direct_artifact) = direct_artifact {
+        workflow["directWasm"]["entryAbi"] = serde_json::json!(direct_artifact.entry_abi);
         workflow["directArtifact"] = serde_json::to_value(direct_artifact)
             .expect("direct artifact metadata should serialize");
     }
@@ -1215,6 +1216,21 @@ impl CompilationService {
         // Every compile produces a components-mode `workflow.wasm`, so the
         // runner type is always `Wasm` now.
         let direct_artifact = direct_artifact_metadata_for_image(compilation_result).await;
+        let artifact_path = binary_path.clone();
+        tokio::task::spawn_blocking(move || {
+            runtara_component_host::lifecycle::require_lifecycle_invoke_file(&artifact_path)
+        })
+        .await
+        .map_err(|error| {
+            ServiceError::RegistrationError(format!(
+                "workflow ABI inspection task panicked: {error}"
+            ))
+        })?
+        .map_err(|error| {
+            ServiceError::RegistrationError(format!(
+                "compiled workflow is not launchable: {error:#}"
+            ))
+        })?;
         let options =
             RegisterImageStreamOptions::new(registration.tenant_id, image_name, binary_size)
                 .with_description(format!(
@@ -1608,7 +1624,12 @@ mod tests {
                 runtara_workflows::direct_wasm::DIRECT_WORKFLOW_ARTIFACT_METADATA_VERSION
             )
         );
-        assert_eq!(direct_artifact["directAbiVersion"], 1);
+        assert_eq!(
+            direct_artifact["directAbiVersion"],
+            runtara_workflows::direct_wasm::compile::DIRECT_WORKFLOW_INVOKE_ABI_VERSION
+        );
+        assert_eq!(direct_artifact["entryAbi"], "invoke");
+        assert_eq!(metadata["workflow"]["directWasm"]["entryAbi"], "invoke");
         assert_eq!(
             direct_artifact["manifestVersion"],
             serde_json::json!(runtara_workflows::direct_wasm::DIRECT_WORKFLOW_MANIFEST_VERSION)
@@ -1690,7 +1711,9 @@ mod tests {
             workflow_id: "workflow-a".to_string(),
             workflow_version: 7,
             source_checksum: Some("source-sha256".to_string()),
-            direct_abi_version: 1,
+            direct_abi_version:
+                runtara_workflows::direct_wasm::compile::DIRECT_WORKFLOW_INVOKE_ABI_VERSION,
+            entry_abi: "invoke".to_string(),
             manifest_version: runtara_workflows::direct_wasm::DIRECT_WORKFLOW_MANIFEST_VERSION,
             template_major_version: runtara_workflows::TEMPLATE_MAJOR_VERSION.to_string(),
             manifest_checksum: "manifest-sha256".to_string(),

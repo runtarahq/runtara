@@ -21,7 +21,7 @@ use super::super::component::{
 };
 use super::super::error::DirectCompileError;
 use super::super::manifest::DIRECT_WORKFLOW_MANIFEST_VERSION;
-use super::{DIRECT_WORKFLOW_ABI_VERSION, DIRECT_WORKFLOW_ARTIFACT_METADATA_VERSION, sha256_hex};
+use super::{DIRECT_WORKFLOW_ARTIFACT_METADATA_VERSION, sha256_hex};
 use runtara_dsl::agent_meta::capability_tags;
 
 /// Metadata sidecar for direct workflow artifacts.
@@ -41,6 +41,10 @@ pub struct DirectArtifactMetadata {
     pub source_checksum: Option<String>,
     /// Direct artifact ABI version.
     pub direct_abi_version: u32,
+    /// Top-level execution export ABI (`invoke`, `agent`, or the retired
+    /// `cli-run` test/migration shape). Image registration records this for
+    /// operator inventory, but execution always verifies the actual export.
+    pub entry_abi: String,
     /// Direct workflow manifest schema version.
     pub manifest_version: u32,
     /// Major version of the workflow compiler/template.
@@ -149,6 +153,8 @@ pub(super) struct InitialArtifactMetadataInput<'a> {
     pub(super) support_report_checksum: &'a str,
     pub(super) workflow_logic_checksum: &'a str,
     pub(super) workflow_logic_size: usize,
+    pub(super) direct_abi_version: u32,
+    pub(super) entry_abi: &'a str,
     pub(super) component_artifacts: &'a DirectComponentArtifacts,
     pub(super) child_workflows: &'a [DirectChildWorkflowDependencyMetadata],
 }
@@ -162,7 +168,8 @@ pub(super) fn initial_artifact_metadata(
         workflow_id: input.workflow_id.to_string(),
         workflow_version: input.workflow_version,
         source_checksum: input.source_checksum.map(str::to_string),
-        direct_abi_version: DIRECT_WORKFLOW_ABI_VERSION,
+        direct_abi_version: input.direct_abi_version,
+        entry_abi: input.entry_abi.to_string(),
         manifest_version: DIRECT_WORKFLOW_MANIFEST_VERSION,
         template_major_version: crate::compile::TEMPLATE_MAJOR_VERSION.to_string(),
         manifest_checksum: input.manifest_checksum.to_string(),

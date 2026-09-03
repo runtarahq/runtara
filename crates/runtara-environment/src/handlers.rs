@@ -19,7 +19,7 @@ use crate::container_registry::{ContainerInfo, ContainerRegistry};
 use crate::db;
 use crate::error::Result;
 use crate::execution_timeout::ExecutionTimeoutPolicy;
-use crate::image_registry::{ImageBuilder, ImageRegistry};
+use crate::image_registry::{ImageBuilder, ImageRegistry, require_current_workflow_entrypoint};
 use crate::runner::{LaunchOptions, Runner, RunnerHandle};
 
 /// Shared drain state for the environment runtime.
@@ -561,6 +561,23 @@ pub async fn handle_start_instance(
         });
     }
 
+    // A compiled workflow must prove its current lifecycle ABI before we
+    // create a pending instance. This keeps a retired `wasi:cli/run` artifact
+    // from ever taking a runner permit or consuming admission while it waits.
+    if let Err(error) = require_current_workflow_entrypoint(&image).await {
+        warn!(
+            image_id = %request.image_id,
+            error = %error,
+            "Refusing workflow image without lifecycle.invoke"
+        );
+        return Ok(StartInstanceResponse {
+            success: false,
+            instance_id: String::new(),
+            deduplicated: false,
+            error: Some(error.to_string()),
+        });
+    }
+
     // Parse input for runner
     let input = request.input.unwrap_or(serde_json::json!({}));
 
@@ -941,6 +958,26 @@ pub async fn handle_resume_instance(
     // Honor the bounded timeout persisted at first launch. Old corrupt rows
     // fail closed rather than narrowing a signed database value into an
     // effectively unbounded Duration on resume.
+    if let Err(error) = require_current_workflow_entrypoint(&image).await {
+        let message = error.to_string();
+        warn!(
+            instance_id = %request.instance_id,
+            image_id = %image_id,
+            error = %message,
+            "Refusing resume of workflow image without lifecycle.invoke"
+        );
+        let _ = state
+            .persistence
+            .complete_instance(
+                CompleteInstanceParams::new(&request.instance_id, "failed").with_error(&message),
+            )
+            .await;
+        return Ok(ResumeInstanceResponse {
+            success: false,
+            error: Some(message),
+        });
+    }
+
     let stored_timeout =
         db::get_instance_timeout_seconds(&state.pool, &request.instance_id).await?;
     let timeout = match state

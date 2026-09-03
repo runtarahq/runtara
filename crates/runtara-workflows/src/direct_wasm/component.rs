@@ -64,9 +64,10 @@ pub enum RuntimeBinding {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum WorkflowAbi {
     /// Legacy: export `wasi:cli/run`, lifecycle over the runtime interface.
-    /// Retained for already-compiled artifacts (the runner dispatches by
-    /// artifact shape) and as the `RUNTARA_DIRECT_WORKFLOW_ABI=cli-run`
-    /// rollback lever.
+    /// Retained only for compiler differential tests and artifact migration
+    /// tooling. Production direct compilation and generated-workflow image
+    /// registration reject this shape because it cannot return a durable
+    /// suspension outcome.
     CliRunHttp,
     /// Unified: export `lifecycle.invoke`, input/result at the call boundary.
     /// The production default since Phase 5 of the agent/workflow

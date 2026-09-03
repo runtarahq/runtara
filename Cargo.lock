@@ -4726,9 +4726,11 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+ "wasmparser 0.247.0",
  "wasmtime",
  "wasmtime-wasi",
  "wasmtime-wasi-http",
+ "wat",
 ]
 
 [[package]]
