@@ -16,6 +16,8 @@
 # Usage:
 #   ./scripts/build-bundle.sh                   # build for the current host
 #   ./scripts/build-bundle.sh --skip-build      # assemble from existing target/release
+#   ./scripts/build-bundle.sh --skip-frontend   # frontend/dist already built elsewhere
+#   ./scripts/build-bundle.sh --skip-components # wasm32-wasip2 components built elsewhere
 #   ./scripts/build-bundle.sh --output-dir /tmp # write bundle to custom dir
 #
 # Prerequisites (BUILD-time only — used to build the agent/shared components):
@@ -32,6 +34,12 @@ cd "$ROOT_DIR"
 # ─── Defaults ────────────────────────────────────────────────────────────────
 
 SKIP_BUILD=0
+# Granular skips, so CI can build the frontend and the (architecture-independent)
+# WASM components in jobs that run alongside the server build instead of after it.
+# Each still runs the same existence check --skip-build does, so a missing input
+# fails loudly here rather than producing a bundle with a hole in it.
+SKIP_FRONTEND=0
+SKIP_COMPONENTS=0
 OUTPUT_DIR="${ROOT_DIR}/target/bundle"
 DOWNLOAD_CACHE="${HOME}/.cache/runtara-bundle-build"
 
@@ -40,6 +48,8 @@ DOWNLOAD_CACHE="${HOME}/.cache/runtara-bundle-build"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --skip-build)      SKIP_BUILD=1; shift ;;
+        --skip-frontend)   SKIP_FRONTEND=1; shift ;;
+        --skip-components) SKIP_COMPONENTS=1; shift ;;
         --output-dir)      OUTPUT_DIR="$2"; shift 2 ;;
         --output-dir=*)    OUTPUT_DIR="${1#*=}"; shift ;;
         --version)         RUNTARA_VERSION_OVERRIDE="$2"; shift 2 ;;
@@ -115,13 +125,13 @@ build_frontend() {
     local frontend_dir="${ROOT_DIR}/crates/runtara-server/frontend"
     local dist_index="${frontend_dir}/dist/index.html"
 
-    if [ "$SKIP_BUILD" = "1" ]; then
+    if [ "$SKIP_BUILD" = "1" ] || [ "$SKIP_FRONTEND" = "1" ]; then
         if [ ! -f "$dist_index" ]; then
             echo "Error: --skip-build but ${dist_index} not found" >&2
             echo "Run (cd ${frontend_dir} && npm ci && npm run build) first." >&2
             exit 1
         fi
-        info "Skipping frontend build (--skip-build), using existing ${dist_index}"
+        info "Skipping frontend build, using existing ${dist_index}"
         return
     fi
 
@@ -159,7 +169,7 @@ build_server() {
 # wit_bindgen::generate! macro) — no cargo-component needed.
 
 build_agent_components() {
-    if [ "$SKIP_BUILD" = "1" ]; then
+    if [ "$SKIP_BUILD" = "1" ] || [ "$SKIP_COMPONENTS" = "1" ]; then
         if ! find "${TARGET_DIR}/wasm32-wasip2/release" -maxdepth 1 \
                 -name 'runtara_agent_*.wasm' 2>/dev/null | grep -q .; then
             echo "Error: --skip-build but no built agent components found at \
@@ -172,7 +182,7 @@ ${TARGET_DIR}/wasm32-wasip2/release/runtara_agent_*.wasm" >&2
 ${TARGET_DIR}/wasm32-wasip2/release/runtara_workflow_*.wasm" >&2
             exit 1
         fi
-        info "Skipping agent component build (--skip-build)"
+        info "Skipping agent component build, using existing components"
         return
     fi
 
