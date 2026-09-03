@@ -197,7 +197,9 @@ describe('PipelineStageRow', () => {
 
     expect(screen.getByText('1 child reaping')).toBeInTheDocument();
     expect(
-      screen.getByTestId('pipeline-reaping-precompile-children-precompileChildren')
+      screen.getByTestId(
+        'pipeline-reaping-precompile-children-precompileChildren'
+      )
     ).toBeInTheDocument();
   });
 
