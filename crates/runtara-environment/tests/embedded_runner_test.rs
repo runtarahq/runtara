@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use runtara_core::persistence::{CompleteInstanceParams, Persistence, PostgresPersistence};
 use runtara_environment::runner::{
-    EmbeddedWasmRunner, LaunchOptions, Runner, RunnerError, WorkflowRunnerConfig,
+    EmbeddedWasmRunner, LaunchOptions, Runner, RunnerError, StartGate, WorkflowRunnerConfig,
 };
 use uuid::Uuid;
 
@@ -122,6 +122,7 @@ fn options(instance_id: &str, wasm_path: &Path) -> LaunchOptions {
         checkpoint_id: None,
         env: HashMap::new(),
         prepersisted_input: None,
+        start_gate: None,
     }
 }
 
@@ -231,6 +232,36 @@ async fn stop_cancels_spinning_instance() {
     .await
     .expect("cancel did not end the spinning guest");
     assert!(!h.runner.is_running(&handle).await);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn detached_gate_blocks_component_loading_until_ownership_is_ready() {
+    let h = harness().await;
+    let inst_id = unique("inst-gated");
+    // The runner validates that a file exists before it reserves capacity, but
+    // parsing this intentionally invalid artifact must happen only after the
+    // gate opens. If guest preparation slipped before the gate, the task would
+    // exit during the first assertion below.
+    let invalid = h.dir.path().join("invalid.wasm");
+    std::fs::write(&invalid, b"not a wasm component").expect("write invalid artifact");
+    let gate = StartGate::new(Duration::from_secs(1));
+    let mut launch = options(inst_id.as_str(), &invalid);
+    launch.start_gate = Some(gate.clone());
+
+    let handle = h.runner.launch_detached(&launch).await.expect("launch");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        h.runner.is_running(&handle).await,
+        "the closed gate must prevent component preparation from ending the task"
+    );
+
+    assert!(gate.open());
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        h.runner.wait_for_exit(&handle, Duration::from_millis(50)),
+    )
+    .await
+    .expect("invalid artifact should be observed only after gate opening");
 }
 
 #[tokio::test(flavor = "multi_thread")]

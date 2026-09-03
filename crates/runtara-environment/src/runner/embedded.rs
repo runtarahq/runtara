@@ -39,7 +39,7 @@ use runtara_core::persistence::Persistence;
 use super::common::{self, WorkflowRunnerConfig};
 use super::traits::{
     CancelToken, ContainerMetrics, LaunchOptions, LaunchResult, Result, Runner, RunnerError,
-    RunnerHandle, RunnerOccupancy,
+    RunnerHandle, RunnerOccupancy, StartGateOutcome,
 };
 
 /// Mark a run `running`, clearing what a previous stop left behind.
@@ -966,11 +966,50 @@ impl Runner for EmbeddedWasmRunner {
         // path, with the bytes it has just written. A wake or resume leaves it
         // None and still reads the stored envelope below.
         let prepersisted_input = options.prepersisted_input.clone();
+        let start_gate = options.start_gate.clone();
+        // Durable dispatchers promote the matching Core instance in the same
+        // transaction that changes their queue row to `running`, before they
+        // open `start_gate`. Direct callers retain the historical runner-side
+        // promotion below.
+        let supervisor_owns_lifecycle = start_gate.is_some();
         // The run slot was already claimed without waiting before any per-run
         // allocation. It moves into the task so every completion/error/panic
         // returns capacity and retires its occupancy timestamp together.
         tokio::spawn(async move {
             let _run_slot = run_slot;
+            if let Some(gate) = start_gate {
+                match gate.wait().await {
+                    StartGateOutcome::Opened => {}
+                    StartGateOutcome::Cancelled | StartGateOutcome::TimedOut => {
+                        info!(
+                            instance_id = %instance_id,
+                            launch_id = %launch_id,
+                            "Detached launch gate closed before guest execution"
+                        );
+                        task_for_run.finished.store(true, Ordering::SeqCst);
+                        remove_task_if_current(&registry, &launch_id, &task_for_run);
+                        task_for_run.done.notify_waiters();
+                        return;
+                    }
+                }
+            }
+            // A stop can win in the small interval after the dispatcher has
+            // durably promoted this generation but before it opens the gate.
+            // `Runner::stop` cannot hold the supervisor's in-memory gate, so
+            // re-check the task-local cancellation fence here. This keeps a
+            // cancelled handoff from loading (let alone invoking) guest code
+            // if the supervisor subsequently opens its gate.
+            if task_for_run.cancel.load(Ordering::SeqCst) {
+                info!(
+                    instance_id = %instance_id,
+                    launch_id = %launch_id,
+                    "Detached launch was cancelled before guest execution"
+                );
+                task_for_run.finished.store(true, Ordering::SeqCst);
+                remove_task_if_current(&registry, &launch_id, &task_for_run);
+                task_for_run.done.notify_waiters();
+                return;
+            }
             match executor.load_instance_pre(&wasm_path).await {
                 Ok(instance_pre) => {
                     if runtara_component_host::lifecycle::exports_lifecycle_invoke(
@@ -1007,7 +1046,9 @@ impl Runner for EmbeddedWasmRunner {
                         // `suspended` would have its `if_running`-guarded
                         // terminal event silently dropped. Set it here so BOTH
                         // paths run as `running` before the guest starts.
-                        mark_running(persistence.as_ref(), &instance_id).await;
+                        if !supervisor_owns_lifecycle {
+                            mark_running(persistence.as_ref(), &instance_id).await;
+                        }
                         let run = executor.execute_invoke(&instance_pre, spec, input).await;
                         {
                             let mut guard = metrics_for_task.lock().await;
@@ -1057,7 +1098,9 @@ impl Runner for EmbeddedWasmRunner {
                                 // `if_running` guard. Doing it on both branches
                                 // is what lets the launching caller stop
                                 // stamping it a second time after the fact.
-                                mark_running(persistence.as_ref(), &instance_id).await;
+                                if !supervisor_owns_lifecycle {
+                                    mark_running(persistence.as_ref(), &instance_id).await;
+                                }
                                 let run = executor.execute(&pre, spec).await;
                                 {
                                     let mut guard = metrics_for_task.lock().await;

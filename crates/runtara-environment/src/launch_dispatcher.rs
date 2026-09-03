@@ -12,6 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use chrono::Utc;
 use runtara_core::persistence::{CompleteInstanceParams, Persistence};
 use sqlx::PgPool;
 use tokio::sync::{Notify, RwLock};
@@ -25,7 +26,7 @@ use crate::image_registry::{Image, ImageRegistry, require_current_workflow_entry
 use crate::launch_queue::{
     LAUNCH_QUEUE_TIMEOUT, Launch, LaunchKind, LaunchRepository, RUNNER_CAPACITY_UNAVAILABLE,
 };
-use crate::runner::{LaunchOptions, Runner, RunnerError};
+use crate::runner::{LaunchOptions, Runner, RunnerError, StartGate};
 
 /// Maximum time a newly accepted launch may remain unhanded to a runner.
 ///
@@ -300,7 +301,7 @@ impl LaunchDispatcher {
             return Ok(());
         }
 
-        let options = match self.options_for(&launch).await {
+        let mut options = match self.options_for(&launch).await {
             Ok(options) => options,
             Err(message) => {
                 self.fail_before_runner(&launch, &message).await?;
@@ -316,6 +317,12 @@ impl LaunchDispatcher {
             debug!(launch_id = %launch.launch_id, "Launch was cancelled or expired before runner handoff");
             return Ok(());
         };
+        // Align the in-process gate with the durable database lease rather
+        // than starting a fresh timeout here. If this dispatcher pauses or
+        // dies, recovery can reclaim `starting` at the same instant the old
+        // runner is forced to abandon its unopened task.
+        let gate = StartGate::new(self.start_gate_remaining(&starting));
+        options.start_gate = Some(gate.clone());
 
         match self.runner.try_launch_detached(&options).await {
             Ok(handle) => {
@@ -333,49 +340,84 @@ impl LaunchDispatcher {
                     ),
                 };
                 if let Err(error) = registry.register(&container).await {
-                    warn!(
+                    error!(
                         launch_id = %launch.launch_id,
                         error = %error,
-                        "Runner accepted a launch but container registry registration failed"
+                        "Refusing unopened runner handoff after container registry registration failed"
                     );
-                }
-
-                if repository
-                    .mark_running(&launch.launch_id, &self.owner)
-                    .await?
-                    .is_none()
-                {
-                    // The generation can only reach this branch if its lease
-                    // expired while the runner was being installed. Stop it
-                    // rather than leaving an untracked guest; the monitor still
-                    // owns the resulting terminal transition.
-                    warn!(
-                        launch_id = %launch.launch_id,
-                        "Launch lease elapsed before running transition; stopping handed-off runner"
-                    );
-                    if let Err(error) = self.runner.stop(&handle).await {
-                        warn!(launch_id = %launch.launch_id, error = %error, "Failed to stop expired launch handoff");
-                    }
-                    if let Err(error) = registry
-                        .cleanup_generation(&handle.instance_id, &handle.launch_id)
-                        .await
-                    {
-                        warn!(launch_id = %launch.launch_id, error = %error, "Failed to remove registry row for expired launch handoff");
-                    }
-                    self.fail_handed_off_after_lease(&launch).await?;
+                    self.stop_unopened_handoff(&registry, &handle, &gate).await;
+                    self.fail_before_runner(
+                        &launch,
+                        "container registry registration failed before start gate",
+                    )
+                    .await?;
                     return Ok(());
                 }
 
+                match repository
+                    .mark_running(&launch.launch_id, &self.owner)
+                    .await
+                {
+                    Ok(Some(_running)) => {}
+                    Ok(None) => {
+                        // A cancellation, deadline, or recovery won before
+                        // this owner could atomically promote Core. The gate is
+                        // still closed, so no guest work needs to be rolled
+                        // back.
+                        warn!(
+                            launch_id = %launch.launch_id,
+                            "Start-gated handoff lost durable ownership before Core promotion"
+                        );
+                        self.stop_unopened_handoff(&registry, &handle, &gate).await;
+                        return Ok(());
+                    }
+                    Err(error) => {
+                        error!(
+                            launch_id = %launch.launch_id,
+                            error = %error,
+                            "Could not atomically promote start-gated handoff"
+                        );
+                        self.stop_unopened_handoff(&registry, &handle, &gate).await;
+                        if let Err(cleanup_error) = self
+                            .fail_before_runner(
+                                &launch,
+                                "could not atomically promote start-gated handoff",
+                            )
+                            .await
+                        {
+                            warn!(
+                                launch_id = %launch.launch_id,
+                                error = %cleanup_error,
+                                "Could not terminalize failed unopened handoff; lease recovery will retry"
+                            );
+                        }
+                        return Ok(());
+                    }
+                }
+
+                // Spawn the generation-owned watchdog before opening the
+                // gate. The monitor itself waits for this same gate, so its
+                // active execution timeout starts with the guest rather than
+                // consuming time while the durable handoff is in flight.
                 spawn_container_monitor(
                     self.pool.clone(),
                     self.runner.clone(),
-                    handle,
+                    handle.clone(),
                     self.persistence.clone(),
                     options.timeout,
                     self.drain.clone(),
                     self.lifecycle_observers.clone(),
+                    Some(gate.clone()),
                 );
-                let _ = starting;
+                if !gate.open() {
+                    // The durable lease elapsed while the monitor was being
+                    // armed. Core is already `running`, but the gate proves no
+                    // guest got that far; fail and release this exact
+                    // generation rather than leaving a fake running slot.
+                    self.stop_unopened_handoff(&registry, &handle, &gate).await;
+                    self.fail_after_start_gate(&launch, "start gate closed before guest execution")
+                        .await?;
+                }
             }
             Err(RunnerError::CapacityUnavailable) => {
                 let _ = repository
@@ -413,15 +455,45 @@ impl LaunchDispatcher {
         Ok(())
     }
 
-    /// Terminalize a handoff whose short ownership lease elapsed after the
-    /// runner accepted it but before the queue could record `running`.
+    /// Return the remaining durable handoff ownership as a gate timeout.
     ///
-    /// This is a containment path for the old two-step handoff. P0.4 replaces
-    /// it with a generation-owned start gate, but merely stopping the guest
-    /// here would otherwise leave either a `starting` row or a Core `pending`
-    /// row stranded indefinitely.
-    async fn fail_handed_off_after_lease(&self, launch: &Launch) -> anyhow::Result<()> {
-        let message = "launch lease elapsed before running transition";
+    /// A small safety margin makes the runner close first when the process and
+    /// PostgreSQL clocks are near the same deadline; recovery can then safely
+    /// reclaim `starting` without overlapping guest work.
+    fn start_gate_remaining(&self, starting: &Launch) -> Duration {
+        let Some(lease_expires_at) = starting.lease_expires_at else {
+            return Duration::ZERO;
+        };
+        lease_expires_at
+            .signed_duration_since(Utc::now())
+            .to_std()
+            .unwrap_or(Duration::ZERO)
+            .saturating_sub(Duration::from_millis(100))
+    }
+
+    /// Cancel/stop an accepted but still-closed handoff and remove only its
+    /// generation-scoped registry row.
+    async fn stop_unopened_handoff(
+        &self,
+        registry: &ContainerRegistry,
+        handle: &crate::runner::RunnerHandle,
+        gate: &StartGate,
+    ) {
+        gate.cancel();
+        if let Err(error) = self.runner.stop(handle).await {
+            warn!(launch_id = %handle.launch_id, error = %error, "Failed to stop unopened launch handoff");
+        }
+        if let Err(error) = registry
+            .cleanup_generation(&handle.instance_id, &handle.launch_id)
+            .await
+        {
+            warn!(launch_id = %handle.launch_id, error = %error, "Failed to remove registry row for unopened launch handoff");
+        }
+    }
+
+    /// Terminalize a handoff after Core and the queue have been atomically
+    /// promoted but before the gate allowed guest code to execute.
+    async fn fail_after_start_gate(&self, launch: &Launch, message: &str) -> anyhow::Result<()> {
         let repository = LaunchRepository::new(self.pool.clone());
         let applied = self
             .persistence
@@ -432,27 +504,27 @@ impl LaunchDispatcher {
             )
             .await
             .unwrap_or_else(|error| {
-                warn!(launch_id = %launch.launch_id, error = %error, "Could not fail expired running handoff in Core");
+                warn!(launch_id = %launch.launch_id, error = %error, "Could not fail unopened running handoff in Core");
                 false
             });
-        let terminal = if applied {
-            repository
-                .mark_terminal(
-                    &launch.launch_id,
-                    crate::launch_queue::LaunchState::Failed,
-                    Some(message),
-                )
-                .await?
-        } else {
-            repository
-                .fail_before_runner(&launch.launch_id, &self.owner, message)
-                .await?
-        };
+        if !applied {
+            // A concurrent stop or monitor may have terminalized Core first.
+            // It owns the matching queue release; do not overwrite that
+            // outcome simply because this gate lost its race.
+            return Ok(());
+        }
+        let terminal = repository
+            .mark_terminal(
+                &launch.launch_id,
+                crate::launch_queue::LaunchState::Failed,
+                Some(message),
+            )
+            .await?;
         if let Some(failed) = terminal {
             self.lifecycle_observers
                 .notify_released(&failed, "launch_failed");
         } else {
-            warn!(launch_id = %launch.launch_id, "Expired handoff could not be terminalized; generation supervisor must reconcile it");
+            warn!(launch_id = %launch.launch_id, "Unopened running handoff could not be terminalized; generation supervisor must reconcile it");
         }
         Ok(())
     }
@@ -522,6 +594,7 @@ impl LaunchDispatcher {
             // The queue is durable; even a first start reads its authoritative
             // committed envelope rather than retaining request memory.
             prepersisted_input: None,
+            start_gate: None,
         })
     }
 

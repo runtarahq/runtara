@@ -671,11 +671,13 @@ impl LaunchRepository {
         )
     }
 
-    /// Requeue bounded leases whose dispatcher died before it started them.
+    /// Requeue bounded handoffs whose dispatcher died before it opened the
+    /// generation's start gate.
     ///
-    /// Only `leased` rows are recoverable here.  Once a dispatcher marks a row
-    /// `starting`, the generation is past the point where blindly retrying it
-    /// is safe; its generation-owned supervisor will decide its recovery.
+    /// `starting` is now recoverable as well as `leased`, but only when the
+    /// durable start-gate marker says this version created it. That rollout
+    /// fence prevents a new binary from reclaiming an older version's
+    /// `starting` row, whose guest may already be executing.
     pub async fn recover_expired_leases(
         &self,
         limit: usize,
@@ -689,7 +691,10 @@ impl LaunchRepository {
             r#"
             SELECT {LAUNCH_COLUMNS}
             FROM instance_launches
-            WHERE state = 'leased'
+            WHERE (
+                    state = 'leased'
+                    OR (state = 'starting' AND start_gate_deadline_at IS NOT NULL)
+                )
               AND lease_expires_at <= NOW()
               AND deadline_at > NOW()
             ORDER BY lease_expires_at, created_at, launch_id
@@ -714,9 +719,13 @@ impl LaunchRepository {
                 available_at = NOW(),
                 lease_owner = NULL,
                 lease_expires_at = NULL,
+                start_gate_deadline_at = NULL,
                 updated_at = NOW()
             WHERE launch_id = ANY($1)
-              AND state = 'leased'
+              AND (
+                    state = 'leased'
+                    OR (state = 'starting' AND start_gate_deadline_at IS NOT NULL)
+                )
             RETURNING {LAUNCH_COLUMNS}
             "#
         );
@@ -742,7 +751,12 @@ impl LaunchRepository {
         let query = format!(
             r#"
             UPDATE instance_launches
-            SET state = 'starting', updated_at = NOW()
+            SET state = 'starting',
+                -- This durable marker is the rollout fence for recovery:
+                -- only a start that was created behind a gate can be safely
+                -- reclaimed while it remains in `starting`.
+                start_gate_deadline_at = lease_expires_at,
+                updated_at = NOW()
             WHERE launch_id = $1
               AND state = 'leased'
               AND lease_owner = $2
@@ -760,18 +774,26 @@ impl LaunchRepository {
             .transpose()
     }
 
-    /// Record that a generation passed the start gate and now owns a runner.
+    /// Atomically promote a generation and its Core instance through the
+    /// start gate.
+    ///
+    /// The dispatcher calls this only after the runner has accepted a closed
+    /// gate and after it has durably registered that generation. Updating the
+    /// queue row and Core lifecycle row in one transaction means no guest can
+    /// observe execution while either side still says `pending`/`suspended`.
     pub async fn mark_running(
         &self,
         launch_id: &str,
         lease_owner: &str,
     ) -> Result<Option<Launch>, LaunchQueueError> {
+        let mut tx = self.pool.begin().await?;
         let query = format!(
             r#"
             UPDATE instance_launches
             SET state = 'running',
                 lease_owner = NULL,
                 lease_expires_at = NULL,
+                start_gate_deadline_at = NULL,
                 updated_at = NOW()
             WHERE launch_id = $1
               AND state = 'starting'
@@ -781,13 +803,54 @@ impl LaunchRepository {
             RETURNING {LAUNCH_COLUMNS}
             "#
         );
-        sqlx::query_as::<_, LaunchRow>(&query)
+        let running = sqlx::query_as::<_, LaunchRow>(&query)
             .bind(launch_id)
             .bind(lease_owner)
-            .fetch_optional(&self.pool)
-            .await?
-            .map(Launch::try_from)
-            .transpose()
+            .fetch_optional(&mut *tx)
+            .await?;
+        let Some(running) = running else {
+            tx.commit().await?;
+            return Ok(None);
+        };
+
+        let expected_status = match running.kind.as_str() {
+            "start" => "pending",
+            "resume" | "wake" => "suspended",
+            // `LaunchRow` is decoded by `LaunchKind` below, but preserve a
+            // closed error path if the database ever contains a new spelling.
+            _ => {
+                return Err(LaunchQueueError::UnknownStoredValue {
+                    field: "kind",
+                    value: running.kind,
+                });
+            }
+        };
+        let promoted = sqlx::query(
+            r#"
+            UPDATE instances
+            SET status = 'running',
+                started_at = COALESCE(started_at, NOW()),
+                finished_at = NULL,
+                sleep_until = NULL,
+                termination_reason = NULL
+            WHERE instance_id = $1
+              AND tenant_id = $2
+              AND status = $3::instance_status
+            "#,
+        )
+        .bind(&running.instance_id)
+        .bind(&running.tenant_id)
+        .bind(expected_status)
+        .execute(&mut *tx)
+        .await?;
+        if promoted.rows_affected() != 1 {
+            return Err(LaunchQueueError::InstanceNoLongerPreStart {
+                launch_id: running.launch_id,
+            });
+        }
+
+        tx.commit().await?;
+        Ok(Some(running.try_into()?))
     }
 
     /// Return a dispatcher-owned pre-run launch to the ready queue.
@@ -811,6 +874,7 @@ impl LaunchRepository {
                 available_at = NOW() + ($3 * INTERVAL '1 microsecond'),
                 lease_owner = NULL,
                 lease_expires_at = NULL,
+                start_gate_deadline_at = NULL,
                 last_error = $4,
                 updated_at = NOW()
             WHERE launch_id = $1
@@ -850,6 +914,7 @@ impl LaunchRepository {
             SET state = 'failed',
                 lease_owner = NULL,
                 lease_expires_at = NULL,
+                start_gate_deadline_at = NULL,
                 last_error = $3,
                 updated_at = NOW()
             WHERE launch_id = $1
@@ -910,6 +975,7 @@ impl LaunchRepository {
             SET state = 'suspended',
                 lease_owner = NULL,
                 lease_expires_at = NULL,
+                start_gate_deadline_at = NULL,
                 updated_at = NOW()
             WHERE launch_id = $1
               AND state IN ('starting', 'running')
@@ -967,6 +1033,7 @@ impl LaunchRepository {
             SET state = $2,
                 lease_owner = NULL,
                 lease_expires_at = NULL,
+                start_gate_deadline_at = NULL,
                 last_error = $3,
                 updated_at = NOW()
             WHERE launch_id = $1
@@ -1000,7 +1067,10 @@ impl LaunchRepository {
             r#"
             SELECT {LAUNCH_COLUMNS}
             FROM instance_launches
-            WHERE state IN ('queued', 'leased')
+            WHERE (
+                    state IN ('queued', 'leased')
+                    OR (state = 'starting' AND start_gate_deadline_at IS NOT NULL)
+                )
               AND deadline_at <= NOW()
             ORDER BY deadline_at, created_at, launch_id
             FOR UPDATE SKIP LOCKED
@@ -1024,10 +1094,14 @@ impl LaunchRepository {
             SET state = 'failed',
                 lease_owner = NULL,
                 lease_expires_at = NULL,
+                start_gate_deadline_at = NULL,
                 last_error = $2,
                 updated_at = NOW()
             WHERE launch_id = ANY($1)
-              AND state IN ('queued', 'leased')
+              AND (
+                    state IN ('queued', 'leased')
+                    OR (state = 'starting' AND start_gate_deadline_at IS NOT NULL)
+                )
             RETURNING {LAUNCH_COLUMNS}
             "#
         );
@@ -1069,11 +1143,12 @@ impl LaunchRepository {
         rows_to_launches(expired)
     }
 
-    /// Cancel a queued or leased generation and terminalize its Core instance.
+    /// Cancel a queued, leased, or gate-marked starting generation and
+    /// terminalize its Core instance.
     ///
     /// This conditional transaction is the pre-start cancellation fence: if a
-    /// dispatcher has already changed the row to `starting`, cancellation is
-    /// deliberately reported as [`CancelOutcome::TooLate`] so normal
+    /// dispatcher has already opened the start gate (`running`), cancellation
+    /// is deliberately reported as [`CancelOutcome::TooLate`] so normal
     /// generation-specific runner cancellation owns the outcome instead.
     pub async fn cancel_before_start(
         &self,
@@ -1086,9 +1161,13 @@ impl LaunchRepository {
             SET state = 'cancelled',
                 lease_owner = NULL,
                 lease_expires_at = NULL,
+                start_gate_deadline_at = NULL,
                 updated_at = NOW()
             WHERE launch_id = $1
-              AND state IN ('queued', 'leased')
+              AND (
+                    state IN ('queued', 'leased')
+                    OR (state = 'starting' AND start_gate_deadline_at IS NOT NULL)
+                )
             RETURNING {LAUNCH_COLUMNS}
             "#
         );

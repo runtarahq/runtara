@@ -7,10 +7,11 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use thiserror::Error;
+use tokio::sync::watch;
 
 /// Errors from runner operations.
 #[derive(Debug, Error)]
@@ -68,6 +69,158 @@ pub enum RunnerError {
 /// Result type for runner operations.
 pub type Result<T> = std::result::Result<T, RunnerError>;
 
+/// Result of waiting for a supervisor-owned launch gate.
+///
+/// A detached runner may reserve a bounded run slot before its owner has
+/// finished installing durable ownership.  It must not execute guest code in
+/// that interval: the gate makes the handoff explicit, and its deadline makes
+/// a process loss during handoff self-releasing rather than a leaked permit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartGateOutcome {
+    /// The supervisor installed ownership and explicitly allowed guest work.
+    Opened,
+    /// The supervisor rejected the handoff before guest work began.
+    Cancelled,
+    /// No owner opened the gate before its absolute handoff deadline.
+    TimedOut,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartGateState {
+    Pending,
+    Opened,
+    Cancelled,
+}
+
+/// A one-way gate between a generation supervisor and a detached runner task.
+///
+/// The gate starts closed. Only one of [`Self::open`], [`Self::cancel`], or the
+/// absolute deadline may win; once it has a terminal outcome it cannot be
+/// reopened. The state sits behind a mutex so an expiry racing the supervisor
+/// cannot overwrite a successful open (or vice versa), while a watch channel
+/// makes the runner's wait cancel-safe without polling.
+#[derive(Clone)]
+pub struct StartGate {
+    state: Arc<Mutex<StartGateState>>,
+    updates: watch::Sender<StartGateState>,
+    deadline: tokio::time::Instant,
+}
+
+impl std::fmt::Debug for StartGate {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("StartGate")
+            .field("state", &self.state())
+            .field("deadline", &self.deadline)
+            .finish()
+    }
+}
+
+impl StartGate {
+    /// Build a closed gate whose owner must decide before `handoff_timeout`.
+    pub fn new(handoff_timeout: Duration) -> Self {
+        Self::until(tokio::time::Instant::now() + handoff_timeout)
+    }
+
+    /// Build a closed gate with an explicit monotonic deadline.
+    pub fn until(deadline: tokio::time::Instant) -> Self {
+        let (updates, _) = watch::channel(StartGateState::Pending);
+        Self {
+            state: Arc::new(Mutex::new(StartGateState::Pending)),
+            updates,
+            deadline,
+        }
+    }
+
+    /// The absolute monotonic deadline at which a still-closed gate expires.
+    pub fn deadline(&self) -> tokio::time::Instant {
+        self.deadline
+    }
+
+    /// Allow guest execution exactly once.
+    ///
+    /// Returns `false` when cancellation or timeout already won the handoff.
+    pub fn open(&self) -> bool {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if *state != StartGateState::Pending {
+            return false;
+        }
+        // `wait()` may not have polled precisely at the deadline yet. Do not
+        // let a delayed supervisor turn that scheduling gap into a late guest
+        // start after durable lease recovery became legal.
+        if tokio::time::Instant::now() >= self.deadline {
+            *state = StartGateState::Cancelled;
+            self.updates.send_replace(StartGateState::Cancelled);
+            return false;
+        }
+        *state = StartGateState::Opened;
+        self.updates.send_replace(StartGateState::Opened);
+        true
+    }
+
+    /// Prevent guest execution exactly once.
+    ///
+    /// Returns `false` when the gate is already open or cancelled.
+    pub fn cancel(&self) -> bool {
+        self.transition(StartGateState::Cancelled)
+    }
+
+    /// Wait until the owner opens or cancels the gate, or its deadline passes.
+    ///
+    /// If expiry wins it atomically cancels the gate before returning, so a
+    /// delayed supervisor cannot later start the old generation.
+    pub async fn wait(&self) -> StartGateOutcome {
+        let mut updates = self.updates.subscribe();
+        loop {
+            match *updates.borrow_and_update() {
+                StartGateState::Opened => return StartGateOutcome::Opened,
+                StartGateState::Cancelled => return StartGateOutcome::Cancelled,
+                StartGateState::Pending => {}
+            }
+
+            tokio::select! {
+                changed = updates.changed() => {
+                    // The sender belongs to the gate itself, so a closed
+                    // channel can only happen while all gate owners are being
+                    // dropped. Treat it as a cancellation rather than letting
+                    // a runner retain a permit indefinitely.
+                    if changed.is_err() {
+                        return StartGateOutcome::Cancelled;
+                    }
+                }
+                _ = tokio::time::sleep_until(self.deadline) => {
+                    if self.cancel() {
+                        return StartGateOutcome::TimedOut;
+                    }
+                }
+            }
+        }
+    }
+
+    fn state(&self) -> StartGateState {
+        *self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn transition(&self, next: StartGateState) -> bool {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if *state != StartGateState::Pending {
+            return false;
+        }
+        *state = next;
+        self.updates.send_replace(next);
+        true
+    }
+}
+
 /// Options for launching an instance.
 #[derive(Debug, Clone)]
 pub struct LaunchOptions {
@@ -100,6 +253,10 @@ pub struct LaunchOptions {
     /// what a woken workflow sees. Only the first-start path may set this, and
     /// only once `store_instance_input` has actually succeeded.
     pub prepersisted_input: Option<Vec<u8>>,
+    /// Optional supervisor gate that must open before the detached task loads
+    /// or invokes the guest. Direct/legacy callers leave this unset; durable
+    /// dispatchers always provide one.
+    pub start_gate: Option<StartGate>,
 }
 
 /// Handle for a launched instance (detached execution).
@@ -263,5 +420,39 @@ pub trait Runner: Send + Sync {
         while self.is_running(handle).await {
             tokio::time::sleep(poll_interval).await;
         }
+    }
+}
+
+#[cfg(test)]
+mod start_gate_tests {
+    use super::{StartGate, StartGateOutcome};
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn gate_opens_exactly_once() {
+        let gate = StartGate::new(Duration::from_secs(1));
+        let waiter = gate.clone();
+        let waiting = tokio::spawn(async move { waiter.wait().await });
+
+        assert!(gate.open());
+        assert!(!gate.open(), "a gate may not be opened twice");
+        assert!(!gate.cancel(), "an opened gate may not be cancelled later");
+        assert_eq!(
+            waiting.await.expect("gate waiter must not panic"),
+            StartGateOutcome::Opened
+        );
+    }
+
+    #[tokio::test]
+    async fn deadline_closes_a_gate_before_a_late_owner_can_open_it() {
+        let gate = StartGate::new(Duration::from_millis(10));
+        let outcome = tokio::time::timeout(Duration::from_secs(1), gate.wait())
+            .await
+            .expect("gate deadline must wake its waiter");
+        assert_eq!(outcome, StartGateOutcome::TimedOut);
+        assert!(
+            !gate.open(),
+            "an owner delayed beyond the durable handoff deadline must not start a guest"
+        );
     }
 }

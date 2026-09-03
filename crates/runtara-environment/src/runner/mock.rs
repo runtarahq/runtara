@@ -21,6 +21,9 @@ struct MockInstance {
     #[allow(dead_code)]
     handle: RunnerHandle,
     running: Arc<AtomicBool>,
+    /// Set by an explicit stop or test-side terminal result. A launch held at
+    /// a start gate must not become runnable later after one of those won.
+    stopped: Arc<AtomicBool>,
     output: Option<Value>,
     error: Option<String>,
 }
@@ -108,6 +111,7 @@ impl MockRunner {
             .find(|instance| instance.handle.instance_id == instance_id)
         {
             instance.running.store(false, Ordering::SeqCst);
+            instance.stopped.store(true, Ordering::SeqCst);
             instance.output = Some(output);
         }
     }
@@ -120,6 +124,7 @@ impl MockRunner {
             .find(|instance| instance.handle.instance_id == instance_id)
         {
             instance.running.store(false, Ordering::SeqCst);
+            instance.stopped.store(true, Ordering::SeqCst);
             instance.error = Some(error.to_string());
         }
     }
@@ -193,7 +198,13 @@ impl Runner for MockRunner {
             metrics: None,
         };
 
-        let running = Arc::new(AtomicBool::new(true));
+        // A gated handoff has reserved a mock runner slot but has not begun
+        // guest work. This mirrors the embedded runner closely enough for the
+        // durable dispatcher tests to prove that Core is promoted before a
+        // guest can observe execution.
+        let start_gate = options.start_gate.clone();
+        let running = Arc::new(AtomicBool::new(start_gate.is_none()));
+        let stopped = Arc::new(AtomicBool::new(false));
 
         // Store mock instance
         {
@@ -203,27 +214,43 @@ impl Runner for MockRunner {
                 MockInstance {
                     handle: handle.clone(),
                     running: running.clone(),
+                    stopped: stopped.clone(),
                     output: None,
                     error: None,
                 },
             );
         }
 
-        // Simulate async completion (unless never_complete is set)
-        if !self.never_complete {
-            let instances = self.instances.clone();
-            let launch_id = options.launch_id.clone();
-            let input = options.input.clone();
-            let fail = self.fail_by_default;
-            let delay = self.execution_delay_ms;
+        // Simulate gate release and async completion. Even a never-completing
+        // mock needs this task so a closed/cancelled gate releases its modeled
+        // runner slot instead of leaving a false positive in test telemetry.
+        let instances = self.instances.clone();
+        let launch_id = options.launch_id.clone();
+        let input = options.input.clone();
+        let fail = self.fail_by_default;
+        let delay = self.execution_delay_ms;
+        let never_complete = self.never_complete;
+        tokio::spawn(async move {
+            if let Some(gate) = start_gate
+                && gate.wait().await != StartGateOutcome::Opened
+            {
+                return;
+            }
+            if stopped.load(Ordering::SeqCst) {
+                return;
+            }
+            running.store(true, Ordering::SeqCst);
 
-            tokio::spawn(async move {
+            if !never_complete {
                 if delay > 0 {
                     tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
                 }
 
                 let mut instances = instances.lock().await;
                 if let Some(instance) = instances.get_mut(&launch_id) {
+                    if instance.stopped.load(Ordering::SeqCst) {
+                        return;
+                    }
                     instance.running.store(false, Ordering::SeqCst);
                     if fail {
                         instance.error = Some("Mock failure".to_string());
@@ -234,8 +261,8 @@ impl Runner for MockRunner {
                         }));
                     }
                 }
-            });
-        }
+            }
+        });
 
         Ok(handle)
     }
@@ -259,6 +286,7 @@ impl Runner for MockRunner {
         let mut instances = self.instances.lock().await;
         if let Some(instance) = instances.get_mut(&handle.launch_id) {
             instance.running.store(false, Ordering::SeqCst);
+            instance.stopped.store(true, Ordering::SeqCst);
             instance.error = Some("Stopped".to_string());
         }
         Ok(())
@@ -301,6 +329,7 @@ mod tests {
             checkpoint_id: None,
             env: std::collections::HashMap::new(),
             prepersisted_input: None,
+            start_gate: None,
         }
     }
 
@@ -422,5 +451,29 @@ mod tests {
         // Only stops when explicitly stopped
         runner.stop(&handle).await.unwrap();
         assert!(!runner.is_running(&handle).await);
+    }
+
+    #[tokio::test]
+    async fn detached_gate_holds_mock_guest_until_supervisor_opens_it() {
+        let runner = MockRunner::never_completing();
+        let gate = StartGate::new(std::time::Duration::from_secs(1));
+        let mut options = test_options();
+        options.start_gate = Some(gate.clone());
+
+        let handle = runner.launch_detached(&options).await.unwrap();
+        assert!(
+            !runner.is_running(&handle).await,
+            "a reserved launch slot must not look like guest execution before its gate opens"
+        );
+
+        assert!(gate.open());
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while !runner.is_running(&handle).await {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("opened gate must begin the detached mock guest");
+        runner.stop(&handle).await.unwrap();
     }
 }

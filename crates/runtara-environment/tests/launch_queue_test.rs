@@ -188,13 +188,17 @@ async fn launch_is_idempotent_and_parking_releases_the_active_generation() {
             .expect("start transition must succeed")
             .is_some()
     );
-    set_instance_status(&context.pool, &fixture.instance_id, "running").await;
     assert!(
         repository
             .mark_running(&first.launch_id, "dispatcher-a")
             .await
             .expect("running transition must succeed")
             .is_some()
+    );
+    assert_eq!(
+        instance_result(&context.pool, &fixture.instance_id).await.0,
+        "running",
+        "the start gate promotion must update Core in the same durable handoff"
     );
     assert!(matches!(
         repository
@@ -231,13 +235,13 @@ async fn launch_is_idempotent_and_parking_releases_the_active_generation() {
 #[tokio::test]
 async fn expired_dispatcher_leases_are_recovered_once_and_reclaimed() {
     let context = TestContext::new().await.expect("test database must start");
-    let fixture = fixture(&context).await;
+    let first_fixture = fixture(&context).await;
     let repository = LaunchRepository::new(context.pool.clone());
     let launch_id = Uuid::new_v4().to_string();
 
     repository
         .enqueue(request(
-            &fixture,
+            &first_fixture,
             &launch_id,
             LaunchKind::Start,
             Duration::from_secs(60),
@@ -281,6 +285,93 @@ async fn expired_dispatcher_leases_are_recovered_once_and_reclaimed() {
             .await
             .expect("a live lease scan must succeed")
             .is_empty()
+    );
+
+    // A `starting` row is still behind its closed in-process gate. Once its
+    // shared handoff lease expires it is safe to reclaim just like a plain
+    // claim; no guest could have crossed into execution under the old owner.
+    assert!(
+        repository
+            .begin_start(&launch_id, "dispatcher-b")
+            .await
+            .expect("starting transition must succeed")
+            .is_some()
+    );
+    sqlx::query(
+        "UPDATE instance_launches SET lease_expires_at = NOW() - INTERVAL '1 second' WHERE launch_id = $1",
+    )
+    .bind(&launch_id)
+    .execute(&context.pool)
+    .await
+    .expect("test start-gate expiry must be writable");
+    let recovered_starting = repository
+        .recover_expired_leases(1)
+        .await
+        .expect("expired gated start must be recoverable");
+    assert_eq!(recovered_starting.len(), 1);
+    assert_eq!(recovered_starting[0].state, LaunchState::Queued);
+    assert_eq!(
+        instance_result(&context.pool, &first_fixture.instance_id)
+            .await
+            .0,
+        "pending",
+        "recovering an unopened gate must not fabricate a Core running state"
+    );
+
+    // Rows made by a pre-gate binary carry no marker. Even if their short
+    // lease is old, a newly deployed dispatcher must leave them to the legacy
+    // recovery/monitor path rather than risk duplicating an already-running
+    // guest during a rolling deployment.
+    let legacy_fixture = fixture(&context).await;
+    let legacy_id = Uuid::new_v4().to_string();
+    repository
+        .enqueue(request(
+            &legacy_fixture,
+            &legacy_id,
+            LaunchKind::Start,
+            Duration::from_secs(60),
+        ))
+        .await
+        .expect("legacy-shaped launch must enqueue");
+    repository
+        .claim_ready("legacy-dispatcher", Duration::from_secs(60), 2)
+        .await
+        .expect("legacy-shaped launch must claim");
+    assert!(
+        repository
+            .begin_start(&legacy_id, "legacy-dispatcher")
+            .await
+            .expect("test setup start must succeed")
+            .is_some()
+    );
+    sqlx::query(
+        r#"
+        UPDATE instance_launches
+        SET lease_expires_at = NOW() - INTERVAL '1 second',
+            start_gate_deadline_at = NULL
+        WHERE launch_id = $1
+        "#,
+    )
+    .bind(&legacy_id)
+    .execute(&context.pool)
+    .await
+    .expect("legacy-shaped marker must be removable for rollout test");
+    assert!(
+        repository
+            .recover_expired_leases(1)
+            .await
+            .expect("rollout-fenced recovery scan must succeed")
+            .is_empty(),
+        "an unmarked pre-gate start must never be reclaimed as safely unopened"
+    );
+    assert_eq!(
+        repository
+            .get(&legacy_id)
+            .await
+            .expect("legacy-shaped launch read must succeed")
+            .expect("legacy-shaped launch must remain")
+            .state,
+        LaunchState::Starting
     );
 
     context.cleanup().await;
@@ -361,6 +452,43 @@ async fn expiry_and_pre_start_cancellation_terminalize_the_matching_instance() {
         CancelOutcome::Cancelled(ref launch)
             if launch.kind == LaunchKind::Wake && launch.state == LaunchState::Cancelled
     ));
+
+    let starting_fixture = fixture(&context).await;
+    let starting_id = Uuid::new_v4().to_string();
+    repository
+        .enqueue(request(
+            &starting_fixture,
+            &starting_id,
+            LaunchKind::Start,
+            Duration::from_secs(60),
+        ))
+        .await
+        .expect("starting launch must enqueue");
+    repository
+        .claim_ready("dispatcher-gated", Duration::from_secs(60), 1)
+        .await
+        .expect("starting launch must claim");
+    assert!(
+        repository
+            .begin_start(&starting_id, "dispatcher-gated")
+            .await
+            .expect("starting transition must succeed")
+            .is_some()
+    );
+    assert!(matches!(
+        repository
+            .cancel_before_start(&starting_id)
+            .await
+            .expect("closed start gate cancellation must succeed"),
+        CancelOutcome::Cancelled(ref launch) if launch.state == LaunchState::Cancelled
+    ));
+    assert_eq!(
+        instance_result(&context.pool, &starting_fixture.instance_id)
+            .await
+            .0,
+        "cancelled",
+        "cancelling a gated start must terminalize its still-pre-start Core row"
+    );
 
     context.cleanup().await;
 }

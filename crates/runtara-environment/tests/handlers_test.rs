@@ -1580,6 +1580,7 @@ async fn test_spawn_container_monitor_timeout_enforcement() {
             checkpoint_id: None,
             env: std::collections::HashMap::new(),
             prepersisted_input: None,
+            start_gate: None,
         })
         .await
         .expect("Failed to launch detached");
@@ -1599,6 +1600,7 @@ async fn test_spawn_container_monitor_timeout_enforcement() {
         Duration::from_millis(100),
         DrainController::new(),
         LaunchLifecycleObservers::default(),
+        None,
     );
 
     // Poll for the terminal status instead of sleeping a fixed budget. The
@@ -1684,6 +1686,7 @@ async fn test_spawn_container_monitor_no_timeout_on_quick_completion() {
             checkpoint_id: None,
             env: std::collections::HashMap::new(),
             prepersisted_input: None,
+            start_gate: None,
         })
         .await
         .expect("Failed to launch detached");
@@ -1697,6 +1700,7 @@ async fn test_spawn_container_monitor_no_timeout_on_quick_completion() {
         Duration::from_secs(10),
         DrainController::new(),
         LaunchLifecycleObservers::default(),
+        None,
     );
 
     // Wait for the container to complete (10ms delay + buffer)
@@ -1773,6 +1777,7 @@ async fn test_spawn_container_monitor_timeout_race_condition() {
             checkpoint_id: None,
             env: std::collections::HashMap::new(),
             prepersisted_input: None,
+            start_gate: None,
         })
         .await
         .expect("Failed to launch detached");
@@ -1786,6 +1791,7 @@ async fn test_spawn_container_monitor_timeout_race_condition() {
         Duration::from_millis(200),
         DrainController::new(),
         LaunchLifecycleObservers::default(),
+        None,
     );
 
     // Simulate Core marking instance as "completed" BEFORE timeout fires
@@ -1973,6 +1979,7 @@ async fn test_wait_for_exit_default_impl_returns_on_not_running() {
             checkpoint_id: None,
             env: std::collections::HashMap::new(),
             prepersisted_input: None,
+            start_gate: None,
         })
         .await
         .expect("Failed to launch detached");

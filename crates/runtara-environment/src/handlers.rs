@@ -25,7 +25,7 @@ use crate::launch_queue::{
     CancelOutcome, EnqueueOutcome, EnqueueRequest, InitialLaunchOutcome, InitialLaunchRequest,
     LaunchKind, LaunchRepository, LaunchState,
 };
-use crate::runner::{Runner, RunnerHandle};
+use crate::runner::{Runner, RunnerHandle, StartGate, StartGateOutcome};
 
 /// Shared drain state for the environment runtime.
 ///
@@ -1081,10 +1081,27 @@ pub fn spawn_container_monitor(
     timeout: Duration,
     drain: DrainController,
     lifecycle_observers: LaunchLifecycleObservers,
+    // A durable dispatcher installs the monitor before it opens this gate.
+    // The active execution timeout begins only once guest execution is
+    // allowed; a closed gate is bounded by its separate handoff lease.
+    start_gate: Option<StartGate>,
 ) {
     let instance_id = handle.instance_id.clone();
 
     tokio::spawn(async move {
+        if let Some(gate) = start_gate {
+            match gate.wait().await {
+                StartGateOutcome::Opened => {}
+                StartGateOutcome::Cancelled | StartGateOutcome::TimedOut => {
+                    debug!(
+                        instance_id = %instance_id,
+                        launch_id = %handle.launch_id,
+                        "Start gate closed before monitor began active execution"
+                    );
+                    return;
+                }
+            }
+        }
         // Brief initial delay to let the process start before we begin watching it.
         tokio::time::sleep(Duration::from_millis(50)).await;
 
