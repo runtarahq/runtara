@@ -332,9 +332,10 @@ pub struct ExecutionEngine {
     pool: PgPool,
     workflow_repo: Arc<WorkflowRepository>,
     runtime_client: Option<Arc<RuntimeClient>>,
-    /// Kept in the constructor while callers migrate; stream publishing is
-    /// owned by [`ExecutionOutbox`] and its relay, never by an intake source.
-    #[allow(dead_code)]
+    /// Stream availability is a prerequisite for synchronous callers: their
+    /// durable request must be relayed to a trigger worker before this API can
+    /// return a result. Publishing itself remains owned by [`ExecutionOutbox`]
+    /// and its relay, never by an intake source.
     trigger_stream: Option<Arc<TriggerStreamPublisher>>,
     /// Durable source request + admission reservation writer.
     outbox: ExecutionOutbox,
@@ -574,64 +575,9 @@ impl ExecutionEngine {
         .inspect_err(|denial| denial.audit_log(tenant_id))
     }
 
-    /// Enforce `maxConcurrentExecutions` at intake. Returns the
-    /// `EntitlementDenial` to surface when the tenant's live active-instance
-    /// count is at/over the effective cap; `Ok(())` otherwise.
-    ///
-    /// Applies whether or not the tenant carries a `maxConcurrentExecutions`
-    /// entitlement: with no tenant cap the infra bound
-    /// (`MAX_CONCURRENT_EXECUTIONS`) is still enforced, which is the only thing
-    /// standing between an untiered deployment and unbounded intake. Fails
-    /// **open** if the count query errors: a transient runtime/count failure
-    /// should not wedge execution.
-    ///
-    /// The count is cached for [`CONCURRENCY_COUNT_TTL`] so a high intake rate
-    /// does not issue two status counts per accepted execution. The cap is a
-    /// backstop against runaway intake, not a precise quota, and the runtime
-    /// count is itself a moment-in-time reading — a sub-second staleness window
-    /// cannot let intake exceed the cap by more than one TTL's worth of work.
-    pub(crate) async fn check_concurrency_gate(
-        &self,
-        tenant_id: &str,
-    ) -> Result<(), crate::entitlement_error::EntitlementDenial> {
-        // Counted here rather than at either call site, so the identity
-        // `offered == accepted + denied` cannot drift as call sites are added.
-        self.gauges.record_offered();
-        // No early return when the tenant has no `maxConcurrentExecutions`:
-        // the infra cap (`MAX_CONCURRENT_EXECUTIONS`, default cores x 32) has
-        // to stand on its own, or an untiered deployment has no admission
-        // control at all — it will accept executions until it runs out of file
-        // descriptors or memory. `concurrent_executions_decision` already
-        // composes the two with `effective_limit`, so passing through with the
-        // entitlement unset simply applies the infra bound.
-        //
-        // Safe against large sleeping populations: `active_execution_count`
-        // counts only Running + Pending, so suspended instances (which are not
-        // terminal, but are also not consuming a slot) never count against the
-        // cap.
-        // Resolve the cap before counting so the count can stop there. The
-        // gate only needs to know whether the cap is reached, and an unbounded
-        // count gets slower exactly as a backlog builds.
-        let decision = self.concurrent_execution_decision(tenant_id).await;
-
-        // Record the admission so the next caller sees it even though the
-        // cached count still cannot.
-        if decision.is_ok() {
-            self.gauges.record_accepted();
-            self.reservations_for(tenant_id)
-                .fetch_add(1, Ordering::SeqCst);
-        } else {
-            // The refusal rate had no counter at all before this: the denial
-            // was returned to the caller and observed nowhere, so the first
-            // question anyone asks about failing intake was unanswerable.
-            self.gauges.record_denied();
-        }
-        decision
-    }
-
-    /// The only asynchronous source admission path. It first returns an
-    /// existing idempotent request, then commits the source reservation and
-    /// outbox record before any relay touches Valkey.
+    /// The only source-admission path. It first returns an existing
+    /// idempotent request, then commits the source reservation and outbox
+    /// record before any relay touches Valkey.
     ///
     /// The returned request ID is carried by the relay in the stream entry and
     /// is the handoff token for P0.1's launch queue. Stream delivery never
@@ -917,15 +863,20 @@ impl ExecutionEngine {
     /// Run a workflow synchronously, returning the full execution output.
     ///
     /// Blocks on compilation via `compilation_worker::wait_for_compilation`
-    /// (max 5 minutes). Then starts an instance and waits for completion
-    /// via `RuntimeClient::execute_sync`. Records metrics (including
-    /// failures) before returning.
+    /// (max 5 minutes). It then enters the same durable outbox/admission path
+    /// as every other HTTP execution and waits for that instance to complete.
+    /// Records metrics (including failures) before returning.
     #[instrument(skip(self, req), fields(tenant_id = %req.tenant_id, workflow_id = %req.workflow_id))]
     pub async fn run_sync(&self, req: SyncRequest<'_>) -> Result<SyncExecution, ExecutionError> {
         let total_start = Instant::now();
         let runtime_client = self.runtime_client.as_ref().ok_or_else(|| {
             ExecutionError::NotConnected("Runtime client not configured".to_string())
         })?;
+        if self.trigger_stream.is_none() {
+            return Err(ExecutionError::NotConnected(
+                "Synchronous execution requires the durable trigger relay".to_string(),
+            ));
+        }
 
         // 1. Resolve + 2. validate + cache workflow for track_events / schema
         let version = self
@@ -948,72 +899,50 @@ impl ExecutionEngine {
                 .map_err(|e| ExecutionError::ValidationError(e.message))?;
 
         // 3. Block on compilation readiness (delegated to compilation worker).
-        // Keep the image ID and tracking mode from this one verified snapshot:
-        // another database read could otherwise pair the mode of one artifact
-        // with the ID of another while a toggle is recompiling.
+        // The durable trigger worker will re-read the ready artifact before it
+        // asks Environment to launch. This wait preserves the synchronous
+        // endpoint's established compile-before-run behavior.
         let ReadyLaunch {
-            image_id,
-            execution_timeout,
-            track_events,
+            execution_timeout, ..
         } = self
             .wait_for_compilation_blocking(req.tenant_id, req.workflow_id, version)
             .await?;
-
-        // 5.5. Per-tenant maxConcurrentExecutions gate (SYN-433 Finding 1).
-        // Same runtime-count gate as the async path — the running instance
-        // this call is about to create counts against the tenant's live
-        // Running + Pending total, and the runtime drops it from that total
-        // the moment it finishes (which for a sync run is when the
-        // `execute_sync` call below returns). No bookkeeping to release.
-        self.check_concurrency_gate(req.tenant_id)
-            .await
-            .map_err(|denial| {
-                crate::product_events::emit_quota_exceeded(
-                    &self.events,
-                    ProductEvent::new(EventType::QuotaExceeded)
-                        .no_user_actor("execution_engine", ActorType::System)
-                        .resource(req.workflow_id, "workflow")
-                        .source(EventSource::Worker),
-                    &denial,
-                );
-                ExecutionError::EntitlementDenied(denial)
-            })?;
-
-        // Product analytics: a synchronous execution is starting. Engine-layer — no user
-        // context — so it's a no-user, `worker`-source event.
-        self.events.emit(
-            ProductEvent::new(EventType::ExecutionStarted)
-                .no_user_actor("execution_engine", ActorType::System)
-                .resource(req.workflow_id, "workflow")
-                .source(EventSource::Worker)
-                .properties(serde_json::json!({ "version": version, "sync": true })),
-        );
 
         let execution_timeout = runtime_client
             .resolve_execution_timeout(execution_timeout)
             .map_err(|error| ExecutionError::ValidationError(error.to_string()))?;
 
-        // 6. Start via the runtime client, then wait for completion. Do not
-        // use RuntimeClient::execute_sync here: its combined return value
-        // hides the accepted start, so a run that later times out would never
-        // reach the pipeline counters despite having actually launched.
-        let execution_result = match runtime_client
-            .start_instance(
-                &image_id,
-                req.tenant_id,
-                req.workflow_id,
-                None, // auto-generate instance id
-                Some(validated_inputs),
-                Some(execution_timeout),
-                false,
-                false,
-            )
+        // `queue` performs the cross-process, transactionally bounded
+        // admission reservation together with the source record and relay
+        // outbox row. Do not call the process-local runtime-count gate here:
+        // it is only a fast prefilter, whereas this durable enqueue is the
+        // authoritative admission decision.
+        let queued = self
+            .queue(QueueRequest {
+                tenant_id: req.tenant_id,
+                workflow_id: req.workflow_id,
+                version: Some(version),
+                inputs: validated_inputs,
+                debug: false,
+                correlation_id: None,
+                idempotency_key: None,
+                trigger_source: TriggerSource::HttpApi,
+                instance_id: Some(Uuid::new_v4()),
+            })
+            .await?;
+        let instance_id = queued.instance_id.to_string();
+
+        // The source row commits before the relay and trigger worker create
+        // the Environment instance. Wait through that handoff first, rather
+        // than treating the expected short-lived `InstanceNotFound` as a
+        // synchronous execution failure.
+        let execution_result = match self
+            .wait_for_queued_sync_start(runtime_client, &instance_id)
             .await
         {
-            Ok(start) => {
-                record_new_runtime_start(&self.gauges, track_events, start.deduplicated);
+            Ok(()) => {
                 runtime_client
-                    .wait_for_completion(&start.instance_id, None, Some(execution_timeout))
+                    .wait_for_completion(&instance_id, None, Some(execution_timeout))
                     .await
             }
             Err(error) => Err(error),
@@ -1044,24 +973,6 @@ impl ExecutionEngine {
                         max_memory_mb,
                     )
                     .await;
-
-                // Product analytics: terminal outcome for this sync execution.
-                self.events.emit(
-                    ProductEvent::new(if result.success {
-                        EventType::ExecutionCompleted
-                    } else {
-                        EventType::ExecutionFailed
-                    })
-                    .no_user_actor("execution_engine", ActorType::System)
-                    .resource(req.workflow_id, "workflow")
-                    .source(EventSource::Worker)
-                    .properties(serde_json::json!({
-                        "version": version,
-                        "duration_ms": result.duration_ms,
-                        "success": result.success,
-                        "error": result.error,
-                    })),
-                );
 
                 info!(
                     tenant_id = req.tenant_id,
@@ -1098,19 +1009,6 @@ impl ExecutionEngine {
                     )
                     .await;
 
-                // Product analytics: the sync run failed to execute.
-                self.events.emit(
-                    ProductEvent::new(EventType::ExecutionFailed)
-                        .no_user_actor("execution_engine", ActorType::System)
-                        .resource(req.workflow_id, "workflow")
-                        .source(EventSource::Worker)
-                        .properties(serde_json::json!({
-                            "version": version,
-                            "error": error_message,
-                            "duration_ms": (total_duration * 1000.0) as u64,
-                        })),
-                );
-
                 info!(
                     tenant_id = req.tenant_id,
                     workflow_id = req.workflow_id,
@@ -1131,6 +1029,36 @@ impl ExecutionEngine {
                         total_duration_seconds: total_duration,
                     },
                 })
+            }
+        }
+    }
+
+    /// Wait for an accepted durable source request to become visible in
+    /// Environment. The source outbox deadline bounds this pre-start phase;
+    /// once visible, [`RuntimeClient::wait_for_completion`] applies the
+    /// workflow's active-execution deadline.
+    async fn wait_for_queued_sync_start(
+        &self,
+        runtime_client: &RuntimeClient,
+        instance_id: &str,
+    ) -> Result<(), RuntimeError> {
+        const POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+        let deadline = self.outbox.policy().request_deadline;
+        let started = Instant::now();
+        loop {
+            match runtime_client.get_instance_status(instance_id).await {
+                Ok(_) => return Ok(()),
+                Err(error) if is_runtime_instance_not_found(&error) => {
+                    if started.elapsed() >= deadline {
+                        return Err(RuntimeError::ExecutionFailed(format!(
+                            "queued synchronous execution did not reach Environment within {} seconds",
+                            deadline.as_secs()
+                        )));
+                    }
+                    tokio::time::sleep(POLL_INTERVAL).await;
+                }
+                Err(error) => return Err(error),
             }
         }
     }
@@ -2639,7 +2567,7 @@ mod tests {
     }
 
     #[test]
-    fn every_runtime_launch_path_records_its_confirmed_start() {
+    fn detached_runtime_launch_records_its_confirmed_start() {
         // A unit test of `record_new_runtime_start` alone cannot catch a
         // perfectly good recorder with no production caller. Keep this guard
         // outside the production source slice so its own assertion cannot
@@ -2656,9 +2584,30 @@ mod tests {
 
         assert_eq!(
             production.matches(call).count(),
-            2,
-            "sync and detached launch paths must each record their confirmed start"
+            1,
+            "only the trigger worker's detached path starts Environment directly"
         );
+
+        let detached_start = production
+            .find("async fn execute_detached_inner")
+            .expect("detached launch path exists");
+        assert!(
+            production[detached_start..].contains(call),
+            "the direct Environment launch must record its confirmed start"
+        );
+    }
+
+    #[test]
+    fn sync_path_uses_durable_admission_before_waiting_for_runtime() {
+        // Synchronous HTTP execution used to call the in-process gate and
+        // `start_instance` directly. That bypassed the transactional source
+        // reservation used by every other intake path. Guard the production
+        // slice so a future refactor cannot quietly reintroduce it.
+        let source = include_str!("execution_engine.rs");
+        let production = source
+            .split("\n#[cfg(test)]")
+            .next()
+            .expect("source has a production section");
 
         let sync_start = production
             .find("pub async fn run_sync")
@@ -2667,13 +2616,26 @@ mod tests {
             .find("async fn execute_detached_inner")
             .expect("detached launch path exists");
         let sync = &production[sync_start..detached_start];
-        let recorded = sync.find(call).expect("sync path records the start");
+        let queued = sync
+            .find(".queue(QueueRequest")
+            .expect("sync path uses the durable queue");
+        let handoff_wait = sync
+            .find("wait_for_queued_sync_start")
+            .expect("sync path waits for its durable handoff");
         let waited = sync
             .find(".wait_for_completion(")
             .expect("sync path waits for completion");
         assert!(
-            recorded < waited,
-            "sync path must record a successful launch before its completion wait"
+            queued < handoff_wait && handoff_wait < waited,
+            "sync path must enqueue durably, wait for the handoff, then wait for completion"
+        );
+        assert!(
+            !sync.contains("self.check_concurrency_gate("),
+            "sync path must not use the process-local admission gate"
+        );
+        assert!(
+            !sync.contains(".start_instance("),
+            "sync path must not bypass the durable trigger handoff"
         );
     }
 
