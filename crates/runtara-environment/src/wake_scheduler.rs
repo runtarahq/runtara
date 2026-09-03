@@ -526,6 +526,7 @@ impl WakeScheduler {
 
         // Build launch options with restored env
         let options = LaunchOptions {
+            launch_id: uuid::Uuid::new_v4().to_string(),
             instance_id: instance.instance_id.clone(),
             tenant_id: instance.tenant_id.clone(),
             wasm_path,
@@ -573,6 +574,7 @@ impl WakeScheduler {
                 let container_registry = ContainerRegistry::new(self.pool.clone());
                 let container_info = ContainerInfo {
                     container_id: handle.handle_id.clone(),
+                    launch_id: handle.launch_id.clone(),
                     instance_id: instance.instance_id.clone(),
                     tenant_id: instance.tenant_id.clone(),
                     binary_path: image.binary_path.clone(),

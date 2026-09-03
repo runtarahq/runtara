@@ -16,6 +16,11 @@ use crate::error::Result;
 pub struct ContainerInfo {
     /// Container/handle ID used with the runner
     pub container_id: String,
+    /// Immutable physical launch generation for this runner handle.
+    ///
+    /// An instance can park and resume under the same durable ID. This value
+    /// is the fence that lets cleanup prove it still owns the observed run.
+    pub launch_id: String,
     /// Execution instance ID (UUID)
     pub instance_id: String,
     /// Tenant ID
@@ -46,17 +51,19 @@ impl ContainerRegistry {
         sqlx::query(
             r#"
             INSERT INTO container_registry (
-                container_id, instance_id, tenant_id, binary_path,
+                container_id, launch_id, instance_id, tenant_id, binary_path,
                 started_at, timeout_seconds
-            ) VALUES ($1, $2, $3, $4, $5, $6)
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7)
             ON CONFLICT (instance_id) DO UPDATE SET
                 container_id = EXCLUDED.container_id,
+                launch_id = EXCLUDED.launch_id,
                 binary_path = EXCLUDED.binary_path,
                 started_at = EXCLUDED.started_at,
                 timeout_seconds = EXCLUDED.timeout_seconds
             "#,
         )
         .bind(&info.container_id)
+        .bind(&info.launch_id)
         .bind(&info.instance_id)
         .bind(&info.tenant_id)
         .bind(&info.binary_path)
@@ -99,27 +106,26 @@ impl ContainerRegistry {
     // ===== Cleanup =====
 
     /// Remove a container only if the registry still holds this exact
-    /// `container_id`, reporting whether it did.
+    /// `launch_id`, reporting whether it did.
     ///
     /// A generation guard. Anything that selected a container and then acts on
     /// it later is racing a wake: the instance can be relaunched in between,
-    /// which writes a fresh row with a new `container_id`. Deleting by instance
+    /// which writes a fresh row with a new `launch_id`. Deleting by instance
     /// alone would throw away the live run's row, so this doubles as an
     /// ownership claim — `false` means a newer run owns the instance and the
     /// caller must leave it alone.
-    pub async fn cleanup_generation(&self, instance_id: &str, container_id: &str) -> Result<bool> {
-        let result = sqlx::query(
-            "DELETE FROM container_registry WHERE instance_id = $1 AND container_id = $2",
-        )
-        .bind(instance_id)
-        .bind(container_id)
-        .execute(&self.pool)
-        .await?;
+    pub async fn cleanup_generation(&self, instance_id: &str, launch_id: &str) -> Result<bool> {
+        let result =
+            sqlx::query("DELETE FROM container_registry WHERE instance_id = $1 AND launch_id = $2")
+                .bind(instance_id)
+                .bind(launch_id)
+                .execute(&self.pool)
+                .await?;
 
         let removed = result.rows_affected() == 1;
         tracing::debug!(
             instance_id = %instance_id,
-            container_id = %container_id,
+            launch_id = %launch_id,
             removed = removed,
             "Generation-guarded container cleanup"
         );

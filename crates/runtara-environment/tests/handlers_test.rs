@@ -990,6 +990,7 @@ async fn test_stop_instance_with_registered_container() {
         runtara_environment::container_registry::ContainerRegistry::new(pool.clone());
     let container_info = runtara_environment::container_registry::ContainerInfo {
         container_id: format!("container-{}", instance_id),
+        launch_id: format!("launch-{instance_id}"),
         instance_id: instance_id.clone(),
         tenant_id: "test-tenant".to_string(),
         binary_path: "/bin/true".to_string(),
@@ -1521,6 +1522,7 @@ async fn test_spawn_container_monitor_timeout_enforcement() {
 
     // Create a handle for the "running" container
     let handle = RunnerHandle {
+        launch_id: format!("launch-{instance_id}"),
         handle_id: format!("mock_{}", &instance_id[..8]),
         instance_id: instance_id.clone(),
         tenant_id: tenant_id.to_string(),
@@ -1531,6 +1533,7 @@ async fn test_spawn_container_monitor_timeout_enforcement() {
     // Register the mock instance in the runner
     runner
         .launch_detached(&LaunchOptions {
+            launch_id: format!("launch-{instance_id}"),
             instance_id: instance_id.clone(),
             tenant_id: tenant_id.to_string(),
             wasm_path: PathBuf::from("/test/workflow.wasm"),
@@ -1633,6 +1636,7 @@ async fn test_spawn_container_monitor_no_timeout_on_quick_completion() {
     // Launch detached (this will auto-complete in 10ms)
     let handle = runner
         .launch_detached(&LaunchOptions {
+            launch_id: format!("launch-{instance_id}"),
             instance_id: instance_id.clone(),
             tenant_id: tenant_id.to_string(),
             wasm_path: PathBuf::from("/test/workflow.wasm"),
@@ -1720,6 +1724,7 @@ async fn test_spawn_container_monitor_timeout_race_condition() {
 
     let handle = runner
         .launch_detached(&LaunchOptions {
+            launch_id: format!("launch-{instance_id}"),
             instance_id: instance_id.clone(),
             tenant_id: tenant_id.to_string(),
             wasm_path: PathBuf::from("/test/workflow.wasm"),
@@ -1823,7 +1828,7 @@ async fn claiming_the_registry_row_is_the_monitors_ownership_check() {
     // Our own row: claimed, and removed by the claim.
     assert!(
         registry
-            .cleanup_generation(&instance_id, "newer-run")
+            .cleanup_generation(&instance_id, "launch-newer-run")
             .await
             .expect("cleanup_generation failed"),
         "the owning monitor must claim its own row"
@@ -1898,6 +1903,7 @@ async fn registering_an_image_invalidates_the_cached_read() {
 fn make_container_info(instance_id: &str, tenant_id: &str, container_id: &str) -> ContainerInfo {
     ContainerInfo {
         container_id: container_id.to_string(),
+        launch_id: format!("launch-{container_id}"),
         instance_id: instance_id.to_string(),
         tenant_id: tenant_id.to_string(),
         binary_path: "/usr/bin/test".to_string(),
@@ -1917,6 +1923,7 @@ async fn test_wait_for_exit_default_impl_returns_on_not_running() {
 
     let handle = runner
         .launch_detached(&LaunchOptions {
+            launch_id: format!("launch-{instance_id}"),
             instance_id: instance_id.clone(),
             tenant_id: tenant_id.to_string(),
             wasm_path: PathBuf::from("/test/workflow.wasm"),
@@ -2001,6 +2008,7 @@ impl Runner for ParksBeforeReturningRunner {
             .await
             .expect("park write must succeed");
         Ok(RunnerHandle {
+            launch_id: options.launch_id.clone(),
             handle_id: format!("handle-{}", options.instance_id),
             instance_id: options.instance_id.clone(),
             tenant_id: options.tenant_id.clone(),

@@ -784,6 +784,7 @@ impl Runner for GatedRunner {
             self.gate.notified().await;
         }
         Ok(runtara_environment::runner::RunnerHandle {
+            launch_id: options.launch_id.clone(),
             handle_id: format!("gated-{}", options.instance_id),
             instance_id: options.instance_id.clone(),
             tenant_id: options.tenant_id.clone(),
@@ -947,6 +948,7 @@ impl Runner for ConcurrencyProbeRunner {
         tokio::time::sleep(Duration::from_millis(120)).await;
         self.in_flight.fetch_sub(1, Ordering::SeqCst);
         Ok(runtara_environment::runner::RunnerHandle {
+            launch_id: options.launch_id.clone(),
             handle_id: format!("probe-{}", options.instance_id),
             instance_id: options.instance_id.clone(),
             tenant_id: options.tenant_id.clone(),

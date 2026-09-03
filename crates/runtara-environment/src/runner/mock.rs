@@ -103,7 +103,10 @@ impl MockRunner {
     /// Mark an instance as completed with output.
     pub async fn complete_instance(&self, instance_id: &str, output: Value) {
         let mut instances = self.instances.lock().await;
-        if let Some(instance) = instances.get_mut(instance_id) {
+        if let Some(instance) = instances
+            .values_mut()
+            .find(|instance| instance.handle.instance_id == instance_id)
+        {
             instance.running.store(false, Ordering::SeqCst);
             instance.output = Some(output);
         }
@@ -112,7 +115,10 @@ impl MockRunner {
     /// Mark an instance as failed with error.
     pub async fn fail_instance(&self, instance_id: &str, error: &str) {
         let mut instances = self.instances.lock().await;
-        if let Some(instance) = instances.get_mut(instance_id) {
+        if let Some(instance) = instances
+            .values_mut()
+            .find(|instance| instance.handle.instance_id == instance_id)
+        {
             instance.running.store(false, Ordering::SeqCst);
             instance.error = Some(error.to_string());
         }
@@ -179,7 +185,8 @@ impl Runner for MockRunner {
             .expect("mock runner launch log poisoned")
             .push(options.clone());
         let handle = RunnerHandle {
-            handle_id: format!("mock_{}", &options.instance_id[..8]),
+            launch_id: options.launch_id.clone(),
+            handle_id: format!("mock_{}", &options.launch_id[..8]),
             instance_id: options.instance_id.clone(),
             tenant_id: options.tenant_id.clone(),
             started_at: Utc::now(),
@@ -192,7 +199,7 @@ impl Runner for MockRunner {
         {
             let mut instances = self.instances.lock().await;
             instances.insert(
-                options.instance_id.clone(),
+                options.launch_id.clone(),
                 MockInstance {
                     handle: handle.clone(),
                     running: running.clone(),
@@ -205,7 +212,7 @@ impl Runner for MockRunner {
         // Simulate async completion (unless never_complete is set)
         if !self.never_complete {
             let instances = self.instances.clone();
-            let instance_id = options.instance_id.clone();
+            let launch_id = options.launch_id.clone();
             let input = options.input.clone();
             let fail = self.fail_by_default;
             let delay = self.execution_delay_ms;
@@ -216,7 +223,7 @@ impl Runner for MockRunner {
                 }
 
                 let mut instances = instances.lock().await;
-                if let Some(instance) = instances.get_mut(&instance_id) {
+                if let Some(instance) = instances.get_mut(&launch_id) {
                     instance.running.store(false, Ordering::SeqCst);
                     if fail {
                         instance.error = Some("Mock failure".to_string());
@@ -236,14 +243,14 @@ impl Runner for MockRunner {
     async fn is_running(&self, handle: &RunnerHandle) -> bool {
         let instances = self.instances.lock().await;
         instances
-            .get(&handle.instance_id)
+            .get(&handle.launch_id)
             .map(|i| i.running.load(Ordering::SeqCst))
             .unwrap_or(false)
     }
 
     async fn stop(&self, handle: &RunnerHandle) -> Result<()> {
         let mut instances = self.instances.lock().await;
-        if let Some(instance) = instances.get_mut(&handle.instance_id) {
+        if let Some(instance) = instances.get_mut(&handle.launch_id) {
             instance.running.store(false, Ordering::SeqCst);
             instance.error = Some("Stopped".to_string());
         }
@@ -255,7 +262,7 @@ impl Runner for MockRunner {
         handle: &RunnerHandle,
     ) -> (Option<Value>, Option<String>, ContainerMetrics) {
         let instances = self.instances.lock().await;
-        if let Some(instance) = instances.get(&handle.instance_id) {
+        if let Some(instance) = instances.get(&handle.launch_id) {
             (
                 instance.output.clone(),
                 instance.error.clone(),
@@ -278,6 +285,7 @@ mod tests {
 
     fn test_options() -> LaunchOptions {
         LaunchOptions {
+            launch_id: "test-launch-123".to_string(),
             instance_id: "test-instance-123".to_string(),
             tenant_id: "test-tenant".to_string(),
             wasm_path: PathBuf::from("/test/workflow.wasm"),
@@ -363,6 +371,28 @@ mod tests {
         runner.stop(&handle).await.unwrap();
 
         assert!(!runner.is_running(&handle).await);
+    }
+
+    #[tokio::test]
+    async fn stale_handle_cannot_stop_a_replacement_launch() {
+        let runner = MockRunner::never_completing();
+        let old = test_options();
+        let mut replacement = old.clone();
+        replacement.launch_id = "test-launch-456".to_string();
+
+        let old_handle = runner.launch_detached(&old).await.unwrap();
+        let replacement_handle = runner.launch_detached(&replacement).await.unwrap();
+
+        runner.stop(&old_handle).await.unwrap();
+
+        assert!(
+            !runner.is_running(&old_handle).await,
+            "the old generation should stop"
+        );
+        assert!(
+            runner.is_running(&replacement_handle).await,
+            "a stale stop must not affect the replacement generation"
+        );
     }
 
     #[tokio::test]

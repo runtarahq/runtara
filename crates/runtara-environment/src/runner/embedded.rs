@@ -63,7 +63,7 @@ async fn mark_running(persistence: &dyn Persistence, instance_id: &str) {
     }
 }
 
-/// Per-instance bookkeeping for detached runs.
+/// Per-launch bookkeeping for detached runs.
 struct InstanceTask {
     cancel: CancelToken,
     finished: AtomicBool,
@@ -71,6 +71,22 @@ struct InstanceTask {
 }
 
 type TaskRegistry = Arc<Mutex<HashMap<String, Arc<InstanceTask>>>>;
+
+/// Remove a detached task only when this generation still owns the registry
+/// entry. A replacement can be installed while an old task is unwinding; an
+/// unconditional remove would make the live replacement invisible to stop and
+/// monitoring paths.
+fn remove_task_if_current(registry: &TaskRegistry, launch_id: &str, task: &Arc<InstanceTask>) {
+    let mut tasks = registry
+        .lock()
+        .expect("embedded runner task registry poisoned");
+    if tasks
+        .get(launch_id)
+        .is_some_and(|current| Arc::ptr_eq(current, task))
+    {
+        tasks.remove(launch_id);
+    }
+}
 
 /// In-process workflow runner backed by an embedded wasmtime engine.
 pub struct EmbeddedWasmRunner {
@@ -112,8 +128,15 @@ pub struct EmbeddedWasmRunner {
     handler_state: Arc<runtara_core::instance_handlers::InstanceHandlerState>,
 }
 
-/// Acquisition times of the run permits currently held, keyed by instance.
-type RunSlotRegistry = Arc<Mutex<HashMap<String, Instant>>>;
+/// A run permit holder, keyed by launch generation.
+#[derive(Clone)]
+struct RunSlotEntry {
+    instance_id: String,
+    taken_at: Instant,
+}
+
+/// Acquisition times of the run permits currently held, keyed by launch.
+type RunSlotRegistry = Arc<Mutex<HashMap<String, RunSlotEntry>>>;
 
 /// A held run permit, tied to the moment it was taken.
 ///
@@ -124,7 +147,7 @@ type RunSlotRegistry = Arc<Mutex<HashMap<String, Instant>>>;
 struct RunSlot {
     /// Dropped with the struct; that release is the whole point of the field.
     _permit: tokio::sync::OwnedSemaphorePermit,
-    instance_id: String,
+    launch_id: String,
     registry: RunSlotRegistry,
     /// Bumped as the permit returns, so the count of finished runs cannot drift
     /// from the count of released permits.
@@ -140,7 +163,7 @@ struct RunSlot {
 fn compute_occupancy(
     limit: usize,
     available: usize,
-    slots: &HashMap<String, Instant>,
+    slots: &HashMap<String, RunSlotEntry>,
     now: Instant,
 ) -> RunnerOccupancy {
     // Deliberately not `slots.len()`. A permit is taken before its acquisition
@@ -148,13 +171,13 @@ fn compute_occupancy(
     // semaphore never does. The map's only job is answering "how old is the
     // oldest", where a momentarily missing entry costs nothing.
     let held = limit.saturating_sub(available);
-    let oldest = slots.iter().min_by_key(|(_, taken)| **taken);
+    let oldest = slots.values().min_by_key(|entry| entry.taken_at);
     RunnerOccupancy {
         limit: limit as u64,
         held: held as u64,
         oldest_held_ms: oldest
-            .map(|(_, taken)| now.saturating_duration_since(*taken).as_millis() as u64),
-        oldest_instance_id: oldest.map(|(id, _)| id.clone()),
+            .map(|entry| now.saturating_duration_since(entry.taken_at).as_millis() as u64),
+        oldest_instance_id: oldest.map(|entry| entry.instance_id.clone()),
         // Filled in by the caller, which owns the lifetime counters; this
         // function is about a single instant's occupancy.
         runs_started: 0,
@@ -172,7 +195,7 @@ impl Drop for RunSlot {
             .registry
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        slots.remove(&self.instance_id);
+        slots.remove(&self.launch_id);
         self.finished.fetch_add(1, Ordering::Relaxed);
     }
 }
@@ -309,11 +332,11 @@ impl EmbeddedWasmRunner {
         })
     }
 
-    fn task_of(&self, instance_id: &str) -> Option<Arc<InstanceTask>> {
+    fn task_of(&self, launch_id: &str) -> Option<Arc<InstanceTask>> {
         self.tasks
             .lock()
             .expect("embedded runner task registry poisoned")
-            .get(instance_id)
+            .get(launch_id)
             .cloned()
     }
 }
@@ -858,12 +881,14 @@ impl Runner for EmbeddedWasmRunner {
             &self.config.data_dir,
             &options.tenant_id,
             &options.instance_id,
+            &options.launch_id,
         )
         .await?;
-        let run_dir = common::run_dir(
+        let run_dir = common::launch_run_dir(
             &self.config.data_dir,
             &options.tenant_id,
             &options.instance_id,
+            &options.launch_id,
         );
         let log_path = run_dir.join("stderr.log");
         let stderr_file = match std::fs::File::create(&log_path) {
@@ -889,7 +914,7 @@ impl Runner for EmbeddedWasmRunner {
         self.tasks
             .lock()
             .expect("embedded runner task registry poisoned")
-            .insert(options.instance_id.clone(), Arc::clone(&task));
+            .insert(options.launch_id.clone(), Arc::clone(&task));
 
         let metrics = Arc::new(tokio::sync::Mutex::new(ContainerMetrics::default()));
 
@@ -904,6 +929,7 @@ impl Runner for EmbeddedWasmRunner {
         let task_for_run = Arc::clone(&task);
         let registry = Arc::clone(&self.tasks);
         let instance_id = options.instance_id.clone();
+        let launch_id = options.launch_id.clone();
         // See `LaunchOptions::prepersisted_input`: set only by the first-start
         // path, with the bytes it has just written. A wake or resume leaves it
         // None and still reads the stored envelope below.
@@ -932,11 +958,17 @@ impl Runner for EmbeddedWasmRunner {
         self.run_slots
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(options.instance_id.clone(), Instant::now());
+            .insert(
+                options.launch_id.clone(),
+                RunSlotEntry {
+                    instance_id: options.instance_id.clone(),
+                    taken_at: Instant::now(),
+                },
+            );
         self.runs_started.fetch_add(1, Ordering::Relaxed);
         let run_slot = RunSlot {
             _permit: permit,
-            instance_id: options.instance_id.clone(),
+            launch_id: options.launch_id.clone(),
             registry: Arc::clone(&self.run_slots),
             finished: Arc::clone(&self.runs_finished),
         };
@@ -1076,10 +1108,7 @@ impl Runner for EmbeddedWasmRunner {
             task_for_run.finished.store(true, Ordering::SeqCst);
             // Self-cleanup keeps the registry leak-free even when the monitor
             // takes the timeout path and never calls collect_result.
-            registry
-                .lock()
-                .expect("embedded runner task registry poisoned")
-                .remove(&instance_id);
+            remove_task_if_current(&registry, &launch_id, &task_for_run);
             task_for_run.done.notify_waiters();
         });
 
@@ -1090,7 +1119,8 @@ impl Runner for EmbeddedWasmRunner {
         );
 
         Ok(RunnerHandle {
-            handle_id: format!("wasm_{}", options.instance_id),
+            launch_id: options.launch_id.clone(),
+            handle_id: format!("wasm_{}", options.launch_id),
             instance_id: options.instance_id.clone(),
             tenant_id: options.tenant_id.clone(),
             started_at: chrono::Utc::now(),
@@ -1099,7 +1129,7 @@ impl Runner for EmbeddedWasmRunner {
     }
 
     async fn is_running(&self, handle: &RunnerHandle) -> bool {
-        match self.task_of(&handle.instance_id) {
+        match self.task_of(&handle.launch_id) {
             Some(task) => !task.finished.load(Ordering::SeqCst),
             None => false,
         }
@@ -1107,7 +1137,7 @@ impl Runner for EmbeddedWasmRunner {
 
     async fn wait_for_exit(&self, handle: &RunnerHandle, poll_interval: Duration) {
         loop {
-            let Some(task) = self.task_of(&handle.instance_id) else {
+            let Some(task) = self.task_of(&handle.launch_id) else {
                 return;
             };
             if task.finished.load(Ordering::SeqCst) {
@@ -1123,8 +1153,8 @@ impl Runner for EmbeddedWasmRunner {
     }
 
     async fn stop(&self, handle: &RunnerHandle) -> Result<()> {
-        if let Some(task) = self.task_of(&handle.instance_id) {
-            info!(instance_id = %handle.instance_id, "Cancelling embedded workflow run");
+        if let Some(task) = self.task_of(&handle.launch_id) {
+            info!(instance_id = %handle.instance_id, launch_id = %handle.launch_id, "Cancelling embedded workflow run");
             task.cancel.store(true, Ordering::SeqCst);
         }
         Ok(())
@@ -1140,6 +1170,7 @@ impl Runner for EmbeddedWasmRunner {
             &self.config.data_dir,
             &handle.tenant_id,
             &handle.instance_id,
+            &handle.launch_id,
         )
         .await;
 
@@ -1155,8 +1186,12 @@ impl Runner for EmbeddedWasmRunner {
 
 #[cfg(test)]
 mod tests {
-    use super::{RunSlot, compute_occupancy};
+    use super::{
+        InstanceTask, RunSlot, RunSlotEntry, TaskRegistry, compute_occupancy,
+        remove_task_if_current,
+    };
     use std::collections::HashMap;
+    use std::sync::atomic::AtomicBool;
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
@@ -1183,7 +1218,13 @@ mod tests {
     fn held_comes_from_the_semaphore_not_the_slot_map() {
         let now = Instant::now();
         let mut slots = HashMap::new();
-        slots.insert("only-one-recorded".to_string(), now);
+        slots.insert(
+            "launch-1".to_string(),
+            RunSlotEntry {
+                instance_id: "only-one-recorded".to_string(),
+                taken_at: now,
+            },
+        );
 
         // Eight permits gone, but only one has been stamped yet.
         let occ = compute_occupancy(8, 0, &slots, now);
@@ -1205,9 +1246,27 @@ mod tests {
     fn age_belongs_to_the_oldest_holder() {
         let now = Instant::now();
         let mut slots = HashMap::new();
-        slots.insert("recent".to_string(), now - Duration::from_secs(2));
-        slots.insert("ancient".to_string(), now - Duration::from_secs(2880));
-        slots.insert("middling".to_string(), now - Duration::from_secs(45));
+        slots.insert(
+            "launch-recent".to_string(),
+            RunSlotEntry {
+                instance_id: "recent".to_string(),
+                taken_at: now - Duration::from_secs(2),
+            },
+        );
+        slots.insert(
+            "launch-ancient".to_string(),
+            RunSlotEntry {
+                instance_id: "ancient".to_string(),
+                taken_at: now - Duration::from_secs(2880),
+            },
+        );
+        slots.insert(
+            "launch-middling".to_string(),
+            RunSlotEntry {
+                instance_id: "middling".to_string(),
+                taken_at: now - Duration::from_secs(45),
+            },
+        );
 
         let occ = compute_occupancy(8, 5, &slots, now);
         assert_eq!(occ.held, 3);
@@ -1238,18 +1297,22 @@ mod tests {
     #[tokio::test]
     async fn dropping_a_slot_releases_the_permit_and_forgets_its_age() {
         let permits = Arc::new(tokio::sync::Semaphore::new(2));
-        let registry: Arc<Mutex<HashMap<String, Instant>>> = Arc::new(Mutex::new(HashMap::new()));
+        let registry: Arc<Mutex<HashMap<String, RunSlotEntry>>> =
+            Arc::new(Mutex::new(HashMap::new()));
         let finished = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
         {
             let permit = Arc::clone(&permits).acquire_owned().await.expect("acquire");
-            registry
-                .lock()
-                .expect("registry")
-                .insert("inst-1".to_string(), Instant::now());
+            registry.lock().expect("registry").insert(
+                "launch-1".to_string(),
+                RunSlotEntry {
+                    instance_id: "inst-1".to_string(),
+                    taken_at: Instant::now(),
+                },
+            );
             let _slot = RunSlot {
                 _permit: permit,
-                instance_id: "inst-1".to_string(),
+                launch_id: "launch-1".to_string(),
                 registry: Arc::clone(&registry),
                 finished: Arc::clone(&finished),
             };
@@ -1282,17 +1345,21 @@ mod tests {
     #[tokio::test]
     async fn a_panicking_run_still_retires_its_slot() {
         let permits = Arc::new(tokio::sync::Semaphore::new(1));
-        let registry: Arc<Mutex<HashMap<String, Instant>>> = Arc::new(Mutex::new(HashMap::new()));
+        let registry: Arc<Mutex<HashMap<String, RunSlotEntry>>> =
+            Arc::new(Mutex::new(HashMap::new()));
         let finished = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
         let permit = Arc::clone(&permits).acquire_owned().await.expect("acquire");
-        registry
-            .lock()
-            .expect("registry")
-            .insert("doomed".to_string(), Instant::now());
+        registry.lock().expect("registry").insert(
+            "launch-doomed".to_string(),
+            RunSlotEntry {
+                instance_id: "doomed".to_string(),
+                taken_at: Instant::now(),
+            },
+        );
         let slot = RunSlot {
             _permit: permit,
-            instance_id: "doomed".to_string(),
+            launch_id: "launch-doomed".to_string(),
             registry: Arc::clone(&registry),
             finished: Arc::clone(&finished),
         };
@@ -1316,6 +1383,39 @@ mod tests {
             1,
             "a run that panicked still finished, and must be counted as such"
         );
+    }
+
+    #[test]
+    fn stale_task_cleanup_cannot_remove_a_replacement_generation() {
+        let registry: TaskRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let old = Arc::new(InstanceTask {
+            cancel: Arc::new(AtomicBool::new(false)),
+            finished: AtomicBool::new(false),
+            done: tokio::sync::Notify::new(),
+        });
+        let replacement = Arc::new(InstanceTask {
+            cancel: Arc::new(AtomicBool::new(false)),
+            finished: AtomicBool::new(false),
+            done: tokio::sync::Notify::new(),
+        });
+
+        registry
+            .lock()
+            .expect("registry")
+            .insert("launch-current".to_string(), Arc::clone(&replacement));
+
+        // This is the stop-then-immediate-resume race: an old task's deferred
+        // cleanup reaches the map after a newer attempt owns the same logical
+        // slot. Pointer comparison must leave the replacement visible.
+        remove_task_if_current(&registry, "launch-current", &old);
+
+        let current = registry
+            .lock()
+            .expect("registry")
+            .get("launch-current")
+            .cloned()
+            .expect("replacement remains registered");
+        assert!(Arc::ptr_eq(&current, &replacement));
     }
 
     /// The advisory bound check must fire only when the setting cannot fit.

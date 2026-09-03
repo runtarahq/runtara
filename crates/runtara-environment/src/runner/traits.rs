@@ -64,6 +64,12 @@ pub type Result<T> = std::result::Result<T, RunnerError>;
 /// Options for launching an instance.
 #[derive(Debug, Clone)]
 pub struct LaunchOptions {
+    /// Immutable identifier for this physical launch attempt.
+    ///
+    /// An instance may park and later resume several times.  Each attempt needs
+    /// a distinct owner so stale task cleanup, monitor results, and cancellation
+    /// can never affect a newer attempt of the same durable instance.
+    pub launch_id: String,
     /// Instance ID (UUID)
     pub instance_id: String,
     /// Tenant ID
@@ -92,6 +98,8 @@ pub struct LaunchOptions {
 /// Handle for a launched instance (detached execution).
 #[derive(Debug, Clone)]
 pub struct RunnerHandle {
+    /// Immutable identifier for this physical launch attempt.
+    pub launch_id: String,
     /// Unique identifier for this launch.
     pub handle_id: String,
     /// Instance ID

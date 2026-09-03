@@ -637,6 +637,7 @@ impl EnvironmentRuntime {
 
         for info in remaining {
             let handle = crate::runner::RunnerHandle {
+                launch_id: info.launch_id.clone(),
                 handle_id: info.container_id.clone(),
                 instance_id: info.instance_id.clone(),
                 tenant_id: info.tenant_id.clone(),
@@ -1269,12 +1270,15 @@ mod tests {
         sqlx::query(
             r#"
             INSERT INTO container_registry (
-                container_id, instance_id, tenant_id, binary_path, started_at
-            ) VALUES ($1, $2, $3, '/test/pending-start-recovery.wasm', $4)
+                container_id, launch_id, instance_id, tenant_id, binary_path, started_at
+            ) VALUES ($1, $2, $3, $4, '/test/pending-start-recovery.wasm', $5)
             "#,
         )
         .bind(crate::test_support::unique_id(
             "pending-start-recovery-container",
+        ))
+        .bind(crate::test_support::unique_id(
+            "pending-start-recovery-launch",
         ))
         .bind(&registered)
         .bind(&tenant_id)

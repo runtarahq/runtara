@@ -649,6 +649,7 @@ pub async fn handle_start_instance(
 
     // Build launch options (using the shared image artifact)
     let options = LaunchOptions {
+        launch_id: uuid::Uuid::new_v4().to_string(),
         instance_id: instance_id.clone(),
         tenant_id: request.tenant_id.clone(),
         wasm_path,
@@ -675,6 +676,7 @@ pub async fn handle_start_instance(
             let container_registry = ContainerRegistry::new(state.pool.clone());
             let container_info = ContainerInfo {
                 container_id: handle_id_for_registry,
+                launch_id: handle.launch_id.clone(),
                 instance_id: instance_id.clone(),
                 tenant_id: request.tenant_id,
                 binary_path: image.binary_path,
@@ -795,8 +797,10 @@ pub async fn handle_stop_instance(
         }
     };
 
-    // Build runner handle and stop
+    // The registry's persisted generation is the cancellation fence. Older
+    // rows are backfilled by the migration from their legacy handle id.
     let handle = RunnerHandle {
+        launch_id: container.launch_id.clone(),
         handle_id: container.container_id,
         instance_id: request.instance_id.clone(),
         tenant_id: container.tenant_id,
@@ -818,7 +822,9 @@ pub async fn handle_stop_instance(
         .await;
 
     // Clean up container registry
-    let _ = container_registry.cleanup(&request.instance_id).await;
+    let _ = container_registry
+        .cleanup_generation(&request.instance_id, &container.launch_id)
+        .await;
 
     info!("Instance stopped successfully");
 
@@ -994,7 +1000,8 @@ pub async fn handle_resume_instance(
             state
                 .persistence
                 .complete_instance(
-                    CompleteInstanceParams::new(&request.instance_id, "failed").with_error(&message),
+                    CompleteInstanceParams::new(&request.instance_id, "failed")
+                        .with_error(&message),
                 )
                 .await?;
             return Ok(ResumeInstanceResponse {
@@ -1006,6 +1013,7 @@ pub async fn handle_resume_instance(
 
     // Build launch options with checkpoint and restored env
     let options = LaunchOptions {
+        launch_id: uuid::Uuid::new_v4().to_string(),
         instance_id: request.instance_id.clone(),
         tenant_id: instance.tenant_id.clone(),
         wasm_path,
@@ -1074,6 +1082,7 @@ pub async fn handle_resume_instance(
             let container_registry = ContainerRegistry::new(state.pool.clone());
             let container_info = ContainerInfo {
                 container_id: handle_id_for_registry,
+                launch_id: handle.launch_id.clone(),
                 instance_id: request.instance_id.clone(),
                 tenant_id: instance.tenant_id,
                 binary_path: image.binary_path,
@@ -1255,7 +1264,7 @@ pub fn spawn_container_monitor(
                 // stale monitor would have used to throw away the row of the
                 // run that replaced it.
                 let is_stale_monitor = match container_registry
-                    .cleanup_generation(&instance_id, &handle.handle_id)
+                    .cleanup_generation(&instance_id, &handle.launch_id)
                     .await
                 {
                     Ok(owned) => !owned,
@@ -1414,7 +1423,7 @@ pub fn spawn_container_monitor(
                 // Clean up container registry, but only the row this monitor
                 // registered: a resume may have replaced it with a live run.
                 let _ = container_registry
-                    .cleanup_generation(&instance_id, &handle.handle_id)
+                    .cleanup_generation(&instance_id, &handle.launch_id)
                     .await;
             }
         }

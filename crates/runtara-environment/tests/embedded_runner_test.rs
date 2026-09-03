@@ -113,6 +113,7 @@ fn write_component(dir: &Path, name: &str, wat: &str) -> PathBuf {
 
 fn options(instance_id: &str, wasm_path: &Path) -> LaunchOptions {
     LaunchOptions {
+        launch_id: format!("launch-{instance_id}"),
         instance_id: instance_id.to_string(),
         tenant_id: "embedded-test".to_string(),
         wasm_path: wasm_path.to_path_buf(),
