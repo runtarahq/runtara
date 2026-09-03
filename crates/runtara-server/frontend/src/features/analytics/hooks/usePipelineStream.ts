@@ -2,7 +2,11 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useAuth } from 'react-oidc-context';
 import { getRuntimeBaseUrl } from '@/shared/queries/utils';
 import { readJsonEventStream } from '@/shared/utils/sse';
-import { stickyChokepoint, type PipelineSnapshot } from '../utils/pipeline';
+import {
+  snapshotStuckAfterMs,
+  stickyChokepoint,
+  type PipelineSnapshot,
+} from '../utils/pipeline';
 
 /// How many snapshots to keep for the sparklines.
 ///
@@ -52,7 +56,11 @@ export function usePipelineStream(): PipelineStreamState {
       }
       return updated;
     });
-    const held = stickyChokepoint(next.stages, chokepointRef.current);
+    const held = stickyChokepoint(
+      next.stages,
+      chokepointRef.current,
+      snapshotStuckAfterMs(next)
+    );
     chokepointRef.current = held;
     setChokepointKey(held);
   }, []);

@@ -31,6 +31,12 @@ export interface PipelineStage {
 
 export interface PipelineSnapshot {
   capturedAt: string;
+  /**
+   * Server policy for the "not draining" callout. Optional during a rolling
+   * upgrade so a newer console can still render a snapshot from an older
+   * server with the documented fallback.
+   */
+  stuckAfterMs?: number;
   windowMs: number;
   /** `null` on the first tick after start, when there is no window yet. */
   rates: PipelineRates | null;
@@ -42,6 +48,11 @@ export const CHOKE_THRESHOLD = 80;
 
 /** How long a full stage may hold its oldest item before that is remarkable. */
 export const DEFAULT_STUCK_AFTER_MS = 5 * 60 * 1000;
+
+/** The server policy carried by a snapshot, with a safe rollout fallback. */
+export function snapshotStuckAfterMs(snapshot: PipelineSnapshot): number {
+  return snapshot.stuckAfterMs ?? DEFAULT_STUCK_AFTER_MS;
+}
 
 export type StageSeverity = 'unknown' | 'ok' | 'warn' | 'bad';
 

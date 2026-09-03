@@ -3321,6 +3321,16 @@ export interface PipelineSnapshotDto {
   /** Every stage, in pipeline order. */
   stages: PipelineStageDto[];
   /**
+   * Server policy for how long a full stage may retain its oldest item
+   * before the UI calls it "not draining".
+   *
+   * The policy travels with the sample so the browser does not silently use
+   * a different hard-coded threshold from the Environment it is observing.
+   * @format int64
+   * @min 0
+   */
+  stuckAfterMs: number;
+  /**
    * The window the rates were measured over.
    *
    * On the wire rather than assumed, so a consumer can tell a normal tick

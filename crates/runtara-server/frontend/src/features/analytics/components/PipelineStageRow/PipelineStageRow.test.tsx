@@ -128,6 +128,25 @@ describe('PipelineStageRow', () => {
     expect(screen.getByText('2.9s oldest')).toBeInTheDocument();
   });
 
+  it('uses the server stuck policy rather than a browser-side constant', () => {
+    render(
+      <PipelineStageRow
+        stage={stage({
+          key: 'runPermits',
+          limit: 16,
+          used: 16,
+          oldestAgeMs: 2_900,
+        })}
+        history={Array(30).fill(16)}
+        inflow={0}
+        pipelineActive
+        isChokepoint
+        stuckAfterMs={2_000}
+      />
+    );
+    expect(screen.getByText('not draining')).toBeInTheDocument();
+  });
+
   it('marks the chokepoint in the DOM so it can be asserted on', () => {
     const { container } = render(
       <PipelineStageRow

@@ -101,6 +101,7 @@ export function System() {
                       (pipeline.snapshot?.rates?.offered ?? 0) > 0
                     }
                     isChokepoint={pipeline.chokepointKey === stage.key}
+                    stuckAfterMs={pipeline.snapshot.stuckAfterMs}
                   />
                 ))}
               </div>

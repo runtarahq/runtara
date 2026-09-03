@@ -51,6 +51,12 @@ pub fn stuck_after() -> Duration {
         .unwrap_or(Duration::from_secs(300))
 }
 
+/// Convert the server policy to the wire unit without ever wrapping an
+/// unusually large valid duration.
+fn stuck_after_ms(stuck_after: Duration) -> u64 {
+    u64::try_from(stuck_after.as_millis()).unwrap_or(u64::MAX)
+}
+
 /// Everything one tick reads, before it becomes a wire snapshot.
 ///
 /// A plain data struct so [`build_snapshot`] is pure and every decision it
@@ -100,6 +106,20 @@ pub fn build_snapshot(
     reading: &PipelineReading,
     rates: Option<PipelineRates>,
     window_ms: u64,
+) -> PipelineSnapshotDto {
+    build_snapshot_with_stuck_after(reading, rates, window_ms, stuck_after())
+}
+
+/// Build a snapshot against an explicit stuck-stage policy.
+///
+/// Keeping the policy an argument preserves a deterministic builder for unit
+/// tests while [`build_snapshot`] remains the production convenience wrapper
+/// around the Environment configuration.
+fn build_snapshot_with_stuck_after(
+    reading: &PipelineReading,
+    rates: Option<PipelineRates>,
+    window_ms: u64,
+    stuck_after: Duration,
 ) -> PipelineSnapshotDto {
     let stages = vec![
         PipelineStageDto {
@@ -175,6 +195,7 @@ pub fn build_snapshot(
 
     PipelineSnapshotDto {
         captured_at: Utc::now(),
+        stuck_after_ms: stuck_after_ms(stuck_after),
         window_ms,
         rates: rates.map(|r| PipelineRatesDto {
             offered: r.offered,
@@ -656,11 +677,23 @@ mod tests {
         let snap = build_snapshot(&reading(), None, 0);
         let json = serde_json::to_value(&snap).expect("serialise");
         assert!(json.get("capturedAt").is_some());
+        assert!(json.get("stuckAfterMs").is_some());
         assert!(json.get("windowMs").is_some());
         let stage = &json["stages"][4];
         assert!(stage.get("oldestAgeMs").is_some());
         assert!(stage.get("inflowKey").is_some());
         assert_eq!(stage["inflowKey"], "started");
+    }
+
+    #[test]
+    fn the_snapshot_carries_the_server_stuck_policy_in_milliseconds() {
+        let snap = build_snapshot_with_stuck_after(&reading(), None, 0, Duration::from_secs(17));
+        assert_eq!(snap.stuck_after_ms, 17_000);
+    }
+
+    #[test]
+    fn huge_stuck_policy_saturates_instead_of_wrapping() {
+        assert_eq!(stuck_after_ms(Duration::from_secs(u64::MAX)), u64::MAX);
     }
 
     /// The feed must publish happily with nobody listening.

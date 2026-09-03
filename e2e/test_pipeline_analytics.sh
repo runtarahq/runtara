@@ -13,7 +13,7 @@
 # it proves: that the gate actually calls the counters at all.
 #
 # Asserts:
-#   * the snapshot endpoint reports all six stages, in pipeline order
+#   * the snapshot endpoint reports all seven stages, in pipeline order
 #   * every bound is a real knob name an operator can act on
 #   * the run-permit stage carries a bound read from the live runner
 #   * driving executions moves offered/accepted, proving the gate is wired
@@ -24,6 +24,7 @@
 #   * the SSE stream opens with a snapshot immediately, not after a tick
 #   * the stream keeps delivering, and its window is a real elapsed time
 #   * a second concurrent subscriber does not disturb the first
+#   * the server's stuck-stage policy reaches both polling and stream snapshots
 #
 # On UNPATCHED code this FAILS at the first assertion: there is no
 # /analytics/pipeline route at all.
@@ -184,6 +185,7 @@ start_server() {
     SESSION_TOKEN_SECRET=8efacf953eb244e07346edb64d1a8adca5bdf92049611737ce09e2c6388cb5f2 \
     VALKEY_HOST=127.0.0.1 \
     VALKEY_PORT="${TEST_VALKEY_PORT}" \
+    RUNTARA_PIPELINE_STUCK_AFTER_SECS=7 \
     OTEL_SDK_DISABLED=true \
     RUNTARA_SDK_BACKEND=http \
     SQLX_OFFLINE="${SQLX_OFFLINE}" \
@@ -239,10 +241,12 @@ fi
 echo "  First snapshot after ~${i}s"
 
 print_step "1. The snapshot is the pipeline, in order"
-expect_eq "stage count" "6" "$(echo "${SNAPSHOT}" | jq -r '.data.stages | length')"
+expect_eq "stage count" "7" "$(echo "${SNAPSHOT}" | jq -r '.data.stages | length')"
 expect_eq "stage keys in pipeline order" \
-  "admission triggerQueue triggerWorkers runPermits executing parked" \
+  "admission triggerQueue triggerWorkers pendingStarts runPermits executing parked" \
   "$(echo "${SNAPSHOT}" | jq -r '[.data.stages[].key] | join(" ")')"
+expect_eq "server stuck policy is carried in milliseconds" "7000" \
+  "$(echo "${SNAPSHOT}" | jq -r '.data.stuckAfterMs')"
 
 print_step "2. Every bound names a knob an operator can act on"
 expect_eq "admission knob" "MAX_CONCURRENT_EXECUTIONS" \
@@ -366,7 +370,7 @@ curl -sS --max-time 4 -H 'Accept: text/event-stream' \
 
 FIRST_FRAME="$(grep -m1 '^data:' "${STREAM_OUT}" | sed 's/^data: *//')"
 expect_true "the first frame arrives and is a snapshot" \
-  "$(echo "${FIRST_FRAME}" | jq -r '(.stages | length) == 6' 2>/dev/null || echo false)"
+  "$(echo "${FIRST_FRAME}" | jq -r '(.stages | length) == 7 and .stuckAfterMs == 7000' 2>/dev/null || echo false)"
 
 print_step "9. The stream keeps delivering"
 FRAME_COUNT="$(grep -c '^data:' "${STREAM_OUT}" || true)"

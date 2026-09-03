@@ -8,6 +8,7 @@ import {
   isNotDraining,
   severityOf,
   sparklinePath,
+  snapshotStuckAfterMs,
   stepsAreMeasured,
   stickyChokepoint,
   utilisation,
@@ -122,6 +123,19 @@ describe('isNotDraining', () => {
 
   it('is never true without an age to judge', () => {
     expect(isNotDraining(stage({ key: 'a', limit: 8, used: 8 }))).toBe(false);
+  });
+});
+
+describe('snapshotStuckAfterMs', () => {
+  it('uses the server policy and only falls back for an older server', () => {
+    const base: PipelineSnapshot = {
+      capturedAt: '2026-09-03T00:00:00Z',
+      windowMs: 1_000,
+      rates: null,
+      stages: [],
+    };
+    expect(snapshotStuckAfterMs({ ...base, stuckAfterMs: 2_000 })).toBe(2_000);
+    expect(snapshotStuckAfterMs(base)).toBe(5 * 60 * 1000);
   });
 });
 
