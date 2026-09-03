@@ -124,6 +124,38 @@ describe('isNotDraining', () => {
   it('is never true without an age to judge', () => {
     expect(isNotDraining(stage({ key: 'a', limit: 8, used: 8 }))).toBe(false);
   });
+
+  it('calls out an old durable queue without blaming it as the capacity bound', () => {
+    const queue = stage({
+      key: 'launchQueued',
+      limit: 64,
+      used: 3,
+      oldestAgeMs: 2_880_000,
+    });
+    expect(isNotDraining(queue)).toBe(true);
+    expect(findChokepoint([queue])).toBeNull();
+  });
+
+  it('does not call retained terminal launch history not draining', () => {
+    expect(
+      isNotDraining(
+        stage({
+          key: 'launchExpired',
+          used: 3,
+          oldestAgeMs: 2_880_000,
+        })
+      )
+    ).toBe(false);
+    expect(
+      isNotDraining(
+        stage({
+          key: 'launchCancelled',
+          used: 3,
+          oldestAgeMs: 2_880_000,
+        })
+      )
+    ).toBe(false);
+  });
 });
 
 describe('snapshotStuckAfterMs', () => {
