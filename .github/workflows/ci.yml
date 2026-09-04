@@ -313,10 +313,16 @@ jobs:
           # into partial matches ("full match: false") on nearly every run.
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
+      # Core owns no storage engine, so its tests need no database: the
+      # in-memory backend runs the conformance suite here, and the Postgres
+      # backend runs the same suite in the store crate's own job below.
       - name: Run runtara-core tests
+        run: cargo test -p runtara-core --features test-support -- --test-threads=1
+
+      - name: Run runtara-store-postgres tests
         env:
           TEST_RUNTARA_DATABASE_URL: postgres://postgres:postgres@localhost:5432/runtara_test
-        run: cargo test -p runtara-core --features db-integration-tests -- --test-threads=1
+        run: cargo test -p runtara-store-postgres --features db-integration-tests -- --test-threads=1
 
   test-server:
     runs-on: ubuntu-latest
