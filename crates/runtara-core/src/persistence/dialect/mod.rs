@@ -14,6 +14,8 @@ pub mod postgres;
 
 pub use self::postgres::PostgresDialect;
 
+use super::EventVocabulary;
+
 /// Categories of enum-typed columns that Postgres casts with `::name`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnumKind {
@@ -89,12 +91,12 @@ pub trait Dialect: Send + Sync + 'static {
 
     /// SQL for reading a pending custom signal by `(instance_id, checkpoint_id)`.
     ///
-    /// **Non-destructive**: this SELECTs the row and leaves it in place. The
-    /// workflow engine is replay-from-start with checkpoints as a result
-    /// cache, so a `WaitForSignal` step must be able to re-read the signal it
-    /// already consumed when the instance is drained/restarted and replayed.
-    /// A destructive take made the wait the only non-replayable durable step
-    /// and dead-hung post-consume resumes. Rows are reclaimed by
+    /// **Non-destructive**: this SELECTs the row and leaves it in place. A
+    /// replay-from-start engine treats checkpoints as a result cache, so a
+    /// guest waiting on a signal must be able to re-read the one it already
+    /// consumed when the instance is drained/restarted and replayed. A
+    /// destructive take made that wait the only non-replayable durable
+    /// operation and dead-hung post-consume resumes. Rows are reclaimed by
     /// `ON DELETE CASCADE` when the instance is deleted.
     ///
     /// Binds (in order): instance_id, checkpoint_id.
@@ -147,15 +149,24 @@ pub trait Dialect: Send + Sync + 'static {
     /// parent_scope_id, root_scopes_only.
     fn sql_count_events() -> &'static str;
 
-    /// SQL for `list_step_summaries`. The CTEs emit `inputs`/`outputs`/
+    /// SQL for `list_paired_records`. The CTEs emit `inputs`/`outputs`/
     /// `error` as TEXT (a `::text` cast on the JSONB extraction) so the
     /// shared row mapper parses every JSON column the same way.
-    /// Binds: instance_id, status_filter, step_type, scope_id,
-    /// parent_scope_id, root_scopes_only, limit, offset.
-    fn sql_list_step_summaries(order_direction: &str) -> String;
+    /// Binds: instance_id, status_filter, kind, scope_id,
+    /// parent_scope_id, root_scopes_only, limit, offset, correlation_ids.
+    ///
+    /// `vocab` supplies every subtype and payload key the query reaches for;
+    /// an implementation must splice those rather than name any of them
+    /// itself. Its output columns are fixed neutral aliases —
+    /// `correlation_id`, `kind`, `label`, `inputs`, `outputs`, `error`,
+    /// `status`, `duration_ms`, `launched_at_ms`, `settled_at_ms`,
+    /// `started_at`, `completed_at`, `scope_id`, `parent_scope_id` — which is
+    /// what keeps the row mapper independent of the vocabulary.
+    fn sql_list_paired_records(vocab: &EventVocabulary, order_direction: &str) -> String;
 
-    /// SQL for `count_step_summaries`. Binds: instance_id,
-    /// status_filter, step_type, scope_id, parent_scope_id,
-    /// root_scopes_only.
-    fn sql_count_step_summaries() -> &'static str;
+    /// SQL for `count_paired_records`. Binds: instance_id,
+    /// status_filter, kind, scope_id, parent_scope_id,
+    /// root_scopes_only, correlation_ids. See
+    /// [`Self::sql_list_paired_records`] for the `vocab` contract.
+    fn sql_count_paired_records(vocab: &EventVocabulary) -> String;
 }

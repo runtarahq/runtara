@@ -391,8 +391,9 @@ mod tests {
     use chrono::{DateTime, Utc};
     use runtara_core::error::CoreError;
     use runtara_core::persistence::{
-        CheckpointRecord, CompleteInstanceParams, CustomSignalRecord, EventRecord, InstanceRecord,
-        ListEventsFilter, ListStepSummariesFilter, Persistence, SignalRecord, StepSummaryRecord,
+        CheckpointRecord, CompleteInstanceParams, CustomSignalRecord, EventRecord, EventVocabulary,
+        InstanceRecord, ListEventsFilter, ListPairedRecordsFilter, PairedRecordSummary,
+        Persistence, SignalRecord,
     };
     use std::time::Instant;
 
@@ -615,20 +616,22 @@ mod tests {
             Ok(0)
         }
 
-        async fn list_step_summaries(
+        async fn list_paired_records(
             &self,
             _instance_id: &str,
-            _filter: &ListStepSummariesFilter,
+            _vocabulary: &EventVocabulary,
+            _filter: &ListPairedRecordsFilter,
             _limit: i64,
             _offset: i64,
-        ) -> Result<Vec<StepSummaryRecord>, CoreError> {
+        ) -> Result<Vec<PairedRecordSummary>, CoreError> {
             Ok(Vec::new())
         }
 
-        async fn count_step_summaries(
+        async fn count_paired_records(
             &self,
             _instance_id: &str,
-            _filter: &ListStepSummariesFilter,
+            _vocabulary: &EventVocabulary,
+            _filter: &ListPairedRecordsFilter,
         ) -> Result<i64, CoreError> {
             Ok(0)
         }
@@ -898,7 +901,7 @@ mod tests {
         struct CountingObserver(AtomicUsize);
 
         impl InstanceEventObserver for CountingObserver {
-            fn on_step_started(&self) {
+            fn on_event_persisted(&self, _subtype: Option<&str>) {
                 self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             }
         }

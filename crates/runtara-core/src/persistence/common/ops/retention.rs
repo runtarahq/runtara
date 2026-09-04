@@ -56,42 +56,52 @@ macro_rules! impl_retention_ops {
                 <$Dialect>::exec_delete_instances_batch(pool, instance_ids).await
             }
 
-            /// DELETE step-debug events older than `older_than`, up to
-            /// `limit` rows. Returns the number removed.
+            /// DELETE the vocabulary's paired events older than
+            /// `older_than`, up to `limit` rows. Returns the number removed.
             ///
-            /// Only `step_debug_*` subtypes: lifecycle events (`completed`,
-            /// `failed`, `suspended`) are the run's history and are removed
-            /// only when the instance itself is, via ON DELETE CASCADE. Debug
-            /// payloads are the bulk of the table and are read while a run is
-            /// recent, so they get their own, shorter window.
+            /// Only the vocabulary's own start and end subtypes: lifecycle
+            /// events (`completed`, `failed`, `suspended`) are the run's
+            /// history and are removed only when the instance itself is, via
+            /// ON DELETE CASCADE. Paired payloads are the bulk of the table
+            /// and are read while a run is recent, so they get their own,
+            /// shorter window.
+            ///
+            /// The two subtypes are bound rather than spliced — they are
+            /// values compared against a column, and this DELETE has no
+            /// plan tuning that a literal would serve.
             ///
             /// Bounded by `limit` and driven in a loop by the caller so a
             /// large backlog never becomes one long-running DELETE.
-            pub(crate) async fn op_delete_debug_events_older_than(
+            pub(crate) async fn op_delete_paired_events_older_than(
                 pool: &$Pool,
+                vocabulary: &$crate::persistence::EventVocabulary,
                 older_than: ::chrono::DateTime<::chrono::Utc>,
                 limit: i64,
             ) -> ::core::result::Result<u64, $crate::error::CoreError> {
                 use $crate::persistence::dialect::Dialect;
                 let p1 = <$Dialect>::placeholder(1);
                 let p2 = <$Dialect>::placeholder(2);
+                let p3 = <$Dialect>::placeholder(3);
+                let p4 = <$Dialect>::placeholder(4);
                 let sql = format!(
                     "DELETE FROM instance_events \
                      WHERE id IN ( \
                          SELECT id FROM instance_events \
-                         WHERE subtype IN ('step_debug_start', 'step_debug_end') \
-                           AND created_at < {p1} \
+                         WHERE subtype IN ({p1}, {p2}) \
+                           AND created_at < {p3} \
                          ORDER BY id \
-                         LIMIT {p2} \
+                         LIMIT {p4} \
                      )"
                 );
                 let result = ::sqlx::query(&sql)
+                    .bind(vocabulary.start_subtype())
+                    .bind(vocabulary.end_subtype())
                     .bind(older_than)
                     .bind(limit)
                     .execute(pool)
                     .await
                     .map_err(|e| $crate::error::CoreError::DatabaseError {
-                        operation: "delete_debug_events_older_than".into(),
+                        operation: "delete_paired_events_older_than".into(),
                         details: e.to_string(),
                     })?;
                 Ok(result.rows_affected())

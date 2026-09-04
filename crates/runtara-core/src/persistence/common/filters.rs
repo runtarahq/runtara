@@ -1,18 +1,18 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Shared filter helpers — mapping [`super::super::StepStatus`] and
+//! Shared filter helpers — mapping [`super::super::PairedRecordStatus`] and
 //! [`super::super::EventSortOrder`] onto the string/enum forms expected
 //! by SQL.
 
-use crate::persistence::{EventSortOrder, StepStatus};
+use crate::persistence::{EventSortOrder, PairedRecordStatus};
 
-/// Convert [`StepStatus`] into the string form used by the step-summary
-/// CTE's `status` column.
-pub fn step_status_filter_str(status: StepStatus) -> &'static str {
+/// Convert [`PairedRecordStatus`] into the string form used by the
+/// paired-record CTE's `status` column.
+pub fn record_status_filter_str(status: PairedRecordStatus) -> &'static str {
     match status {
-        StepStatus::Running => "running",
-        StepStatus::Completed => "completed",
-        StepStatus::Failed => "failed",
+        PairedRecordStatus::Running => "running",
+        PairedRecordStatus::Completed => "completed",
+        PairedRecordStatus::Failed => "failed",
     }
 }
 
@@ -33,10 +33,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn step_status_strings_match_cte_convention() {
-        assert_eq!(step_status_filter_str(StepStatus::Running), "running");
-        assert_eq!(step_status_filter_str(StepStatus::Completed), "completed");
-        assert_eq!(step_status_filter_str(StepStatus::Failed), "failed");
+    fn record_status_strings_match_cte_convention() {
+        assert_eq!(
+            record_status_filter_str(PairedRecordStatus::Running),
+            "running"
+        );
+        assert_eq!(
+            record_status_filter_str(PairedRecordStatus::Completed),
+            "completed"
+        );
+        assert_eq!(
+            record_status_filter_str(PairedRecordStatus::Failed),
+            "failed"
+        );
     }
 
     #[test]

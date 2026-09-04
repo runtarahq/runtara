@@ -15,8 +15,8 @@ use chrono::{Duration, Utc};
 use uuid::Uuid;
 
 use crate::persistence::{
-    CompleteInstanceParams, EventRecord, ListEventsFilter, ListStepSummariesFilter, Persistence,
-    StepStatus,
+    CompleteInstanceParams, EventRecord, EventVocabulary, EventVocabularySpec, ListEventsFilter,
+    ListPairedRecordsFilter, PairedRecordStatus, Persistence,
 };
 
 /// Run the full conformance sequence against `backend`.
@@ -535,27 +535,41 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     assert_eq!(taken_again.checkpoint_id, checkpoint_id);
     assert_eq!(taken_again.payload, taken.payload);
 
-    // --- step summaries -----------------------------------------------------
-    // This harness emits no step_debug_start events, so the summary query must
-    // come back empty rather than surfacing this instance's other events.
-    // Content-level coverage of the summary CTE lives in the backend's own
-    // tests (`test_list_step_summaries_*` in `persistence::postgres`).
-    let step_filter = ListStepSummariesFilter::default();
-    let step_summaries = backend
-        .list_step_summaries(&instance_id, &step_filter, 50, 0)
+    // --- paired records -----------------------------------------------------
+    // This harness emits none of this vocabulary's start events, so the paired
+    // query must come back empty rather than surfacing this instance's other
+    // events. Content-level coverage of the paired CTE lives in the backend's
+    // own tests (`test_list_step_summaries_*` in `persistence::postgres`).
+    let vocabulary = EventVocabulary::new(EventVocabularySpec {
+        start_subtype: "conformance_start",
+        end_subtype: "conformance_end",
+        correlation_key: "unit_id",
+        kind_key: "unit_kind",
+        label_key: "unit_label",
+        inputs_key: "given",
+        outputs_key: "produced",
+        error_key: "failure",
+        error_flag_key: "_failed",
+        launched_at_key: "began_ms",
+        settled_at_key: "ended_ms",
+    })
+    .expect("valid vocabulary");
+    let paired_filter = ListPairedRecordsFilter::default();
+    let paired_records = backend
+        .list_paired_records(&instance_id, &vocabulary, &paired_filter, 50, 0)
         .await
-        .expect("list_step_summaries failed");
-    assert!(step_summaries.is_empty());
+        .expect("list_paired_records failed");
+    assert!(paired_records.is_empty());
     assert_eq!(
         backend
-            .count_step_summaries(&instance_id, &step_filter)
+            .count_paired_records(&instance_id, &vocabulary, &paired_filter)
             .await
-            .expect("count_step_summaries failed"),
+            .expect("count_paired_records failed"),
         0,
         "the count must agree with the (empty) listing"
     );
     // Bind the variant so the match remains type-checked when we add status-filtered cases.
-    let _ = StepStatus::Running;
+    let _ = PairedRecordStatus::Running;
 
     // --- sleep cycle --------------------------------------------------------
     // Verifies both the "not due yet" (running) and "due now" (suspended +

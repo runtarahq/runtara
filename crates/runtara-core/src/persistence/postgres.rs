@@ -125,8 +125,9 @@ async fn record_resources_from_db(pool: &PgPool, instance_id: &str) {
 // ============================================================================
 
 use super::{
-    CheckpointRecord, CompleteInstanceParams, CustomSignalRecord, EventRecord, InstanceRecord,
-    ListEventsFilter, ListStepSummariesFilter, Persistence, SignalRecord, StepSummaryRecord,
+    CheckpointRecord, CompleteInstanceParams, CustomSignalRecord, EventRecord, EventVocabulary,
+    InstanceRecord, ListEventsFilter, ListPairedRecordsFilter, PairedRecordSummary, Persistence,
+    SignalRecord,
 };
 
 // ============================================================================
@@ -163,7 +164,7 @@ crate::persistence::common::ops::impl_event_ops!(
     PgPool,
     crate::persistence::dialect::PostgresDialect
 );
-crate::persistence::common::ops::impl_step_summary_ops!(
+crate::persistence::common::ops::impl_paired_record_ops!(
     PostgresPersistence,
     PgPool,
     crate::persistence::dialect::PostgresDialect
@@ -773,22 +774,25 @@ impl Persistence for PostgresPersistence {
         Self::op_count_events(&self.pool, instance_id, filter).await
     }
 
-    async fn list_step_summaries(
+    async fn list_paired_records(
         &self,
         instance_id: &str,
-        filter: &ListStepSummariesFilter,
+        vocabulary: &EventVocabulary,
+        filter: &ListPairedRecordsFilter,
         limit: i64,
         offset: i64,
-    ) -> Result<Vec<StepSummaryRecord>, CoreError> {
-        Self::op_list_step_summaries(&self.pool, instance_id, filter, limit, offset).await
+    ) -> Result<Vec<PairedRecordSummary>, CoreError> {
+        Self::op_list_paired_records(&self.pool, instance_id, vocabulary, filter, limit, offset)
+            .await
     }
 
-    async fn count_step_summaries(
+    async fn count_paired_records(
         &self,
         instance_id: &str,
-        filter: &ListStepSummariesFilter,
+        vocabulary: &EventVocabulary,
+        filter: &ListPairedRecordsFilter,
     ) -> Result<i64, CoreError> {
-        Self::op_count_step_summaries(&self.pool, instance_id, filter).await
+        Self::op_count_paired_records(&self.pool, instance_id, vocabulary, filter).await
     }
 
     async fn update_instance_metrics(
@@ -832,12 +836,13 @@ impl Persistence for PostgresPersistence {
         Self::op_delete_instances_batch(&self.pool, instance_ids).await
     }
 
-    async fn delete_debug_events_older_than(
+    async fn delete_paired_events_older_than(
         &self,
+        vocabulary: &EventVocabulary,
         older_than: DateTime<Utc>,
         limit: i64,
     ) -> Result<u64, CoreError> {
-        Self::op_delete_debug_events_older_than(&self.pool, older_than, limit).await
+        Self::op_delete_paired_events_older_than(&self.pool, vocabulary, older_than, limit).await
     }
 }
 
@@ -982,12 +987,32 @@ mod tests {
         let _ = backend.delete_instances_batch(&ids).await;
     }
 
-    /// The debug-event sweep must remove step-debug payloads past the window
-    /// and leave everything else — lifecycle events, and recent debug events —
-    /// alone. Losing a `completed` event would erase the run's history.
+    /// The paired-event sweep must remove the caller's paired payloads past
+    /// the window and leave everything else — lifecycle events, recent paired
+    /// events, and any subtype the caller did not name — alone. Losing a
+    /// `completed` event would erase the run's history.
     #[tokio::test]
-    async fn debug_event_sweep_spares_lifecycle_and_recent_events() {
-        use crate::persistence::EventRecord;
+    async fn paired_event_sweep_spares_lifecycle_and_recent_events() {
+        use crate::persistence::{EventRecord, EventVocabulary, EventVocabularySpec};
+
+        // Only the two subtypes named here may be swept. The rest of the
+        // vocabulary is irrelevant to a DELETE but must still be supplied.
+        let vocabulary = |start: &'static str, end: &'static str| {
+            EventVocabulary::new(EventVocabularySpec {
+                start_subtype: start,
+                end_subtype: end,
+                correlation_key: "step_id",
+                kind_key: "step_type",
+                label_key: "step_name",
+                inputs_key: "inputs",
+                outputs_key: "outputs",
+                error_key: "error",
+                error_flag_key: "_error",
+                launched_at_key: "launched_at_ms",
+                settled_at_key: "settled_at_ms",
+            })
+            .expect("valid vocabulary")
+        };
         let backend = PostgresPersistence::new(test_pool().await);
         let id = uuid::Uuid::new_v4().to_string();
         backend
@@ -1029,11 +1054,28 @@ mod tests {
             .unwrap();
 
         let cutoff = chrono::Utc::now() - chrono::Duration::hours(24);
-        let deleted = backend
-            .delete_debug_events_older_than(cutoff, 100)
+
+        // A vocabulary this producer does not use must sweep nothing, which is
+        // what proves the subtypes come from the parameter rather than from a
+        // literal inside the kernel.
+        let swept_by_a_foreign_vocabulary = backend
+            .delete_paired_events_older_than(&vocabulary("unit_start", "unit_end"), cutoff, 100)
             .await
             .expect("sweep failed");
-        assert_eq!(deleted, 2, "only the two aged step-debug events may go");
+        assert_eq!(
+            swept_by_a_foreign_vocabulary, 0,
+            "a vocabulary naming other subtypes must not touch these events"
+        );
+
+        let deleted = backend
+            .delete_paired_events_older_than(
+                &vocabulary("step_debug_start", "step_debug_end"),
+                cutoff,
+                100,
+            )
+            .await
+            .expect("sweep failed");
+        assert_eq!(deleted, 2, "only the two aged paired events may go");
 
         let filter = crate::persistence::ListEventsFilter::default();
         let left = backend.list_events(&id, &filter, 50, 0).await.unwrap();
@@ -2512,19 +2554,42 @@ mod tests {
     // Step Summaries Tests
     // ========================================================================
     //
-    // These exercise the Postgres step-summary CTE
-    // (`dialect::postgres::PostgresDialect::sql_list_step_summaries` /
-    // `sql_count_step_summaries`) end to end: the `MATERIALIZED` + `OFFSET 0`
+    // These exercise the Postgres paired-record CTE
+    // (`dialect::postgres::PostgresDialect::sql_list_paired_records` /
+    // `sql_count_paired_records`) end to end: the `MATERIALIZED` + `OFFSET 0`
     // planner fences, the BYTEA payload -> `convert_from(...)::jsonb` decode,
     // the start/end pairing join and every filter it supports.
     //
-    // `StepStatus` and `EventSortOrder` are NOT among the names postgres.rs
-    // imports from its parent module, so `use super::*` does not bring them
-    // into scope. They are imported here under family-specific aliases so this
-    // block cannot collide with a plain `use` of the same items elsewhere in
-    // the test module.
+    // `PairedRecordStatus` and `EventSortOrder` are NOT among the names
+    // postgres.rs imports from its parent module, so `use super::*` does not
+    // bring them into scope. They are imported here under family-specific
+    // aliases so this block cannot collide with a plain `use` of the same
+    // items elsewhere in the test module.
     use crate::persistence::EventSortOrder as StepSummarySortOrder;
-    use crate::persistence::StepStatus as StepSummaryStatus;
+    use crate::persistence::PairedRecordStatus as StepSummaryStatus;
+    use crate::persistence::{EventVocabulary, EventVocabularySpec};
+
+    /// The workflow DSL's own naming, which these fixtures emit.
+    ///
+    /// It lives here, in a test, rather than in this crate's source: the whole
+    /// point of the vocabulary parameter is that the kernel names none of
+    /// this. `runtara-environment` holds the production copy.
+    fn workflow_vocabulary() -> EventVocabulary {
+        EventVocabulary::new(EventVocabularySpec {
+            start_subtype: "step_debug_start",
+            end_subtype: "step_debug_end",
+            correlation_key: "step_id",
+            kind_key: "step_type",
+            label_key: "step_name",
+            inputs_key: "inputs",
+            outputs_key: "outputs",
+            error_key: "error",
+            error_flag_key: "_error",
+            launched_at_key: "launched_at_ms",
+            settled_at_key: "settled_at_ms",
+        })
+        .expect("valid vocabulary")
+    }
 
     /// Unique instance id for one step-summary test.
     ///
@@ -2646,17 +2711,178 @@ mod tests {
         persistence.insert_event(&event).await.unwrap();
     }
 
-    /// Default (unfiltered) step-summary filter.
-    fn step_summary_filter(sort_order: StepSummarySortOrder) -> ListStepSummariesFilter {
-        ListStepSummariesFilter {
+    /// Default (unfiltered) paired-record filter.
+    fn step_summary_filter(sort_order: StepSummarySortOrder) -> ListPairedRecordsFilter {
+        ListPairedRecordsFilter {
             sort_order,
             status: None,
-            step_type: None,
+            kind: None,
             scope_id: None,
             parent_scope_id: None,
             root_scopes_only: false,
-            step_ids: None,
+            correlation_ids: None,
         }
+    }
+
+    /// The whole query must run on a vocabulary that shares nothing with the
+    /// workflow DSL — different subtypes, a different correlation key, a
+    /// different output-failure envelope.
+    ///
+    /// This is the test that would have failed before the vocabulary became a
+    /// parameter: with the DSL's names spelled into the SQL, none of these
+    /// events pair, and the failing record reads as completed. Asserting
+    /// against DSL-named fixtures cannot catch that, because it agrees with
+    /// hardcoded names by construction.
+    #[tokio::test]
+    async fn test_list_paired_records_under_a_foreign_vocabulary() {
+        let pool = test_pool().await;
+        let persistence = PostgresPersistence::new(pool.clone());
+
+        let instance_id = register_step_summary_instance(&persistence, "foreign-vocab").await;
+
+        let vocabulary = EventVocabulary::new(EventVocabularySpec {
+            start_subtype: "unit_start",
+            end_subtype: "unit_end",
+            correlation_key: "unit_id",
+            kind_key: "unit_kind",
+            label_key: "unit_label",
+            inputs_key: "given",
+            outputs_key: "produced",
+            error_key: "failure",
+            error_flag_key: "_failed",
+            launched_at_key: "began_ms",
+            settled_at_key: "ended_ms",
+        })
+        .expect("valid vocabulary");
+
+        let insert = |subtype: &'static str, payload: serde_json::Value| {
+            let persistence = &persistence;
+            let instance_id = instance_id.clone();
+            async move {
+                persistence
+                    .insert_event(&EventRecord {
+                        id: None,
+                        instance_id,
+                        event_type: "custom".to_string(),
+                        checkpoint_id: None,
+                        payload: Some(serde_json::to_vec(&payload).unwrap()),
+                        created_at: Utc::now(),
+                        subtype: Some(subtype.to_string()),
+                    })
+                    .await
+                    .unwrap();
+            }
+        };
+
+        // A record that completes.
+        insert(
+            "unit_start",
+            serde_json::json!({
+                "unit_id": "u-1",
+                "unit_kind": "Fetch",
+                "unit_label": "Fetch it",
+                "given": {"url": "https://example.test"},
+            }),
+        )
+        .await;
+        insert(
+            "unit_end",
+            serde_json::json!({
+                "unit_id": "u-1",
+                "produced": {"count": 7},
+                "began_ms": 1_700_000_000_100i64,
+                "ended_ms": 1_700_000_000_500i64,
+            }),
+        )
+        .await;
+
+        // A record that fails only through the output envelope, under this
+        // vocabulary's flag rather than the DSL's `_error`.
+        insert(
+            "unit_start",
+            serde_json::json!({"unit_id": "u-2", "unit_kind": "Call"}),
+        )
+        .await;
+        insert(
+            "unit_end",
+            serde_json::json!({
+                "unit_id": "u-2",
+                "produced": {"_failed": true, "failure": {"message": "downstream refused"}},
+            }),
+        )
+        .await;
+
+        // An event carrying the workflow DSL's own names must be ignored
+        // entirely: it is not part of the vocabulary being asked about.
+        insert(
+            "step_debug_start",
+            serde_json::json!({"step_id": "s-1", "step_type": "Http"}),
+        )
+        .await;
+
+        let filter = step_summary_filter(StepSummarySortOrder::Asc);
+        let records = persistence
+            .list_paired_records(&instance_id, &vocabulary, &filter, 100, 0)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            records.len(),
+            2,
+            "only this vocabulary's records may appear: {records:?}"
+        );
+
+        assert_eq!(records[0].correlation_id, "u-1");
+        assert_eq!(records[0].kind, "Fetch");
+        assert_eq!(records[0].label, Some("Fetch it".to_string()));
+        assert_eq!(records[0].status, StepSummaryStatus::Completed);
+        assert_eq!(
+            records[0].inputs,
+            Some(serde_json::json!({"url": "https://example.test"}))
+        );
+        assert_eq!(records[0].outputs, Some(serde_json::json!({"count": 7})));
+        assert_eq!(records[0].launched_at_ms, Some(1_700_000_000_100));
+        assert_eq!(records[0].settled_at_ms, Some(1_700_000_000_500));
+
+        assert_eq!(records[1].correlation_id, "u-2");
+        assert_eq!(
+            records[1].status,
+            StepSummaryStatus::Failed,
+            "the output envelope's own flag must mark the record failed"
+        );
+        assert_eq!(
+            records[1].error,
+            Some(serde_json::json!({"message": "downstream refused"}))
+        );
+
+        assert_eq!(
+            persistence
+                .count_paired_records(&instance_id, &vocabulary, &filter)
+                .await
+                .unwrap(),
+            2
+        );
+
+        // Filtering rides on the same vocabulary-supplied keys.
+        let mut kind_filter = step_summary_filter(StepSummarySortOrder::Asc);
+        kind_filter.kind = Some("Call".to_string());
+        let filtered = persistence
+            .list_paired_records(&instance_id, &vocabulary, &kind_filter, 100, 0)
+            .await
+            .unwrap();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].correlation_id, "u-2");
+
+        // ...and the DSL vocabulary sees only its own half-open record.
+        let dsl_records = persistence
+            .list_paired_records(&instance_id, &workflow_vocabulary(), &filter, 100, 0)
+            .await
+            .unwrap();
+        assert_eq!(dsl_records.len(), 1);
+        assert_eq!(dsl_records[0].correlation_id, "s-1");
+        assert_eq!(dsl_records[0].status, StepSummaryStatus::Running);
+
+        cleanup_step_summary_instance(&pool, &instance_id).await;
     }
 
     #[tokio::test]
@@ -2671,14 +2897,14 @@ mod tests {
         // Both queries are scoped to `instance_id`, so an empty result here is
         // unaffected by rows other tests leave in the shared database.
         let steps = persistence
-            .list_step_summaries(&instance_id, &filter, 100, 0)
+            .list_paired_records(&instance_id, &workflow_vocabulary(), &filter, 100, 0)
             .await
             .unwrap();
 
         assert!(steps.is_empty());
 
         let count = persistence
-            .count_step_summaries(&instance_id, &filter)
+            .count_paired_records(&instance_id, &workflow_vocabulary(), &filter)
             .await
             .unwrap();
 
@@ -2724,14 +2950,14 @@ mod tests {
         let filter = step_summary_filter(StepSummarySortOrder::Desc);
 
         let steps = persistence
-            .list_step_summaries(&instance_id, &filter, 100, 0)
+            .list_paired_records(&instance_id, &workflow_vocabulary(), &filter, 100, 0)
             .await
             .unwrap();
 
         assert_eq!(steps.len(), 1);
-        assert_eq!(steps[0].step_id, "step-1");
-        assert_eq!(steps[0].step_name, Some("Fetch Data".to_string()));
-        assert_eq!(steps[0].step_type, "Http");
+        assert_eq!(steps[0].correlation_id, "step-1");
+        assert_eq!(steps[0].label, Some("Fetch Data".to_string()));
+        assert_eq!(steps[0].kind, "Http");
         assert_eq!(steps[0].status, StepSummaryStatus::Completed);
         assert!(steps[0].completed_at.is_some());
         assert!(steps[0].duration_ms.is_some());
@@ -2816,7 +3042,7 @@ mod tests {
         let filter = step_summary_filter(StepSummarySortOrder::Desc);
 
         let steps = persistence
-            .list_step_summaries(&instance_id, &filter, 100, 0)
+            .list_paired_records(&instance_id, &workflow_vocabulary(), &filter, 100, 0)
             .await
             .unwrap();
 
@@ -2880,7 +3106,7 @@ mod tests {
         let filter = step_summary_filter(StepSummarySortOrder::Desc);
 
         let steps = persistence
-            .list_step_summaries(&instance_id, &filter, 100, 0)
+            .list_paired_records(&instance_id, &workflow_vocabulary(), &filter, 100, 0)
             .await
             .unwrap();
 
@@ -2916,12 +3142,12 @@ mod tests {
         let filter = step_summary_filter(StepSummarySortOrder::Desc);
 
         let steps = persistence
-            .list_step_summaries(&instance_id, &filter, 100, 0)
+            .list_paired_records(&instance_id, &workflow_vocabulary(), &filter, 100, 0)
             .await
             .unwrap();
 
         assert_eq!(steps.len(), 1);
-        assert_eq!(steps[0].step_id, "step-running");
+        assert_eq!(steps[0].correlation_id, "step-running");
         assert_eq!(steps[0].status, StepSummaryStatus::Running);
         assert!(steps[0].completed_at.is_none());
         assert!(steps[0].duration_ms.is_none());
@@ -2962,12 +3188,12 @@ mod tests {
         let filter = step_summary_filter(StepSummarySortOrder::Desc);
 
         let steps = persistence
-            .list_step_summaries(&instance_id, &filter, 100, 0)
+            .list_paired_records(&instance_id, &workflow_vocabulary(), &filter, 100, 0)
             .await
             .unwrap();
 
         assert_eq!(steps.len(), 1);
-        assert_eq!(steps[0].step_id, "step-failed");
+        assert_eq!(steps[0].correlation_id, "step-failed");
         assert_eq!(steps[0].status, StepSummaryStatus::Failed);
         assert!(steps[0].error.is_some());
         // The CTE emits `(ej->'error')::text` and the shared row mapper parses
@@ -3016,7 +3242,7 @@ mod tests {
         let filter = step_summary_filter(StepSummarySortOrder::Desc);
 
         let steps = persistence
-            .list_step_summaries(&instance_id, &filter, 100, 0)
+            .list_paired_records(&instance_id, &workflow_vocabulary(), &filter, 100, 0)
             .await
             .unwrap();
 
@@ -3029,14 +3255,14 @@ mod tests {
             Some(serde_json::json!({"message": "Capability failed"}))
         );
 
-        let failed_filter = ListStepSummariesFilter {
+        let failed_filter = ListPairedRecordsFilter {
             status: Some(StepSummaryStatus::Failed),
             ..filter
         };
         // Count is instance-scoped, so this is not a whole-table count.
         assert_eq!(
             persistence
-                .count_step_summaries(&instance_id, &failed_filter)
+                .count_paired_records(&instance_id, &workflow_vocabulary(), &failed_filter)
                 .await
                 .unwrap(),
             1
@@ -3110,46 +3336,46 @@ mod tests {
         .await;
 
         // Filter by completed
-        let filter = ListStepSummariesFilter {
+        let filter = ListPairedRecordsFilter {
             status: Some(StepSummaryStatus::Completed),
             ..step_summary_filter(StepSummarySortOrder::Desc)
         };
 
         let steps = persistence
-            .list_step_summaries(&instance_id, &filter, 100, 0)
+            .list_paired_records(&instance_id, &workflow_vocabulary(), &filter, 100, 0)
             .await
             .unwrap();
 
         assert_eq!(steps.len(), 1);
-        assert_eq!(steps[0].step_id, "step-1");
+        assert_eq!(steps[0].correlation_id, "step-1");
 
         // Filter by running
-        let filter = ListStepSummariesFilter {
+        let filter = ListPairedRecordsFilter {
             status: Some(StepSummaryStatus::Running),
             ..filter
         };
 
         let steps = persistence
-            .list_step_summaries(&instance_id, &filter, 100, 0)
+            .list_paired_records(&instance_id, &workflow_vocabulary(), &filter, 100, 0)
             .await
             .unwrap();
 
         assert_eq!(steps.len(), 1);
-        assert_eq!(steps[0].step_id, "step-2");
+        assert_eq!(steps[0].correlation_id, "step-2");
 
         // Filter by failed
-        let filter = ListStepSummariesFilter {
+        let filter = ListPairedRecordsFilter {
             status: Some(StepSummaryStatus::Failed),
             ..filter
         };
 
         let steps = persistence
-            .list_step_summaries(&instance_id, &filter, 100, 0)
+            .list_paired_records(&instance_id, &workflow_vocabulary(), &filter, 100, 0)
             .await
             .unwrap();
 
         assert_eq!(steps.len(), 1);
-        assert_eq!(steps[0].step_id, "step-3");
+        assert_eq!(steps[0].correlation_id, "step-3");
 
         cleanup_step_summary_instance(&pool, &instance_id).await;
     }
@@ -3197,19 +3423,19 @@ mod tests {
         )
         .await;
 
-        let filter = ListStepSummariesFilter {
-            step_type: Some("Http".to_string()),
+        let filter = ListPairedRecordsFilter {
+            kind: Some("Http".to_string()),
             ..step_summary_filter(StepSummarySortOrder::Desc)
         };
 
         let steps = persistence
-            .list_step_summaries(&instance_id, &filter, 100, 0)
+            .list_paired_records(&instance_id, &workflow_vocabulary(), &filter, 100, 0)
             .await
             .unwrap();
 
         assert_eq!(steps.len(), 1);
-        assert_eq!(steps[0].step_id, "step-http");
-        assert_eq!(steps[0].step_type, "Http");
+        assert_eq!(steps[0].correlation_id, "step-http");
+        assert_eq!(steps[0].kind, "Http");
 
         cleanup_step_summary_instance(&pool, &instance_id).await;
     }
@@ -3239,41 +3465,41 @@ mod tests {
             insert_step_end_pg(&persistence, &instance_id, step_id, None, None, None).await;
         }
 
-        let filter = ListStepSummariesFilter {
-            step_ids: Some(vec!["step-a".to_string(), "step-\"quoted\"".to_string()]),
+        let filter = ListPairedRecordsFilter {
+            correlation_ids: Some(vec!["step-a".to_string(), "step-\"quoted\"".to_string()]),
             ..step_summary_filter(StepSummarySortOrder::Asc)
         };
 
         let steps = persistence
-            .list_step_summaries(&instance_id, &filter, 100, 0)
+            .list_paired_records(&instance_id, &workflow_vocabulary(), &filter, 100, 0)
             .await
             .unwrap();
 
         assert_eq!(steps.len(), 2);
         // Postgres orders these by the start event's BIGSERIAL `id`, so ascending
         // order is insertion order regardless of `created_at` clock resolution.
-        assert_eq!(steps[0].step_id, "step-a");
-        assert_eq!(steps[1].step_id, "step-\"quoted\"");
+        assert_eq!(steps[0].correlation_id, "step-a");
+        assert_eq!(steps[1].correlation_id, "step-\"quoted\"");
 
         let count = persistence
-            .count_step_summaries(&instance_id, &filter)
+            .count_paired_records(&instance_id, &workflow_vocabulary(), &filter)
             .await
             .unwrap();
         assert_eq!(count, 2);
 
         // An id that matches nothing filters everything out.
-        let filter = ListStepSummariesFilter {
-            step_ids: Some(vec!["missing".to_string()]),
+        let filter = ListPairedRecordsFilter {
+            correlation_ids: Some(vec!["missing".to_string()]),
             ..filter
         };
         let steps = persistence
-            .list_step_summaries(&instance_id, &filter, 100, 0)
+            .list_paired_records(&instance_id, &workflow_vocabulary(), &filter, 100, 0)
             .await
             .unwrap();
         assert!(steps.is_empty());
         assert_eq!(
             persistence
-                .count_step_summaries(&instance_id, &filter)
+                .count_paired_records(&instance_id, &workflow_vocabulary(), &filter)
                 .await
                 .unwrap(),
             0
@@ -3321,28 +3547,28 @@ mod tests {
         // Total count for THIS instance only (other tests' rows live in the
         // same table).
         let count = persistence
-            .count_step_summaries(&instance_id, &filter)
+            .count_paired_records(&instance_id, &workflow_vocabulary(), &filter)
             .await
             .unwrap();
         assert_eq!(count, 5);
 
         // Get first page (limit 2)
         let steps = persistence
-            .list_step_summaries(&instance_id, &filter, 2, 0)
+            .list_paired_records(&instance_id, &workflow_vocabulary(), &filter, 2, 0)
             .await
             .unwrap();
         assert_eq!(steps.len(), 2);
-        assert_eq!(steps[0].step_id, "step-1");
-        assert_eq!(steps[1].step_id, "step-2");
+        assert_eq!(steps[0].correlation_id, "step-1");
+        assert_eq!(steps[1].correlation_id, "step-2");
 
         // Get second page
         let steps = persistence
-            .list_step_summaries(&instance_id, &filter, 2, 2)
+            .list_paired_records(&instance_id, &workflow_vocabulary(), &filter, 2, 2)
             .await
             .unwrap();
         assert_eq!(steps.len(), 2);
-        assert_eq!(steps[0].step_id, "step-3");
-        assert_eq!(steps[1].step_id, "step-4");
+        assert_eq!(steps[0].correlation_id, "step-3");
+        assert_eq!(steps[1].correlation_id, "step-4");
 
         cleanup_step_summary_instance(&pool, &instance_id).await;
     }
@@ -3413,53 +3639,53 @@ mod tests {
         .await;
 
         // Filter by root scopes only
-        let filter = ListStepSummariesFilter {
+        let filter = ListPairedRecordsFilter {
             root_scopes_only: true,
             ..step_summary_filter(StepSummarySortOrder::Desc)
         };
 
         let steps = persistence
-            .list_step_summaries(&instance_id, &filter, 100, 0)
+            .list_paired_records(&instance_id, &workflow_vocabulary(), &filter, 100, 0)
             .await
             .unwrap();
 
         // Both step-root and step-scoped have no parent_scope_id
         assert_eq!(steps.len(), 2);
-        let step_ids: Vec<_> = steps.iter().map(|s| s.step_id.as_str()).collect();
+        let step_ids: Vec<_> = steps.iter().map(|s| s.correlation_id.as_str()).collect();
         assert!(step_ids.contains(&"step-root"));
         assert!(step_ids.contains(&"step-scoped"));
 
         // Filter by scope: the start/end pairing joins on
         // `COALESCE(scope_id,'')`, so a scoped step must still resolve to
         // 'completed' rather than dangling as 'running'.
-        let filter = ListStepSummariesFilter {
+        let filter = ListPairedRecordsFilter {
             scope_id: Some("sc_main".to_string()),
             ..step_summary_filter(StepSummarySortOrder::Desc)
         };
 
         let steps = persistence
-            .list_step_summaries(&instance_id, &filter, 100, 0)
+            .list_paired_records(&instance_id, &workflow_vocabulary(), &filter, 100, 0)
             .await
             .unwrap();
 
         assert_eq!(steps.len(), 1);
-        assert_eq!(steps[0].step_id, "step-scoped");
+        assert_eq!(steps[0].correlation_id, "step-scoped");
         assert_eq!(steps[0].scope_id, Some("sc_main".to_string()));
         assert_eq!(steps[0].status, StepSummaryStatus::Completed);
 
         // Filter by parent scope
-        let filter = ListStepSummariesFilter {
+        let filter = ListPairedRecordsFilter {
             parent_scope_id: Some("sc_main".to_string()),
             ..step_summary_filter(StepSummarySortOrder::Desc)
         };
 
         let steps = persistence
-            .list_step_summaries(&instance_id, &filter, 100, 0)
+            .list_paired_records(&instance_id, &workflow_vocabulary(), &filter, 100, 0)
             .await
             .unwrap();
 
         assert_eq!(steps.len(), 1);
-        assert_eq!(steps[0].step_id, "step-nested");
+        assert_eq!(steps[0].correlation_id, "step-nested");
 
         cleanup_step_summary_instance(&pool, &instance_id).await;
     }

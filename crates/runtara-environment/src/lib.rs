@@ -192,6 +192,9 @@ pub mod instance_output;
 /// In-process WASM execution backend.
 pub mod runner;
 
+/// The workflow event vocabulary handed to `runtara-core` per query.
+pub mod step_vocabulary;
+
 /// Durable sleep wake scheduling.
 pub mod wake_scheduler;
 

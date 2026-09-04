@@ -8,8 +8,9 @@ use async_trait::async_trait;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use runtara_core::error::CoreError;
 use runtara_core::persistence::{
-    CheckpointRecord, CompleteInstanceParams, CustomSignalRecord, EventRecord, InstanceRecord,
-    ListEventsFilter, ListStepSummariesFilter, Persistence, SignalRecord, StepSummaryRecord,
+    CheckpointRecord, CompleteInstanceParams, CustomSignalRecord, EventRecord, EventVocabulary,
+    InstanceRecord, ListEventsFilter, ListPairedRecordsFilter, PairedRecordSummary, Persistence,
+    SignalRecord,
 };
 use runtara_environment::container_registry::ContainerRegistry;
 use runtara_environment::heartbeat_monitor::{HeartbeatMonitor, HeartbeatMonitorConfig};
@@ -458,20 +459,22 @@ impl Persistence for MockPersistence {
         Ok(0)
     }
 
-    async fn list_step_summaries(
+    async fn list_paired_records(
         &self,
         _instance_id: &str,
-        _filter: &ListStepSummariesFilter,
+        _vocabulary: &EventVocabulary,
+        _filter: &ListPairedRecordsFilter,
         _limit: i64,
         _offset: i64,
-    ) -> Result<Vec<StepSummaryRecord>, CoreError> {
+    ) -> Result<Vec<PairedRecordSummary>, CoreError> {
         Ok(vec![])
     }
 
-    async fn count_step_summaries(
+    async fn count_paired_records(
         &self,
         _instance_id: &str,
-        _filter: &ListStepSummariesFilter,
+        _vocabulary: &EventVocabulary,
+        _filter: &ListPairedRecordsFilter,
     ) -> Result<i64, CoreError> {
         Ok(0)
     }
