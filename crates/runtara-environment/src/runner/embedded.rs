@@ -470,6 +470,16 @@ impl ComponentPrecompiler for ChildComponentPrecompiler {
         executor: &WorkflowExecutor,
         options: &LaunchOptions,
     ) -> Result<PreparedWorkflow> {
+        // A prepared artifact for this exact image may already be linked in
+        // this process. Reusing it skips a process spawn and a full component
+        // compile that are otherwise paid on every launch of the same
+        // workflow. The cache still hands back the digest recorded when the
+        // artifact was verified, so the checksum fence below runs unchanged.
+        if let Some((cached, source_digest)) = executor.cached_prepared(&options.wasm_path).await {
+            validate_expected_workflow_checksum(options, source_digest)?;
+            return Ok(cached);
+        }
+
         let (request, response) = self.exchange(options).await?;
         let source_digest = validate_precompile_response(&request, &response)
             .map_err(|error| map_precompile_error(&options.wasm_path, error))?
@@ -489,6 +499,9 @@ impl ComponentPrecompiler for ChildComponentPrecompiler {
             .map_err(|error| {
                 RunnerError::StartFailed(format!("link precompiled workflow: {error:#}"))
             })?;
+        executor
+            .cache_prepared(&options.wasm_path, source_digest, &workflow)
+            .await;
         Ok(workflow)
     }
 

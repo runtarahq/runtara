@@ -52,6 +52,24 @@ const OUTGOING_BODY_CHUNK_SIZE: usize = 1024 * 1024;
 /// images. A composed workflow compiles to one cache entry per image path.
 const COMPONENT_CACHE_MAX: usize = 32;
 
+/// Whether prepared (precompile-worker) artifacts may be reused across
+/// launches, via `RUNTARA_PREPARED_COMPONENT_CACHE`.
+///
+/// Off by default: [`WorkflowExecutor::prepare_precompiled`] documents that a
+/// prepared artifact's native Wasmtime allocations are meant to drop with its
+/// token, and a count-bounded cache does not bound those bytes. Deployments
+/// that run a small, fixed set of workflow images at high rate can trade that
+/// for skipping one process spawn and one full compile per launch, which is
+/// otherwise paid on *every* execution of the same image.
+fn prepared_cache_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("RUNTARA_PREPARED_COMPONENT_CACHE")
+            .map(|v| matches!(v.trim(), "1" | "true" | "TRUE" | "yes"))
+            .unwrap_or(false)
+    })
+}
+
 /// Per-instance resource limits applied to the guest `Store`.
 #[derive(Clone, Debug)]
 pub struct WorkflowLimits {
@@ -272,6 +290,11 @@ struct CachedComponent {
     mtime: Option<SystemTime>,
     len: u64,
     last_used: Instant,
+    /// Source digest recorded when a *prepared* artifact was cached, so a
+    /// later cache hit can re-run the caller's checksum check instead of
+    /// trusting mtime+len alone. `None` for entries built by
+    /// [`WorkflowExecutor::load_instance_pre`], which never had one.
+    source_digest: Option<[u8; 32]>,
     /// The linked component, export-shape-agnostic.
     instance_pre: Arc<wasmtime::component::InstancePre<WorkflowState>>,
     /// Lazily-derived `wasi:cli/run` wrapper — present only once a legacy
@@ -286,6 +309,7 @@ struct CachedComponent {
 /// execution. The child response binds the source digest and serialized
 /// component together, so the runner executes those exact prepared bytes
 /// without reopening the mutable artifact path before it accepts a run permit.
+#[derive(Clone)]
 pub struct PreparedWorkflow {
     instance_pre: Arc<wasmtime::component::InstancePre<WorkflowState>>,
     command: Option<Arc<CommandPre<WorkflowState>>>,
@@ -421,6 +445,7 @@ impl WorkflowExecutor {
                 mtime,
                 len,
                 last_used: Instant::now(),
+                source_digest: None,
                 instance_pre: Arc::clone(&instance_pre),
                 command: None,
             },
@@ -464,6 +489,74 @@ impl WorkflowExecutor {
             instance_pre,
             command,
         })
+    }
+
+    /// Look up a previously prepared artifact for `wasm_path`.
+    ///
+    /// Returns the prepared workflow together with the source digest recorded
+    /// when it was cached, so the caller can repeat the same checksum check it
+    /// would have run against a freshly precompiled artifact — a cache hit is
+    /// never allowed to skip that verification.
+    ///
+    /// Opt-in: see [`prepared_cache_enabled`]. When the cache is off this
+    /// always misses, preserving the drop-with-the-token allocation behaviour
+    /// documented on [`Self::prepare_precompiled`].
+    pub async fn cached_prepared(&self, wasm_path: &Path) -> Option<(PreparedWorkflow, [u8; 32])> {
+        if !prepared_cache_enabled() {
+            return None;
+        }
+        let meta = std::fs::metadata(wasm_path).ok()?;
+        let mtime = meta.modified().ok();
+        let len = meta.len();
+
+        let mut cache = self.cache.lock().await;
+        let entry = cache.get_mut(wasm_path)?;
+        if entry.mtime != mtime || entry.len != len {
+            return None;
+        }
+        let digest = entry.source_digest?;
+        entry.last_used = Instant::now();
+        Some((
+            PreparedWorkflow {
+                instance_pre: Arc::clone(&entry.instance_pre),
+                command: entry.command.clone(),
+            },
+            digest,
+        ))
+    }
+
+    /// Record a prepared artifact so later launches of the same image skip the
+    /// precompile worker entirely.
+    ///
+    /// Bounded by the same `COMPONENT_CACHE_MAX` LRU as compiled components.
+    /// No-op unless the cache is enabled.
+    pub async fn cache_prepared(
+        &self,
+        wasm_path: &Path,
+        source_digest: [u8; 32],
+        prepared: &PreparedWorkflow,
+    ) {
+        if !prepared_cache_enabled() {
+            return;
+        }
+        let Ok(meta) = std::fs::metadata(wasm_path) else {
+            return;
+        };
+        let mut cache = self.cache.lock().await;
+        cache.insert(
+            wasm_path.to_path_buf(),
+            CachedComponent {
+                mtime: meta.modified().ok(),
+                len: meta.len(),
+                last_used: Instant::now(),
+                source_digest: Some(source_digest),
+                instance_pre: Arc::clone(&prepared.instance_pre),
+                command: prepared.command.clone(),
+            },
+        );
+        if cache.len() > COMPONENT_CACHE_MAX {
+            evict_lru(&mut cache);
+        }
     }
 
     /// Execute one workflow instance to completion (or interruption).
