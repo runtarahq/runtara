@@ -51,8 +51,10 @@ impl<'s> sqlx::migrate::MigrationSource<'s> for CombinedMigrations {
     > {
         Box::pin(async move {
             // Get core migrations
-            let core_migrations: Vec<Migration> =
-                runtara_core::migrations::POSTGRES.iter().cloned().collect();
+            let core_migrations: Vec<Migration> = runtara_store_postgres::migrations::POSTGRES
+                .iter()
+                .cloned()
+                .collect();
 
             // Get environment migrations
             let env_migrations: Vec<Migration> = ENV_MIGRATOR.iter().cloned().collect();
@@ -95,7 +97,9 @@ pub async fn run(pool: &sqlx::PgPool) -> Result<(), MigrateError> {
 ///
 /// Returns migrations sorted by version number.
 pub fn iter() -> impl Iterator<Item = Cow<'static, Migration>> {
-    let core_iter = runtara_core::migrations::POSTGRES.iter().map(Cow::Borrowed);
+    let core_iter = runtara_store_postgres::migrations::POSTGRES
+        .iter()
+        .map(Cow::Borrowed);
     let env_iter = ENV_MIGRATOR.iter().map(Cow::Borrowed);
 
     let mut all: Vec<_> = core_iter.chain(env_iter).collect();

@@ -8,9 +8,9 @@
 //! rather than read straight off a table, and the CTE hands them back as
 //! TEXT, so they need parsing rather than a direct `jsonb` decode.
 //!
-//! [`PairedRecordSummary`]: crate::persistence::PairedRecordSummary
+//! [`PairedRecordSummary`]: ::runtara_core::persistence::PairedRecordSummary
 
-use crate::persistence::PairedRecordStatus;
+use ::runtara_core::persistence::PairedRecordStatus;
 
 /// Parse the string form of [`PairedRecordStatus`] used by the paired-record CTE.
 ///
@@ -44,7 +44,7 @@ pub fn decode_json_text(text: Option<String>) -> Option<serde_json::Value> {
 /// object rather than by populating the end event's error key — a return
 /// convention of the code that emits the events, one layer below the event
 /// protocol itself. Both key names come from the caller's
-/// [`EventVocabulary`](crate::persistence::EventVocabulary); this crate knows
+/// [`EventVocabulary`](::runtara_core::persistence::EventVocabulary); this crate knows
 /// neither.
 pub fn error_from_output_envelope(
     output: Option<&serde_json::Value>,

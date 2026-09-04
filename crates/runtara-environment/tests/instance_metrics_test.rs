@@ -6,8 +6,9 @@
 //! time and captured stderr are the runner's observations, and Core never reads
 //! any of them back to decide anything.
 
-use runtara_core::persistence::{Persistence, PostgresPersistence};
+use runtara_core::persistence::Persistence;
 use runtara_environment::metrics;
+use runtara_store_postgres::PostgresPersistence;
 use sqlx::PgPool;
 use uuid::Uuid;
 

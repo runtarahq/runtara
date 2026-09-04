@@ -14,7 +14,6 @@ name = "runtara_core"
 path = "src/lib.rs"
 
 [features]
-db-integration-tests = []
 
 # Exposes the in-memory `Persistence` mock so downstream crates — chiefly the
 # instance HTTP API, which now lives in runtara-server — can test handler
@@ -24,10 +23,6 @@ test-support = []
 [dependencies]
 # Async runtime
 tokio = { version = "1", features = ["full"] }
-
-# Database
-sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls-ring-webpki", "postgres", "uuid", "chrono", "macros", "migrate"] }
-
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -49,6 +44,3 @@ async-trait = "0.1"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util", "macros", "rt-multi-thread"] }
-# Testcontainers for automatic PostgreSQL setup in tests
-testcontainers = "0.27"
-testcontainers-modules = { version = "0.15", features = ["postgres"] }

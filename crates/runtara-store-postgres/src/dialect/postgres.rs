@@ -3,10 +3,12 @@
 //! Postgres dialect: `$N` placeholders, enum type casts, JSONB operators,
 //! `ILIKE`, `ANY($1)` for batch `IN`, `EXTRACT(EPOCH FROM ...)`.
 
-use crate::error::CoreError;
-use crate::persistence::EventVocabulary;
+use ::runtara_core::error::CoreError;
+use ::runtara_core::persistence::EventVocabulary;
 
 use super::{Dialect, EnumKind};
+
+use crate::rows::DbResult;
 
 /// Zero-sized Postgres dialect implementation.
 #[derive(Debug, Clone, Copy, Default)]
@@ -30,7 +32,8 @@ impl PostgresDialect {
         let result = sqlx::query("DELETE FROM instances WHERE instance_id = ANY($1)")
             .bind(instance_ids)
             .execute(pool)
-            .await?;
+            .await
+            .db()?;
         Ok(result.rows_affected())
     }
 }
@@ -411,7 +414,7 @@ mod tests {
     /// A vocabulary whose every name differs from the workflow DSL's, so a
     /// test can tell a spliced name from a leftover literal.
     fn other_vocabulary() -> EventVocabulary {
-        EventVocabulary::new(crate::persistence::EventVocabularySpec {
+        EventVocabulary::new(::runtara_core::persistence::EventVocabularySpec {
             start_subtype: "unit_start",
             end_subtype: "unit_end",
             correlation_key: "unit_id",
@@ -488,7 +491,7 @@ mod tests {
     /// mapper keeps reading the same columns.
     #[test]
     fn column_aliases_do_not_follow_the_vocabulary() {
-        let colliding = EventVocabulary::new(crate::persistence::EventVocabularySpec {
+        let colliding = EventVocabulary::new(::runtara_core::persistence::EventVocabularySpec {
             start_subtype: "opened",
             end_subtype: "closed",
             correlation_key: "id",

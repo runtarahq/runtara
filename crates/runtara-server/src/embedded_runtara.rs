@@ -17,9 +17,9 @@ use std::sync::Arc;
 
 use runtara_core::config::RuntimeOverrides;
 use runtara_core::persistence::Persistence;
-use runtara_core::persistence::postgres::PostgresPersistence;
 use runtara_environment::execution_timeout::ExecutionTimeoutPolicy;
 use runtara_environment::runtime::EnvironmentRuntime;
+use runtara_store_postgres::PostgresPersistence;
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 use tracing::{error, info};

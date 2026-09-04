@@ -16,7 +16,7 @@
 //!
 //! ```rust,ignore
 //! use std::sync::Arc;
-//! use runtara_core::persistence::PostgresPersistence;
+//! use runtara_store_postgres::PostgresPersistence;
 //! use runtara_server::core_runtime::CoreRuntime;
 //!
 //! #[tokio::main]

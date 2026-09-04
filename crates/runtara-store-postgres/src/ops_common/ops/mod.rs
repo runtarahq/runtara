@@ -6,9 +6,9 @@
 //! events, signals, sleep, paired records, retention) and exposes a
 //! `macro_rules!` macro that expands to concrete `impl` blocks against a
 //! given backend type + pool type + dialect type. The shared body composes
-//! SQL via [`crate::persistence::dialect::Dialect`], binds, executes, and
-//! routes errors/rows through [`crate::persistence::common::error`] and
-//! [`crate::persistence::common::row`].
+//! SQL via [`crate::dialect::Dialect`], binds, executes, and
+//! routes errors/rows through [`crate::ops_common::error`] and
+//! [`crate::ops_common::row`].
 //!
 //! The macro indirection dates from when there were two backends. With one
 //! left it buys nothing; expanding it into plain `impl` blocks is a separate
@@ -29,6 +29,3 @@ pub(crate) use paired_records::impl_paired_record_ops;
 pub(crate) use retention::impl_retention_ops;
 pub(crate) use signals::impl_signal_ops;
 pub(crate) use sleep::impl_sleep_ops;
-
-#[cfg(test)]
-pub mod postgres_conformance;

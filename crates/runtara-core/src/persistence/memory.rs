@@ -778,8 +778,7 @@ mod tests {
     #[tokio::test]
     async fn in_memory_backend_satisfies_the_conformance_sequence() {
         let backend = InMemoryPersistence::new();
-        crate::persistence::common::ops::postgres_conformance::run_conformance_sequence(&backend)
-            .await;
+        crate::persistence::conformance::run_conformance_sequence(&backend).await;
     }
 
     fn foreign_vocabulary() -> EventVocabulary {

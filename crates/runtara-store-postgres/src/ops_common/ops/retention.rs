@@ -5,7 +5,7 @@
 //! Covers `get_terminal_instances_older_than` and `delete_instances_batch`.
 //!
 //! `delete_instances_batch` still delegates to an inherent
-//! [`crate::persistence::dialect::PostgresDialect::exec_delete_instances_batch`]
+//! [`crate::dialect::PostgresDialect::exec_delete_instances_batch`]
 //! rather than expanding inline. That indirection existed to keep a second
 //! backend's placeholder fan-out out of the macro; with one backend it is
 //! simply an extra hop, and folding it back in belongs with the wider dialect
@@ -23,9 +23,9 @@ macro_rules! impl_retention_ops {
                 limit: i64,
             ) -> ::core::result::Result<
                 ::std::vec::Vec<::std::string::String>,
-                $crate::error::CoreError,
+                ::runtara_core::error::CoreError,
             > {
-                use $crate::persistence::dialect::Dialect;
+                use crate::dialect::Dialect;
                 let p1 = <$Dialect>::placeholder(1);
                 let p2 = <$Dialect>::placeholder(2);
                 let sql = format!(
@@ -41,7 +41,8 @@ macro_rules! impl_retention_ops {
                     .bind(older_than)
                     .bind(limit)
                     .fetch_all(pool)
-                    .await?;
+                    .await
+                    .db()?;
                 Ok(rows.into_iter().map(|(id,)| id).collect())
             }
 
@@ -52,7 +53,7 @@ macro_rules! impl_retention_ops {
             pub(crate) async fn op_delete_instances_batch(
                 pool: &$Pool,
                 instance_ids: &[::std::string::String],
-            ) -> ::core::result::Result<u64, $crate::error::CoreError> {
+            ) -> ::core::result::Result<u64, ::runtara_core::error::CoreError> {
                 <$Dialect>::exec_delete_instances_batch(pool, instance_ids).await
             }
 
@@ -79,11 +80,11 @@ macro_rules! impl_retention_ops {
             /// large backlog never becomes one long-running DELETE.
             pub(crate) async fn op_delete_paired_events_older_than(
                 pool: &$Pool,
-                vocabulary: &$crate::persistence::EventVocabulary,
+                vocabulary: &::runtara_core::persistence::EventVocabulary,
                 older_than: ::chrono::DateTime<::chrono::Utc>,
                 limit: i64,
-            ) -> ::core::result::Result<u64, $crate::error::CoreError> {
-                use $crate::persistence::dialect::Dialect;
+            ) -> ::core::result::Result<u64, ::runtara_core::error::CoreError> {
+                use crate::dialect::Dialect;
                 let p1 = <$Dialect>::placeholder(1);
                 let p2 = <$Dialect>::placeholder(2);
                 let start_subtype = vocabulary.start_subtype();
@@ -103,7 +104,7 @@ macro_rules! impl_retention_ops {
                     .bind(limit)
                     .execute(pool)
                     .await
-                    .map_err(|e| $crate::error::CoreError::DatabaseError {
+                    .map_err(|e| ::runtara_core::error::CoreError::DatabaseError {
                         operation: "delete_paired_events_older_than".into(),
                         details: e.to_string(),
                     })?;

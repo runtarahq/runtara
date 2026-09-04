@@ -4,9 +4,9 @@
 //!
 //! The `impl_instance_ops!` macro expands to concrete `impl $Backend { ... }`
 //! blocks with one `async fn op_*` per trait method in the family. Each
-//! body composes SQL via the backend's [`crate::persistence::dialect::Dialect`],
+//! body composes SQL via the backend's [`crate::dialect::Dialect`],
 //! binds against the concrete pool type, and routes errors through
-//! [`crate::persistence::common::error`].
+//! [`crate::ops_common::error`].
 //!
 //! Single-instance `UPDATE` writes raise `CoreError::InstanceNotFound`
 //! when `rows_affected == 0`, so a write aimed at a row that was already
@@ -36,8 +36,8 @@ macro_rules! impl_instance_ops {
                 pool: &$Pool,
                 instance_id: &str,
                 tenant_id: &str,
-            ) -> ::core::result::Result<(), $crate::error::CoreError> {
-                use $crate::persistence::dialect::{Dialect, EnumKind};
+            ) -> ::core::result::Result<(), ::runtara_core::error::CoreError> {
+                use crate::dialect::{Dialect, EnumKind};
                 let p1 = <$Dialect>::placeholder(1);
                 let p2 = <$Dialect>::placeholder(2);
                 let status_cast = <$Dialect>::enum_cast(EnumKind::InstanceStatus);
@@ -51,7 +51,7 @@ macro_rules! impl_instance_ops {
                     .bind(tenant_id)
                     .execute(pool)
                     .await
-                    .map_err(|e| $crate::error::CoreError::DatabaseError {
+                    .map_err(|e| ::runtara_core::error::CoreError::DatabaseError {
                         operation: "register_instance".into(),
                         details: e.to_string(),
                     })?;
@@ -73,8 +73,8 @@ macro_rules! impl_instance_ops {
                 instance_id: &str,
                 tenant_id: &str,
                 input: ::core::option::Option<&[u8]>,
-            ) -> ::core::result::Result<bool, $crate::error::CoreError> {
-                use $crate::persistence::dialect::{Dialect, EnumKind};
+            ) -> ::core::result::Result<bool, ::runtara_core::error::CoreError> {
+                use crate::dialect::{Dialect, EnumKind};
                 let p1 = <$Dialect>::placeholder(1);
                 let p2 = <$Dialect>::placeholder(2);
                 let status_cast = <$Dialect>::enum_cast(EnumKind::InstanceStatus);
@@ -92,7 +92,7 @@ macro_rules! impl_instance_ops {
                     .bind(input)
                     .execute(pool)
                     .await
-                    .map_err(|e| $crate::error::CoreError::DatabaseError {
+                    .map_err(|e| ::runtara_core::error::CoreError::DatabaseError {
                         operation: "try_register_instance".into(),
                         details: e.to_string(),
                     })?;
@@ -114,10 +114,10 @@ macro_rules! impl_instance_ops {
                 pool: &$Pool,
                 instance_id: &str,
             ) -> ::core::result::Result<
-                ::core::option::Option<$crate::persistence::InstanceRecord>,
-                $crate::error::CoreError,
+                ::core::option::Option<::runtara_core::persistence::InstanceRecord>,
+                ::runtara_core::error::CoreError,
             > {
-                use $crate::persistence::dialect::Dialect;
+                use crate::dialect::Dialect;
                 let p1 = <$Dialect>::placeholder(1);
                 let status_col = <$Dialect>::select_status_col();
                 let termination_col = <$Dialect>::select_termination_col();
@@ -129,11 +129,11 @@ macro_rules! impl_instance_ops {
                      FROM instances \
                      WHERE instance_id = {p1}"
                 );
-                let record = ::sqlx::query_as::<_, $crate::persistence::InstanceRecord>(&sql)
+                let record = ::sqlx::query_as::<_, crate::rows::InstanceRow>(&sql)
                     .bind(instance_id)
                     .fetch_optional(pool)
-                    .await?;
-                Ok(record)
+                    .await.db()?;
+                Ok(record.map(|r| r.0))
             }
 
             /// SELECT a single instance by id, including the `input` BLOB.
@@ -141,10 +141,10 @@ macro_rules! impl_instance_ops {
                 pool: &$Pool,
                 instance_id: &str,
             ) -> ::core::result::Result<
-                ::core::option::Option<$crate::persistence::InstanceRecord>,
-                $crate::error::CoreError,
+                ::core::option::Option<::runtara_core::persistence::InstanceRecord>,
+                ::runtara_core::error::CoreError,
             > {
-                use $crate::persistence::dialect::Dialect;
+                use crate::dialect::Dialect;
                 let p1 = <$Dialect>::placeholder(1);
                 let status_col = <$Dialect>::select_status_col();
                 let termination_col = <$Dialect>::select_termination_col();
@@ -156,15 +156,15 @@ macro_rules! impl_instance_ops {
                      FROM instances \
                      WHERE instance_id = {p1}"
                 );
-                let record = ::sqlx::query_as::<_, $crate::persistence::InstanceRecord>(&sql)
+                let record = ::sqlx::query_as::<_, crate::rows::InstanceRow>(&sql)
                     .bind(instance_id)
                     .fetch_optional(pool)
                     .await
-                    .map_err(|e| $crate::error::CoreError::DatabaseError {
+                    .map_err(|e| ::runtara_core::error::CoreError::DatabaseError {
                         operation: "get_instance".into(),
                         details: e.to_string(),
                     })?;
-                Ok(record)
+                Ok(record.map(|r| r.0))
             }
 
             /// UPDATE status (and optionally `started_at`). Errors with
@@ -204,8 +204,8 @@ macro_rules! impl_instance_ops {
                 pool: &$Pool,
                 instance_id: &str,
                 started_at: ::chrono::DateTime<::chrono::Utc>,
-            ) -> ::core::result::Result<(), $crate::error::CoreError> {
-                use $crate::persistence::dialect::{Dialect, EnumKind};
+            ) -> ::core::result::Result<(), ::runtara_core::error::CoreError> {
+                use crate::dialect::{Dialect, EnumKind};
                 let p1 = <$Dialect>::placeholder(1);
                 let p2 = <$Dialect>::placeholder(2);
                 let status_cast = <$Dialect>::enum_cast(EnumKind::InstanceStatus);
@@ -221,7 +221,7 @@ macro_rules! impl_instance_ops {
                     .bind(started_at)
                     .execute(pool)
                     .await
-                    .map_err(|e| $crate::error::CoreError::DatabaseError {
+                    .map_err(|e| ::runtara_core::error::CoreError::DatabaseError {
                         operation: "mark_instance_running".into(),
                         details: e.to_string(),
                     })?;
@@ -233,8 +233,8 @@ macro_rules! impl_instance_ops {
                 pool: &$Pool,
                 instance_id: &str,
                 started_at: ::chrono::DateTime<::chrono::Utc>,
-            ) -> ::core::result::Result<bool, $crate::error::CoreError> {
-                use $crate::persistence::dialect::{Dialect, EnumKind};
+            ) -> ::core::result::Result<bool, ::runtara_core::error::CoreError> {
+                use crate::dialect::{Dialect, EnumKind};
                 let p1 = <$Dialect>::placeholder(1);
                 let p2 = <$Dialect>::placeholder(2);
                 let status_cast = <$Dialect>::enum_cast(EnumKind::InstanceStatus);
@@ -251,7 +251,7 @@ macro_rules! impl_instance_ops {
                     .bind(started_at)
                     .execute(pool)
                     .await
-                    .map_err(|e| $crate::error::CoreError::DatabaseError {
+                    .map_err(|e| ::runtara_core::error::CoreError::DatabaseError {
                         operation: "mark_instance_started".into(),
                         details: e.to_string(),
                     })?;
@@ -263,9 +263,9 @@ macro_rules! impl_instance_ops {
                 instance_id: &str,
                 status: &str,
                 started_at: ::core::option::Option<::chrono::DateTime<::chrono::Utc>>,
-            ) -> ::core::result::Result<(), $crate::error::CoreError> {
-                use $crate::persistence::common::error::not_found_if_empty;
-                use $crate::persistence::dialect::{Dialect, EnumKind};
+            ) -> ::core::result::Result<(), ::runtara_core::error::CoreError> {
+                use crate::ops_common::error::not_found_if_empty;
+                use crate::dialect::{Dialect, EnumKind};
                 let p1 = <$Dialect>::placeholder(1);
                 let p2 = <$Dialect>::placeholder(2);
                 let p3 = <$Dialect>::placeholder(3);
@@ -283,7 +283,7 @@ macro_rules! impl_instance_ops {
                         .bind(ts)
                         .execute(pool)
                         .await
-                        .map_err(|e| $crate::error::CoreError::DatabaseError {
+                        .map_err(|e| ::runtara_core::error::CoreError::DatabaseError {
                             operation: "update_instance_status".into(),
                             details: e.to_string(),
                         })?
@@ -298,7 +298,7 @@ macro_rules! impl_instance_ops {
                         .bind(status)
                         .execute(pool)
                         .await
-                        .map_err(|e| $crate::error::CoreError::DatabaseError {
+                        .map_err(|e| ::runtara_core::error::CoreError::DatabaseError {
                             operation: "update_instance_status".into(),
                             details: e.to_string(),
                         })?
@@ -312,9 +312,9 @@ macro_rules! impl_instance_ops {
                 pool: &$Pool,
                 instance_id: &str,
                 checkpoint_id: &str,
-            ) -> ::core::result::Result<(), $crate::error::CoreError> {
-                use $crate::persistence::common::error::not_found_if_empty;
-                use $crate::persistence::dialect::Dialect;
+            ) -> ::core::result::Result<(), ::runtara_core::error::CoreError> {
+                use crate::ops_common::error::not_found_if_empty;
+                use crate::dialect::Dialect;
                 let p1 = <$Dialect>::placeholder(1);
                 let p2 = <$Dialect>::placeholder(2);
                 let sql = format!(
@@ -324,7 +324,7 @@ macro_rules! impl_instance_ops {
                     .bind(instance_id)
                     .bind(checkpoint_id)
                     .execute(pool)
-                    .await?;
+                    .await.db()?;
                 not_found_if_empty::<<$Dialect as Dialect>::Database>(&result, instance_id)
             }
 
@@ -351,11 +351,11 @@ macro_rules! impl_instance_ops {
             ///   success or `Err(InstanceNotFound)` on miss.
             pub(crate) async fn op_complete_instance_unified(
                 pool: &$Pool,
-                params: $crate::persistence::CompleteInstanceParams<'_>,
-            ) -> ::core::result::Result<bool, $crate::error::CoreError> {
-                use $crate::persistence::CompleteInstanceGuard;
-                use $crate::persistence::common::error::{RowsAffected, not_found_if_empty};
-                use $crate::persistence::dialect::{Dialect, EnumKind};
+                params: ::runtara_core::persistence::CompleteInstanceParams<'_>,
+            ) -> ::core::result::Result<bool, ::runtara_core::error::CoreError> {
+                use ::runtara_core::persistence::CompleteInstanceGuard;
+                use crate::ops_common::error::{RowsAffected, not_found_if_empty};
+                use crate::dialect::{Dialect, EnumKind};
                 let p1 = <$Dialect>::placeholder(1);
                 let p2 = <$Dialect>::placeholder(2);
                 let p3 = <$Dialect>::placeholder(3);
@@ -397,7 +397,7 @@ macro_rules! impl_instance_ops {
                     .bind(params.checkpoint_id)
                     .execute(pool)
                     .await
-                    .map_err(|e| $crate::error::CoreError::DatabaseError {
+                    .map_err(|e| ::runtara_core::error::CoreError::DatabaseError {
                         operation: "complete_instance".into(),
                         details: e.to_string(),
                     })?;
@@ -421,8 +421,8 @@ macro_rules! impl_instance_ops {
                 pool: &$Pool,
                 instance_id: &str,
                 input: &[u8],
-            ) -> ::core::result::Result<(), $crate::error::CoreError> {
-                use $crate::persistence::dialect::Dialect;
+            ) -> ::core::result::Result<(), ::runtara_core::error::CoreError> {
+                use crate::dialect::Dialect;
                 let p1 = <$Dialect>::placeholder(1);
                 let p2 = <$Dialect>::placeholder(2);
                 let sql = format!(
@@ -432,7 +432,7 @@ macro_rules! impl_instance_ops {
                     .bind(instance_id)
                     .bind(input)
                     .execute(pool)
-                    .await?;
+                    .await.db()?;
                 Ok(())
             }
 
@@ -447,10 +447,10 @@ macro_rules! impl_instance_ops {
                 limit: i64,
                 offset: i64,
             ) -> ::core::result::Result<
-                ::std::vec::Vec<$crate::persistence::InstanceRecord>,
-                $crate::error::CoreError,
+                ::std::vec::Vec<::runtara_core::persistence::InstanceRecord>,
+                ::runtara_core::error::CoreError,
             > {
-                use $crate::persistence::dialect::{Dialect, EnumKind};
+                use crate::dialect::{Dialect, EnumKind};
                 let p1 = <$Dialect>::placeholder(1);
                 let p2 = <$Dialect>::placeholder(2);
                 let p3 = <$Dialect>::placeholder(3);
@@ -468,22 +468,22 @@ macro_rules! impl_instance_ops {
                      ORDER BY created_at DESC \
                      LIMIT {p3} OFFSET {p4}"
                 );
-                let records = ::sqlx::query_as::<_, $crate::persistence::InstanceRecord>(&sql)
+                let records = ::sqlx::query_as::<_, crate::rows::InstanceRow>(&sql)
                     .bind(tenant_id)
                     .bind(status)
                     .bind(limit)
                     .bind(offset)
                     .fetch_all(pool)
-                    .await?;
-                Ok(records)
+                    .await.db()?;
+                Ok(records.into_iter().map(|r| r.0).collect())
             }
 
             /// Single-row probe via the dialect's health-check SQL.
             /// Returns `true` iff the query completes without error.
             pub(crate) async fn op_health_check_db(
                 pool: &$Pool,
-            ) -> ::core::result::Result<bool, $crate::error::CoreError> {
-                use $crate::persistence::dialect::Dialect;
+            ) -> ::core::result::Result<bool, ::runtara_core::error::CoreError> {
+                use crate::dialect::Dialect;
                 let sql = <$Dialect>::sql_health_check();
                 let result: ::core::result::Result<(i64,), _> =
                     ::sqlx::query_as(sql).fetch_one(pool).await;
@@ -510,11 +510,11 @@ macro_rules! impl_instance_ops {
             /// the embedding host.
             pub(crate) async fn op_count_active_instances(
                 pool: &$Pool,
-            ) -> ::core::result::Result<i64, $crate::error::CoreError> {
+            ) -> ::core::result::Result<i64, ::runtara_core::error::CoreError> {
                 let row: (i64,) =
                     ::sqlx::query_as("SELECT COUNT(*) FROM instances WHERE status = 'running'")
                         .fetch_one(pool)
-                        .await?;
+                        .await.db()?;
                 Ok(row.0)
             }
         }

@@ -14,7 +14,7 @@ pub mod postgres;
 
 pub use self::postgres::PostgresDialect;
 
-use super::EventVocabulary;
+use ::runtara_core::persistence::EventVocabulary;
 
 /// Categories of enum-typed columns that Postgres casts with `::name`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -6,18 +6,19 @@
 #[cfg(any(test, feature = "test-support"))]
 pub mod memory;
 
-pub(crate) mod common;
-pub(crate) mod dialect;
-pub mod postgres;
+/// The executable definition of the [`Persistence`] contract, for backends to
+/// prove themselves against.
+#[cfg(any(test, feature = "test-support"))]
+pub mod conformance;
+
 pub mod vocabulary;
 
-pub use self::postgres::PostgresPersistence;
 pub use self::vocabulary::{EventVocabulary, EventVocabularySpec};
 
 use crate::error::CoreError;
 
 /// Instance record from the persistence layer.
-#[derive(Debug, Clone, sqlx::FromRow)]
+#[derive(Debug, Clone)]
 pub struct InstanceRecord {
     /// Unique identifier for the instance.
     pub instance_id: String,
@@ -40,7 +41,6 @@ pub struct InstanceRecord {
     /// When the instance finished (completed, failed, or cancelled).
     pub finished_at: Option<DateTime<Utc>>,
     /// Input data provided at launch time.
-    #[sqlx(default)]
     pub input: Option<Vec<u8>>,
     /// Output data from successful completion.
     pub output: Option<Vec<u8>>,
@@ -49,24 +49,20 @@ pub struct InstanceRecord {
     /// When a sleeping instance should be woken.
     pub sleep_until: Option<DateTime<Utc>>,
     /// How/why the instance reached its terminal state.
-    #[sqlx(default)]
     pub termination_reason: Option<String>,
     /// Process exit code if available.
-    #[sqlx(default)]
     pub exit_code: Option<i32>,
     /// Consecutive no-progress auto-restarts after an Environment restart.
     /// Reset to 0 when the instance's checkpoint count advances between
     /// recoveries. See [`Persistence::mark_for_recovery`].
-    #[sqlx(default)]
     pub recovery_attempts: i32,
     /// Checkpoint count observed at the last auto-recovery, as text. Compared
     /// against the current count to distinguish "made progress" from "stuck".
-    #[sqlx(default)]
     pub recovery_marker: Option<String>,
 }
 
 /// Checkpoint record from the persistence layer.
-#[derive(Debug, Clone, sqlx::FromRow)]
+#[derive(Debug, Clone)]
 pub struct CheckpointRecord {
     /// Database primary key.
     pub id: i64,
@@ -81,10 +77,9 @@ pub struct CheckpointRecord {
 }
 
 /// Event record from the persistence layer.
-#[derive(Debug, Clone, sqlx::FromRow)]
+#[derive(Debug, Clone)]
 pub struct EventRecord {
     /// Database primary key (None when inserting new events).
-    #[sqlx(default)]
     pub id: Option<i64>,
     /// Instance this event belongs to.
     pub instance_id: String,
@@ -101,7 +96,7 @@ pub struct EventRecord {
 }
 
 /// Signal record from the persistence layer.
-#[derive(Debug, Clone, sqlx::FromRow)]
+#[derive(Debug, Clone)]
 pub struct SignalRecord {
     /// Instance this signal is for.
     pub instance_id: String,
@@ -116,7 +111,7 @@ pub struct SignalRecord {
 }
 
 /// Pending custom signal scoped to a specific checkpoint.
-#[derive(Debug, Clone, sqlx::FromRow)]
+#[derive(Debug, Clone)]
 pub struct CustomSignalRecord {
     /// Instance this signal is for.
     pub instance_id: String,

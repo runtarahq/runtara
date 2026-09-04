@@ -1,0 +1,35 @@
+[package]
+name = "runtara-store-postgres"
+edition.workspace = true
+rust-version.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "PostgreSQL implementation of runtara-core's Persistence contract"
+keywords = ["durable", "workflow", "postgres", "persistence"]
+categories = ["asynchronous", "database"]
+
+[features]
+# Runs runtara-core's conformance suite against this backend. Needs a database.
+db-integration-tests = ["runtara-core/test-support"]
+
+[dependencies]
+runtara-core = { path = "../runtara-core" }
+
+tokio = { version = "1", features = ["full"] }
+sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls-ring-webpki", "postgres", "uuid", "chrono", "macros", "migrate"] }
+serde_json = "1"
+tracing = "0.1"
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+async-trait = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["test-util", "macros", "rt-multi-thread"] }
+testcontainers = "0.27"
+testcontainers-modules = { version = "0.15", features = ["postgres"] }
+
+[[test]]
+name = "conformance"
+path = "tests/conformance.rs"
+required-features = ["db-integration-tests"]

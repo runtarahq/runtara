@@ -7,7 +7,7 @@
 //! The paired-record query is a CTE that joins each start event to the end
 //! event sharing its correlation id within the same scope. Which subtypes and
 //! payload keys those are comes from the caller's
-//! [`EventVocabulary`](crate::persistence::EventVocabulary) — this crate names
+//! [`EventVocabulary`](::runtara_core::persistence::EventVocabulary) — this crate names
 //! none of them. The SQL lives behind `Dialect::sql_list_paired_records` /
 //! `sql_count_paired_records` and leans on JSONB operators to reach into the
 //! payload blob plus `Dialect::duration_ms` for the paired duration.
@@ -15,7 +15,7 @@
 //! The outer SELECT emits `inputs`, `outputs`, and `error` as TEXT via
 //! `(jsonb_expr)::text` rather than as JSONB, and the row-marshaling
 //! parses them back with
-//! [`crate::persistence::common::row::decode_json_text`]. The
+//! [`crate::ops_common::row::decode_json_text`]. The
 //! serialize-then-parse round trip yields an equal `serde_json::Value`,
 //! so `PairedRecordSummary` looks the same to every caller; the path is
 //! pinned by `postgres_conformance::run_conformance_sequence` and the
@@ -25,26 +25,24 @@ macro_rules! impl_paired_record_ops {
     ($Backend:ty, $Pool:ty, $Dialect:ty) => {
         impl $Backend {
             /// List paired start/end events as
-            /// [`crate::persistence::PairedRecordSummary`] entries.
+            /// [`::runtara_core::persistence::PairedRecordSummary`] entries.
             pub(crate) async fn op_list_paired_records(
                 pool: &$Pool,
                 instance_id: &str,
-                vocabulary: &$crate::persistence::EventVocabulary,
-                filter: &$crate::persistence::ListPairedRecordsFilter,
+                vocabulary: &::runtara_core::persistence::EventVocabulary,
+                filter: &::runtara_core::persistence::ListPairedRecordsFilter,
                 limit: i64,
                 offset: i64,
             ) -> ::core::result::Result<
-                ::std::vec::Vec<$crate::persistence::PairedRecordSummary>,
-                $crate::error::CoreError,
+                ::std::vec::Vec<::runtara_core::persistence::PairedRecordSummary>,
+                ::runtara_core::error::CoreError,
             > {
-                use ::sqlx::Row;
-                use $crate::persistence::common::filters::{
-                    record_status_filter_str, sort_direction_sql,
-                };
-                use $crate::persistence::common::row::{
+                use crate::dialect::Dialect;
+                use crate::ops_common::filters::{record_status_filter_str, sort_direction_sql};
+                use crate::ops_common::row::{
                     decode_json_text, error_from_output_envelope, parse_record_status,
                 };
-                use $crate::persistence::dialect::Dialect;
+                use ::sqlx::Row;
 
                 let order_direction = sort_direction_sql(filter.sort_order);
                 let status_filter: ::core::option::Option<&str> =
@@ -69,7 +67,8 @@ macro_rules! impl_paired_record_ops {
                     .bind(offset)
                     .bind(correlation_ids_json)
                     .fetch_all(pool)
-                    .await?;
+                    .await
+                    .db()?;
 
                 let mut records = ::std::vec::Vec::with_capacity(rows.len());
                 for row in rows {
@@ -84,7 +83,7 @@ macro_rules! impl_paired_record_ops {
                         )
                     });
 
-                    records.push($crate::persistence::PairedRecordSummary {
+                    records.push(::runtara_core::persistence::PairedRecordSummary {
                         correlation_id: row.get("correlation_id"),
                         label: row.get("label"),
                         kind: row
@@ -110,11 +109,11 @@ macro_rules! impl_paired_record_ops {
             pub(crate) async fn op_count_paired_records(
                 pool: &$Pool,
                 instance_id: &str,
-                vocabulary: &$crate::persistence::EventVocabulary,
-                filter: &$crate::persistence::ListPairedRecordsFilter,
-            ) -> ::core::result::Result<i64, $crate::error::CoreError> {
-                use $crate::persistence::common::filters::record_status_filter_str;
-                use $crate::persistence::dialect::Dialect;
+                vocabulary: &::runtara_core::persistence::EventVocabulary,
+                filter: &::runtara_core::persistence::ListPairedRecordsFilter,
+            ) -> ::core::result::Result<i64, ::runtara_core::error::CoreError> {
+                use crate::dialect::Dialect;
+                use crate::ops_common::filters::record_status_filter_str;
                 let status_filter: ::core::option::Option<&str> =
                     filter.status.map(record_status_filter_str);
                 let correlation_ids_json: ::core::option::Option<::std::string::String> = filter
@@ -131,7 +130,8 @@ macro_rules! impl_paired_record_ops {
                     .bind(filter.root_scopes_only)
                     .bind(correlation_ids_json)
                     .fetch_one(pool)
-                    .await?;
+                    .await
+                    .db()?;
                 Ok(count.0)
             }
         }

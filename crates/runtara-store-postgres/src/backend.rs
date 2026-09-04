@@ -6,11 +6,13 @@
 
 use std::sync::Arc;
 
+use crate::rows::DbResult;
+
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 
-use crate::error::CoreError;
-use crate::persistence::{InstanceCompletionMetrics, InstanceMetricsSink};
+use ::runtara_core::error::CoreError;
+use ::runtara_core::persistence::{InstanceCompletionMetrics, InstanceMetricsSink};
 
 /// PostgreSQL-backed persistence implementation.
 #[derive(Clone)]
@@ -134,7 +136,7 @@ async fn report_completion(sink: &dyn InstanceMetricsSink, pool: &PgPool, instan
 // Record Types
 // ============================================================================
 
-use super::{
+use ::runtara_core::persistence::{
     CheckpointRecord, CompleteInstanceParams, CustomSignalRecord, EventRecord, EventVocabulary,
     InstanceRecord, ListEventsFilter, ListPairedRecordsFilter, PairedRecordSummary, Persistence,
     SignalRecord,
@@ -143,46 +145,46 @@ use super::{
 // ============================================================================
 // Shared Operations
 // ============================================================================
-// The instance + sleep families live in crate::persistence::common::ops and
+// The instance + sleep families live in crate::ops_common::ops and
 // are materialized onto PostgresPersistence via the macros below. The inline
 // free functions they replaced have been removed; callers in this module's
 // tests (see the `tests` submodule) reach the shared ops through
 // `PostgresPersistence::op_*` instead.
 
-crate::persistence::common::ops::impl_instance_ops!(
+crate::ops_common::ops::impl_instance_ops!(
     PostgresPersistence,
     PgPool,
-    crate::persistence::dialect::PostgresDialect
+    crate::dialect::PostgresDialect
 );
-crate::persistence::common::ops::impl_sleep_ops!(
+crate::ops_common::ops::impl_sleep_ops!(
     PostgresPersistence,
     PgPool,
-    crate::persistence::dialect::PostgresDialect
+    crate::dialect::PostgresDialect
 );
-crate::persistence::common::ops::impl_checkpoint_ops!(
+crate::ops_common::ops::impl_checkpoint_ops!(
     PostgresPersistence,
     PgPool,
-    crate::persistence::dialect::PostgresDialect
+    crate::dialect::PostgresDialect
 );
-crate::persistence::common::ops::impl_signal_ops!(
+crate::ops_common::ops::impl_signal_ops!(
     PostgresPersistence,
     PgPool,
-    crate::persistence::dialect::PostgresDialect
+    crate::dialect::PostgresDialect
 );
-crate::persistence::common::ops::impl_event_ops!(
+crate::ops_common::ops::impl_event_ops!(
     PostgresPersistence,
     PgPool,
-    crate::persistence::dialect::PostgresDialect
+    crate::dialect::PostgresDialect
 );
-crate::persistence::common::ops::impl_paired_record_ops!(
+crate::ops_common::ops::impl_paired_record_ops!(
     PostgresPersistence,
     PgPool,
-    crate::persistence::dialect::PostgresDialect
+    crate::dialect::PostgresDialect
 );
-crate::persistence::common::ops::impl_retention_ops!(
+crate::ops_common::ops::impl_retention_ops!(
     PostgresPersistence,
     PgPool,
-    crate::persistence::dialect::PostgresDialect
+    crate::dialect::PostgresDialect
 );
 
 // ============================================================================
@@ -190,7 +192,7 @@ crate::persistence::common::ops::impl_retention_ops!(
 // ============================================================================
 
 // `store_instance_input` is migrated to the shared layer:
-// see PostgresPersistence::op_store_instance_input (crate::persistence::common::ops::instances).
+// see PostgresPersistence::op_store_instance_input (crate::ops_common::ops::instances).
 
 // ============================================================================
 // Checkpoint Operations
@@ -199,14 +201,14 @@ crate::persistence::common::ops::impl_retention_ops!(
 // are migrated to the shared layer:
 // see PostgresPersistence::op_save_checkpoint / op_load_checkpoint /
 // op_list_checkpoints / op_count_checkpoints
-// (crate::persistence::common::ops::checkpoints).
+// (crate::ops_common::ops::checkpoints).
 
 /// Load the latest checkpoint for an instance.
 pub async fn load_latest_checkpoint(
     pool: &PgPool,
     instance_id: &str,
 ) -> Result<Option<CheckpointRecord>, CoreError> {
-    let record = sqlx::query_as::<_, CheckpointRecord>(
+    let record = sqlx::query_as::<_, crate::rows::CheckpointRow>(
         r#"
         SELECT id, instance_id, checkpoint_id, state, created_at
         FROM checkpoints
@@ -217,9 +219,10 @@ pub async fn load_latest_checkpoint(
     )
     .bind(instance_id)
     .fetch_optional(pool)
-    .await?;
+    .await
+    .db()?;
 
-    Ok(record)
+    Ok(record.map(|r| r.0))
 }
 
 /// Retry attempt record from the database.
@@ -295,7 +298,8 @@ async fn load_retry_history(
     .bind(instance_id)
     .bind(&pattern)
     .fetch_all(pool)
-    .await?;
+    .await
+    .db()?;
 
     Ok(records)
 }
@@ -319,7 +323,7 @@ async fn insert_event(pool: &PgPool, event: &EventRecord) -> Result<(), CoreErro
     .bind(event.created_at)
     .bind(&event.subtype)
     .execute(pool)
-    .await?;
+    .await.db()?;
 
     Ok(())
 }
@@ -328,7 +332,7 @@ async fn insert_event(pool: &PgPool, event: &EventRecord) -> Result<(), CoreErro
 // are migrated to the shared layer:
 // see PostgresPersistence::op_list_events / op_count_events /
 // op_list_step_summaries / op_count_step_summaries
-// (crate::persistence::common::ops::{events, step_summaries}).
+// (crate::ops_common::ops::{events, step_summaries}).
 
 // ============================================================================
 // Signal Operations
@@ -363,7 +367,8 @@ async fn insert_signal(
     .bind(signal_type)
     .bind(payload_opt)
     .execute(pool)
-    .await?;
+    .await
+    .db()?;
 
     Ok(())
 }
@@ -394,7 +399,8 @@ async fn insert_custom_signal(
     .bind(checkpoint_id)
     .bind(payload_opt)
     .execute(pool)
-    .await?;
+    .await
+    .db()?;
 
     Ok(())
 }
@@ -402,12 +408,12 @@ async fn insert_custom_signal(
 // `get_pending_signal`, `acknowledge_signal`, `take_pending_custom_signal`
 // are migrated to the shared layer:
 // see PostgresPersistence::op_get_pending_signal / op_acknowledge_signal /
-// op_take_pending_custom_signal (crate::persistence::common::ops::signals).
+// op_take_pending_custom_signal (crate::ops_common::ops::signals).
 
 // Health, sleep, and active-count operations are migrated to the shared layer:
 // see PostgresPersistence::op_health_check_db, op_count_active_instances,
 // op_set_instance_sleep, op_clear_instance_sleep, op_get_sleeping_instances_due
-// (crate::persistence::common::ops::{instances, sleep}).
+// (crate::ops_common::ops::{instances, sleep}).
 
 #[async_trait::async_trait]
 impl Persistence for PostgresPersistence {
@@ -740,7 +746,7 @@ impl Persistence for PostgresPersistence {
 // `list_instances` are migrated to the shared layer:
 // see PostgresPersistence::op_get_terminal_instances_older_than /
 // op_delete_instances_batch / op_list_instances
-// (crate::persistence::common::ops::{retention, instances}).
+// (crate::ops_common::ops::{retention, instances}).
 
 #[cfg(all(test, feature = "db-integration-tests"))]
 mod tests {
@@ -883,7 +889,7 @@ mod tests {
     /// `completed` event would erase the run's history.
     #[tokio::test]
     async fn paired_event_sweep_spares_lifecycle_and_recent_events() {
-        use crate::persistence::{EventRecord, EventVocabulary, EventVocabularySpec};
+        use ::runtara_core::persistence::{EventRecord, EventVocabulary, EventVocabularySpec};
 
         // Only the two subtypes named here may be swept. The rest of the
         // vocabulary is irrelevant to a DELETE but must still be supplied.
@@ -967,7 +973,7 @@ mod tests {
             .expect("sweep failed");
         assert_eq!(deleted, 2, "only the two aged paired events may go");
 
-        let filter = crate::persistence::ListEventsFilter::default();
+        let filter = ::runtara_core::persistence::ListEventsFilter::default();
         let left = backend.list_events(&id, &filter, 50, 0).await.unwrap();
         let subtypes: Vec<_> = left
             .iter()
@@ -2358,9 +2364,9 @@ mod tests {
     // bring them into scope. They are imported here under family-specific
     // aliases so this block cannot collide with a plain `use` of the same
     // items elsewhere in the test module.
-    use crate::persistence::EventSortOrder as StepSummarySortOrder;
-    use crate::persistence::PairedRecordStatus as StepSummaryStatus;
-    use crate::persistence::{EventVocabulary, EventVocabularySpec};
+    use ::runtara_core::persistence::EventSortOrder as StepSummarySortOrder;
+    use ::runtara_core::persistence::PairedRecordStatus as StepSummaryStatus;
+    use ::runtara_core::persistence::{EventVocabulary, EventVocabularySpec};
 
     /// The workflow DSL's own naming, which these fixtures emit.
     ///

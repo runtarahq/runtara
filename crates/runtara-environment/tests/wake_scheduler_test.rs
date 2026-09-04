@@ -5,12 +5,13 @@
 mod common;
 
 use chrono::Utc;
-use runtara_core::persistence::{CompleteInstanceParams, Persistence, PostgresPersistence};
+use runtara_core::persistence::{CompleteInstanceParams, Persistence};
 use runtara_environment::db::{self, Instance};
 use runtara_environment::handlers::DrainController;
 use runtara_environment::launch_queue::{LaunchKind, LaunchRepository, LaunchState};
 use runtara_environment::runner::{MockRunner, Runner};
 use runtara_environment::wake_scheduler::{WakeScheduler, WakeSchedulerConfig};
+use runtara_store_postgres::PostgresPersistence;
 use sqlx::PgPool;
 use std::path::PathBuf;
 use std::sync::Arc;

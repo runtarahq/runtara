@@ -4,7 +4,7 @@
 //! [`super::super::EventSortOrder`] onto the string/enum forms expected
 //! by SQL.
 
-use crate::persistence::{EventSortOrder, PairedRecordStatus};
+use ::runtara_core::persistence::{EventSortOrder, PairedRecordStatus};
 
 /// Convert [`PairedRecordStatus`] into the string form used by the
 /// paired-record CTE's `status` column.
