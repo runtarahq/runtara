@@ -66,17 +66,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("Skipping database migrations (SKIP_MIGRATIONS=true)");
     } else {
         println!("Running database migrations...");
-        match sqlx::migrate!("./migrations")
+        // A failed migration is fatal. Booting anyway produces a server whose
+        // code expects tables the database does not have: it answers health
+        // checks, serves most requests, and fails only on whatever the missing
+        // migration was for -- which is how a checksum mismatch went unnoticed
+        // for a week while every migration behind it silently never applied.
+        // Deployments that genuinely need to start without migrating have
+        // SKIP_MIGRATIONS for that, and say so on purpose.
+        if let Err(e) = sqlx::migrate!("./migrations")
             .set_ignore_missing(true)
             .run(&pool)
             .await
         {
-            Ok(_) => println!("Migrations completed"),
-            Err(e) => {
-                eprintln!("Warning: Migration failed: {}", e);
-                println!("Continuing without migrations...");
-            }
+            eprintln!("Migration failed: {e}");
+            eprintln!(
+                "Refusing to start: the schema is not what this build expects. \
+                 If a migration was edited after being applied, restore its \
+                 original bytes -- an applied migration is immutable, comments \
+                 included. Set SKIP_MIGRATIONS=true to start anyway."
+            );
+            std::process::exit(1);
         }
+        println!("Migrations completed");
     }
 
     runtara_server::start(pool).await

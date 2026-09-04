@@ -1189,7 +1189,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         .expect("Failed to connect to object model database");
 
     // Run server migrations (workflows, api_keys, etc.) against the main pool
-    run_server_migrations(&pool).await;
+    run_server_migrations(&pool).await?;
 
     // Create ObjectStoreManager from the pool (single-database mode for now)
     let object_store_manager = Arc::new(
@@ -2933,7 +2933,7 @@ async fn wait_for_shutdown_signal() -> std::io::Result<()> {
 /// These run against the main server pool (OBJECT_MODEL_DATABASE_URL) which holds
 /// all server-managed tables. Uses ignore_missing since this pool may share the
 /// _sqlx_migrations table with other migrators.
-async fn run_server_migrations(pool: &PgPool) {
+async fn run_server_migrations(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     #[derive(Debug)]
     struct Migrations(Vec<sqlx::migrate::Migration>);
 
@@ -2958,20 +2958,21 @@ async fn run_server_migrations(pool: &PgPool) {
     println!("Running server migrations...");
     let source = sqlx::migrate!("./migrations");
     let migrations: Vec<sqlx::migrate::Migration> = source.iter().cloned().collect();
-    match sqlx::migrate::Migrator::new(Migrations(migrations)).await {
-        Ok(mut migrator) => {
-            migrator.set_ignore_missing(true);
-            if let Err(e) = migrator.run(pool).await {
-                eprintln!("⚠ Server migrations failed: {e}");
-                eprintln!("  Some features may not work until migrations are applied.");
-            } else {
-                println!("✓ Server migrations completed");
-            }
-        }
-        Err(e) => {
-            eprintln!("⚠ Failed to initialize server migrator: {e}");
-        }
-    }
+    let mut migrator = sqlx::migrate::Migrator::new(Migrations(migrations))
+        .await
+        .map_err(|e| format!("failed to initialize the server migrator: {e}"))?;
+    migrator.set_ignore_missing(true);
+    migrator.run(pool).await.map_err(|e| {
+        format!(
+            "server migrations failed: {e}. The schema is not what this build \
+             expects, so starting would leave features silently broken rather \
+             than visibly down. If a migration was edited after being applied, \
+             restore its original bytes -- an applied migration is immutable, \
+             comments included."
+        )
+    })?;
+    println!("✓ Server migrations completed");
+    Ok(())
 }
 
 #[cfg(test)]
