@@ -30,5 +30,5 @@ pub(crate) use retention::impl_retention_ops;
 pub(crate) use signals::impl_signal_ops;
 pub(crate) use sleep::impl_sleep_ops;
 
-#[cfg(all(test, feature = "db-integration-tests"))]
+#[cfg(test)]
 pub mod postgres_conformance;

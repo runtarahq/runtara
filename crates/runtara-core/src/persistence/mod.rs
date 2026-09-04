@@ -2,6 +2,10 @@
 //!
 //! This module defines the persistence abstraction and backend implementations.
 
+/// In-memory backend, for tests and for hosts that need no durability.
+#[cfg(any(test, feature = "test-support"))]
+pub mod memory;
+
 pub(crate) mod common;
 pub(crate) mod dialect;
 pub mod postgres;
@@ -397,12 +401,19 @@ pub trait Persistence: Send + Sync {
     /// launch payload can be large, and reading it back on every status check
     /// is what this exists to avoid.
     ///
-    /// Defaults to the full read so in-memory and test backends need no change.
+    /// The default reads the whole row and drops the input, which is correct
+    /// but not cheap — it still pays to fetch the blob. Backends that can
+    /// project it away in the query should override this; what they must not
+    /// do is return the input, which is the one thing every caller here is
+    /// trying to avoid loading.
     async fn get_instance_meta(
         &self,
         instance_id: &str,
     ) -> Result<Option<InstanceRecord>, CoreError> {
-        self.get_instance(instance_id).await
+        Ok(self.get_instance(instance_id).await?.map(|mut instance| {
+            instance.input = None;
+            instance
+        }))
     }
 
     async fn update_instance_status(
@@ -654,7 +665,8 @@ pub trait Persistence: Send + Sync {
     /// Atomically claim a due sleeping instance before waking it.
     ///
     /// Conditionally clears `sleep_until` only while the instance is still
-    /// `status='suspended'` with a non-null `sleep_until`, and reports whether
+    /// `status='suspended'` with a non-null `sleep_until` that is **already
+    /// due** (`sleep_until <= now`), and reports whether
     /// this caller won the claim. Returns `true` if it did, `false` if another
     /// waker (or a second Environment sharing this Core DB) already took it.
     /// Callers MUST launch only when this returns `true` — this is what
@@ -662,12 +674,29 @@ pub trait Persistence: Send + Sync {
     /// failure after a successful claim, re-stamp `sleep_until` via
     /// [`Persistence::set_instance_sleep`] so the instance is retried.
     ///
-    /// The default implementation is a non-atomic best-effort fallback for
-    /// in-memory/mock backends; the SQL backends override it with a single
-    /// conditional UPDATE whose row-count is the claim outcome.
+    /// The default reads the instance and then clears it, so it reports a
+    /// loss against an instance that is no longer claimable but can still let
+    /// two concurrent callers both win: each may read a claimable row before
+    /// either clears it. **A backend serving more than one waker must override
+    /// this** with an operation whose atomicity it can vouch for -- a single
+    /// conditional UPDATE for a SQL backend, a claim taken under the store's
+    /// own lock for an in-memory one. Taking the default and running two
+    /// wakers double-launches instances.
     async fn claim_sleeping_instance(&self, instance_id: &str) -> Result<bool, CoreError> {
-        self.clear_instance_sleep(instance_id).await?;
-        Ok(true)
+        match self.get_instance(instance_id).await? {
+            // The due-ness check is what makes a lease a lease: a batch claim
+            // pushes `sleep_until` into the future rather than clearing it, and
+            // an instance leased that way must lose a later claim until the
+            // lease expires.
+            Some(instance)
+                if instance.status == "suspended"
+                    && instance.sleep_until.is_some_and(|t| t <= Utc::now()) =>
+            {
+                self.clear_instance_sleep(instance_id).await?;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
     }
 
     /// Mark an instance for automatic recovery after an Environment restart.
