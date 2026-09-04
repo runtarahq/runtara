@@ -32,7 +32,7 @@ pub mod valkey;
 pub mod workers;
 pub mod workflow_agents;
 
-pub use server::start;
+pub use server::{skip_migrations, start};
 
 // Link runtara_agents so the static metadata registry is available at runtime.
 extern crate runtara_agents;

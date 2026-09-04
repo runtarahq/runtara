@@ -57,12 +57,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Run server-level migrations (workflows, connections, compilations, etc.)
     // ignore_missing(true) allows existing databases that have the old individual
     // smo-runtime migrations in _sqlx_migrations to work without errors.
-    let skip_migrations = std::env::var("SKIP_MIGRATIONS")
-        .unwrap_or_else(|_| "false".to_string())
-        .parse::<bool>()
-        .unwrap_or(false);
-
-    if skip_migrations {
+    if runtara_server::skip_migrations() {
         println!("Skipping database migrations (SKIP_MIGRATIONS=true)");
     } else {
         println!("Running database migrations...");
