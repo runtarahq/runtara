@@ -161,19 +161,17 @@ impl Persistence for InMemoryPersistence {
         }
 
         inst.status = params.status.to_string();
-        // Per CompleteInstanceParams: "All optional fields use COALESCE
-        // semantics -- None leaves the existing value unchanged."
+        // Replaced: a transition that carries no output or error clears the
+        // previous one, so a failure cannot be read as still holding a stale
+        // success payload.
+        inst.output = params.output.map(<[u8]>::to_vec);
+        inst.error = params.error.map(str::to_string);
+        // Merged: omitting these leaves what an earlier transition recorded.
         if let Some(v) = params.termination_reason {
             inst.termination_reason = Some(v.to_string());
         }
         if let Some(v) = params.exit_code {
             inst.exit_code = Some(v);
-        }
-        if let Some(v) = params.output {
-            inst.output = Some(v.to_vec());
-        }
-        if let Some(v) = params.error {
-            inst.error = Some(v.to_string());
         }
         if let Some(v) = params.checkpoint_id {
             inst.checkpoint_id = Some(v.to_string());

@@ -787,6 +787,54 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
         .expect("instance must still exist post-complete");
     assert_eq!(record.status, "completed");
 
+    // `output` and `error` are REPLACED, not merged: a transition that carries
+    // no output clears whatever was there. The fields that do merge are
+    // `termination_reason`, `exit_code`, `stderr` and `checkpoint_id`, which a
+    // later transition must not erase. Two backends disagreed on this until it
+    // was pinned here.
+    backend
+        .complete_instance(
+            CompleteInstanceParams::new(&instance_id, "failed")
+                .with_error("boom")
+                .with_termination("crashed", Some(137)),
+        )
+        .await
+        .expect("complete_instance (replace) failed");
+    let record = backend
+        .get_instance(&instance_id)
+        .await
+        .expect("get_instance after replace failed")
+        .expect("instance must still exist");
+    assert_eq!(
+        record.output, None,
+        "a transition carrying no output must clear the previous one"
+    );
+    assert_eq!(record.error.as_deref(), Some("boom"));
+    assert_eq!(
+        record.checkpoint_id.as_deref(),
+        Some(checkpoint_id),
+        "checkpoint_id merges, so a later transition must not erase it"
+    );
+    assert_eq!(record.termination_reason.as_deref(), Some("crashed"));
+    assert_eq!(record.exit_code, Some(137));
+
+    // The merging fields keep their value when the next transition omits them.
+    backend
+        .complete_instance(CompleteInstanceParams::new(&instance_id, "failed"))
+        .await
+        .expect("complete_instance (merge) failed");
+    let record = backend
+        .get_instance(&instance_id)
+        .await
+        .expect("get_instance after merge failed")
+        .expect("instance must still exist");
+    assert_eq!(
+        record.termination_reason.as_deref(),
+        Some("crashed"),
+        "termination_reason merges: omitting it must not clear it"
+    );
+    assert_eq!(record.exit_code, Some(137), "exit_code merges");
+
     // --- retention sweep ----------------------------------------------------
     // The instance finished moments ago; using a slightly-future cutoff
     // guarantees it appears in the terminal sweep. An empty-list delete

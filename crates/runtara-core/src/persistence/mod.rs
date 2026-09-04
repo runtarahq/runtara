@@ -315,8 +315,14 @@ pub enum CompleteInstanceGuard {
 /// Parameters for [`Persistence::complete_instance`], transitioning an
 /// instance to a terminal or quasi-terminal state.
 ///
-/// All optional fields use COALESCE semantics on the persistence side —
-/// `None` leaves the existing column value unchanged. The required fields
+/// The optional fields split into two groups, and the difference matters.
+///
+/// `output` and `error` are **replaced**: passing `None` clears whatever was
+/// there, so a failing transition cannot leave a stale success payload behind.
+/// `termination_reason`, `exit_code`, `stderr` and `checkpoint_id` are
+/// **merged**: passing `None` leaves what an earlier transition recorded, so a
+/// later status change does not erase the reason a run ended. Both halves are
+/// pinned by the conformance suite. The required fields
 /// `instance_id` and `status` borrow from the caller; most call sites
 /// already hold `&str` locals and can pass them directly.
 ///
@@ -481,8 +487,9 @@ pub trait Persistence: Send + Sync {
     /// Single consolidated entry point for what were previously five
     /// overlapping `complete_instance*` variants. The behavior is
     /// controlled entirely by the [`CompleteInstanceParams`] struct —
-    /// see its documentation for the per-field semantics (COALESCE vs.
-    /// overwrite, terminal-only `finished_at`, guard against races).
+    /// see its documentation for the per-field semantics (which fields are
+    /// replaced and which are merged, terminal-only `finished_at`, guard
+    /// against races).
     ///
     /// Return value:
     /// - `Ok(true)` — the update matched a row.

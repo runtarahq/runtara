@@ -1606,14 +1606,11 @@ mod tests {
 
     /// Read the two termination columns straight from the row.
     ///
-    /// `exit_code` is the reason this helper exists: `op_get_instance`'s
-    /// SELECT list does not include it, and `InstanceRecord::exit_code`
-    /// carries `#[sqlx(default)]`, so `get_instance(..).exit_code` is
-    /// *always* `None` no matter what the column holds. Asserting through
-    /// `InstanceRecord` would pass even if the COALESCE were deleted.
-    /// (`termination_reason` *is* projected — as `termination_reason::text`
-    /// — but is read here too so both halves of the COALESCE pair come
-    /// from the same place.)
+    /// Reads both columns straight from the row rather than through
+    /// `InstanceRecord`, so the assertion cannot be satisfied by whatever the
+    /// record projection happens to carry. (`get_instance` does now project
+    /// `exit_code`; this helper predates that and still isolates the merge
+    /// behaviour from the projection.)
     ///
     /// `termination_reason` is a Postgres ENUM, so it is cast to text here:
     /// sqlx cannot decode a custom enum type into `String`.
