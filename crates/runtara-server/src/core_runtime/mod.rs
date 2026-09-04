@@ -16,7 +16,7 @@
 //!
 //! ```rust,ignore
 //! use std::sync::Arc;
-//! use runtara_core::persistence::PostgresPersistence;
+//! use runtara_store_postgres::PostgresPersistence;
 //! use runtara_server::core_runtime::CoreRuntime;
 //!
 //! #[tokio::main]
@@ -391,17 +391,18 @@ mod tests {
     use chrono::{DateTime, Utc};
     use runtara_core::error::CoreError;
     use runtara_core::persistence::{
-        CheckpointRecord, CompleteInstanceParams, CustomSignalRecord, EventRecord, InstanceRecord,
-        ListEventsFilter, ListStepSummariesFilter, Persistence, SignalRecord, StepSummaryRecord,
+        CheckpointRecord, CompleteInstanceParams, CustomSignalRecord, EventRecord, EventVocabulary,
+        InstanceRecord, ListEventsFilter, ListPairedRecordsFilter, PairedRecordSummary,
+        Persistence, SignalRecord,
     };
     use std::time::Instant;
 
     /// Mock persistence for testing the runtime without a database.
     struct MockPersistence {
-        /// How long `health_check_db` blocks, so a test can hold a request in
+        /// How long `health_check` blocks, so a test can hold a request in
         /// flight across a shutdown.
         health_delay: Duration,
-        /// Fired on entry to `health_check_db`, so a test can establish that the
+        /// Fired on entry to `health_check`, so a test can establish that the
         /// request is inside the handler before it signals shutdown. Inferring
         /// that from elapsed time instead is unreliable: the request can finish
         /// first, and the test then passes against a runtime that never drained
@@ -566,7 +567,7 @@ mod tests {
             Ok(Vec::new())
         }
 
-        async fn health_check_db(&self) -> Result<bool, CoreError> {
+        async fn health_check(&self) -> Result<bool, CoreError> {
             self.health_entered.notify_one();
             if !self.health_delay.is_zero() {
                 tokio::time::sleep(self.health_delay).await;
@@ -615,20 +616,22 @@ mod tests {
             Ok(0)
         }
 
-        async fn list_step_summaries(
+        async fn list_paired_records(
             &self,
             _instance_id: &str,
-            _filter: &ListStepSummariesFilter,
+            _vocabulary: &EventVocabulary,
+            _filter: &ListPairedRecordsFilter,
             _limit: i64,
             _offset: i64,
-        ) -> Result<Vec<StepSummaryRecord>, CoreError> {
+        ) -> Result<Vec<PairedRecordSummary>, CoreError> {
             Ok(Vec::new())
         }
 
-        async fn count_step_summaries(
+        async fn count_paired_records(
             &self,
             _instance_id: &str,
-            _filter: &ListStepSummariesFilter,
+            _vocabulary: &EventVocabulary,
+            _filter: &ListPairedRecordsFilter,
         ) -> Result<i64, CoreError> {
             Ok(0)
         }
@@ -898,7 +901,7 @@ mod tests {
         struct CountingObserver(AtomicUsize);
 
         impl InstanceEventObserver for CountingObserver {
-            fn on_step_started(&self) {
+            fn on_event_persisted(&self, _subtype: Option<&str>) {
                 self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             }
         }

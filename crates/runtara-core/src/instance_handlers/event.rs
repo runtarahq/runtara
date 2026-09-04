@@ -71,14 +71,13 @@ pub async fn handle_instance_event(
     };
     state.persistence.insert_event(&event_record).await?;
 
-    // Count the step where every step is already passing. Doing it here rather
-    // than at a call site means a new step type cannot be added without being
-    // counted — the alternative drifts silently, and a step counter that
-    // undercounts reads as a stall.
-    if event.subtype.as_deref() == Some("step_debug_start")
-        && let Some(observer) = &state.event_observer
-    {
-        observer.on_step_started();
+    // Report the event where every event is already passing. Doing it here
+    // rather than at a call site means a new event kind cannot be added
+    // without being reported — the alternative drifts silently, and a counter
+    // that undercounts reads as a stall. Which subtypes are worth counting is
+    // the observer's decision, not this crate's.
+    if let Some(observer) = &state.event_observer {
+        observer.on_event_persisted(event.subtype.as_deref());
     }
 
     // 5. Update instance status based on event type
@@ -328,60 +327,57 @@ mod tests {
         assert_eq!(inst.status, "suspended");
     }
 
-    /// A step event must reach an observer that is watching for it.
+    /// Every persisted event must reach an observer that is watching, with its
+    /// subtype passed through verbatim.
     ///
-    /// This is the seam that lets a host count steps without core depending on
-    /// it. Nothing else proves the wiring: an observer that is never called
-    /// passes every test written against the observer itself, which is exactly
-    /// how the counter behind it shipped reporting "not measured" forever.
+    /// This is the seam that lets a host count what it cares about without
+    /// core knowing what any subtype means. Nothing else proves the wiring: an
+    /// observer that is never called passes every test written against the
+    /// observer itself, which is exactly how the counter behind it shipped
+    /// reporting "not measured" forever.
     #[tokio::test]
-    async fn a_step_debug_start_reaches_the_event_observer() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
+    async fn every_persisted_event_reaches_the_observer_with_its_subtype() {
+        use std::sync::Mutex;
 
-        struct Counting(AtomicUsize);
-        impl super::super::InstanceEventObserver for Counting {
-            fn on_step_started(&self) {
-                self.0.fetch_add(1, Ordering::SeqCst);
+        struct Recording(Mutex<Vec<Option<String>>>);
+        impl super::super::InstanceEventObserver for Recording {
+            fn on_event_persisted(&self, subtype: Option<&str>) {
+                self.0.lock().unwrap().push(subtype.map(str::to_string));
             }
         }
 
-        let observer = Arc::new(Counting(AtomicUsize::new(0)));
+        let observer = Arc::new(Recording(Mutex::new(Vec::new())));
         let persistence = Arc::new(
             MockPersistence::new().with_instance(make_instance("inst-1", "tenant-1", "running")),
         );
         let state =
             InstanceHandlerState::new(persistence.clone()).with_event_observer(observer.clone());
 
-        let step_event = |subtype: &str| InstanceEvent {
+        let custom_event = |subtype: Option<&str>| InstanceEvent {
             instance_id: "inst-1".to_string(),
             event_type: InstanceEventType::EventCustom as i32,
             checkpoint_id: None,
             payload: b"{}".to_vec(),
             timestamp_ms: chrono::Utc::now().timestamp_millis(),
-            subtype: Some(subtype.to_string()),
+            subtype: subtype.map(str::to_string),
         };
 
-        handle_instance_event(&state, step_event("step_debug_start"))
-            .await
-            .unwrap();
-        assert_eq!(
-            observer.0.load(Ordering::SeqCst),
-            1,
-            "a step start must be counted"
-        );
+        for subtype in [Some("step_debug_start"), Some("workflow_log"), None] {
+            handle_instance_event(&state, custom_event(subtype))
+                .await
+                .unwrap();
+        }
 
-        // The end of a step is not a second start, and a log line is neither.
-        // Counting either would double or inflate the reported step rate.
-        handle_instance_event(&state, step_event("step_debug_end"))
-            .await
-            .unwrap();
-        handle_instance_event(&state, step_event("workflow_log"))
-            .await
-            .unwrap();
+        // Core forwards all three unfiltered and untranslated. Deciding which
+        // of them counts needs the producer's vocabulary and belongs to the
+        // observer — core selecting for it is the coupling this seam removes.
         assert_eq!(
-            observer.0.load(Ordering::SeqCst),
-            1,
-            "only step starts count; ends and logs must not inflate the rate"
+            *observer.0.lock().unwrap(),
+            vec![
+                Some("step_debug_start".to_string()),
+                Some("workflow_log".to_string()),
+                None
+            ]
         );
     }
 

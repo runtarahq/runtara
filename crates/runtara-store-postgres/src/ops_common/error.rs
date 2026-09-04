@@ -16,7 +16,7 @@
 
 use sqlx::Database;
 
-use crate::error::CoreError;
+use ::runtara_core::error::CoreError;
 
 /// Raise [`CoreError::InstanceNotFound`] if an `UPDATE`/`DELETE` affected
 /// zero rows.

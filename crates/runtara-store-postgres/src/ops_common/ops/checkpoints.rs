@@ -37,9 +37,9 @@ macro_rules! impl_checkpoint_ops {
                 instance_id: &str,
                 checkpoint_id: &str,
                 state: &[u8],
-            ) -> ::core::result::Result<(), $crate::error::CoreError> {
-                use $crate::persistence::common::error::wrap_checkpoint_save;
-                use $crate::persistence::dialect::Dialect;
+            ) -> ::core::result::Result<(), ::runtara_core::error::CoreError> {
+                use crate::dialect::Dialect;
+                use crate::ops_common::error::wrap_checkpoint_save;
                 let sql = <$Dialect>::sql_save_checkpoint();
                 ::sqlx::query(sql)
                     .bind(instance_id)
@@ -57,27 +57,27 @@ macro_rules! impl_checkpoint_ops {
                 instance_id: &str,
                 checkpoint_id: &str,
             ) -> ::core::result::Result<
-                ::core::option::Option<$crate::persistence::CheckpointRecord>,
-                $crate::error::CoreError,
+                ::core::option::Option<::runtara_core::persistence::CheckpointRecord>,
+                ::runtara_core::error::CoreError,
             > {
-                use $crate::persistence::dialect::Dialect;
+                use crate::dialect::Dialect;
                 let p1 = <$Dialect>::placeholder(1);
                 let p2 = <$Dialect>::placeholder(2);
                 let sql = format!(
-                    "SELECT id, instance_id, checkpoint_id, state, created_at \
+                    "SELECT instance_id, checkpoint_id, state, created_at \
                      FROM checkpoints \
                      WHERE instance_id = {p1} AND checkpoint_id = {p2}"
                 );
-                let record = ::sqlx::query_as::<_, $crate::persistence::CheckpointRecord>(&sql)
+                let record = ::sqlx::query_as::<_, crate::rows::CheckpointRow>(&sql)
                     .bind(instance_id)
                     .bind(checkpoint_id)
                     .fetch_optional(pool)
                     .await
-                    .map_err(|e| $crate::error::CoreError::DatabaseError {
+                    .map_err(|e| ::runtara_core::error::CoreError::DatabaseError {
                         operation: "load_checkpoint".into(),
                         details: e.to_string(),
                     })?;
-                Ok(record)
+                Ok(record.map(|r| r.0))
             }
 
             /// List checkpoints for an instance with optional
@@ -92,12 +92,12 @@ macro_rules! impl_checkpoint_ops {
                 created_after: ::core::option::Option<::chrono::DateTime<::chrono::Utc>>,
                 created_before: ::core::option::Option<::chrono::DateTime<::chrono::Utc>>,
             ) -> ::core::result::Result<
-                ::std::vec::Vec<$crate::persistence::CheckpointRecord>,
-                $crate::error::CoreError,
+                ::std::vec::Vec<::runtara_core::persistence::CheckpointRecord>,
+                ::runtara_core::error::CoreError,
             > {
-                use $crate::persistence::dialect::Dialect;
+                use crate::dialect::Dialect;
                 let sql = <$Dialect>::sql_list_checkpoints();
-                let rows = ::sqlx::query_as::<_, $crate::persistence::CheckpointRecord>(sql)
+                let rows = ::sqlx::query_as::<_, crate::rows::CheckpointRow>(sql)
                     .bind(instance_id)
                     .bind(checkpoint_id)
                     .bind(created_after)
@@ -105,8 +105,9 @@ macro_rules! impl_checkpoint_ops {
                     .bind(limit)
                     .bind(offset)
                     .fetch_all(pool)
-                    .await?;
-                Ok(rows)
+                    .await
+                    .db()?;
+                Ok(rows.into_iter().map(|r| r.0).collect())
             }
 
             /// COUNT checkpoints for an instance using the same filter
@@ -117,8 +118,8 @@ macro_rules! impl_checkpoint_ops {
                 checkpoint_id: ::core::option::Option<&str>,
                 created_after: ::core::option::Option<::chrono::DateTime<::chrono::Utc>>,
                 created_before: ::core::option::Option<::chrono::DateTime<::chrono::Utc>>,
-            ) -> ::core::result::Result<i64, $crate::error::CoreError> {
-                use $crate::persistence::dialect::Dialect;
+            ) -> ::core::result::Result<i64, ::runtara_core::error::CoreError> {
+                use crate::dialect::Dialect;
                 let sql = <$Dialect>::sql_count_checkpoints();
                 let count: (i64,) = ::sqlx::query_as(sql)
                     .bind(instance_id)
@@ -126,7 +127,8 @@ macro_rules! impl_checkpoint_ops {
                     .bind(created_after)
                     .bind(created_before)
                     .fetch_one(pool)
-                    .await?;
+                    .await
+                    .db()?;
                 Ok(count.0)
             }
         }

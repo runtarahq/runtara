@@ -582,7 +582,8 @@ impl EnvironmentClient {
         options: ListStepSummariesOptions,
     ) -> Result<ListStepSummariesResult> {
         use runtara_core::persistence::{
-            EventSortOrder as CoreSort, ListStepSummariesFilter, StepStatus as CoreStepStatus,
+            EventSortOrder as CoreSort, ListPairedRecordsFilter,
+            PairedRecordStatus as CoreStepStatus,
         };
 
         debug!("Listing step summaries");
@@ -590,7 +591,7 @@ impl EnvironmentClient {
         let limit = options.limit.unwrap_or(100);
         let offset = options.offset.unwrap_or(0);
 
-        let filter = ListStepSummariesFilter {
+        let filter = ListPairedRecordsFilter {
             sort_order: match options.sort_order.map(|o| o.as_str()) {
                 Some("asc") => CoreSort::Asc,
                 _ => CoreSort::Desc,
@@ -600,11 +601,11 @@ impl EnvironmentClient {
                 StepStatus::Completed => CoreStepStatus::Completed,
                 StepStatus::Failed => CoreStepStatus::Failed,
             }),
-            step_type: options.step_type,
+            kind: options.step_type,
             scope_id: options.scope_id,
             parent_scope_id: options.parent_scope_id,
             root_scopes_only: options.root_scopes_only,
-            step_ids: options.step_ids.filter(|ids| !ids.is_empty()),
+            correlation_ids: options.step_ids.filter(|ids| !ids.is_empty()),
         };
 
         let result = handlers::handle_list_step_summaries(

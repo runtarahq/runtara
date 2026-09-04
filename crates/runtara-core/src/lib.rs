@@ -159,26 +159,8 @@
 
 #![deny(missing_docs)]
 
-/// Database migrations for runtara-core.
-///
-/// Products embedding runtara-core can use this module to run migrations:
-///
-/// ```ignore
-/// use runtara_core::migrations;
-///
-/// let pool = PgPool::connect(&database_url).await?;
-/// migrations::run_postgres(&pool).await?;
-/// ```
-pub mod migrations;
-
 /// Persistence layer for instances, checkpoints, events, and signals.
 pub mod persistence;
-
-/// OpenTelemetry metrics for workflow execution state.
-///
-/// Internal: the persistence layer emits these as instances reach a terminal
-/// state. Hosts own their own meter provider.
-mod observability;
 
 /// Error types for Core operations with RPC error code mapping.
 pub mod error;

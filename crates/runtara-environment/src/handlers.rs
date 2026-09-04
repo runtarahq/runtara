@@ -1318,13 +1318,13 @@ pub fn spawn_container_monitor(
                 // same statement: this monitor needs both, and they are the
                 // same row. Kept even when there are no metrics to write, so
                 // the crash check below always has a status to look at.
-                let observed_status = match persistence
-                    .update_metrics_returning_status(
-                        &instance_id,
-                        metrics.memory_peak_bytes,
-                        metrics.cpu_usage_usec,
-                    )
-                    .await
+                let observed_status = match crate::metrics::record_resources_returning_status(
+                    &pool,
+                    &instance_id,
+                    metrics.memory_peak_bytes,
+                    metrics.cpu_usage_usec,
+                )
+                .await
                 {
                     Ok(observed) => {
                         debug!(
@@ -1353,9 +1353,9 @@ pub fn spawn_container_monitor(
 
                 // Store stderr via Persistence trait for debugging (even if instance succeeds via Core)
                 if let Some(ref stderr_content) = stderr {
-                    if let Err(e) = persistence
-                        .update_instance_stderr(&instance_id, stderr_content)
-                        .await
+                    if let Err(e) =
+                        crate::metrics::record_instance_stderr(&pool, &instance_id, stderr_content)
+                            .await
                     {
                         warn!(
                             instance_id = %instance_id,
@@ -2404,11 +2404,11 @@ pub struct ListStepSummariesResult {
 pub async fn handle_list_step_summaries(
     state: &EnvironmentHandlerState,
     instance_id: &str,
-    filter: &runtara_core::persistence::ListStepSummariesFilter,
+    filter: &runtara_core::persistence::ListPairedRecordsFilter,
     limit: i64,
     offset: i64,
 ) -> Result<ListStepSummariesResult> {
-    use runtara_core::persistence::StepStatus;
+    use runtara_core::persistence::PairedRecordStatus;
 
     if instance_id.is_empty() {
         return Err(crate::error::Error::InvalidRequest(
@@ -2416,14 +2416,18 @@ pub async fn handle_list_step_summaries(
         ));
     }
 
+    // Steps are this crate's concept, so this is where the kernel is told what
+    // the guest's step events are called.
+    let vocabulary = crate::step_vocabulary::workflow_steps();
+
     let steps = state
         .persistence
-        .list_step_summaries(instance_id, filter, limit, offset)
+        .list_paired_records(instance_id, vocabulary, filter, limit, offset)
         .await?;
 
     let total_count = state
         .persistence
-        .count_step_summaries(instance_id, filter)
+        .count_paired_records(instance_id, vocabulary, filter)
         .await
         .unwrap_or(0);
 
@@ -2432,14 +2436,14 @@ pub async fn handle_list_step_summaries(
             .into_iter()
             .map(|step| StepSummary {
                 status: match step.status {
-                    StepStatus::Running => "running",
-                    StepStatus::Completed => "completed",
-                    StepStatus::Failed => "failed",
+                    PairedRecordStatus::Running => "running",
+                    PairedRecordStatus::Completed => "completed",
+                    PairedRecordStatus::Failed => "failed",
                 }
                 .to_string(),
-                step_id: step.step_id,
-                step_name: step.step_name,
-                step_type: step.step_type,
+                step_id: step.correlation_id,
+                step_name: step.label,
+                step_type: step.kind,
                 started_at_ms: step.started_at.timestamp_millis(),
                 completed_at_ms: step.completed_at.map(|t| t.timestamp_millis()),
                 duration_ms: step.duration_ms,

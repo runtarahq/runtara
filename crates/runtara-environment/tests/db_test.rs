@@ -6,8 +6,9 @@
 
 mod common;
 
-use runtara_core::persistence::{CompleteInstanceParams, Persistence, PostgresPersistence};
+use runtara_core::persistence::{CompleteInstanceParams, Persistence};
 use runtara_environment::db;
+use runtara_store_postgres::PostgresPersistence;
 use sqlx::PgPool;
 use uuid::Uuid;
 

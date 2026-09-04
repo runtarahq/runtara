@@ -15,8 +15,8 @@ use chrono::{Duration, Utc};
 use uuid::Uuid;
 
 use crate::persistence::{
-    CompleteInstanceParams, EventRecord, ListEventsFilter, ListStepSummariesFilter, Persistence,
-    StepStatus,
+    CompleteInstanceParams, EventRecord, EventVocabulary, EventVocabularySpec, ListEventsFilter,
+    ListPairedRecordsFilter, PairedRecordStatus, Persistence,
 };
 
 /// Run the full conformance sequence against `backend`.
@@ -535,27 +535,41 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     assert_eq!(taken_again.checkpoint_id, checkpoint_id);
     assert_eq!(taken_again.payload, taken.payload);
 
-    // --- step summaries -----------------------------------------------------
-    // This harness emits no step_debug_start events, so the summary query must
-    // come back empty rather than surfacing this instance's other events.
-    // Content-level coverage of the summary CTE lives in the backend's own
-    // tests (`test_list_step_summaries_*` in `persistence::postgres`).
-    let step_filter = ListStepSummariesFilter::default();
-    let step_summaries = backend
-        .list_step_summaries(&instance_id, &step_filter, 50, 0)
+    // --- paired records -----------------------------------------------------
+    // This harness emits none of this vocabulary's start events, so the paired
+    // query must come back empty rather than surfacing this instance's other
+    // events. Content-level coverage of the paired CTE lives in the backend's
+    // own tests (`test_list_step_summaries_*` in `persistence::postgres`).
+    let vocabulary = EventVocabulary::new(EventVocabularySpec {
+        start_subtype: "conformance_start",
+        end_subtype: "conformance_end",
+        correlation_key: "unit_id",
+        kind_key: "unit_kind",
+        label_key: "unit_label",
+        inputs_key: "given",
+        outputs_key: "produced",
+        error_key: "failure",
+        error_flag_key: "_failed",
+        launched_at_key: "began_ms",
+        settled_at_key: "ended_ms",
+    })
+    .expect("valid vocabulary");
+    let paired_filter = ListPairedRecordsFilter::default();
+    let paired_records = backend
+        .list_paired_records(&instance_id, &vocabulary, &paired_filter, 50, 0)
         .await
-        .expect("list_step_summaries failed");
-    assert!(step_summaries.is_empty());
+        .expect("list_paired_records failed");
+    assert!(paired_records.is_empty());
     assert_eq!(
         backend
-            .count_step_summaries(&instance_id, &step_filter)
+            .count_paired_records(&instance_id, &vocabulary, &paired_filter)
             .await
-            .expect("count_step_summaries failed"),
+            .expect("count_paired_records failed"),
         0,
         "the count must agree with the (empty) listing"
     );
     // Bind the variant so the match remains type-checked when we add status-filtered cases.
-    let _ = StepStatus::Running;
+    let _ = PairedRecordStatus::Running;
 
     // --- sleep cycle --------------------------------------------------------
     // Verifies both the "not due yet" (running) and "due now" (suspended +
@@ -773,6 +787,54 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
         .expect("instance must still exist post-complete");
     assert_eq!(record.status, "completed");
 
+    // `output` and `error` are REPLACED, not merged: a transition that carries
+    // no output clears whatever was there. The fields that do merge are
+    // `termination_reason`, `exit_code`, `stderr` and `checkpoint_id`, which a
+    // later transition must not erase. Two backends disagreed on this until it
+    // was pinned here.
+    backend
+        .complete_instance(
+            CompleteInstanceParams::new(&instance_id, "failed")
+                .with_error("boom")
+                .with_termination("crashed", Some(137)),
+        )
+        .await
+        .expect("complete_instance (replace) failed");
+    let record = backend
+        .get_instance(&instance_id)
+        .await
+        .expect("get_instance after replace failed")
+        .expect("instance must still exist");
+    assert_eq!(
+        record.output, None,
+        "a transition carrying no output must clear the previous one"
+    );
+    assert_eq!(record.error.as_deref(), Some("boom"));
+    assert_eq!(
+        record.checkpoint_id.as_deref(),
+        Some(checkpoint_id),
+        "checkpoint_id merges, so a later transition must not erase it"
+    );
+    assert_eq!(record.termination_reason.as_deref(), Some("crashed"));
+    assert_eq!(record.exit_code, Some(137));
+
+    // The merging fields keep their value when the next transition omits them.
+    backend
+        .complete_instance(CompleteInstanceParams::new(&instance_id, "failed"))
+        .await
+        .expect("complete_instance (merge) failed");
+    let record = backend
+        .get_instance(&instance_id)
+        .await
+        .expect("get_instance after merge failed")
+        .expect("instance must still exist");
+    assert_eq!(
+        record.termination_reason.as_deref(),
+        Some("crashed"),
+        "termination_reason merges: omitting it must not clear it"
+    );
+    assert_eq!(record.exit_code, Some(137), "exit_code merges");
+
     // --- retention sweep ----------------------------------------------------
     // The instance finished moments ago; using a slightly-future cutoff
     // guarantees it appears in the terminal sweep. An empty-list delete
@@ -819,89 +881,5 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     );
 
     // --- health -------------------------------------------------------------
-    assert!(
-        backend
-            .health_check_db()
-            .await
-            .expect("health_check_db failed")
-    );
-}
-
-#[cfg(all(test, feature = "db-integration-tests"))]
-mod tests {
-    use super::*;
-    use sqlx::PgPool;
-    use testcontainers::ContainerAsync;
-    use testcontainers::ImageExt;
-    use testcontainers::runners::AsyncRunner;
-    use testcontainers_modules::postgres::Postgres;
-
-    use crate::persistence::PostgresPersistence;
-
-    /// Image tag for the fallback Postgres container.
-    ///
-    /// `Postgres::default()` ships `postgres:11-alpine`, and PostgreSQL 11
-    /// refuses `ALTER TYPE ... ADD VALUE` inside a transaction block, which the
-    /// core migrations rely on. Pin a modern tag matching the version CI runs
-    /// against so the container route exercises the same schema as CI.
-    const POSTGRES_TEST_IMAGE_TAG: &str = "16-alpine";
-
-    #[tokio::test]
-    async fn postgres_backend_passes_conformance_sequence() {
-        let (pool, _container) = postgres_test_pool().await;
-        let backend = PostgresPersistence::new(pool);
-        run_conformance_sequence(&backend).await;
-    }
-
-    /// Obtain a Postgres pool. Prefers `TEST_RUNTARA_DATABASE_URL` (for CI and
-    /// local setups that already have a database running), then falls back to a
-    /// fresh testcontainers-managed container. Infrastructure failures are test
-    /// failures, never successful early returns.
-    ///
-    /// When a container is returned, keeping its handle alive keeps the
-    /// container running; callers hold it in a `_container` bind.
-    async fn postgres_test_pool() -> (PgPool, Option<ContainerAsync<Postgres>>) {
-        if let Ok(url) = std::env::var("TEST_RUNTARA_DATABASE_URL") {
-            let pool = PgPool::connect(&url)
-                .await
-                .expect("required core conformance database must accept connections");
-            // Ensure pgcrypto for `gen_random_uuid()` used by migrations.
-            sqlx::query("CREATE EXTENSION IF NOT EXISTS pgcrypto")
-                .execute(&pool)
-                .await
-                .expect("pgcrypto extension must be available");
-            crate::migrations::POSTGRES
-                .run(&pool)
-                .await
-                .expect("core Postgres migrations must succeed");
-            return (pool, None);
-        }
-
-        let container = Postgres::default()
-            .with_tag(POSTGRES_TEST_IMAGE_TAG)
-            .start()
-            .await
-            .expect("required Postgres test container must start");
-        let host = container
-            .get_host()
-            .await
-            .expect("required Postgres container host must be available");
-        let port = container
-            .get_host_port_ipv4(5432)
-            .await
-            .expect("required Postgres container port must be mapped");
-        let url = format!("postgres://postgres:postgres@{host}:{port}/postgres");
-        let pool = PgPool::connect(&url)
-            .await
-            .expect("required Postgres container must accept connections");
-        sqlx::query("CREATE EXTENSION IF NOT EXISTS pgcrypto")
-            .execute(&pool)
-            .await
-            .expect("pgcrypto extension must be available");
-        crate::migrations::POSTGRES
-            .run(&pool)
-            .await
-            .expect("core Postgres migrations must succeed");
-        (pool, Some(container))
-    }
+    assert!(backend.health_check().await.expect("health_check failed"));
 }

@@ -4,25 +4,43 @@
 //!
 //! Provides all durable storage access functions for instances, checkpoints, events, and signals.
 
+use std::sync::Arc;
+
+use crate::rows::DbResult;
+
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 
-use crate::error::CoreError;
-use crate::observability::{
-    InstanceCompletionMetrics, is_recorded_terminal_status, record_instance_completion,
-    record_instance_resources,
-};
+use ::runtara_core::error::CoreError;
+use ::runtara_core::persistence::{InstanceCompletionMetrics, InstanceMetricsSink};
 
 /// PostgreSQL-backed persistence implementation.
 #[derive(Clone)]
 pub struct PostgresPersistence {
     pool: PgPool,
+    metrics_sink: Option<Arc<dyn InstanceMetricsSink>>,
 }
 
 impl PostgresPersistence {
     /// Create a new Postgres-backed persistence implementation.
+    ///
+    /// Reports no completion metrics until a sink is attached with
+    /// [`Self::with_metrics_sink`].
     pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            metrics_sink: None,
+        }
+    }
+
+    /// Report terminal-state metrics to `sink`.
+    ///
+    /// Core assembles the facts; the host decides what they mean and where
+    /// they go. See [`InstanceMetricsSink`].
+    #[must_use]
+    pub fn with_metrics_sink(mut self, sink: Arc<dyn InstanceMetricsSink>) -> Self {
+        self.metrics_sink = Some(sink);
+        self
     }
 }
 
@@ -90,32 +108,26 @@ async fn fetch_instance_metric_row(
     .await
 }
 
-async fn record_completion_from_db(pool: &PgPool, instance_id: &str) {
-    match fetch_instance_metric_row(pool, instance_id).await {
-        Ok(Some(row)) => record_instance_completion(&row.into()),
-        Ok(None) => tracing::warn!(
-            instance_id = %instance_id,
-            "Skipped OTLP workflow completion metric because instance row was not found"
-        ),
-        Err(error) => tracing::warn!(
-            instance_id = %instance_id,
-            error = %error,
-            "Skipped OTLP workflow completion metric"
-        ),
-    }
+/// Terminal statuses a completion is reported for.
+fn is_reportable_terminal_status(status: &str) -> bool {
+    matches!(status, "completed" | "failed" | "cancelled")
 }
 
-async fn record_resources_from_db(pool: &PgPool, instance_id: &str) {
+/// Read back the terminal row and hand it to the host's sink.
+///
+/// A missing row or a read error is logged and dropped: reporting must never
+/// fail a completion.
+async fn report_completion(sink: &dyn InstanceMetricsSink, pool: &PgPool, instance_id: &str) {
     match fetch_instance_metric_row(pool, instance_id).await {
-        Ok(Some(row)) => record_instance_resources(&row.into()),
+        Ok(Some(row)) => sink.on_terminal(&row.into()),
         Ok(None) => tracing::warn!(
             instance_id = %instance_id,
-            "Skipped OTLP workflow resource metric because instance row was not found"
+            "Skipped completion metric because instance row was not found"
         ),
         Err(error) => tracing::warn!(
             instance_id = %instance_id,
             error = %error,
-            "Skipped OTLP workflow resource metric"
+            "Skipped completion metric"
         ),
     }
 }
@@ -124,142 +136,63 @@ async fn record_resources_from_db(pool: &PgPool, instance_id: &str) {
 // Record Types
 // ============================================================================
 
-use super::{
-    CheckpointRecord, CompleteInstanceParams, CustomSignalRecord, EventRecord, InstanceRecord,
-    ListEventsFilter, ListStepSummariesFilter, Persistence, SignalRecord, StepSummaryRecord,
+use ::runtara_core::persistence::{
+    CheckpointRecord, CompleteInstanceParams, CustomSignalRecord, EventRecord, EventVocabulary,
+    InstanceRecord, ListEventsFilter, ListPairedRecordsFilter, PairedRecordSummary, Persistence,
+    SignalRecord,
 };
 
 // ============================================================================
 // Shared Operations
 // ============================================================================
-// The instance + sleep families live in crate::persistence::common::ops and
+// The instance + sleep families live in crate::ops_common::ops and
 // are materialized onto PostgresPersistence via the macros below. The inline
 // free functions they replaced have been removed; callers in this module's
 // tests (see the `tests` submodule) reach the shared ops through
 // `PostgresPersistence::op_*` instead.
 
-crate::persistence::common::ops::impl_instance_ops!(
+crate::ops_common::ops::impl_instance_ops!(
     PostgresPersistence,
     PgPool,
-    crate::persistence::dialect::PostgresDialect
+    crate::dialect::PostgresDialect
 );
-crate::persistence::common::ops::impl_sleep_ops!(
+crate::ops_common::ops::impl_sleep_ops!(
     PostgresPersistence,
     PgPool,
-    crate::persistence::dialect::PostgresDialect
+    crate::dialect::PostgresDialect
 );
-crate::persistence::common::ops::impl_checkpoint_ops!(
+crate::ops_common::ops::impl_checkpoint_ops!(
     PostgresPersistence,
     PgPool,
-    crate::persistence::dialect::PostgresDialect
+    crate::dialect::PostgresDialect
 );
-crate::persistence::common::ops::impl_signal_ops!(
+crate::ops_common::ops::impl_signal_ops!(
     PostgresPersistence,
     PgPool,
-    crate::persistence::dialect::PostgresDialect
+    crate::dialect::PostgresDialect
 );
-crate::persistence::common::ops::impl_event_ops!(
+crate::ops_common::ops::impl_event_ops!(
     PostgresPersistence,
     PgPool,
-    crate::persistence::dialect::PostgresDialect
+    crate::dialect::PostgresDialect
 );
-crate::persistence::common::ops::impl_step_summary_ops!(
+crate::ops_common::ops::impl_paired_record_ops!(
     PostgresPersistence,
     PgPool,
-    crate::persistence::dialect::PostgresDialect
+    crate::dialect::PostgresDialect
 );
-crate::persistence::common::ops::impl_retention_ops!(
+crate::ops_common::ops::impl_retention_ops!(
     PostgresPersistence,
     PgPool,
-    crate::persistence::dialect::PostgresDialect
+    crate::dialect::PostgresDialect
 );
 
 // ============================================================================
 // Remaining Instance Operations (pre-shared — migrated in later phases)
 // ============================================================================
 
-/// Update execution metrics for an instance.
-///
-/// Stores cgroup-collected resource usage metrics (memory, CPU) after container execution.
-/// Only updates if metrics are not already set (first writer wins).
-async fn update_instance_metrics(
-    pool: &PgPool,
-    instance_id: &str,
-    memory_peak_bytes: Option<u64>,
-    cpu_usage_usec: Option<u64>,
-) -> Result<(), CoreError> {
-    sqlx::query(
-        r#"
-        UPDATE instances
-        SET memory_peak_bytes = COALESCE(memory_peak_bytes, $2),
-            cpu_usage_usec = COALESCE(cpu_usage_usec, $3)
-        WHERE instance_id = $1
-        "#,
-    )
-    .bind(instance_id)
-    .bind(memory_peak_bytes.map(|v| v as i64))
-    .bind(cpu_usage_usec.map(|v| v as i64))
-    .execute(pool)
-    .await?;
-
-    Ok(())
-}
-
-/// Record metrics and return the instance's current status in one statement.
-///
-/// The container monitor writes the metrics it collected at termination and
-/// then has to look at the status the SDK reported, to tell a normal exit from
-/// a crash. Those were two round trips for the same row; `RETURNING` makes them
-/// one. `None` means no such instance.
-async fn update_metrics_returning_status(
-    pool: &PgPool,
-    instance_id: &str,
-    memory_peak_bytes: Option<u64>,
-    cpu_usage_usec: Option<u64>,
-) -> Result<Option<(String, Option<String>)>, CoreError> {
-    let row: Option<(String, Option<String>)> = sqlx::query_as(
-        r#"
-        UPDATE instances
-        SET memory_peak_bytes = COALESCE(memory_peak_bytes, $2),
-            cpu_usage_usec = COALESCE(cpu_usage_usec, $3)
-        WHERE instance_id = $1
-        RETURNING status::TEXT, termination_reason::TEXT
-        "#,
-    )
-    .bind(instance_id)
-    .bind(memory_peak_bytes.map(|v| v as i64))
-    .bind(cpu_usage_usec.map(|v| v as i64))
-    .fetch_optional(pool)
-    .await?;
-    Ok(row)
-}
-
-/// Update instance stderr (raw container stderr output).
-///
-/// Stores stderr from container execution for debugging/logging purposes.
-/// Only updates if stderr is not already set (first writer wins).
-async fn update_instance_stderr(
-    pool: &PgPool,
-    instance_id: &str,
-    stderr: &str,
-) -> Result<(), CoreError> {
-    sqlx::query(
-        r#"
-        UPDATE instances
-        SET stderr = COALESCE(stderr, $2)
-        WHERE instance_id = $1
-        "#,
-    )
-    .bind(instance_id)
-    .bind(stderr)
-    .execute(pool)
-    .await?;
-
-    Ok(())
-}
-
 // `store_instance_input` is migrated to the shared layer:
-// see PostgresPersistence::op_store_instance_input (crate::persistence::common::ops::instances).
+// see PostgresPersistence::op_store_instance_input (crate::ops_common::ops::instances).
 
 // ============================================================================
 // Checkpoint Operations
@@ -268,16 +201,16 @@ async fn update_instance_stderr(
 // are migrated to the shared layer:
 // see PostgresPersistence::op_save_checkpoint / op_load_checkpoint /
 // op_list_checkpoints / op_count_checkpoints
-// (crate::persistence::common::ops::checkpoints).
+// (crate::ops_common::ops::checkpoints).
 
 /// Load the latest checkpoint for an instance.
 pub async fn load_latest_checkpoint(
     pool: &PgPool,
     instance_id: &str,
 ) -> Result<Option<CheckpointRecord>, CoreError> {
-    let record = sqlx::query_as::<_, CheckpointRecord>(
+    let record = sqlx::query_as::<_, crate::rows::CheckpointRow>(
         r#"
-        SELECT id, instance_id, checkpoint_id, state, created_at
+        SELECT instance_id, checkpoint_id, state, created_at
         FROM checkpoints
         WHERE instance_id = $1
         ORDER BY created_at DESC
@@ -286,9 +219,10 @@ pub async fn load_latest_checkpoint(
     )
     .bind(instance_id)
     .fetch_optional(pool)
-    .await?;
+    .await
+    .db()?;
 
-    Ok(record)
+    Ok(record.map(|r| r.0))
 }
 
 /// Retry attempt record from the database.
@@ -364,7 +298,8 @@ async fn load_retry_history(
     .bind(instance_id)
     .bind(&pattern)
     .fetch_all(pool)
-    .await?;
+    .await
+    .db()?;
 
     Ok(records)
 }
@@ -388,7 +323,7 @@ async fn insert_event(pool: &PgPool, event: &EventRecord) -> Result<(), CoreErro
     .bind(event.created_at)
     .bind(&event.subtype)
     .execute(pool)
-    .await?;
+    .await.db()?;
 
     Ok(())
 }
@@ -397,7 +332,7 @@ async fn insert_event(pool: &PgPool, event: &EventRecord) -> Result<(), CoreErro
 // are migrated to the shared layer:
 // see PostgresPersistence::op_list_events / op_count_events /
 // op_list_step_summaries / op_count_step_summaries
-// (crate::persistence::common::ops::{events, step_summaries}).
+// (crate::ops_common::ops::{events, step_summaries}).
 
 // ============================================================================
 // Signal Operations
@@ -432,7 +367,8 @@ async fn insert_signal(
     .bind(signal_type)
     .bind(payload_opt)
     .execute(pool)
-    .await?;
+    .await
+    .db()?;
 
     Ok(())
 }
@@ -463,7 +399,8 @@ async fn insert_custom_signal(
     .bind(checkpoint_id)
     .bind(payload_opt)
     .execute(pool)
-    .await?;
+    .await
+    .db()?;
 
     Ok(())
 }
@@ -471,12 +408,12 @@ async fn insert_custom_signal(
 // `get_pending_signal`, `acknowledge_signal`, `take_pending_custom_signal`
 // are migrated to the shared layer:
 // see PostgresPersistence::op_get_pending_signal / op_acknowledge_signal /
-// op_take_pending_custom_signal (crate::persistence::common::ops::signals).
+// op_take_pending_custom_signal (crate::ops_common::ops::signals).
 
 // Health, sleep, and active-count operations are migrated to the shared layer:
-// see PostgresPersistence::op_health_check_db, op_count_active_instances,
+// see PostgresPersistence::op_health_check, op_count_active_instances,
 // op_set_instance_sleep, op_clear_instance_sleep, op_get_sleeping_instances_due
-// (crate::persistence::common::ops::{instances, sleep}).
+// (crate::ops_common::ops::{instances, sleep}).
 
 #[async_trait::async_trait]
 impl Persistence for PostgresPersistence {
@@ -532,10 +469,11 @@ impl Persistence for PostgresPersistence {
         // is gated on the TARGET status being one we record — so for every
         // other transition, a park above all, the read was fetched and thrown
         // away. A launch that parks pays for it once per instance.
-        let records_metric = is_recorded_terminal_status(&target_status);
+        let records_metric =
+            self.metrics_sink.is_some() && is_reportable_terminal_status(&target_status);
         let previous_was_terminal = if records_metric {
             match fetch_instance_status(&self.pool, &instance_id).await {
-                Ok(Some(status)) => is_recorded_terminal_status(&status),
+                Ok(Some(status)) => is_reportable_terminal_status(&status),
                 Ok(None) => false,
                 Err(error) => {
                     tracing::warn!(
@@ -552,7 +490,10 @@ impl Persistence for PostgresPersistence {
 
         let applied = Self::op_complete_instance_unified(&self.pool, params).await?;
         if applied && records_metric && !previous_was_terminal {
-            record_completion_from_db(&self.pool, &instance_id).await;
+            // `records_metric` is only true when a sink is wired.
+            if let Some(sink) = &self.metrics_sink {
+                report_completion(sink.as_ref(), &self.pool, &instance_id).await;
+            }
         }
 
         Ok(applied)
@@ -681,8 +622,8 @@ impl Persistence for PostgresPersistence {
         Self::op_list_instances(&self.pool, tenant_id, status, limit, offset).await
     }
 
-    async fn health_check_db(&self) -> Result<bool, CoreError> {
-        Self::op_health_check_db(&self.pool).await
+    async fn health_check(&self) -> Result<bool, CoreError> {
+        Self::op_health_check(&self.pool).await
     }
 
     async fn count_active_instances(&self) -> Result<i64, CoreError> {
@@ -695,16 +636,6 @@ impl Persistence for PostgresPersistence {
         sleep_until: DateTime<Utc>,
     ) -> Result<(), CoreError> {
         Self::op_set_instance_sleep(&self.pool, instance_id, sleep_until).await
-    }
-
-    async fn update_metrics_returning_status(
-        &self,
-        instance_id: &str,
-        memory_peak_bytes: Option<u64>,
-        cpu_usage_usec: Option<u64>,
-    ) -> Result<Option<(String, Option<String>)>, CoreError> {
-        update_metrics_returning_status(&self.pool, instance_id, memory_peak_bytes, cpu_usage_usec)
-            .await
     }
 
     async fn mark_instance_running(
@@ -729,15 +660,6 @@ impl Persistence for PostgresPersistence {
 
     async fn claim_sleeping_instance(&self, instance_id: &str) -> Result<bool, CoreError> {
         Self::op_claim_sleeping_instance(&self.pool, instance_id).await
-    }
-
-    async fn mark_for_recovery(
-        &self,
-        instance_id: &str,
-        attempt: i32,
-        marker: Option<&str>,
-    ) -> Result<(), CoreError> {
-        Self::op_mark_for_recovery(&self.pool, instance_id, attempt, marker).await
     }
 
     async fn get_sleeping_instances_due(
@@ -773,47 +695,25 @@ impl Persistence for PostgresPersistence {
         Self::op_count_events(&self.pool, instance_id, filter).await
     }
 
-    async fn list_step_summaries(
+    async fn list_paired_records(
         &self,
         instance_id: &str,
-        filter: &ListStepSummariesFilter,
+        vocabulary: &EventVocabulary,
+        filter: &ListPairedRecordsFilter,
         limit: i64,
         offset: i64,
-    ) -> Result<Vec<StepSummaryRecord>, CoreError> {
-        Self::op_list_step_summaries(&self.pool, instance_id, filter, limit, offset).await
+    ) -> Result<Vec<PairedRecordSummary>, CoreError> {
+        Self::op_list_paired_records(&self.pool, instance_id, vocabulary, filter, limit, offset)
+            .await
     }
 
-    async fn count_step_summaries(
+    async fn count_paired_records(
         &self,
         instance_id: &str,
-        filter: &ListStepSummariesFilter,
+        vocabulary: &EventVocabulary,
+        filter: &ListPairedRecordsFilter,
     ) -> Result<i64, CoreError> {
-        Self::op_count_step_summaries(&self.pool, instance_id, filter).await
-    }
-
-    async fn update_instance_metrics(
-        &self,
-        instance_id: &str,
-        memory_peak_bytes: Option<u64>,
-        cpu_usage_usec: Option<u64>,
-    ) -> Result<(), CoreError> {
-        let result =
-            update_instance_metrics(&self.pool, instance_id, memory_peak_bytes, cpu_usage_usec)
-                .await;
-
-        if result.is_ok() && (memory_peak_bytes.is_some() || cpu_usage_usec.is_some()) {
-            record_resources_from_db(&self.pool, instance_id).await;
-        }
-
-        result
-    }
-
-    async fn update_instance_stderr(
-        &self,
-        instance_id: &str,
-        stderr: &str,
-    ) -> Result<(), CoreError> {
-        update_instance_stderr(&self.pool, instance_id, stderr).await
+        Self::op_count_paired_records(&self.pool, instance_id, vocabulary, filter).await
     }
 
     async fn store_instance_input(&self, instance_id: &str, input: &[u8]) -> Result<(), CoreError> {
@@ -832,12 +732,13 @@ impl Persistence for PostgresPersistence {
         Self::op_delete_instances_batch(&self.pool, instance_ids).await
     }
 
-    async fn delete_debug_events_older_than(
+    async fn delete_paired_events_older_than(
         &self,
+        vocabulary: &EventVocabulary,
         older_than: DateTime<Utc>,
         limit: i64,
     ) -> Result<u64, CoreError> {
-        Self::op_delete_debug_events_older_than(&self.pool, older_than, limit).await
+        Self::op_delete_paired_events_older_than(&self.pool, vocabulary, older_than, limit).await
     }
 }
 
@@ -845,7 +746,7 @@ impl Persistence for PostgresPersistence {
 // `list_instances` are migrated to the shared layer:
 // see PostgresPersistence::op_get_terminal_instances_older_than /
 // op_delete_instances_batch / op_list_instances
-// (crate::persistence::common::ops::{retention, instances}).
+// (crate::ops_common::ops::{retention, instances}).
 
 #[cfg(all(test, feature = "db-integration-tests"))]
 mod tests {
@@ -982,12 +883,32 @@ mod tests {
         let _ = backend.delete_instances_batch(&ids).await;
     }
 
-    /// The debug-event sweep must remove step-debug payloads past the window
-    /// and leave everything else — lifecycle events, and recent debug events —
-    /// alone. Losing a `completed` event would erase the run's history.
+    /// The paired-event sweep must remove the caller's paired payloads past
+    /// the window and leave everything else — lifecycle events, recent paired
+    /// events, and any subtype the caller did not name — alone. Losing a
+    /// `completed` event would erase the run's history.
     #[tokio::test]
-    async fn debug_event_sweep_spares_lifecycle_and_recent_events() {
-        use crate::persistence::EventRecord;
+    async fn paired_event_sweep_spares_lifecycle_and_recent_events() {
+        use ::runtara_core::persistence::{EventRecord, EventVocabulary, EventVocabularySpec};
+
+        // Only the two subtypes named here may be swept. The rest of the
+        // vocabulary is irrelevant to a DELETE but must still be supplied.
+        let vocabulary = |start: &'static str, end: &'static str| {
+            EventVocabulary::new(EventVocabularySpec {
+                start_subtype: start,
+                end_subtype: end,
+                correlation_key: "step_id",
+                kind_key: "step_type",
+                label_key: "step_name",
+                inputs_key: "inputs",
+                outputs_key: "outputs",
+                error_key: "error",
+                error_flag_key: "_error",
+                launched_at_key: "launched_at_ms",
+                settled_at_key: "settled_at_ms",
+            })
+            .expect("valid vocabulary")
+        };
         let backend = PostgresPersistence::new(test_pool().await);
         let id = uuid::Uuid::new_v4().to_string();
         backend
@@ -1029,13 +950,30 @@ mod tests {
             .unwrap();
 
         let cutoff = chrono::Utc::now() - chrono::Duration::hours(24);
-        let deleted = backend
-            .delete_debug_events_older_than(cutoff, 100)
+
+        // A vocabulary this producer does not use must sweep nothing, which is
+        // what proves the subtypes come from the parameter rather than from a
+        // literal inside the kernel.
+        let swept_by_a_foreign_vocabulary = backend
+            .delete_paired_events_older_than(&vocabulary("unit_start", "unit_end"), cutoff, 100)
             .await
             .expect("sweep failed");
-        assert_eq!(deleted, 2, "only the two aged step-debug events may go");
+        assert_eq!(
+            swept_by_a_foreign_vocabulary, 0,
+            "a vocabulary naming other subtypes must not touch these events"
+        );
 
-        let filter = crate::persistence::ListEventsFilter::default();
+        let deleted = backend
+            .delete_paired_events_older_than(
+                &vocabulary("step_debug_start", "step_debug_end"),
+                cutoff,
+                100,
+            )
+            .await
+            .expect("sweep failed");
+        assert_eq!(deleted, 2, "only the two aged paired events may go");
+
+        let filter = ::runtara_core::persistence::ListEventsFilter::default();
         let left = backend.list_events(&id, &filter, 50, 0).await.unwrap();
         let subtypes: Vec<_> = left
             .iter()
@@ -1616,10 +1554,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_health_check_db() {
+    async fn test_health_check() {
         let pool = test_pool().await;
 
-        let result = PostgresPersistence::op_health_check_db(&pool).await;
+        let result = PostgresPersistence::op_health_check(&pool).await;
         assert!(result.is_ok());
         assert!(result.unwrap());
     }
@@ -1668,14 +1606,11 @@ mod tests {
 
     /// Read the two termination columns straight from the row.
     ///
-    /// `exit_code` is the reason this helper exists: `op_get_instance`'s
-    /// SELECT list does not include it, and `InstanceRecord::exit_code`
-    /// carries `#[sqlx(default)]`, so `get_instance(..).exit_code` is
-    /// *always* `None` no matter what the column holds. Asserting through
-    /// `InstanceRecord` would pass even if the COALESCE were deleted.
-    /// (`termination_reason` *is* projected — as `termination_reason::text`
-    /// — but is read here too so both halves of the COALESCE pair come
-    /// from the same place.)
+    /// Reads both columns straight from the row rather than through
+    /// `InstanceRecord`, so the assertion cannot be satisfied by whatever the
+    /// record projection happens to carry. (`get_instance` does now project
+    /// `exit_code`; this helper predates that and still isolates the merge
+    /// behaviour from the projection.)
     ///
     /// `termination_reason` is a Postgres ENUM, so it is cast to text here:
     /// sqlx cannot decode a custom enum type into `String`.
@@ -2371,103 +2306,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_update_instance_metrics() {
-        let pool = test_pool().await;
-        let p = PostgresPersistence::new(pool.clone());
-
-        let instance_id = misc_instance_id("metrics");
-        p.register_instance(&instance_id, &misc_tenant_id("metrics"))
-            .await
-            .unwrap();
-
-        p.update_instance_metrics(&instance_id, Some(1024 * 1024), Some(500_000))
-            .await
-            .expect("Failed to update metrics");
-
-        let row: (Option<i64>, Option<i64>) = sqlx::query_as(
-            "SELECT memory_peak_bytes, cpu_usage_usec FROM instances WHERE instance_id = $1",
-        )
-        .bind(&instance_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(row.0, Some(1024 * 1024));
-        assert_eq!(row.1, Some(500_000));
-
-        // The second write is where the semantics live:
-        // `update_instance_metrics` is `SET x = COALESCE(x, $n)`, so the first
-        // non-NULL write sticks and every later one is silently ignored rather
-        // than overwriting it.
-        p.update_instance_metrics(&instance_id, Some(9_999_999), Some(1))
-            .await
-            .expect("Failed to update metrics");
-
-        let row: (Option<i64>, Option<i64>) = sqlx::query_as(
-            "SELECT memory_peak_bytes, cpu_usage_usec FROM instances WHERE instance_id = $1",
-        )
-        .bind(&instance_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(
-            row.0,
-            Some(1024 * 1024),
-            "COALESCE keeps the first recorded memory peak"
-        );
-        assert_eq!(
-            row.1,
-            Some(500_000),
-            "COALESCE keeps the first recorded CPU usage"
-        );
-
-        cleanup_misc_instance(&pool, &instance_id).await;
-    }
-
-    #[tokio::test]
-    async fn test_update_instance_stderr() {
-        let pool = test_pool().await;
-        let p = PostgresPersistence::new(pool.clone());
-
-        let instance_id = misc_instance_id("stderr");
-        p.register_instance(&instance_id, &misc_tenant_id("stderr"))
-            .await
-            .unwrap();
-
-        p.update_instance_stderr(&instance_id, "Error: something went wrong\n")
-            .await
-            .expect("Failed to update stderr");
-
-        let row: (Option<String>,) =
-            sqlx::query_as("SELECT stderr FROM instances WHERE instance_id = $1")
-                .bind(&instance_id)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert_eq!(row.0, Some("Error: something went wrong\n".to_string()));
-
-        // The second write matters here as in `test_update_instance_metrics`:
-        // `update_instance_stderr` is `SET stderr = COALESCE(stderr, $2)`, so
-        // the first capture is preserved and a later one is ignored.
-        p.update_instance_stderr(&instance_id, "second capture\n")
-            .await
-            .expect("Failed to update stderr");
-
-        let row: (Option<String>,) =
-            sqlx::query_as("SELECT stderr FROM instances WHERE instance_id = $1")
-                .bind(&instance_id)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert_eq!(
-            row.0,
-            Some("Error: something went wrong\n".to_string()),
-            "COALESCE keeps the first captured stderr"
-        );
-
-        cleanup_misc_instance(&pool, &instance_id).await;
-    }
-
-    #[tokio::test]
     async fn test_store_instance_input() {
         let pool = test_pool().await;
         let p = PostgresPersistence::new(pool.clone());
@@ -2512,19 +2350,42 @@ mod tests {
     // Step Summaries Tests
     // ========================================================================
     //
-    // These exercise the Postgres step-summary CTE
-    // (`dialect::postgres::PostgresDialect::sql_list_step_summaries` /
-    // `sql_count_step_summaries`) end to end: the `MATERIALIZED` + `OFFSET 0`
+    // These exercise the Postgres paired-record CTE
+    // (`dialect::postgres::PostgresDialect::sql_list_paired_records` /
+    // `sql_count_paired_records`) end to end: the `MATERIALIZED` + `OFFSET 0`
     // planner fences, the BYTEA payload -> `convert_from(...)::jsonb` decode,
     // the start/end pairing join and every filter it supports.
     //
-    // `StepStatus` and `EventSortOrder` are NOT among the names postgres.rs
-    // imports from its parent module, so `use super::*` does not bring them
-    // into scope. They are imported here under family-specific aliases so this
-    // block cannot collide with a plain `use` of the same items elsewhere in
-    // the test module.
-    use crate::persistence::EventSortOrder as StepSummarySortOrder;
-    use crate::persistence::StepStatus as StepSummaryStatus;
+    // `PairedRecordStatus` and `EventSortOrder` are NOT among the names
+    // postgres.rs imports from its parent module, so `use super::*` does not
+    // bring them into scope. They are imported here under family-specific
+    // aliases so this block cannot collide with a plain `use` of the same
+    // items elsewhere in the test module.
+    use ::runtara_core::persistence::EventSortOrder as StepSummarySortOrder;
+    use ::runtara_core::persistence::PairedRecordStatus as StepSummaryStatus;
+    use ::runtara_core::persistence::{EventVocabulary, EventVocabularySpec};
+
+    /// The workflow DSL's own naming, which these fixtures emit.
+    ///
+    /// It lives here, in a test, rather than in this crate's source: the whole
+    /// point of the vocabulary parameter is that the kernel names none of
+    /// this. `runtara-environment` holds the production copy.
+    fn workflow_vocabulary() -> EventVocabulary {
+        EventVocabulary::new(EventVocabularySpec {
+            start_subtype: "step_debug_start",
+            end_subtype: "step_debug_end",
+            correlation_key: "step_id",
+            kind_key: "step_type",
+            label_key: "step_name",
+            inputs_key: "inputs",
+            outputs_key: "outputs",
+            error_key: "error",
+            error_flag_key: "_error",
+            launched_at_key: "launched_at_ms",
+            settled_at_key: "settled_at_ms",
+        })
+        .expect("valid vocabulary")
+    }
 
     /// Unique instance id for one step-summary test.
     ///
@@ -2646,17 +2507,178 @@ mod tests {
         persistence.insert_event(&event).await.unwrap();
     }
 
-    /// Default (unfiltered) step-summary filter.
-    fn step_summary_filter(sort_order: StepSummarySortOrder) -> ListStepSummariesFilter {
-        ListStepSummariesFilter {
+    /// Default (unfiltered) paired-record filter.
+    fn step_summary_filter(sort_order: StepSummarySortOrder) -> ListPairedRecordsFilter {
+        ListPairedRecordsFilter {
             sort_order,
             status: None,
-            step_type: None,
+            kind: None,
             scope_id: None,
             parent_scope_id: None,
             root_scopes_only: false,
-            step_ids: None,
+            correlation_ids: None,
         }
+    }
+
+    /// The whole query must run on a vocabulary that shares nothing with the
+    /// workflow DSL — different subtypes, a different correlation key, a
+    /// different output-failure envelope.
+    ///
+    /// This is the test that would have failed before the vocabulary became a
+    /// parameter: with the DSL's names spelled into the SQL, none of these
+    /// events pair, and the failing record reads as completed. Asserting
+    /// against DSL-named fixtures cannot catch that, because it agrees with
+    /// hardcoded names by construction.
+    #[tokio::test]
+    async fn test_list_paired_records_under_a_foreign_vocabulary() {
+        let pool = test_pool().await;
+        let persistence = PostgresPersistence::new(pool.clone());
+
+        let instance_id = register_step_summary_instance(&persistence, "foreign-vocab").await;
+
+        let vocabulary = EventVocabulary::new(EventVocabularySpec {
+            start_subtype: "unit_start",
+            end_subtype: "unit_end",
+            correlation_key: "unit_id",
+            kind_key: "unit_kind",
+            label_key: "unit_label",
+            inputs_key: "given",
+            outputs_key: "produced",
+            error_key: "failure",
+            error_flag_key: "_failed",
+            launched_at_key: "began_ms",
+            settled_at_key: "ended_ms",
+        })
+        .expect("valid vocabulary");
+
+        let insert = |subtype: &'static str, payload: serde_json::Value| {
+            let persistence = &persistence;
+            let instance_id = instance_id.clone();
+            async move {
+                persistence
+                    .insert_event(&EventRecord {
+                        id: None,
+                        instance_id,
+                        event_type: "custom".to_string(),
+                        checkpoint_id: None,
+                        payload: Some(serde_json::to_vec(&payload).unwrap()),
+                        created_at: Utc::now(),
+                        subtype: Some(subtype.to_string()),
+                    })
+                    .await
+                    .unwrap();
+            }
+        };
+
+        // A record that completes.
+        insert(
+            "unit_start",
+            serde_json::json!({
+                "unit_id": "u-1",
+                "unit_kind": "Fetch",
+                "unit_label": "Fetch it",
+                "given": {"url": "https://example.test"},
+            }),
+        )
+        .await;
+        insert(
+            "unit_end",
+            serde_json::json!({
+                "unit_id": "u-1",
+                "produced": {"count": 7},
+                "began_ms": 1_700_000_000_100i64,
+                "ended_ms": 1_700_000_000_500i64,
+            }),
+        )
+        .await;
+
+        // A record that fails only through the output envelope, under this
+        // vocabulary's flag rather than the DSL's `_error`.
+        insert(
+            "unit_start",
+            serde_json::json!({"unit_id": "u-2", "unit_kind": "Call"}),
+        )
+        .await;
+        insert(
+            "unit_end",
+            serde_json::json!({
+                "unit_id": "u-2",
+                "produced": {"_failed": true, "failure": {"message": "downstream refused"}},
+            }),
+        )
+        .await;
+
+        // An event carrying the workflow DSL's own names must be ignored
+        // entirely: it is not part of the vocabulary being asked about.
+        insert(
+            "step_debug_start",
+            serde_json::json!({"step_id": "s-1", "step_type": "Http"}),
+        )
+        .await;
+
+        let filter = step_summary_filter(StepSummarySortOrder::Asc);
+        let records = persistence
+            .list_paired_records(&instance_id, &vocabulary, &filter, 100, 0)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            records.len(),
+            2,
+            "only this vocabulary's records may appear: {records:?}"
+        );
+
+        assert_eq!(records[0].correlation_id, "u-1");
+        assert_eq!(records[0].kind, "Fetch");
+        assert_eq!(records[0].label, Some("Fetch it".to_string()));
+        assert_eq!(records[0].status, StepSummaryStatus::Completed);
+        assert_eq!(
+            records[0].inputs,
+            Some(serde_json::json!({"url": "https://example.test"}))
+        );
+        assert_eq!(records[0].outputs, Some(serde_json::json!({"count": 7})));
+        assert_eq!(records[0].launched_at_ms, Some(1_700_000_000_100));
+        assert_eq!(records[0].settled_at_ms, Some(1_700_000_000_500));
+
+        assert_eq!(records[1].correlation_id, "u-2");
+        assert_eq!(
+            records[1].status,
+            StepSummaryStatus::Failed,
+            "the output envelope's own flag must mark the record failed"
+        );
+        assert_eq!(
+            records[1].error,
+            Some(serde_json::json!({"message": "downstream refused"}))
+        );
+
+        assert_eq!(
+            persistence
+                .count_paired_records(&instance_id, &vocabulary, &filter)
+                .await
+                .unwrap(),
+            2
+        );
+
+        // Filtering rides on the same vocabulary-supplied keys.
+        let mut kind_filter = step_summary_filter(StepSummarySortOrder::Asc);
+        kind_filter.kind = Some("Call".to_string());
+        let filtered = persistence
+            .list_paired_records(&instance_id, &vocabulary, &kind_filter, 100, 0)
+            .await
+            .unwrap();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].correlation_id, "u-2");
+
+        // ...and the DSL vocabulary sees only its own half-open record.
+        let dsl_records = persistence
+            .list_paired_records(&instance_id, &workflow_vocabulary(), &filter, 100, 0)
+            .await
+            .unwrap();
+        assert_eq!(dsl_records.len(), 1);
+        assert_eq!(dsl_records[0].correlation_id, "s-1");
+        assert_eq!(dsl_records[0].status, StepSummaryStatus::Running);
+
+        cleanup_step_summary_instance(&pool, &instance_id).await;
     }
 
     #[tokio::test]
@@ -2671,14 +2693,14 @@ mod tests {
         // Both queries are scoped to `instance_id`, so an empty result here is
         // unaffected by rows other tests leave in the shared database.
         let steps = persistence
-            .list_step_summaries(&instance_id, &filter, 100, 0)
+            .list_paired_records(&instance_id, &workflow_vocabulary(), &filter, 100, 0)
             .await
             .unwrap();
 
         assert!(steps.is_empty());
 
         let count = persistence
-            .count_step_summaries(&instance_id, &filter)
+            .count_paired_records(&instance_id, &workflow_vocabulary(), &filter)
             .await
             .unwrap();
 
@@ -2724,14 +2746,14 @@ mod tests {
         let filter = step_summary_filter(StepSummarySortOrder::Desc);
 
         let steps = persistence
-            .list_step_summaries(&instance_id, &filter, 100, 0)
+            .list_paired_records(&instance_id, &workflow_vocabulary(), &filter, 100, 0)
             .await
             .unwrap();
 
         assert_eq!(steps.len(), 1);
-        assert_eq!(steps[0].step_id, "step-1");
-        assert_eq!(steps[0].step_name, Some("Fetch Data".to_string()));
-        assert_eq!(steps[0].step_type, "Http");
+        assert_eq!(steps[0].correlation_id, "step-1");
+        assert_eq!(steps[0].label, Some("Fetch Data".to_string()));
+        assert_eq!(steps[0].kind, "Http");
         assert_eq!(steps[0].status, StepSummaryStatus::Completed);
         assert!(steps[0].completed_at.is_some());
         assert!(steps[0].duration_ms.is_some());
@@ -2816,7 +2838,7 @@ mod tests {
         let filter = step_summary_filter(StepSummarySortOrder::Desc);
 
         let steps = persistence
-            .list_step_summaries(&instance_id, &filter, 100, 0)
+            .list_paired_records(&instance_id, &workflow_vocabulary(), &filter, 100, 0)
             .await
             .unwrap();
 
@@ -2880,7 +2902,7 @@ mod tests {
         let filter = step_summary_filter(StepSummarySortOrder::Desc);
 
         let steps = persistence
-            .list_step_summaries(&instance_id, &filter, 100, 0)
+            .list_paired_records(&instance_id, &workflow_vocabulary(), &filter, 100, 0)
             .await
             .unwrap();
 
@@ -2916,12 +2938,12 @@ mod tests {
         let filter = step_summary_filter(StepSummarySortOrder::Desc);
 
         let steps = persistence
-            .list_step_summaries(&instance_id, &filter, 100, 0)
+            .list_paired_records(&instance_id, &workflow_vocabulary(), &filter, 100, 0)
             .await
             .unwrap();
 
         assert_eq!(steps.len(), 1);
-        assert_eq!(steps[0].step_id, "step-running");
+        assert_eq!(steps[0].correlation_id, "step-running");
         assert_eq!(steps[0].status, StepSummaryStatus::Running);
         assert!(steps[0].completed_at.is_none());
         assert!(steps[0].duration_ms.is_none());
@@ -2962,12 +2984,12 @@ mod tests {
         let filter = step_summary_filter(StepSummarySortOrder::Desc);
 
         let steps = persistence
-            .list_step_summaries(&instance_id, &filter, 100, 0)
+            .list_paired_records(&instance_id, &workflow_vocabulary(), &filter, 100, 0)
             .await
             .unwrap();
 
         assert_eq!(steps.len(), 1);
-        assert_eq!(steps[0].step_id, "step-failed");
+        assert_eq!(steps[0].correlation_id, "step-failed");
         assert_eq!(steps[0].status, StepSummaryStatus::Failed);
         assert!(steps[0].error.is_some());
         // The CTE emits `(ej->'error')::text` and the shared row mapper parses
@@ -3016,7 +3038,7 @@ mod tests {
         let filter = step_summary_filter(StepSummarySortOrder::Desc);
 
         let steps = persistence
-            .list_step_summaries(&instance_id, &filter, 100, 0)
+            .list_paired_records(&instance_id, &workflow_vocabulary(), &filter, 100, 0)
             .await
             .unwrap();
 
@@ -3029,14 +3051,14 @@ mod tests {
             Some(serde_json::json!({"message": "Capability failed"}))
         );
 
-        let failed_filter = ListStepSummariesFilter {
+        let failed_filter = ListPairedRecordsFilter {
             status: Some(StepSummaryStatus::Failed),
             ..filter
         };
         // Count is instance-scoped, so this is not a whole-table count.
         assert_eq!(
             persistence
-                .count_step_summaries(&instance_id, &failed_filter)
+                .count_paired_records(&instance_id, &workflow_vocabulary(), &failed_filter)
                 .await
                 .unwrap(),
             1
@@ -3110,46 +3132,46 @@ mod tests {
         .await;
 
         // Filter by completed
-        let filter = ListStepSummariesFilter {
+        let filter = ListPairedRecordsFilter {
             status: Some(StepSummaryStatus::Completed),
             ..step_summary_filter(StepSummarySortOrder::Desc)
         };
 
         let steps = persistence
-            .list_step_summaries(&instance_id, &filter, 100, 0)
+            .list_paired_records(&instance_id, &workflow_vocabulary(), &filter, 100, 0)
             .await
             .unwrap();
 
         assert_eq!(steps.len(), 1);
-        assert_eq!(steps[0].step_id, "step-1");
+        assert_eq!(steps[0].correlation_id, "step-1");
 
         // Filter by running
-        let filter = ListStepSummariesFilter {
+        let filter = ListPairedRecordsFilter {
             status: Some(StepSummaryStatus::Running),
             ..filter
         };
 
         let steps = persistence
-            .list_step_summaries(&instance_id, &filter, 100, 0)
+            .list_paired_records(&instance_id, &workflow_vocabulary(), &filter, 100, 0)
             .await
             .unwrap();
 
         assert_eq!(steps.len(), 1);
-        assert_eq!(steps[0].step_id, "step-2");
+        assert_eq!(steps[0].correlation_id, "step-2");
 
         // Filter by failed
-        let filter = ListStepSummariesFilter {
+        let filter = ListPairedRecordsFilter {
             status: Some(StepSummaryStatus::Failed),
             ..filter
         };
 
         let steps = persistence
-            .list_step_summaries(&instance_id, &filter, 100, 0)
+            .list_paired_records(&instance_id, &workflow_vocabulary(), &filter, 100, 0)
             .await
             .unwrap();
 
         assert_eq!(steps.len(), 1);
-        assert_eq!(steps[0].step_id, "step-3");
+        assert_eq!(steps[0].correlation_id, "step-3");
 
         cleanup_step_summary_instance(&pool, &instance_id).await;
     }
@@ -3197,19 +3219,19 @@ mod tests {
         )
         .await;
 
-        let filter = ListStepSummariesFilter {
-            step_type: Some("Http".to_string()),
+        let filter = ListPairedRecordsFilter {
+            kind: Some("Http".to_string()),
             ..step_summary_filter(StepSummarySortOrder::Desc)
         };
 
         let steps = persistence
-            .list_step_summaries(&instance_id, &filter, 100, 0)
+            .list_paired_records(&instance_id, &workflow_vocabulary(), &filter, 100, 0)
             .await
             .unwrap();
 
         assert_eq!(steps.len(), 1);
-        assert_eq!(steps[0].step_id, "step-http");
-        assert_eq!(steps[0].step_type, "Http");
+        assert_eq!(steps[0].correlation_id, "step-http");
+        assert_eq!(steps[0].kind, "Http");
 
         cleanup_step_summary_instance(&pool, &instance_id).await;
     }
@@ -3239,41 +3261,41 @@ mod tests {
             insert_step_end_pg(&persistence, &instance_id, step_id, None, None, None).await;
         }
 
-        let filter = ListStepSummariesFilter {
-            step_ids: Some(vec!["step-a".to_string(), "step-\"quoted\"".to_string()]),
+        let filter = ListPairedRecordsFilter {
+            correlation_ids: Some(vec!["step-a".to_string(), "step-\"quoted\"".to_string()]),
             ..step_summary_filter(StepSummarySortOrder::Asc)
         };
 
         let steps = persistence
-            .list_step_summaries(&instance_id, &filter, 100, 0)
+            .list_paired_records(&instance_id, &workflow_vocabulary(), &filter, 100, 0)
             .await
             .unwrap();
 
         assert_eq!(steps.len(), 2);
         // Postgres orders these by the start event's BIGSERIAL `id`, so ascending
         // order is insertion order regardless of `created_at` clock resolution.
-        assert_eq!(steps[0].step_id, "step-a");
-        assert_eq!(steps[1].step_id, "step-\"quoted\"");
+        assert_eq!(steps[0].correlation_id, "step-a");
+        assert_eq!(steps[1].correlation_id, "step-\"quoted\"");
 
         let count = persistence
-            .count_step_summaries(&instance_id, &filter)
+            .count_paired_records(&instance_id, &workflow_vocabulary(), &filter)
             .await
             .unwrap();
         assert_eq!(count, 2);
 
         // An id that matches nothing filters everything out.
-        let filter = ListStepSummariesFilter {
-            step_ids: Some(vec!["missing".to_string()]),
+        let filter = ListPairedRecordsFilter {
+            correlation_ids: Some(vec!["missing".to_string()]),
             ..filter
         };
         let steps = persistence
-            .list_step_summaries(&instance_id, &filter, 100, 0)
+            .list_paired_records(&instance_id, &workflow_vocabulary(), &filter, 100, 0)
             .await
             .unwrap();
         assert!(steps.is_empty());
         assert_eq!(
             persistence
-                .count_step_summaries(&instance_id, &filter)
+                .count_paired_records(&instance_id, &workflow_vocabulary(), &filter)
                 .await
                 .unwrap(),
             0
@@ -3321,28 +3343,28 @@ mod tests {
         // Total count for THIS instance only (other tests' rows live in the
         // same table).
         let count = persistence
-            .count_step_summaries(&instance_id, &filter)
+            .count_paired_records(&instance_id, &workflow_vocabulary(), &filter)
             .await
             .unwrap();
         assert_eq!(count, 5);
 
         // Get first page (limit 2)
         let steps = persistence
-            .list_step_summaries(&instance_id, &filter, 2, 0)
+            .list_paired_records(&instance_id, &workflow_vocabulary(), &filter, 2, 0)
             .await
             .unwrap();
         assert_eq!(steps.len(), 2);
-        assert_eq!(steps[0].step_id, "step-1");
-        assert_eq!(steps[1].step_id, "step-2");
+        assert_eq!(steps[0].correlation_id, "step-1");
+        assert_eq!(steps[1].correlation_id, "step-2");
 
         // Get second page
         let steps = persistence
-            .list_step_summaries(&instance_id, &filter, 2, 2)
+            .list_paired_records(&instance_id, &workflow_vocabulary(), &filter, 2, 2)
             .await
             .unwrap();
         assert_eq!(steps.len(), 2);
-        assert_eq!(steps[0].step_id, "step-3");
-        assert_eq!(steps[1].step_id, "step-4");
+        assert_eq!(steps[0].correlation_id, "step-3");
+        assert_eq!(steps[1].correlation_id, "step-4");
 
         cleanup_step_summary_instance(&pool, &instance_id).await;
     }
@@ -3413,53 +3435,53 @@ mod tests {
         .await;
 
         // Filter by root scopes only
-        let filter = ListStepSummariesFilter {
+        let filter = ListPairedRecordsFilter {
             root_scopes_only: true,
             ..step_summary_filter(StepSummarySortOrder::Desc)
         };
 
         let steps = persistence
-            .list_step_summaries(&instance_id, &filter, 100, 0)
+            .list_paired_records(&instance_id, &workflow_vocabulary(), &filter, 100, 0)
             .await
             .unwrap();
 
         // Both step-root and step-scoped have no parent_scope_id
         assert_eq!(steps.len(), 2);
-        let step_ids: Vec<_> = steps.iter().map(|s| s.step_id.as_str()).collect();
+        let step_ids: Vec<_> = steps.iter().map(|s| s.correlation_id.as_str()).collect();
         assert!(step_ids.contains(&"step-root"));
         assert!(step_ids.contains(&"step-scoped"));
 
         // Filter by scope: the start/end pairing joins on
         // `COALESCE(scope_id,'')`, so a scoped step must still resolve to
         // 'completed' rather than dangling as 'running'.
-        let filter = ListStepSummariesFilter {
+        let filter = ListPairedRecordsFilter {
             scope_id: Some("sc_main".to_string()),
             ..step_summary_filter(StepSummarySortOrder::Desc)
         };
 
         let steps = persistence
-            .list_step_summaries(&instance_id, &filter, 100, 0)
+            .list_paired_records(&instance_id, &workflow_vocabulary(), &filter, 100, 0)
             .await
             .unwrap();
 
         assert_eq!(steps.len(), 1);
-        assert_eq!(steps[0].step_id, "step-scoped");
+        assert_eq!(steps[0].correlation_id, "step-scoped");
         assert_eq!(steps[0].scope_id, Some("sc_main".to_string()));
         assert_eq!(steps[0].status, StepSummaryStatus::Completed);
 
         // Filter by parent scope
-        let filter = ListStepSummariesFilter {
+        let filter = ListPairedRecordsFilter {
             parent_scope_id: Some("sc_main".to_string()),
             ..step_summary_filter(StepSummarySortOrder::Desc)
         };
 
         let steps = persistence
-            .list_step_summaries(&instance_id, &filter, 100, 0)
+            .list_paired_records(&instance_id, &workflow_vocabulary(), &filter, 100, 0)
             .await
             .unwrap();
 
         assert_eq!(steps.len(), 1);
-        assert_eq!(steps[0].step_id, "step-nested");
+        assert_eq!(steps[0].correlation_id, "step-nested");
 
         cleanup_step_summary_instance(&pool, &instance_id).await;
     }

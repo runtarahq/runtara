@@ -17,11 +17,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use runtara_core::persistence::{CompleteInstanceParams, Persistence, PostgresPersistence};
+use runtara_core::persistence::{CompleteInstanceParams, Persistence};
 use runtara_environment::runner::{
     EmbeddedWasmRunner, LaunchOptions, Result as RunnerResult, Runner, RunnerError, StartGate,
     StartGateConfirmation, WorkflowRunnerConfig,
 };
+use runtara_store_postgres::PostgresPersistence;
 use uuid::Uuid;
 
 /// An instance id no concurrently-running test can also be using.

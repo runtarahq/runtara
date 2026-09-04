@@ -5,8 +5,8 @@
 mod common;
 
 use chrono::{Duration as ChronoDuration, Utc};
-use runtara_core::persistence::PostgresPersistence;
 use runtara_environment::db_cleanup_worker::{DbCleanupWorker, DbCleanupWorkerConfig};
+use runtara_store_postgres::PostgresPersistence;
 use sqlx::PgPool;
 use std::sync::Arc;
 use std::time::Duration;
@@ -22,6 +22,19 @@ macro_rules! skip_if_no_db {
         );
     };
 }
+
+/// Serializes every test that sweeps the shared tables.
+///
+/// The cleanup worker deletes by age across the WHOLE table -- it has no
+/// tenant or instance scoping -- so two of these running at once wipe each
+/// other's fixtures: a test asserting "my 35-day-old instance is still here"
+/// fails because a rival test's worker legitimately swept it. Each test is
+/// correct in isolation; it is the shared database that makes them mutually
+/// destructive, so they take turns.
+///
+/// Held across the whole test body, not just the sweep, because the fixtures
+/// are created before the worker runs and asserted after it stops.
+static SWEEP_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Get a database pool for testing
 async fn get_test_pool() -> Option<PgPool> {
@@ -175,6 +188,7 @@ async fn cleanup_test_data(pool: &PgPool, instance_ids: &[&str], image_id: &str)
 #[tokio::test]
 async fn test_cleanup_old_terminal_instances() {
     skip_if_no_db!();
+    let _sweep = SWEEP_LOCK.lock().await;
     let pool = get_test_pool().await.expect("Failed to get test pool");
     let persistence = Arc::new(PostgresPersistence::new(pool.clone()));
     let tenant_id = format!("test-tenant-{}", Uuid::new_v4());
@@ -290,6 +304,7 @@ async fn test_cleanup_old_terminal_instances() {
 #[tokio::test]
 async fn test_cleanup_disabled_by_default() {
     skip_if_no_db!();
+    let _sweep = SWEEP_LOCK.lock().await;
     let pool = get_test_pool().await.expect("Failed to get test pool");
     let persistence = Arc::new(PostgresPersistence::new(pool.clone()));
     let tenant_id = format!("test-tenant-{}", Uuid::new_v4());
@@ -441,6 +456,7 @@ async fn count_instances(pool: &PgPool, tenant_id: &str) -> i64 {
 #[tokio::test]
 async fn test_e2e_cascade_deletion_checkpoints_and_events() {
     skip_if_no_db!();
+    let _sweep = SWEEP_LOCK.lock().await;
     let pool = get_test_pool().await.expect("Failed to get test pool");
     let persistence = Arc::new(PostgresPersistence::new(pool.clone()));
     let tenant_id = format!("test-tenant-{}", Uuid::new_v4());
@@ -522,6 +538,7 @@ async fn test_e2e_cascade_deletion_checkpoints_and_events() {
 #[tokio::test]
 async fn test_e2e_batch_processing() {
     skip_if_no_db!();
+    let _sweep = SWEEP_LOCK.lock().await;
     let pool = get_test_pool().await.expect("Failed to get test pool");
     let persistence = Arc::new(PostgresPersistence::new(pool.clone()));
     let tenant_id = format!("test-tenant-{}", Uuid::new_v4());
@@ -590,6 +607,7 @@ async fn test_e2e_batch_processing() {
 #[tokio::test]
 async fn test_e2e_cancelled_instances_deleted() {
     skip_if_no_db!();
+    let _sweep = SWEEP_LOCK.lock().await;
     let pool = get_test_pool().await.expect("Failed to get test pool");
     let persistence = Arc::new(PostgresPersistence::new(pool.clone()));
     let tenant_id = format!("test-tenant-{}", Uuid::new_v4());
@@ -646,6 +664,7 @@ async fn test_e2e_cancelled_instances_deleted() {
 #[tokio::test]
 async fn test_e2e_suspended_instances_not_deleted() {
     skip_if_no_db!();
+    let _sweep = SWEEP_LOCK.lock().await;
     let pool = get_test_pool().await.expect("Failed to get test pool");
     let persistence = Arc::new(PostgresPersistence::new(pool.clone()));
     let tenant_id = format!("test-tenant-{}", Uuid::new_v4());
@@ -704,6 +723,7 @@ async fn test_e2e_suspended_instances_not_deleted() {
 #[tokio::test]
 async fn test_e2e_pending_instances_not_deleted() {
     skip_if_no_db!();
+    let _sweep = SWEEP_LOCK.lock().await;
     let pool = get_test_pool().await.expect("Failed to get test pool");
     let persistence = Arc::new(PostgresPersistence::new(pool.clone()));
     let tenant_id = format!("test-tenant-{}", Uuid::new_v4());
@@ -811,6 +831,7 @@ async fn count_events(pool: &PgPool, instance_id: &str, subtype: Option<&str>) -
 #[tokio::test]
 async fn debug_events_age_out_before_their_instance_does() {
     skip_if_no_db!();
+    let _sweep = SWEEP_LOCK.lock().await;
     let pool = get_test_pool().await.expect("test pool");
     let persistence = Arc::new(PostgresPersistence::new(pool.clone()));
 
@@ -879,6 +900,7 @@ async fn debug_events_age_out_before_their_instance_does() {
 #[tokio::test]
 async fn debug_sweep_is_off_when_no_window_is_configured() {
     skip_if_no_db!();
+    let _sweep = SWEEP_LOCK.lock().await;
     let pool = get_test_pool().await.expect("test pool");
     let persistence = Arc::new(PostgresPersistence::new(pool.clone()));
 

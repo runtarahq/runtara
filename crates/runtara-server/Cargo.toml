@@ -107,6 +107,7 @@ runtara-workflows = { path = "../runtara-workflows" }
 runtara-dsl = { path = "../runtara-dsl", features = ["utoipa"] }
 runtara-agents = { path = "../runtara-agents", default-features = false, features = ["native"] }
 runtara-core = { path = "../runtara-core" }
+runtara-store-postgres = { path = "../runtara-store-postgres" }
 runtara-environment = { path = "../runtara-environment" }
 runtara-object-store = { path = "../runtara-object-store" }
 runtara-text-parser = { path = "../runtara-text-parser" }

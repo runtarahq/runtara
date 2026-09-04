@@ -4778,12 +4778,8 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
- "opentelemetry",
  "serde",
  "serde_json",
- "sqlx",
- "testcontainers",
- "testcontainers-modules",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -4812,8 +4808,10 @@ dependencies = [
  "chrono",
  "futures",
  "getrandom 0.3.4",
+ "opentelemetry",
  "runtara-component-host",
  "runtara-core",
+ "runtara-store-postgres",
  "serde",
  "serde_json",
  "sqlx",
@@ -4955,6 +4953,7 @@ dependencies = [
  "runtara-environment",
  "runtara-object-store",
  "runtara-report-dsl",
+ "runtara-store-postgres",
  "runtara-text-parser",
  "runtara-workflows",
  "rust-embed",
@@ -4980,6 +4979,22 @@ dependencies = [
  "utoipa",
  "uuid",
  "wiremock",
+]
+
+[[package]]
+name = "runtara-store-postgres"
+version = "8.9.4"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "runtara-core",
+ "serde_json",
+ "sqlx",
+ "testcontainers",
+ "testcontainers-modules",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

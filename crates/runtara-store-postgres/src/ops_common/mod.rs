@@ -6,7 +6,7 @@
 //! - [`error`] — error-mapping helpers (e.g. `rows_affected == 0 → InstanceNotFound`
 //!   and `CheckpointSaveFailed` wrapping) shared by every operation family.
 //! - [`row`] — result-marshaling helpers for records that aren't served by
-//!   `#[sqlx(FromRow)]` auto-derive (currently `StepSummaryRecord`).
+//!   `#[sqlx(FromRow)]` auto-derive (currently `PairedRecordSummary`).
 //! - [`filters`] — shared predicates and bind ordering for list/count filters.
 //! - [`ops`] — macro-generated operation implementations for
 //!   [`super::postgres::PostgresPersistence`].

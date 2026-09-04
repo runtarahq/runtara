@@ -30,20 +30,20 @@ macro_rules! impl_signal_ops {
                 pool: &$Pool,
                 instance_id: &str,
             ) -> ::core::result::Result<
-                ::core::option::Option<$crate::persistence::SignalRecord>,
-                $crate::error::CoreError,
+                ::core::option::Option<::runtara_core::persistence::SignalRecord>,
+                ::runtara_core::error::CoreError,
             > {
-                use $crate::persistence::dialect::Dialect;
+                use crate::dialect::Dialect;
                 let sql = <$Dialect>::sql_get_pending_signal();
-                let record = ::sqlx::query_as::<_, $crate::persistence::SignalRecord>(sql)
+                let record = ::sqlx::query_as::<_, crate::rows::SignalRow>(sql)
                     .bind(instance_id)
                     .fetch_optional(pool)
                     .await
-                    .map_err(|e| $crate::error::CoreError::DatabaseError {
+                    .map_err(|e| ::runtara_core::error::CoreError::DatabaseError {
                         operation: "get_pending_signal".into(),
                         details: e.to_string(),
                     })?;
-                Ok(record)
+                Ok(record.map(|r| r.0))
             }
 
             /// UPDATE `acknowledged_at = NOW()` for the pending signal.
@@ -52,14 +52,14 @@ macro_rules! impl_signal_ops {
             pub(crate) async fn op_acknowledge_signal(
                 pool: &$Pool,
                 instance_id: &str,
-            ) -> ::core::result::Result<(), $crate::error::CoreError> {
-                use $crate::persistence::dialect::Dialect;
+            ) -> ::core::result::Result<(), ::runtara_core::error::CoreError> {
+                use crate::dialect::Dialect;
                 let sql = <$Dialect>::sql_acknowledge_signal();
                 ::sqlx::query(sql)
                     .bind(instance_id)
                     .execute(pool)
                     .await
-                    .map_err(|e| $crate::error::CoreError::DatabaseError {
+                    .map_err(|e| ::runtara_core::error::CoreError::DatabaseError {
                         operation: "acknowledge_signal".into(),
                         details: e.to_string(),
                     })?;
@@ -81,17 +81,18 @@ macro_rules! impl_signal_ops {
                 instance_id: &str,
                 checkpoint_id: &str,
             ) -> ::core::result::Result<
-                ::core::option::Option<$crate::persistence::CustomSignalRecord>,
-                $crate::error::CoreError,
+                ::core::option::Option<::runtara_core::persistence::CustomSignalRecord>,
+                ::runtara_core::error::CoreError,
             > {
-                use $crate::persistence::dialect::Dialect;
+                use crate::dialect::Dialect;
                 let sql = <$Dialect>::sql_take_pending_custom_signal();
-                let record = ::sqlx::query_as::<_, $crate::persistence::CustomSignalRecord>(sql)
+                let record = ::sqlx::query_as::<_, crate::rows::CustomSignalRow>(sql)
                     .bind(instance_id)
                     .bind(checkpoint_id)
                     .fetch_optional(pool)
-                    .await?;
-                Ok(record)
+                    .await
+                    .db()?;
+                Ok(record.map(|r| r.0))
             }
         }
     };

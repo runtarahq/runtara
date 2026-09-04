@@ -13,12 +13,16 @@ use crate::persistence::Persistence;
 /// these — the same dependency inversion the connections crate uses for its
 /// lifecycle events. Core defines the shape; the host implements it.
 ///
-/// Implementations run on the event path of every step of every workflow, so
-/// they must be cheap and non-blocking. An atomic add is the intended cost; a
-/// lock or any I/O here is a bug.
+/// The subtype is handed over verbatim and this crate reads nothing into it:
+/// deciding which subtypes are worth counting needs the producer's vocabulary,
+/// which belongs to the implementer, not to a durable-execution kernel.
+///
+/// Implementations run on the event path of every event of every run, so they
+/// must be cheap and non-blocking. An atomic add is the intended cost; a lock
+/// or any I/O here is a bug.
 pub trait InstanceEventObserver: Send + Sync {
-    /// A workflow step reported starting.
-    fn on_step_started(&self);
+    /// An event was persisted, carrying the producer's subtype if it set one.
+    fn on_event_persisted(&self, subtype: Option<&str>);
 }
 
 /// Shared state for instance handlers.

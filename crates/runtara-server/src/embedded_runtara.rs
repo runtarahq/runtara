@@ -17,9 +17,9 @@ use std::sync::Arc;
 
 use runtara_core::config::RuntimeOverrides;
 use runtara_core::persistence::Persistence;
-use runtara_core::persistence::postgres::PostgresPersistence;
 use runtara_environment::execution_timeout::ExecutionTimeoutPolicy;
 use runtara_environment::runtime::EnvironmentRuntime;
+use runtara_store_postgres::PostgresPersistence;
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 use tracing::{error, info};
@@ -70,9 +70,13 @@ impl EmbeddedRuntara {
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         info!("Starting embedded Runtara servers...");
 
-        // Create shared persistence layer
-        let persistence: Arc<dyn Persistence> =
-            Arc::new(PostgresPersistence::new(config.pool.clone()));
+        // Create shared persistence layer. The metrics sink is what turns
+        // Core's terminal-state facts into OTLP workflow metrics; without it
+        // Core still completes instances, it just reports nothing.
+        let persistence: Arc<dyn Persistence> = Arc::new(
+            PostgresPersistence::new(config.pool.clone())
+                .with_metrics_sink(Arc::new(runtara_environment::metrics::OtlpMetricsSink)),
+        );
 
         // Start Core (instance protocol - workflows connect here via HTTP)
         let core_http_addr = config.core_http_bind_addr.unwrap_or(config.core_bind_addr);

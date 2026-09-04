@@ -8,8 +8,9 @@ use async_trait::async_trait;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use runtara_core::error::CoreError;
 use runtara_core::persistence::{
-    CheckpointRecord, CompleteInstanceParams, CustomSignalRecord, EventRecord, InstanceRecord,
-    ListEventsFilter, ListStepSummariesFilter, Persistence, SignalRecord, StepSummaryRecord,
+    CheckpointRecord, CompleteInstanceParams, CustomSignalRecord, EventRecord, EventVocabulary,
+    InstanceRecord, ListEventsFilter, ListPairedRecordsFilter, PairedRecordSummary, Persistence,
+    SignalRecord,
 };
 use runtara_environment::container_registry::ContainerRegistry;
 use runtara_environment::heartbeat_monitor::{HeartbeatMonitor, HeartbeatMonitorConfig};
@@ -137,6 +138,30 @@ async fn create_env_instance(
     .execute(pool)
     .await
     .expect("Failed to create test instance");
+}
+
+/// Serializes the tests that run a real HeartbeatMonitor.
+///
+/// The monitor sweeps every running instance in the database, not just the one
+/// a test created, so two of them running at once act on each other's fixtures:
+/// one test's orphan sweep suspends another's instance before that test has
+/// asserted on it. Each is correct alone; the shared database is what makes
+/// them collide, so they take turns.
+static MONITOR_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Read back how an instance was marked for recovery.
+///
+/// Recovery marking is Environment's own UPDATE rather than a `Persistence`
+/// call, so it lands in the database and not in the mock's bookkeeping. These
+/// tests therefore assert the row, which is the observable outcome anyway.
+async fn recovery_state(pool: &PgPool, instance_id: &str) -> (String, Option<String>) {
+    sqlx::query_as::<_, (String, Option<String>)>(
+        "SELECT status::text, termination_reason::text FROM instances WHERE instance_id = $1",
+    )
+    .bind(instance_id)
+    .fetch_one(pool)
+    .await
+    .expect("the instance row must exist")
 }
 
 /// Register a container in container_registry
@@ -413,7 +438,7 @@ impl Persistence for MockPersistence {
         Ok(filtered)
     }
 
-    async fn health_check_db(&self) -> Result<bool, CoreError> {
+    async fn health_check(&self) -> Result<bool, CoreError> {
         Ok(true)
     }
 
@@ -458,20 +483,22 @@ impl Persistence for MockPersistence {
         Ok(0)
     }
 
-    async fn list_step_summaries(
+    async fn list_paired_records(
         &self,
         _instance_id: &str,
-        _filter: &ListStepSummariesFilter,
+        _vocabulary: &EventVocabulary,
+        _filter: &ListPairedRecordsFilter,
         _limit: i64,
         _offset: i64,
-    ) -> Result<Vec<StepSummaryRecord>, CoreError> {
+    ) -> Result<Vec<PairedRecordSummary>, CoreError> {
         Ok(vec![])
     }
 
-    async fn count_step_summaries(
+    async fn count_paired_records(
         &self,
         _instance_id: &str,
-        _filter: &ListStepSummariesFilter,
+        _vocabulary: &EventVocabulary,
+        _filter: &ListPairedRecordsFilter,
     ) -> Result<i64, CoreError> {
         Ok(0)
     }
@@ -525,6 +552,7 @@ fn test_heartbeat_monitor_config_debug() {
 #[tokio::test]
 async fn test_heartbeat_monitor_shutdown() {
     skip_if_no_db!();
+    let _monitor = MONITOR_LOCK.lock().await;
     let pool = get_test_pool().await;
 
     let persistence = Arc::new(MockPersistence::new());
@@ -564,6 +592,7 @@ async fn test_heartbeat_monitor_shutdown() {
 #[tokio::test]
 async fn test_stale_container_no_heartbeat() {
     skip_if_no_db!();
+    let _monitor = MONITOR_LOCK.lock().await;
     let pool = get_test_pool().await;
 
     let tenant_id = format!("test-tenant-stale-{}", Uuid::new_v4());
@@ -616,6 +645,7 @@ async fn test_stale_container_no_heartbeat() {
 #[tokio::test]
 async fn test_stale_container_old_heartbeat() {
     skip_if_no_db!();
+    let _monitor = MONITOR_LOCK.lock().await;
     let pool = get_test_pool().await;
 
     let tenant_id = format!("test-tenant-old-hb-{}", Uuid::new_v4());
@@ -669,6 +699,7 @@ async fn test_stale_container_old_heartbeat() {
 #[tokio::test]
 async fn test_container_with_recent_heartbeat_not_stale() {
     skip_if_no_db!();
+    let _monitor = MONITOR_LOCK.lock().await;
     let pool = get_test_pool().await;
 
     let tenant_id = format!("test-tenant-fresh-{}", Uuid::new_v4());
@@ -724,6 +755,7 @@ async fn test_container_with_recent_heartbeat_not_stale() {
 #[tokio::test]
 async fn test_orphaned_instance_detected() {
     skip_if_no_db!();
+    let _monitor = MONITOR_LOCK.lock().await;
     let pool = get_test_pool().await;
 
     let tenant_id = format!("test-tenant-orphan-{}", Uuid::new_v4());
@@ -736,6 +768,8 @@ async fn test_orphaned_instance_detected() {
         &tenant_id,
         started_at,
     ));
+    // The recovery mark is a real UPDATE, so the row has to exist.
+    create_env_instance(&pool, &instance_id, &tenant_id, "", "running").await;
 
     let config = HeartbeatMonitorConfig {
         poll_interval: Duration::from_millis(50),
@@ -762,22 +796,20 @@ async fn test_orphaned_instance_detected() {
     shutdown.notify_one();
     handle.await.ok();
 
-    // The orphaned instance should have entered the default automatic-recovery
-    // path. The mock's default mark_for_recovery implementation records the
-    // suspended completion without an error.
-    let completed = persistence.get_completed_instances();
-    assert!(
-        completed
-            .iter()
-            .any(|(id, _, err)| id == &instance_id && err.is_none()),
-        "Orphaned instance should have been marked for recovery. Completed: {:?}",
-        completed
+    // The orphaned instance should have entered the automatic-recovery path,
+    // which suspends it and stamps the reason so the wake scheduler relaunches it.
+    let (status, reason) = recovery_state(&pool, &instance_id).await;
+    assert_eq!(
+        status, "suspended",
+        "the orphan must be suspended for recovery"
     );
+    assert_eq!(reason.as_deref(), Some("environment_restart"));
 }
 
 #[tokio::test]
 async fn test_tracked_instance_not_orphaned() {
     skip_if_no_db!();
+    let _monitor = MONITOR_LOCK.lock().await;
     let pool = get_test_pool().await;
 
     let tenant_id = format!("test-tenant-tracked-{}", Uuid::new_v4());
@@ -836,6 +868,7 @@ async fn test_tracked_instance_not_orphaned() {
 #[tokio::test]
 async fn test_recent_instance_not_immediately_orphaned() {
     skip_if_no_db!();
+    let _monitor = MONITOR_LOCK.lock().await;
     let pool = get_test_pool().await;
 
     let tenant_id = format!("test-tenant-recent-{}", Uuid::new_v4());
@@ -885,6 +918,7 @@ async fn test_recent_instance_not_immediately_orphaned() {
 #[tokio::test]
 async fn test_multiple_orphaned_instances() {
     skip_if_no_db!();
+    let _monitor = MONITOR_LOCK.lock().await;
     let pool = get_test_pool().await;
 
     let tenant_id = format!("test-tenant-multi-{}", Uuid::new_v4());
@@ -902,6 +936,10 @@ async fn test_multiple_orphaned_instances() {
             .with_running_instance(&instance2, &tenant_id, old_start)
             .with_running_instance(&instance3, &tenant_id, recent_start), // Should NOT be orphaned yet
     );
+    // The recovery mark is a real UPDATE, so the rows have to exist.
+    for id in [&instance1, &instance2, &instance3] {
+        create_env_instance(&pool, id, &tenant_id, "", "running").await;
+    }
 
     let config = HeartbeatMonitorConfig {
         poll_interval: Duration::from_millis(50),
@@ -928,24 +966,21 @@ async fn test_multiple_orphaned_instances() {
     shutdown.notify_one();
     handle.await.ok();
 
-    // Check which instances were completed
-    let completed = persistence.get_completed_instances();
-    let completed_ids: Vec<&String> = completed.iter().map(|(id, _, _)| id).collect();
+    // Both old instances should have been suspended for recovery.
+    for (label, id) in [("1", &instance1), ("2", &instance2)] {
+        let (status, reason) = recovery_state(&pool, id).await;
+        assert_eq!(
+            status, "suspended",
+            "old instance {label} should be orphaned"
+        );
+        assert_eq!(reason.as_deref(), Some("environment_restart"));
+    }
 
-    // Old instances should be marked as orphaned
-    assert!(
-        completed_ids.contains(&&instance1),
-        "Old instance 1 should be marked as orphaned"
-    );
-    assert!(
-        completed_ids.contains(&&instance2),
-        "Old instance 2 should be marked as orphaned"
-    );
-
-    // Recent instance should NOT be marked as orphaned
-    assert!(
-        !completed_ids.contains(&&instance3),
-        "Recent instance 3 should not be immediately marked as orphaned"
+    // The recent one is still within its grace period and must be left alone.
+    let (status, _) = recovery_state(&pool, &instance3).await;
+    assert_eq!(
+        status, "running",
+        "recent instance 3 should not be immediately marked as orphaned"
     );
 }
 
@@ -956,6 +991,7 @@ async fn test_multiple_orphaned_instances() {
 #[tokio::test]
 async fn test_no_instances_to_check() {
     skip_if_no_db!();
+    let _monitor = MONITOR_LOCK.lock().await;
     let pool = get_test_pool().await;
 
     // Empty persistence - no running instances
@@ -997,6 +1033,7 @@ async fn test_no_instances_to_check() {
 #[tokio::test]
 async fn test_completed_instance_in_core_not_flagged() {
     skip_if_no_db!();
+    let _monitor = MONITOR_LOCK.lock().await;
     let pool = get_test_pool().await;
 
     let tenant_id = format!("test-tenant-completed-{}", Uuid::new_v4());
@@ -1072,6 +1109,7 @@ async fn test_completed_instance_in_core_not_flagged() {
 #[tokio::test]
 async fn test_checkpoint_event_counts_as_activity() {
     skip_if_no_db!();
+    let _monitor = MONITOR_LOCK.lock().await;
     let pool = get_test_pool().await;
 
     let tenant_id = format!("test-tenant-checkpoint-{}", Uuid::new_v4());
@@ -1132,6 +1170,7 @@ async fn test_checkpoint_event_counts_as_activity() {
 #[tokio::test]
 async fn test_any_event_type_counts_as_activity() {
     skip_if_no_db!();
+    let _monitor = MONITOR_LOCK.lock().await;
     let pool = get_test_pool().await;
 
     let tenant_id = format!("test-tenant-anyevent-{}", Uuid::new_v4());
@@ -1190,6 +1229,7 @@ async fn test_any_event_type_counts_as_activity() {
 #[tokio::test]
 async fn test_multiple_events_uses_most_recent() {
     skip_if_no_db!();
+    let _monitor = MONITOR_LOCK.lock().await;
     let pool = get_test_pool().await;
 
     let tenant_id = format!("test-tenant-multi-events-{}", Uuid::new_v4());
@@ -1252,6 +1292,7 @@ async fn test_multiple_events_uses_most_recent() {
 #[tokio::test]
 async fn test_freshly_woken_instance_is_not_stale_despite_old_events() {
     skip_if_no_db!();
+    let _monitor = MONITOR_LOCK.lock().await;
     let pool = get_test_pool().await;
 
     let tenant_id = format!("test-tenant-woken-{}", Uuid::new_v4());
@@ -1321,6 +1362,7 @@ async fn test_freshly_woken_instance_is_not_stale_despite_old_events() {
 #[tokio::test]
 async fn cleanup_generation_refuses_to_remove_a_replacement_container() {
     skip_if_no_db!();
+    let _monitor = MONITOR_LOCK.lock().await;
     let pool = get_test_pool().await;
     let tenant_id = format!("test-tenant-generation-{}", Uuid::new_v4());
     let image_id = create_test_image(&pool, &tenant_id).await;
@@ -1397,6 +1439,7 @@ async fn cleanup_generation_refuses_to_remove_a_replacement_container() {
 #[tokio::test]
 async fn test_long_running_instance_with_old_events_is_still_stale() {
     skip_if_no_db!();
+    let _monitor = MONITOR_LOCK.lock().await;
     let pool = get_test_pool().await;
 
     let tenant_id = format!("test-tenant-hung-{}", Uuid::new_v4());

@@ -204,15 +204,6 @@ impl fmt::Display for CoreError {
 
 impl std::error::Error for CoreError {}
 
-impl From<sqlx::Error> for CoreError {
-    fn from(err: sqlx::Error) -> Self {
-        CoreError::DatabaseError {
-            operation: "query".to_string(),
-            details: err.to_string(),
-        }
-    }
-}
-
 impl From<serde_json::Error> for CoreError {
     fn from(err: serde_json::Error) -> Self {
         CoreError::DatabaseError {

@@ -22,9 +22,10 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use runtara_core::migrations;
-use runtara_core::persistence::{Persistence, PostgresPersistence};
+use runtara_core::persistence::Persistence;
 use runtara_server::core_runtime::CoreRuntime;
+use runtara_store_postgres::PostgresPersistence;
+use runtara_store_postgres::migrations;
 use serde_json::json;
 use sqlx::PgPool;
 use uuid::Uuid;

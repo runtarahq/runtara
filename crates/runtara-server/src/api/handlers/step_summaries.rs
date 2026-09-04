@@ -121,7 +121,11 @@ fn error_from_output_envelope(outputs: Option<&Value>) -> Option<Value> {
         outputs
             .get("error")
             .cloned()
-            .unwrap_or_else(|| json!("Step output reported _error=true")),
+            // Kept identical to runtara-core's own envelope fallback
+            // (`persistence::common::row::error_from_output_envelope`). Core's
+            // value wins where both run, so a divergence here would surface as
+            // one failure reported two different ways.
+            .unwrap_or_else(|| json!("Output reported _error=true")),
     )
 }
 

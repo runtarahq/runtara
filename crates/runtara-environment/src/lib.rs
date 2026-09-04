@@ -192,6 +192,9 @@ pub mod instance_output;
 /// In-process WASM execution backend.
 pub mod runner;
 
+/// The workflow event vocabulary handed to `runtara-core` per query.
+pub mod step_vocabulary;
+
 /// Durable sleep wake scheduling.
 pub mod wake_scheduler;
 
@@ -200,6 +203,8 @@ pub mod cleanup_worker;
 
 /// Background worker for cleaning up old database records.
 pub mod db_cleanup_worker;
+pub mod metrics;
+pub mod recovery_marks;
 
 /// Background worker for cleaning up unused images.
 pub mod image_cleanup_worker;

@@ -17,7 +17,8 @@
 
 use std::sync::Arc;
 
-use runtara_core::persistence::{Persistence, PostgresPersistence};
+use runtara_core::persistence::Persistence;
+use runtara_store_postgres::PostgresPersistence;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{Connection, PgConnection, PgPool};
 use uuid::Uuid;

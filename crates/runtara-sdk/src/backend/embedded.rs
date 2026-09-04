@@ -722,7 +722,6 @@ mod tests {
             Ok(checkpoints
                 .get(&key)
                 .map(|state| runtara_core::persistence::CheckpointRecord {
-                    id: 1,
                     instance_id: instance_id.to_string(),
                     checkpoint_id: checkpoint_id.to_string(),
                     state: state.clone(),
@@ -816,7 +815,7 @@ mod tests {
             Ok(vec![])
         }
 
-        async fn health_check_db(&self) -> CoreResult<bool> {
+        async fn health_check(&self) -> CoreResult<bool> {
             Ok(true)
         }
 
@@ -869,20 +868,22 @@ mod tests {
             Ok(0)
         }
 
-        async fn list_step_summaries(
+        async fn list_paired_records(
             &self,
             _instance_id: &str,
-            _filter: &runtara_core::persistence::ListStepSummariesFilter,
+            _vocabulary: &runtara_core::persistence::EventVocabulary,
+            _filter: &runtara_core::persistence::ListPairedRecordsFilter,
             _limit: i64,
             _offset: i64,
-        ) -> CoreResult<Vec<runtara_core::persistence::StepSummaryRecord>> {
+        ) -> CoreResult<Vec<runtara_core::persistence::PairedRecordSummary>> {
             Ok(vec![])
         }
 
-        async fn count_step_summaries(
+        async fn count_paired_records(
             &self,
             _instance_id: &str,
-            _filter: &runtara_core::persistence::ListStepSummariesFilter,
+            _vocabulary: &runtara_core::persistence::EventVocabulary,
+            _filter: &runtara_core::persistence::ListPairedRecordsFilter,
         ) -> CoreResult<i64> {
             Ok(0)
         }

@@ -2,16 +2,23 @@
 //!
 //! This module defines the persistence abstraction and backend implementations.
 
-pub(crate) mod common;
-pub(crate) mod dialect;
-pub mod postgres;
+/// In-memory backend, for tests and for hosts that need no durability.
+#[cfg(any(test, feature = "test-support"))]
+pub mod memory;
 
-pub use self::postgres::PostgresPersistence;
+/// The executable definition of the [`Persistence`] contract, for backends to
+/// prove themselves against.
+#[cfg(any(test, feature = "test-support"))]
+pub mod conformance;
+
+pub mod vocabulary;
+
+pub use self::vocabulary::{EventVocabulary, EventVocabularySpec};
 
 use crate::error::CoreError;
 
 /// Instance record from the persistence layer.
-#[derive(Debug, Clone, sqlx::FromRow)]
+#[derive(Debug, Clone)]
 pub struct InstanceRecord {
     /// Unique identifier for the instance.
     pub instance_id: String,
@@ -34,7 +41,6 @@ pub struct InstanceRecord {
     /// When the instance finished (completed, failed, or cancelled).
     pub finished_at: Option<DateTime<Utc>>,
     /// Input data provided at launch time.
-    #[sqlx(default)]
     pub input: Option<Vec<u8>>,
     /// Output data from successful completion.
     pub output: Option<Vec<u8>>,
@@ -43,27 +49,21 @@ pub struct InstanceRecord {
     /// When a sleeping instance should be woken.
     pub sleep_until: Option<DateTime<Utc>>,
     /// How/why the instance reached its terminal state.
-    #[sqlx(default)]
     pub termination_reason: Option<String>,
     /// Process exit code if available.
-    #[sqlx(default)]
     pub exit_code: Option<i32>,
     /// Consecutive no-progress auto-restarts after an Environment restart.
     /// Reset to 0 when the instance's checkpoint count advances between
     /// recoveries. See [`Persistence::mark_for_recovery`].
-    #[sqlx(default)]
     pub recovery_attempts: i32,
     /// Checkpoint count observed at the last auto-recovery, as text. Compared
     /// against the current count to distinguish "made progress" from "stuck".
-    #[sqlx(default)]
     pub recovery_marker: Option<String>,
 }
 
 /// Checkpoint record from the persistence layer.
-#[derive(Debug, Clone, sqlx::FromRow)]
+#[derive(Debug, Clone)]
 pub struct CheckpointRecord {
-    /// Database primary key.
-    pub id: i64,
     /// Instance this checkpoint belongs to.
     pub instance_id: String,
     /// Unique checkpoint identifier within the instance.
@@ -75,10 +75,14 @@ pub struct CheckpointRecord {
 }
 
 /// Event record from the persistence layer.
-#[derive(Debug, Clone, sqlx::FromRow)]
+#[derive(Debug, Clone)]
 pub struct EventRecord {
-    /// Database primary key (None when inserting new events).
-    #[sqlx(default)]
+    /// Position in the instance's append sequence, assigned by the store.
+    ///
+    /// `None` before the event is stored — a caller building one to append has
+    /// no position yet. Readers rely on it to order events written within the
+    /// same clock tick, so a store must assign values that increase with
+    /// insertion order.
     pub id: Option<i64>,
     /// Instance this event belongs to.
     pub instance_id: String,
@@ -95,7 +99,7 @@ pub struct EventRecord {
 }
 
 /// Signal record from the persistence layer.
-#[derive(Debug, Clone, sqlx::FromRow)]
+#[derive(Debug, Clone)]
 pub struct SignalRecord {
     /// Instance this signal is for.
     pub instance_id: String,
@@ -110,7 +114,7 @@ pub struct SignalRecord {
 }
 
 /// Pending custom signal scoped to a specific checkpoint.
-#[derive(Debug, Clone, sqlx::FromRow)]
+#[derive(Debug, Clone)]
 pub struct CustomSignalRecord {
     /// Instance this signal is for.
     pub instance_id: String,
@@ -137,7 +141,7 @@ pub enum EventSortOrder {
 pub struct ListEventsFilter {
     /// Filter by event type (e.g., "custom", "started", "completed").
     pub event_type: Option<String>,
-    /// Filter by subtype (e.g., "step_debug_start", "step_debug_end", "workflow_log").
+    /// Filter by the producer's event subtype. Opaque to this crate.
     pub subtype: Option<String>,
     /// Filter events created at or after this time.
     pub created_after: Option<DateTime<Utc>>,
@@ -160,81 +164,139 @@ pub struct ListEventsFilter {
 }
 
 // ============================================================================
-// Step Summary Types (for paired step_debug_start/end events)
+// Paired Record Types
 // ============================================================================
 
-/// Status of a step execution.
+/// Status of a paired record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StepStatus {
-    /// Step is currently running (has start event, no end event yet).
+pub enum PairedRecordStatus {
+    /// The start event has arrived and no end event has paired with it yet.
     Running,
-    /// Step completed successfully.
+    /// The record closed without a failure.
     Completed,
-    /// Step failed with an error.
+    /// The record closed carrying failure detail, either under the
+    /// vocabulary's error key or via its output error flag.
     Failed,
 }
 
-/// Summary of a step execution, pairing step_debug_start and step_debug_end events.
+/// One unit of work, assembled from the start and end events that share a
+/// correlation id within the same scope.
+///
+/// The field names are this crate's own. What the producer calls them is
+/// supplied per query by an [`EventVocabulary`].
 #[derive(Debug, Clone)]
-pub struct StepSummaryRecord {
-    /// Unique step identifier within the instance.
-    pub step_id: String,
-    /// Human-readable step name.
-    pub step_name: Option<String>,
-    /// Step type (e.g., "Agent", "Conditional", "Split").
-    pub step_type: String,
-    /// Current status of the step.
-    pub status: StepStatus,
-    /// When the step started executing.
+pub struct PairedRecordSummary {
+    /// Correlation id, unique within the instance and scope.
+    pub correlation_id: String,
+    /// Human-readable label, if the producer emitted one.
+    pub label: Option<String>,
+    /// Opaque classifier from the producer, exposed for filtering. This crate
+    /// never matches on its value.
+    pub kind: String,
+    /// Current status of the record.
+    pub status: PairedRecordStatus,
+    /// When the start event was recorded.
     pub started_at: DateTime<Utc>,
-    /// When the step completed (None if still running).
+    /// When the end event was recorded (None while still running).
     pub completed_at: Option<DateTime<Utc>>,
-    /// Duration in milliseconds (None if still running).
+    /// Duration in milliseconds (None while still running).
     pub duration_ms: Option<i64>,
-    /// Optional real launch wall-clock (epoch ms) of a parallel branch's async
-    /// work, from the `step_debug_end` payload. Present only for steps that ran
-    /// concurrently; pairs with [`Self::settled_at_ms`] to describe the true
-    /// overlapping interval, versus `started_at`/`duration_ms` (which the summary
-    /// derives from the sequential assemble-order event rows).
+    /// Optional real launch wall-clock (epoch ms) of concurrent work, from the
+    /// end event's payload. Present only for records that ran concurrently;
+    /// pairs with [`Self::settled_at_ms`] to describe the true overlapping
+    /// interval, versus `started_at`/`duration_ms` (which this summary derives
+    /// from the sequential event rows).
     pub launched_at_ms: Option<i64>,
-    /// Optional real settle wall-clock (epoch ms) of a parallel branch's async
-    /// work, from the `step_debug_end` payload. See [`Self::launched_at_ms`].
+    /// Optional real settle wall-clock (epoch ms). See [`Self::launched_at_ms`].
     pub settled_at_ms: Option<i64>,
-    /// Step inputs from step_debug_start payload.
+    /// Input recorded on the start event.
     pub inputs: Option<serde_json::Value>,
-    /// Step outputs from step_debug_end payload.
+    /// Output recorded on the end event.
     pub outputs: Option<serde_json::Value>,
-    /// Error details from step_debug_end payload (if failed).
+    /// Failure detail from the end event, if the record failed.
     pub error: Option<serde_json::Value>,
-    /// Scope ID for nested execution contexts (Split/While/EmbedWorkflow).
+    /// Scope id for nested execution contexts. Opaque to this crate — it is
+    /// only ever compared, never interpreted.
     pub scope_id: Option<String>,
-    /// Parent scope ID for hierarchy.
+    /// Enclosing scope id, for hierarchy.
     pub parent_scope_id: Option<String>,
 }
 
-/// Filter options for listing step summaries.
+/// Filter options for listing paired records.
 #[derive(Debug, Clone, Default)]
-pub struct ListStepSummariesFilter {
-    /// Sort order for steps by started_at.
+pub struct ListPairedRecordsFilter {
+    /// Sort order by start event.
     pub sort_order: EventSortOrder,
-    /// Filter by step status.
-    pub status: Option<StepStatus>,
-    /// Filter by step type (e.g., "Agent", "Conditional").
-    pub step_type: Option<String>,
-    /// Filter by scope_id (for steps within a specific scope).
+    /// Filter by record status.
+    pub status: Option<PairedRecordStatus>,
+    /// Filter by the producer's opaque classifier.
+    pub kind: Option<String>,
+    /// Filter by scope_id (records within a specific scope).
     pub scope_id: Option<String>,
-    /// Filter by parent_scope_id (for direct children of a scope).
+    /// Filter by parent_scope_id (direct children of a scope).
     pub parent_scope_id: Option<String>,
-    /// When true, only return steps with no parent_scope_id (root-level steps).
+    /// When true, only return records with no parent_scope_id (root-level).
     pub root_scopes_only: bool,
-    /// Only return steps whose step_id is in this set. `None` means no
-    /// step-id filtering; an empty vec matches nothing.
-    pub step_ids: Option<Vec<String>>,
+    /// Only return records whose correlation id is in this set. `None` means
+    /// no correlation-id filtering; an empty vec matches nothing.
+    pub correlation_ids: Option<Vec<String>>,
 }
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
+/// Execution facts about an instance that reached a terminal state.
+///
+/// A plain data carrier: Core assembles it from its own row and hands it to an
+/// [`InstanceMetricsSink`]. Core does not know what a host does with it — the
+/// OpenTelemetry vocabulary, the exporter and the attribute names all belong to
+/// whoever implements the sink.
+#[derive(Debug, Clone)]
+pub struct InstanceCompletionMetrics {
+    /// Tenant identifier for the invocation.
+    pub tenant_id: String,
+    /// Terminal status: completed, failed, or cancelled.
+    pub status: String,
+    /// Optional terminal reason such as timeout or heartbeat_timeout.
+    pub termination_reason: Option<String>,
+    /// When execution began.
+    pub started_at: Option<DateTime<Utc>>,
+    /// When execution reached a terminal state.
+    pub finished_at: Option<DateTime<Utc>>,
+    /// Peak memory collected by the runner cgroup.
+    pub memory_peak_bytes: Option<u64>,
+    /// CPU usage collected by the runner cgroup.
+    pub cpu_usage_usec: Option<u64>,
+}
+
+impl InstanceCompletionMetrics {
+    /// Wall-clock execution time, when both ends of the interval are known.
+    pub fn duration_seconds(&self) -> Option<f64> {
+        let started_at = self.started_at?;
+        let finished_at = self.finished_at?;
+        finished_at
+            .signed_duration_since(started_at)
+            .to_std()
+            .ok()
+            .map(|d| d.as_secs_f64())
+    }
+}
+
+/// Notified when an instance reaches a terminal state, for a host that reports
+/// on completions.
+///
+/// Exists for the same reason as
+/// [`InstanceEventObserver`](crate::instance_handlers::InstanceEventObserver):
+/// Core cannot depend on the crate that owns the telemetry pipeline, so it
+/// defines the shape and the host implements it. A host that wires no sink
+/// simply reports nothing; Core's behaviour is identical either way.
+///
+/// Called on the completion path, so implementations must be cheap and
+/// non-blocking.
+pub trait InstanceMetricsSink: Send + Sync {
+    /// An instance reached `completed`, `failed`, or `cancelled`.
+    fn on_terminal(&self, metrics: &InstanceCompletionMetrics);
+}
 /// Whether a `complete_instance` call should apply unconditionally or only
 /// when the target row is still in the `running` state.
 ///
@@ -256,8 +318,14 @@ pub enum CompleteInstanceGuard {
 /// Parameters for [`Persistence::complete_instance`], transitioning an
 /// instance to a terminal or quasi-terminal state.
 ///
-/// All optional fields use COALESCE semantics on the persistence side —
-/// `None` leaves the existing column value unchanged. The required fields
+/// The optional fields split into two groups, and the difference matters.
+///
+/// `output` and `error` are **replaced**: passing `None` clears whatever was
+/// there, so a failing transition cannot leave a stale success payload behind.
+/// `termination_reason`, `exit_code`, `stderr` and `checkpoint_id` are
+/// **merged**: passing `None` leaves what an earlier transition recorded, so a
+/// later status change does not erase the reason a run ended. Both halves are
+/// pinned by the conformance suite. The required fields
 /// `instance_id` and `status` borrow from the caller; most call sites
 /// already hold `&str` locals and can pass them directly.
 ///
@@ -389,12 +457,19 @@ pub trait Persistence: Send + Sync {
     /// launch payload can be large, and reading it back on every status check
     /// is what this exists to avoid.
     ///
-    /// Defaults to the full read so in-memory and test backends need no change.
+    /// The default reads the whole row and drops the input, which is correct
+    /// but not cheap — it still pays to fetch the blob. Backends that can
+    /// project it away in the query should override this; what they must not
+    /// do is return the input, which is the one thing every caller here is
+    /// trying to avoid loading.
     async fn get_instance_meta(
         &self,
         instance_id: &str,
     ) -> Result<Option<InstanceRecord>, CoreError> {
-        self.get_instance(instance_id).await
+        Ok(self.get_instance(instance_id).await?.map(|mut instance| {
+            instance.input = None;
+            instance
+        }))
     }
 
     async fn update_instance_status(
@@ -415,8 +490,9 @@ pub trait Persistence: Send + Sync {
     /// Single consolidated entry point for what were previously five
     /// overlapping `complete_instance*` variants. The behavior is
     /// controlled entirely by the [`CompleteInstanceParams`] struct —
-    /// see its documentation for the per-field semantics (COALESCE vs.
-    /// overwrite, terminal-only `finished_at`, guard against races).
+    /// see its documentation for the per-field semantics (which fields are
+    /// replaced and which are merged, terminal-only `finished_at`, guard
+    /// against races).
     ///
     /// Return value:
     /// - `Ok(true)` — the update matched a row.
@@ -430,33 +506,6 @@ pub trait Persistence: Send + Sync {
         &self,
         params: CompleteInstanceParams<'_>,
     ) -> Result<bool, CoreError>;
-
-    /// Update execution metrics for an instance (memory, CPU usage).
-    ///
-    /// This is an environment-specific operation for storing cgroup metrics.
-    /// Core implementations can ignore this (default is no-op).
-    async fn update_instance_metrics(
-        &self,
-        _instance_id: &str,
-        _memory_peak_bytes: Option<u64>,
-        _cpu_usage_usec: Option<u64>,
-    ) -> Result<(), CoreError> {
-        // Default: no-op (Core doesn't track metrics)
-        Ok(())
-    }
-
-    /// Update instance stderr output.
-    ///
-    /// This is an environment-specific operation for storing container stderr.
-    /// Core implementations can ignore this (default is no-op).
-    async fn update_instance_stderr(
-        &self,
-        _instance_id: &str,
-        _stderr: &str,
-    ) -> Result<(), CoreError> {
-        // Default: no-op (Core doesn't track stderr)
-        Ok(())
-    }
 
     /// Store input data for an instance.
     ///
@@ -506,11 +555,11 @@ pub trait Persistence: Send + Sync {
     ///
     /// `event.created_at` is the time the emitter observed, and an
     /// implementation must store it verbatim — never substituting its own
-    /// write time by defaulting the column. The debug views order events by
-    /// this column and derive every step duration from the delta between a
-    /// step's paired start and end events, so a receive-time stamp silently
-    /// reorders the timeline and rewrites every duration into the interval
-    /// between two writes.
+    /// write time by defaulting the column. Readers order events by this
+    /// column, and [`Self::list_paired_records`] derives every duration from
+    /// the delta between a record's paired start and end events, so a
+    /// receive-time stamp silently reorders the timeline and rewrites every
+    /// duration into the interval between two writes.
     async fn insert_event(&self, event: &EventRecord) -> Result<(), CoreError>;
 
     async fn insert_signal(
@@ -556,36 +605,18 @@ pub trait Persistence: Send + Sync {
         offset: i64,
     ) -> Result<Vec<InstanceRecord>, CoreError>;
 
-    async fn health_check_db(&self) -> Result<bool, CoreError>;
+    /// Whether the store is reachable and answering.
+    async fn health_check(&self) -> Result<bool, CoreError>;
 
     async fn count_active_instances(&self) -> Result<i64, CoreError>;
-
-    /// Record execution metrics and return the instance's current status and
-    /// termination reason, in one statement where the backend supports it.
-    ///
-    /// For the container monitor, which writes what it collected at termination
-    /// and then has to read the status the SDK reported. `None` means no such
-    /// instance. The default is the separate write-then-read this replaces.
-    async fn update_metrics_returning_status(
-        &self,
-        instance_id: &str,
-        memory_peak_bytes: Option<u64>,
-        cpu_usage_usec: Option<u64>,
-    ) -> Result<Option<(String, Option<String>)>, CoreError> {
-        self.update_instance_metrics(instance_id, memory_peak_bytes, cpu_usage_usec)
-            .await?;
-        Ok(self
-            .get_instance_meta(instance_id)
-            .await?
-            .map(|i| (i.status, i.termination_reason)))
-    }
 
     /// Promote an instance to `running` on a relaunch, preserving its
     /// original `started_at`.
     ///
     /// For wake and resume, which promote from `suspended` — a state
     /// [`Self::mark_instance_started`] deliberately refuses. The default is the
-    /// read-then-write this replaces; SQL backends do it in one statement.
+    /// read-then-write this replaces; a backend that can do it in one operation
+    /// should.
     async fn mark_instance_running(
         &self,
         instance_id: &str,
@@ -611,9 +642,9 @@ pub trait Persistence: Send + Sync {
     /// callers that stamp it *before* launching can use
     /// [`Persistence::update_instance_status`] directly.
     ///
-    /// The default implementation reads-then-writes and is adequate for
-    /// in-memory backends; SQL backends override it with a single guarded
-    /// UPDATE.
+    /// The default reads then writes, which is adequate for a backend whose
+    /// store cannot express a guarded update in one operation. One that can
+    /// should override it.
     async fn mark_instance_started(
         &self,
         instance_id: &str,
@@ -646,7 +677,8 @@ pub trait Persistence: Send + Sync {
     /// Atomically claim a due sleeping instance before waking it.
     ///
     /// Conditionally clears `sleep_until` only while the instance is still
-    /// `status='suspended'` with a non-null `sleep_until`, and reports whether
+    /// `status='suspended'` with a non-null `sleep_until` that is **already
+    /// due** (`sleep_until <= now`), and reports whether
     /// this caller won the claim. Returns `true` if it did, `false` if another
     /// waker (or a second Environment sharing this Core DB) already took it.
     /// Callers MUST launch only when this returns `true` — this is what
@@ -654,40 +686,29 @@ pub trait Persistence: Send + Sync {
     /// failure after a successful claim, re-stamp `sleep_until` via
     /// [`Persistence::set_instance_sleep`] so the instance is retried.
     ///
-    /// The default implementation is a non-atomic best-effort fallback for
-    /// in-memory/mock backends; the SQL backends override it with a single
-    /// conditional UPDATE whose row-count is the claim outcome.
+    /// The default reads the instance and then clears it, so it reports a
+    /// loss against an instance that is no longer claimable but can still let
+    /// two concurrent callers both win: each may read a claimable row before
+    /// either clears it. **A backend serving more than one waker must override
+    /// this** with an operation whose atomicity it can vouch for -- a single
+    /// conditional update for a SQL backend, a claim taken under the store's
+    /// own lock for an in-memory one. Taking the default and running two
+    /// wakers double-launches instances.
     async fn claim_sleeping_instance(&self, instance_id: &str) -> Result<bool, CoreError> {
-        self.clear_instance_sleep(instance_id).await?;
-        Ok(true)
-    }
-
-    /// Mark an instance for automatic recovery after an Environment restart.
-    ///
-    /// Sets `status='suspended'`, `termination_reason='environment_restart'`,
-    /// `sleep_until=NOW()` (so the wake scheduler relaunches it), and stores the
-    /// crash-loop counters `recovery_attempts` / `recovery_marker`. The instance
-    /// is then replayed-from-start with the checkpoint cache, so completed
-    /// durable steps are served from cache. `marker` is the checkpoint count at
-    /// recovery time, used to detect forward progress between recoveries.
-    ///
-    /// The default implementation suspends the instance and schedules an
-    /// immediate wake using the existing building blocks; the SQL backends
-    /// override it to also persist the `recovery_attempts`/`recovery_marker`
-    /// crash-loop counters in a single atomic UPDATE.
-    async fn mark_for_recovery(
-        &self,
-        instance_id: &str,
-        _attempt: i32,
-        _marker: Option<&str>,
-    ) -> Result<(), CoreError> {
-        self.complete_instance(
-            CompleteInstanceParams::new(instance_id, "suspended")
-                .with_termination("environment_restart", None),
-        )
-        .await?;
-        self.set_instance_sleep(instance_id, chrono::Utc::now())
-            .await
+        match self.get_instance(instance_id).await? {
+            // The due-ness check is what makes a lease a lease: a batch claim
+            // pushes `sleep_until` into the future rather than clearing it, and
+            // an instance leased that way must lose a later claim until the
+            // lease expires.
+            Some(instance)
+                if instance.status == "suspended"
+                    && instance.sleep_until.is_some_and(|t| t <= Utc::now()) =>
+            {
+                self.clear_instance_sleep(instance_id).await?;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
     }
 
     /// Get instances that are due to wake (sleep_until <= now).
@@ -717,9 +738,9 @@ pub trait Persistence: Send + Sync {
     /// that window entirely, and costs one round trip per batch instead of one
     /// per instance.
     ///
-    /// The default implementation composes the two existing operations and is
-    /// correct but non-atomic — adequate for in-memory/mock backends. SQL
-    /// backends override it with a single claiming statement.
+    /// The default composes the two existing operations and is correct but
+    /// non-atomic. A backend that can select and claim in one operation should
+    /// override it.
     async fn claim_sleeping_instances_due(
         &self,
         limit: i64,
@@ -756,26 +777,29 @@ pub trait Persistence: Send + Sync {
     ) -> Result<i64, CoreError>;
 
     // ========================================================================
-    // Step Summaries (paired step_debug_start/end events)
+    // Paired Records
     // ========================================================================
 
-    /// List step summaries for an instance, pairing step_debug_start and step_debug_end events.
+    /// List an instance's paired records, joining each start event to the end
+    /// event that shares its correlation id within the same scope.
     ///
-    /// Returns unified step execution records with status, timing, inputs/outputs.
-    /// Steps are matched by step_id within the same scope context.
-    async fn list_step_summaries(
+    /// `vocabulary` names the subtypes and payload keys of the caller's event
+    /// protocol; this crate reads them and interprets none of them.
+    async fn list_paired_records(
         &self,
         instance_id: &str,
-        filter: &ListStepSummariesFilter,
+        vocabulary: &EventVocabulary,
+        filter: &ListPairedRecordsFilter,
         limit: i64,
         offset: i64,
-    ) -> Result<Vec<StepSummaryRecord>, CoreError>;
+    ) -> Result<Vec<PairedRecordSummary>, CoreError>;
 
-    /// Count step summaries for an instance with filtering.
-    async fn count_step_summaries(
+    /// Count an instance's paired records under the same filter.
+    async fn count_paired_records(
         &self,
         instance_id: &str,
-        filter: &ListStepSummariesFilter,
+        vocabulary: &EventVocabulary,
+        filter: &ListPairedRecordsFilter,
     ) -> Result<i64, CoreError>;
 
     // ========================================================================
@@ -809,20 +833,25 @@ pub trait Persistence: Send + Sync {
         Ok(0)
     }
 
-    /// Delete step-debug events older than `older_than`, up to `limit` rows.
+    /// Delete the paired events named by `vocabulary` older than `older_than`,
+    /// up to `limit` rows.
     ///
-    /// Step-debug payloads dominate `instance_events` — on a large run they are
-    /// the great majority of rows — but they are only read while a run is
-    /// recent. Ageing them out on their own, shorter window keeps the table
-    /// bounded during a burst without touching the lifecycle events
-    /// (`completed`, `failed`, `suspended`) that are the run's durable history,
-    /// and without reducing what workflows record in the first place.
+    /// These payloads dominate `instance_events` — on a large run they are the
+    /// great majority of rows — but they are only read while a run is recent.
+    /// Ageing them out on their own, shorter window keeps the table bounded
+    /// during a burst without touching the lifecycle events (`completed`,
+    /// `failed`, `suspended`) that are the run's durable history, and without
+    /// reducing what producers record in the first place.
+    ///
+    /// Only the vocabulary's start and end subtypes are removed; this crate
+    /// picks no subtypes of its own.
     ///
     /// Callers should loop until this returns fewer than `limit`.
     ///
     /// Returns the count of deleted events.
-    async fn delete_debug_events_older_than(
+    async fn delete_paired_events_older_than(
         &self,
+        _vocabulary: &EventVocabulary,
         _older_than: DateTime<Utc>,
         _limit: i64,
     ) -> Result<u64, CoreError> {

@@ -27,10 +27,12 @@ required-features = ["db-integration-tests"]
 tokio = { version = "1", features = ["full"] }
 
 # Database
+opentelemetry = { version = "0.32", features = ["metrics"] }
 sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls-ring-webpki", "postgres", "uuid", "chrono", "macros", "migrate"] }
 
 # Core persistence layer (for shared database access)
 runtara-core = { path = "../runtara-core", version = "8.9" }
+runtara-store-postgres = { path = "../runtara-store-postgres" }
 
 # Embedded wasmtime workflow execution (EmbeddedWasmRunner)
 runtara-component-host = { path = "../runtara-component-host", version = "8.9" }
@@ -71,6 +73,11 @@ testcontainers-modules = { version = "0.15", features = ["postgres"] }
 [[test]]
 name = "container_registry_test"
 path = "tests/container_registry_test.rs"
+required-features = ["db-integration-tests"]
+
+[[test]]
+name = "instance_metrics_test"
+path = "tests/instance_metrics_test.rs"
 required-features = ["db-integration-tests"]
 
 [[test]]

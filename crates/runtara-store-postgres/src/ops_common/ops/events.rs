@@ -26,18 +26,18 @@ macro_rules! impl_event_ops {
             pub(crate) async fn op_list_events(
                 pool: &$Pool,
                 instance_id: &str,
-                filter: &$crate::persistence::ListEventsFilter,
+                filter: &::runtara_core::persistence::ListEventsFilter,
                 limit: i64,
                 offset: i64,
             ) -> ::core::result::Result<
-                ::std::vec::Vec<$crate::persistence::EventRecord>,
-                $crate::error::CoreError,
+                ::std::vec::Vec<::runtara_core::persistence::EventRecord>,
+                ::runtara_core::error::CoreError,
             > {
-                use $crate::persistence::common::filters::sort_direction_sql;
-                use $crate::persistence::dialect::Dialect;
+                use crate::dialect::Dialect;
+                use crate::ops_common::filters::sort_direction_sql;
                 let order_direction = sort_direction_sql(filter.sort_order);
                 let sql = <$Dialect>::sql_list_events(order_direction);
-                let records = ::sqlx::query_as::<_, $crate::persistence::EventRecord>(&sql)
+                let records = ::sqlx::query_as::<_, crate::rows::EventRow>(&sql)
                     .bind(instance_id)
                     .bind(&filter.event_type)
                     .bind(&filter.subtype)
@@ -50,8 +50,9 @@ macro_rules! impl_event_ops {
                     .bind(limit)
                     .bind(offset)
                     .fetch_all(pool)
-                    .await?;
-                Ok(records)
+                    .await
+                    .db()?;
+                Ok(records.into_iter().map(|r| r.0).collect())
             }
 
             /// Count events for an instance with the same filter
@@ -59,9 +60,9 @@ macro_rules! impl_event_ops {
             pub(crate) async fn op_count_events(
                 pool: &$Pool,
                 instance_id: &str,
-                filter: &$crate::persistence::ListEventsFilter,
-            ) -> ::core::result::Result<i64, $crate::error::CoreError> {
-                use $crate::persistence::dialect::Dialect;
+                filter: &::runtara_core::persistence::ListEventsFilter,
+            ) -> ::core::result::Result<i64, ::runtara_core::error::CoreError> {
+                use crate::dialect::Dialect;
                 let sql = <$Dialect>::sql_count_events();
                 let count: (i64,) = ::sqlx::query_as(sql)
                     .bind(instance_id)
@@ -74,7 +75,8 @@ macro_rules! impl_event_ops {
                     .bind(&filter.parent_scope_id)
                     .bind(filter.root_scopes_only)
                     .fetch_one(pool)
-                    .await?;
+                    .await
+                    .db()?;
                 Ok(count.0)
             }
         }

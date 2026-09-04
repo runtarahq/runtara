@@ -7,7 +7,6 @@ mod common;
 use std::{sync::Arc, time::Duration};
 
 use common::TestContext;
-use runtara_core::persistence::PostgresPersistence;
 use runtara_environment::runner::{MockRunner, Runner, RunnerHandle};
 use runtara_environment::{
     db,
@@ -17,6 +16,7 @@ use runtara_environment::{
         LAUNCH_QUEUE_TIMEOUT, LaunchKind, LaunchQueueError, LaunchRepository, LaunchState,
     },
 };
+use runtara_store_postgres::PostgresPersistence;
 use sqlx::PgPool;
 use uuid::Uuid;
 

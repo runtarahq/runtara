@@ -22,9 +22,9 @@ macro_rules! impl_sleep_ops {
                 pool: &$Pool,
                 instance_id: &str,
                 sleep_until: ::chrono::DateTime<::chrono::Utc>,
-            ) -> ::core::result::Result<(), $crate::error::CoreError> {
-                use $crate::persistence::common::error::not_found_if_empty;
-                use $crate::persistence::dialect::Dialect;
+            ) -> ::core::result::Result<(), ::runtara_core::error::CoreError> {
+                use crate::ops_common::error::not_found_if_empty;
+                use crate::dialect::Dialect;
                 let p1 = <$Dialect>::placeholder(1);
                 let p2 = <$Dialect>::placeholder(2);
                 let sql = format!(
@@ -35,7 +35,7 @@ macro_rules! impl_sleep_ops {
                     .bind(sleep_until)
                     .execute(pool)
                     .await
-                    .map_err(|e| $crate::error::CoreError::DatabaseError {
+                    .map_err(|e| ::runtara_core::error::CoreError::DatabaseError {
                         operation: "set_instance_sleep".into(),
                         details: e.to_string(),
                     })?;
@@ -47,9 +47,9 @@ macro_rules! impl_sleep_ops {
             pub(crate) async fn op_clear_instance_sleep(
                 pool: &$Pool,
                 instance_id: &str,
-            ) -> ::core::result::Result<(), $crate::error::CoreError> {
-                use $crate::persistence::common::error::not_found_if_empty;
-                use $crate::persistence::dialect::Dialect;
+            ) -> ::core::result::Result<(), ::runtara_core::error::CoreError> {
+                use crate::ops_common::error::not_found_if_empty;
+                use crate::dialect::Dialect;
                 let p1 = <$Dialect>::placeholder(1);
                 let sql = format!(
                     "UPDATE instances SET sleep_until = NULL WHERE instance_id = {p1}"
@@ -57,7 +57,7 @@ macro_rules! impl_sleep_ops {
                 let result = ::sqlx::query(&sql)
                     .bind(instance_id)
                     .execute(pool)
-                    .await?;
+                    .await.db()?;
                 not_found_if_empty::<<$Dialect as Dialect>::Database>(&result, instance_id)
             }
 
@@ -81,8 +81,8 @@ macro_rules! impl_sleep_ops {
             pub(crate) async fn op_claim_sleeping_instance(
                 pool: &$Pool,
                 instance_id: &str,
-            ) -> ::core::result::Result<bool, $crate::error::CoreError> {
-                use $crate::persistence::dialect::Dialect;
+            ) -> ::core::result::Result<bool, ::runtara_core::error::CoreError> {
+                use crate::dialect::Dialect;
                 let p1 = <$Dialect>::placeholder(1);
                 let now = <$Dialect>::NOW;
                 let lhs = <$Dialect>::normalize_timestamp("sleep_until");
@@ -98,7 +98,7 @@ macro_rules! impl_sleep_ops {
                     .bind(instance_id)
                     .execute(pool)
                     .await
-                    .map_err(|e| $crate::error::CoreError::DatabaseError {
+                    .map_err(|e| ::runtara_core::error::CoreError::DatabaseError {
                         operation: "claim_sleeping_instance".into(),
                         details: e.to_string(),
                     })?;
@@ -112,10 +112,10 @@ macro_rules! impl_sleep_ops {
                 pool: &$Pool,
                 limit: i64,
             ) -> ::core::result::Result<
-                ::std::vec::Vec<$crate::persistence::InstanceRecord>,
-                $crate::error::CoreError,
+                ::std::vec::Vec<::runtara_core::persistence::InstanceRecord>,
+                ::runtara_core::error::CoreError,
             > {
-                use $crate::persistence::dialect::Dialect;
+                use crate::dialect::Dialect;
                 let p1 = <$Dialect>::placeholder(1);
                 let status_col = <$Dialect>::select_status_col();
                 let termination_col = <$Dialect>::select_termination_col();
@@ -133,11 +133,11 @@ macro_rules! impl_sleep_ops {
                      ORDER BY sleep_until ASC \
                      LIMIT {p1}"
                 );
-                let records = ::sqlx::query_as::<_, $crate::persistence::InstanceRecord>(&sql)
+                let records = ::sqlx::query_as::<_, crate::rows::InstanceRow>(&sql)
                     .bind(limit)
                     .fetch_all(pool)
-                    .await?;
-                Ok(records)
+                    .await.db()?;
+                Ok(records.into_iter().map(|r| r.0).collect())
             }
 
             /// SELECT due instances and claim them in one statement.
@@ -169,10 +169,10 @@ macro_rules! impl_sleep_ops {
                 limit: i64,
                 retry_at: ::chrono::DateTime<::chrono::Utc>,
             ) -> ::core::result::Result<
-                ::std::vec::Vec<$crate::persistence::InstanceRecord>,
-                $crate::error::CoreError,
+                ::std::vec::Vec<::runtara_core::persistence::InstanceRecord>,
+                ::runtara_core::error::CoreError,
             > {
-                use $crate::persistence::dialect::Dialect;
+                use crate::dialect::Dialect;
                 let p1 = <$Dialect>::placeholder(1);
                 let status_col = <$Dialect>::select_status_col();
                 let termination_col = <$Dialect>::select_termination_col();
@@ -195,12 +195,12 @@ macro_rules! impl_sleep_ops {
                                {status_col}, {termination_col}, checkpoint_id, attempt, max_attempts, \
                                created_at, started_at, finished_at, output, error, sleep_until"
                 );
-                let records = ::sqlx::query_as::<_, $crate::persistence::InstanceRecord>(&sql)
+                let records = ::sqlx::query_as::<_, crate::rows::InstanceRow>(&sql)
                     .bind(limit)
                     .bind(retry_at)
                     .fetch_all(pool)
-                    .await?;
-                Ok(records)
+                    .await.db()?;
+                Ok(records.into_iter().map(|r| r.0).collect())
             }
         }
     };

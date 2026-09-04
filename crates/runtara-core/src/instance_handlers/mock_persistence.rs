@@ -18,8 +18,8 @@ use chrono::{DateTime, Utc};
 use crate::error::CoreError;
 use crate::persistence::{
     CheckpointRecord, CompleteInstanceGuard, CompleteInstanceParams, CustomSignalRecord,
-    EventRecord, InstanceRecord, ListEventsFilter, ListStepSummariesFilter, Persistence,
-    SignalRecord, StepSummaryRecord,
+    EventRecord, EventVocabulary, InstanceRecord, ListEventsFilter, ListPairedRecordsFilter,
+    PairedRecordSummary, Persistence, SignalRecord,
 };
 
 /// Mock persistence for handler unit tests.
@@ -146,7 +146,6 @@ pub fn make_instance(instance_id: &str, tenant_id: &str, status: &str) -> Instan
 /// Build a `CheckpointRecord` holding `state`.
 pub fn make_checkpoint(instance_id: &str, checkpoint_id: &str, state: &[u8]) -> CheckpointRecord {
     CheckpointRecord {
-        id: 1,
         instance_id: instance_id.to_string(),
         checkpoint_id: checkpoint_id.to_string(),
         state: state.to_vec(),
@@ -390,7 +389,7 @@ impl Persistence for MockPersistence {
         Ok(Vec::new())
     }
 
-    async fn health_check_db(&self) -> std::result::Result<bool, CoreError> {
+    async fn health_check(&self) -> std::result::Result<bool, CoreError> {
         Ok(true)
     }
 
@@ -438,20 +437,22 @@ impl Persistence for MockPersistence {
         Ok(0)
     }
 
-    async fn list_step_summaries(
+    async fn list_paired_records(
         &self,
         _instance_id: &str,
-        _filter: &ListStepSummariesFilter,
+        _vocabulary: &EventVocabulary,
+        _filter: &ListPairedRecordsFilter,
         _limit: i64,
         _offset: i64,
-    ) -> std::result::Result<Vec<StepSummaryRecord>, CoreError> {
+    ) -> std::result::Result<Vec<PairedRecordSummary>, CoreError> {
         Ok(Vec::new())
     }
 
-    async fn count_step_summaries(
+    async fn count_paired_records(
         &self,
         _instance_id: &str,
-        _filter: &ListStepSummariesFilter,
+        _vocabulary: &EventVocabulary,
+        _filter: &ListPairedRecordsFilter,
     ) -> std::result::Result<i64, CoreError> {
         Ok(0)
     }

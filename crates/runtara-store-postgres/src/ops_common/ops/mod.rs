@@ -3,12 +3,12 @@
 //! Operation implementations for the persistence backend.
 //!
 //! Each submodule hosts a family of operations (instances, checkpoints,
-//! events, signals, sleep, step summaries, retention) and exposes a
+//! events, signals, sleep, paired records, retention) and exposes a
 //! `macro_rules!` macro that expands to concrete `impl` blocks against a
 //! given backend type + pool type + dialect type. The shared body composes
-//! SQL via [`crate::persistence::dialect::Dialect`], binds, executes, and
-//! routes errors/rows through [`crate::persistence::common::error`] and
-//! [`crate::persistence::common::row`].
+//! SQL via [`crate::dialect::Dialect`], binds, executes, and
+//! routes errors/rows through [`crate::ops_common::error`] and
+//! [`crate::ops_common::row`].
 //!
 //! The macro indirection dates from when there were two backends. With one
 //! left it buys nothing; expanding it into plain `impl` blocks is a separate
@@ -17,18 +17,15 @@
 pub mod checkpoints;
 pub mod events;
 pub mod instances;
+pub mod paired_records;
 pub mod retention;
 pub mod signals;
 pub mod sleep;
-pub mod step_summaries;
 
 pub(crate) use checkpoints::impl_checkpoint_ops;
 pub(crate) use events::impl_event_ops;
 pub(crate) use instances::impl_instance_ops;
+pub(crate) use paired_records::impl_paired_record_ops;
 pub(crate) use retention::impl_retention_ops;
 pub(crate) use signals::impl_signal_ops;
 pub(crate) use sleep::impl_sleep_ops;
-pub(crate) use step_summaries::impl_step_summary_ops;
-
-#[cfg(all(test, feature = "db-integration-tests"))]
-pub mod postgres_conformance;

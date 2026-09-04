@@ -2,6 +2,8 @@
 resolver = "2"
 members = [
     "crates/runtara-core",
+    # PostgreSQL implementation of core's Persistence contract
+    "crates/runtara-store-postgres",
     "crates/runtara-environment",
     "crates/runtara-sdk",
     "crates/runtara-sdk-macros",

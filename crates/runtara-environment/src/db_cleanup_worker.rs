@@ -266,7 +266,11 @@ impl DbCleanupWorker {
         loop {
             let deleted = self
                 .persistence
-                .delete_debug_events_older_than(cutoff, self.config.batch_size)
+                .delete_paired_events_older_than(
+                    crate::step_vocabulary::workflow_steps(),
+                    cutoff,
+                    self.config.batch_size,
+                )
                 .await?;
             total_deleted += deleted;
 
