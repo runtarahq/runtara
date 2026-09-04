@@ -64,7 +64,7 @@ macro_rules! impl_checkpoint_ops {
                 let p1 = <$Dialect>::placeholder(1);
                 let p2 = <$Dialect>::placeholder(2);
                 let sql = format!(
-                    "SELECT id, instance_id, checkpoint_id, state, created_at \
+                    "SELECT instance_id, checkpoint_id, state, created_at \
                      FROM checkpoints \
                      WHERE instance_id = {p1} AND checkpoint_id = {p2}"
                 );

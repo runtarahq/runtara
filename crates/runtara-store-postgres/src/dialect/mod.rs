@@ -131,7 +131,7 @@ pub trait Dialect: Send + Sync + 'static {
     /// SQL for acknowledging a pending signal (bind: instance_id).
     fn sql_acknowledge_signal() -> &'static str;
 
-    /// SQL for `health_check_db`. Must return a single `BIGINT` (i64)
+    /// SQL for `health_check`. Must return a single `BIGINT` (i64)
     /// column so the shared op can decode it as `(i64,)`, which is why the
     /// literal carries a `::bigint` cast — `SELECT 1` on its own produces a
     /// 32-bit `integer` and fails to decode.

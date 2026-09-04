@@ -91,7 +91,7 @@ impl Dialect for PostgresDialect {
     }
 
     fn sql_list_checkpoints() -> &'static str {
-        "SELECT id, instance_id, checkpoint_id, state, created_at \
+        "SELECT instance_id, checkpoint_id, state, created_at \
          FROM checkpoints \
          WHERE instance_id = $1 \
            AND ($2::TEXT IS NULL OR checkpoint_id = $2) \

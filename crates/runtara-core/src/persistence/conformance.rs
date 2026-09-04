@@ -881,10 +881,5 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     );
 
     // --- health -------------------------------------------------------------
-    assert!(
-        backend
-            .health_check_db()
-            .await
-            .expect("health_check_db failed")
-    );
+    assert!(backend.health_check().await.expect("health_check failed"));
 }

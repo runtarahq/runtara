@@ -399,10 +399,10 @@ mod tests {
 
     /// Mock persistence for testing the runtime without a database.
     struct MockPersistence {
-        /// How long `health_check_db` blocks, so a test can hold a request in
+        /// How long `health_check` blocks, so a test can hold a request in
         /// flight across a shutdown.
         health_delay: Duration,
-        /// Fired on entry to `health_check_db`, so a test can establish that the
+        /// Fired on entry to `health_check`, so a test can establish that the
         /// request is inside the handler before it signals shutdown. Inferring
         /// that from elapsed time instead is unreliable: the request can finish
         /// first, and the test then passes against a runtime that never drained
@@ -567,7 +567,7 @@ mod tests {
             Ok(Vec::new())
         }
 
-        async fn health_check_db(&self) -> Result<bool, CoreError> {
+        async fn health_check(&self) -> Result<bool, CoreError> {
             self.health_entered.notify_one();
             if !self.health_delay.is_zero() {
                 tokio::time::sleep(self.health_delay).await;

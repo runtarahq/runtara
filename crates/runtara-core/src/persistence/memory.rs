@@ -205,9 +205,7 @@ impl Persistence for InMemoryPersistence {
             existing.state = state.to_vec();
             return Ok(());
         }
-        let id = store.next_id();
         store.checkpoints.push(CheckpointRecord {
-            id,
             instance_id: instance_id.to_string(),
             checkpoint_id: checkpoint_id.to_string(),
             state: state.to_vec(),
@@ -398,7 +396,7 @@ impl Persistence for InMemoryPersistence {
             .collect())
     }
 
-    async fn health_check_db(&self) -> Result<bool, CoreError> {
+    async fn health_check(&self) -> Result<bool, CoreError> {
         Ok(true)
     }
 

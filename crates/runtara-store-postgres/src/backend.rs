@@ -210,7 +210,7 @@ pub async fn load_latest_checkpoint(
 ) -> Result<Option<CheckpointRecord>, CoreError> {
     let record = sqlx::query_as::<_, crate::rows::CheckpointRow>(
         r#"
-        SELECT id, instance_id, checkpoint_id, state, created_at
+        SELECT instance_id, checkpoint_id, state, created_at
         FROM checkpoints
         WHERE instance_id = $1
         ORDER BY created_at DESC
@@ -411,7 +411,7 @@ async fn insert_custom_signal(
 // op_take_pending_custom_signal (crate::ops_common::ops::signals).
 
 // Health, sleep, and active-count operations are migrated to the shared layer:
-// see PostgresPersistence::op_health_check_db, op_count_active_instances,
+// see PostgresPersistence::op_health_check, op_count_active_instances,
 // op_set_instance_sleep, op_clear_instance_sleep, op_get_sleeping_instances_due
 // (crate::ops_common::ops::{instances, sleep}).
 
@@ -622,8 +622,8 @@ impl Persistence for PostgresPersistence {
         Self::op_list_instances(&self.pool, tenant_id, status, limit, offset).await
     }
 
-    async fn health_check_db(&self) -> Result<bool, CoreError> {
-        Self::op_health_check_db(&self.pool).await
+    async fn health_check(&self) -> Result<bool, CoreError> {
+        Self::op_health_check(&self.pool).await
     }
 
     async fn count_active_instances(&self) -> Result<i64, CoreError> {
@@ -1554,10 +1554,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_health_check_db() {
+    async fn test_health_check() {
         let pool = test_pool().await;
 
-        let result = PostgresPersistence::op_health_check_db(&pool).await;
+        let result = PostgresPersistence::op_health_check(&pool).await;
         assert!(result.is_ok());
         assert!(result.unwrap());
     }

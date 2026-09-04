@@ -54,7 +54,6 @@ pub struct CheckpointRow(pub CheckpointRecord);
 impl<'r> FromRow<'r, PgRow> for CheckpointRow {
     fn from_row(row: &'r PgRow) -> Result<Self, sqlx::Error> {
         Ok(Self(CheckpointRecord {
-            id: row.try_get("id")?,
             instance_id: row.try_get("instance_id")?,
             checkpoint_id: row.try_get("checkpoint_id")?,
             state: row.try_get("state")?,

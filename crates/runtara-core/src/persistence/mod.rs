@@ -64,8 +64,6 @@ pub struct InstanceRecord {
 /// Checkpoint record from the persistence layer.
 #[derive(Debug, Clone)]
 pub struct CheckpointRecord {
-    /// Database primary key.
-    pub id: i64,
     /// Instance this checkpoint belongs to.
     pub instance_id: String,
     /// Unique checkpoint identifier within the instance.
@@ -79,7 +77,12 @@ pub struct CheckpointRecord {
 /// Event record from the persistence layer.
 #[derive(Debug, Clone)]
 pub struct EventRecord {
-    /// Database primary key (None when inserting new events).
+    /// Position in the instance's append sequence, assigned by the store.
+    ///
+    /// `None` before the event is stored — a caller building one to append has
+    /// no position yet. Readers rely on it to order events written within the
+    /// same clock tick, so a store must assign values that increase with
+    /// insertion order.
     pub id: Option<i64>,
     /// Instance this event belongs to.
     pub instance_id: String,
@@ -602,7 +605,8 @@ pub trait Persistence: Send + Sync {
         offset: i64,
     ) -> Result<Vec<InstanceRecord>, CoreError>;
 
-    async fn health_check_db(&self) -> Result<bool, CoreError>;
+    /// Whether the store is reachable and answering.
+    async fn health_check(&self) -> Result<bool, CoreError>;
 
     async fn count_active_instances(&self) -> Result<i64, CoreError>;
 
@@ -611,7 +615,8 @@ pub trait Persistence: Send + Sync {
     ///
     /// For wake and resume, which promote from `suspended` — a state
     /// [`Self::mark_instance_started`] deliberately refuses. The default is the
-    /// read-then-write this replaces; SQL backends do it in one statement.
+    /// read-then-write this replaces; a backend that can do it in one operation
+    /// should.
     async fn mark_instance_running(
         &self,
         instance_id: &str,
@@ -637,9 +642,9 @@ pub trait Persistence: Send + Sync {
     /// callers that stamp it *before* launching can use
     /// [`Persistence::update_instance_status`] directly.
     ///
-    /// The default implementation reads-then-writes and is adequate for
-    /// in-memory backends; SQL backends override it with a single guarded
-    /// UPDATE.
+    /// The default reads then writes, which is adequate for a backend whose
+    /// store cannot express a guarded update in one operation. One that can
+    /// should override it.
     async fn mark_instance_started(
         &self,
         instance_id: &str,
@@ -686,7 +691,7 @@ pub trait Persistence: Send + Sync {
     /// two concurrent callers both win: each may read a claimable row before
     /// either clears it. **A backend serving more than one waker must override
     /// this** with an operation whose atomicity it can vouch for -- a single
-    /// conditional UPDATE for a SQL backend, a claim taken under the store's
+    /// conditional update for a SQL backend, a claim taken under the store's
     /// own lock for an in-memory one. Taking the default and running two
     /// wakers double-launches instances.
     async fn claim_sleeping_instance(&self, instance_id: &str) -> Result<bool, CoreError> {
@@ -733,9 +738,9 @@ pub trait Persistence: Send + Sync {
     /// that window entirely, and costs one round trip per batch instead of one
     /// per instance.
     ///
-    /// The default implementation composes the two existing operations and is
-    /// correct but non-atomic — adequate for in-memory/mock backends. SQL
-    /// backends override it with a single claiming statement.
+    /// The default composes the two existing operations and is correct but
+    /// non-atomic. A backend that can select and claim in one operation should
+    /// override it.
     async fn claim_sleeping_instances_due(
         &self,
         limit: i64,

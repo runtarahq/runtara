@@ -777,7 +777,7 @@ async fn input_handler(
 
 /// GET /health
 async fn health_handler(State(state): State<Arc<InstanceHandlerState>>) -> impl IntoResponse {
-    let db_ok = state.persistence.health_check_db().await.unwrap_or(false);
+    let db_ok = state.persistence.health_check().await.unwrap_or(false);
     if db_ok {
         Json(json!({"status": "healthy"})).into_response()
     } else {

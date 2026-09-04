@@ -146,7 +146,6 @@ pub fn make_instance(instance_id: &str, tenant_id: &str, status: &str) -> Instan
 /// Build a `CheckpointRecord` holding `state`.
 pub fn make_checkpoint(instance_id: &str, checkpoint_id: &str, state: &[u8]) -> CheckpointRecord {
     CheckpointRecord {
-        id: 1,
         instance_id: instance_id.to_string(),
         checkpoint_id: checkpoint_id.to_string(),
         state: state.to_vec(),
@@ -390,7 +389,7 @@ impl Persistence for MockPersistence {
         Ok(Vec::new())
     }
 
-    async fn health_check_db(&self) -> std::result::Result<bool, CoreError> {
+    async fn health_check(&self) -> std::result::Result<bool, CoreError> {
         Ok(true)
     }
 

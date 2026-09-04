@@ -722,7 +722,6 @@ mod tests {
             Ok(checkpoints
                 .get(&key)
                 .map(|state| runtara_core::persistence::CheckpointRecord {
-                    id: 1,
                     instance_id: instance_id.to_string(),
                     checkpoint_id: checkpoint_id.to_string(),
                     state: state.clone(),
@@ -816,7 +815,7 @@ mod tests {
             Ok(vec![])
         }
 
-        async fn health_check_db(&self) -> CoreResult<bool> {
+        async fn health_check(&self) -> CoreResult<bool> {
             Ok(true)
         }
 

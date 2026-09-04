@@ -483,7 +483,7 @@ macro_rules! impl_instance_ops {
 
             /// Single-row probe via the dialect's health-check SQL.
             /// Returns `true` iff the query completes without error.
-            pub(crate) async fn op_health_check_db(
+            pub(crate) async fn op_health_check(
                 pool: &$Pool,
             ) -> ::core::result::Result<bool, ::runtara_core::error::CoreError> {
                 use crate::dialect::Dialect;

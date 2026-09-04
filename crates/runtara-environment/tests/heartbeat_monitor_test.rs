@@ -414,7 +414,7 @@ impl Persistence for MockPersistence {
         Ok(filtered)
     }
 
-    async fn health_check_db(&self) -> Result<bool, CoreError> {
+    async fn health_check(&self) -> Result<bool, CoreError> {
         Ok(true)
     }
 
