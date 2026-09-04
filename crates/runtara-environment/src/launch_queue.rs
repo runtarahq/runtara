@@ -504,11 +504,17 @@ impl LaunchRepository {
 
         // Every workflow-scoped start takes the same transaction advisory
         // lock, even if this particular source did not opt into
-        // single_instance. That preserves the historical workflow-wide
-        // behavior: a guarded trigger sees regular active workflow work too.
+        // single_instance: that is what lets a guarded trigger see regular
+        // active workflow work too. Only the guarded start needs it
+        // exclusively, so ordinary starts take it shared and stay concurrent.
         if let Some(scope) = workflow_scope.as_ref() {
-            acquire_workflow_scope_lock(&mut tx, &request.launch.tenant_id, &scope.workflow_id)
-                .await?;
+            acquire_workflow_scope_lock(
+                &mut tx,
+                &request.launch.tenant_id,
+                &scope.workflow_id,
+                scope.single_instance,
+            )
+            .await?;
             if scope.single_instance
                 && has_active_workflow_launch(
                     &mut tx,
@@ -699,8 +705,13 @@ impl LaunchRepository {
             };
 
             if let Some(scope) = workflow_scope.as_ref() {
-                acquire_workflow_scope_lock(&mut tx, &request.tenant_id, &scope.workflow_id)
-                    .await?;
+                acquire_workflow_scope_lock(
+                    &mut tx,
+                    &request.tenant_id,
+                    &scope.workflow_id,
+                    scope.single_instance,
+                )
+                .await?;
                 if scope.single_instance
                     && has_active_workflow_launch(&mut tx, &request.tenant_id, &scope.workflow_id)
                         .await?
@@ -1857,23 +1868,35 @@ impl TryFrom<LaunchRow> for Launch {
     }
 }
 
-/// Serialize every workflow-scoped launch admission on one PostgreSQL
-/// transaction advisory lock.
+/// Take the workflow-scope launch admission lock on one PostgreSQL
+/// transaction advisory lock, in the weakest mode that still holds the
+/// single-instance invariant.
 ///
 /// The durable active-row query below is the actual lease. The advisory lock
 /// only makes its check-plus-insert atomic across server processes and is
 /// released automatically with this transaction on commit, rollback, or a
 /// process crash.
+///
+/// Mode matters for throughput. A `single_instance` start is the only caller
+/// that reads the workflow's active set, so it takes the lock exclusively: it
+/// then waits out every in-flight ordinary launch and blocks new ones, and so
+/// observes their rows committed before deciding. Ordinary launches only need
+/// to be *visible* to that check, never to exclude one another, so they take
+/// the shared mode and proceed concurrently. Holding the exclusive mode for
+/// every launch serialized a hot workflow's entire pipeline on one lock.
 async fn acquire_workflow_scope_lock(
     tx: &mut Transaction<'_, Postgres>,
     tenant_id: &str,
     workflow_id: &str,
+    single_instance: bool,
 ) -> Result<(), LaunchQueueError> {
     let scope_key = format!("{tenant_id}\u{1f}{workflow_id}");
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-        .bind(scope_key)
-        .execute(&mut **tx)
-        .await?;
+    let sql = if single_instance {
+        "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))"
+    } else {
+        "SELECT pg_advisory_xact_lock_shared(hashtextextended($1, 0))"
+    };
+    sqlx::query(sql).bind(scope_key).execute(&mut **tx).await?;
     Ok(())
 }
 
