@@ -2933,6 +2933,17 @@ async fn wait_for_shutdown_signal() -> std::io::Result<()> {
 /// These run against the main server pool (OBJECT_MODEL_DATABASE_URL) which holds
 /// all server-managed tables. Uses ignore_missing since this pool may share the
 /// _sqlx_migrations table with other migrators.
+/// Whether `SKIP_MIGRATIONS` asks this process to start without migrating.
+///
+/// Anything that is not a parseable `true` means "migrate", so a typo cannot
+/// silently disable migrations.
+pub fn skip_migrations() -> bool {
+    std::env::var("SKIP_MIGRATIONS")
+        .ok()
+        .and_then(|v| v.trim().parse::<bool>().ok())
+        .unwrap_or(false)
+}
+
 async fn run_server_migrations(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     #[derive(Debug)]
     struct Migrations(Vec<sqlx::migrate::Migration>);
@@ -2953,6 +2964,15 @@ async fn run_server_migrations(pool: &PgPool) -> Result<(), Box<dyn std::error::
         > {
             Box::pin(async move { Ok(self.0) })
         }
+    }
+
+    // Both migration paths are fatal, so both must honour the same escape
+    // hatch. This one did not, and during an incident `SKIP_MIGRATIONS=true`
+    // left the server still refusing to start here -- the documented way out
+    // of a bad migration did not actually get you out.
+    if skip_migrations() {
+        println!("Skipping server migrations (SKIP_MIGRATIONS=true)");
+        return Ok(());
     }
 
     println!("Running server migrations...");
