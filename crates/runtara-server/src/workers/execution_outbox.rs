@@ -178,6 +178,20 @@ pub enum DurableLaunchClaim {
     Rejected,
 }
 
+/// What became of a relay's attempt to record its own stream delivery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeliveryMark {
+    /// This relay recorded the delivery itself.
+    Marked,
+    /// A consumer claimed the launch handoff between this relay's XADD and
+    /// its delivery commit. The publish still succeeded; the next durable
+    /// stage simply got there first.
+    AlreadyClaimed,
+    /// The source record was expired or cancelled while the relay published,
+    /// so this delivery no longer counts for anything.
+    Lost,
+}
+
 #[derive(Debug, Error)]
 pub enum ExecutionOutboxError {
     #[error("execution admission is full (limit {limit})")]
@@ -442,6 +456,16 @@ impl ExecutionOutbox {
         // PEL retry can make progress.
         for _ in 0..2 {
             let mut tx = self.pool.begin().await?;
+            // Take the outbox row before the request row. The relay's delivery
+            // commit locks them in that order, and the claim below locks them
+            // in the opposite one, so the two deadlock whenever they touch the
+            // same request — which is the ordinary case now that a consumer
+            // may claim inside the relay's delivery window. Ordering both
+            // paths the same way turns that race into a short wait.
+            sqlx::query("SELECT 1 FROM execution_outbox WHERE request_id = $1 FOR UPDATE")
+                .bind(request_id)
+                .execute(&mut *tx)
+                .await?;
             let claimed = sqlx::query_scalar::<_, Uuid>(
                 r#"
                 WITH claimed AS (
@@ -452,8 +476,18 @@ impl ExecutionOutbox {
                       AND outbox.request_id = request.request_id
                       AND request.tenant_id = $2
                       AND request.instance_id = $3
-                      AND request.state = 'delivered'
-                      AND outbox.state = 'delivered'
+                      -- Either the relay's delivery commit already landed, or
+                      -- this caller is inside the window between the relay's
+                      -- XADD and that commit. Holding the stream entry that
+                      -- carries this request_id is itself proof the relay
+                      -- published it, so the still-`leased` row is claimable:
+                      -- waiting for the commit would strand the entry in the
+                      -- PEL until an idle-based reclaim, adding that delay to
+                      -- every launch.
+                      AND (
+                            (request.state = 'delivered' AND outbox.state = 'delivered')
+                         OR (request.state = 'queued' AND outbox.state = 'leased')
+                      )
                       AND request.deadline_at > NOW()
                     RETURNING request.request_id
                 )
@@ -787,7 +821,7 @@ impl ExecutionOutbox {
         request_id: Uuid,
         worker_id: &str,
         stream_id: &str,
-    ) -> Result<bool, ExecutionOutboxError> {
+    ) -> Result<DeliveryMark, ExecutionOutboxError> {
         let mut tx = self.pool.begin().await?;
         let delivered = sqlx::query_scalar::<_, Uuid>(
             r#"
@@ -815,8 +849,33 @@ impl ExecutionOutbox {
         .await?;
 
         let Some(request_id) = delivered else {
+            // A consumer can claim the launch handoff inside the window
+            // between the XADD and this commit, which leaves nothing for the
+            // update above to match. That is a completed delivery, not a lost
+            // one: stamp the stream id for traceability and say so.
+            let handed_off = sqlx::query_scalar::<_, Uuid>(
+                r#"
+                UPDATE execution_outbox AS o
+                SET stream_id = COALESCE(o.stream_id, $2),
+                    delivered_at = COALESCE(o.delivered_at, NOW()),
+                    updated_at = NOW()
+                FROM execution_requests AS r
+                WHERE o.request_id = $1
+                  AND o.request_id = r.request_id
+                  AND r.state IN ('launching', 'accepted')
+                RETURNING o.request_id
+                "#,
+            )
+            .bind(request_id)
+            .bind(stream_id)
+            .fetch_optional(&mut *tx)
+            .await?;
             tx.commit().await?;
-            return Ok(false);
+            return Ok(if handed_off.is_some() {
+                DeliveryMark::AlreadyClaimed
+            } else {
+                DeliveryMark::Lost
+            });
         };
 
         sqlx::query(
@@ -835,7 +894,7 @@ impl ExecutionOutbox {
         // and calls the explicit release hook only when its launch lifecycle
         // owns that transition.
         tx.commit().await?;
-        Ok(true)
+        Ok(DeliveryMark::Marked)
     }
 
     async fn release_claim(
@@ -1402,27 +1461,31 @@ impl ExecutionOutboxRelay {
                 .await
             {
                 Ok(stream_id) => {
-                    if self
+                    match self
                         .outbox
                         .mark_delivered(claim.request_id, &self.worker_id, &stream_id)
                         .await?
                     {
-                        stats.delivered += 1;
-                        debug!(
-                            request_id = %claim.request_id,
-                            stream_id = %stream_id,
-                            instance_id = %event.instance_id,
-                            "Delivered durable execution request to trigger stream"
-                        );
-                    } else {
-                        // Another process expired/cancelled the request while
-                        // this relay was publishing. The stream consumer still
-                        // deduplicates by instance ID, but do not claim success
-                        // for an obsolete source record.
-                        warn!(
-                            request_id = %claim.request_id,
-                            "Execution outbox delivery lost its lease or deadline before it could be marked"
-                        );
+                        mark @ (DeliveryMark::Marked | DeliveryMark::AlreadyClaimed) => {
+                            stats.delivered += 1;
+                            debug!(
+                                request_id = %claim.request_id,
+                                stream_id = %stream_id,
+                                instance_id = %event.instance_id,
+                                already_claimed = mark == DeliveryMark::AlreadyClaimed,
+                                "Delivered durable execution request to trigger stream"
+                            );
+                        }
+                        DeliveryMark::Lost => {
+                            // The request was expired/cancelled while this
+                            // relay was publishing. The stream consumer still
+                            // deduplicates by instance ID, but do not claim
+                            // success for an obsolete source record.
+                            warn!(
+                                request_id = %claim.request_id,
+                                "Execution outbox delivery lost its lease or deadline before it could be marked"
+                            );
+                        }
                     }
                 }
                 Err(error) => {

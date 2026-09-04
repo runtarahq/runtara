@@ -300,6 +300,87 @@ async fn delivered_request_expires_before_worker_handoff_and_cannot_start_later(
 }
 
 #[tokio::test]
+async fn consumer_claims_the_handoff_before_the_relay_commits_its_delivery() {
+    let _guard = OUTBOX_TEST_LOCK.lock().await;
+    let pool = test_pool().await;
+    let tenant_id = format!("outbox-delivery-race-{}", Uuid::new_v4());
+    let outbox = ExecutionOutbox::with_policy(pool.clone(), policy());
+    let instance_id = Uuid::new_v4();
+    let accepted = outbox
+        .enqueue(
+            &tenant_id,
+            &event(&tenant_id, instance_id),
+            &source_idempotency_key("http-api", "delivery-race"),
+            1,
+        )
+        .await
+        .expect("enqueue request");
+
+    // The relay leases the row, publishes it, and has not yet committed its
+    // delivery mark. A trigger worker woken by that XADD arrives here first —
+    // this is the ordinary case, because the blocking stream read returns in
+    // about a millisecond while the relay still has a transaction to commit.
+    sqlx::query(
+        r#"
+        UPDATE execution_outbox
+        SET state = 'leased',
+            lease_owner = 'relay-1',
+            lease_expires_at = NOW() + INTERVAL '30 seconds'
+        WHERE request_id = $1
+        "#,
+    )
+    .bind(accepted.request_id)
+    .execute(&pool)
+    .await
+    .expect("simulate relay lease held across its own XADD");
+
+    // Holding the stream entry proves the relay published it, so the consumer
+    // must be able to fence and launch now. Before this was allowed the claim
+    // returned InProgress, the entry stayed unacked in the PEL, and every
+    // launch waited for an idle-based XAUTOCLAIM reclaim.
+    assert_eq!(
+        outbox
+            .claim_for_launch(
+                accepted.request_id,
+                &tenant_id,
+                &instance_id.to_string(),
+                "trigger-worker-1",
+            )
+            .await
+            .expect("claim handoff inside the relay's delivery window"),
+        DurableLaunchClaim::Claimed
+    );
+
+    let (request_state, outbox_state, lease_owner): (String, String, Option<String>) =
+        sqlx::query_as(
+            r#"
+            SELECT r.state, o.state, o.lease_owner
+            FROM execution_requests AS r
+            INNER JOIN execution_outbox AS o ON o.request_id = r.request_id
+            WHERE r.request_id = $1
+            "#,
+        )
+        .bind(accepted.request_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read state after the consumer claimed the handoff");
+    assert_eq!(request_state, "launching");
+    assert_eq!(outbox_state, "leased");
+    assert_eq!(lease_owner.as_deref(), Some("trigger-worker-1"));
+
+    // The handoff the consumer owns still completes, so the launch is fenced
+    // exactly once rather than being replayed by the retry path.
+    assert!(
+        outbox
+            .mark_launch_accepted(accepted.request_id, "trigger-worker-1")
+            .await
+            .expect("accept the environment handoff")
+    );
+
+    cleanup(&pool, &tenant_id).await;
+}
+
+#[tokio::test]
 async fn accepted_environment_handoff_retains_admission_until_lifecycle_release() {
     let _guard = OUTBOX_TEST_LOCK.lock().await;
     let pool = test_pool().await;
