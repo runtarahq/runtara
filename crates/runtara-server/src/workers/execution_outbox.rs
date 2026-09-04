@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use futures::stream::StreamExt;
 use serde_json::Value;
 use sqlx::{FromRow, PgPool, Postgres, Transaction};
 use thiserror::Error;
@@ -313,76 +314,119 @@ impl ExecutionOutbox {
             });
         }
 
-        sqlx::query(
-            r#"
-            INSERT INTO execution_admission_tenants (tenant_id)
-            VALUES ($1)
-            ON CONFLICT (tenant_id) DO NOTHING
-            "#,
-        )
-        .bind(tenant_id)
-        .execute(&mut *tx)
-        .await?;
+        // Take the reservation before writing the durable rows. Valkey holds
+        // the counter when it is installed: `INCR` bounds admission atomically
+        // without pinning a row for the length of this transaction, which is
+        // what made the PostgreSQL counter serialize the entire pipeline.
+        // Every failure path below hands the reservation back, so a rejected
+        // or aborted intake leaves the count where it started.
+        let valkey_admission = crate::workers::admission_counter::is_enabled();
+        if valkey_admission {
+            if !crate::workers::admission_counter::try_reserve(tenant_id, max_reservations)
+                .await
+                .map_err(|error| {
+                    ExecutionOutboxError::Database(sqlx::Error::Protocol(format!(
+                        "valkey admission reserve failed: {error}"
+                    )))
+                })?
+            {
+                return Err(ExecutionOutboxError::AdmissionFull {
+                    limit: admission_limit,
+                });
+            }
+        } else {
+            sqlx::query(
+                r#"
+                INSERT INTO execution_admission_tenants (tenant_id)
+                VALUES ($1)
+                ON CONFLICT (tenant_id) DO NOTHING
+                "#,
+            )
+            .bind(tenant_id)
+            .execute(&mut *tx)
+            .await?;
 
-        let reserved = sqlx::query_scalar::<_, i64>(
-            r#"
-            UPDATE execution_admission_tenants
-            SET reserved_count = reserved_count + 1, updated_at = NOW()
-            WHERE tenant_id = $1 AND reserved_count < $2
-            RETURNING reserved_count
-            "#,
-        )
-        .bind(tenant_id)
-        .bind(max_reservations)
-        .fetch_optional(&mut *tx)
-        .await?;
-        if reserved.is_none() {
-            // Dropping the transaction rolls back the tenant-row creation too
-            // when it was only created for this rejected request.
-            return Err(ExecutionOutboxError::AdmissionFull {
-                limit: admission_limit,
-            });
+            let reserved = sqlx::query_scalar::<_, i64>(
+                r#"
+                UPDATE execution_admission_tenants
+                SET reserved_count = reserved_count + 1, updated_at = NOW()
+                WHERE tenant_id = $1 AND reserved_count < $2
+                RETURNING reserved_count
+                "#,
+            )
+            .bind(tenant_id)
+            .bind(max_reservations)
+            .fetch_optional(&mut *tx)
+            .await?;
+            if reserved.is_none() {
+                // Dropping the transaction rolls back the tenant-row creation
+                // too when it was only created for this rejected request.
+                return Err(ExecutionOutboxError::AdmissionFull {
+                    limit: admission_limit,
+                });
+            }
+        }
+
+        // From here the reservation is held; give it back on any failure.
+        macro_rules! give_back {
+            ($expr:expr) => {
+                match $expr {
+                    Ok(value) => value,
+                    Err(error) => {
+                        if valkey_admission {
+                            let _ = crate::workers::admission_counter::release(tenant_id).await;
+                        }
+                        return Err(error.into());
+                    }
+                }
+            };
         }
 
         let request_id = Uuid::new_v4();
         let deadline_at = deadline_from(Utc::now(), self.policy.request_deadline);
-        sqlx::query(
-            r#"
+        give_back!(
+            sqlx::query(
+                r#"
             INSERT INTO execution_requests (
                 request_id, tenant_id, idempotency_key, instance_id, workflow_id,
                 workflow_version, trigger_event, deadline_at
             )
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             "#,
-        )
-        .bind(request_id)
-        .bind(tenant_id)
-        .bind(idempotency_key)
-        .bind(&event.instance_id)
-        .bind(&event.workflow_id)
-        .bind(event.version)
-        .bind(sqlx::types::Json(payload))
-        .bind(deadline_at)
-        .execute(&mut *tx)
-        .await?;
+            )
+            .bind(request_id)
+            .bind(tenant_id)
+            .bind(idempotency_key)
+            .bind(&event.instance_id)
+            .bind(&event.workflow_id)
+            .bind(event.version)
+            .bind(sqlx::types::Json(payload))
+            .bind(deadline_at)
+            .execute(&mut *tx)
+            .await
+        );
 
-        sqlx::query(
-            r#"
+        give_back!(
+            sqlx::query(
+                r#"
             INSERT INTO execution_admission_reservations (request_id, tenant_id)
             VALUES ($1, $2)
             "#,
-        )
-        .bind(request_id)
-        .bind(tenant_id)
-        .execute(&mut *tx)
-        .await?;
-
-        sqlx::query("INSERT INTO execution_outbox (request_id) VALUES ($1)")
+            )
             .bind(request_id)
+            .bind(tenant_id)
             .execute(&mut *tx)
-            .await?;
+            .await
+        );
 
-        tx.commit().await?;
+        give_back!(
+            sqlx::query("INSERT INTO execution_outbox (request_id) VALUES ($1)")
+                .bind(request_id)
+                .execute(&mut *tx)
+                .await
+        );
+
+        give_back!(tx.commit().await);
 
         Ok(EnqueuedExecution {
             request_id,
@@ -399,6 +443,39 @@ impl ExecutionOutbox {
         request_id: Uuid,
         reason: &str,
     ) -> Result<bool, ExecutionOutboxError> {
+        if crate::workers::admission_counter::is_enabled() {
+            // With the counter in Valkey this release is a single atomic
+            // statement, so wrapping it in an explicit transaction only buys
+            // a BEGIN and a COMMIT round-trip. The Valkey decrement was never
+            // inside the database's atomicity domain anyway -- it is reseeded
+            // from these rows on restart -- so nothing is weakened by dropping
+            // the transaction here.
+            let tenant_id = sqlx::query_scalar::<_, String>(
+                r#"
+                UPDATE execution_admission_reservations
+                SET released_at = NOW(), release_reason = $2
+                WHERE request_id = $1 AND released_at IS NULL
+                RETURNING tenant_id
+                "#,
+            )
+            .bind(request_id)
+            .bind(reason)
+            .fetch_optional(&self.pool)
+            .await?;
+
+            let Some(tenant_id) = tenant_id else {
+                return Ok(false);
+            };
+            if let Err(error) = crate::workers::admission_counter::release(&tenant_id).await {
+                warn!(
+                    tenant_id = %tenant_id,
+                    error = %error,
+                    "Failed to release Valkey admission reservation; counter reseeds on restart"
+                );
+            }
+            return Ok(true);
+        }
+
         let mut tx = self.pool.begin().await?;
         let released = release_admission_in_tx(&mut tx, request_id, reason).await?;
         tx.commit().await?;
@@ -1049,6 +1126,41 @@ async fn find_by_idempotency_in_tx(
     .await
 }
 
+/// Result of relaying one outbox row.
+enum DeliveryOutcome {
+    Delivered,
+    Failed,
+    /// Published, but the source record was already expired or cancelled.
+    Lost,
+}
+
+/// How many outbox rows the relay publishes at once, from
+/// `RUNTARA_OUTBOX_RELAY_CONCURRENCY` (default 4).
+///
+/// Delivering a row is one Valkey round-trip plus one PostgreSQL transaction.
+/// Done strictly one row at a time, that latency -- not any saturated
+/// resource -- is what capped the pipeline: the relay fed only about eight
+/// concurrent executions while the runners sat idle well under their limit.
+///
+/// More is not better, and the curve is sharp. On a 14-vCPU / 4 GB benchmark
+/// VM running one hot workflow, end-to-end throughput measured 439/s at 1,
+/// **575/s at 4**, 503/s at 8, 555/s at 16 and 329/s at 64 -- past a handful of
+/// in-flight publishes the added database contention costs more than the
+/// pipelining wins, and 64 lands well below plain sequential delivery. The
+/// default is deliberately near the low end of that curve; treat these numbers
+/// as one rig's shape rather than a tuning table, and re-measure before moving
+/// it on different hardware.
+fn relay_delivery_concurrency() -> usize {
+    static N: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("RUNTARA_OUTBOX_RELAY_CONCURRENCY")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .filter(|n| *n >= 1)
+            .unwrap_or(4)
+    })
+}
+
 async fn release_admission_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     request_id: Uuid,
@@ -1070,6 +1182,27 @@ async fn release_admission_in_tx(
     let Some(tenant_id) = tenant_id else {
         return Ok(false);
     };
+
+    if crate::workers::admission_counter::is_enabled() {
+        // The row above is the durable record of this release; the Valkey
+        // counter is the cache in front of it. A failed decrement therefore
+        // holds a reservation until the next restart reseeds from those rows,
+        // which is why it warns rather than failing the release.
+        //
+        // This runs inside the caller's transaction, so a rollback after this
+        // point leaves the counter one below the durable rows -- the direction
+        // that admits slightly early rather than refusing work. The rows stay
+        // authoritative and `admission_counter::install` reseeds from them on
+        // the next start.
+        if let Err(error) = crate::workers::admission_counter::release(&tenant_id).await {
+            warn!(
+                tenant_id = %tenant_id,
+                error = %error,
+                "Failed to release Valkey admission reservation; counter reseeds on restart"
+            );
+        }
+        return Ok(true);
+    }
 
     sqlx::query(
         r#"
@@ -1436,74 +1569,99 @@ impl ExecutionOutboxRelay {
             ..RelayRunStats::default()
         };
 
-        for claim in claimed {
-            let mut event = match serde_json::from_value::<TriggerEvent>(claim.trigger_event) {
-                Ok(event) => event,
-                Err(error) => {
-                    // The writer serializes the same type, so this represents
-                    // data corruption rather than a user payload failure. Keep
-                    // the row durable/retryable and surface it loudly instead
-                    // of silently dropping accepted work.
-                    let message = format!("failed to decode stored trigger event: {error}");
-                    error!(request_id = %claim.request_id, error = %error, "Execution outbox payload is invalid");
-                    self.outbox
-                        .release_claim(claim.request_id, &self.worker_id, &message)
-                        .await?;
-                    stats.failed += 1;
-                    continue;
-                }
-            };
-            event.request_id = Some(claim.request_id);
-
-            match self
-                .publisher
-                .publish_with_request_id(&claim.tenant_id, &event, claim.request_id)
-                .await
-            {
-                Ok(stream_id) => {
-                    match self
-                        .outbox
-                        .mark_delivered(claim.request_id, &self.worker_id, &stream_id)
-                        .await?
-                    {
-                        mark @ (DeliveryMark::Marked | DeliveryMark::AlreadyClaimed) => {
-                            stats.delivered += 1;
-                            debug!(
-                                request_id = %claim.request_id,
-                                stream_id = %stream_id,
-                                instance_id = %event.instance_id,
-                                already_claimed = mark == DeliveryMark::AlreadyClaimed,
-                                "Delivered durable execution request to trigger stream"
-                            );
-                        }
-                        DeliveryMark::Lost => {
-                            // The request was expired/cancelled while this
-                            // relay was publishing. The stream consumer still
-                            // deduplicates by instance ID, but do not claim
-                            // success for an obsolete source record.
-                            warn!(
-                                request_id = %claim.request_id,
-                                "Execution outbox delivery lost its lease or deadline before it could be marked"
-                            );
-                        }
-                    }
-                }
-                Err(error) => {
-                    let message = error.to_string();
-                    warn!(
-                        request_id = %claim.request_id,
-                        tenant_id = %claim.tenant_id,
-                        error = %message,
-                        "Failed to relay execution outbox record; keeping it durable for retry"
-                    );
-                    self.outbox
-                        .release_claim(claim.request_id, &self.worker_id, &message)
-                        .await?;
-                    stats.failed += 1;
-                }
+        // Deliver the batch concurrently. Each row is an independent Valkey
+        // publish followed by its own durable mark, so the sequential form
+        // paid one stream round-trip plus one Postgres transaction of latency
+        // per row. That set the whole pipeline's ceiling at roughly
+        // 1/(per-row latency) -- about 400/s here -- while leaving both the
+        // database and the runners mostly idle. Rows address different
+        // requests and the stream is unordered across them, so overlapping
+        // them changes no ordering the consumer relies on.
+        let results = futures::stream::iter(claimed)
+            .map(|claim| self.deliver_one(claim))
+            .buffer_unordered(relay_delivery_concurrency())
+            .collect::<Vec<_>>()
+            .await;
+        for outcome in results {
+            match outcome? {
+                DeliveryOutcome::Delivered => stats.delivered += 1,
+                DeliveryOutcome::Failed => stats.failed += 1,
+                DeliveryOutcome::Lost => {}
             }
         }
         Ok(stats)
+    }
+
+    /// Publish one claimed row and record its durable delivery.
+    async fn deliver_one(
+        &self,
+        claim: ClaimedOutbox,
+    ) -> Result<DeliveryOutcome, ExecutionOutboxError> {
+        let mut event = match serde_json::from_value::<TriggerEvent>(claim.trigger_event) {
+            Ok(event) => event,
+            Err(error) => {
+                // The writer serializes the same type, so this represents data
+                // corruption rather than a user payload failure. Keep the row
+                // durable/retryable and surface it loudly instead of silently
+                // dropping accepted work.
+                let message = format!("failed to decode stored trigger event: {error}");
+                error!(request_id = %claim.request_id, error = %error, "Execution outbox payload is invalid");
+                self.outbox
+                    .release_claim(claim.request_id, &self.worker_id, &message)
+                    .await?;
+                return Ok(DeliveryOutcome::Failed);
+            }
+        };
+        event.request_id = Some(claim.request_id);
+
+        match self
+            .publisher
+            .publish_with_request_id(&claim.tenant_id, &event, claim.request_id)
+            .await
+        {
+            Ok(stream_id) => {
+                match self
+                    .outbox
+                    .mark_delivered(claim.request_id, &self.worker_id, &stream_id)
+                    .await?
+                {
+                    mark @ (DeliveryMark::Marked | DeliveryMark::AlreadyClaimed) => {
+                        debug!(
+                            request_id = %claim.request_id,
+                            stream_id = %stream_id,
+                            instance_id = %event.instance_id,
+                            already_claimed = mark == DeliveryMark::AlreadyClaimed,
+                            "Delivered durable execution request to trigger stream"
+                        );
+                        Ok(DeliveryOutcome::Delivered)
+                    }
+                    DeliveryMark::Lost => {
+                        // The request was expired/cancelled while this relay
+                        // was publishing. The stream consumer still
+                        // deduplicates by instance ID, but do not claim
+                        // success for an obsolete source record.
+                        warn!(
+                            request_id = %claim.request_id,
+                            "Execution outbox delivery lost its lease or deadline before it could be marked"
+                        );
+                        Ok(DeliveryOutcome::Lost)
+                    }
+                }
+            }
+            Err(error) => {
+                let message = error.to_string();
+                warn!(
+                    request_id = %claim.request_id,
+                    tenant_id = %claim.tenant_id,
+                    error = %message,
+                    "Failed to relay execution outbox record; keeping it durable for retry"
+                );
+                self.outbox
+                    .release_claim(claim.request_id, &self.worker_id, &message)
+                    .await?;
+                Ok(DeliveryOutcome::Failed)
+            }
+        }
     }
 
     pub async fn run(self, shutdown: ShutdownSignal) {

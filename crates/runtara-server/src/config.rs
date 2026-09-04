@@ -719,6 +719,18 @@ pub fn entitlements() -> &'static EntitlementSnapshot {
     &get().entitlement_snapshot
 }
 
+/// Whether source admission counting uses Valkey instead of the
+/// `execution_admission_tenants` row, via `RUNTARA_VALKEY_ADMISSION`
+/// (default on when a Valkey is configured).
+///
+/// The database keeps the durable reservation rows either way; this only
+/// chooses where the bound is counted.
+pub fn valkey_admission_enabled() -> bool {
+    std::env::var("RUNTARA_VALKEY_ADMISSION")
+        .map(|v| !matches!(v.trim(), "0" | "false" | "FALSE" | "no"))
+        .unwrap_or(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

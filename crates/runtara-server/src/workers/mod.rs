@@ -3,6 +3,7 @@
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
+pub mod admission_counter;
 pub mod compilation_worker;
 pub mod cron_scheduler;
 pub mod execution_engine;

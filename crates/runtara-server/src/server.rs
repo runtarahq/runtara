@@ -914,6 +914,22 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
+    // Source admission counting moves to Valkey when one is configured and
+    // `RUNTARA_VALKEY_ADMISSION` allows it. Installed here, before any worker
+    // or route can take a reservation, and seeded from the durable
+    // reservation rows so a cold Valkey starts from real state.
+    if let Some(manager) = redis_manager
+        .clone()
+        .filter(|_| config::valkey_admission_enabled())
+    {
+        match workers::admission_counter::install(manager, &pool).await {
+            Ok(()) => println!("✓ Valkey admission counter installed"),
+            Err(error) => eprintln!(
+                "⚠ Failed to install Valkey admission counter, using the database counter: {error}"
+            ),
+        }
+    }
+
     // Per-tenant Valkey membership enforcement policy. Built here, after the
     // shared manager, so the policy default can see whether Valkey is actually configured.
     // The auth middleware consumes both; they ride on AuthState.
