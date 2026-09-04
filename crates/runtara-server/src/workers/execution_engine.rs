@@ -598,27 +598,27 @@ impl ExecutionEngine {
             return Ok(existing);
         }
 
-        let admission_lock = self.admission_lock_for(tenant_id);
-        let _admission_guard = admission_lock.lock().await;
+        // The local gate is a check-then-decide on an in-process count, so it
+        // still needs its per-tenant lock to be atomic. The durable enqueue
+        // below does not: it is the authoritative admission decision, bounding
+        // the counter inside one transaction, and it deduplicates the
+        // idempotency key under its own advisory lock. Holding this guard
+        // across it serialized every intake for a tenant behind ~6 ms of
+        // database work — one request in flight at a time, which caps a
+        // single-tenant deployment near 170 launches/second regardless of
+        // cores or connections.
+        let cap = {
+            let admission_lock = self.admission_lock_for(tenant_id);
+            let _admission_guard = admission_lock.lock().await;
 
-        // A waiter can have committed the same key while this task waited for
-        // the local active-count lock. Do not consume a second reservation.
-        if let Some(existing) = self
-            .outbox
-            .find_by_idempotency(tenant_id, &idempotency_key)
-            .await
-            .map_err(map_outbox_error)?
-        {
-            return Ok(existing);
-        }
+            self.gauges.record_offered();
+            if let Err(denial) = self.concurrent_execution_decision(tenant_id).await {
+                self.gauges.record_denied();
+                return Err(ExecutionError::EntitlementDenied(denial));
+            }
+            self.effective_concurrency_cap()
+        };
 
-        self.gauges.record_offered();
-        if let Err(denial) = self.concurrent_execution_decision(tenant_id).await {
-            self.gauges.record_denied();
-            return Err(ExecutionError::EntitlementDenied(denial));
-        }
-
-        let cap = self.effective_concurrency_cap();
         match self
             .outbox
             .enqueue(tenant_id, &event, &idempotency_key, cap)
