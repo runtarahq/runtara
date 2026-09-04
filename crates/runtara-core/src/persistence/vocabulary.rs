@@ -133,6 +133,23 @@ impl EventVocabulary {
             validate_name(field, value)?;
         }
 
+        // One subtype for both ends is not a naming choice, it is a broken
+        // vocabulary: `se` and `ee` would select the same rows, so the pairing
+        // join degenerates into a self-join. A lone event would pair with
+        // itself and read as settled, and n events sharing a correlation id
+        // would multiply into n*n rows. Refuse it here rather than return
+        // nonsense from every query built on it.
+        if spec.start_subtype == spec.end_subtype {
+            return Err(CoreError::ValidationError {
+                field: "end_subtype".to_string(),
+                message: format!(
+                    "must differ from start_subtype (both are {:?}): a single \
+                     subtype for both ends pairs every record with itself",
+                    spec.start_subtype
+                ),
+            });
+        }
+
         Ok(Self {
             start_subtype: spec.start_subtype.to_string(),
             end_subtype: spec.end_subtype.to_string(),
@@ -270,6 +287,32 @@ mod tests {
                 other => panic!("expected a validation error, got {other:?}"),
             }
         }
+    }
+
+    /// A vocabulary whose two subtypes are the same is structurally broken,
+    /// not merely odd: every name in it passes the character check, so nothing
+    /// else would catch it, and the paired query would silently return a
+    /// self-join instead of an error.
+    #[test]
+    fn rejects_one_subtype_serving_as_both_ends() {
+        let mut s = spec();
+        s.end_subtype = s.start_subtype;
+
+        let err = EventVocabulary::new(s).expect_err("a single subtype must be rejected");
+        match err {
+            CoreError::ValidationError { field, message } => {
+                assert_eq!(field, "end_subtype");
+                assert!(
+                    message.contains("must differ from start_subtype"),
+                    "the message must say what is wrong: {message}"
+                );
+            }
+            other => panic!("expected a validation error, got {other:?}"),
+        }
+
+        // Distinct subtypes remain acceptable, so the check is not simply
+        // refusing everything.
+        assert!(EventVocabulary::new(spec()).is_ok());
     }
 
     /// Validation must cover every field, not just the first — a spec that is
