@@ -247,6 +247,58 @@ pub struct ListPairedRecordsFilter {
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
+/// Execution facts about an instance that reached a terminal state.
+///
+/// A plain data carrier: Core assembles it from its own row and hands it to an
+/// [`InstanceMetricsSink`]. Core does not know what a host does with it — the
+/// OpenTelemetry vocabulary, the exporter and the attribute names all belong to
+/// whoever implements the sink.
+#[derive(Debug, Clone)]
+pub struct InstanceCompletionMetrics {
+    /// Tenant identifier for the invocation.
+    pub tenant_id: String,
+    /// Terminal status: completed, failed, or cancelled.
+    pub status: String,
+    /// Optional terminal reason such as timeout or heartbeat_timeout.
+    pub termination_reason: Option<String>,
+    /// When execution began.
+    pub started_at: Option<DateTime<Utc>>,
+    /// When execution reached a terminal state.
+    pub finished_at: Option<DateTime<Utc>>,
+    /// Peak memory collected by the runner cgroup.
+    pub memory_peak_bytes: Option<u64>,
+    /// CPU usage collected by the runner cgroup.
+    pub cpu_usage_usec: Option<u64>,
+}
+
+impl InstanceCompletionMetrics {
+    /// Wall-clock execution time, when both ends of the interval are known.
+    pub fn duration_seconds(&self) -> Option<f64> {
+        let started_at = self.started_at?;
+        let finished_at = self.finished_at?;
+        finished_at
+            .signed_duration_since(started_at)
+            .to_std()
+            .ok()
+            .map(|d| d.as_secs_f64())
+    }
+}
+
+/// Notified when an instance reaches a terminal state, for a host that reports
+/// on completions.
+///
+/// Exists for the same reason as
+/// [`InstanceEventObserver`](crate::instance_handlers::InstanceEventObserver):
+/// Core cannot depend on the crate that owns the telemetry pipeline, so it
+/// defines the shape and the host implements it. A host that wires no sink
+/// simply reports nothing; Core's behaviour is identical either way.
+///
+/// Called on the completion path, so implementations must be cheap and
+/// non-blocking.
+pub trait InstanceMetricsSink: Send + Sync {
+    /// An instance reached `completed`, `failed`, or `cancelled`.
+    fn on_terminal(&self, metrics: &InstanceCompletionMetrics);
+}
 /// Whether a `complete_instance` call should apply unconditionally or only
 /// when the target row is still in the `running` state.
 ///
@@ -450,33 +502,6 @@ pub trait Persistence: Send + Sync {
         params: CompleteInstanceParams<'_>,
     ) -> Result<bool, CoreError>;
 
-    /// Update execution metrics for an instance (memory, CPU usage).
-    ///
-    /// This is an environment-specific operation for storing cgroup metrics.
-    /// Core implementations can ignore this (default is no-op).
-    async fn update_instance_metrics(
-        &self,
-        _instance_id: &str,
-        _memory_peak_bytes: Option<u64>,
-        _cpu_usage_usec: Option<u64>,
-    ) -> Result<(), CoreError> {
-        // Default: no-op (Core doesn't track metrics)
-        Ok(())
-    }
-
-    /// Update instance stderr output.
-    ///
-    /// This is an environment-specific operation for storing container stderr.
-    /// Core implementations can ignore this (default is no-op).
-    async fn update_instance_stderr(
-        &self,
-        _instance_id: &str,
-        _stderr: &str,
-    ) -> Result<(), CoreError> {
-        // Default: no-op (Core doesn't track stderr)
-        Ok(())
-    }
-
     /// Store input data for an instance.
     ///
     /// This is an environment-specific operation for storing instance input.
@@ -579,26 +604,6 @@ pub trait Persistence: Send + Sync {
 
     async fn count_active_instances(&self) -> Result<i64, CoreError>;
 
-    /// Record execution metrics and return the instance's current status and
-    /// termination reason, in one statement where the backend supports it.
-    ///
-    /// For the container monitor, which writes what it collected at termination
-    /// and then has to read the status the SDK reported. `None` means no such
-    /// instance. The default is the separate write-then-read this replaces.
-    async fn update_metrics_returning_status(
-        &self,
-        instance_id: &str,
-        memory_peak_bytes: Option<u64>,
-        cpu_usage_usec: Option<u64>,
-    ) -> Result<Option<(String, Option<String>)>, CoreError> {
-        self.update_instance_metrics(instance_id, memory_peak_bytes, cpu_usage_usec)
-            .await?;
-        Ok(self
-            .get_instance_meta(instance_id)
-            .await?
-            .map(|i| (i.status, i.termination_reason)))
-    }
-
     /// Promote an instance to `running` on a relaunch, preserving its
     /// original `started_at`.
     ///
@@ -697,34 +702,6 @@ pub trait Persistence: Send + Sync {
             }
             _ => Ok(false),
         }
-    }
-
-    /// Mark an instance for automatic recovery after an Environment restart.
-    ///
-    /// Sets `status='suspended'`, `termination_reason='environment_restart'`,
-    /// `sleep_until=NOW()` (so the wake scheduler relaunches it), and stores the
-    /// crash-loop counters `recovery_attempts` / `recovery_marker`. The instance
-    /// is then replayed-from-start with the checkpoint cache, so completed
-    /// durable steps are served from cache. `marker` is the checkpoint count at
-    /// recovery time, used to detect forward progress between recoveries.
-    ///
-    /// The default implementation suspends the instance and schedules an
-    /// immediate wake using the existing building blocks; the SQL backends
-    /// override it to also persist the `recovery_attempts`/`recovery_marker`
-    /// crash-loop counters in a single atomic UPDATE.
-    async fn mark_for_recovery(
-        &self,
-        instance_id: &str,
-        _attempt: i32,
-        _marker: Option<&str>,
-    ) -> Result<(), CoreError> {
-        self.complete_instance(
-            CompleteInstanceParams::new(instance_id, "suspended")
-                .with_termination("environment_restart", None),
-        )
-        .await?;
-        self.set_instance_sleep(instance_id, chrono::Utc::now())
-            .await
     }
 
     /// Get instances that are due to wake (sleep_until <= now).

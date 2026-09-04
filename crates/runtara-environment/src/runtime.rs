@@ -899,6 +899,7 @@ async fn recover_orphaned_containers(pool: &PgPool, persistence: &dyn Persistenc
                     );
 
                     let outcome = crate::recovery::recover_or_fail(
+                        pool,
                         persistence,
                         instance_id,
                         crate::recovery::auto_recover_enabled(),

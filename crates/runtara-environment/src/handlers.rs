@@ -1318,13 +1318,13 @@ pub fn spawn_container_monitor(
                 // same statement: this monitor needs both, and they are the
                 // same row. Kept even when there are no metrics to write, so
                 // the crash check below always has a status to look at.
-                let observed_status = match persistence
-                    .update_metrics_returning_status(
-                        &instance_id,
-                        metrics.memory_peak_bytes,
-                        metrics.cpu_usage_usec,
-                    )
-                    .await
+                let observed_status = match crate::metrics::record_resources_returning_status(
+                    &pool,
+                    &instance_id,
+                    metrics.memory_peak_bytes,
+                    metrics.cpu_usage_usec,
+                )
+                .await
                 {
                     Ok(observed) => {
                         debug!(
@@ -1353,9 +1353,9 @@ pub fn spawn_container_monitor(
 
                 // Store stderr via Persistence trait for debugging (even if instance succeeds via Core)
                 if let Some(ref stderr_content) = stderr {
-                    if let Err(e) = persistence
-                        .update_instance_stderr(&instance_id, stderr_content)
-                        .await
+                    if let Err(e) =
+                        crate::metrics::record_instance_stderr(&pool, &instance_id, stderr_content)
+                            .await
                     {
                         warn!(
                             instance_id = %instance_id,

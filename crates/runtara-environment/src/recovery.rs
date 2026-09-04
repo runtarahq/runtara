@@ -117,6 +117,7 @@ fn decide(
 /// `auto_recover` is the per-workflow policy (default `true`; Phase 3 wires the
 /// real value through from the workflow definition).
 pub async fn recover_or_fail(
+    pool: &sqlx::PgPool,
     persistence: &dyn Persistence,
     instance_id: &str,
     auto_recover: bool,
@@ -171,9 +172,9 @@ pub async fn recover_or_fail(
             RecoveryOutcome::Failed
         }
         Decision::Recover { attempt } => {
-            if let Err(e) = persistence
-                .mark_for_recovery(instance_id, attempt, Some(&marker))
-                .await
+            if let Err(e) =
+                crate::recovery_marks::mark_for_recovery(pool, instance_id, attempt, Some(&marker))
+                    .await
             {
                 error!(
                     instance_id = %instance_id,

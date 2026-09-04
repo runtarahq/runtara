@@ -4,25 +4,41 @@
 //!
 //! Provides all durable storage access functions for instances, checkpoints, events, and signals.
 
+use std::sync::Arc;
+
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 
 use crate::error::CoreError;
-use crate::observability::{
-    InstanceCompletionMetrics, is_recorded_terminal_status, record_instance_completion,
-    record_instance_resources,
-};
+use crate::persistence::{InstanceCompletionMetrics, InstanceMetricsSink};
 
 /// PostgreSQL-backed persistence implementation.
 #[derive(Clone)]
 pub struct PostgresPersistence {
     pool: PgPool,
+    metrics_sink: Option<Arc<dyn InstanceMetricsSink>>,
 }
 
 impl PostgresPersistence {
     /// Create a new Postgres-backed persistence implementation.
+    ///
+    /// Reports no completion metrics until a sink is attached with
+    /// [`Self::with_metrics_sink`].
     pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            metrics_sink: None,
+        }
+    }
+
+    /// Report terminal-state metrics to `sink`.
+    ///
+    /// Core assembles the facts; the host decides what they mean and where
+    /// they go. See [`InstanceMetricsSink`].
+    #[must_use]
+    pub fn with_metrics_sink(mut self, sink: Arc<dyn InstanceMetricsSink>) -> Self {
+        self.metrics_sink = Some(sink);
+        self
     }
 }
 
@@ -90,32 +106,26 @@ async fn fetch_instance_metric_row(
     .await
 }
 
-async fn record_completion_from_db(pool: &PgPool, instance_id: &str) {
-    match fetch_instance_metric_row(pool, instance_id).await {
-        Ok(Some(row)) => record_instance_completion(&row.into()),
-        Ok(None) => tracing::warn!(
-            instance_id = %instance_id,
-            "Skipped OTLP workflow completion metric because instance row was not found"
-        ),
-        Err(error) => tracing::warn!(
-            instance_id = %instance_id,
-            error = %error,
-            "Skipped OTLP workflow completion metric"
-        ),
-    }
+/// Terminal statuses a completion is reported for.
+fn is_reportable_terminal_status(status: &str) -> bool {
+    matches!(status, "completed" | "failed" | "cancelled")
 }
 
-async fn record_resources_from_db(pool: &PgPool, instance_id: &str) {
+/// Read back the terminal row and hand it to the host's sink.
+///
+/// A missing row or a read error is logged and dropped: reporting must never
+/// fail a completion.
+async fn report_completion(sink: &dyn InstanceMetricsSink, pool: &PgPool, instance_id: &str) {
     match fetch_instance_metric_row(pool, instance_id).await {
-        Ok(Some(row)) => record_instance_resources(&row.into()),
+        Ok(Some(row)) => sink.on_terminal(&row.into()),
         Ok(None) => tracing::warn!(
             instance_id = %instance_id,
-            "Skipped OTLP workflow resource metric because instance row was not found"
+            "Skipped completion metric because instance row was not found"
         ),
         Err(error) => tracing::warn!(
             instance_id = %instance_id,
             error = %error,
-            "Skipped OTLP workflow resource metric"
+            "Skipped completion metric"
         ),
     }
 }
@@ -178,86 +188,6 @@ crate::persistence::common::ops::impl_retention_ops!(
 // ============================================================================
 // Remaining Instance Operations (pre-shared — migrated in later phases)
 // ============================================================================
-
-/// Update execution metrics for an instance.
-///
-/// Stores cgroup-collected resource usage metrics (memory, CPU) after container execution.
-/// Only updates if metrics are not already set (first writer wins).
-async fn update_instance_metrics(
-    pool: &PgPool,
-    instance_id: &str,
-    memory_peak_bytes: Option<u64>,
-    cpu_usage_usec: Option<u64>,
-) -> Result<(), CoreError> {
-    sqlx::query(
-        r#"
-        UPDATE instances
-        SET memory_peak_bytes = COALESCE(memory_peak_bytes, $2),
-            cpu_usage_usec = COALESCE(cpu_usage_usec, $3)
-        WHERE instance_id = $1
-        "#,
-    )
-    .bind(instance_id)
-    .bind(memory_peak_bytes.map(|v| v as i64))
-    .bind(cpu_usage_usec.map(|v| v as i64))
-    .execute(pool)
-    .await?;
-
-    Ok(())
-}
-
-/// Record metrics and return the instance's current status in one statement.
-///
-/// The container monitor writes the metrics it collected at termination and
-/// then has to look at the status the SDK reported, to tell a normal exit from
-/// a crash. Those were two round trips for the same row; `RETURNING` makes them
-/// one. `None` means no such instance.
-async fn update_metrics_returning_status(
-    pool: &PgPool,
-    instance_id: &str,
-    memory_peak_bytes: Option<u64>,
-    cpu_usage_usec: Option<u64>,
-) -> Result<Option<(String, Option<String>)>, CoreError> {
-    let row: Option<(String, Option<String>)> = sqlx::query_as(
-        r#"
-        UPDATE instances
-        SET memory_peak_bytes = COALESCE(memory_peak_bytes, $2),
-            cpu_usage_usec = COALESCE(cpu_usage_usec, $3)
-        WHERE instance_id = $1
-        RETURNING status::TEXT, termination_reason::TEXT
-        "#,
-    )
-    .bind(instance_id)
-    .bind(memory_peak_bytes.map(|v| v as i64))
-    .bind(cpu_usage_usec.map(|v| v as i64))
-    .fetch_optional(pool)
-    .await?;
-    Ok(row)
-}
-
-/// Update instance stderr (raw container stderr output).
-///
-/// Stores stderr from container execution for debugging/logging purposes.
-/// Only updates if stderr is not already set (first writer wins).
-async fn update_instance_stderr(
-    pool: &PgPool,
-    instance_id: &str,
-    stderr: &str,
-) -> Result<(), CoreError> {
-    sqlx::query(
-        r#"
-        UPDATE instances
-        SET stderr = COALESCE(stderr, $2)
-        WHERE instance_id = $1
-        "#,
-    )
-    .bind(instance_id)
-    .bind(stderr)
-    .execute(pool)
-    .await?;
-
-    Ok(())
-}
 
 // `store_instance_input` is migrated to the shared layer:
 // see PostgresPersistence::op_store_instance_input (crate::persistence::common::ops::instances).
@@ -533,10 +463,11 @@ impl Persistence for PostgresPersistence {
         // is gated on the TARGET status being one we record — so for every
         // other transition, a park above all, the read was fetched and thrown
         // away. A launch that parks pays for it once per instance.
-        let records_metric = is_recorded_terminal_status(&target_status);
+        let records_metric =
+            self.metrics_sink.is_some() && is_reportable_terminal_status(&target_status);
         let previous_was_terminal = if records_metric {
             match fetch_instance_status(&self.pool, &instance_id).await {
-                Ok(Some(status)) => is_recorded_terminal_status(&status),
+                Ok(Some(status)) => is_reportable_terminal_status(&status),
                 Ok(None) => false,
                 Err(error) => {
                     tracing::warn!(
@@ -553,7 +484,10 @@ impl Persistence for PostgresPersistence {
 
         let applied = Self::op_complete_instance_unified(&self.pool, params).await?;
         if applied && records_metric && !previous_was_terminal {
-            record_completion_from_db(&self.pool, &instance_id).await;
+            // `records_metric` is only true when a sink is wired.
+            if let Some(sink) = &self.metrics_sink {
+                report_completion(sink.as_ref(), &self.pool, &instance_id).await;
+            }
         }
 
         Ok(applied)
@@ -698,16 +632,6 @@ impl Persistence for PostgresPersistence {
         Self::op_set_instance_sleep(&self.pool, instance_id, sleep_until).await
     }
 
-    async fn update_metrics_returning_status(
-        &self,
-        instance_id: &str,
-        memory_peak_bytes: Option<u64>,
-        cpu_usage_usec: Option<u64>,
-    ) -> Result<Option<(String, Option<String>)>, CoreError> {
-        update_metrics_returning_status(&self.pool, instance_id, memory_peak_bytes, cpu_usage_usec)
-            .await
-    }
-
     async fn mark_instance_running(
         &self,
         instance_id: &str,
@@ -730,15 +654,6 @@ impl Persistence for PostgresPersistence {
 
     async fn claim_sleeping_instance(&self, instance_id: &str) -> Result<bool, CoreError> {
         Self::op_claim_sleeping_instance(&self.pool, instance_id).await
-    }
-
-    async fn mark_for_recovery(
-        &self,
-        instance_id: &str,
-        attempt: i32,
-        marker: Option<&str>,
-    ) -> Result<(), CoreError> {
-        Self::op_mark_for_recovery(&self.pool, instance_id, attempt, marker).await
     }
 
     async fn get_sleeping_instances_due(
@@ -793,31 +708,6 @@ impl Persistence for PostgresPersistence {
         filter: &ListPairedRecordsFilter,
     ) -> Result<i64, CoreError> {
         Self::op_count_paired_records(&self.pool, instance_id, vocabulary, filter).await
-    }
-
-    async fn update_instance_metrics(
-        &self,
-        instance_id: &str,
-        memory_peak_bytes: Option<u64>,
-        cpu_usage_usec: Option<u64>,
-    ) -> Result<(), CoreError> {
-        let result =
-            update_instance_metrics(&self.pool, instance_id, memory_peak_bytes, cpu_usage_usec)
-                .await;
-
-        if result.is_ok() && (memory_peak_bytes.is_some() || cpu_usage_usec.is_some()) {
-            record_resources_from_db(&self.pool, instance_id).await;
-        }
-
-        result
-    }
-
-    async fn update_instance_stderr(
-        &self,
-        instance_id: &str,
-        stderr: &str,
-    ) -> Result<(), CoreError> {
-        update_instance_stderr(&self.pool, instance_id, stderr).await
     }
 
     async fn store_instance_input(&self, instance_id: &str, input: &[u8]) -> Result<(), CoreError> {
@@ -2410,103 +2300,6 @@ mod tests {
 
         cleanup_misc_instance(&pool, &instance1).await;
         cleanup_misc_instance(&pool, &instance2).await;
-    }
-
-    #[tokio::test]
-    async fn test_update_instance_metrics() {
-        let pool = test_pool().await;
-        let p = PostgresPersistence::new(pool.clone());
-
-        let instance_id = misc_instance_id("metrics");
-        p.register_instance(&instance_id, &misc_tenant_id("metrics"))
-            .await
-            .unwrap();
-
-        p.update_instance_metrics(&instance_id, Some(1024 * 1024), Some(500_000))
-            .await
-            .expect("Failed to update metrics");
-
-        let row: (Option<i64>, Option<i64>) = sqlx::query_as(
-            "SELECT memory_peak_bytes, cpu_usage_usec FROM instances WHERE instance_id = $1",
-        )
-        .bind(&instance_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(row.0, Some(1024 * 1024));
-        assert_eq!(row.1, Some(500_000));
-
-        // The second write is where the semantics live:
-        // `update_instance_metrics` is `SET x = COALESCE(x, $n)`, so the first
-        // non-NULL write sticks and every later one is silently ignored rather
-        // than overwriting it.
-        p.update_instance_metrics(&instance_id, Some(9_999_999), Some(1))
-            .await
-            .expect("Failed to update metrics");
-
-        let row: (Option<i64>, Option<i64>) = sqlx::query_as(
-            "SELECT memory_peak_bytes, cpu_usage_usec FROM instances WHERE instance_id = $1",
-        )
-        .bind(&instance_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(
-            row.0,
-            Some(1024 * 1024),
-            "COALESCE keeps the first recorded memory peak"
-        );
-        assert_eq!(
-            row.1,
-            Some(500_000),
-            "COALESCE keeps the first recorded CPU usage"
-        );
-
-        cleanup_misc_instance(&pool, &instance_id).await;
-    }
-
-    #[tokio::test]
-    async fn test_update_instance_stderr() {
-        let pool = test_pool().await;
-        let p = PostgresPersistence::new(pool.clone());
-
-        let instance_id = misc_instance_id("stderr");
-        p.register_instance(&instance_id, &misc_tenant_id("stderr"))
-            .await
-            .unwrap();
-
-        p.update_instance_stderr(&instance_id, "Error: something went wrong\n")
-            .await
-            .expect("Failed to update stderr");
-
-        let row: (Option<String>,) =
-            sqlx::query_as("SELECT stderr FROM instances WHERE instance_id = $1")
-                .bind(&instance_id)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert_eq!(row.0, Some("Error: something went wrong\n".to_string()));
-
-        // The second write matters here as in `test_update_instance_metrics`:
-        // `update_instance_stderr` is `SET stderr = COALESCE(stderr, $2)`, so
-        // the first capture is preserved and a later one is ignored.
-        p.update_instance_stderr(&instance_id, "second capture\n")
-            .await
-            .expect("Failed to update stderr");
-
-        let row: (Option<String>,) =
-            sqlx::query_as("SELECT stderr FROM instances WHERE instance_id = $1")
-                .bind(&instance_id)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert_eq!(
-            row.0,
-            Some("Error: something went wrong\n".to_string()),
-            "COALESCE keeps the first captured stderr"
-        );
-
-        cleanup_misc_instance(&pool, &instance_id).await;
     }
 
     #[tokio::test]

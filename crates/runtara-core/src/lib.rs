@@ -174,12 +174,6 @@ pub mod migrations;
 /// Persistence layer for instances, checkpoints, events, and signals.
 pub mod persistence;
 
-/// OpenTelemetry metrics for workflow execution state.
-///
-/// Internal: the persistence layer emits these as instances reach a terminal
-/// state. Hosts own their own meter provider.
-mod observability;
-
 /// Error types for Core operations with RPC error code mapping.
 pub mod error;
 
