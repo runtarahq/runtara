@@ -10,9 +10,13 @@
 //! `runtara-workflows` — so they are declared here, in the crate that knows
 //! about steps, and handed to the kernel per query.
 //!
-//! This module is the single place the two halves agree. If the guest ever
-//! renames one of these keys, this is the file that changes, and the compiler
-//! points at every call site.
+//! This module is the single place the *kernel* is told these names — nothing
+//! in `runtara-core` names them any more. It is not the only place they appear
+//! in the workspace: `runtara-server` still matches some of the same subtypes
+//! itself when it reads events for chat, sessions and pending inputs. Those
+//! readers live in a layer that legitimately knows what a step is, so they are
+//! duplication rather than a layering fault — but a rename here will not make
+//! the compiler point at them, and they need changing by hand.
 //!
 //! # These names are a wire contract
 //!

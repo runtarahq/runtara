@@ -66,9 +66,14 @@ macro_rules! impl_retention_ops {
             /// and are read while a run is recent, so they get their own,
             /// shorter window.
             ///
-            /// The two subtypes are bound rather than spliced — they are
-            /// values compared against a column, and this DELETE has no
-            /// plan tuning that a literal would serve.
+            /// The two subtypes are spliced, like every other vocabulary
+            /// name this crate puts into SQL. They are validated identifiers,
+            /// so it is safe, and one rule for the whole crate beats two.
+            /// Binding them instead measures the same: over a table where
+            /// these subtypes are the great majority of rows, a generic plan
+            /// for `IN ($1, $2)` picks the same LIMIT-over-primary-key-index
+            /// scan the literal form does, differing only in the row estimate.
+            /// Consistency is the reason here, not the plan.
             ///
             /// Bounded by `limit` and driven in a loop by the caller so a
             /// large backlog never becomes one long-running DELETE.
@@ -81,21 +86,19 @@ macro_rules! impl_retention_ops {
                 use $crate::persistence::dialect::Dialect;
                 let p1 = <$Dialect>::placeholder(1);
                 let p2 = <$Dialect>::placeholder(2);
-                let p3 = <$Dialect>::placeholder(3);
-                let p4 = <$Dialect>::placeholder(4);
+                let start_subtype = vocabulary.start_subtype();
+                let end_subtype = vocabulary.end_subtype();
                 let sql = format!(
                     "DELETE FROM instance_events \
                      WHERE id IN ( \
                          SELECT id FROM instance_events \
-                         WHERE subtype IN ({p1}, {p2}) \
-                           AND created_at < {p3} \
+                         WHERE subtype IN ('{start_subtype}', '{end_subtype}') \
+                           AND created_at < {p1} \
                          ORDER BY id \
-                         LIMIT {p4} \
+                         LIMIT {p2} \
                      )"
                 );
                 let result = ::sqlx::query(&sql)
-                    .bind(vocabulary.start_subtype())
-                    .bind(vocabulary.end_subtype())
                     .bind(older_than)
                     .bind(limit)
                     .execute(pool)

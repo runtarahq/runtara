@@ -1244,7 +1244,11 @@ fn output_error_from_step(step: &serde_json::Value) -> Option<serde_json::Value>
         outputs
             .get("error")
             .cloned()
-            .unwrap_or_else(|| json!("Step output reported _error=true")),
+            // Kept identical to runtara-core's own envelope fallback
+            // (`persistence::common::row::error_from_output_envelope`). Core's
+            // value wins where both run, so a divergence here would surface as
+            // one failure reported two different ways.
+            .unwrap_or_else(|| json!("Output reported _error=true")),
     )
 }
 
@@ -2634,7 +2638,7 @@ mod tests {
         // has no nested `outputs.error` object at all; the structured fields
         // (`category`/`code`/`message`/`severity`) sit flat on `outputs`
         // alongside `_error`, and the top-level `error` field collapses to the
-        // generic "Step output reported _error=true" string. Must still recover
+        // generic "Output reported _error=true" string. Must still recover
         // the real fields from `outputs` directly.
         let summaries = json!({
             "data": {
@@ -2642,7 +2646,7 @@ mod tests {
                     "stepId": "boom",
                     "stepType": "Error",
                     "status": "failed",
-                    "error": "Step output reported _error=true",
+                    "error": "Output reported _error=true",
                     "outputs": {
                         "_error": true,
                         "category": "transient",
