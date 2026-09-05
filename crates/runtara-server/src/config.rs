@@ -550,6 +550,31 @@ pub fn get() -> &'static Config {
     CONFIG.get().expect("Config must be initialized before use")
 }
 
+/// Initialize the global configuration for a unit test, if nothing has yet.
+///
+/// The global is a `OnceLock` shared by every test in this binary, so this
+/// tolerates losing the race rather than panicking the way [`init`] does.
+#[cfg(test)]
+pub(crate) fn init_for_test() {
+    if CONFIG.get().is_some() {
+        return;
+    }
+    // Only fill what `from_env` requires and only when absent, so a test that
+    // has deliberately configured the process is never overwritten.
+    for (key, value) in [
+        ("TENANT_ID", "test-tenant"),
+        ("OBJECT_MODEL_DATABASE_URL", "postgres://unused/unused"),
+        ("VALKEY_HOST", "127.0.0.1"),
+    ] {
+        if std::env::var(key).is_err() {
+            unsafe { std::env::set_var(key, value) };
+        }
+    }
+    if let Ok(config) = Config::from_env() {
+        let _ = CONFIG.set(config);
+    }
+}
+
 /// Get the global configuration if it has been initialized.
 ///
 /// For code that can also run outside a booted server — unit tests, and

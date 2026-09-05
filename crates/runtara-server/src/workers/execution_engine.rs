@@ -534,6 +534,48 @@ impl ExecutionEngine {
     }
 
     /// The admission counter for a tenant, created on first use.
+    /// Take one local admission slot for `tenant_id`, or refuse.
+    ///
+    /// The check and the increment it feeds happen under the same per-tenant
+    /// guard, which is the whole point of the guard. Incrementing after the
+    /// guard released made this a check-then-act with the act outside the
+    /// lock: every request in a burst observed the same pre-burst count, all
+    /// passed, and only then incremented, so the gate admitted well past its
+    /// ceiling and the resulting spike denied legitimate work until a
+    /// background refresh caught up.
+    ///
+    /// The slot is optimistic — the caller hands it back via
+    /// [`Self::release_local_reservation`] for anything that does not become
+    /// newly accepted work. The durable enqueue stays outside the guard: it is
+    /// the authoritative bound, and holding this lock across its ~6 ms of
+    /// database work serialized intake for the whole tenant.
+    async fn try_admit_locally(
+        &self,
+        tenant_id: &str,
+    ) -> Result<u64, crate::entitlement_error::EntitlementDenial> {
+        let admission_lock = self.admission_lock_for(tenant_id);
+        let _admission_guard = admission_lock.lock().await;
+
+        self.gauges.record_offered();
+        self.concurrent_execution_decision(tenant_id).await?;
+        self.reservations_for(tenant_id)
+            .fetch_add(1, Ordering::SeqCst);
+        Ok(self.effective_concurrency_cap())
+    }
+
+    /// Hand back an optimistic local reservation taken during admission.
+    ///
+    /// Saturating, because the background count refresh may `store` a smaller
+    /// figure between the increment and this call; an unchecked `fetch_sub`
+    /// would wrap to `u64::MAX` and wedge the gate closed for the tenant.
+    fn release_local_reservation(&self, tenant_id: &str) {
+        let _ = self.reservations_for(tenant_id).fetch_update(
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+            |held| Some(held.saturating_sub(1)),
+        );
+    }
+
     fn reservations_for(&self, tenant_id: &str) -> Arc<AtomicU64> {
         Arc::clone(
             self.concurrency_reservations
@@ -607,16 +649,12 @@ impl ExecutionEngine {
         // database work — one request in flight at a time, which caps a
         // single-tenant deployment near 170 launches/second regardless of
         // cores or connections.
-        let cap = {
-            let admission_lock = self.admission_lock_for(tenant_id);
-            let _admission_guard = admission_lock.lock().await;
-
-            self.gauges.record_offered();
-            if let Err(denial) = self.concurrent_execution_decision(tenant_id).await {
+        let cap = match self.try_admit_locally(tenant_id).await {
+            Ok(cap) => cap,
+            Err(denial) => {
                 self.gauges.record_denied();
                 return Err(ExecutionError::EntitlementDenied(denial));
             }
-            self.effective_concurrency_cap()
         };
 
         match self
@@ -624,18 +662,23 @@ impl ExecutionEngine {
             .enqueue(tenant_id, &event, &idempotency_key, cap)
             .await
         {
-            Ok(enqueued) if enqueued.duplicate => Ok(enqueued),
+            Ok(enqueued) if enqueued.duplicate => {
+                // A replay admits no new work, so the optimistic reservation
+                // above is not backing anything.
+                self.release_local_reservation(tenant_id);
+                Ok(enqueued)
+            }
             Ok(enqueued) => {
-                // Preserve the active-runtime gate's short handoff protection
-                // until the runtime count refresh subsumes this accepted
-                // request. The durable DB reservation independently protects
-                // a restart or a Valkey outage before relay delivery.
+                // Keep the reservation: it preserves the active-runtime gate's
+                // short handoff protection until the runtime count refresh
+                // subsumes this accepted request. The durable DB reservation
+                // independently protects a restart or a Valkey outage before
+                // relay delivery.
                 self.gauges.record_accepted();
-                self.reservations_for(tenant_id)
-                    .fetch_add(1, Ordering::SeqCst);
                 Ok(enqueued)
             }
             Err(ExecutionOutboxError::AdmissionFull { limit }) => {
+                self.release_local_reservation(tenant_id);
                 self.gauges.record_denied();
                 let denial = crate::entitlement_error::EntitlementDenial::LimitExceeded {
                     limit: "maxConcurrentExecutions",
@@ -648,6 +691,7 @@ impl ExecutionEngine {
                 // The intake response is a refusal, not an accepted request;
                 // retain the pipeline identity while surfacing the real DB or
                 // validation failure to the caller.
+                self.release_local_reservation(tenant_id);
                 self.gauges.record_denied();
                 Err(map_outbox_error(error))
             }
@@ -2647,6 +2691,60 @@ mod tests {
     /// database time. On the request path that makes admission slowest exactly
     /// when admissions are most frequent, so the caller takes the last count
     /// and a refresh happens behind it.
+    #[tokio::test]
+    async fn admission_slot_is_visible_the_moment_it_is_granted() {
+        // The local gate is a check-then-act on an in-process count. The
+        // increment used to happen after the guard released -- in the caller,
+        // once the durable enqueue had returned -- so for the whole width of
+        // that transaction a granted slot was invisible to the next caller.
+        // Concurrent intake therefore read the same pre-burst count, all
+        // passed, and the gate admitted well past its ceiling; the resulting
+        // spike then denied legitimate work until a background refresh caught
+        // up. Granting a slot must publish it, so assert exactly that.
+        crate::config::init_for_test();
+
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://unused/unused")
+            .expect("lazy pool");
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let engine = ExecutionEngine::new(
+            pool.clone(),
+            Arc::new(WorkflowRepository::new(pool)),
+            None,
+            None,
+            None,
+            ProductEventSink::new(tx),
+            crate::workers::pipeline_gauges::PipelineGauges::new(),
+        );
+        let tenant = format!("tenant-{}", uuid::Uuid::new_v4());
+
+        // Fresh, so nothing is served from a stale entry or a refresh.
+        engine
+            .concurrency_counts
+            .insert(tenant.clone(), (Instant::now(), 0));
+
+        let cap = engine.effective_concurrency_cap();
+        for granted in 1..=3u64 {
+            engine
+                .try_admit_locally(&tenant)
+                .await
+                .expect("under the ceiling, admission should be granted");
+
+            assert_eq!(
+                engine.active_execution_count(&tenant, cap),
+                granted,
+                "a granted slot must be visible to the very next caller; \
+                 incrementing after the guard releases lets a burst admit \
+                 past the ceiling"
+            );
+        }
+
+        // And handing a slot back is symmetric, so a refusal or a duplicate
+        // does not strand budget until the next background refresh.
+        engine.release_local_reservation(&tenant);
+        assert_eq!(engine.active_execution_count(&tenant, cap), 2);
+    }
+
     #[tokio::test]
     async fn the_gate_answers_from_memory_without_querying() {
         // No runtime client, so any attempt to refresh in-band would have to
