@@ -1581,6 +1581,18 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             .await;
         });
 
+        // Keep the admission counter honest against the durable rows while the
+        // process runs. Startup seeding alone left a slot leaked by a crash
+        // between a reservation's increment and its row's commit stranded for
+        // the whole life of the process.
+        {
+            let reconcile_pool = pool.clone();
+            let reconcile_shutdown = shutdown_signal.clone();
+            tokio::spawn(async move {
+                workers::admission_counter::run_reconciler(reconcile_pool, reconcile_shutdown).await
+            });
+        }
+
         // Relay source requests after their transaction commits. A publish
         // failure is retried from `execution_outbox`; it never makes an intake
         // source lose an accepted execution.
