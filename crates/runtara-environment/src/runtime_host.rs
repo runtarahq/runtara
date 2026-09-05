@@ -30,6 +30,11 @@
 //!   `is_cancelled` short-circuits after a consumed cancel/shutdown, exactly
 //!   like `runtara_sdk::is_cancelled()`.
 
+#[cfg(all(test, feature = "db-integration-tests"))]
+use runtara_core::domain::InstanceStatus as CoreInstanceStatus;
+#[cfg(all(test, feature = "db-integration-tests"))]
+use runtara_core::domain::SignalType as CoreSignalType;
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -694,7 +699,7 @@ mod tests {
         let (p, host, inst_id) = setup().await;
         host.complete(b"{\"result\":1}".to_vec()).await.unwrap();
         let inst = p.get_instance(inst_id.as_str()).await.unwrap().unwrap();
-        assert_eq!(inst.status, "completed");
+        assert_eq!(inst.status, CoreInstanceStatus::Completed);
         assert_eq!(inst.output.as_deref(), Some(b"{\"result\":1}".as_slice()));
     }
 
@@ -703,7 +708,7 @@ mod tests {
         let (p, host, inst_id) = setup().await;
         host.fail(b"boom".to_vec()).await.unwrap();
         let inst = p.get_instance(inst_id.as_str()).await.unwrap().unwrap();
-        assert_eq!(inst.status, "failed");
+        assert_eq!(inst.status, CoreInstanceStatus::Failed);
     }
 
     #[tokio::test]
@@ -722,10 +727,16 @@ mod tests {
             )
             .await
             .unwrap();
-        let types: Vec<&str> = events.iter().map(|e| e.event_type.as_str()).collect();
+        let types: Vec<&str> = events
+            .iter()
+            .map(|e| crate::core_types::event_name(e.event_type))
+            .collect();
         assert!(types.contains(&"heartbeat"), "events: {types:?}");
         assert!(types.contains(&"custom"), "events: {types:?}");
-        let custom = events.iter().find(|e| e.event_type == "custom").unwrap();
+        let custom = events
+            .iter()
+            .find(|e| e.event_type == runtara_core::domain::EventType::Custom)
+            .unwrap();
         assert_eq!(custom.subtype.as_deref(), Some("step-debug-start"));
     }
 
@@ -733,7 +744,7 @@ mod tests {
     async fn cancel_signal_is_consumed_acked_and_latched() {
         let (p, host, inst_id) = setup().await;
         assert!(!host.is_cancelled().await.unwrap());
-        p.insert_signal(inst_id.as_str(), "cancel", b"")
+        p.insert_signal(inst_id.as_str(), CoreSignalType::Cancel, b"")
             .await
             .unwrap();
         assert!(
@@ -751,7 +762,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .status,
-            "cancelled"
+            CoreInstanceStatus::Cancelled
         );
         assert!(
             p.get_pending_signal(inst_id.as_str())
@@ -768,12 +779,12 @@ mod tests {
     async fn pause_signal_suspends_via_check_signals() {
         let (p, host, inst_id) = setup().await;
         assert!(!host.check_signals().await.unwrap());
-        p.insert_signal(inst_id.as_str(), "pause", b"")
+        p.insert_signal(inst_id.as_str(), CoreSignalType::Pause, b"")
             .await
             .unwrap();
         assert!(host.check_signals().await.unwrap(), "pause handled");
         let inst = p.get_instance(inst_id.as_str()).await.unwrap().unwrap();
-        assert_eq!(inst.status, "suspended");
+        assert_eq!(inst.status, CoreInstanceStatus::Suspended);
         assert!(
             p.get_pending_signal(inst_id.as_str())
                 .await
@@ -788,12 +799,12 @@ mod tests {
     #[tokio::test]
     async fn shutdown_signal_suspends_with_reason_and_wake() {
         let (p, host, inst_id) = setup().await;
-        p.insert_signal(inst_id.as_str(), "shutdown", b"")
+        p.insert_signal(inst_id.as_str(), CoreSignalType::Shutdown, b"")
             .await
             .unwrap();
         assert!(host.check_signals().await.unwrap(), "shutdown handled");
         let inst = p.get_instance(inst_id.as_str()).await.unwrap().unwrap();
-        assert_eq!(inst.status, "suspended");
+        assert_eq!(inst.status, CoreInstanceStatus::Suspended);
         // The ack's complete_instance records why it parked and when to wake.
         // Both assertions pin that the ack reached the database at all: its
         // error is only warned about, so a `termination_reason` the schema's
@@ -814,7 +825,7 @@ mod tests {
     #[tokio::test]
     async fn checkpoint_reports_pending_signal_and_handle_reacts() {
         let (p, host, inst_id) = setup().await;
-        p.insert_signal(inst_id.as_str(), "pause", b"")
+        p.insert_signal(inst_id.as_str(), CoreSignalType::Pause, b"")
             .await
             .unwrap();
         let result = host
@@ -830,7 +841,7 @@ mod tests {
                 .unwrap()
         );
         let inst = p.get_instance(inst_id.as_str()).await.unwrap().unwrap();
-        assert_eq!(inst.status, "suspended");
+        assert_eq!(inst.status, CoreInstanceStatus::Suspended);
 
         // Unknown types are ignored (guest parity).
         assert!(
@@ -880,7 +891,7 @@ mod tests {
         let (p, _host, inst_id) = setup().await;
         let host = PersistenceRuntimeHost::from_persistence(Arc::clone(&p), inst_id.clone(), false)
             .with_signal_poll_interval(Duration::from_secs(60));
-        p.insert_signal(inst_id.as_str(), "cancel", b"")
+        p.insert_signal(inst_id.as_str(), CoreSignalType::Cancel, b"")
             .await
             .unwrap();
 
@@ -901,7 +912,8 @@ mod tests {
         );
         let inst = p.get_instance(inst_id.as_str()).await.unwrap().unwrap();
         assert_eq!(
-            inst.status, "cancelled",
+            inst.status,
+            CoreInstanceStatus::Cancelled,
             "observing the cancel must drive the instance to cancelled"
         );
     }
@@ -916,7 +928,7 @@ mod tests {
         let cancel: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
         let host = PersistenceRuntimeHost::from_persistence(Arc::clone(&p), inst_id.clone(), false)
             .with_cancel_token(Arc::clone(&cancel));
-        p.insert_signal(inst_id.as_str(), "cancel", b"")
+        p.insert_signal(inst_id.as_str(), CoreSignalType::Cancel, b"")
             .await
             .unwrap();
 
@@ -930,7 +942,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .status,
-            "running",
+            CoreInstanceStatus::Running,
             "the interrupted sleep alone must not decide the run's fate"
         );
 
@@ -946,7 +958,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .status,
-            "cancelled"
+            CoreInstanceStatus::Cancelled
         );
         assert!(
             cancel.load(Ordering::SeqCst),
@@ -977,7 +989,7 @@ mod tests {
                     seen.lock().unwrap().push(cancel.load(Ordering::SeqCst));
                 }))
         };
-        p.insert_signal(inst_id.as_str(), "cancel", b"")
+        p.insert_signal(inst_id.as_str(), CoreSignalType::Cancel, b"")
             .await
             .unwrap();
 
@@ -1009,7 +1021,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .status,
-            "cancelled",
+            CoreInstanceStatus::Cancelled,
             "the terminal status must be durable before the guest is stopped"
         );
     }
@@ -1025,7 +1037,7 @@ mod tests {
                 .with_cancel_token(Arc::new(AtomicBool::new(false)))
                 .with_guest_interrupt(Arc::new(move || fired.store(true, Ordering::SeqCst)))
         };
-        p.insert_signal(inst_id.as_str(), "cancel", b"")
+        p.insert_signal(inst_id.as_str(), CoreSignalType::Cancel, b"")
             .await
             .unwrap();
 
@@ -1050,7 +1062,7 @@ mod tests {
         let cancel: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
         let host = PersistenceRuntimeHost::from_persistence(Arc::clone(&p), inst_id.clone(), false)
             .with_cancel_token(Arc::clone(&cancel));
-        p.insert_signal(inst_id.as_str(), "cancel", b"")
+        p.insert_signal(inst_id.as_str(), CoreSignalType::Cancel, b"")
             .await
             .unwrap();
 
@@ -1062,8 +1074,9 @@ mod tests {
 
         let inst = p.get_instance(inst_id.as_str()).await.unwrap().unwrap();
         assert_eq!(
-            inst.status, "cancelled",
-            "a stopped run must not report success; got {}",
+            inst.status,
+            CoreInstanceStatus::Cancelled,
+            "a stopped run must not report success; got {:?}",
             inst.status
         );
         assert!(cancel.load(Ordering::SeqCst));
@@ -1078,7 +1091,7 @@ mod tests {
         let cancel: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
         let host = PersistenceRuntimeHost::from_persistence(Arc::clone(&p), inst_id.clone(), false)
             .with_cancel_token(Arc::clone(&cancel));
-        p.insert_signal(inst_id.as_str(), "cancel", b"")
+        p.insert_signal(inst_id.as_str(), CoreSignalType::Cancel, b"")
             .await
             .unwrap();
 
@@ -1093,7 +1106,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .status,
-            "cancelled"
+            CoreInstanceStatus::Cancelled
         );
         assert!(
             !cancel.load(Ordering::SeqCst),
@@ -1119,7 +1132,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .status,
-            "cancelled"
+            CoreInstanceStatus::Cancelled
         );
     }
 
@@ -1147,7 +1160,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .status,
-            "completed"
+            CoreInstanceStatus::Completed
         );
     }
 
@@ -1158,7 +1171,7 @@ mod tests {
             .with_signal_poll_interval(Duration::from_secs(60));
         // First poll consumes the rate budget (no signal pending).
         assert!(!host.is_cancelled().await.unwrap());
-        p.insert_signal(inst_id.as_str(), "cancel", b"")
+        p.insert_signal(inst_id.as_str(), CoreSignalType::Cancel, b"")
             .await
             .unwrap();
         // Within the interval the poll is suppressed — parity with the SDK's

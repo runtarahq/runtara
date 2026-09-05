@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Tests for environment handlers module.
 
+use runtara_core::domain::InstanceStatus as CoreInstanceStatus;
+
 mod common;
 
 use chrono::Utc;
@@ -131,7 +133,11 @@ async fn update_test_instance_status(
 ) {
     let persistence = PostgresPersistence::new(pool.clone());
     persistence
-        .update_instance_status(instance_id, status, None)
+        .update_instance_status(
+            instance_id,
+            runtara_store_postgres::encoding::status_from_str(status).unwrap(),
+            None,
+        )
         .await
         .expect("Failed to update instance status");
     if let Some(cp_id) = checkpoint_id {
@@ -1555,7 +1561,7 @@ async fn test_spawn_container_monitor_timeout_enforcement() {
 
     // Update status to running (required for complete_instance_if_running to work)
     persistence
-        .update_instance_status(&instance_id, "running", Some(Utc::now()))
+        .update_instance_status(&instance_id, CoreInstanceStatus::Running, Some(Utc::now()))
         .await
         .expect("Failed to update instance status");
 
@@ -1623,7 +1629,7 @@ async fn test_spawn_container_monitor_timeout_enforcement() {
             .await
             .expect("Failed to get instance")
             .expect("Instance not found");
-        if current.status == "failed" {
+        if current.status == CoreInstanceStatus::Failed {
             timed_out_instance = Some(current);
             break;
         }
@@ -1675,7 +1681,7 @@ async fn test_spawn_container_monitor_no_timeout_on_quick_completion() {
 
     // Update status to running
     persistence
-        .update_instance_status(&instance_id, "running", Some(Utc::now()))
+        .update_instance_status(&instance_id, CoreInstanceStatus::Running, Some(Utc::now()))
         .await
         .expect("Failed to update instance status");
 
@@ -1732,7 +1738,7 @@ async fn test_spawn_container_monitor_no_timeout_on_quick_completion() {
 
     // The status might still be "running" since we didn't simulate SDK completion,
     // but it should NOT be "failed" with timeout error
-    if instance.status == "failed" {
+    if instance.status == CoreInstanceStatus::Failed {
         assert!(
             !instance
                 .error
@@ -1771,7 +1777,7 @@ async fn test_spawn_container_monitor_timeout_race_condition() {
 
     // Start with running status
     persistence
-        .update_instance_status(&instance_id, "running", Some(Utc::now()))
+        .update_instance_status(&instance_id, CoreInstanceStatus::Running, Some(Utc::now()))
         .await
         .expect("Failed to update instance status");
 
@@ -1811,7 +1817,8 @@ async fn test_spawn_container_monitor_timeout_race_condition() {
     tokio::time::sleep(Duration::from_millis(50)).await;
     persistence
         .complete_instance(
-            CompleteInstanceParams::new(&instance_id, "completed").with_output(b"success"),
+            CompleteInstanceParams::new(&instance_id, CoreInstanceStatus::Completed)
+                .with_output(b"success"),
         )
         .await
         .expect("Failed to complete instance");
@@ -1827,7 +1834,8 @@ async fn test_spawn_container_monitor_timeout_race_condition() {
         .expect("Instance not found");
 
     assert_eq!(
-        instance.status, "completed",
+        instance.status,
+        CoreInstanceStatus::Completed,
         "Status should remain 'completed' even after timeout fires"
     );
     assert!(
@@ -2067,7 +2075,7 @@ impl Runner for ParksBeforeReturningRunner {
         // The guest ran and parked on a signal wait before we returned.
         self.persistence
             .complete_instance(
-                CompleteInstanceParams::new(&options.instance_id, "suspended")
+                CompleteInstanceParams::new(&options.instance_id, CoreInstanceStatus::Suspended)
                     .with_termination("waiting_signal", None),
             )
             .await
@@ -2168,7 +2176,7 @@ async fn test_launch_does_not_resurrect_a_run_that_already_parked() {
         .unwrap()
         .expect("instance must exist");
 
-    assert_eq!(instance.status, "pending");
+    assert_eq!(instance.status, CoreInstanceStatus::Pending);
     assert_eq!(
         active_launch(&pool, &response.instance_id).await.state,
         LaunchState::Queued,
@@ -2257,4 +2265,53 @@ async fn test_tenant_metrics_allows_the_widest_console_request() {
         buckets.iter().all(|bucket| bucket.invocation_count == 0),
         "an unseeded tenant should aggregate to an empty but complete spine"
     );
+}
+
+#[tokio::test]
+async fn scope_ancestry_uses_custom_event_subtypes() {
+    skip_if_no_db!();
+    let pool = get_test_pool().await;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let state = create_test_state(pool, temp_dir.path().to_path_buf());
+    let id = Uuid::new_v4().to_string();
+    state
+        .persistence
+        .register_instance(&id, "scope-types")
+        .await
+        .unwrap();
+    for (scope, parent) in [("root", None), ("child", Some("root"))] {
+        state
+            .persistence
+            .insert_event(&runtara_core::persistence::EventRecord {
+                id: None,
+                instance_id: id.clone(),
+                event_type: runtara_core::domain::EventType::Custom,
+                checkpoint_id: None,
+                subtype: Some("scope_enter".into()),
+                created_at: Utc::now(),
+                payload: Some(
+                    serde_json::to_vec(&serde_json::json!({
+                        "scope_id": scope, "parent_scope_id": parent, "step_id": "step",
+                    }))
+                    .unwrap(),
+                ),
+            })
+            .await
+            .unwrap();
+    }
+    let ancestors = runtara_environment::handlers::handle_get_scope_ancestors(&state, &id, "child")
+        .await
+        .unwrap();
+    assert_eq!(
+        ancestors
+            .iter()
+            .map(|scope| scope.scope_id.as_str())
+            .collect::<Vec<_>>(),
+        ["child", "root"]
+    );
+    state
+        .persistence
+        .delete_instances_batch(&[id])
+        .await
+        .unwrap();
 }

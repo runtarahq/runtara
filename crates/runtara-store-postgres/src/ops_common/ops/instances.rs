@@ -263,7 +263,7 @@ macro_rules! impl_instance_ops {
             pub(crate) async fn op_update_instance_status(
                 pool: &$Pool,
                 instance_id: &str,
-                status: &str,
+                status: ::runtara_core::domain::InstanceStatus,
                 started_at: ::core::option::Option<::chrono::DateTime<::chrono::Utc>>,
             ) -> ::core::result::Result<(), ::runtara_core::error::CoreError> {
                 use crate::ops_common::error::not_found_if_empty;
@@ -281,7 +281,7 @@ macro_rules! impl_instance_ops {
                     );
                     ::sqlx::query(&sql)
                         .bind(instance_id)
-                        .bind(status)
+                        .bind(crate::encoding::status_to_str(status))
                         .bind(ts)
                         .execute(pool)
                         .await
@@ -297,7 +297,7 @@ macro_rules! impl_instance_ops {
                     );
                     ::sqlx::query(&sql)
                         .bind(instance_id)
-                        .bind(status)
+                        .bind(crate::encoding::status_to_str(status))
                         .execute(pool)
                         .await
                         .map_err(|e| ::runtara_core::error::CoreError::DatabaseError {
@@ -390,7 +390,7 @@ macro_rules! impl_instance_ops {
                 );
                 let result = ::sqlx::query(&sql)
                     .bind(params.instance_id)
-                    .bind(params.status)
+                    .bind(crate::encoding::status_to_str(params.status))
                     .bind(params.termination_reason)
                     .bind(params.exit_code)
                     .bind(params.output)
@@ -445,7 +445,7 @@ macro_rules! impl_instance_ops {
             pub(crate) async fn op_list_instances(
                 pool: &$Pool,
                 tenant_id: ::core::option::Option<&str>,
-                status: ::core::option::Option<&str>,
+                status: ::core::option::Option<::runtara_core::domain::InstanceStatus>,
                 limit: i64,
                 offset: i64,
             ) -> ::core::result::Result<
@@ -473,7 +473,7 @@ macro_rules! impl_instance_ops {
                 );
                 let records = ::sqlx::query_as::<_, crate::rows::InstanceRow>(&sql)
                     .bind(tenant_id)
-                    .bind(status)
+                    .bind(status.map(crate::encoding::status_to_str))
                     .bind(limit)
                     .bind(offset)
                     .fetch_all(pool)

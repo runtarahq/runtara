@@ -9,6 +9,8 @@
 //! `runtara_core::instance_handlers::mock_persistence` to drive the instance
 //! HTTP router.
 
+use crate::domain::InstanceStatus as CoreInstanceStatus;
+
 use std::collections::HashMap;
 use std::sync::Mutex;
 
@@ -29,6 +31,7 @@ pub struct MockPersistence {
     signals: Mutex<HashMap<String, SignalRecord>>,
     events: Mutex<Vec<EventRecord>>,
     custom_signals: Mutex<HashMap<(String, String), CustomSignalRecord>>,
+    fail_signal_read: Mutex<bool>,
     fail_register: Mutex<bool>,
     fail_status_update: Mutex<bool>,
     active_instance_count: Mutex<Option<i64>>,
@@ -49,6 +52,7 @@ impl MockPersistence {
             signals: Mutex::new(HashMap::new()),
             events: Mutex::new(Vec::new()),
             custom_signals: Mutex::new(HashMap::new()),
+            fail_signal_read: Mutex::new(false),
             fail_register: Mutex::new(false),
             fail_status_update: Mutex::new(false),
             active_instance_count: Mutex::new(None),
@@ -100,6 +104,11 @@ impl MockPersistence {
         self
     }
 
+    /// Make pending signal reads fail.
+    pub fn set_fail_signal_read(&self) {
+        *self.fail_signal_read.lock().unwrap() = true;
+    }
+
     /// Make every subsequent `register_instance` fail.
     #[allow(dead_code)]
     pub fn set_fail_register(&self) {
@@ -120,12 +129,16 @@ impl MockPersistence {
 
 /// Build an `InstanceRecord` with plausible defaults for everything the
 /// caller does not care about.
-pub fn make_instance(instance_id: &str, tenant_id: &str, status: &str) -> InstanceRecord {
+pub fn make_instance(
+    instance_id: &str,
+    tenant_id: &str,
+    status: CoreInstanceStatus,
+) -> InstanceRecord {
     InstanceRecord {
         instance_id: instance_id.to_string(),
         tenant_id: tenant_id.to_string(),
         definition_version: 1,
-        status: status.to_string(),
+        status,
         checkpoint_id: None,
         attempt: 1,
         max_attempts: 3,
@@ -154,10 +167,10 @@ pub fn make_checkpoint(instance_id: &str, checkpoint_id: &str, state: &[u8]) -> 
 }
 
 /// Build an unacknowledged `SignalRecord` with no payload.
-pub fn make_signal(instance_id: &str, signal_type: &str) -> SignalRecord {
+pub fn make_signal(instance_id: &str, signal_type: crate::domain::SignalType) -> SignalRecord {
     SignalRecord {
         instance_id: instance_id.to_string(),
-        signal_type: signal_type.to_string(),
+        signal_type,
         payload: None,
         created_at: Utc::now(),
         acknowledged_at: None,
@@ -177,7 +190,7 @@ impl Persistence for MockPersistence {
                 details: "Mock register failure".to_string(),
             });
         }
-        let instance = make_instance(instance_id, tenant_id, "pending");
+        let instance = make_instance(instance_id, tenant_id, CoreInstanceStatus::Pending);
         self.instances
             .lock()
             .unwrap()
@@ -195,7 +208,7 @@ impl Persistence for MockPersistence {
     async fn update_instance_status(
         &self,
         instance_id: &str,
-        status: &str,
+        status: CoreInstanceStatus,
         started_at: Option<DateTime<Utc>>,
     ) -> std::result::Result<(), CoreError> {
         if *self.fail_status_update.lock().unwrap() {
@@ -205,7 +218,7 @@ impl Persistence for MockPersistence {
             });
         }
         if let Some(inst) = self.instances.lock().unwrap().get_mut(instance_id) {
-            inst.status = status.to_string();
+            inst.status = status;
             inst.started_at = started_at;
         }
         Ok(())
@@ -237,10 +250,12 @@ impl Persistence for MockPersistence {
                 CompleteInstanceGuard::OnlyRunning => Ok(false),
             };
         };
-        if matches!(params.guard, CompleteInstanceGuard::OnlyRunning) && inst.status != "running" {
+        if matches!(params.guard, CompleteInstanceGuard::OnlyRunning)
+            && inst.status != CoreInstanceStatus::Running
+        {
             return Ok(false);
         }
-        inst.status = params.status.to_string();
+        inst.status = params.status;
         // output/error are overwritten unconditionally (matches SQL
         // `SET output = $N`, not `COALESCE`).
         inst.output = params.output.map(|o| o.to_vec());
@@ -258,7 +273,10 @@ impl Persistence for MockPersistence {
         }
         if matches!(
             params.status,
-            "completed" | "failed" | "cancelled" | "suspended"
+            CoreInstanceStatus::Completed
+                | CoreInstanceStatus::Failed
+                | CoreInstanceStatus::Cancelled
+                | CoreInstanceStatus::Suspended
         ) {
             inst.finished_at = Some(Utc::now());
         }
@@ -322,7 +340,7 @@ impl Persistence for MockPersistence {
     async fn insert_signal(
         &self,
         instance_id: &str,
-        signal_type: &str,
+        signal_type: crate::domain::SignalType,
         _payload: &[u8],
     ) -> std::result::Result<(), CoreError> {
         let signal = make_signal(instance_id, signal_type);
@@ -337,6 +355,12 @@ impl Persistence for MockPersistence {
         &self,
         instance_id: &str,
     ) -> std::result::Result<Option<SignalRecord>, CoreError> {
+        if *self.fail_signal_read.lock().unwrap() {
+            return Err(CoreError::DatabaseError {
+                operation: "get_pending_signal".into(),
+                details: "Mock signal read failure".into(),
+            });
+        }
         Ok(self.signals.lock().unwrap().get(instance_id).cloned())
     }
 
@@ -382,7 +406,7 @@ impl Persistence for MockPersistence {
     async fn list_instances(
         &self,
         _tenant_id: Option<&str>,
-        _status: Option<&str>,
+        _status: Option<CoreInstanceStatus>,
         _limit: i64,
         _offset: i64,
     ) -> std::result::Result<Vec<InstanceRecord>, CoreError> {

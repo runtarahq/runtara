@@ -15,6 +15,7 @@ pub mod vocabulary;
 
 pub use self::vocabulary::{EventVocabulary, EventVocabularySpec};
 
+use crate::domain::{EventType, InstanceStatus, SignalType};
 use crate::error::CoreError;
 
 /// Instance record from the persistence layer.
@@ -27,7 +28,7 @@ pub struct InstanceRecord {
     /// Version of the workflow definition.
     pub definition_version: i32,
     /// Current status (pending, running, suspended, completed, failed, cancelled).
-    pub status: String,
+    pub status: InstanceStatus,
     /// Last checkpoint ID if instance was checkpointed.
     pub checkpoint_id: Option<String>,
     /// Current attempt number (for retries).
@@ -87,7 +88,7 @@ pub struct EventRecord {
     /// Instance this event belongs to.
     pub instance_id: String,
     /// Type of event (heartbeat, completed, failed, suspended, custom).
-    pub event_type: String,
+    pub event_type: EventType,
     /// Associated checkpoint ID if applicable.
     pub checkpoint_id: Option<String>,
     /// Optional event payload data.
@@ -104,7 +105,7 @@ pub struct SignalRecord {
     /// Instance this signal is for.
     pub instance_id: String,
     /// Type of signal (cancel, pause, resume).
-    pub signal_type: String,
+    pub signal_type: SignalType,
     /// Optional signal payload data.
     pub payload: Option<Vec<u8>>,
     /// When the signal was created.
@@ -140,7 +141,7 @@ pub enum EventSortOrder {
 #[derive(Debug, Clone, Default)]
 pub struct ListEventsFilter {
     /// Filter by event type (e.g., "custom", "started", "completed").
-    pub event_type: Option<String>,
+    pub event_type: Option<EventType>,
     /// Filter by the producer's event subtype. Opaque to this crate.
     pub subtype: Option<String>,
     /// Filter events created at or after this time.
@@ -256,7 +257,7 @@ pub struct InstanceCompletionMetrics {
     /// Tenant identifier for the invocation.
     pub tenant_id: String,
     /// Terminal status: completed, failed, or cancelled.
-    pub status: String,
+    pub status: InstanceStatus,
     /// Optional terminal reason such as timeout or heartbeat_timeout.
     pub termination_reason: Option<String>,
     /// When execution began.
@@ -331,14 +332,14 @@ pub enum CompleteInstanceGuard {
 ///
 /// Build with [`CompleteInstanceParams::new`] and the chained `with_*`
 /// setters.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct CompleteInstanceParams<'a> {
     /// Instance being completed.
     pub instance_id: &'a str,
     /// Target status. One of `completed`, `failed`, `cancelled`,
     /// `suspended`, or `running` (for mid-execution transitions that
     /// carry metadata but don't finalize the instance).
-    pub status: &'a str,
+    pub status: InstanceStatus,
     /// Whether to guard against races by requiring the current status
     /// to be `running`. See [`CompleteInstanceGuard`].
     pub guard: CompleteInstanceGuard,
@@ -359,11 +360,17 @@ pub struct CompleteInstanceParams<'a> {
 
 impl<'a> CompleteInstanceParams<'a> {
     /// Start a minimal completion request targeting `status`.
-    pub fn new(instance_id: &'a str, status: &'a str) -> Self {
+    pub fn new(instance_id: &'a str, status: InstanceStatus) -> Self {
         Self {
             instance_id,
             status,
-            ..Default::default()
+            guard: CompleteInstanceGuard::Any,
+            output: None,
+            error: None,
+            stderr: None,
+            checkpoint_id: None,
+            termination_reason: None,
+            exit_code: None,
         }
     }
 
@@ -475,7 +482,7 @@ pub trait Persistence: Send + Sync {
     async fn update_instance_status(
         &self,
         instance_id: &str,
-        status: &str,
+        status: InstanceStatus,
         started_at: Option<DateTime<Utc>>,
     ) -> Result<(), CoreError>;
 
@@ -565,7 +572,7 @@ pub trait Persistence: Send + Sync {
     async fn insert_signal(
         &self,
         instance_id: &str,
-        signal_type: &str,
+        signal_type: SignalType,
         payload: &[u8],
     ) -> Result<(), CoreError>;
 
@@ -600,7 +607,7 @@ pub trait Persistence: Send + Sync {
     async fn list_instances(
         &self,
         tenant_id: Option<&str>,
-        status: Option<&str>,
+        status: Option<InstanceStatus>,
         limit: i64,
         offset: i64,
     ) -> Result<Vec<InstanceRecord>, CoreError>;
@@ -626,8 +633,12 @@ pub trait Persistence: Send + Sync {
             Ok(Some(instance)) => instance.started_at.unwrap_or(started_at),
             _ => started_at,
         };
-        self.update_instance_status(instance_id, "running", Some(started_at))
-            .await
+        self.update_instance_status(
+            instance_id,
+            crate::domain::InstanceStatus::Running,
+            Some(started_at),
+        )
+        .await
     }
 
     /// Promote an instance to `running`, but only if it has not already moved
@@ -651,10 +662,15 @@ pub trait Persistence: Send + Sync {
         started_at: DateTime<Utc>,
     ) -> Result<bool, CoreError> {
         match self.get_instance(instance_id).await? {
-            Some(inst) if matches!(inst.status.as_str(), "pending" | "running") => {
+            Some(inst)
+                if matches!(
+                    inst.status,
+                    InstanceStatus::Pending | InstanceStatus::Running
+                ) =>
+            {
                 self.update_instance_status(
                     instance_id,
-                    "running",
+                    crate::domain::InstanceStatus::Running,
                     Some(inst.started_at.unwrap_or(started_at)),
                 )
                 .await?;
@@ -701,7 +717,7 @@ pub trait Persistence: Send + Sync {
             // an instance leased that way must lose a later claim until the
             // lease expires.
             Some(instance)
-                if instance.status == "suspended"
+                if instance.status == crate::domain::InstanceStatus::Suspended
                     && instance.sleep_until.is_some_and(|t| t <= Utc::now()) =>
             {
                 self.clear_instance_sleep(instance_id).await?;

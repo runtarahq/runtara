@@ -159,6 +159,9 @@
 
 #![deny(missing_docs)]
 
+/// Execution domain types independent of storage and transport.
+pub mod domain;
+
 /// Persistence layer for instances, checkpoints, events, and signals.
 pub mod persistence;
 

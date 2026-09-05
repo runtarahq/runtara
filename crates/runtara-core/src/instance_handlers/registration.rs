@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Instance registration handler.
 
+use crate::domain::InstanceStatus as CoreInstanceStatus;
+
 use anyhow::Result;
 use chrono::Utc;
 use tracing::{debug, info, instrument, warn};
@@ -150,14 +152,18 @@ pub async fn handle_register_instance(
     // Propagated for the same reason as the registration write above.
     state
         .persistence
-        .update_instance_status(&request.instance_id, "running", Some(started_at))
+        .update_instance_status(
+            &request.instance_id,
+            CoreInstanceStatus::Running,
+            Some(started_at),
+        )
         .await?;
 
     // 6. Insert started event
     let event = EventRecord {
         id: None,
         instance_id: request.instance_id.clone(),
-        event_type: "started".to_string(),
+        event_type: crate::domain::EventType::Started,
         checkpoint_id: request.checkpoint_id.clone(),
         payload: None,
         created_at: started_at,
@@ -236,9 +242,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_register_existing_instance() {
-        let persistence = Arc::new(
-            MockPersistence::new().with_instance(make_instance("inst-1", "tenant-1", "pending")),
-        );
+        let persistence = Arc::new(MockPersistence::new().with_instance(make_instance(
+            "inst-1",
+            "tenant-1",
+            CoreInstanceStatus::Pending,
+        )));
         let state = InstanceHandlerState::new(persistence);
 
         let request = RegisterInstanceRequest {
@@ -255,7 +263,11 @@ mod tests {
     async fn test_register_with_valid_checkpoint() {
         let persistence = Arc::new(
             MockPersistence::new()
-                .with_instance(make_instance("inst-1", "tenant-1", "pending"))
+                .with_instance(make_instance(
+                    "inst-1",
+                    "tenant-1",
+                    CoreInstanceStatus::Pending,
+                ))
                 .with_checkpoint(make_checkpoint("inst-1", "cp-1", b"state")),
         );
         let state = InstanceHandlerState::new(persistence);
@@ -272,9 +284,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_register_with_invalid_checkpoint() {
-        let persistence = Arc::new(
-            MockPersistence::new().with_instance(make_instance("inst-1", "tenant-1", "pending")),
-        );
+        let persistence = Arc::new(MockPersistence::new().with_instance(make_instance(
+            "inst-1",
+            "tenant-1",
+            CoreInstanceStatus::Pending,
+        )));
         let state = InstanceHandlerState::new(persistence);
 
         let request = RegisterInstanceRequest {
@@ -360,7 +374,7 @@ mod tests {
         // Check that started event was created
         let events = persistence.get_events();
         assert!(!events.is_empty());
-        assert_eq!(events[0].event_type, "started");
+        assert_eq!(events[0].event_type, crate::domain::EventType::Started);
         assert_eq!(events[0].instance_id, "inst-1");
     }
 
@@ -385,9 +399,11 @@ mod tests {
     async fn test_register_existing_instance_allowed_during_drain() {
         // Existing (resuming) instances must still be able to register — we only
         // want to keep out fresh work.
-        let persistence = Arc::new(
-            MockPersistence::new().with_instance(make_instance("inst-1", "tenant-1", "running")),
-        );
+        let persistence = Arc::new(MockPersistence::new().with_instance(make_instance(
+            "inst-1",
+            "tenant-1",
+            CoreInstanceStatus::Running,
+        )));
         let state = InstanceHandlerState::new(persistence);
         state.draining.store(true, Ordering::SeqCst);
 

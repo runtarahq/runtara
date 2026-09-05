@@ -4,6 +4,8 @@
 //!
 //! Handles requests from Management SDK and proxies to Core when needed.
 
+use runtara_core::domain::InstanceStatus as CoreInstanceStatus;
+
 use serde::Serialize;
 use serde_json::Value;
 use sqlx::PgPool;
@@ -431,7 +433,7 @@ async fn existing_start_response(
         instance_id,
         tenant_id,
         image_id,
-        status = %existing.status,
+        status = ?existing.status,
         "Instance start already accepted; returning deduplicated response"
     );
     Ok(Some(StartInstanceResponse {
@@ -857,7 +859,7 @@ pub async fn handle_stop_instance(
         .persistence
         .complete_instance(CompleteInstanceParams::new(
             &request.instance_id,
-            "cancelled",
+            CoreInstanceStatus::Cancelled,
         ))
         .await;
 
@@ -1073,27 +1075,29 @@ async fn release_launch_after_monitor(
         }
     };
     let repository = LaunchRepository::new(pool.clone());
-    let result = match instance.status.as_str() {
-        "suspended" => repository
+    let result = match instance.status {
+        CoreInstanceStatus::Suspended => repository
             .mark_suspended(launch_id)
             .await
             .map(|launch| launch.map(|launch| (launch, "suspended"))),
-        "completed" => repository
+        CoreInstanceStatus::Completed => repository
             .mark_terminal(launch_id, LaunchState::Completed, None)
             .await
             .map(|launch| launch.map(|launch| (launch, "completed"))),
-        "failed" => repository
+        CoreInstanceStatus::Failed => repository
             .mark_terminal(launch_id, LaunchState::Failed, instance.error.as_deref())
             .await
             .map(|launch| launch.map(|launch| (launch, "failed"))),
-        "cancelled" => repository
+        CoreInstanceStatus::Cancelled => repository
             .mark_terminal(launch_id, LaunchState::Cancelled, None)
             .await
             .map(|launch| launch.map(|launch| (launch, "cancelled"))),
         status => {
             debug!(
                 launch_id,
-                instance_id, status, "Launch monitor left nonterminal queue generation active"
+                instance_id,
+                ?status,
+                "Launch monitor left nonterminal queue generation active"
             );
             return;
         }
@@ -1414,15 +1418,12 @@ pub fn spawn_container_monitor(
                     // no longer needs a read of its own.
                     match &observed_status {
                         Ok(Some((status, _)))
-                            if matches!(
-                                status.as_str(),
-                                "completed" | "failed" | "cancelled" | "suspended"
-                            ) =>
+                            if matches!(status, CoreInstanceStatus::Completed | CoreInstanceStatus::Failed | CoreInstanceStatus::Cancelled | CoreInstanceStatus::Suspended) =>
                         {
                             // SDK already reported terminal status — normal termination
                             info!(
                                 instance_id = %instance_id,
-                                status = %status,
+                                status = ?status,
                                 "Instance completed normally (SDK reported)"
                             );
                         }
@@ -1435,12 +1436,12 @@ pub fn spawn_container_monitor(
                             let draining = drain.is_draining();
                             let (status, termination_reason, default_error) = if draining {
                                 (
-                                    "suspended",
+                                    CoreInstanceStatus::Suspended,
                                     "shutdown_requested",
                                     "Process terminated during graceful shutdown",
                                 )
                             } else {
-                                ("failed", "crashed", "Process terminated without SDK event")
+                                (CoreInstanceStatus::Failed, "crashed", "Process terminated without SDK event")
                             };
 
                             // A crash with no terminal SDK event (e.g. a guest trap such as
@@ -1541,7 +1542,7 @@ pub fn spawn_container_monitor(
                 // Update instance status to failed with termination_reason = "timeout"
                 if let Err(e) = persistence
                     .complete_instance(
-                        CompleteInstanceParams::new(&instance_id, "failed")
+                        CompleteInstanceParams::new(&instance_id, CoreInstanceStatus::Failed)
                             .if_running()
                             .with_termination("timeout", None)
                             .with_error("Execution timed out"),
@@ -2048,19 +2049,24 @@ pub async fn handle_send_signal(
     };
 
     if !matches!(
-        instance.status.as_str(),
-        "running" | "suspended" | "pending"
+        instance.status,
+        CoreInstanceStatus::Running | CoreInstanceStatus::Suspended | CoreInstanceStatus::Pending
     ) {
         return Ok(SendSignalOutcome::NotSignalable {
-            status: instance.status,
+            status: crate::core_types::status_name(instance.status).to_owned(),
         });
     }
 
-    if !matches!(signal_type, "cancel" | "pause" | "resume") {
-        return Ok(SendSignalOutcome::UnknownSignalType {
-            signal_type: signal_type.to_string(),
-        });
-    }
+    let signal_type = match signal_type {
+        "cancel" => runtara_core::domain::SignalType::Cancel,
+        "pause" => runtara_core::domain::SignalType::Pause,
+        "resume" => runtara_core::domain::SignalType::Resume,
+        _ => {
+            return Ok(SendSignalOutcome::UnknownSignalType {
+                signal_type: signal_type.to_string(),
+            });
+        }
+    };
 
     let payload = payload.map(|p| p.as_bytes().to_vec()).unwrap_or_default();
     state
@@ -2130,7 +2136,7 @@ pub async fn handle_send_custom_signal(
 pub async fn wake_suspended_on_signal(persistence: &dyn Persistence, instance_id: &str) {
     match persistence.get_instance_meta(instance_id).await {
         Ok(Some(inst))
-            if inst.status == "suspended"
+            if inst.status == CoreInstanceStatus::Suspended
                 && inst.termination_reason.as_deref()
                     == Some(crate::runner::embedded::WAITING_SIGNAL_TERMINATION) =>
         {
@@ -2333,7 +2339,7 @@ pub async fn handle_list_events(
             .map(|ev| EventSummary {
                 id: ev.id.unwrap_or(0),
                 instance_id: ev.instance_id,
-                event_type: ev.event_type,
+                event_type: crate::core_types::event_name(ev.event_type).to_owned(),
                 checkpoint_id: ev.checkpoint_id,
                 payload: ev
                     .payload
@@ -2502,8 +2508,8 @@ pub async fn handle_get_scope_ancestors(
     }
 
     let filter = ListEventsFilter {
-        event_type: Some("scope_enter".to_string()),
-        subtype: None,
+        event_type: Some(runtara_core::domain::EventType::Custom),
+        subtype: Some("scope_enter".to_string()),
         created_after: None,
         created_before: None,
         payload_contains: None,
@@ -2836,7 +2842,8 @@ mod tests {
     #[cfg(feature = "db-integration-tests")]
     async fn suspended_instance(marker: Option<&str>) -> (Arc<dyn Persistence>, String) {
         let (persistence, instance_id) = test_support::running_instance("waker").await;
-        let mut params = CompleteInstanceParams::new(&instance_id, "suspended").if_running();
+        let mut params =
+            CompleteInstanceParams::new(&instance_id, CoreInstanceStatus::Suspended).if_running();
         if let Some(marker) = marker {
             params = params.with_termination(marker, None);
         }
@@ -2861,7 +2868,7 @@ mod tests {
             .await
             .expect("get")
             .expect("instance exists");
-        assert_eq!(inst.status, "suspended");
+        assert_eq!(inst.status, CoreInstanceStatus::Suspended);
         assert!(
             inst.sleep_until.is_none(),
             "a custom signal must never schedule a wake for a paused instance"
@@ -2880,7 +2887,7 @@ mod tests {
             .await
             .expect("get")
             .expect("instance exists");
-        assert_eq!(inst.status, "suspended");
+        assert_eq!(inst.status, CoreInstanceStatus::Suspended);
         assert!(
             inst.sleep_until.is_some(),
             "an on-signal park must be scheduled for relaunch when its signal arrives"

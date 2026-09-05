@@ -3,6 +3,10 @@
 //! Checkpoint-related handlers: save/resume, read-only lookup, and durable
 //! sleep.
 
+use crate::domain::InstanceStatus as CoreInstanceStatus;
+#[cfg(test)]
+use crate::domain::SignalType as CoreSignalType;
+
 use std::time::Duration;
 
 use anyhow::Result;
@@ -10,11 +14,10 @@ use chrono::Utc;
 use tokio::time::Instant;
 use tracing::{debug, instrument};
 
-use super::mappers::map_event_type;
 use super::state::InstanceHandlerState;
 use super::types::{
     CheckpointRequest, CheckpointResponse, CustomSignal, GetCheckpointRequest,
-    GetCheckpointResponse, InstanceEventType, Signal, SignalType, SleepRequest, SleepResponse,
+    GetCheckpointResponse, Signal, SignalType, SleepRequest, SleepResponse,
 };
 use crate::error::CoreError;
 use crate::persistence::{EventRecord, Persistence};
@@ -53,7 +56,7 @@ pub async fn handle_checkpoint(
 
         // Check for pending signal even when returning existing checkpoint
         let pending_signal =
-            get_pending_signal(state.persistence.as_ref(), &request.instance_id).await;
+            get_pending_signal(state.persistence.as_ref(), &request.instance_id).await?;
         let custom_signal = state
             .persistence
             .take_pending_custom_signal(&request.instance_id, &request.checkpoint_id)
@@ -81,7 +84,7 @@ pub async fn handle_checkpoint(
             found: false,
             state: vec![],
             pending_signal: get_pending_signal(state.persistence.as_ref(), &request.instance_id)
-                .await,
+                .await?,
             custom_signal: None,
         });
     }
@@ -98,7 +101,8 @@ pub async fn handle_checkpoint(
         .await?;
 
     // 5. Check for pending signals to include in response
-    let pending_signal = get_pending_signal(state.persistence.as_ref(), &request.instance_id).await;
+    let pending_signal =
+        get_pending_signal(state.persistence.as_ref(), &request.instance_id).await?;
     let custom_signal = state
         .persistence
         .take_pending_custom_signal(&request.instance_id, &request.checkpoint_id)
@@ -139,11 +143,11 @@ async fn ensure_instance_running(
     instance_id: &str,
 ) -> std::result::Result<(), CoreError> {
     match persistence.get_instance_meta(instance_id).await? {
-        Some(inst) if inst.status == "running" => Ok(()),
+        Some(inst) if inst.status == CoreInstanceStatus::Running => Ok(()),
         Some(inst) => Err(CoreError::InvalidInstanceState {
             instance_id: instance_id.to_string(),
             expected: "running".to_string(),
-            actual: inst.status,
+            actual: format!("{:?}", inst.status),
         }),
         None => Err(CoreError::InstanceNotFound {
             instance_id: instance_id.to_string(),
@@ -152,24 +156,18 @@ async fn ensure_instance_running(
 }
 
 /// Helper to get the pending instance-wide signal for an instance.
-async fn get_pending_signal(persistence: &dyn Persistence, instance_id: &str) -> Option<Signal> {
-    match persistence.get_pending_signal(instance_id).await {
-        Ok(Some(signal)) => {
-            let signal_type = match signal.signal_type.as_str() {
-                "cancel" => SignalType::SignalCancel,
-                "pause" => SignalType::SignalPause,
-                "resume" => SignalType::SignalResume,
-                "shutdown" => SignalType::SignalShutdown,
-                _ => return None,
-            };
-            Some(Signal {
-                instance_id: instance_id.to_string(),
-                signal_type: signal_type.into(),
-                payload: signal.payload.unwrap_or_default(),
-            })
-        }
-        _ => None,
-    }
+async fn get_pending_signal(
+    persistence: &dyn Persistence,
+    instance_id: &str,
+) -> std::result::Result<Option<Signal>, CoreError> {
+    Ok(persistence
+        .get_pending_signal(instance_id)
+        .await?
+        .map(|signal| Signal {
+            instance_id: instance_id.to_string(),
+            signal_type: SignalType::from(signal.signal_type).into(),
+            payload: signal.payload.unwrap_or_default(),
+        }))
 }
 
 /// Get checkpoint handler - read-only lookup without saving.
@@ -301,7 +299,7 @@ pub async fn handle_sleep(
         record_sleep_heartbeat(state, &request.instance_id).await;
 
         if let Some(signal) = get_pending_signal(state.persistence.as_ref(), &request.instance_id)
-            .await
+            .await?
             .filter(interrupts_sleep)
         {
             debug!(
@@ -332,7 +330,7 @@ async fn record_sleep_heartbeat(state: &InstanceHandlerState, instance_id: &str)
     let event = EventRecord {
         id: None,
         instance_id: instance_id.to_string(),
-        event_type: map_event_type(InstanceEventType::EventHeartbeat).to_string(),
+        event_type: crate::domain::EventType::Heartbeat,
         checkpoint_id: None,
         payload: None,
         created_at: Utc::now(),
@@ -375,7 +373,7 @@ mod tests {
         let persistence = Arc::new(MockPersistence::new().with_instance(make_instance(
             "inst-1",
             "tenant-1",
-            "completed",
+            CoreInstanceStatus::Completed,
         )));
         let state = InstanceHandlerState::new(persistence);
 
@@ -391,9 +389,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_checkpoint_new_saves_state() {
-        let persistence = Arc::new(
-            MockPersistence::new().with_instance(make_instance("inst-1", "tenant-1", "running")),
-        );
+        let persistence = Arc::new(MockPersistence::new().with_instance(make_instance(
+            "inst-1",
+            "tenant-1",
+            CoreInstanceStatus::Running,
+        )));
         let state = InstanceHandlerState::new(persistence);
 
         let request = CheckpointRequest {
@@ -410,7 +410,11 @@ mod tests {
     async fn test_checkpoint_existing_returns_state() {
         let persistence = Arc::new(
             MockPersistence::new()
-                .with_instance(make_instance("inst-1", "tenant-1", "running"))
+                .with_instance(make_instance(
+                    "inst-1",
+                    "tenant-1",
+                    CoreInstanceStatus::Running,
+                ))
                 .with_checkpoint(make_checkpoint("inst-1", "cp-1", b"existing state")),
         );
         let state = InstanceHandlerState::new(persistence);
@@ -430,8 +434,12 @@ mod tests {
     async fn test_checkpoint_returns_pending_signal() {
         let persistence = Arc::new(
             MockPersistence::new()
-                .with_instance(make_instance("inst-1", "tenant-1", "running"))
-                .with_signal(make_signal("inst-1", "cancel")),
+                .with_instance(make_instance(
+                    "inst-1",
+                    "tenant-1",
+                    CoreInstanceStatus::Running,
+                ))
+                .with_signal(make_signal("inst-1", CoreSignalType::Cancel)),
         );
         let state = InstanceHandlerState::new(persistence);
 
@@ -457,7 +465,11 @@ mod tests {
         };
         let persistence = Arc::new(
             MockPersistence::new()
-                .with_instance(make_instance("inst-1", "tenant-1", "running"))
+                .with_instance(make_instance(
+                    "inst-1",
+                    "tenant-1",
+                    CoreInstanceStatus::Running,
+                ))
                 .with_custom_signal(custom_signal),
         );
         let state = InstanceHandlerState::new(persistence);
@@ -541,7 +553,7 @@ mod tests {
         let persistence = Arc::new(MockPersistence::new().with_instance(make_instance(
             "inst-1",
             "tenant-1",
-            "cancelled",
+            CoreInstanceStatus::Cancelled,
         )));
         let state = InstanceHandlerState::new(persistence);
 
@@ -552,7 +564,7 @@ mod tests {
         assert!(
             matches!(
                 error.downcast_ref::<CoreError>(),
-                Some(CoreError::InvalidInstanceState { actual, .. }) if actual == "cancelled"
+                Some(CoreError::InvalidInstanceState { actual, .. }) if actual == "Cancelled"
             ),
             "expected InvalidInstanceState, got: {error:?}"
         );
@@ -572,7 +584,7 @@ mod tests {
         persistence
             .get_events()
             .iter()
-            .filter(|event| event.event_type == "heartbeat")
+            .filter(|event| event.event_type == crate::domain::EventType::Heartbeat)
             .count()
     }
 
@@ -584,8 +596,12 @@ mod tests {
     async fn test_sleep_wakes_early_on_pending_cancel() {
         let persistence = Arc::new(
             MockPersistence::new()
-                .with_instance(make_instance("inst-1", "tenant-1", "running"))
-                .with_signal(make_signal("inst-1", "cancel")),
+                .with_instance(make_instance(
+                    "inst-1",
+                    "tenant-1",
+                    CoreInstanceStatus::Running,
+                ))
+                .with_signal(make_signal("inst-1", CoreSignalType::Cancel)),
         );
         let state = InstanceHandlerState::new(persistence);
 
@@ -609,8 +625,12 @@ mod tests {
     async fn test_sleep_wakes_early_on_pending_shutdown() {
         let persistence = Arc::new(
             MockPersistence::new()
-                .with_instance(make_instance("inst-1", "tenant-1", "running"))
-                .with_signal(make_signal("inst-1", "shutdown")),
+                .with_instance(make_instance(
+                    "inst-1",
+                    "tenant-1",
+                    CoreInstanceStatus::Running,
+                ))
+                .with_signal(make_signal("inst-1", CoreSignalType::Shutdown)),
         );
         let state = InstanceHandlerState::new(persistence);
 
@@ -627,8 +647,12 @@ mod tests {
     async fn test_sleep_ignores_pending_pause() {
         let persistence = Arc::new(
             MockPersistence::new()
-                .with_instance(make_instance("inst-1", "tenant-1", "running"))
-                .with_signal(make_signal("inst-1", "pause")),
+                .with_instance(make_instance(
+                    "inst-1",
+                    "tenant-1",
+                    CoreInstanceStatus::Running,
+                ))
+                .with_signal(make_signal("inst-1", CoreSignalType::Pause)),
         );
         let state = InstanceHandlerState::new(persistence);
 
@@ -647,9 +671,11 @@ mod tests {
     /// requested duration, no early exit.
     #[tokio::test(start_paused = true)]
     async fn test_sleep_without_signal_runs_full_duration() {
-        let persistence = Arc::new(
-            MockPersistence::new().with_instance(make_instance("inst-1", "tenant-1", "running")),
-        );
+        let persistence = Arc::new(MockPersistence::new().with_instance(make_instance(
+            "inst-1",
+            "tenant-1",
+            CoreInstanceStatus::Running,
+        )));
         let state = InstanceHandlerState::new(persistence);
 
         let started = Instant::now();
@@ -665,9 +691,11 @@ mod tests {
     /// reaped as `failed`.
     #[tokio::test(start_paused = true)]
     async fn test_long_sleep_emits_heartbeats() {
-        let persistence = Arc::new(
-            MockPersistence::new().with_instance(make_instance("inst-1", "tenant-1", "running")),
-        );
+        let persistence = Arc::new(MockPersistence::new().with_instance(make_instance(
+            "inst-1",
+            "tenant-1",
+            CoreInstanceStatus::Running,
+        )));
         let state = InstanceHandlerState::new(persistence.clone());
 
         handle_sleep(&state, sleep_request(5_000)).await.unwrap();
@@ -684,8 +712,12 @@ mod tests {
     async fn test_short_sleep_does_not_poll_or_heartbeat() {
         let persistence = Arc::new(
             MockPersistence::new()
-                .with_instance(make_instance("inst-1", "tenant-1", "running"))
-                .with_signal(make_signal("inst-1", "cancel")),
+                .with_instance(make_instance(
+                    "inst-1",
+                    "tenant-1",
+                    CoreInstanceStatus::Running,
+                ))
+                .with_signal(make_signal("inst-1", CoreSignalType::Cancel)),
         );
         let state = InstanceHandlerState::new(persistence.clone());
 
@@ -706,8 +738,12 @@ mod tests {
     async fn test_sleep_saves_checkpoint_before_waking_early() {
         let persistence = Arc::new(
             MockPersistence::new()
-                .with_instance(make_instance("inst-1", "tenant-1", "running"))
-                .with_signal(make_signal("inst-1", "cancel")),
+                .with_instance(make_instance(
+                    "inst-1",
+                    "tenant-1",
+                    CoreInstanceStatus::Running,
+                ))
+                .with_signal(make_signal("inst-1", CoreSignalType::Cancel)),
         );
         let state = InstanceHandlerState::new(persistence.clone());
 

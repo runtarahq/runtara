@@ -358,7 +358,10 @@ impl WakeScheduler {
             // already filters on `acknowledged_at IS NULL`: defence in depth.
             // Waking is destructive enough that a regression in that predicate
             // must not silently re-cancel a handled run. The check is free.
-            Ok(Some(signal)) => signal.signal_type == "cancel" && signal.acknowledged_at.is_none(),
+            Ok(Some(signal)) => {
+                signal.signal_type == runtara_core::domain::SignalType::Cancel
+                    && signal.acknowledged_at.is_none()
+            }
             Ok(None) => false,
             Err(e) => {
                 warn!(
@@ -488,8 +491,11 @@ impl WakeScheduler {
                 warn!(instance_id = %instance.instance_id, "Failing wake without image association");
                 self.persistence
                     .complete_instance(
-                        CompleteInstanceParams::new(&instance.instance_id, "failed")
-                            .with_error(message),
+                        CompleteInstanceParams::new(
+                            &instance.instance_id,
+                            runtara_core::domain::InstanceStatus::Failed,
+                        )
+                        .with_error(message),
                     )
                     .await?;
                 self.lifecycle_observers.notify_instance_released(
@@ -551,8 +557,11 @@ impl WakeScheduler {
                 warn!(instance_id = %instance.instance_id, "Failing wake with invalid image binding");
                 self.persistence
                     .complete_instance(
-                        CompleteInstanceParams::new(&instance.instance_id, "failed")
-                            .with_error(message),
+                        CompleteInstanceParams::new(
+                            &instance.instance_id,
+                            runtara_core::domain::InstanceStatus::Failed,
+                        )
+                        .with_error(message),
                     )
                     .await?;
                 self.lifecycle_observers.notify_instance_released(

@@ -102,7 +102,11 @@ pub(crate) async fn running_instance(prefix: &str) -> (Arc<dyn Persistence>, Str
         .await
         .expect("register instance");
     persistence
-        .update_instance_status(&instance_id, "running", None)
+        .update_instance_status(
+            &instance_id,
+            runtara_core::domain::InstanceStatus::Running,
+            None,
+        )
         .await
         .expect("mark running");
     (persistence, instance_id)

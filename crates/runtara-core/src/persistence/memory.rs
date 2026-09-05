@@ -12,6 +12,8 @@
 //! A single mutex covers the whole store, which is what makes the claim and
 //! guard operations atomic without any SQL.
 
+use crate::domain::InstanceStatus as CoreInstanceStatus;
+
 use std::collections::HashMap;
 use std::sync::Mutex;
 
@@ -69,8 +71,14 @@ impl InMemoryPersistence {
 }
 
 /// Statuses that stamp `finished_at`.
-fn stamps_finished_at(status: &str) -> bool {
-    matches!(status, "completed" | "failed" | "cancelled" | "suspended")
+fn stamps_finished_at(status: CoreInstanceStatus) -> bool {
+    matches!(
+        status,
+        CoreInstanceStatus::Completed
+            | CoreInstanceStatus::Failed
+            | CoreInstanceStatus::Cancelled
+            | CoreInstanceStatus::Suspended
+    )
 }
 
 #[async_trait]
@@ -88,7 +96,7 @@ impl Persistence for InMemoryPersistence {
                 instance_id: instance_id.to_string(),
                 tenant_id: tenant_id.to_string(),
                 definition_version: 1,
-                status: "pending".to_string(),
+                status: CoreInstanceStatus::Pending,
                 checkpoint_id: None,
                 attempt: 1,
                 max_attempts: 3,
@@ -121,12 +129,12 @@ impl Persistence for InMemoryPersistence {
     async fn update_instance_status(
         &self,
         instance_id: &str,
-        status: &str,
+        status: CoreInstanceStatus,
         started_at: Option<DateTime<Utc>>,
     ) -> Result<(), CoreError> {
         let mut store = self.store.lock().unwrap();
         let inst = store.instance_mut(instance_id)?;
-        inst.status = status.to_string();
+        inst.status = status;
         if let Some(at) = started_at {
             inst.started_at = Some(at);
         }
@@ -156,11 +164,13 @@ impl Persistence for InMemoryPersistence {
                 CompleteInstanceGuard::OnlyRunning => Ok(false),
             };
         };
-        if params.guard == CompleteInstanceGuard::OnlyRunning && inst.status != "running" {
+        if params.guard == CompleteInstanceGuard::OnlyRunning
+            && inst.status != CoreInstanceStatus::Running
+        {
             return Ok(false);
         }
 
-        inst.status = params.status.to_string();
+        inst.status = params.status;
         // Replaced: a transition that carries no output or error clears the
         // previous one, so a failure cannot be read as still holding a stale
         // success payload.
@@ -283,7 +293,7 @@ impl Persistence for InMemoryPersistence {
     async fn insert_signal(
         &self,
         instance_id: &str,
-        signal_type: &str,
+        signal_type: crate::domain::SignalType,
         payload: &[u8],
     ) -> Result<(), CoreError> {
         let mut store = self.store.lock().unwrap();
@@ -291,7 +301,7 @@ impl Persistence for InMemoryPersistence {
             instance_id.to_string(),
             SignalRecord {
                 instance_id: instance_id.to_string(),
-                signal_type: signal_type.to_string(),
+                signal_type,
                 payload: (!payload.is_empty()).then(|| payload.to_vec()),
                 created_at: Utc::now(),
                 acknowledged_at: None,
@@ -375,7 +385,7 @@ impl Persistence for InMemoryPersistence {
     async fn list_instances(
         &self,
         tenant_id: Option<&str>,
-        status: Option<&str>,
+        status: Option<CoreInstanceStatus>,
         limit: i64,
         offset: i64,
     ) -> Result<Vec<InstanceRecord>, CoreError> {
@@ -407,7 +417,7 @@ impl Persistence for InMemoryPersistence {
             .unwrap()
             .instances
             .values()
-            .filter(|i| i.status == "running")
+            .filter(|i| i.status == CoreInstanceStatus::Running)
             .count() as i64)
     }
 
@@ -436,7 +446,8 @@ impl Persistence for InMemoryPersistence {
         };
         // Due-ness, not just presence: an instance leased by a batch claim has
         // `sleep_until` in the future and must lose until the lease expires.
-        if instance.status != "suspended" || !instance.sleep_until.is_some_and(|t| t <= Utc::now())
+        if instance.status != CoreInstanceStatus::Suspended
+            || !instance.sleep_until.is_some_and(|t| t <= Utc::now())
         {
             return Ok(false);
         }
@@ -525,7 +536,7 @@ impl Persistence for InMemoryPersistence {
         let mut terminal: Vec<_> = store
             .instances
             .values()
-            .filter(|i| matches!(i.status.as_str(), "completed" | "failed" | "cancelled"))
+            .filter(|i| i.status.is_terminal())
             .filter(|i| i.finished_at.is_some_and(|t| t < older_than))
             .collect();
         terminal.sort_by_key(|i| i.finished_at);
@@ -594,7 +605,7 @@ impl Persistence for InMemoryPersistence {
         let mut due: Vec<_> = store
             .instances
             .values()
-            .filter(|i| i.status == "suspended")
+            .filter(|i| i.status == CoreInstanceStatus::Suspended)
             .filter(|i| i.sleep_until.is_some_and(|t| t <= now))
             .cloned()
             .collect();
@@ -801,7 +812,7 @@ mod tests {
             .insert_event(&EventRecord {
                 id: None,
                 instance_id: "inst".to_string(),
-                event_type: "custom".to_string(),
+                event_type: crate::domain::EventType::Custom,
                 checkpoint_id: None,
                 payload: Some(payload.to_string().into_bytes()),
                 created_at: Utc::now(),
