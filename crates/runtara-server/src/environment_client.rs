@@ -531,7 +531,11 @@ impl EnvironmentClient {
         let offset = options.offset.unwrap_or(0);
 
         let filter = ListEventsFilter {
-            event_type: options.event_type,
+            event_type: options
+                .event_type
+                .as_deref()
+                .map(parse_event_type)
+                .transpose()?,
             subtype: options.subtype,
             created_after: options.created_after,
             created_before: options.created_before,
@@ -820,3 +824,17 @@ fn decode_base64_json(encoded: &str) -> Option<serde_json::Value> {
 
 /// Keeps `HashMap` in the signature list honest for callers building env maps.
 pub type EnvMap = HashMap<String, String>;
+
+fn parse_event_type(value: &str) -> Result<runtara_core::domain::EventType> {
+    use runtara_core::domain::EventType;
+    match value {
+        "started" => Ok(EventType::Started),
+        "progress" => Ok(EventType::Progress),
+        "heartbeat" => Ok(EventType::Heartbeat),
+        "completed" => Ok(EventType::Completed),
+        "failed" => Ok(EventType::Failed),
+        "suspended" => Ok(EventType::Suspended),
+        "custom" => Ok(EventType::Custom),
+        _ => Err(EnvironmentError::InvalidInput("unknown event type".into())),
+    }
+}

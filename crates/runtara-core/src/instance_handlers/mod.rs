@@ -12,11 +12,9 @@
 //! - [`status`]: `handle_get_instance_status`
 //! - [`types`]: plain Rust request/response types and enums
 //! - [`state`]: the shared [`InstanceHandlerState`] handed to every handler
-//! - [`mappers`]: enum-to-string helpers used by the HTTP layer
 
 mod checkpoint;
 mod event;
-mod mappers;
 mod registration;
 mod signal;
 mod state;
@@ -35,7 +33,6 @@ pub mod mock_persistence;
 
 pub use self::checkpoint::{handle_checkpoint, handle_get_checkpoint, handle_sleep};
 pub use self::event::{handle_instance_event, handle_retry_attempt};
-pub use self::mappers::{map_event_type, map_signal_type, map_status};
 pub use self::registration::handle_register_instance;
 pub use self::signal::{handle_poll_signals, handle_signal_ack};
 pub use self::state::{InstanceEventObserver, InstanceHandlerState};

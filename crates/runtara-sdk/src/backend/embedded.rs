@@ -5,6 +5,10 @@
 //! This backend calls the persistence layer directly,
 //! suitable for embedding runtara-core within the same process.
 
+use runtara_core::domain::EventType as CoreEventType;
+use runtara_core::domain::InstanceStatus as CoreInstanceStatus;
+use runtara_core::domain::SignalType as CoreSignalType;
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -73,12 +77,11 @@ impl EmbeddedBackend {
             .block_on(self.persistence.get_pending_signal(&self.instance_id))
             .ok()
             .flatten()?;
-        let signal_type = match record.signal_type.as_str() {
-            "cancel" => SignalType::Cancel,
-            "pause" => SignalType::Pause,
-            "resume" => SignalType::Resume,
-            "shutdown" => SignalType::Shutdown,
-            _ => return None,
+        let signal_type = match record.signal_type {
+            CoreSignalType::Cancel => SignalType::Cancel,
+            CoreSignalType::Pause => SignalType::Pause,
+            CoreSignalType::Resume => SignalType::Resume,
+            CoreSignalType::Shutdown => SignalType::Shutdown,
         };
         // Acknowledge (idempotent: only clears an unacknowledged signal) so the
         // signal is consumed once.
@@ -123,7 +126,7 @@ impl SdkBackend for EmbeddedBackend {
         self.rt
             .block_on(self.persistence.update_instance_status(
                 &self.instance_id,
-                "running",
+                CoreInstanceStatus::Running,
                 Some(Utc::now()),
             ))
             .map_err(|e| SdkError::Internal(e.to_string()))?;
@@ -200,7 +203,7 @@ impl SdkBackend for EmbeddedBackend {
         let event = EventRecord {
             id: None,
             instance_id: self.instance_id.clone(),
-            event_type: "heartbeat".to_string(),
+            event_type: CoreEventType::Heartbeat,
             checkpoint_id: None,
             payload: None,
             created_at: Utc::now(),
@@ -218,15 +221,18 @@ impl SdkBackend for EmbeddedBackend {
     #[cfg_attr(feature = "tracing", tracing::instrument(skip(self, output), fields(instance_id = %self.instance_id, output_size = output.len())))]
     fn completed(&self, output: &[u8]) -> Result<()> {
         self.rt
-            .block_on(self.persistence.complete_instance(
-                CompleteInstanceParams::new(&self.instance_id, "completed").with_output(output),
-            ))
+            .block_on(
+                self.persistence.complete_instance(
+                    CompleteInstanceParams::new(&self.instance_id, CoreInstanceStatus::Completed)
+                        .with_output(output),
+                ),
+            )
             .map_err(|e| SdkError::Internal(e.to_string()))?;
 
         let event = EventRecord {
             id: None,
             instance_id: self.instance_id.clone(),
-            event_type: "completed".to_string(),
+            event_type: CoreEventType::Completed,
             checkpoint_id: None,
             payload: Some(output.to_vec()),
             created_at: Utc::now(),
@@ -244,15 +250,18 @@ impl SdkBackend for EmbeddedBackend {
     #[cfg_attr(feature = "tracing", tracing::instrument(skip(self), fields(instance_id = %self.instance_id)))]
     fn failed(&self, error: &str) -> Result<()> {
         self.rt
-            .block_on(self.persistence.complete_instance(
-                CompleteInstanceParams::new(&self.instance_id, "failed").with_error(error),
-            ))
+            .block_on(
+                self.persistence.complete_instance(
+                    CompleteInstanceParams::new(&self.instance_id, CoreInstanceStatus::Failed)
+                        .with_error(error),
+                ),
+            )
             .map_err(|e| SdkError::Internal(e.to_string()))?;
 
         let event = EventRecord {
             id: None,
             instance_id: self.instance_id.clone(),
-            event_type: "failed".to_string(),
+            event_type: CoreEventType::Failed,
             checkpoint_id: None,
             payload: Some(error.as_bytes().to_vec()),
             created_at: Utc::now(),
@@ -270,16 +279,17 @@ impl SdkBackend for EmbeddedBackend {
     #[cfg_attr(feature = "tracing", tracing::instrument(skip(self), fields(instance_id = %self.instance_id)))]
     fn suspended(&self) -> Result<()> {
         self.rt
-            .block_on(
-                self.persistence
-                    .update_instance_status(&self.instance_id, "suspended", None),
-            )
+            .block_on(self.persistence.update_instance_status(
+                &self.instance_id,
+                CoreInstanceStatus::Suspended,
+                None,
+            ))
             .map_err(|e| SdkError::Internal(e.to_string()))?;
 
         let event = EventRecord {
             id: None,
             instance_id: self.instance_id.clone(),
-            event_type: "suspended".to_string(),
+            event_type: CoreEventType::Suspended,
             checkpoint_id: None,
             payload: None,
             created_at: Utc::now(),
@@ -322,17 +332,18 @@ impl SdkBackend for EmbeddedBackend {
 
         // Mark as suspended
         self.rt
-            .block_on(
-                self.persistence
-                    .update_instance_status(&self.instance_id, "suspended", None),
-            )
+            .block_on(self.persistence.update_instance_status(
+                &self.instance_id,
+                CoreInstanceStatus::Suspended,
+                None,
+            ))
             .map_err(|e| SdkError::Internal(e.to_string()))?;
 
         // Record the event
         let event = EventRecord {
             id: None,
             instance_id: self.instance_id.clone(),
-            event_type: "suspended".to_string(),
+            event_type: CoreEventType::Suspended,
             checkpoint_id: Some(checkpoint_id.to_string()),
             payload: None,
             created_at: Utc::now(),
@@ -352,7 +363,7 @@ impl SdkBackend for EmbeddedBackend {
         let event = EventRecord {
             id: None,
             instance_id: self.instance_id.clone(),
-            event_type: "custom".to_string(),
+            event_type: CoreEventType::Custom,
             checkpoint_id: None,
             payload: Some(payload),
             created_at: Utc::now(),
@@ -396,14 +407,7 @@ impl SdkBackend for EmbeddedBackend {
 
         match instance {
             Some(record) => {
-                let status = match record.status.as_str() {
-                    "pending" => InstanceStatus::Pending,
-                    "running" => InstanceStatus::Running,
-                    "suspended" => InstanceStatus::Suspended,
-                    "completed" => InstanceStatus::Completed,
-                    "failed" => InstanceStatus::Failed,
-                    _ => InstanceStatus::Pending,
-                };
+                let status = sdk_status(record.status);
 
                 Ok(StatusResponse {
                     found: true,
@@ -444,14 +448,7 @@ impl SdkBackend for EmbeddedBackend {
 
         match instance {
             Some(record) => {
-                let status = match record.status.as_str() {
-                    "pending" => InstanceStatus::Pending,
-                    "running" => InstanceStatus::Running,
-                    "suspended" => InstanceStatus::Suspended,
-                    "completed" => InstanceStatus::Completed,
-                    "failed" => InstanceStatus::Failed,
-                    _ => InstanceStatus::Pending,
-                };
+                let status = sdk_status(record.status);
 
                 Ok(StatusResponse {
                     found: true,
@@ -575,6 +572,17 @@ impl SdkBackend for EmbeddedBackend {
     }
 }
 
+fn sdk_status(value: CoreInstanceStatus) -> InstanceStatus {
+    match value {
+        CoreInstanceStatus::Pending => InstanceStatus::Pending,
+        CoreInstanceStatus::Running => InstanceStatus::Running,
+        CoreInstanceStatus::Suspended => InstanceStatus::Suspended,
+        CoreInstanceStatus::Completed => InstanceStatus::Completed,
+        CoreInstanceStatus::Failed => InstanceStatus::Failed,
+        CoreInstanceStatus::Cancelled => InstanceStatus::Cancelled,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -595,7 +603,7 @@ mod tests {
         instance_id: String,
         #[allow(dead_code)]
         tenant_id: String,
-        status: String,
+        status: CoreInstanceStatus,
         checkpoint_id: Option<String>,
         input: Option<Vec<u8>>,
         output: Option<Vec<u8>>,
@@ -625,7 +633,7 @@ mod tests {
                 MockInstance {
                     instance_id: instance_id.to_string(),
                     tenant_id: tenant_id.to_string(),
-                    status: "pending".to_string(),
+                    status: CoreInstanceStatus::Pending,
                     checkpoint_id: None,
                     input: None,
                     output: None,
@@ -647,7 +655,7 @@ mod tests {
                     instance_id: instance_id.to_string(),
                     tenant_id: inst.tenant_id.clone(),
                     definition_version: 1,
-                    status: inst.status.clone(),
+                    status: inst.status,
                     checkpoint_id: inst.checkpoint_id.clone(),
                     attempt: 1,
                     max_attempts: 3,
@@ -668,12 +676,12 @@ mod tests {
         async fn update_instance_status(
             &self,
             instance_id: &str,
-            status: &str,
+            status: CoreInstanceStatus,
             _started_at: Option<chrono::DateTime<chrono::Utc>>,
         ) -> CoreResult<()> {
             let mut instances = self.instances.write().await;
             if let Some(inst) = instances.get_mut(instance_id) {
-                inst.status = status.to_string();
+                inst.status = status;
             }
             Ok(())
         }
@@ -693,7 +701,7 @@ mod tests {
         async fn complete_instance(&self, params: CompleteInstanceParams<'_>) -> CoreResult<bool> {
             let mut instances = self.instances.write().await;
             if let Some(inst) = instances.get_mut(params.instance_id) {
-                inst.status = params.status.to_string();
+                inst.status = params.status;
                 inst.output = params.output.map(|o| o.to_vec());
                 inst.error = params.error.map(|e| e.to_string());
             }
@@ -761,7 +769,7 @@ mod tests {
         async fn insert_signal(
             &self,
             _instance_id: &str,
-            _signal_type: &str,
+            _signal_type: CoreSignalType,
             _payload: &[u8],
         ) -> CoreResult<()> {
             Ok(())
@@ -808,7 +816,7 @@ mod tests {
         async fn list_instances(
             &self,
             _tenant_id: Option<&str>,
-            _status: Option<&str>,
+            _status: Option<CoreInstanceStatus>,
             _limit: i64,
             _offset: i64,
         ) -> CoreResult<Vec<runtara_core::persistence::InstanceRecord>> {
@@ -890,6 +898,14 @@ mod tests {
     }
 
     #[test]
+    fn cancelled_status_is_preserved() {
+        assert_eq!(
+            sdk_status(CoreInstanceStatus::Cancelled),
+            InstanceStatus::Cancelled
+        );
+    }
+
+    #[test]
     fn test_embedded_backend_register() {
         let persistence = Arc::new(MockPersistence::new());
         let backend = EmbeddedBackend::new(persistence.clone(), "test-instance", "test-tenant");
@@ -909,7 +925,7 @@ mod tests {
             .unwrap();
         assert_eq!(instance.instance_id, "test-instance");
         assert_eq!(instance.tenant_id, "test-tenant");
-        assert_eq!(instance.status, "running");
+        assert_eq!(instance.status, CoreInstanceStatus::Running);
     }
 
     #[test]
@@ -981,7 +997,7 @@ mod tests {
             .block_on(persistence.get_instance("test-instance"))
             .unwrap()
             .unwrap();
-        assert_eq!(instance.status, "completed");
+        assert_eq!(instance.status, CoreInstanceStatus::Completed);
         assert_eq!(instance.output, Some(b"result data".to_vec()));
     }
 
@@ -998,7 +1014,7 @@ mod tests {
             .block_on(persistence.get_instance("test-instance"))
             .unwrap()
             .unwrap();
-        assert_eq!(instance.status, "failed");
+        assert_eq!(instance.status, CoreInstanceStatus::Failed);
         assert_eq!(instance.error, Some("something went wrong".to_string()));
     }
 
@@ -1015,7 +1031,7 @@ mod tests {
             .block_on(persistence.get_instance("test-instance"))
             .unwrap()
             .unwrap();
-        assert_eq!(instance.status, "suspended");
+        assert_eq!(instance.status, CoreInstanceStatus::Suspended);
     }
 
     #[test]

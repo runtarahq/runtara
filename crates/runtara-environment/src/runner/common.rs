@@ -175,8 +175,8 @@ pub(crate) fn launch_run_dir(
 /// persisted.
 pub(crate) async fn load_output(persistence: &dyn Persistence, instance_id: &str) -> Result<Value> {
     match persistence.get_instance(instance_id).await {
-        Ok(Some(inst)) => match inst.status.as_str() {
-            "completed" => {
+        Ok(Some(inst)) => match inst.status {
+            runtara_core::domain::InstanceStatus::Completed => {
                 if let Some(output_bytes) = inst.output {
                     serde_json::from_slice(&output_bytes)
                         .map_err(|e| RunnerError::Other(format!("Failed to parse output: {}", e)))
@@ -184,13 +184,13 @@ pub(crate) async fn load_output(persistence: &dyn Persistence, instance_id: &str
                     Ok(Value::Null)
                 }
             }
-            "failed" => {
+            runtara_core::domain::InstanceStatus::Failed => {
                 let error = inst.error.unwrap_or_else(|| "Unknown error".to_string());
                 Err(RunnerError::Other(error))
             }
-            "cancelled" => Err(RunnerError::Cancelled),
+            runtara_core::domain::InstanceStatus::Cancelled => Err(RunnerError::Cancelled),
             status => Err(RunnerError::Other(format!(
-                "Unexpected instance status after exit: {}",
+                "Unexpected instance status after exit: {:?}",
                 status
             ))),
         },

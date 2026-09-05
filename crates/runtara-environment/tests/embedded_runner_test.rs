@@ -181,8 +181,11 @@ async fn run_maps_completed_guest_to_persisted_output() {
         .expect("register");
     h.persistence
         .complete_instance(
-            CompleteInstanceParams::new(inst_id.as_str(), "completed")
-                .with_output(br#"{"answer":42}"#),
+            CompleteInstanceParams::new(
+                inst_id.as_str(),
+                runtara_core::domain::InstanceStatus::Completed,
+            )
+            .with_output(br#"{"answer":42}"#),
         )
         .await
         .expect("complete");
@@ -209,7 +212,11 @@ async fn run_maps_guest_error_to_persisted_error_message() {
         .expect("register");
     h.persistence
         .complete_instance(
-            CompleteInstanceParams::new(inst_id.as_str(), "failed").with_error("boom from sdk"),
+            CompleteInstanceParams::new(
+                inst_id.as_str(),
+                runtara_core::domain::InstanceStatus::Failed,
+            )
+            .with_error("boom from sdk"),
         )
         .await
         .expect("complete");

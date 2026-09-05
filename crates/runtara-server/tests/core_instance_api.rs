@@ -242,7 +242,11 @@ async fn a_suspend_event_with_a_sleep_payload_arms_no_wake() {
         .await
         .expect("get_instance")
         .expect("instance must exist");
-    assert_eq!(record.status, "suspended", "the instance still parks");
+    assert_eq!(
+        record.status,
+        runtara_core::domain::InstanceStatus::Suspended,
+        "the instance still parks"
+    );
     assert!(
         record.sleep_until.is_none(),
         "no wake may be armed from a payload core no longer parses"
@@ -261,5 +265,67 @@ async fn a_suspend_event_with_a_sleep_payload_arms_no_wake() {
         "no checkpoint may be reconstructed out of the payload"
     );
 
+    runtime.shutdown().await.expect("shutdown");
+}
+
+/// Storage domain values preserve the instance protocol's public spellings.
+#[tokio::test(flavor = "multi_thread")]
+async fn typed_signals_round_trip_through_poll_checkpoint_and_ack() {
+    use runtara_core::domain::{InstanceStatus, SignalType};
+    let backend = Arc::new(PostgresPersistence::new(test_pool().await));
+    let (runtime, addr) = start(backend.clone(), 0).await;
+    let client = reqwest::Client::new();
+    for (signal_type, label, status) in [
+        (SignalType::Cancel, "cancel", InstanceStatus::Cancelled),
+        (SignalType::Pause, "pause", InstanceStatus::Suspended),
+        (SignalType::Resume, "resume", InstanceStatus::Running),
+        (SignalType::Shutdown, "shutdown", InstanceStatus::Suspended),
+    ] {
+        let id = Uuid::new_v4().to_string();
+        assert_eq!(register(addr, &id, "typed-wire").await, 200);
+        backend
+            .insert_signal(&id, signal_type, b"payload")
+            .await
+            .unwrap();
+        let url = format!("http://{addr}/api/v1/instances/{id}");
+        let poll: serde_json::Value = client
+            .get(format!("{url}/signals"))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(poll["signal"]["signal_type"], label);
+        assert_eq!(poll["signal"]["payload"], "cGF5bG9hZA==");
+        let checkpoint: serde_json::Value = client
+            .post(format!("{url}/checkpoint"))
+            .json(&json!({"checkpoint_id": "cp", "state": "e30="}))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(checkpoint["signal"], poll["signal"]);
+        client
+            .post(format!("{url}/signals/ack"))
+            .json(&json!({"signal_type": label}))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+        assert_eq!(
+            backend.get_instance(&id).await.unwrap().unwrap().status,
+            status
+        );
+        assert!(backend.get_pending_signal(&id).await.unwrap().is_none());
+        backend.delete_instances_batch(&[id]).await.unwrap();
+    }
     runtime.shutdown().await.expect("shutdown");
 }

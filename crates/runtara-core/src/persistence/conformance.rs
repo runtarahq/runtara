@@ -11,6 +11,9 @@
 //! `clear_instance_sleep`) and for
 //! `get_terminal_instances_older_than` / `delete_instances_batch`.
 
+use crate::domain::InstanceStatus as CoreInstanceStatus;
+use crate::domain::SignalType as CoreSignalType;
+
 use chrono::{Duration, Utc};
 use uuid::Uuid;
 
@@ -40,7 +43,7 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
         .expect("instance should exist immediately after register");
     assert_eq!(record.instance_id, instance_id);
     assert_eq!(record.tenant_id, tenant_id);
-    assert_eq!(record.status, "pending");
+    assert_eq!(record.status, CoreInstanceStatus::Pending);
 
     // --- try_register is a claim, not a second insert -----------------------
     // The id is an idempotency key for an at-least-once trigger stream, so a
@@ -97,7 +100,7 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
         Some(fresh_input.as_slice()),
         "the claim must persist the input it was given"
     );
-    assert_eq!(created.status, "pending");
+    assert_eq!(created.status, CoreInstanceStatus::Pending);
 
     // And a claim with no input leaves the column null rather than erroring.
     let no_input_id = Uuid::new_v4().to_string();
@@ -186,7 +189,7 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
         .await
         .expect("register sleeper failed");
     backend
-        .update_instance_status(&sleeper, "suspended", None)
+        .update_instance_status(&sleeper, CoreInstanceStatus::Suspended, None)
         .await
         .expect("suspend sleeper failed");
     backend
@@ -277,11 +280,15 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     // that suspends and wakes still reports when it first began.
     let first_started = Utc::now() - chrono::Duration::seconds(120);
     backend
-        .update_instance_status(&instance_id, "running", Some(first_started))
+        .update_instance_status(
+            &instance_id,
+            CoreInstanceStatus::Running,
+            Some(first_started),
+        )
         .await
         .expect("seed running failed");
     backend
-        .update_instance_status(&instance_id, "suspended", None)
+        .update_instance_status(&instance_id, CoreInstanceStatus::Suspended, None)
         .await
         .expect("suspend failed");
     let before = backend
@@ -289,7 +296,7 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
         .await
         .expect("get_instance failed")
         .expect("instance should exist");
-    assert_eq!(before.status, "suspended");
+    assert_eq!(before.status, CoreInstanceStatus::Suspended);
 
     backend
         .mark_instance_running(&instance_id, Utc::now())
@@ -301,7 +308,8 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
         .expect("get_instance failed")
         .expect("instance should exist");
     assert_eq!(
-        promoted.status, "running",
+        promoted.status,
+        CoreInstanceStatus::Running,
         "mark_instance_running must promote a suspended instance"
     );
     assert_eq!(
@@ -312,7 +320,7 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
 
     // --- update status → running -------------------------------------------
     backend
-        .update_instance_status(&instance_id, "running", Some(Utc::now()))
+        .update_instance_status(&instance_id, CoreInstanceStatus::Running, Some(Utc::now()))
         .await
         .expect("update_instance_status running failed");
     let record = backend
@@ -320,7 +328,7 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
         .await
         .expect("get_instance after update failed")
         .expect("instance must still exist");
-    assert_eq!(record.status, "running");
+    assert_eq!(record.status, CoreInstanceStatus::Running);
     assert!(record.started_at.is_some());
 
     // --- checkpoints --------------------------------------------------------
@@ -429,7 +437,7 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     let event = EventRecord {
         id: None,
         instance_id: instance_id.clone(),
-        event_type: "custom".to_string(),
+        event_type: crate::domain::EventType::Custom,
         checkpoint_id: Some(checkpoint_id.to_string()),
         payload: Some(br#"{"note":"hello"}"#.to_vec()),
         created_at: emitted_at,
@@ -472,7 +480,7 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     // --- signals ------------------------------------------------------------
     let signal_payload = br#"{"reason":"parity"}"#.to_vec();
     backend
-        .insert_signal(&instance_id, "cancel", &signal_payload)
+        .insert_signal(&instance_id, CoreSignalType::Cancel, &signal_payload)
         .await
         .expect("insert_signal failed");
     let pending = backend
@@ -480,7 +488,7 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
         .await
         .expect("get_pending_signal failed")
         .expect("signal should be pending after insert");
-    assert_eq!(pending.signal_type, "cancel");
+    assert_eq!(pending.signal_type, CoreSignalType::Cancel);
     backend
         .acknowledge_signal(&instance_id)
         .await
@@ -500,7 +508,7 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     // A genuinely new signal for the same instance is still delivered: the
     // insert resets the acknowledgement.
     backend
-        .insert_signal(&instance_id, "shutdown", b"drain")
+        .insert_signal(&instance_id, CoreSignalType::Shutdown, b"drain")
         .await
         .expect("insert_signal after ack failed");
     let reinserted = backend
@@ -508,7 +516,7 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
         .await
         .expect("get_pending_signal after re-insert failed")
         .expect("a freshly inserted signal must be pending again");
-    assert_eq!(reinserted.signal_type, "shutdown");
+    assert_eq!(reinserted.signal_type, CoreSignalType::Shutdown);
     assert!(reinserted.acknowledged_at.is_none());
 
     // --- custom checkpoint signals -----------------------------------------
@@ -590,7 +598,7 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
         "instance in 'running' must not appear as due to wake"
     );
     backend
-        .update_instance_status(&instance_id, "suspended", None)
+        .update_instance_status(&instance_id, CoreInstanceStatus::Suspended, None)
         .await
         .expect("update_instance_status suspended failed");
     let due = backend
@@ -641,7 +649,7 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     // faster than its launcher returns gets resurrected as `running` with no
     // process behind it — which the container monitor then fails as a crash.
     backend
-        .update_instance_status(&instance_id, "suspended", None)
+        .update_instance_status(&instance_id, CoreInstanceStatus::Suspended, None)
         .await
         .expect("update_instance_status suspended failed (start guard setup)");
     let promoted_parked = backend
@@ -658,12 +666,13 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
         .expect("get_instance failed (start guard)")
         .expect("instance must still exist");
     assert_eq!(
-        parked.status, "suspended",
+        parked.status,
+        CoreInstanceStatus::Suspended,
         "the guarded promotion must leave a parked instance untouched"
     );
 
     backend
-        .update_instance_status(&instance_id, "running", Some(Utc::now()))
+        .update_instance_status(&instance_id, CoreInstanceStatus::Running, Some(Utc::now()))
         .await
         .expect("update_instance_status running failed (start guard reset)");
     let promoted_running = backend
@@ -677,7 +686,7 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
 
     // Hand the next section the `suspended` instance it expects.
     backend
-        .update_instance_status(&instance_id, "suspended", None)
+        .update_instance_status(&instance_id, CoreInstanceStatus::Suspended, None)
         .await
         .expect("update_instance_status suspended failed (start guard teardown)");
 
@@ -747,7 +756,7 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
         .await
         .expect("count_active_instances (suspended) failed");
     backend
-        .update_instance_status(&instance_id, "running", None)
+        .update_instance_status(&instance_id, CoreInstanceStatus::Running, None)
         .await
         .expect("update_instance_status running (re-run) failed");
     let active = backend
@@ -774,7 +783,7 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     // --- completion ---------------------------------------------------------
     backend
         .complete_instance(
-            CompleteInstanceParams::new(&instance_id, "completed")
+            CompleteInstanceParams::new(&instance_id, CoreInstanceStatus::Completed)
                 .with_output(b"{\"result\":42}")
                 .with_checkpoint(checkpoint_id),
         )
@@ -785,7 +794,7 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
         .await
         .expect("get_instance after complete failed")
         .expect("instance must still exist post-complete");
-    assert_eq!(record.status, "completed");
+    assert_eq!(record.status, CoreInstanceStatus::Completed);
 
     // `output` and `error` are REPLACED, not merged: a transition that carries
     // no output clears whatever was there. The fields that do merge are
@@ -794,7 +803,7 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     // was pinned here.
     backend
         .complete_instance(
-            CompleteInstanceParams::new(&instance_id, "failed")
+            CompleteInstanceParams::new(&instance_id, CoreInstanceStatus::Failed)
                 .with_error("boom")
                 .with_termination("crashed", Some(137)),
         )
@@ -820,7 +829,10 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
 
     // The merging fields keep their value when the next transition omits them.
     backend
-        .complete_instance(CompleteInstanceParams::new(&instance_id, "failed"))
+        .complete_instance(CompleteInstanceParams::new(
+            &instance_id,
+            CoreInstanceStatus::Failed,
+        ))
         .await
         .expect("complete_instance (merge) failed");
     let record = backend
