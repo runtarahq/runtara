@@ -26,5 +26,6 @@ pub mod encoding;
 mod backend;
 mod dialect;
 mod ops_common;
+mod vocabulary;
 
 pub use backend::{PostgresPersistence, load_latest_checkpoint};
