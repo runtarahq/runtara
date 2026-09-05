@@ -51,7 +51,7 @@ macro_rules! impl_instance_ops {
                     .bind(tenant_id)
                     .execute(pool)
                     .await
-                    .map_err(|e| ::runtara_core::error::CoreError::DatabaseError {
+                    .map_err(|e| ::runtara_core::error::CoreError::PersistenceError {
                         operation: "register_instance".into(),
                         details: e.to_string(),
                     })?;
@@ -92,7 +92,7 @@ macro_rules! impl_instance_ops {
                     .bind(input)
                     .execute(pool)
                     .await
-                    .map_err(|e| ::runtara_core::error::CoreError::DatabaseError {
+                    .map_err(|e| ::runtara_core::error::CoreError::PersistenceError {
                         operation: "try_register_instance".into(),
                         details: e.to_string(),
                     })?;
@@ -162,7 +162,7 @@ macro_rules! impl_instance_ops {
                     .bind(instance_id)
                     .fetch_optional(pool)
                     .await
-                    .map_err(|e| ::runtara_core::error::CoreError::DatabaseError {
+                    .map_err(|e| ::runtara_core::error::CoreError::PersistenceError {
                         operation: "get_instance".into(),
                         details: e.to_string(),
                     })?;
@@ -223,7 +223,7 @@ macro_rules! impl_instance_ops {
                     .bind(started_at)
                     .execute(pool)
                     .await
-                    .map_err(|e| ::runtara_core::error::CoreError::DatabaseError {
+                    .map_err(|e| ::runtara_core::error::CoreError::PersistenceError {
                         operation: "mark_instance_running".into(),
                         details: e.to_string(),
                     })?;
@@ -253,7 +253,7 @@ macro_rules! impl_instance_ops {
                     .bind(started_at)
                     .execute(pool)
                     .await
-                    .map_err(|e| ::runtara_core::error::CoreError::DatabaseError {
+                    .map_err(|e| ::runtara_core::error::CoreError::PersistenceError {
                         operation: "mark_instance_started".into(),
                         details: e.to_string(),
                     })?;
@@ -285,7 +285,7 @@ macro_rules! impl_instance_ops {
                         .bind(ts)
                         .execute(pool)
                         .await
-                        .map_err(|e| ::runtara_core::error::CoreError::DatabaseError {
+                        .map_err(|e| ::runtara_core::error::CoreError::PersistenceError {
                             operation: "update_instance_status".into(),
                             details: e.to_string(),
                         })?
@@ -300,7 +300,7 @@ macro_rules! impl_instance_ops {
                         .bind(crate::encoding::status_to_str(status))
                         .execute(pool)
                         .await
-                        .map_err(|e| ::runtara_core::error::CoreError::DatabaseError {
+                        .map_err(|e| ::runtara_core::error::CoreError::PersistenceError {
                             operation: "update_instance_status".into(),
                             details: e.to_string(),
                         })?
@@ -399,7 +399,7 @@ macro_rules! impl_instance_ops {
                     .bind(params.checkpoint_id)
                     .execute(pool)
                     .await
-                    .map_err(|e| ::runtara_core::error::CoreError::DatabaseError {
+                    .map_err(|e| ::runtara_core::error::CoreError::PersistenceError {
                         operation: "complete_instance".into(),
                         details: e.to_string(),
                     })?;

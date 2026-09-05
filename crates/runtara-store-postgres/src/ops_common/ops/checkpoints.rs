@@ -8,7 +8,7 @@
 //! `op_save_checkpoint` routes its `sqlx::Error` through
 //! `common::error::wrap_checkpoint_save` rather than letting it fall
 //! through the blanket `From<sqlx::Error> for CoreError` impl: the
-//! blanket conversion produces a bare `DatabaseError` and drops the
+//! blanket conversion produces a bare `PersistenceError` and drops the
 //! instance ID, which is the only handle a caller has for attributing a
 //! failed save to the run that made it.
 //!
@@ -73,7 +73,7 @@ macro_rules! impl_checkpoint_ops {
                     .bind(checkpoint_id)
                     .fetch_optional(pool)
                     .await
-                    .map_err(|e| ::runtara_core::error::CoreError::DatabaseError {
+                    .map_err(|e| ::runtara_core::error::CoreError::PersistenceError {
                         operation: "load_checkpoint".into(),
                         details: e.to_string(),
                     })?;

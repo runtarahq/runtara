@@ -330,7 +330,7 @@ mod tests {
         };
         assert!(matches!(
             err.downcast_ref::<CoreError>(),
-            Some(CoreError::DatabaseError { .. })
+            Some(CoreError::PersistenceError { .. })
         ));
     }
 
@@ -352,7 +352,7 @@ mod tests {
         };
         assert!(matches!(
             err.downcast_ref::<CoreError>(),
-            Some(CoreError::DatabaseError { .. })
+            Some(CoreError::PersistenceError { .. })
         ));
     }
 

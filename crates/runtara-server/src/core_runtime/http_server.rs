@@ -1003,7 +1003,7 @@ mod tests {
                 StatusCode::BAD_REQUEST,
             ),
             (
-                CoreError::DatabaseError {
+                CoreError::PersistenceError {
                     operation: "insert".into(),
                     details: "connection refused".into(),
                 },
@@ -1080,7 +1080,7 @@ mod tests {
         let (status, _, retry_after) = read(core_error_response(
             "REGISTER_ERROR",
             "Register handler error",
-            CoreError::DatabaseError {
+            CoreError::PersistenceError {
                 operation: "register_instance".into(),
                 details: "connection refused".into(),
             },

@@ -104,7 +104,7 @@ macro_rules! impl_retention_ops {
                     .bind(limit)
                     .execute(pool)
                     .await
-                    .map_err(|e| ::runtara_core::error::CoreError::DatabaseError {
+                    .map_err(|e| ::runtara_core::error::CoreError::PersistenceError {
                         operation: "delete_paired_events_older_than".into(),
                         details: e.to_string(),
                     })?;

@@ -185,7 +185,7 @@ impl Persistence for MockPersistence {
         tenant_id: &str,
     ) -> std::result::Result<(), CoreError> {
         if *self.fail_register.lock().unwrap() {
-            return Err(CoreError::DatabaseError {
+            return Err(CoreError::PersistenceError {
                 operation: "register_instance".to_string(),
                 details: "Mock register failure".to_string(),
             });
@@ -212,7 +212,7 @@ impl Persistence for MockPersistence {
         started_at: Option<DateTime<Utc>>,
     ) -> std::result::Result<(), CoreError> {
         if *self.fail_status_update.lock().unwrap() {
-            return Err(CoreError::DatabaseError {
+            return Err(CoreError::PersistenceError {
                 operation: "update_instance_status".to_string(),
                 details: "Mock status update failure".to_string(),
             });
@@ -356,7 +356,7 @@ impl Persistence for MockPersistence {
         instance_id: &str,
     ) -> std::result::Result<Option<SignalRecord>, CoreError> {
         if *self.fail_signal_read.lock().unwrap() {
-            return Err(CoreError::DatabaseError {
+            return Err(CoreError::PersistenceError {
                 operation: "get_pending_signal".into(),
                 details: "Mock signal read failure".into(),
             });
