@@ -136,53 +136,6 @@ impl Runner for MockRunner {
         "mock"
     }
 
-    async fn run(
-        &self,
-        options: &LaunchOptions,
-        cancel_token: Option<CancelToken>,
-    ) -> Result<LaunchResult> {
-        let start = std::time::Instant::now();
-
-        // Simulate execution
-        if self.execution_delay_ms > 0 {
-            tokio::time::sleep(std::time::Duration::from_millis(self.execution_delay_ms)).await;
-        }
-
-        // Check cancellation
-        if let Some(token) = &cancel_token
-            && token.load(Ordering::SeqCst)
-        {
-            return Err(RunnerError::Cancelled);
-        }
-
-        let duration_ms = start.elapsed().as_millis() as u64;
-
-        if self.fail_by_default {
-            Ok(LaunchResult {
-                instance_id: options.instance_id.clone(),
-                success: false,
-                output: None,
-                error: Some("Mock failure".to_string()),
-                stderr: None,
-                duration_ms,
-                metrics: ContainerMetrics::default(),
-            })
-        } else {
-            Ok(LaunchResult {
-                instance_id: options.instance_id.clone(),
-                success: true,
-                output: Some(serde_json::json!({
-                    "status": "completed",
-                    "result": options.input.clone()
-                })),
-                error: None,
-                stderr: None,
-                duration_ms,
-                metrics: ContainerMetrics::default(),
-            })
-        }
-    }
-
     async fn launch_detached(&self, options: &LaunchOptions) -> Result<RunnerHandle> {
         self.launch_count.fetch_add(1, Ordering::SeqCst);
         self.launches
@@ -335,43 +288,6 @@ mod tests {
             prepersisted_input: None,
             start_gate: None,
         }
-    }
-
-    #[tokio::test]
-    async fn test_mock_runner_run_success() {
-        let runner = MockRunner::new();
-        let options = test_options();
-
-        let result = runner.run(&options, None).await.unwrap();
-
-        assert!(result.success);
-        assert!(result.output.is_some());
-        assert!(result.error.is_none());
-    }
-
-    #[tokio::test]
-    async fn test_mock_runner_run_failure() {
-        let runner = MockRunner::failing();
-        let options = test_options();
-
-        let result = runner.run(&options, None).await.unwrap();
-
-        assert!(!result.success);
-        assert!(result.error.is_some());
-    }
-
-    #[tokio::test]
-    async fn test_mock_runner_cancellation() {
-        let runner = MockRunner {
-            execution_delay_ms: 100,
-            ..MockRunner::new()
-        };
-        let options = test_options();
-        let cancel = Arc::new(AtomicBool::new(true));
-
-        let result = runner.run(&options, Some(cancel)).await;
-
-        assert!(matches!(result, Err(RunnerError::Cancelled)));
     }
 
     #[tokio::test]

@@ -687,13 +687,6 @@ impl Runner for GatedRunner {
     fn runner_type(&self) -> &'static str {
         "gated"
     }
-    async fn run(
-        &self,
-        _options: &runtara_environment::runner::LaunchOptions,
-        _cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
-    ) -> runtara_environment::runner::Result<runtara_environment::runner::LaunchResult> {
-        unimplemented!("the wake path uses launch_detached")
-    }
     async fn launch_detached(
         &self,
         options: &runtara_environment::runner::LaunchOptions,

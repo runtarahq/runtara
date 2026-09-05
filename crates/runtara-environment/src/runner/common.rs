@@ -2,21 +2,15 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Workflow runner configuration and contract helpers.
 //!
-//! The guest-facing contract (env vars) and platform-facing contract (output
-//! read from runtara-core persistence, stderr in the per-run log file) live
-//! here, separate from the execution engine, so any future runner (e.g. a
-//! self-exec process runner) inherits them unchanged.
+//! The guest-facing contract (env vars) and the platform-facing one (stderr in
+//! the per-run log file) live here, separate from the execution engine, so any
+//! future runner inherits them unchanged.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use serde_json::Value;
 use tokio::fs;
-
-use runtara_core::persistence::Persistence;
-
-use super::traits::{Result, RunnerError};
 
 /// How much of a stderr preview is kept for diagnostics.
 const STDERR_PREVIEW_CHARS: usize = 2000;
@@ -166,40 +160,6 @@ pub(crate) fn launch_run_dir(
     launch_id: &str,
 ) -> PathBuf {
     run_dir(data_dir, tenant_id, instance_id).join(launch_id)
-}
-
-/// Load output from runtara-core persistence.
-///
-/// The SDK reports completion/failure to runtara-core via HTTP during
-/// execution. By the time the guest exits, the instance record is already
-/// persisted.
-pub(crate) async fn load_output(persistence: &dyn Persistence, instance_id: &str) -> Result<Value> {
-    match persistence.get_instance(instance_id).await {
-        Ok(Some(inst)) => match inst.status.as_str() {
-            "completed" => {
-                if let Some(output_bytes) = inst.output {
-                    serde_json::from_slice(&output_bytes)
-                        .map_err(|e| RunnerError::Other(format!("Failed to parse output: {}", e)))
-                } else {
-                    Ok(Value::Null)
-                }
-            }
-            "failed" => {
-                let error = inst.error.unwrap_or_else(|| "Unknown error".to_string());
-                Err(RunnerError::Other(error))
-            }
-            "cancelled" => Err(RunnerError::Cancelled),
-            status => Err(RunnerError::Other(format!(
-                "Unexpected instance status after exit: {}",
-                status
-            ))),
-        },
-        Ok(None) => Err(RunnerError::OutputNotFound(instance_id.to_string())),
-        Err(e) => Err(RunnerError::Other(format!(
-            "Failed to query instance status: {}",
-            e
-        ))),
-    }
 }
 
 /// Load stderr from the per-run log file for diagnostics.

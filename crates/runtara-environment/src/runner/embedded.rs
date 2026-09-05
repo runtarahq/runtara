@@ -48,8 +48,8 @@ use runtara_core::persistence::Persistence;
 
 use super::common::{self, WorkflowRunnerConfig};
 use super::traits::{
-    CancelToken, ContainerMetrics, LaunchOptions, LaunchResult, PreparationOccupancy,
-    PreparedLaunch, Result, Runner, RunnerError, RunnerHandle, RunnerOccupancy, StartGateOutcome,
+    CancelToken, ContainerMetrics, LaunchOptions, PreparationOccupancy, PreparedLaunch, Result,
+    Runner, RunnerError, RunnerHandle, RunnerOccupancy, StartGateOutcome,
 };
 
 /// Mark a run `running`, clearing what a previous stop left behind.
@@ -903,22 +903,6 @@ impl EmbeddedWasmRunner {
         }
     }
 
-    /// The instance's persisted (enriched) input envelope — what
-    /// `runtime.load-input` served the legacy guest. Errors if the instance is
-    /// gone; the detached path logs and falls back instead.
-    async fn persisted_input(&self, options: &LaunchOptions) -> Result<Vec<u8>> {
-        resolve_run_input(
-            self.persistence.as_ref(),
-            &options.instance_id,
-            options.prepersisted_input.clone(),
-        )
-        .await
-        .map_err(|e| RunnerError::StartFailed(format!("load instance input: {e:#}")))?
-        .ok_or_else(|| {
-            RunnerError::StartFailed(format!("instance {} not found", options.instance_id))
-        })
-    }
-
     /// Load the exact durable envelope required by a queued preparation.
     ///
     /// Unlike the legacy synchronous runner path, a durable launch must not
@@ -1030,32 +1014,6 @@ impl EmbeddedWasmRunner {
             .get(launch_id)
             .cloned()
     }
-}
-
-/// The enriched input envelope a run starts from.
-///
-/// `prepersisted` is [`LaunchOptions::prepersisted_input`]: the first-start
-/// path passes the bytes it has just written so the launch does not read back
-/// its own write. Every other path passes `None` and gets the stored envelope,
-/// which is what makes a woken instance resume on its real input instead of the
-/// relaunch request's placeholder.
-///
-/// Both launch paths — synchronous `run` and the spawned `launch_detached` —
-/// go through here on purpose. They used to each fetch the input themselves,
-/// and the duplicate was how the detached path came to ignore this field.
-/// `Ok(None)` means no such instance; callers differ on how loudly to fail.
-async fn resolve_run_input(
-    persistence: &dyn Persistence,
-    instance_id: &str,
-    prepersisted: Option<Vec<u8>>,
-) -> std::result::Result<Option<Vec<u8>>, runtara_core::error::CoreError> {
-    if let Some(input) = prepersisted {
-        return Ok(Some(input));
-    }
-    Ok(persistence
-        .get_instance(instance_id)
-        .await?
-        .map(|instance| instance.input.unwrap_or_else(|| b"{}".to_vec())))
 }
 
 /// How many guests may execute concurrently in this process.
@@ -1241,49 +1199,6 @@ fn limits_from_env() -> WorkflowLimits {
         limits.max_memory_bytes = max;
     }
     limits
-}
-
-/// Map a finished embedded run to the `Result<()>` shape `WasmRunner`'s
-/// process-exit path produces, so the surrounding `LaunchResult` logic stays
-/// identical between runners.
-fn exit_to_result(exit: &WorkflowExit) -> std::result::Result<(), RunnerError> {
-    match exit {
-        WorkflowExit::Completed => Ok(()),
-        WorkflowExit::GuestError => Err(RunnerError::ExitCode {
-            exit_code: 1,
-            stderr: String::new(),
-        }),
-        WorkflowExit::Failed { reason } => Err(RunnerError::ExitCode {
-            exit_code: 1,
-            stderr: reason.clone(),
-        }),
-        WorkflowExit::Timeout => Err(RunnerError::Timeout),
-        WorkflowExit::Cancelled => Err(RunnerError::Cancelled),
-    }
-}
-
-/// Map an invoke-shaped run to the same `Result<()>` shape. A suspension is a
-/// clean exit (the suspended status was recorded host-side by the signal
-/// ack), exactly as the legacy run path's Ok-exit-with-DB-suspended was; a
-/// Failed outcome mirrors GuestError (the error was recorded additively via
-/// runtime.fail, so `load_output` surfaces it downstream unchanged).
-fn invoke_exit_to_result(
-    exit: &runtara_component_host::InvokeExit,
-) -> std::result::Result<(), RunnerError> {
-    use runtara_component_host::InvokeExit;
-    match exit {
-        InvokeExit::Completed(_) | InvokeExit::Suspended(_) => Ok(()),
-        InvokeExit::Failed(_) => Err(RunnerError::ExitCode {
-            exit_code: 1,
-            stderr: String::new(),
-        }),
-        InvokeExit::Trapped { reason } => Err(RunnerError::ExitCode {
-            exit_code: 1,
-            stderr: reason.clone(),
-        }),
-        InvokeExit::Timeout => Err(RunnerError::Timeout),
-        InvokeExit::Cancelled => Err(RunnerError::Cancelled),
-    }
 }
 
 /// `termination_reason` stamped on an on-signal park — the discriminator the
@@ -1572,149 +1487,6 @@ impl Runner for EmbeddedWasmRunner {
             occupancy.precompile_child_retired = Some(children.retired);
         }
         Some(occupancy)
-    }
-
-    async fn run(
-        &self,
-        options: &LaunchOptions,
-        cancel_token: Option<CancelToken>,
-    ) -> Result<LaunchResult> {
-        let start = std::time::Instant::now();
-
-        let wasm_path = options.wasm_path.clone();
-        if !wasm_path.exists() {
-            return Err(RunnerError::BinaryNotFound(wasm_path.display().to_string()));
-        }
-
-        let env = self.merged_env(options);
-        let instance_pre = self
-            .executor
-            .load_instance_pre(&wasm_path)
-            .await
-            .map_err(|e| RunnerError::StartFailed(format!("{e:#}")))?;
-        if options.requires_lifecycle_invoke
-            && !runtara_component_host::lifecycle::exports_lifecycle_invoke(
-                &instance_pre,
-                self.executor.engine(),
-            )
-        {
-            return Err(RunnerError::StartFailed(
-                "generated workflow image does not export the current lifecycle invoke entrypoint"
-                    .to_string(),
-            ));
-        }
-
-        // Dual-ABI dispatch: an invoke-shaped artifact runs through the
-        // in-band entry (input fetched from persistence — the enriched
-        // stored envelope, first run AND wake alike); a legacy artifact
-        // keeps the wasi:cli/run path unchanged.
-        let (metrics, result) = if runtara_component_host::lifecycle::exports_lifecycle_invoke(
-            &instance_pre,
-            self.executor.engine(),
-        ) {
-            let input = self.persisted_input(options).await?;
-            // Run as `running` (see the detached path for why relaunches need
-            // this) — no-op on the first-run path, which is already running.
-            mark_running(self.persistence.as_ref(), &options.instance_id).await;
-            let run = self
-                .executor
-                .execute_invoke(
-                    &instance_pre,
-                    self.run_spec(
-                        options,
-                        env,
-                        None,
-                        options.timeout,
-                        cancel_token,
-                        Some(input.clone()),
-                    ),
-                    input,
-                )
-                .await;
-            // A store-freeing suspend has no output yet — park it and report a
-            // clean, non-terminal result rather than letting `load_output` fail.
-            if let runtara_component_host::InvokeExit::Suspended(wakes) = &run.exit {
-                park_invoke_suspend(self.persistence.as_ref(), &options.instance_id, wakes).await;
-                return Ok(LaunchResult {
-                    instance_id: options.instance_id.clone(),
-                    success: true,
-                    output: None,
-                    error: None,
-                    stderr: None,
-                    duration_ms: start.elapsed().as_millis() as u64,
-                    metrics: invoke_metrics_of(&run),
-                });
-            }
-            (invoke_metrics_of(&run), invoke_exit_to_result(&run.exit))
-        } else {
-            let pre = self
-                .executor
-                .load(&wasm_path)
-                .await
-                .map_err(|e| RunnerError::StartFailed(format!("{e:#}")))?;
-            let run = self
-                .executor
-                .execute(
-                    &pre,
-                    self.run_spec(
-                        options,
-                        env,
-                        None,
-                        options.timeout,
-                        cancel_token,
-                        options.prepersisted_input.clone(),
-                    ),
-                )
-                .await;
-            (metrics_of(&run), exit_to_result(&run.exit))
-        };
-        let duration_ms = start.elapsed().as_millis() as u64;
-
-        match result {
-            Ok(()) => {
-                match common::load_output(self.persistence.as_ref(), &options.instance_id).await {
-                    Ok(output) => Ok(LaunchResult {
-                        instance_id: options.instance_id.clone(),
-                        success: true,
-                        output: Some(output),
-                        error: None,
-                        stderr: None,
-                        duration_ms,
-                        metrics,
-                    }),
-                    Err(e) => Ok(LaunchResult {
-                        instance_id: options.instance_id.clone(),
-                        success: false,
-                        output: None,
-                        error: Some(format!("Failed to load output: {}", e)),
-                        stderr: None,
-                        duration_ms,
-                        metrics,
-                    }),
-                }
-            }
-            Err(e) => {
-                // Prefer the SDK-reported error from runtara-core when present.
-                let error_msg = match common::load_output(
-                    self.persistence.as_ref(),
-                    &options.instance_id,
-                )
-                .await
-                {
-                    Err(RunnerError::Other(msg)) => msg,
-                    _ => e.to_string(),
-                };
-                Ok(LaunchResult {
-                    instance_id: options.instance_id.clone(),
-                    success: false,
-                    output: None,
-                    error: Some(error_msg),
-                    stderr: None,
-                    duration_ms,
-                    metrics,
-                })
-            }
-        }
     }
 
     async fn try_prepare_launch(&self, options: &LaunchOptions) -> Result<PreparedLaunch> {

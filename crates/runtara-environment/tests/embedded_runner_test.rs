@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use runtara_core::persistence::{CompleteInstanceParams, Persistence};
+use runtara_core::persistence::Persistence;
 use runtara_environment::runner::{
     EmbeddedWasmRunner, LaunchOptions, Result as RunnerResult, Runner, RunnerError, StartGate,
     StartGateConfirmation, WorkflowRunnerConfig,
@@ -35,19 +35,6 @@ const RUN_OK_WAT: &str = r#"
     (component
         (core module $m
             (func (export "run") (result i32) (i32.const 0))
-        )
-        (core instance $i (instantiate $m))
-        (func $run (result (result)) (canon lift (core func $i "run")))
-        (instance $run_iface (export "run" (func $run)))
-        (export "wasi:cli/run@0.2.3" (instance $run_iface))
-    )
-"#;
-
-/// `wasi:cli/run` returning err — the embedded analogue of exit code 1.
-const RUN_ERR_WAT: &str = r#"
-    (component
-        (core module $m
-            (func (export "run") (result i32) (i32.const 1))
         )
         (core instance $i (instantiate $m))
         (func $run (result (result)) (canon lift (core func $i "run")))
@@ -166,61 +153,6 @@ impl StartGateConfirmation for BlockingGateConfirmation {
         self.release.notified().await;
         Ok(())
     }
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn run_maps_completed_guest_to_persisted_output() {
-    let h = harness().await;
-    let inst_id = unique("inst-ok");
-    let wasm = write_component(h.dir.path(), "ok.wasm", RUN_OK_WAT);
-
-    // Seed what the SDK would have reported during execution.
-    h.persistence
-        .register_instance(inst_id.as_str(), "embedded-test")
-        .await
-        .expect("register");
-    h.persistence
-        .complete_instance(
-            CompleteInstanceParams::new(inst_id.as_str(), "completed")
-                .with_output(br#"{"answer":42}"#),
-        )
-        .await
-        .expect("complete");
-
-    let result = h
-        .runner
-        .run(&options(inst_id.as_str(), &wasm), None)
-        .await
-        .expect("run");
-    assert!(result.success, "error: {:?}", result.error);
-    assert_eq!(result.output, Some(serde_json::json!({"answer": 42})));
-    assert!(result.metrics.memory_peak_bytes.is_some());
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn run_maps_guest_error_to_persisted_error_message() {
-    let h = harness().await;
-    let inst_id = unique("inst-err");
-    let wasm = write_component(h.dir.path(), "err.wasm", RUN_ERR_WAT);
-
-    h.persistence
-        .register_instance(inst_id.as_str(), "embedded-test")
-        .await
-        .expect("register");
-    h.persistence
-        .complete_instance(
-            CompleteInstanceParams::new(inst_id.as_str(), "failed").with_error("boom from sdk"),
-        )
-        .await
-        .expect("complete");
-
-    let result = h
-        .runner
-        .run(&options(inst_id.as_str(), &wasm), None)
-        .await
-        .expect("run");
-    assert!(!result.success);
-    assert_eq!(result.error.as_deref(), Some("boom from sdk"));
 }
 
 #[tokio::test(flavor = "multi_thread")]

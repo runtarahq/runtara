@@ -1964,14 +1964,6 @@ impl Runner for ParksBeforeReturningRunner {
         "parks-before-returning"
     }
 
-    async fn run(
-        &self,
-        _options: &LaunchOptions,
-        _cancel_token: Option<runtara_environment::runner::CancelToken>,
-    ) -> runtara_environment::runner::Result<runtara_environment::runner::LaunchResult> {
-        unimplemented!("not used by this test")
-    }
-
     async fn launch_detached(
         &self,
         options: &LaunchOptions,
