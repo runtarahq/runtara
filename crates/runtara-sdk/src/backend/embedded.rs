@@ -1,6 +1,6 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Embedded SDK backend for direct database access.
+//! Embedded SDK backend for direct persistence access.
 //!
 //! This backend calls the persistence layer directly,
 //! suitable for embedding runtara-core within the same process.
@@ -71,12 +71,14 @@ impl EmbeddedBackend {
     /// shutdown grace deadline. The signal is acknowledged on read so it is not
     /// redelivered after the instance relaunches (otherwise a recovered
     /// instance would immediately re-suspend on the same stale signal).
-    fn take_pending_lifecycle_signal(&self) -> Option<Signal> {
-        let record = self
+    fn take_pending_lifecycle_signal(&self) -> Result<Option<Signal>> {
+        let Some(record) = self
             .rt
             .block_on(self.persistence.get_pending_signal(&self.instance_id))
-            .ok()
-            .flatten()?;
+            .map_err(|e| SdkError::Internal(e.to_string()))?
+        else {
+            return Ok(None);
+        };
         let signal_type = match record.signal_type {
             CoreSignalType::Cancel => SignalType::Cancel,
             CoreSignalType::Pause => SignalType::Pause,
@@ -88,11 +90,11 @@ impl EmbeddedBackend {
         let _ = self
             .rt
             .block_on(self.persistence.acknowledge_signal(&self.instance_id));
-        Some(Signal {
+        Ok(Some(Signal {
             signal_type,
             payload: record.payload.unwrap_or_default(),
             checkpoint_id: None,
-        })
+        }))
     }
 }
 
@@ -154,7 +156,7 @@ impl SdkBackend for EmbeddedBackend {
             return Ok(CheckpointResult {
                 found: true,
                 state: checkpoint.state,
-                pending_signal: self.take_pending_lifecycle_signal(),
+                pending_signal: self.take_pending_lifecycle_signal()?,
                 custom_signal: None,
             });
         }
@@ -180,7 +182,7 @@ impl SdkBackend for EmbeddedBackend {
         Ok(CheckpointResult {
             found: false,
             state: Vec::new(),
-            pending_signal: self.take_pending_lifecycle_signal(),
+            pending_signal: self.take_pending_lifecycle_signal()?,
             custom_signal: None,
         })
     }
@@ -596,6 +598,7 @@ mod tests {
     struct MockPersistence {
         instances: tokio::sync::RwLock<std::collections::HashMap<String, MockInstance>>,
         checkpoints: tokio::sync::RwLock<std::collections::HashMap<String, Vec<u8>>>,
+        fail_signal_read: bool,
     }
 
     struct MockInstance {
@@ -616,6 +619,7 @@ mod tests {
             Self {
                 instances: tokio::sync::RwLock::new(std::collections::HashMap::new()),
                 checkpoints: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+                fail_signal_read: false,
             }
         }
 
@@ -779,6 +783,12 @@ mod tests {
             &self,
             _instance_id: &str,
         ) -> CoreResult<Option<runtara_core::persistence::SignalRecord>> {
+            if self.fail_signal_read {
+                return Err(runtara_core::error::CoreError::PersistenceError {
+                    operation: "get_pending_signal".into(),
+                    details: "cannot decode stored signal".into(),
+                });
+            }
             Ok(None)
         }
 
@@ -944,6 +954,20 @@ mod tests {
         assert!(!result.found);
         assert!(result.state.is_empty());
         assert!(result.pending_signal.is_none());
+    }
+
+    #[test]
+    fn checkpoint_propagates_signal_read_errors_on_save_and_replay() {
+        let persistence = Arc::new(MockPersistence {
+            fail_signal_read: true,
+            ..MockPersistence::new()
+        });
+        let backend = EmbeddedBackend::new(persistence, "test-instance", "test-tenant");
+        backend.register(None).unwrap();
+        for _ in 0..2 {
+            let error = backend.checkpoint("step-1", b"state").unwrap_err();
+            assert!(error.to_string().contains("cannot decode stored signal"));
+        }
     }
 
     #[test]
