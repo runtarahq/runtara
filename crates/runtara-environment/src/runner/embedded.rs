@@ -176,7 +176,7 @@ pub struct EmbeddedWasmRunner {
     precompiler: Arc<dyn ComponentPrecompiler>,
     /// Bounds how many guests execute at once, whatever asks for them.
     ///
-    /// `launch_detached` spawns the run and returns, so the caller's own
+    /// A launch spawns the run and returns, so the caller's own
     /// concurrency limit does not bound execution — it bounds how fast runs are
     /// *started*. Nothing else stops a fast producer stacking guests until the
     /// machine runs out of memory, and each live guest holds a wasmtime store.
@@ -1493,7 +1493,7 @@ impl Runner for EmbeddedWasmRunner {
         self.prepare_embedded_launch(options).await
     }
 
-    async fn launch_detached(&self, options: &LaunchOptions) -> Result<RunnerHandle> {
+    async fn try_launch_detached(&self, options: &LaunchOptions) -> Result<RunnerHandle> {
         let prepared = self.try_prepare_launch(options).await?;
         self.try_launch_prepared_detached(options, prepared).await
     }
@@ -1752,13 +1752,6 @@ impl Runner for EmbeddedWasmRunner {
             started_at: chrono::Utc::now(),
             metrics: Some(metrics),
         })
-    }
-
-    async fn try_launch_detached(&self, options: &LaunchOptions) -> Result<RunnerHandle> {
-        // `launch_detached` itself now uses `try_acquire_owned`, so retaining
-        // this explicit trait entry point makes durable-dispatch intent clear
-        // while guaranteeing it never puts the dispatcher on a permit waiter.
-        self.launch_detached(options).await
     }
 
     async fn is_running(&self, handle: &RunnerHandle) -> bool {

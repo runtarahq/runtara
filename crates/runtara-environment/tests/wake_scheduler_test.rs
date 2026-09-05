@@ -687,7 +687,7 @@ impl Runner for GatedRunner {
     fn runner_type(&self) -> &'static str {
         "gated"
     }
-    async fn launch_detached(
+    async fn try_launch_detached(
         &self,
         options: &runtara_environment::runner::LaunchOptions,
     ) -> runtara_environment::runner::Result<runtara_environment::runner::RunnerHandle> {
@@ -707,12 +707,6 @@ impl Runner for GatedRunner {
             started_at: Utc::now(),
             metrics: None,
         })
-    }
-    async fn try_launch_detached(
-        &self,
-        options: &runtara_environment::runner::LaunchOptions,
-    ) -> runtara_environment::runner::Result<runtara_environment::runner::RunnerHandle> {
-        self.launch_detached(options).await
     }
     async fn is_running(&self, _handle: &runtara_environment::runner::RunnerHandle) -> bool {
         true

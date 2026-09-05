@@ -1483,7 +1483,7 @@ async fn test_spawn_container_monitor_timeout_enforcement() {
 
     // Register the mock instance in the runner
     runner
-        .launch_detached(&LaunchOptions {
+        .try_launch_detached(&LaunchOptions {
             launch_id: format!("launch-{instance_id}"),
             instance_id: instance_id.clone(),
             tenant_id: tenant_id.to_string(),
@@ -1593,7 +1593,7 @@ async fn test_spawn_container_monitor_no_timeout_on_quick_completion() {
 
     // Launch detached (this will auto-complete in 10ms)
     let handle = runner
-        .launch_detached(&LaunchOptions {
+        .try_launch_detached(&LaunchOptions {
             launch_id: format!("launch-{instance_id}"),
             instance_id: instance_id.clone(),
             tenant_id: tenant_id.to_string(),
@@ -1688,7 +1688,7 @@ async fn test_spawn_container_monitor_timeout_race_condition() {
         .expect("Failed to update instance status");
 
     let handle = runner
-        .launch_detached(&LaunchOptions {
+        .try_launch_detached(&LaunchOptions {
             launch_id: format!("launch-{instance_id}"),
             instance_id: instance_id.clone(),
             tenant_id: tenant_id.to_string(),
@@ -1894,7 +1894,7 @@ async fn test_wait_for_exit_default_impl_returns_on_not_running() {
     let tenant_id = "test-tenant-wait-for-exit";
 
     let handle = runner
-        .launch_detached(&LaunchOptions {
+        .try_launch_detached(&LaunchOptions {
             launch_id: format!("launch-{instance_id}"),
             instance_id: instance_id.clone(),
             tenant_id: tenant_id.to_string(),
@@ -1949,7 +1949,7 @@ async fn test_wait_for_exit_default_impl_returns_on_not_running() {
 // Regression: a run that parks before its launcher returns
 // ============================================================================
 
-/// A runner that parks the instance *inside* `launch_detached`, before it
+/// A runner that parks the instance *inside* `try_launch_detached`, before it
 /// returns — the deterministic version of what a `Delay` or a no-timeout
 /// `WaitForSignal` does in production, where the spawned run reaches
 /// `suspended` in a millisecond or two while the launching caller is still
@@ -1964,7 +1964,7 @@ impl Runner for ParksBeforeReturningRunner {
         "parks-before-returning"
     }
 
-    async fn launch_detached(
+    async fn try_launch_detached(
         &self,
         options: &LaunchOptions,
     ) -> runtara_environment::runner::Result<RunnerHandle> {
@@ -1984,13 +1984,6 @@ impl Runner for ParksBeforeReturningRunner {
             started_at: Utc::now(),
             metrics: None,
         })
-    }
-
-    async fn try_launch_detached(
-        &self,
-        options: &LaunchOptions,
-    ) -> runtara_environment::runner::Result<RunnerHandle> {
-        self.launch_detached(options).await
     }
 
     // Keep the monitor spawned by `handle_start_instance` from concluding

@@ -572,18 +572,20 @@ pub trait Runner: Send + Sync {
     /// Runner type identifier (e.g., "wasm-embedded", "mock")
     fn runner_type(&self) -> &'static str;
 
-    /// Launch an instance without waiting for completion (fire-and-forget).
+    /// Launch an instance without waiting for completion, but only when
+    /// runner capacity is immediately available.
     ///
-    /// Returns a handle that can be used to check status or stop the instance.
-    /// The caller is responsible for registering the instance in the database.
-    async fn launch_detached(&self, options: &LaunchOptions) -> Result<RunnerHandle>;
-
-    /// Launch an instance only when runner capacity is immediately available.
+    /// Returns a handle the caller uses to check status or stop the instance;
+    /// registering the instance in the database is the caller's job. A full
+    /// runner returns [`RunnerError::CapacityUnavailable`] rather than parking
+    /// the caller on an in-memory permit waiter, because the callers that
+    /// matter own a durable queue and must return the launch to it.
     ///
-    /// A full runner returns [`RunnerError::CapacityUnavailable`] without
-    /// parking the caller on an in-memory permit waiter. Durable dispatchers
-    /// use this method; [`Self::launch_detached`] remains for legacy callers
-    /// that intentionally await capacity.
+    /// An implementation that satisfies this by calling
+    /// [`Self::try_prepare_launch`] then [`Self::try_launch_prepared_detached`]
+    /// MUST also override the latter, whose default delegates back here. A
+    /// runner that overrides one and inherits the other recurses forever.
+    /// Runners with no preparation phase inherit both defaults and are fine.
     async fn try_launch_detached(&self, options: &LaunchOptions) -> Result<RunnerHandle>;
 
     /// Prepare an artifact without acquiring a live guest permit.
@@ -602,9 +604,13 @@ pub trait Runner: Send + Sync {
     /// Acquire a run permit and start a previously prepared launch.
     ///
     /// Implementations must consume `prepared`; dropping it releases any
-    /// preparation reservation on every stale/cancel/error path. The default
-    /// deliberately delegates to the existing nonblocking launch path for
-    /// runners whose preparation token is a no-op.
+    /// preparation reservation on every stale/cancel/error path.
+    ///
+    /// The default discards the token and delegates to
+    /// [`Self::try_launch_detached`], which is correct only for a runner whose
+    /// preparation is a no-op — the passthrough token costs nothing to drop.
+    /// A runner that does real preparation and inherits this default throws
+    /// that work away and re-does it; see the note on `try_launch_detached`.
     async fn try_launch_prepared_detached(
         &self,
         options: &LaunchOptions,

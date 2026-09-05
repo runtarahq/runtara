@@ -32,7 +32,7 @@ struct MockInstance {
 pub struct MockRunner {
     instances: Arc<Mutex<HashMap<String, MockInstance>>>,
     launch_count: Arc<AtomicU64>,
-    /// Every `launch_detached` call's options, in order, so a test can assert
+    /// Every `try_launch_detached` call's options, in order, so a test can assert
     /// on what the handler actually handed the runner.
     launches: Arc<std::sync::Mutex<Vec<LaunchOptions>>>,
     /// Optional delay to simulate execution time (in milliseconds)
@@ -94,7 +94,7 @@ impl MockRunner {
         self.launch_count.load(Ordering::SeqCst)
     }
 
-    /// The options passed to the most recent `launch_detached`.
+    /// The options passed to the most recent `try_launch_detached`.
     pub fn last_launch(&self) -> Option<LaunchOptions> {
         self.launches
             .lock()
@@ -136,7 +136,7 @@ impl Runner for MockRunner {
         "mock"
     }
 
-    async fn launch_detached(&self, options: &LaunchOptions) -> Result<RunnerHandle> {
+    async fn try_launch_detached(&self, options: &LaunchOptions) -> Result<RunnerHandle> {
         self.launch_count.fetch_add(1, Ordering::SeqCst);
         self.launches
             .lock()
@@ -220,13 +220,6 @@ impl Runner for MockRunner {
         Ok(handle)
     }
 
-    async fn try_launch_detached(&self, options: &LaunchOptions) -> Result<RunnerHandle> {
-        // The mock does not impose a capacity bound, so every launch is
-        // immediately available. Keeping the same path makes test launch
-        // accounting reflect what the durable dispatcher requested.
-        self.launch_detached(options).await
-    }
-
     async fn is_running(&self, handle: &RunnerHandle) -> bool {
         let instances = self.instances.lock().await;
         instances
@@ -298,7 +291,7 @@ mod tests {
         };
         let options = test_options();
 
-        let handle = runner.launch_detached(&options).await.unwrap();
+        let handle = runner.try_launch_detached(&options).await.unwrap();
 
         assert!(runner.is_running(&handle).await);
 
@@ -320,7 +313,7 @@ mod tests {
         };
         let options = test_options();
 
-        let handle = runner.launch_detached(&options).await.unwrap();
+        let handle = runner.try_launch_detached(&options).await.unwrap();
 
         assert!(runner.is_running(&handle).await);
 
@@ -336,8 +329,8 @@ mod tests {
         let mut replacement = old.clone();
         replacement.launch_id = "test-launch-456".to_string();
 
-        let old_handle = runner.launch_detached(&old).await.unwrap();
-        let replacement_handle = runner.launch_detached(&replacement).await.unwrap();
+        let old_handle = runner.try_launch_detached(&old).await.unwrap();
+        let replacement_handle = runner.try_launch_detached(&replacement).await.unwrap();
 
         runner.stop(&old_handle).await.unwrap();
 
@@ -356,7 +349,7 @@ mod tests {
         let runner = MockRunner::never_completing();
         let options = test_options();
 
-        let handle = runner.launch_detached(&options).await.unwrap();
+        let handle = runner.try_launch_detached(&options).await.unwrap();
 
         // Should be running initially
         assert!(runner.is_running(&handle).await);
@@ -380,7 +373,7 @@ mod tests {
         let mut options = test_options();
         options.start_gate = Some(gate.clone());
 
-        let handle = runner.launch_detached(&options).await.unwrap();
+        let handle = runner.try_launch_detached(&options).await.unwrap();
         assert!(
             !runner.is_running(&handle).await,
             "a reserved launch slot must not look like guest execution before its gate opens"

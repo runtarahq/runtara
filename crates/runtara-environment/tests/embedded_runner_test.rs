@@ -156,7 +156,7 @@ impl StartGateConfirmation for BlockingGateConfirmation {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn launch_detached_completes_and_clears_registry() {
+async fn try_launch_detached_completes_and_clears_registry() {
     let h = harness().await;
     let inst_id = unique("inst-detached");
     let wasm = write_component(h.dir.path(), "ok.wasm", RUN_OK_WAT);
@@ -164,7 +164,7 @@ async fn launch_detached_completes_and_clears_registry() {
 
     let handle = h
         .runner
-        .launch_detached(&options(inst_id.as_str(), &wasm))
+        .try_launch_detached(&options(inst_id.as_str(), &wasm))
         .await
         .expect("launch");
 
@@ -189,7 +189,7 @@ async fn stop_cancels_spinning_instance() {
 
     let handle = h
         .runner
-        .launch_detached(&options(inst_id.as_str(), &wasm))
+        .try_launch_detached(&options(inst_id.as_str(), &wasm))
         .await
         .expect("launch");
 
@@ -231,7 +231,7 @@ async fn detached_gate_allows_preparation_but_blocks_guest_instantiation() {
     let mut launch = options(inst_id.as_str(), &wasm);
     launch.start_gate = Some(gate.clone());
 
-    let handle = h.runner.launch_detached(&launch).await.expect("launch");
+    let handle = h.runner.try_launch_detached(&launch).await.expect("launch");
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert!(
         h.runner.is_running(&handle).await,
@@ -296,7 +296,7 @@ async fn missing_component_is_binary_not_found() {
     let missing = h.dir.path().join("nope.wasm");
     let err = h
         .runner
-        .launch_detached(&options(inst_id.as_str(), &missing))
+        .try_launch_detached(&options(inst_id.as_str(), &missing))
         .await
         .expect_err("must fail");
     assert!(matches!(err, RunnerError::BinaryNotFound(_)));
