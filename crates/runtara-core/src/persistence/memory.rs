@@ -822,6 +822,65 @@ mod tests {
             .expect("append");
     }
 
+    #[tokio::test]
+    async fn pairs_and_retires_events_with_non_identifier_names() {
+        let backend = InMemoryPersistence::new();
+        backend.register_instance("inst", "tenant").await.unwrap();
+        let vocabulary = EventVocabulary::new(crate::persistence::EventVocabularySpec {
+            start_subtype: "unit-open",
+            end_subtype: "unit-close",
+            correlation_key: "unit.id",
+            kind_key: "kind name",
+            label_key: "étiquette",
+            inputs_key: "in'put",
+            outputs_key: "out.put",
+            error_key: "failure detail",
+            error_flag_key: "is-error",
+            launched_at_key: "began.ms",
+            settled_at_key: "settled.ms",
+        })
+        .unwrap();
+        append(
+            &backend,
+            "unit-open",
+            serde_json::json!({
+                "unit.id": "u1", "kind name": "work", "étiquette": "label", "in'put": {"x": 1},
+            }),
+        )
+        .await;
+        append(
+            &backend,
+            "unit-close",
+            serde_json::json!({
+                "unit.id": "u1", "out.put": {"x": 2},
+            }),
+        )
+        .await;
+        let filter = ListPairedRecordsFilter::default();
+        let records = backend
+            .list_paired_records("inst", &vocabulary, &filter, 10, 0)
+            .await
+            .unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].status, PairedRecordStatus::Completed);
+        assert_eq!(records[0].label.as_deref(), Some("label"));
+        assert_eq!(records[0].outputs, Some(serde_json::json!({"x": 2})));
+        assert_eq!(
+            backend
+                .count_paired_records("inst", &vocabulary, &filter)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            backend
+                .delete_paired_events_older_than(&vocabulary, Utc::now() + Duration::seconds(1), 10)
+                .await
+                .unwrap(),
+            2
+        );
+    }
+
     /// Pairing must be driven entirely by the supplied names.
     #[tokio::test]
     async fn pairs_records_under_a_vocabulary_that_shares_nothing_with_the_dsl() {
