@@ -479,7 +479,8 @@ impl ExecutionOutbox {
         let mut tx = self.pool.begin().await?;
         let released = release_admission_in_tx(&mut tx, request_id, reason).await?;
         tx.commit().await?;
-        Ok(released)
+        release_valkey_admission(released.clone()).await;
+        Ok(released.is_some())
     }
 
     /// Release by the stable execution identity for runtime paths that have an
@@ -643,8 +644,9 @@ impl ExecutionOutbox {
                 && row.outbox_state == "leased"
                 && !row.lease_expired;
             if row.deadline_elapsed && !handoff_lease_is_live {
-                expire_request_in_tx(&mut tx, request_id).await?;
+                let released = expire_request_in_tx(&mut tx, request_id).await?;
                 tx.commit().await?;
+                release_valkey_admission(released).await;
                 return Ok(DurableLaunchClaim::Expired);
             }
 
@@ -802,6 +804,7 @@ impl ExecutionOutbox {
         .bind(reason)
         .fetch_optional(&mut *tx)
         .await?;
+        let mut released_tenant: Option<String> = None;
         if terminalized.is_some() {
             sqlx::query(
                 r#"
@@ -819,9 +822,10 @@ impl ExecutionOutbox {
             .bind(reason)
             .execute(&mut *tx)
             .await?;
-            release_admission_in_tx(&mut tx, request_id, reason).await?;
+            released_tenant = release_admission_in_tx(&mut tx, request_id, reason).await?;
         }
         tx.commit().await?;
+        release_valkey_admission(released_tenant).await;
         Ok(terminalized.is_some())
     }
 
@@ -1042,6 +1046,7 @@ impl ExecutionOutbox {
         .fetch_all(&mut *tx)
         .await?;
 
+        let mut released_tenants: Vec<String> = Vec::new();
         for request_id in &request_ids {
             sqlx::query(
                 r#"
@@ -1056,11 +1061,14 @@ impl ExecutionOutbox {
             .bind(request_id)
             .execute(&mut *tx)
             .await?;
-            release_admission_in_tx(&mut tx, *request_id, "execution_outbox_deadline_exceeded")
-                .await?;
+            released_tenants.extend(
+                release_admission_in_tx(&mut tx, *request_id, "execution_outbox_deadline_exceeded")
+                    .await?,
+            );
         }
 
         tx.commit().await?;
+        release_valkey_admission(released_tenants).await;
         Ok(request_ids.len())
     }
 
@@ -1161,11 +1169,18 @@ fn relay_delivery_concurrency() -> usize {
     })
 }
 
+/// Mark one durable reservation released, reporting the tenant it belonged to.
+///
+/// Deliberately does **not** touch the Valkey counter. This runs inside the
+/// caller's transaction, and a decrement here would already have happened if
+/// that transaction then rolled back, leaving the counter below the durable
+/// rows and silently admitting past the bound. The caller decrements after its
+/// commit instead, via [`release_valkey_admission`].
 async fn release_admission_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     request_id: Uuid,
     reason: &str,
-) -> Result<bool, sqlx::Error> {
+) -> Result<Option<String>, sqlx::Error> {
     let tenant_id = sqlx::query_scalar::<_, String>(
         r#"
         UPDATE execution_admission_reservations
@@ -1180,20 +1195,38 @@ async fn release_admission_in_tx(
     .await?;
 
     let Some(tenant_id) = tenant_id else {
-        return Ok(false);
+        return Ok(None);
     };
 
-    if crate::workers::admission_counter::is_enabled() {
-        // The row above is the durable record of this release; the Valkey
-        // counter is the cache in front of it. A failed decrement therefore
-        // holds a reservation until the next restart reseeds from those rows,
-        // which is why it warns rather than failing the release.
-        //
-        // This runs inside the caller's transaction, so a rollback after this
-        // point leaves the counter one below the durable rows -- the direction
-        // that admits slightly early rather than refusing work. The rows stay
-        // authoritative and `admission_counter::install` reseeds from them on
-        // the next start.
+    if !crate::workers::admission_counter::is_enabled() {
+        sqlx::query(
+            r#"
+            UPDATE execution_admission_tenants
+            SET reserved_count = GREATEST(reserved_count - 1, 0), updated_at = NOW()
+            WHERE tenant_id = $1
+            "#,
+        )
+        .bind(&tenant_id)
+        .execute(&mut **tx)
+        .await?;
+    }
+    Ok(Some(tenant_id))
+}
+
+/// Hand released reservations back to the Valkey counter, after the durable
+/// rows recording those releases have committed.
+///
+/// The rows are authoritative; this counter is the cache in front of them. A
+/// failed decrement therefore only holds a slot until the next start reseeds
+/// from those rows, so it warns rather than failing the caller's work.
+async fn release_valkey_admission<I>(tenants: I)
+where
+    I: IntoIterator<Item = String>,
+{
+    if !crate::workers::admission_counter::is_enabled() {
+        return;
+    }
+    for tenant_id in tenants {
         if let Err(error) = crate::workers::admission_counter::release(&tenant_id).await {
             warn!(
                 tenant_id = %tenant_id,
@@ -1201,26 +1234,13 @@ async fn release_admission_in_tx(
                 "Failed to release Valkey admission reservation; counter reseeds on restart"
             );
         }
-        return Ok(true);
     }
-
-    sqlx::query(
-        r#"
-        UPDATE execution_admission_tenants
-        SET reserved_count = GREATEST(reserved_count - 1, 0), updated_at = NOW()
-        WHERE tenant_id = $1
-        "#,
-    )
-    .bind(tenant_id)
-    .execute(&mut **tx)
-    .await?;
-    Ok(true)
 }
 
 async fn expire_request_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     request_id: Uuid,
-) -> Result<(), sqlx::Error> {
+) -> Result<Option<String>, sqlx::Error> {
     sqlx::query(
         r#"
         UPDATE execution_outbox
@@ -1249,8 +1269,7 @@ async fn expire_request_in_tx(
     .bind(request_id)
     .execute(&mut **tx)
     .await?;
-    release_admission_in_tx(tx, request_id, "execution_outbox_deadline_exceeded").await?;
-    Ok(())
+    release_admission_in_tx(tx, request_id, "execution_outbox_deadline_exceeded").await
 }
 
 async fn reset_launch_handoff_in_tx(
