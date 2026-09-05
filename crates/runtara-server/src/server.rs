@@ -914,6 +914,25 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
+    // Admission admits work the runner must then execute, and an admitted
+    // request holds its reservation until it terminates or parks. A ceiling
+    // well above the runner's own bound therefore cannot raise throughput --
+    // the surplus only queues, consuming the budget and turning offered load
+    // into 403s that clients wait on. Say so at boot rather than leaving it to
+    // be inferred from a saturated pipeline.
+    let run_capacity = runtara_environment::runner::embedded::max_concurrent_runs();
+    let admission_cap = config::raw_max_concurrent_executions();
+    if admission_cap > run_capacity.saturating_mul(4) {
+        eprintln!(
+            "⚠ MAX_CONCURRENT_EXECUTIONS={admission_cap} is {ratio}x this process's execution \
+             capacity ({run_capacity} concurrent runs). Admission beyond that can only queue, \
+             and queued work holds its slot -- expect 403s while most of the budget waits. \
+             Consider {suggested}.",
+            ratio = admission_cap / run_capacity.max(1),
+            suggested = run_capacity.saturating_mul(2),
+        );
+    }
+
     // Source admission counting moves to Valkey when one is configured and
     // `RUNTARA_VALKEY_ADMISSION` allows it. Installed here, before any worker
     // or route can take a reservation, and seeded from the durable

@@ -1064,7 +1064,13 @@ async fn resolve_run_input(
 /// is a throughput one: on a small host, letting a fast producer stack runs
 /// exhausts the machine and the process is killed, which is a far worse outcome
 /// than queueing. `RUNTARA_MAX_CONCURRENT_RUNS`, defaulting to four per core.
-fn max_concurrent_runs() -> usize {
+/// How many guests this process will execute concurrently.
+///
+/// Public because it is the pipeline's real execution capacity, and the
+/// server's admission ceiling is derived from it: admitting substantially
+/// more than this cannot raise throughput, because the surplus can only
+/// queue while holding an admission reservation.
+pub fn max_concurrent_runs() -> usize {
     std::env::var("RUNTARA_MAX_CONCURRENT_RUNS")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())

@@ -123,7 +123,7 @@ impl Config {
         let max_concurrent_executions: usize = std::env::var("MAX_CONCURRENT_EXECUTIONS")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or_else(|| num_cpus::get() * 32);
+            .unwrap_or_else(default_max_concurrent_executions);
 
         let checkpoint_ttl_hours: u64 = parse_u64_or("CHECKPOINT_TTL_HOURS", 48)?;
         let adaptive_rate_limiting_enabled: bool = parse_bool_or("ADAPTIVE_RATE_LIMITING", true)?;
@@ -603,6 +603,20 @@ pub fn raw_max_concurrent_executions() -> usize {
     get().max_concurrent_executions
 }
 
+/// Admission ceiling used when `MAX_CONCURRENT_EXECUTIONS` is unset.
+///
+/// Derived from the runner's own bound rather than from the core count
+/// directly, so the two cannot drift apart. Admission is allowed the work the
+/// runner can actually execute plus a queue of the same depth; beyond that a
+/// higher ceiling buys queue, not throughput, because an admitted request
+/// holds its reservation from intake until it terminates or parks. A ceiling
+/// far above the runner's capacity therefore shows up as 403s with most of the
+/// budget sitting in `queued` — observed in production as 78 of 123 held
+/// reservations waiting on a runner that only executes 16 at a time.
+fn default_max_concurrent_executions() -> usize {
+    runtara_environment::runner::embedded::max_concurrent_runs().saturating_mul(2)
+}
+
 /// Get checkpoint TTL in hours.
 pub fn checkpoint_ttl_hours() -> u64 {
     get().checkpoint_ttl_hours
@@ -734,6 +748,28 @@ pub fn valkey_admission_enabled() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The admission ceiling exists to bound work the runner will execute, so
+    /// it must stay anchored to the runner's own bound. These drifted apart
+    /// once -- admission defaulted to `num_cpus * 32` while the runner ran
+    /// `num_cpus * 4` -- and the 8x gap surfaced in production as 403s with
+    /// most of the budget held by requests that were only queued.
+    #[test]
+    fn admission_default_tracks_the_runner_bound() {
+        let runs = runtara_environment::runner::embedded::max_concurrent_runs();
+        let admission = default_max_concurrent_executions();
+
+        assert_eq!(
+            admission,
+            runs * 2,
+            "admission default must stay derived from the runner bound"
+        );
+        assert!(
+            admission >= runs,
+            "admission below the runner bound would starve the runner: \
+             admission={admission} runs={runs}"
+        );
+    }
 
     #[test]
     fn parses_bool_values() {
