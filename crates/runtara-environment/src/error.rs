@@ -8,10 +8,6 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum Error {
-    /// Configuration loading failed.
-    #[error("Configuration error: {0}")]
-    Config(#[from] crate::config::ConfigError),
-
     /// Database operation failed.
     #[error("Database error: {0}")]
     Database(#[from] sqlx::Error),
@@ -43,10 +39,6 @@ pub enum Error {
     /// Request validation failed.
     #[error("Invalid request: {0}")]
     InvalidRequest(String),
-
-    /// Failed to proxy request to Core.
-    #[error("Core proxy error: {0}")]
-    CoreProxy(String),
 
     /// Other error.
     #[error("{0}")]

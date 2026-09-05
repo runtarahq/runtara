@@ -107,8 +107,6 @@ pub struct EnvironmentHandlerState {
     pub version: String,
     /// Runner for launching instances.
     pub runner: Arc<dyn Runner>,
-    /// Address of runtara-core for instances to connect.
-    pub core_addr: String,
     /// Data directory for images and instance I/O.
     pub data_dir: PathBuf,
     /// Request timeout for database operations.
@@ -131,19 +129,6 @@ const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// generation remains recoverable by the expiry scan after this local budget.
 const START_GATE_MONITOR_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Resolve the default standalone-Environment execution timeout.
-///
-/// Production callers should use
-/// [`EnvironmentHandlerState::execution_timeout_policy`] instead: the embedded
-/// server injects one policy into initial starts, resumes, and wakes. This
-/// wrapper remains for external callers that instantiate a standalone
-/// Environment without a policy override.
-pub fn default_instance_timeout() -> Duration {
-    ExecutionTimeoutPolicy::default()
-        .default_timeout()
-        .as_duration()
-}
-
 impl EnvironmentHandlerState {
     /// Create a new environment handler state.
     ///
@@ -152,13 +137,11 @@ impl EnvironmentHandlerState {
     /// * `pool` - PostgreSQL pool for Environment-specific queries (reads with JOINs)
     /// * `persistence` - Core persistence layer for all instance write operations
     /// * `runner` - Container runner for launching instances
-    /// * `core_addr` - Address of runtara-core for instances to connect
     /// * `data_dir` - Data directory for images and instance I/O
     pub fn new(
         pool: PgPool,
         persistence: Arc<dyn Persistence>,
         runner: Arc<dyn Runner>,
-        core_addr: String,
         data_dir: PathBuf,
     ) -> Self {
         Self {
@@ -167,7 +150,6 @@ impl EnvironmentHandlerState {
             start_time: std::time::Instant::now(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             runner,
-            core_addr,
             data_dir: ensure_absolute_path(data_dir),
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
             execution_timeout_policy: ExecutionTimeoutPolicy::default(),
@@ -1574,67 +1556,6 @@ pub fn spawn_container_monitor(
     });
 }
 
-/// Response for listing agents.
-pub struct ListAgentsResponse {
-    /// JSON-encoded list of agents.
-    pub agents_json: Vec<u8>,
-}
-
-/// Handle list agents request.
-///
-/// This returns metadata about all available agents and their capabilities.
-pub async fn handle_list_agents(_state: &EnvironmentHandlerState) -> Result<ListAgentsResponse> {
-    // The environment is no longer the agent-metadata authority. The agent
-    // catalog now lives on runtara-server, sourced from the in-process
-    // component dispatcher (component `meta.json`). This legacy endpoint is
-    // deprecated.
-    Err(crate::error::Error::Other(
-        "Environment-side /api/v1/agents was removed. Use runtara-server's \
-         GET /api/runtime/agents instead."
-            .to_string(),
-    ))
-}
-
-/// Request to get capability details.
-pub struct GetCapabilityRequest {
-    /// Agent module name.
-    pub agent_id: String,
-    /// Capability ID.
-    pub capability_id: String,
-}
-
-/// Response for getting capability details.
-pub struct GetCapabilityResponse {
-    /// Whether the capability was found.
-    pub found: bool,
-    /// JSON-encoded capability info.
-    pub capability_json: Vec<u8>,
-    /// JSON-encoded input fields.
-    pub inputs_json: Vec<u8>,
-}
-
-/// Handle get capability request.
-///
-/// This returns detailed information about a specific capability including its input schema.
-#[instrument(skip(_state, request), fields(
-    agent_id = %request.agent_id,
-    capability_id = %request.capability_id,
-))]
-pub async fn handle_get_capability(
-    _state: &EnvironmentHandlerState,
-    request: GetCapabilityRequest,
-) -> Result<GetCapabilityResponse> {
-    // See `handle_list_agents`: agent + capability metadata now lives on
-    // runtara-server (component dispatcher), not the environment's
-    // statically-linked registry.
-    Err(crate::error::Error::Other(
-        "Environment-side /api/v1/agents/{agent}/capabilities/{capability} was \
-         removed. Use runtara-server's \
-         GET /api/runtime/agents/{name}/capabilities/{capability} instead."
-            .to_string(),
-    ))
-}
-
 // ============================================================================
 // Reads and signals
 //
@@ -1649,15 +1570,6 @@ pub async fn handle_get_capability(
 // bodies): they are what the management protocol already promises, and keeping
 // them identical is what makes this a move rather than a rewrite.
 // ============================================================================
-
-/// Normalize a raw instance status for the wire.
-///
-/// Unknown values pass through untouched rather than being coerced, so a status
-/// added to the database but not yet to this list is visible instead of silently
-/// becoming something else.
-pub fn instance_status_to_string(status: &str) -> &str {
-    status
-}
 
 /// Image summary as the management protocol reports it.
 #[derive(Debug, Serialize)]
@@ -1900,7 +1812,7 @@ pub async fn handle_get_instance_status(
 
     Ok(InstanceStatusResponse {
         found: true,
-        status: Some(instance_status_to_string(&inst.status).to_string()),
+        status: Some(inst.status),
         tenant_id: Some(inst.tenant_id),
         instance_id: inst.instance_id,
         image_id: inst.image_id,
@@ -2003,7 +1915,7 @@ pub async fn handle_list_instances(
                 tenant_id: inst.tenant_id,
                 image_id: inst.image_id,
                 image_name: inst.image_name,
-                status: instance_status_to_string(&inst.status).to_string(),
+                status: inst.status,
                 created_at_ms: inst.created_at.timestamp_millis(),
                 started_at_ms: inst.started_at.map(|t| t.timestamp_millis()),
                 finished_at_ms: inst.finished_at.map(|t| t.timestamp_millis()),

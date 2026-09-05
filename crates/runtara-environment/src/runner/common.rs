@@ -18,6 +18,35 @@ use runtara_core::persistence::Persistence;
 
 use super::traits::{Result, RunnerError};
 
+/// How much of a stderr preview is kept for diagnostics.
+const STDERR_PREVIEW_CHARS: usize = 2000;
+
+/// Cap a stderr preview at `max` characters, marking it when truncated.
+///
+/// Counted in characters, not bytes. Guest stderr is arbitrary text, and
+/// slicing a `String` at a fixed byte offset panics whenever that offset lands
+/// inside a multi-byte character — in the detached monitor task, where the
+/// panic is furthest from anyone who could interpret it.
+fn truncate_preview(preview: String, max: usize) -> String {
+    match preview.char_indices().nth(max) {
+        Some((cut, _)) => format!("{}...", &preview[..cut]),
+        None => preview,
+    }
+}
+
+/// Parse a boolean env var accepting the common opt-in forms: `true/false`,
+/// `1/0`, `yes/no`, `on/off` (case-insensitive). Unknown values are `false`.
+///
+/// Deliberately the inverse of `runtara_core::config::parse_enabled_env`, which
+/// backs the `*_ENABLED` opt-outs: this one guards a setting that must stay off
+/// unless a deployment explicitly asks for it.
+fn parse_bool_lenient(s: &str) -> bool {
+    matches!(
+        s.trim().to_ascii_lowercase().as_str(),
+        "true" | "1" | "yes" | "on"
+    )
+}
+
 /// Configuration shared by workflow runners.
 #[derive(Clone, Debug)]
 pub struct WorkflowRunnerConfig {
@@ -59,7 +88,7 @@ impl WorkflowRunnerConfig {
             ),
             skip_cert_verification: std::env::var("RUNTARA_SKIP_CERT_VERIFICATION")
                 .ok()
-                .map(|v| crate::config::parse_bool_lenient(&v))
+                .map(|v| parse_bool_lenient(&v))
                 .unwrap_or(false),
             // `RUNTARA_CONNECTION_SERVICE_URL` is the runner's own setting and
             // wins; `CONNECTION_SERVICE_URL` is the general name the rest of the
@@ -197,13 +226,7 @@ pub(crate) async fn load_stderr(
                 .collect();
 
             if !lines.is_empty() {
-                let preview = lines.join("\n");
-                let truncated = if preview.len() > 2000 {
-                    format!("{}...", &preview[..2000])
-                } else {
-                    preview
-                };
-                return Some(truncated);
+                return Some(truncate_preview(lines.join("\n"), STDERR_PREVIEW_CHARS));
             }
         }
     }
@@ -213,7 +236,9 @@ pub(crate) async fn load_stderr(
 
 #[cfg(test)]
 mod tests {
-    use super::{WorkflowRunnerConfig, build_env};
+    use super::{
+        STDERR_PREVIEW_CHARS, WorkflowRunnerConfig, build_env, parse_bool_lenient, truncate_preview,
+    };
     use std::{path::PathBuf, time::Duration};
 
     fn config() -> WorkflowRunnerConfig {
@@ -223,6 +248,51 @@ mod tests {
             skip_cert_verification: false,
             connection_service_url: None,
         }
+    }
+
+    #[test]
+    fn opt_in_booleans_default_to_off_for_anything_unrecognised() {
+        for on in ["true", "1", "yes", "on", " TRUE ", "On"] {
+            assert!(parse_bool_lenient(on), "{on:?} must read as enabled");
+        }
+        for off in ["false", "0", "no", "off", "", "disabled", "yep"] {
+            assert!(!parse_bool_lenient(off), "{off:?} must read as disabled");
+        }
+    }
+
+    /// Guest stderr is arbitrary text. Truncating it by byte offset panics the
+    /// monitor task whenever the cut lands inside a multi-byte character, so
+    /// the cap is counted in characters.
+    #[test]
+    fn a_stderr_preview_is_truncated_on_a_character_boundary() {
+        // An em dash is 3 bytes, so byte 2000 falls *inside* a character:
+        // this is the input the old byte slice `&preview[..2000]` panicked on.
+        let dashes = "—".repeat(STDERR_PREVIEW_CHARS + 50);
+        assert!(
+            !dashes.is_char_boundary(STDERR_PREVIEW_CHARS),
+            "the fixture must put a character across the old byte cut"
+        );
+
+        let truncated = truncate_preview(dashes.clone(), STDERR_PREVIEW_CHARS);
+        assert!(truncated.ends_with("..."), "truncation must be marked");
+        assert_eq!(
+            truncated.chars().count(),
+            STDERR_PREVIEW_CHARS + 3,
+            "the cap counts characters, not bytes"
+        );
+        assert!(dashes.starts_with(truncated.trim_end_matches('.')));
+
+        // A multi-byte string under the cap survives whole and unmarked.
+        let short = "héllo wörld — ünicode".to_string();
+        assert_eq!(truncate_preview(short.clone(), STDERR_PREVIEW_CHARS), short);
+
+        // Exactly at the cap is not truncated; one past it is.
+        let exact = "é".repeat(STDERR_PREVIEW_CHARS);
+        assert_eq!(truncate_preview(exact.clone(), STDERR_PREVIEW_CHARS), exact);
+        assert!(
+            truncate_preview("é".repeat(STDERR_PREVIEW_CHARS + 1), STDERR_PREVIEW_CHARS)
+                .ends_with("...")
+        );
     }
 
     #[test]

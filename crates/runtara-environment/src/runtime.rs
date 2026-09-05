@@ -22,7 +22,6 @@
 //!     let runtime = EnvironmentRuntime::builder()
 //!         .pool(pool)
 //!         .runner(runner)
-//!         .core_addr("127.0.0.1:8001")  // External Core server
 //!         .build()?
 //!         .start()
 //!         .await?;
@@ -126,7 +125,6 @@ pub struct EnvironmentRuntimeBuilder {
     pool: Option<PgPool>,
     core_persistence: Option<Arc<dyn Persistence>>,
     runner: Option<Arc<dyn Runner>>,
-    core_addr: String,
     data_dir: PathBuf,
     wake_poll_interval: Duration,
     wake_batch_size: i64,
@@ -148,7 +146,6 @@ impl Default for EnvironmentRuntimeBuilder {
             pool: None,
             core_persistence: None,
             runner: None,
-            core_addr: "127.0.0.1:8001".to_string(),
             data_dir: PathBuf::from(".data"),
             wake_poll_interval: wake_poll_interval_from_env(),
             wake_batch_size: wake_batch_size_from_env(),
@@ -190,14 +187,6 @@ impl EnvironmentRuntimeBuilder {
     /// Set the container runner (required).
     pub fn runner(mut self, runner: Arc<dyn Runner>) -> Self {
         self.runner = Some(runner);
-        self
-    }
-
-    /// Set the address of runtara-core (passed to instances).
-    ///
-    /// Default: `127.0.0.1:8001`
-    pub fn core_addr(mut self, addr: impl Into<String>) -> Self {
-        self.core_addr = addr.into();
         self
     }
 
@@ -319,7 +308,6 @@ impl EnvironmentRuntimeBuilder {
             pool,
             persistence,
             runner,
-            core_addr: self.core_addr,
             data_dir: self.data_dir,
             wake_poll_interval: self.wake_poll_interval,
             wake_batch_size: self.wake_batch_size,
@@ -342,7 +330,6 @@ pub struct EnvironmentRuntimeConfig {
     pool: PgPool,
     persistence: Arc<dyn Persistence>,
     runner: Arc<dyn Runner>,
-    core_addr: String,
     data_dir: PathBuf,
     wake_poll_interval: Duration,
     wake_batch_size: i64,
@@ -377,7 +364,6 @@ impl EnvironmentRuntimeConfig {
                 self.pool.clone(),
                 self.persistence.clone(),
                 self.runner.clone(),
-                self.core_addr.clone(),
                 self.data_dir.clone(),
             )
             .with_request_timeout(self.request_timeout)
@@ -403,18 +389,12 @@ impl EnvironmentRuntimeConfig {
             concurrency: self.wake_concurrency,
             claim_lease: self.wake_claim_lease,
             failed_wake_retry_delay: Duration::from_secs(5),
-            core_addr: self.core_addr.clone(),
-            data_dir: self.data_dir.clone(),
         };
 
-        let wake_scheduler = WakeScheduler::new(
-            self.pool.clone(),
-            self.persistence.clone(),
-            self.runner.clone(),
-            wake_config,
-        )
-        .with_drain(drain.clone())
-        .with_launch_control(launch_notifier.clone(), lifecycle_observers.clone());
+        let wake_scheduler =
+            WakeScheduler::new(self.pool.clone(), self.persistence.clone(), wake_config)
+                .with_drain(drain.clone())
+                .with_launch_control(launch_notifier.clone(), lifecycle_observers.clone());
 
         let wake_shutdown = wake_scheduler.shutdown_handle();
 
@@ -494,10 +474,7 @@ impl EnvironmentRuntimeConfig {
             image_cleanup_worker.run().await;
         });
 
-        info!(
-            core_addr = %self.core_addr,
-            "EnvironmentRuntime started"
-        );
+        info!("EnvironmentRuntime started");
 
         Ok(EnvironmentRuntime {
             wake_handle,
@@ -1041,7 +1018,6 @@ mod tests {
         assert!(builder.pool.is_none());
         assert!(builder.core_persistence.is_none());
         assert!(builder.runner.is_none());
-        assert_eq!(builder.core_addr, "127.0.0.1:8001");
         assert_eq!(builder.data_dir, PathBuf::from(".data"));
         assert_eq!(builder.wake_poll_interval, Duration::from_secs(5));
         // Batch of 10 could not feed a concurrent waker; the interval is now
@@ -1116,28 +1092,12 @@ mod tests {
         let builder_new = EnvironmentRuntimeBuilder::new();
         let builder_default = EnvironmentRuntimeBuilder::default();
 
-        assert_eq!(builder_new.core_addr, builder_default.core_addr);
         assert_eq!(builder_new.data_dir, builder_default.data_dir);
         assert_eq!(
             builder_new.wake_poll_interval,
             builder_default.wake_poll_interval
         );
         assert_eq!(builder_new.wake_batch_size, builder_default.wake_batch_size);
-    }
-
-    #[test]
-    fn test_builder_core_addr() {
-        let builder = EnvironmentRuntimeBuilder::new().core_addr("10.0.0.1:8001");
-
-        assert_eq!(builder.core_addr, "10.0.0.1:8001");
-    }
-
-    #[test]
-    fn test_builder_core_addr_from_string() {
-        let addr = String::from("custom-host:8001");
-        let builder = EnvironmentRuntimeBuilder::new().core_addr(addr);
-
-        assert_eq!(builder.core_addr, "custom-host:8001");
     }
 
     #[test]
@@ -1172,12 +1132,10 @@ mod tests {
     #[test]
     fn test_builder_chaining() {
         let builder = EnvironmentRuntimeBuilder::new()
-            .core_addr("core.local:8001")
             .data_dir("/data")
             .wake_poll_interval(Duration::from_secs(10))
             .wake_batch_size(25);
 
-        assert_eq!(builder.core_addr, "core.local:8001");
         assert_eq!(builder.data_dir, PathBuf::from("/data"));
         assert_eq!(builder.wake_poll_interval, Duration::from_secs(10));
         assert_eq!(builder.wake_batch_size, 25);
@@ -1200,7 +1158,7 @@ mod tests {
         let builder = EnvironmentRuntime::builder();
 
         // Should have default values
-        assert_eq!(builder.core_addr, "127.0.0.1:8001");
+        assert_eq!(builder.data_dir, PathBuf::from(".data"));
     }
 
     #[test]
@@ -1411,14 +1369,5 @@ mod tests {
         assert!(fresh_reason.is_none());
 
         tx.rollback().await.expect("roll back test transaction");
-    }
-
-    #[test]
-    fn test_builder_core_addr_overwrite() {
-        let builder = EnvironmentRuntimeBuilder::new()
-            .core_addr("host1:8001")
-            .core_addr("host2:8001");
-
-        assert_eq!(builder.core_addr, "host2:8001");
     }
 }
