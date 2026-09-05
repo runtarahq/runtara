@@ -20,8 +20,17 @@
 # default 200 instances would take ~100s; the threshold here is 30s.
 #
 # It also asserts the properties that make the concurrent batch claim safe:
-# every instance completes exactly once (no duplicate launch), and none is
-# left stranded `suspended` with no wake deadline.
+# every instance is woken exactly once (no duplicate claim), and none is left
+# stranded `suspended` with no wake deadline.
+#
+# What it deliberately does NOT assert is that the instances COMPLETE. Forcing
+# `sleep_until` makes the scheduler treat a row as due, but the Delay lowering
+# checkpoints an ABSOLUTE deadline and the guest honours that: a woken instance
+# replays, finds its hour is not up, and re-parks on the same deadline. That is
+# the contract — e2e/test_durable_delay_parks_and_wakes.sh asserts the re-park
+# directly — so a completion count here could only ever be zero. The subject of
+# this test is the scheduler's claim rate, and the observable that belongs to it
+# is one wake generation per parked instance.
 #
 # Prereqs: Postgres reachable on ${POSTGRES_HOST}:${POSTGRES_PORT} (host `psql`,
 # or a `runtara-dev-postgres` docker container as fallback), docker (isolated
@@ -94,6 +103,12 @@ fi
 
 api_post() { curl -sS --max-time "${3:-60}" -X POST -H "Content-Type: application/json" -d "$2" "${API}$1"; }
 rt_count() { psql_quiet -d "${TEST_DB_RUNTIME}" -c "SELECT COUNT(*) FROM instances WHERE $1" | tr -d '[:space:]'; }
+launch_count() { psql_quiet -d "${TEST_DB_RUNTIME}" -c "SELECT COUNT(*) FROM instance_launches WHERE $1" | tr -d '[:space:]'; }
+# Instances whose wake generation has been carried all the way through the
+# dispatcher to a runner and settled. A `queued` wake means the scheduler
+# claimed the row but nothing has launched it yet, which is exactly the state a
+# too-early assertion would mistake for a drained backlog.
+woken_instances() { psql_quiet -d "${TEST_DB_RUNTIME}" -c "SELECT COUNT(DISTINCT instance_id) FROM instance_launches WHERE kind='wake' AND state IN ('suspended','completed','failed','cancelled')" | tr -d '[:space:]'; }
 
 cleanup() {
     if [ -n "${SERVER_PID}" ] && kill -0 "${SERVER_PID}" 2>/dev/null; then
@@ -246,13 +261,13 @@ START=$(date +%s)
 DONE=0
 DEADLINE=$(( START + DRAIN_BUDGET_S ))
 while [ "$(date +%s)" -lt "${DEADLINE}" ]; do
-    DONE=$(rt_count "status='completed'")
+    DONE=$(woken_instances)
     [ "${DONE}" -ge "${INSTANCES}" ] && break
     sleep 1
 done
 ELAPSED=$(( $(date +%s) - START ))
 
-echo "  drained ${DONE}/${INSTANCES} in ${ELAPSED}s"
+echo "  woke ${DONE}/${INSTANCES} in ${ELAPSED}s"
 
 if [ "${FAILED}" -gt 0 ]; then
     print_error "${FAILED} launch request(s) were rejected — the backlog is not the size this test thinks it is"
@@ -300,23 +315,32 @@ else
     print_success "Full batches spanned ${FULL_SPAN_MS}ms, well inside the ${WAKE_POLL_INTERVAL_MS}ms idle interval"
 fi
 
+# Coverage, not completion. Forcing `sleep_until` makes the SCHEDULER treat a
+# row as due; it does not move the absolute deadline the guest checkpointed, so
+# a woken instance replays, finds its Delay still unmet and re-parks — which is
+# the documented contract, asserted directly by
+# e2e/test_durable_delay_parks_and_wakes.sh. What this test owns is that the
+# whole backlog was claimed and handed to a runner, one generation apiece.
 if [ "${DONE}" -lt "${INSTANCES}" ]; then
-    print_error "Backlog did not fully drain: ${DONE}/${INSTANCES} in ${ELAPSED}s."
+    print_error "Backlog did not fully drain: ${DONE}/${INSTANCES} woken in ${ELAPSED}s."
     print_error "The scheduler checks above pass or fail independently of host speed;"
     print_error "if they passed, suspect the box rather than the wake path."
     FAILURES=$((FAILURES+1))
 else
-    print_success "Backlog drained: ${INSTANCES} in ${ELAPSED}s"
+    print_success "Backlog drained: ${INSTANCES} wake generations in ${ELAPSED}s"
 fi
 
-# Every instance exactly once: a duplicate launch means two guests ran the
-# same in-flight step.
-DUPES=$(psql_quiet -d "${TEST_DB_RUNTIME}" -c "SELECT COUNT(*) FROM (SELECT instance_id FROM instance_events WHERE event_type='completed' GROUP BY instance_id HAVING COUNT(*) > 1) d" | tr -d '[:space:]')
+# Every instance exactly once: a second wake generation for the same instance
+# means the concurrent batch claim handed one row to two dispatchers, and two
+# guests would run the same in-flight step. A re-parked instance is due again
+# an hour out, so within this budget one apiece is the only correct answer.
+DUPES=$(psql_quiet -d "${TEST_DB_RUNTIME}" -c "SELECT COUNT(*) FROM (SELECT instance_id FROM instance_launches WHERE kind='wake' GROUP BY instance_id HAVING COUNT(*) > 1) d" | tr -d '[:space:]')
+TOTAL_WAKES=$(launch_count "kind='wake'")
 if [ "${DUPES}" != "0" ]; then
-    print_error "${DUPES} instance(s) completed more than once — duplicate launch."
+    print_error "${DUPES} instance(s) got more than one wake generation — duplicate claim."
     FAILURES=$((FAILURES+1))
 else
-    print_success "No duplicate completions"
+    print_success "No duplicate wakes (${TOTAL_WAKES} generations for ${INSTANCES} instances)"
 fi
 
 # Nothing stranded. The claim leases rather than clears, so a suspended row with
