@@ -242,7 +242,7 @@ impl Persistence for MockPersistence {
         let mut instances = self.instances.lock().unwrap();
         let Some(inst) = instances.get_mut(params.instance_id) else {
             return match params.guard {
-                // Matches the SQL backends: unguarded miss is a hard error,
+                // The contract requires an unguarded miss to be a hard error,
                 // guarded miss is just a skipped Ok(false).
                 CompleteInstanceGuard::Any => Err(CoreError::InstanceNotFound {
                     instance_id: params.instance_id.to_string(),
@@ -256,12 +256,10 @@ impl Persistence for MockPersistence {
             return Ok(false);
         }
         inst.status = params.status;
-        // output/error are overwritten unconditionally (matches SQL
-        // `SET output = $N`, not `COALESCE`).
+        // Output and error are replaced, including when the caller passes None.
         inst.output = params.output.map(|o| o.to_vec());
         inst.error = params.error.map(|e| e.to_string());
-        // stderr/checkpoint/termination_reason/exit_code use COALESCE
-        // semantics — only overwrite when the caller provided a value.
+        // Optional metadata is merged: only overwrite supplied values.
         if let Some(cp) = params.checkpoint_id {
             inst.checkpoint_id = Some(cp.to_string());
         }
@@ -383,7 +381,7 @@ impl Persistence for MockPersistence {
         instance_id: &str,
         checkpoint_id: &str,
     ) -> std::result::Result<Option<CustomSignalRecord>, CoreError> {
-        // Non-destructive read (mirrors the DB ops): retain the row so a
+        // Non-destructive read: retain the signal so a
         // replayed WaitForSignal re-reads the same signal idempotently.
         Ok(self
             .custom_signals

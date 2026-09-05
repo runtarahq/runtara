@@ -181,8 +181,7 @@ pub async fn handle_instance_event(
 
 /// Handle retry attempt event (fire-and-forget).
 ///
-/// Records a retry attempt for audit trail. Retry attempts are stored
-/// in the checkpoints table with `is_retry_attempt=true`.
+/// Records a retry attempt through [`Persistence::save_retry_attempt`](crate::persistence::Persistence::save_retry_attempt).
 ///
 /// This is sent by the SDK when a durable function fails and is about
 /// to be retried (before the backoff delay).

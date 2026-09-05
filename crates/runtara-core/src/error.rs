@@ -13,7 +13,7 @@ pub type Result<T> = std::result::Result<T, CoreError>;
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum CoreError {
-    /// Instance was not found in the database.
+    /// Instance was not found in the store.
     InstanceNotFound {
         /// The instance ID that was not found.
         instance_id: String,
