@@ -35,7 +35,7 @@ macro_rules! impl_sleep_ops {
                     .bind(sleep_until)
                     .execute(pool)
                     .await
-                    .map_err(|e| ::runtara_core::error::CoreError::DatabaseError {
+                    .map_err(|e| ::runtara_core::error::CoreError::PersistenceError {
                         operation: "set_instance_sleep".into(),
                         details: e.to_string(),
                     })?;
@@ -98,7 +98,7 @@ macro_rules! impl_sleep_ops {
                     .bind(instance_id)
                     .execute(pool)
                     .await
-                    .map_err(|e| ::runtara_core::error::CoreError::DatabaseError {
+                    .map_err(|e| ::runtara_core::error::CoreError::PersistenceError {
                         operation: "claim_sleeping_instance".into(),
                         details: e.to_string(),
                     })?;

@@ -2,6 +2,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Signal handlers: polling and acknowledgement.
 
+use crate::domain::InstanceStatus as CoreInstanceStatus;
+#[cfg(test)]
+use crate::domain::SignalType as CoreSignalType;
+
 use anyhow::Result;
 use tracing::{debug, info, instrument, warn};
 
@@ -42,16 +46,7 @@ pub async fn handle_poll_signals(
     };
 
     let signal = pending.map(|sig| {
-        let signal_type = match sig.signal_type.as_str() {
-            "cancel" => SignalType::SignalCancel,
-            "pause" => SignalType::SignalPause,
-            "resume" => SignalType::SignalResume,
-            "shutdown" => SignalType::SignalShutdown,
-            _ => {
-                warn!(signal_type = %sig.signal_type, "Unknown signal type");
-                SignalType::SignalCancel
-            }
-        };
+        let signal_type = SignalType::from(sig.signal_type);
 
         Signal {
             instance_id: request.instance_id.clone(),
@@ -103,7 +98,10 @@ pub async fn handle_signal_ack(state: &InstanceHandlerState, ack: SignalAck) -> 
                 // Update instance status to cancelled with finished_at
                 state
                     .persistence
-                    .complete_instance(CompleteInstanceParams::new(&ack.instance_id, "cancelled"))
+                    .complete_instance(CompleteInstanceParams::new(
+                        &ack.instance_id,
+                        CoreInstanceStatus::Cancelled,
+                    ))
                     .await?;
                 info!("Instance cancelled");
             }
@@ -111,7 +109,7 @@ pub async fn handle_signal_ack(state: &InstanceHandlerState, ack: SignalAck) -> 
                 // Update instance status to suspended
                 state
                     .persistence
-                    .update_instance_status(&ack.instance_id, "suspended", None)
+                    .update_instance_status(&ack.instance_id, CoreInstanceStatus::Suspended, None)
                     .await?;
                 info!("Instance paused/suspended");
             }
@@ -126,8 +124,11 @@ pub async fn handle_signal_ack(state: &InstanceHandlerState, ack: SignalAck) -> 
                 state
                     .persistence
                     .complete_instance(
-                        CompleteInstanceParams::new(&ack.instance_id, "suspended")
-                            .with_termination("shutdown_requested", None),
+                        CompleteInstanceParams::new(
+                            &ack.instance_id,
+                            CoreInstanceStatus::Suspended,
+                        )
+                        .with_termination("shutdown_requested", None),
                     )
                     .await?;
                 // Mark the instance as immediately due for wake so the wake
@@ -147,7 +148,7 @@ pub async fn handle_signal_ack(state: &InstanceHandlerState, ack: SignalAck) -> 
         // Acknowledge last, once the status transition above has landed.
         // Acknowledging first consumes the signal whether or not the
         // transition succeeded, and callers log-and-continue on the error, so
-        // a transient database failure would leave an instance that was told
+        // a transient persistence failure would leave an instance that was told
         // to cancel recorded as a clean success: the guest's next poll would
         // no longer see the signal, and the end-of-run cancel backstop would
         // find nothing to enforce. Acking here instead leaves an unhandled
@@ -172,10 +173,94 @@ mod tests {
     use crate::persistence::Persistence;
 
     #[tokio::test]
+    async fn checkpoint_and_poll_deliver_every_signal_identically() {
+        use crate::domain::{InstanceStatus, SignalType as StoredSignal};
+        use crate::instance_handlers::{CheckpointRequest, handle_checkpoint};
+        for signal_type in [
+            StoredSignal::Cancel,
+            StoredSignal::Pause,
+            StoredSignal::Resume,
+            StoredSignal::Shutdown,
+        ] {
+            let persistence = Arc::new(
+                MockPersistence::new()
+                    .with_instance(make_instance("instance", "tenant", InstanceStatus::Running))
+                    .with_signal(make_signal("instance", signal_type)),
+            );
+            let state = InstanceHandlerState::new(persistence);
+            let poll = handle_poll_signals(
+                &state,
+                PollSignalsRequest {
+                    instance_id: "instance".into(),
+                    checkpoint_id: None,
+                },
+            )
+            .await
+            .unwrap()
+            .signal
+            .unwrap();
+            let checkpoint = handle_checkpoint(
+                &state,
+                CheckpointRequest {
+                    instance_id: "instance".into(),
+                    checkpoint_id: "cp".into(),
+                    state: vec![1],
+                },
+            )
+            .await
+            .unwrap()
+            .pending_signal
+            .unwrap();
+            assert_eq!(poll.signal_type, i32::from(SignalType::from(signal_type)));
+            assert_eq!(checkpoint.signal_type, poll.signal_type);
+        }
+    }
+
+    #[tokio::test]
+    async fn checkpoint_and_poll_report_signal_read_failures() {
+        use crate::domain::InstanceStatus;
+        use crate::instance_handlers::{CheckpointRequest, handle_checkpoint};
+        let persistence = Arc::new(MockPersistence::new().with_instance(make_instance(
+            "instance",
+            "tenant",
+            InstanceStatus::Running,
+        )));
+        persistence.set_fail_signal_read();
+        let state = InstanceHandlerState::new(persistence);
+        let poll = handle_poll_signals(
+            &state,
+            PollSignalsRequest {
+                instance_id: "instance".into(),
+                checkpoint_id: None,
+            },
+        )
+        .await;
+        let checkpoint = handle_checkpoint(
+            &state,
+            CheckpointRequest {
+                instance_id: "instance".into(),
+                checkpoint_id: "cp".into(),
+                state: vec![1],
+            },
+        )
+        .await;
+        for result in [poll.map(|_| ()), checkpoint.map(|_| ())] {
+            assert!(matches!(
+                result
+                    .unwrap_err()
+                    .downcast_ref::<crate::error::CoreError>(),
+                Some(crate::error::CoreError::PersistenceError { .. })
+            ));
+        }
+    }
+
+    #[tokio::test]
     async fn test_poll_signals_no_signal() {
-        let persistence = Arc::new(
-            MockPersistence::new().with_instance(make_instance("inst-1", "tenant-1", "running")),
-        );
+        let persistence = Arc::new(MockPersistence::new().with_instance(make_instance(
+            "inst-1",
+            "tenant-1",
+            CoreInstanceStatus::Running,
+        )));
         let state = InstanceHandlerState::new(persistence);
 
         let request = PollSignalsRequest {
@@ -191,8 +276,12 @@ mod tests {
     async fn test_poll_signals_with_pending_signal() {
         let persistence = Arc::new(
             MockPersistence::new()
-                .with_instance(make_instance("inst-1", "tenant-1", "running"))
-                .with_signal(make_signal("inst-1", "pause")),
+                .with_instance(make_instance(
+                    "inst-1",
+                    "tenant-1",
+                    CoreInstanceStatus::Running,
+                ))
+                .with_signal(make_signal("inst-1", CoreSignalType::Pause)),
         );
         let state = InstanceHandlerState::new(persistence);
 
@@ -211,8 +300,12 @@ mod tests {
     async fn test_signal_ack_success() {
         let persistence = Arc::new(
             MockPersistence::new()
-                .with_instance(make_instance("inst-1", "tenant-1", "running"))
-                .with_signal(make_signal("inst-1", "cancel")),
+                .with_instance(make_instance(
+                    "inst-1",
+                    "tenant-1",
+                    CoreInstanceStatus::Running,
+                ))
+                .with_signal(make_signal("inst-1", CoreSignalType::Cancel)),
         );
         let state = InstanceHandlerState::new(persistence.clone());
 
@@ -243,8 +336,9 @@ mod tests {
     async fn test_signal_ack_leaves_signal_pending_when_the_transition_fails() {
         // No instance registered, so `complete_instance` fails with
         // InstanceNotFound — the transition never lands.
-        let persistence =
-            Arc::new(MockPersistence::new().with_signal(make_signal("inst-1", "cancel")));
+        let persistence = Arc::new(
+            MockPersistence::new().with_signal(make_signal("inst-1", CoreSignalType::Cancel)),
+        );
         let state = InstanceHandlerState::new(persistence.clone());
 
         let ack = SignalAck {
@@ -271,8 +365,12 @@ mod tests {
     async fn test_signal_ack_shutdown_persists_suspended() {
         let persistence = Arc::new(
             MockPersistence::new()
-                .with_instance(make_instance("inst-1", "tenant-1", "running"))
-                .with_signal(make_signal("inst-1", "shutdown")),
+                .with_instance(make_instance(
+                    "inst-1",
+                    "tenant-1",
+                    CoreInstanceStatus::Running,
+                ))
+                .with_signal(make_signal("inst-1", CoreSignalType::Shutdown)),
         );
         let state = InstanceHandlerState::new(persistence.clone());
 
@@ -291,7 +389,7 @@ mod tests {
             .await
             .unwrap()
             .expect("instance still present");
-        assert_eq!(inst.status, "suspended");
+        assert_eq!(inst.status, CoreInstanceStatus::Suspended);
         assert_eq!(
             inst.termination_reason.as_deref(),
             Some("shutdown_requested")

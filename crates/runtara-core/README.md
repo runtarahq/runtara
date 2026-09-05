@@ -1,56 +1,53 @@
 # runtara-core
 
-Durable execution engine for Runtara: checkpoints, signals, durable sleep, and instance events backed by PostgreSQL.
+Durable execution semantics for Runtara: instances, checkpoints, signals, sleep, and events over a host-provided persistence backend.
 
-[![crates.io](https://img.shields.io/crates/v/runtara-core.svg)](https://crates.io/crates/runtara-core)
-[![docs.rs](https://docs.rs/runtara-core/badge.svg)](https://docs.rs/runtara-core)
-[![License](https://img.shields.io/crates/l/runtara-core.svg)](LICENSE)
+## Using core
 
-## What it is
-
-`runtara-core` is the host-side execution engine that workflow instances talk to in order to persist state and progress durably. The `persistence` module defines the `Persistence` trait (implemented by `PostgresPersistence`) covering instances, checkpoints, events, and signals. The `instance_handlers` module implements the instance protocol (register, checkpoint, sleep, events, signal poll/ack) as plain async functions over that trait. The `migrations` module ships SQL migrations so embedders can set up the schema.
-
-It is a library, not a service: no HTTP, no sockets, no binary. A host picks the transport. `runtara-server` serves these handlers over HTTP on the instance port for guests using the SDK's HTTP backend; `runtara-environment` calls them in-process for guests composed against the runtime as a host import, which is the default.
-
-## Using it
-
-```toml
-[dependencies]
-runtara-core = "8.7"
-sqlx = { version = "0.8", features = ["runtime-tokio", "postgres"] }
-tokio = { version = "1", features = ["full"] }
-```
+Core is a library. The host supplies storage and transport; `runtara-server` exposes the instance protocol over HTTP, and embedded callers invoke the same handlers directly.
 
 ```rust
 use std::sync::Arc;
-use runtara_core::instance_handlers::{InstanceHandlerState, handle_checkpoint};
-use runtara_core::persistence::{Persistence, PostgresPersistence};
-use sqlx::postgres::PgPoolOptions;
+use runtara_core::instance_handlers::InstanceHandlerState;
+use runtara_core::persistence::Persistence;
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let pool = PgPoolOptions::new().connect(&std::env::var("RUNTARA_DATABASE_URL")?).await?;
-    runtara_core::migrations::run_postgres(&pool).await?;
-    let persistence: Arc<dyn Persistence> = Arc::new(PostgresPersistence::new(pool));
-
-    let state = Arc::new(InstanceHandlerState::new(persistence));
-    // Call the handlers directly, or wrap `state` in a transport of your own.
-    let _ = &state;
-    Ok(())
+fn handlers(persistence: Arc<dyn Persistence>) -> InstanceHandlerState {
+    InstanceHandlerState::new(persistence)
 }
 ```
 
-Requires a reachable PostgreSQL database.
+A host choosing PostgreSQL obtains its implementation and migrations from `runtara-store-postgres`:
 
-## Inside Runtara
+```rust
+use std::sync::Arc;
+use runtara_core::instance_handlers::InstanceHandlerState;
+use runtara_store_postgres::{migrations, PostgresPersistence};
 
-- `runtara-server` owns the instance HTTP API (`core_runtime` module), including the drain that lets an instance mid-checkpoint finish writing.
-- `runtara-environment` shares the `Persistence` trait and calls `instance_handlers` directly, never over HTTP.
-- `runtara-sdk` uses it via the optional `embedded` feature for in-process tests that skip the HTTP hop.
-- Depends on `sqlx` (Postgres) and `tokio`. No web framework.
-- The `test-support` feature exposes the in-memory `Persistence` mock for downstream handler tests.
-- Primary integration point is the `Persistence` trait — environment and SDK both program against it.
-- Runs in: native host (Tokio + sqlx).
+async fn postgres_handlers(pool: sqlx::PgPool) -> anyhow::Result<InstanceHandlerState> {
+    migrations::run_postgres(&pool).await?;
+    Ok(InstanceHandlerState::new(Arc::new(PostgresPersistence::new(pool))))
+}
+```
+
+That host depends on `runtara-core`, `runtara-store-postgres`, `sqlx`, and `anyhow`. Core itself has no database-driver dependency and ships no migrations.
+
+## Contracts
+
+- `domain` defines typed instance statuses, lifecycle signals, and timeline events. Storage encodings and wire spellings belong to adapters.
+- `persistence` defines records, queries, conditional updates, wake claims, and retention obligations through `Persistence`.
+- `instance_handlers` implements registration, checkpoints, sleep, events, and signal delivery over that trait.
+- `error` provides storage-neutral errors and transport-independent classifications.
+- `config` provides runtime overrides that hosts apply when constructing their runtime.
+
+Event subtypes and payload keys are opaque producer-defined strings. `EventVocabulary` requires distinct opening and closing subtypes. Each backend validates any additional restrictions required by its query implementation.
+
+The `test-support` feature exposes an in-memory backend, handler mocks, and a shared conformance suite. Backend implementations should run that suite against their own store; tests in core need no external services.
+
+## Adapter migration
+
+Persistence records, status filters, completion parameters, event filters, and lifecycle signal operations now use `domain` enums. Stored event types include `Started` and legacy `Progress`, in addition to incoming instance events. PostgreSQL encoding and checked decoding live in `runtara-store-postgres::encoding`; core's database string mappers have been removed.
+
+`CoreError::DatabaseError` is now `CoreError::PersistenceError`, with code `PERSISTENCE_ERROR`. The blanket conversion from JSON errors has been removed: callers must classify failures in context. The server's HTTP route error codes and existing database enum labels remain unchanged.
 
 ## License
 

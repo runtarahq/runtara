@@ -3,6 +3,9 @@
 //! Plain Rust request/response types, enums, and error constants for the
 //! instance protocol.
 
+use crate::domain::InstanceStatus as CoreInstanceStatus;
+use crate::domain::SignalType as CoreSignalType;
+
 /// Signal type for instance-wide signals.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SignalType {
@@ -356,3 +359,39 @@ pub const ERROR_SERVER_DRAINING: &str = "server draining";
 /// count has reached `RUNTARA_MAX_CONCURRENT_INSTANCES`. The HTTP layer maps
 /// this to `429 Too Many Requests`.
 pub const ERROR_MAX_CONCURRENT_INSTANCES: &str = "max concurrent instances reached";
+
+impl From<CoreSignalType> for SignalType {
+    fn from(value: CoreSignalType) -> Self {
+        match value {
+            CoreSignalType::Cancel => Self::SignalCancel,
+            CoreSignalType::Pause => Self::SignalPause,
+            CoreSignalType::Resume => Self::SignalResume,
+            CoreSignalType::Shutdown => Self::SignalShutdown,
+        }
+    }
+}
+
+impl From<InstanceEventType> for crate::domain::EventType {
+    fn from(value: InstanceEventType) -> Self {
+        match value {
+            InstanceEventType::EventHeartbeat => Self::Heartbeat,
+            InstanceEventType::EventCompleted => Self::Completed,
+            InstanceEventType::EventFailed => Self::Failed,
+            InstanceEventType::EventSuspended => Self::Suspended,
+            InstanceEventType::EventCustom => Self::Custom,
+        }
+    }
+}
+
+impl From<CoreInstanceStatus> for InstanceStatus {
+    fn from(value: CoreInstanceStatus) -> Self {
+        match value {
+            CoreInstanceStatus::Pending => Self::StatusPending,
+            CoreInstanceStatus::Running => Self::StatusRunning,
+            CoreInstanceStatus::Suspended => Self::StatusSuspended,
+            CoreInstanceStatus::Completed => Self::StatusCompleted,
+            CoreInstanceStatus::Failed => Self::StatusFailed,
+            CoreInstanceStatus::Cancelled => Self::StatusCancelled,
+        }
+    }
+}

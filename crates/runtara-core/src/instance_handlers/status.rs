@@ -5,7 +5,6 @@
 use anyhow::Result;
 use tracing::{debug, instrument};
 
-use super::mappers::map_status;
 use super::state::InstanceHandlerState;
 use super::types::{GetInstanceStatusRequest, GetInstanceStatusResponse, InstanceStatus};
 
@@ -32,7 +31,7 @@ pub async fn handle_get_instance_status(
 
     match instance {
         Some(inst) => {
-            let status = map_status(&inst.status);
+            let status = super::types::InstanceStatus::from(inst.status);
 
             Ok(GetInstanceStatusResponse {
                 instance_id: request.instance_id,
@@ -79,9 +78,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_status_found() {
-        let persistence = Arc::new(
-            MockPersistence::new().with_instance(make_instance("inst-1", "tenant-1", "running")),
-        );
+        let persistence = Arc::new(MockPersistence::new().with_instance(make_instance(
+            "inst-1",
+            "tenant-1",
+            crate::domain::InstanceStatus::Running,
+        )));
         let state = InstanceHandlerState::new(persistence);
 
         let request = GetInstanceStatusRequest {

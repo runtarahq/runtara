@@ -18,6 +18,8 @@
 //! - Memory metrics come from the store's resource limiter (exact guest
 //!   linear-memory peak); CPU metrics are absent.
 
+use runtara_core::domain::InstanceStatus as CoreInstanceStatus;
+
 use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -1340,7 +1342,10 @@ async fn enforce_unacked_cancel(persistence: &Arc<dyn Persistence>, instance_id:
     // overwrites a terminal status, so a regression in that predicate must not
     // re-cancel a run whose guest handled its signal properly. The check is free.
     match persistence.get_pending_signal(instance_id).await {
-        Ok(Some(signal)) if signal.signal_type == "cancel" && signal.acknowledged_at.is_none() => {
+        Ok(Some(signal))
+            if signal.signal_type == runtara_core::domain::SignalType::Cancel
+                && signal.acknowledged_at.is_none() =>
+        {
             warn!(
                 instance_id = %instance_id,
                 "Run ended with an unacknowledged cancel; recording cancelled"
@@ -1390,9 +1395,12 @@ async fn park_invoke_suspend(
     // exposes a half-parked instance to a premature claim.
     match persistence
         .complete_instance(
-            runtara_core::persistence::CompleteInstanceParams::new(instance_id, "suspended")
-                .if_running()
-                .with_termination(wake_marker, None),
+            runtara_core::persistence::CompleteInstanceParams::new(
+                instance_id,
+                CoreInstanceStatus::Suspended,
+            )
+            .if_running()
+            .with_termination(wake_marker, None),
         )
         .await
     {
@@ -2187,7 +2195,7 @@ mod tests {
             .await
             .expect("get")
             .expect("instance exists");
-        assert_eq!(inst.status, "suspended");
+        assert_eq!(inst.status, CoreInstanceStatus::Suspended);
         assert_eq!(
             inst.sleep_until.map(|dt| dt.timestamp_millis() as u64),
             Some(deadline_ms),
@@ -2218,7 +2226,11 @@ mod tests {
             .await
             .expect("get")
             .expect("instance exists");
-        assert_eq!(inst.status, "running", "no timed wake => no status change");
+        assert_eq!(
+            inst.status,
+            CoreInstanceStatus::Running,
+            "no timed wake => no status change"
+        );
         assert!(
             inst.sleep_until.is_none(),
             "no timed wake => no sleep_until stamp"
@@ -2246,7 +2258,11 @@ mod tests {
             .await
             .expect("get")
             .expect("instance exists");
-        assert_eq!(inst.status, "suspended", "on-signal parks as suspended");
+        assert_eq!(
+            inst.status,
+            CoreInstanceStatus::Suspended,
+            "on-signal parks as suspended"
+        );
         assert!(
             inst.sleep_until.is_none(),
             "a deadline-less on-signal wait relies on the waker, not sleep_until"
@@ -2288,7 +2304,7 @@ mod tests {
             .await
             .expect("get")
             .expect("instance exists");
-        assert_eq!(inst.status, "suspended");
+        assert_eq!(inst.status, CoreInstanceStatus::Suspended);
         assert!(
             inst.sleep_until.is_some(),
             "a signal already present at park time must self-wake the instance, \
@@ -2325,7 +2341,7 @@ mod tests {
             .await
             .expect("get")
             .expect("instance exists");
-        assert_eq!(inst.status, "suspended");
+        assert_eq!(inst.status, CoreInstanceStatus::Suspended);
         assert!(
             inst.sleep_until.is_none(),
             "with no signal present the waker remains the sole wake path"
@@ -2342,8 +2358,11 @@ mod tests {
         let (persistence, instance_id) = running_instance().await;
         persistence
             .complete_instance(
-                runtara_core::persistence::CompleteInstanceParams::new(&instance_id, "completed")
-                    .if_running(),
+                runtara_core::persistence::CompleteInstanceParams::new(
+                    &instance_id,
+                    CoreInstanceStatus::Completed,
+                )
+                .if_running(),
             )
             .await
             .expect("complete");
@@ -2361,7 +2380,8 @@ mod tests {
             .expect("get")
             .expect("instance exists");
         assert_eq!(
-            inst.status, "completed",
+            inst.status,
+            CoreInstanceStatus::Completed,
             "a terminal status must survive a late suspend return"
         );
         assert!(
@@ -2390,7 +2410,7 @@ mod tests {
             .await
             .expect("get")
             .expect("instance exists");
-        assert_eq!(inst.status, "suspended");
+        assert_eq!(inst.status, CoreInstanceStatus::Suspended);
         assert_eq!(
             inst.sleep_until.map(|dt| dt.timestamp_millis() as u64),
             Some(deadline_ms),
@@ -2413,13 +2433,17 @@ mod tests {
     async fn unacked_cancel_overrides_a_reported_completion() {
         let (persistence, instance_id) = backstop_fixture().await;
         persistence
-            .insert_signal(instance_id.as_str(), "cancel", b"")
+            .insert_signal(
+                instance_id.as_str(),
+                runtara_core::domain::SignalType::Cancel,
+                b"",
+            )
             .await
             .unwrap();
         persistence
             .complete_instance(runtara_core::persistence::CompleteInstanceParams::new(
                 instance_id.as_str(),
-                "completed",
+                CoreInstanceStatus::Completed,
             ))
             .await
             .unwrap();
@@ -2433,7 +2457,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .status,
-            "cancelled",
+            CoreInstanceStatus::Cancelled,
             "cancel wins the exit race: a stop was requested and not honoured"
         );
     }
@@ -2447,7 +2471,11 @@ mod tests {
     async fn an_acknowledged_cancel_does_not_re_cancel_a_finished_run() {
         let (persistence, instance_id) = backstop_fixture().await;
         persistence
-            .insert_signal(instance_id.as_str(), "cancel", b"")
+            .insert_signal(
+                instance_id.as_str(),
+                runtara_core::domain::SignalType::Cancel,
+                b"",
+            )
             .await
             .unwrap();
         persistence
@@ -2457,7 +2485,7 @@ mod tests {
         persistence
             .complete_instance(runtara_core::persistence::CompleteInstanceParams::new(
                 instance_id.as_str(),
-                "completed",
+                CoreInstanceStatus::Completed,
             ))
             .await
             .unwrap();
@@ -2471,7 +2499,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .status,
-            "completed",
+            CoreInstanceStatus::Completed,
             "an already-acknowledged cancel must not touch a finished run"
         );
     }
@@ -2484,7 +2512,7 @@ mod tests {
         persistence
             .complete_instance(runtara_core::persistence::CompleteInstanceParams::new(
                 instance_id.as_str(),
-                "completed",
+                CoreInstanceStatus::Completed,
             ))
             .await
             .unwrap();
@@ -2498,7 +2526,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .status,
-            "completed"
+            CoreInstanceStatus::Completed
         );
     }
 }

@@ -39,7 +39,7 @@ macro_rules! impl_signal_ops {
                     .bind(instance_id)
                     .fetch_optional(pool)
                     .await
-                    .map_err(|e| ::runtara_core::error::CoreError::DatabaseError {
+                    .map_err(|e| ::runtara_core::error::CoreError::PersistenceError {
                         operation: "get_pending_signal".into(),
                         details: e.to_string(),
                     })?;
@@ -59,7 +59,7 @@ macro_rules! impl_signal_ops {
                     .bind(instance_id)
                     .execute(pool)
                     .await
-                    .map_err(|e| ::runtara_core::error::CoreError::DatabaseError {
+                    .map_err(|e| ::runtara_core::error::CoreError::PersistenceError {
                         operation: "acknowledge_signal".into(),
                         details: e.to_string(),
                     })?;

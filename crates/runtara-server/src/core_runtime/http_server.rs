@@ -1003,7 +1003,7 @@ mod tests {
                 StatusCode::BAD_REQUEST,
             ),
             (
-                CoreError::DatabaseError {
+                CoreError::PersistenceError {
                     operation: "insert".into(),
                     details: "connection refused".into(),
                 },
@@ -1080,7 +1080,7 @@ mod tests {
         let (status, _, retry_after) = read(core_error_response(
             "REGISTER_ERROR",
             "Register handler error",
-            CoreError::DatabaseError {
+            CoreError::PersistenceError {
                 operation: "register_instance".into(),
                 details: "connection refused".into(),
             },
@@ -1108,8 +1108,11 @@ mod tests {
         // The drain race this ticket exists for: the instance finished between
         // the client's last step and this checkpoint. The client is wrong, not
         // the server, and retrying will never help.
-        let persistence =
-            MockPersistence::new().with_instance(make_instance("done", "t1", "completed"));
+        let persistence = MockPersistence::new().with_instance(make_instance(
+            "done",
+            "t1",
+            runtara_core::domain::InstanceStatus::Completed,
+        ));
 
         let (status, body) = send(
             router_over(persistence),
@@ -1146,8 +1149,11 @@ mod tests {
     async fn resuming_from_a_missing_checkpoint_is_not_found() {
         // The same fact as a missing checkpoint on the checkpoint route, so it
         // has to get the same status — registration used to answer 400 here.
-        let persistence =
-            MockPersistence::new().with_instance(make_instance("inst-1", "t1", "pending"));
+        let persistence = MockPersistence::new().with_instance(make_instance(
+            "inst-1",
+            "t1",
+            runtara_core::domain::InstanceStatus::Pending,
+        ));
 
         let (status, body) = send(
             router_over(persistence),
@@ -1179,8 +1185,11 @@ mod tests {
     async fn a_checkpoint_that_succeeds_is_untouched() {
         // The rewrite touched every error arm; this proves it left the happy
         // path — and its response body — alone.
-        let persistence =
-            MockPersistence::new().with_instance(make_instance("live", "t1", "running"));
+        let persistence = MockPersistence::new().with_instance(make_instance(
+            "live",
+            "t1",
+            runtara_core::domain::InstanceStatus::Running,
+        ));
 
         let (status, body) = send(
             router_over(persistence),

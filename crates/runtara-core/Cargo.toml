@@ -17,7 +17,7 @@ path = "src/lib.rs"
 
 # Exposes the in-memory `Persistence` mock so downstream crates — chiefly the
 # instance HTTP API, which now lives in runtara-server — can test handler
-# wiring without a database.
+# wiring without external services.
 test-support = []
 
 [dependencies]

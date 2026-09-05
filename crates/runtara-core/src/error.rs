@@ -13,7 +13,7 @@ pub type Result<T> = std::result::Result<T, CoreError>;
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum CoreError {
-    /// Instance was not found in the database.
+    /// Instance was not found in the store.
     InstanceNotFound {
         /// The instance ID that was not found.
         instance_id: String,
@@ -69,8 +69,8 @@ pub enum CoreError {
         message: String,
     },
 
-    /// Database operation failed.
-    DatabaseError {
+    /// Persistence operation failed.
+    PersistenceError {
         /// The operation that failed.
         operation: String,
         /// Error details.
@@ -116,7 +116,7 @@ impl CoreError {
                 CoreErrorClass::Conflict
             }
             Self::ValidationError { .. } => CoreErrorClass::Invalid,
-            Self::DatabaseError { .. }
+            Self::PersistenceError { .. }
             | Self::CheckpointSaveFailed { .. }
             | Self::SignalDeliveryFailed { .. } => CoreErrorClass::Unavailable,
         }
@@ -132,7 +132,7 @@ impl CoreError {
             Self::CheckpointSaveFailed { .. } => "CHECKPOINT_SAVE_FAILED",
             Self::SignalDeliveryFailed { .. } => "SIGNAL_DELIVERY_FAILED",
             Self::ValidationError { .. } => "VALIDATION_ERROR",
-            Self::DatabaseError { .. } => "DATABASE_ERROR",
+            Self::PersistenceError { .. } => "PERSISTENCE_ERROR",
         }
     }
 }
@@ -195,23 +195,14 @@ impl fmt::Display for CoreError {
             Self::ValidationError { field, message } => {
                 write!(f, "Validation error for '{}': {}", field, message)
             }
-            Self::DatabaseError { operation, details } => {
-                write!(f, "Database error during '{}': {}", operation, details)
+            Self::PersistenceError { operation, details } => {
+                write!(f, "Persistence error during '{}': {}", operation, details)
             }
         }
     }
 }
 
 impl std::error::Error for CoreError {}
-
-impl From<serde_json::Error> for CoreError {
-    fn from(err: serde_json::Error) -> Self {
-        CoreError::DatabaseError {
-            operation: "json".to_string(),
-            details: err.to_string(),
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -270,11 +261,11 @@ mod tests {
                 "VALIDATION_ERROR",
             ),
             (
-                CoreError::DatabaseError {
+                CoreError::PersistenceError {
                     operation: "insert".to_string(),
                     details: "connection refused".to_string(),
                 },
-                "DATABASE_ERROR",
+                "PERSISTENCE_ERROR",
             ),
         ];
 
@@ -345,14 +336,14 @@ mod tests {
             "Validation error for 'instance_id': must be a valid UUID"
         );
 
-        // Test DatabaseError
-        let err = CoreError::DatabaseError {
+        // Test PersistenceError
+        let err = CoreError::PersistenceError {
             operation: "insert".to_string(),
             details: "connection refused".to_string(),
         };
         assert_eq!(
             err.to_string(),
-            "Database error during 'insert': connection refused"
+            "Persistence error during 'insert': connection refused"
         );
     }
 

@@ -3,7 +3,9 @@
 //! Postgres dialect: `$N` placeholders, enum type casts, JSONB operators,
 //! `ILIKE`, `ANY($1)` for batch `IN`, `EXTRACT(EPOCH FROM ...)`.
 
+use crate::vocabulary::SqlVocabulary;
 use ::runtara_core::error::CoreError;
+#[cfg(test)]
 use ::runtara_core::persistence::EventVocabulary;
 
 use super::{Dialect, EnumKind};
@@ -184,7 +186,7 @@ impl Dialect for PostgresDialect {
            ))"
     }
 
-    fn sql_list_paired_records(vocab: &EventVocabulary, order_direction: &str) -> String {
+    fn sql_list_paired_records(vocab: &SqlVocabulary<'_>, order_direction: &str) -> String {
         // Page-first: the expensive part of this query is the per-row
         // `convert_from(payload,'UTF8')::jsonb` parse and carrying the full
         // `inputs`/`outputs` text through an `ORDER BY` (which spills to temp
@@ -317,7 +319,7 @@ impl Dialect for PostgresDialect {
         )
     }
 
-    fn sql_count_paired_records(vocab: &EventVocabulary) -> String {
+    fn sql_count_paired_records(vocab: &SqlVocabulary<'_>) -> String {
         // Key-only (never touches `inputs`/`outputs`). The `OFFSET 0` fence
         // parses each event's payload jsonb exactly once instead of re-parsing
         // it per extracted key; `MATERIALIZED` keeps the full payload jsonb
@@ -435,7 +437,10 @@ mod tests {
     /// apart again.
     #[test]
     fn paired_record_sql_derives_duration_from_helper() {
-        let sql = PostgresDialect::sql_list_paired_records(&other_vocabulary(), "ASC");
+        let sql = PostgresDialect::sql_list_paired_records(
+            &SqlVocabulary::new(&other_vocabulary()).unwrap(),
+            "ASC",
+        );
         assert!(sql.contains(&PostgresDialect::duration_ms(
             "ee.completed_at",
             "se.started_at"
@@ -449,8 +454,9 @@ mod tests {
     #[test]
     fn generated_sql_carries_no_vocabulary_this_crate_did_not_receive() {
         let vocab = other_vocabulary();
-        let list = PostgresDialect::sql_list_paired_records(&vocab, "ASC");
-        let count = PostgresDialect::sql_count_paired_records(&vocab);
+        let list =
+            PostgresDialect::sql_list_paired_records(&SqlVocabulary::new(&vocab).unwrap(), "ASC");
+        let count = PostgresDialect::sql_count_paired_records(&SqlVocabulary::new(&vocab).unwrap());
 
         for sql in [&list, &count] {
             // Quoted forms: these are JSON keys and subtype literals in the
@@ -506,7 +512,10 @@ mod tests {
         })
         .expect("valid vocabulary");
 
-        let sql = PostgresDialect::sql_list_paired_records(&colliding, "ASC");
+        let sql = PostgresDialect::sql_list_paired_records(
+            &SqlVocabulary::new(&colliding).unwrap(),
+            "ASC",
+        );
 
         assert!(sql.contains("sj->>'id' as correlation_id"));
         assert!(sql.contains("sj->>'payload' as kind"));
@@ -520,7 +529,10 @@ mod tests {
     fn order_direction_reaches_both_order_by_clauses() {
         let vocab = other_vocabulary();
         for direction in ["ASC", "DESC"] {
-            let sql = PostgresDialect::sql_list_paired_records(&vocab, direction);
+            let sql = PostgresDialect::sql_list_paired_records(
+                &SqlVocabulary::new(&vocab).unwrap(),
+                direction,
+            );
             assert_eq!(sql.matches(&format!("ORDER BY id {direction}")).count(), 1);
             assert_eq!(
                 sql.matches(&format!("ORDER BY p.id {direction}")).count(),

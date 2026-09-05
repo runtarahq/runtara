@@ -3,7 +3,7 @@
 //! Runtara Core - Durable Execution Engine
 //!
 //! This crate provides the execution engine for durable workflows. It manages checkpoints,
-//! signals, and instance events, persisting all state to the database for crash resilience.
+//! signals, and instance events, persisting state through a host-provided backend for crash resilience.
 //!
 //! # A library, not a service
 //!
@@ -47,7 +47,7 @@
 //!           │
 //!           ▼
 //! ┌───────────────────────┐
-//! │      PostgreSQL       │
+//! │  Persistence backend  │
 //! │  (Durable Storage)    │
 //! └───────────────────────┘
 //! ```
@@ -55,7 +55,7 @@
 //! # Instance Protocol
 //!
 //! The instance protocol handles all communication between workflow instances and Core.
-//! Instances use [`runtara-sdk`] which wraps this protocol.
+//! Instances use `runtara-sdk`, which wraps this protocol.
 //!
 //! `runtara-server` exposes it over HTTP on the instance port (8001 by
 //! default); environment's in-process runner calls the same handlers directly.
@@ -67,7 +67,7 @@
 //! | `RegisterInstance` | Self-register on startup, optionally resume from checkpoint |
 //! | `Checkpoint` | Save state (or return existing if checkpoint_id exists) + signal delivery |
 //! | `GetCheckpoint` | Read-only checkpoint lookup |
-//! | `Sleep` | Durable sleep - stores wake time in database |
+//! | `Sleep` | Durable sleep - persists a wake deadline |
 //! | `InstanceEvent` | Fire-and-forget events (heartbeat, completed, failed, suspended) |
 //! | `GetInstanceStatus` | Query instance status |
 //! | `PollSignals` | Poll for pending cancel/pause/resume signals |
@@ -83,7 +83,8 @@
 //!
 //! ## Durable Sleep
 //!
-//! The `Sleep` operation stores a `sleep_until` timestamp in the instances table.
+//! Wake scheduling uses the instance record’s `sleep_until` timestamp.
+//! The sleep handler persists a checkpoint and waits, delivering interrupting signals.
 //! Environment's wake scheduler polls for sleeping instances and relaunches them
 //! when their wake time arrives. On resume, the SDK calculates remaining sleep time.
 //!
@@ -146,18 +147,19 @@
 //!
 //! # Modules
 //!
-//! - [`config`]: Runtime knobs read from environment variables
-//! - [`persistence`]: Database persistence layer for instances, checkpoints, events, signals
-//! - [`error`]: Error types with RPC error code mapping
-//! - [`instance_handlers`]: Instance protocol request handlers
-//! - [`migrations`]: The Postgres migrator, for hosts that own schema setup
+//! - [`config`] — Runtime knobs read from environment variables
+//! - [`domain`] — Typed instance statuses, signals, and timeline events
+//! - [`persistence`] — Storage contracts for instances, checkpoints, events, and signals
+//! - [`error`] — Error types and transport-independent classifications
+//! - [`instance_handlers`] — Instance protocol request handlers
 //!
-//! Everything else is an implementation detail. The SQL dialect, the shared
-//! operation macros, and the OTLP metrics recorder are private: they exist to
-//! serve the four modules above, and nothing outside this crate reached for
-//! them.
+//! Hosts supply a [`persistence::Persistence`] implementation. Backends own
+//! storage schemas, encodings, queries, and setup. Core owns execution semantics.
 
 #![deny(missing_docs)]
+
+/// Execution domain types independent of storage and transport.
+pub mod domain;
 
 /// Persistence layer for instances, checkpoints, events, and signals.
 pub mod persistence;

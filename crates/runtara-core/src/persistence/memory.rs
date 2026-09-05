@@ -3,14 +3,16 @@
 //! An in-memory [`Persistence`] backend.
 //!
 //! Written from the [`Persistence`] trait's own documentation — the contract a
-//! backend author actually has — rather than from the SQL backend or the
+//! backend author actually has — rather than from another implementation or the
 //! conformance suite. Where the trait says a default implementation is adequate
 //! for an in-memory backend, this takes the default rather than overriding it,
 //! so any gap between what the docs promise and what the contract requires
 //! shows up as a conformance failure instead of being papered over.
 //!
 //! A single mutex covers the whole store, which is what makes the claim and
-//! guard operations atomic without any SQL.
+//! guard operations atomic.
+
+use crate::domain::InstanceStatus as CoreInstanceStatus;
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -69,8 +71,14 @@ impl InMemoryPersistence {
 }
 
 /// Statuses that stamp `finished_at`.
-fn stamps_finished_at(status: &str) -> bool {
-    matches!(status, "completed" | "failed" | "cancelled" | "suspended")
+fn stamps_finished_at(status: CoreInstanceStatus) -> bool {
+    matches!(
+        status,
+        CoreInstanceStatus::Completed
+            | CoreInstanceStatus::Failed
+            | CoreInstanceStatus::Cancelled
+            | CoreInstanceStatus::Suspended
+    )
 }
 
 #[async_trait]
@@ -88,7 +96,7 @@ impl Persistence for InMemoryPersistence {
                 instance_id: instance_id.to_string(),
                 tenant_id: tenant_id.to_string(),
                 definition_version: 1,
-                status: "pending".to_string(),
+                status: CoreInstanceStatus::Pending,
                 checkpoint_id: None,
                 attempt: 1,
                 max_attempts: 3,
@@ -121,12 +129,12 @@ impl Persistence for InMemoryPersistence {
     async fn update_instance_status(
         &self,
         instance_id: &str,
-        status: &str,
+        status: CoreInstanceStatus,
         started_at: Option<DateTime<Utc>>,
     ) -> Result<(), CoreError> {
         let mut store = self.store.lock().unwrap();
         let inst = store.instance_mut(instance_id)?;
-        inst.status = status.to_string();
+        inst.status = status;
         if let Some(at) = started_at {
             inst.started_at = Some(at);
         }
@@ -156,11 +164,13 @@ impl Persistence for InMemoryPersistence {
                 CompleteInstanceGuard::OnlyRunning => Ok(false),
             };
         };
-        if params.guard == CompleteInstanceGuard::OnlyRunning && inst.status != "running" {
+        if params.guard == CompleteInstanceGuard::OnlyRunning
+            && inst.status != CoreInstanceStatus::Running
+        {
             return Ok(false);
         }
 
-        inst.status = params.status.to_string();
+        inst.status = params.status;
         // Replaced: a transition that carries no output or error clears the
         // previous one, so a failure cannot be read as still holding a stale
         // success payload.
@@ -283,7 +293,7 @@ impl Persistence for InMemoryPersistence {
     async fn insert_signal(
         &self,
         instance_id: &str,
-        signal_type: &str,
+        signal_type: crate::domain::SignalType,
         payload: &[u8],
     ) -> Result<(), CoreError> {
         let mut store = self.store.lock().unwrap();
@@ -291,7 +301,7 @@ impl Persistence for InMemoryPersistence {
             instance_id.to_string(),
             SignalRecord {
                 instance_id: instance_id.to_string(),
-                signal_type: signal_type.to_string(),
+                signal_type,
                 payload: (!payload.is_empty()).then(|| payload.to_vec()),
                 created_at: Utc::now(),
                 acknowledged_at: None,
@@ -375,7 +385,7 @@ impl Persistence for InMemoryPersistence {
     async fn list_instances(
         &self,
         tenant_id: Option<&str>,
-        status: Option<&str>,
+        status: Option<CoreInstanceStatus>,
         limit: i64,
         offset: i64,
     ) -> Result<Vec<InstanceRecord>, CoreError> {
@@ -387,7 +397,7 @@ impl Persistence for InMemoryPersistence {
             .filter(|i| status.is_none_or(|s| i.status == s))
             .cloned()
             .collect();
-        // Newest first, matching the SQL backend's ORDER BY created_at DESC.
+        // Return newest instances first.
         found.sort_by_key(|i| std::cmp::Reverse(i.created_at));
         Ok(found
             .into_iter()
@@ -407,7 +417,7 @@ impl Persistence for InMemoryPersistence {
             .unwrap()
             .instances
             .values()
-            .filter(|i| i.status == "running")
+            .filter(|i| i.status == CoreInstanceStatus::Running)
             .count() as i64)
     }
 
@@ -436,7 +446,8 @@ impl Persistence for InMemoryPersistence {
         };
         // Due-ness, not just presence: an instance leased by a batch claim has
         // `sleep_until` in the future and must lose until the lease expires.
-        if instance.status != "suspended" || !instance.sleep_until.is_some_and(|t| t <= Utc::now())
+        if instance.status != CoreInstanceStatus::Suspended
+            || !instance.sleep_until.is_some_and(|t| t <= Utc::now())
         {
             return Ok(false);
         }
@@ -525,7 +536,7 @@ impl Persistence for InMemoryPersistence {
         let mut terminal: Vec<_> = store
             .instances
             .values()
-            .filter(|i| matches!(i.status.as_str(), "completed" | "failed" | "cancelled"))
+            .filter(|i| i.status.is_terminal())
             .filter(|i| i.finished_at.is_some_and(|t| t < older_than))
             .collect();
         terminal.sort_by_key(|i| i.finished_at);
@@ -538,9 +549,7 @@ impl Persistence for InMemoryPersistence {
 
     /// Delete instances and everything hanging off them.
     ///
-    /// The SQL backend gets the cascade from the schema; here the child
-    /// collections are pruned explicitly, which is the same guarantee written
-    /// out by hand.
+    /// Prune every dependent collection under the same store lock.
     async fn delete_instances_batch(&self, instance_ids: &[String]) -> Result<u64, CoreError> {
         let mut store = self.store.lock().unwrap();
         let mut deleted = 0;
@@ -594,7 +603,7 @@ impl Persistence for InMemoryPersistence {
         let mut due: Vec<_> = store
             .instances
             .values()
-            .filter(|i| i.status == "suspended")
+            .filter(|i| i.status == CoreInstanceStatus::Suspended)
             .filter(|i| i.sleep_until.is_some_and(|t| t <= now))
             .cloned()
             .collect();
@@ -606,8 +615,7 @@ impl Persistence for InMemoryPersistence {
 /// Events for one instance that satisfy `filter`.
 ///
 /// `payload_contains` is a case-insensitive substring match over the decoded
-/// bytes, and the scope predicates read two keys out of the payload — the same
-/// three the SQL backend expresses as `ILIKE` and JSON path lookups.
+/// bytes; scope predicates compare the corresponding payload keys.
 fn filtered_events<'s>(
     store: &'s Store,
     instance_id: &str,
@@ -670,7 +678,7 @@ fn payload_str(event: &EventRecord, key: &str) -> Option<String> {
 /// supplied.
 ///
 /// This function is the reason the in-memory backend is worth having: it
-/// implements the pairing rule with no SQL at all, so a vocabulary key that the
+/// implements the pairing rule independently, so a vocabulary key that the
 /// kernel secretly special-cased would show up here as a name this code had to
 /// know. It knows none of them — every key comes from `vocabulary`.
 ///
@@ -770,7 +778,7 @@ mod tests {
     use super::*;
     use chrono::Duration;
 
-    /// The probe: the backend contract, run against a store with no SQL in it.
+    /// Run the backend contract against the in-memory implementation.
     #[tokio::test]
     async fn in_memory_backend_satisfies_the_conformance_sequence() {
         let backend = InMemoryPersistence::new();
@@ -801,7 +809,7 @@ mod tests {
             .insert_event(&EventRecord {
                 id: None,
                 instance_id: "inst".to_string(),
-                event_type: "custom".to_string(),
+                event_type: crate::domain::EventType::Custom,
                 checkpoint_id: None,
                 payload: Some(payload.to_string().into_bytes()),
                 created_at: Utc::now(),
@@ -809,6 +817,65 @@ mod tests {
             })
             .await
             .expect("append");
+    }
+
+    #[tokio::test]
+    async fn pairs_and_retires_events_with_non_identifier_names() {
+        let backend = InMemoryPersistence::new();
+        backend.register_instance("inst", "tenant").await.unwrap();
+        let vocabulary = EventVocabulary::new(crate::persistence::EventVocabularySpec {
+            start_subtype: "unit-open",
+            end_subtype: "unit-close",
+            correlation_key: "unit.id",
+            kind_key: "kind name",
+            label_key: "étiquette",
+            inputs_key: "in'put",
+            outputs_key: "out.put",
+            error_key: "failure detail",
+            error_flag_key: "is-error",
+            launched_at_key: "began.ms",
+            settled_at_key: "settled.ms",
+        })
+        .unwrap();
+        append(
+            &backend,
+            "unit-open",
+            serde_json::json!({
+                "unit.id": "u1", "kind name": "work", "étiquette": "label", "in'put": {"x": 1},
+            }),
+        )
+        .await;
+        append(
+            &backend,
+            "unit-close",
+            serde_json::json!({
+                "unit.id": "u1", "out.put": {"x": 2},
+            }),
+        )
+        .await;
+        let filter = ListPairedRecordsFilter::default();
+        let records = backend
+            .list_paired_records("inst", &vocabulary, &filter, 10, 0)
+            .await
+            .unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].status, PairedRecordStatus::Completed);
+        assert_eq!(records[0].label.as_deref(), Some("label"));
+        assert_eq!(records[0].outputs, Some(serde_json::json!({"x": 2})));
+        assert_eq!(
+            backend
+                .count_paired_records("inst", &vocabulary, &filter)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            backend
+                .delete_paired_events_older_than(&vocabulary, Utc::now() + Duration::seconds(1), 10)
+                .await
+                .unwrap(),
+            2
+        );
     }
 
     /// Pairing must be driven entirely by the supplied names.

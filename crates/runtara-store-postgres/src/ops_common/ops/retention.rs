@@ -87,6 +87,7 @@ macro_rules! impl_retention_ops {
                 use crate::dialect::Dialect;
                 let p1 = <$Dialect>::placeholder(1);
                 let p2 = <$Dialect>::placeholder(2);
+                let vocabulary = crate::vocabulary::SqlVocabulary::new(vocabulary)?;
                 let start_subtype = vocabulary.start_subtype();
                 let end_subtype = vocabulary.end_subtype();
                 let sql = format!(
@@ -104,7 +105,7 @@ macro_rules! impl_retention_ops {
                     .bind(limit)
                     .execute(pool)
                     .await
-                    .map_err(|e| ::runtara_core::error::CoreError::DatabaseError {
+                    .map_err(|e| ::runtara_core::error::CoreError::PersistenceError {
                         operation: "delete_paired_events_older_than".into(),
                         details: e.to_string(),
                     })?;

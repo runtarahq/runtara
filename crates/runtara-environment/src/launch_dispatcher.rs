@@ -1165,12 +1165,14 @@ impl LaunchDispatcher {
             return Err("durable instance tenant no longer matches launch".to_string());
         }
         let expected_status = match launch.kind {
-            LaunchKind::Start => "pending",
-            LaunchKind::Resume | LaunchKind::Wake => "suspended",
+            LaunchKind::Start => runtara_core::domain::InstanceStatus::Pending,
+            LaunchKind::Resume | LaunchKind::Wake => {
+                runtara_core::domain::InstanceStatus::Suspended
+            }
         };
         if instance.status != expected_status {
             return Err(format!(
-                "durable instance is '{}' instead of expected '{}'",
+                "durable instance is '{:?}' instead of expected '{:?}'",
                 instance.status, expected_status
             ));
         }
