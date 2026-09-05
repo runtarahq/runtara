@@ -31,8 +31,8 @@
 //!   - Body: exactly one Agent step (terminal next), no retries, no breakpoint,
 //!     and not a workflow-agent child (those share the parent's
 //!     runtime host and checkpoint scope — concurrent invocations are a
-//!     Phase-4 question). A requested retrying body is a stable support error,
-//!     not an in-run timer fallback.
+//!     Phase-4 question). A retrying body degrades like every other ineligible
+//!     shape: the sequential lowering owns the retry and parks it durably.
 
 use std::collections::BTreeMap;
 
@@ -173,8 +173,12 @@ pub(super) fn parallel_agent_body<'a>(
     };
     // A top-level lifecycle retry parks the whole workflow. The concurrent
     // window cannot retain independent per-item timer continuations across
-    // that park, so support rejects this production shape. Keep the internal
-    // eligibility gate aligned as a defense for callers that bypass support.
+    // that park, so a retrying item is INELIGIBLE — it falls back to the
+    // sequential lowering, which parks one item's retry at a time. This is a
+    // silent degrade (advisory W073), never a compile error: rejecting the
+    // shape stops the workflow from starting at all, and an Agent's maxRetries
+    // defaults to 3, so the overwhelming majority of authored Splits carry a
+    // retry policy they never opted into.
     if *breakpoint || *agent_retries > 0 || static_data.agent_is_workflow_agent(*agent_id) {
         return None;
     }

@@ -16,9 +16,10 @@ use std::time::{Duration, Instant};
 use base64::Engine;
 use runtara_workflows::direct_wasm::{
     DIRECT_SHARED_COMPONENT_REQUIREMENTS, DirectArtifactMetadata, DirectCompilationInput,
-    DirectCompileError, RuntimeBinding, WorkflowAbi, compile_direct_workflow,
-    compile_direct_workflow_composed, compile_direct_workflow_composed_configured,
-    compose_direct_workflow, emit_direct_component_artifacts_with_binding,
+    DirectCompileError, RuntimeBinding, WorkflowAbi, analyze_direct_wasm_support,
+    compile_direct_workflow, compile_direct_workflow_composed,
+    compile_direct_workflow_composed_configured, compose_direct_workflow,
+    emit_direct_component_artifacts_with_binding,
 };
 use runtara_workflows::{
     CompilationInput, DirectWorkflowCompileOptions, ExecutionGraph, WorkflowCompilerMode,
@@ -7040,6 +7041,70 @@ fn lifecycle_retry_http_graph() -> String {
     .to_string()
 }
 
+/// The production shape that regressed: a Split that REQUESTS concurrency whose
+/// item body is an ordinary retrying Agent. The concurrent window is ineligible
+/// (retrying item), so this must compile onto the sequential lowering and use
+/// its durable retry park — not fail to compile.
+fn lifecycle_parallel_split_retry_graph(url: &str) -> String {
+    serde_json::json!({
+        "name": "Lifecycle Parallel Split Retry Park",
+        "durable": true,
+        "rateLimitBudgetMs": 60_000,
+        "steps": {
+            "iterate_jobs": {
+                "stepType": "Split",
+                "id": "iterate_jobs",
+                "config": {
+                    "value": {"valueType": "immediate", "value": [1]},
+                    "parallelism": 4
+                },
+                "subgraph": {
+                    "entryPoint": "fetch",
+                    "steps": {
+                        "fetch": {
+                            "stepType": "Agent",
+                            "id": "fetch",
+                            "agentId": "http",
+                            "capabilityId": "http-request",
+                            "durable": true,
+                            "maxRetries": 1,
+                            "retryDelay": 1,
+                            "inputMapping": {
+                                "method": {"valueType": "immediate", "value": "GET"},
+                                "url": {"valueType": "immediate", "value": url}
+                            }
+                        },
+                        "item_finish": {
+                            "stepType": "Finish",
+                            "id": "item_finish",
+                            "inputMapping": {
+                                "status": {"valueType": "reference", "value": "steps.fetch.outputs.status_code"}
+                            }
+                        }
+                    },
+                    "executionPlan": [{"fromStep": "fetch", "toStep": "item_finish"}],
+                    "variables": {},
+                    "inputSchema": {},
+                    "outputSchema": {}
+                }
+            },
+            "finish": {
+                "stepType": "Finish",
+                "id": "finish",
+                "inputMapping": {
+                    "results": {"valueType": "reference", "value": "steps.iterate_jobs.outputs"}
+                }
+            }
+        },
+        "entryPoint": "iterate_jobs",
+        "executionPlan": [{"fromStep": "iterate_jobs", "toStep": "finish"}],
+        "variables": {},
+        "inputSchema": {},
+        "outputSchema": {}
+    })
+    .to_string()
+}
+
 fn lifecycle_retry_split_graph() -> String {
     serde_json::json!({
         "name": "Lifecycle Split Retry Park",
@@ -7718,8 +7783,9 @@ fn direct_wasm_execute_invoke_rate_limited_agent_retry_parks_and_replays_once() 
 }
 
 /// Whole-Split retries park in the lifecycle ABI as well. This exercises the
-/// sequential Split path specifically; concurrent item retries are rejected at
-/// compile time because they would need independent wake continuations.
+/// sequential Split path specifically; a Split that requests concurrency but
+/// carries retrying items degrades onto this same path (see
+/// `direct_wasm_execute_invoke_parallel_split_item_retry_parks_sequentially`).
 #[test]
 fn direct_wasm_execute_invoke_sequential_split_retry_parks_before_second_attempt() {
     let components_dir = direct_e2e_components_dir();
@@ -7768,6 +7834,83 @@ fn direct_wasm_execute_invoke_sequential_split_retry_parks_before_second_attempt
         host.sleeps.lock().unwrap().is_empty(),
         "the due Split retry must still avoid durable sleep"
     );
+}
+
+/// The regression from #217: a Split with `parallelism` > 1 whose item Agent
+/// carries the ordinary retry policy. The concurrent window cannot park a
+/// per-item retry, so the emitter falls back to the sequential lowering — and
+/// that fallback must actually run, park on an absolute deadline, and never
+/// hold the runner in a durable sleep. Rejecting this graph at compile time
+/// instead left every triggered run permanently unstartable.
+#[test]
+fn direct_wasm_execute_invoke_parallel_split_item_retry_parks_sequentially() {
+    let components_dir = direct_e2e_components_dir();
+    let (proxy_url, hits, proxy) = spawn_retry_http_proxy(vec![
+        br#"{"status":429,"headers":{"retry-after-ms":"5000"},"body":{"error":"rate limited"}}"#
+            .to_vec(),
+        br#"{"status":200,"headers":{},"body":{"ok":true}}"#.to_vec(),
+    ]);
+    let artifact = compile_invoke_abi_artifact(
+        &components_dir,
+        "invoke-parallel-split-item-retry-park",
+        &lifecycle_parallel_split_retry_graph(&format!("{proxy_url}/item")),
+    );
+    let input = br#"{}"#.to_vec();
+    let mut env = HashMap::new();
+    env.insert("RUNTARA_HTTP_PROXY_URL".to_string(), proxy_url);
+    let host = Arc::new(CheckpointingRuntimeHost::new(&input));
+
+    let first = run_invoke_once_with_env(
+        &artifact.wasm_path,
+        host.clone(),
+        input.clone(),
+        env.clone(),
+    );
+    let deadline = match first {
+        runtara_component_host::InvokeExit::Suspended(wakes) => match wakes.as_slice() {
+            [runtara_component_host::lifecycle::WorkflowWake::At(deadline)] => *deadline,
+            other => panic!("the item retry must park on one timed wake, got {other:?}"),
+        },
+        other => panic!("the item retry must park, got {other:?}"),
+    };
+    assert_eq!(
+        hits.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the first 429 is the only call before a due wake"
+    );
+    let checkpoints = host.checkpoints.lock().unwrap();
+    assert!(
+        checkpoints
+            .iter()
+            .any(|(key, state)| key.contains("::retry_sleep::2") && state.len() == 8),
+        "the parked item retry must persist one absolute u64 deadline: {checkpoints:?}"
+    );
+    drop(checkpoints);
+    assert!(
+        host.sleeps.lock().unwrap().is_empty(),
+        "the sequential fallback must not hold the runner in a durable sleep"
+    );
+
+    host.advance_clock_past(deadline);
+    let completed = run_invoke_once_with_env(&artifact.wasm_path, host.clone(), input, env);
+    let output = match completed {
+        runtara_component_host::InvokeExit::Completed(output) => output,
+        other => panic!("the due wake must complete the split, got {other:?}"),
+    };
+    let output: Value = serde_json::from_slice(&output).expect("split output JSON");
+    let results = output["results"].as_array().expect("split results");
+    assert_eq!(results.len(), 1, "one item: {output}");
+    assert_eq!(results[0]["status"], 200, "item result: {}", results[0]);
+    assert_eq!(
+        hits.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "the due wake must issue exactly one retry"
+    );
+    assert!(
+        host.sleeps.lock().unwrap().is_empty(),
+        "the due retry leg must still avoid durable sleep"
+    );
+    proxy.join().expect("retry proxy joins");
 }
 
 /// EmbedWorkflow retries use the same per-attempt envelope plus absolute wake
@@ -10955,12 +11098,20 @@ fn parallel_http_split_graph(url: &str, parallelism: u32) -> String {
     )
 }
 
-/// Retrying items need independent durable wake state. The current parallel
-/// Split lowering cannot preserve that state, so compiling one is a stable
-/// rejection rather than an in-run blocking-timer fallback.
-fn assert_parallel_retry_backoff_rejected(workflow_id: &str, graph: ExecutionGraph) {
+/// A requested-concurrent Split whose item body retries is INELIGIBLE for the
+/// concurrent window, not unsupported: the emitter degrades it to the
+/// sequential lowering, whose durable retry park is the supported path. A hard
+/// rejection here would stop the workflow from starting at all.
+fn assert_parallel_retry_backoff_compiles(workflow_id: &str, graph: ExecutionGraph) {
+    let support = analyze_direct_wasm_support(&graph);
+    assert!(
+        support.supported,
+        "a requested-concurrent Split with retrying items must stay supported: {:?}",
+        support.unsupported
+    );
+
     let temp = tempfile::tempdir().expect("tempdir");
-    let error = compile_direct_workflow(DirectCompilationInput {
+    compile_direct_workflow(DirectCompilationInput {
         workflow_id: workflow_id.to_string(),
         version: 1,
         source_checksum: None,
@@ -10971,17 +11122,7 @@ fn assert_parallel_retry_backoff_rejected(workflow_id: &str, graph: ExecutionGra
         agent_catalog: None,
         agent_slug: None,
     })
-    .expect_err("parallel retry/backoff must be rejected before composition");
-    let DirectCompileError::Unsupported { report } = error else {
-        panic!("expected direct support rejection, got {error:?}");
-    };
-    assert!(
-        report
-            .unsupported
-            .iter()
-            .any(|feature| feature.feature == "parallel-retry-backoff"),
-        "missing parallel-retry-backoff diagnostic: {report:?}"
-    );
+    .expect("the sequential fallback must compile");
 }
 
 /// A single-Agent diamond `start → {b, c} → finish` whose two branches each hit
@@ -12148,27 +12289,28 @@ fn direct_wasm_execute_parallel_split_pause_mid_window_resumes() {
     let _ = stub.join();
 }
 
-/// A durable parallel Split with retried items is rejected before it can mint
-/// concurrent in-run timers. The sequential lowering remains the supported
-/// durable retry path.
+/// A durable Split that requests concurrency but carries retried items keeps
+/// compiling: the concurrent window is skipped and the sequential lowering's
+/// durable retry park takes over.
 #[test]
-fn direct_wasm_rejects_parallel_split_durable_rate_limited_retries() {
+fn direct_wasm_compiles_parallel_split_durable_rate_limited_retries() {
     let mut graph: Value = serde_json::from_str(&parallel_http_split_graph("http://127.0.0.1", 4))
         .expect("graph json");
     graph["steps"]["split"]["subgraph"]["steps"]["fetch"]
         .as_object_mut()
         .expect("fetch step")
         .remove("maxRetries");
-    assert_parallel_retry_backoff_rejected(
+    assert_parallel_retry_backoff_compiles(
         "parallel-rate-limited",
         serde_json::from_value(graph).expect("graph parses"),
     );
 }
 
-/// Retry backoff is rejected for non-durable parallel Split items too: the
-/// prior timer-subtask lowering held an invocation while it waited.
+/// Non-durable parallel Split items with retries degrade the same way. The
+/// retired timer-subtask lowering held an invocation while it waited; the
+/// sequential fallback does not.
 #[test]
-fn direct_wasm_rejects_non_durable_parallel_split_retries() {
+fn direct_wasm_compiles_non_durable_parallel_split_retries() {
     let mut graph: Value = serde_json::from_str(&parallel_http_split_graph("http://127.0.0.1", 4))
         .expect("graph json");
     graph["durable"] = Value::Bool(false);
@@ -12176,23 +12318,24 @@ fn direct_wasm_rejects_non_durable_parallel_split_retries() {
         .as_object_mut()
         .expect("fetch step")
         .remove("maxRetries");
-    assert_parallel_retry_backoff_rejected(
+    assert_parallel_retry_backoff_compiles(
         "parallel-concurrent-backoff",
         serde_json::from_value(graph).expect("graph parses"),
     );
 }
 
-/// A replay-oriented durable parallel retry is also rejected at compile time;
-/// the compiler must not quietly retain a path that sleeps inside a runner.
+/// The replay-oriented durable parallel retry compiles too. The runtime
+/// guarantee that matters — no path sleeps inside a runner — is asserted by
+/// `direct_wasm_execute_invoke_parallel_split_item_retry_parks_sequentially`.
 #[test]
-fn direct_wasm_rejects_parallel_split_durable_retry_replay_shape() {
+fn direct_wasm_compiles_parallel_split_durable_retry_replay_shape() {
     let mut graph: Value = serde_json::from_str(&parallel_http_split_graph("http://127.0.0.1", 4))
         .expect("graph json");
     graph["steps"]["split"]["subgraph"]["steps"]["fetch"]
         .as_object_mut()
         .expect("fetch step")
         .remove("maxRetries");
-    assert_parallel_retry_backoff_rejected(
+    assert_parallel_retry_backoff_compiles(
         "durable-backoff-replay",
         serde_json::from_value(graph).expect("graph parses"),
     );

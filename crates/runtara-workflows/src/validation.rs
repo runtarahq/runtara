@@ -1339,7 +1339,7 @@ impl std::fmt::Display for ValidationWarning {
             } => {
                 write!(
                     f,
-                    "[W073] Split step '{}' sets parallelism={} — concurrent windows apply only to non-durable-compatible single-Agent bodies (no breakpoints, no split retries/timeout, not a workflow-agent child); other shapes run sequentially.",
+                    "[W073] Split step '{}' sets parallelism={} — a concurrent window requires a single-Agent body whose maxRetries is 0 (unset defaults to 3, which forces sequential execution), with no breakpoint and not a workflow-agent child, on a Split with no retries or timeout; other shapes run sequentially.",
                     step_id, parallelism
                 )
             }
@@ -3734,8 +3734,11 @@ fn validate_configuration(graph: &ExecutionGraph, result: &mut ValidationResult)
 
             Step::Split(split_step) => {
                 if let Some(config) = &split_step.config {
-                    // W073: parallelism promises concurrency that the WASM
-                    // runtime does not deliver — Split is always sequential.
+                    // W073: parallelism is a request, not a guarantee — only
+                    // eligible shapes get a concurrent window and everything
+                    // else silently runs sequentially. The advisory states the
+                    // rule rather than judging this step, because eligibility
+                    // is decided by the emitter (see `split_parallel.rs`).
                     // parallelism=1 matches actual behavior, so only other
                     // values (0 = "unlimited", >1) warn. `sequential` also
                     // matches actual behavior and never warns.
@@ -11645,6 +11648,9 @@ mod tests {
         );
         assert!(display.contains("[W073]"), "{display}");
         assert!(display.contains("sequentially"), "{display}");
+        // The unset-maxRetries default is the trap that silently forces
+        // sequential execution; the advisory must name it.
+        assert!(display.contains("maxRetries"), "{display}");
     }
 
     #[test]

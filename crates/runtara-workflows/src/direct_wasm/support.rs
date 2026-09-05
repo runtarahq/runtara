@@ -544,15 +544,6 @@ fn collect_graph_support_inner(
         }
     }
 
-    // A lifecycle retry parks the whole invocation at a keyed absolute
-    // deadline. That is safe for a sequential path, where replay can advance
-    // one persisted failure at a time. It is not safe inside the concurrent
-    // Split/branch schedulers: each sibling would need an independent parked
-    // continuation and a root wake cannot preserve that scheduler state.
-    // Reject the shapes that those schedulers would otherwise pick rather
-    // than silently serialising them or retaining an in-run sleep.
-    collect_parallel_retry_backoff_support(graph, unsupported);
-
     let finish_steps = graph
         .steps
         .values()
@@ -1417,142 +1408,6 @@ fn normal_flow_edges<'a>(
         .enumerate()
         .filter(|(_, edge)| edge.from_step == step_id && is_normal_label(edge.label.as_deref()))
         .collect()
-}
-
-/// Reject retry policies that would otherwise enter one of the concurrent
-/// schedulers. The durable retry lowering has a single top-level wake result;
-/// it cannot safely carry independently due timers for sibling branches.
-///
-/// This intentionally recognizes only shapes the concurrent emitters can
-/// actually choose. A configured-but-ineligible Split remains sequential and
-/// uses the regular durable retry park instead of being rejected merely for an
-/// advisory `parallelism` value.
-fn collect_parallel_retry_backoff_support(
-    graph: &ExecutionGraph,
-    unsupported: &mut Vec<UnsupportedWorkflowFeature>,
-) {
-    let mut step_entries: Vec<_> = graph.steps.iter().collect();
-    step_entries.sort_by_key(|(step_id, _)| *step_id);
-
-    // Concurrent Split windows are eligible only when the outer Split itself
-    // has no retry/timeout policy and its entry is a non-breakpoint Agent. A
-    // retrying entry Agent would otherwise ask the window timer machinery to
-    // continue independently from its siblings.
-    for (_, step) in &step_entries {
-        let Step::Split(split) = step else {
-            continue;
-        };
-        let Some(config) = split.config.as_ref() else {
-            continue;
-        };
-        let requests_concurrency = config.parallelism.is_some_and(|value| value != 1);
-        let outer_is_sequential_only =
-            config.max_retries.unwrap_or(0) > 0 || config.timeout.is_some();
-        if !requests_concurrency || outer_is_sequential_only {
-            continue;
-        }
-        let Some(Step::Agent(agent)) = split.subgraph.steps.get(&split.subgraph.entry_point) else {
-            continue;
-        };
-        if agent.breakpoint == Some(true) || !agent_has_retry_backoff(agent) {
-            continue;
-        }
-        unsupported.push(UnsupportedWorkflowFeature {
-            step_id: Some(split.id.clone()),
-            step_type: Some("Split".to_string()),
-            feature: "parallel-retry-backoff".to_string(),
-            reason: "a concurrent Split cannot park an Agent retry independently for each item; set parallelism to 1 or set the nested Agent maxRetries to 0".to_string(),
-        });
-    }
-
-    // `ParallelBranches` is planned from a rejoining unconditional fan-out.
-    // Walk the simple Agent/synchronous chains it can execute concurrently and
-    // reject the exact retrying Agent rather than letting the emitter fall back
-    // to an in-run branch timer.
-    for (source_id, _) in &step_entries {
-        let branches = normal_flow_edges(graph, source_id)
-            .into_iter()
-            .filter(|(_, edge)| edge.condition.is_none())
-            .collect::<Vec<_>>();
-        if branches.len() < 2 {
-            continue;
-        }
-        let starts = branches
-            .iter()
-            .map(|(_, edge)| Some(edge.to_step.clone()))
-            .collect::<Vec<_>>();
-        let Some(merge) = super::graph_order::find_merge_point_n(&starts, graph) else {
-            continue;
-        };
-        // A branch emitter only takes its async pool when every sibling is a
-        // simple schedulable chain. If another sibling is a composite, the
-        // fan-out follows the sequential/pass-two lowering instead; rejecting
-        // the retry in the otherwise-simple branch would be a false positive.
-        let Some(branch_agents) = branches
-            .iter()
-            .map(|(_, edge)| parallel_branch_agents(graph, &edge.to_step, &merge))
-            .collect::<Option<Vec<_>>>()
-        else {
-            continue;
-        };
-        for agent in branch_agents.into_iter().flatten() {
-            if !agent_has_retry_backoff(agent) {
-                continue;
-            }
-            unsupported.push(UnsupportedWorkflowFeature {
-                step_id: Some(agent.id.clone()),
-                step_type: Some("Agent".to_string()),
-                feature: "parallel-retry-backoff".to_string(),
-                reason: "an Agent retry inside a concurrent branch cannot be parked independently from sibling branches; set maxRetries to 0 or make the branch sequential".to_string(),
-            });
-        }
-    }
-}
-
-/// Return every Agent in a simple chain that the async branch pool can
-/// schedule. Composites/conditioned edges return `None`: their fan-out is not
-/// the retry-timer shape this gate protects.
-fn parallel_branch_agents<'a>(
-    graph: &'a ExecutionGraph,
-    start: &str,
-    merge: &str,
-) -> Option<Vec<&'a AgentStep>> {
-    let mut current = start;
-    let mut seen = BTreeSet::new();
-    let mut agents = Vec::new();
-    loop {
-        if current == merge || !seen.insert(current.to_string()) {
-            return (current == merge).then_some(agents);
-        }
-        let step = graph.steps.get(current)?;
-        match step {
-            Step::Agent(agent) => agents.push(agent),
-            Step::Log(_) | Step::Filter(_) | Step::GroupBy(_) => {}
-            // Value Switches have a synchronous lowering, but their routing
-            // shapes may branch; keep this guard conservative until the branch
-            // scheduler can preserve retry continuations through a route.
-            Step::Switch(switch)
-                if switch
-                    .config
-                    .as_ref()
-                    .is_none_or(|config| !config.is_routing()) => {}
-            _ => return None,
-        }
-        let next = normal_flow_edges(graph, current)
-            .into_iter()
-            .filter(|(_, edge)| edge.condition.is_none())
-            .collect::<Vec<_>>();
-        let [(_, edge)] = next.as_slice() else {
-            return None;
-        };
-        current = &edge.to_step;
-    }
-}
-
-fn agent_has_retry_backoff(agent: &AgentStep) -> bool {
-    // Agent's documented default is three retries. An explicit zero is the
-    // opt-out that keeps concurrent branch scheduling safe.
-    agent.max_retries.unwrap_or(3) > 0
 }
 
 fn on_error_edges<'a>(
@@ -3372,7 +3227,7 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_split_retry_backoff_is_rejected_instead_of_serialized() {
+    fn concurrent_split_with_retrying_body_stays_supported_and_serializes() {
         let graph: ExecutionGraph = serde_json::from_value(serde_json::json!({
             "durable": true,
             "steps": {
@@ -3405,15 +3260,12 @@ mod tests {
         .expect("graph parses");
 
         let report = analyze_direct_wasm_support(&graph);
-        assert!(!report.supported, "{:?}", report.unsupported);
-        assert!(report.unsupported.iter().any(|feature| {
-            feature.step_id.as_deref() == Some("split")
-                && feature.feature == "parallel-retry-backoff"
-        }));
+        assert!(report.supported, "{:?}", report.unsupported);
+        assert!(report.unsupported.is_empty(), "{:?}", report.unsupported);
     }
 
     #[test]
-    fn concurrent_branch_retry_backoff_is_rejected_with_agent_diagnostic() {
+    fn concurrent_branches_with_retrying_agent_stay_supported_and_serialize() {
         let graph: ExecutionGraph = serde_json::from_value(serde_json::json!({
             "durable": true,
             "steps": {
@@ -3444,12 +3296,8 @@ mod tests {
         .expect("graph parses");
 
         let report = analyze_direct_wasm_support(&graph);
-        assert!(!report.supported, "{:?}", report.unsupported);
-        assert!(report.unsupported.iter().any(|feature| {
-            feature.step_id.as_deref() == Some("retry")
-                && feature.step_type.as_deref() == Some("Agent")
-                && feature.feature == "parallel-retry-backoff"
-        }));
+        assert!(report.supported, "{:?}", report.unsupported);
+        assert!(report.unsupported.is_empty(), "{:?}", report.unsupported);
     }
 
     #[test]

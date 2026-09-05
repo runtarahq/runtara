@@ -623,8 +623,9 @@ fn emit_branch_agent(
         // slot is empty here and `emit_agent_plan` runs a BLOCKING invoke with the
         // breakpoint emitted first — pause-before-run semantics, no resume double-fire.
         branch.breakpoint,
-        // Concurrent branch eligibility requires zero retries. A retrying
-        // branch is rejected before it could need an in-run backoff.
+        // Concurrent branch eligibility requires zero retries: a retrying
+        // branch is excluded from the pool above and runs on the sequential
+        // lowering, which parks its backoff durably.
         branch.max_retries,
         branch.retry_delay_ms,
         branch.rate_limit_budget_ms,
