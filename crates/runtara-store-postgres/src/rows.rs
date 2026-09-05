@@ -29,7 +29,7 @@ impl<'r> FromRow<'r, PgRow> for InstanceRow {
             instance_id: row.try_get("instance_id")?,
             tenant_id: row.try_get("tenant_id")?,
             definition_version: row.try_get("definition_version")?,
-            status: row.try_get("status")?,
+            status: crate::encoding::status_from_str(&row.try_get::<String, _>("status")?)?,
             checkpoint_id: row.try_get("checkpoint_id")?,
             attempt: row.try_get("attempt")?,
             max_attempts: row.try_get("max_attempts")?,
@@ -70,7 +70,9 @@ impl<'r> FromRow<'r, PgRow> for EventRow {
         Ok(Self(EventRecord {
             id: row.try_get("id").unwrap_or_default(),
             instance_id: row.try_get("instance_id")?,
-            event_type: row.try_get("event_type")?,
+            event_type: crate::encoding::event_type_from_str(
+                &row.try_get::<String, _>("event_type")?,
+            )?,
             checkpoint_id: row.try_get("checkpoint_id")?,
             payload: row.try_get("payload")?,
             created_at: row.try_get("created_at")?,
@@ -86,7 +88,9 @@ impl<'r> FromRow<'r, PgRow> for SignalRow {
     fn from_row(row: &'r PgRow) -> Result<Self, sqlx::Error> {
         Ok(Self(SignalRecord {
             instance_id: row.try_get("instance_id")?,
-            signal_type: row.try_get("signal_type")?,
+            signal_type: crate::encoding::signal_type_from_str(
+                &row.try_get::<String, _>("signal_type")?,
+            )?,
             payload: row.try_get("payload")?,
             created_at: row.try_get("created_at")?,
             acknowledged_at: row.try_get("acknowledged_at")?,
@@ -115,13 +119,13 @@ impl<'r> FromRow<'r, PgRow> for CustomSignalRow {
 /// either. An extension trait on the driver's own `Result` is what is left, and
 /// it has the advantage of being visible at each call site.
 pub(crate) trait DbResult<T> {
-    /// Convert a driver failure into [`CoreError::DatabaseError`].
+    /// Convert a driver failure into [`CoreError::PersistenceError`].
     fn db(self) -> Result<T, runtara_core::error::CoreError>;
 }
 
 impl<T> DbResult<T> for Result<T, sqlx::Error> {
     fn db(self) -> Result<T, runtara_core::error::CoreError> {
-        self.map_err(|e| runtara_core::error::CoreError::DatabaseError {
+        self.map_err(|e| runtara_core::error::CoreError::PersistenceError {
             operation: "postgres".to_string(),
             details: e.to_string(),
         })

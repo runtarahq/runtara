@@ -164,7 +164,7 @@ async fn returning_status_reports_the_guest_status() {
             .await
             .expect("failed to record resources");
     let (status, _reason) = observed.expect("a registered instance must return a status");
-    assert_eq!(status, "pending");
+    assert_eq!(status, runtara_core::domain::InstanceStatus::Pending);
 
     assert!(
         metrics::record_resources_returning_status(&pool, "no-such-instance", None, None)

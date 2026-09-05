@@ -35,6 +35,8 @@
 //! ```
 //!
 
+use runtara_core::domain::InstanceStatus as CoreInstanceStatus;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -632,7 +634,11 @@ impl EnvironmentRuntime {
             if let Err(e) = self
                 .state
                 .persistence
-                .insert_signal(&info.instance_id, "shutdown", &[])
+                .insert_signal(
+                    &info.instance_id,
+                    runtara_core::domain::SignalType::Shutdown,
+                    &[],
+                )
                 .await
             {
                 warn!(
@@ -687,7 +693,7 @@ impl EnvironmentRuntime {
                 .state
                 .persistence
                 .complete_instance(
-                    CompleteInstanceParams::new(&info.instance_id, "suspended")
+                    CompleteInstanceParams::new(&info.instance_id, CoreInstanceStatus::Suspended)
                         .if_running()
                         .with_termination("shutdown_requested", None)
                         .with_error("Force-stopped after grace period expired during shutdown"),
@@ -738,13 +744,16 @@ impl EnvironmentRuntime {
             match persistence.get_instance_meta(&info.instance_id).await {
                 Ok(Some(inst))
                     if matches!(
-                        inst.status.as_str(),
-                        "suspended" | "completed" | "failed" | "cancelled"
+                        inst.status,
+                        CoreInstanceStatus::Suspended
+                            | CoreInstanceStatus::Completed
+                            | CoreInstanceStatus::Failed
+                            | CoreInstanceStatus::Cancelled
                     ) =>
                 {
                     debug!(
                         instance_id = %info.instance_id,
-                        status = %inst.status,
+                        status = ?inst.status,
                         "Instance drained"
                     );
                 }
@@ -875,12 +884,18 @@ async fn recover_orphaned_containers(pool: &PgPool, persistence: &dyn Persistenc
         // The guest died with the previous process — check Core status.
         match persistence.get_instance_meta(instance_id).await {
             Ok(Some(inst)) => {
-                let status = inst.status.as_str();
-                if matches!(status, "completed" | "failed" | "cancelled" | "suspended") {
+                let status = inst.status;
+                if matches!(
+                    status,
+                    CoreInstanceStatus::Completed
+                        | CoreInstanceStatus::Failed
+                        | CoreInstanceStatus::Cancelled
+                        | CoreInstanceStatus::Suspended
+                ) {
                     // Already terminal - just clean up registry
                     info!(
                         instance_id = %instance_id,
-                        status = %status,
+                        status = ?status,
                         "Cleaning up terminated container from registry"
                     );
                     let _ = registry.cleanup(instance_id).await;
@@ -894,7 +909,7 @@ async fn recover_orphaned_containers(pool: &PgPool, persistence: &dyn Persistenc
                     // a later phase; default is to recover.
                     warn!(
                         instance_id = %instance_id,
-                        status = %status,
+                        status = ?status,
                         "Found orphaned container (process gone, Core shows running) - recovering after Environment restart"
                     );
 

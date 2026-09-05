@@ -20,8 +20,12 @@ pub mod migrations;
 /// Row decoding for Core's record types.
 pub mod rows;
 
+/// PostgreSQL encodings of execution domain values.
+pub mod encoding;
+
 mod backend;
 mod dialect;
 mod ops_common;
+mod vocabulary;
 
 pub use backend::{PostgresPersistence, load_latest_checkpoint};

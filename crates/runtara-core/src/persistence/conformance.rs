@@ -3,13 +3,14 @@
 //! Conformance harness for the persistence backend.
 //!
 //! Runs a scripted sequence of [`Persistence`] operations and asserts
-//! invariants on the observable state between steps. It began as a parity
-//! harness comparing two backends; with one backend left it is the only
-//! unit-level coverage in this crate for the sleep lifecycle
+//! invariants on the observable state between steps. It covers the sleep lifecycle
 //! (`set_instance_sleep`, `get_sleeping_instances_due`,
 //! `claim_sleeping_instance`, `claim_sleeping_instances_due`,
-//! `clear_instance_sleep`) and for
+//! `clear_instance_sleep`) and retention via
 //! `get_terminal_instances_older_than` / `delete_instances_batch`.
+
+use crate::domain::InstanceStatus as CoreInstanceStatus;
+use crate::domain::SignalType as CoreSignalType;
 
 use chrono::{Duration, Utc};
 use uuid::Uuid;
@@ -40,7 +41,7 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
         .expect("instance should exist immediately after register");
     assert_eq!(record.instance_id, instance_id);
     assert_eq!(record.tenant_id, tenant_id);
-    assert_eq!(record.status, "pending");
+    assert_eq!(record.status, CoreInstanceStatus::Pending);
 
     // --- try_register is a claim, not a second insert -----------------------
     // The id is an idempotency key for an at-least-once trigger stream, so a
@@ -76,7 +77,7 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
         "a losing claim must not write its input over the existing row"
     );
 
-    // A winning claim persists the input in the same statement, so no separate
+    // A winning claim persists the input in the same operation, so no separate
     // store_instance_input is needed on the launch path.
     let fresh_id = Uuid::new_v4().to_string();
     let fresh_input = b"{\"data\":{\"claimed\":true}}".to_vec();
@@ -97,9 +98,9 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
         Some(fresh_input.as_slice()),
         "the claim must persist the input it was given"
     );
-    assert_eq!(created.status, "pending");
+    assert_eq!(created.status, CoreInstanceStatus::Pending);
 
-    // And a claim with no input leaves the column null rather than erroring.
+    // And a claim with no input leaves the input absent rather than erroring.
     let no_input_id = Uuid::new_v4().to_string();
     assert!(
         backend
@@ -119,8 +120,8 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
 
     // --- get_instance_meta drops the input and nothing else -----------------
     // The projection exists to keep status checks off the launch payload, so
-    // the contract is narrow: `input` comes back None, every other column comes
-    // back exactly as the full read gives it. A column quietly falling to its
+    // the contract is narrow: `input` comes back None, every other field comes
+    // back exactly as the full read gives it. A field quietly falling to its
     // Default here would be a silent data bug at the call sites that swapped.
     let payload = b"{\"data\":{\"conformance\":true}}".to_vec();
     backend
@@ -186,7 +187,7 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
         .await
         .expect("register sleeper failed");
     backend
-        .update_instance_status(&sleeper, "suspended", None)
+        .update_instance_status(&sleeper, CoreInstanceStatus::Suspended, None)
         .await
         .expect("suspend sleeper failed");
     backend
@@ -194,7 +195,7 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
         .await
         .expect("set_instance_sleep failed");
 
-    // The lib tests share one database, so a rival test polling the same due
+    // The lib tests share one store, so a rival test polling the same due
     // set may take this row first. Claim in a bounded loop and accept either
     // outcome: what must hold is that whoever claimed it left a deadline
     // behind. `SKIP LOCKED` also means one round need not see every row.
@@ -277,11 +278,15 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     // that suspends and wakes still reports when it first began.
     let first_started = Utc::now() - chrono::Duration::seconds(120);
     backend
-        .update_instance_status(&instance_id, "running", Some(first_started))
+        .update_instance_status(
+            &instance_id,
+            CoreInstanceStatus::Running,
+            Some(first_started),
+        )
         .await
         .expect("seed running failed");
     backend
-        .update_instance_status(&instance_id, "suspended", None)
+        .update_instance_status(&instance_id, CoreInstanceStatus::Suspended, None)
         .await
         .expect("suspend failed");
     let before = backend
@@ -289,7 +294,7 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
         .await
         .expect("get_instance failed")
         .expect("instance should exist");
-    assert_eq!(before.status, "suspended");
+    assert_eq!(before.status, CoreInstanceStatus::Suspended);
 
     backend
         .mark_instance_running(&instance_id, Utc::now())
@@ -301,7 +306,8 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
         .expect("get_instance failed")
         .expect("instance should exist");
     assert_eq!(
-        promoted.status, "running",
+        promoted.status,
+        CoreInstanceStatus::Running,
         "mark_instance_running must promote a suspended instance"
     );
     assert_eq!(
@@ -312,7 +318,7 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
 
     // --- update status → running -------------------------------------------
     backend
-        .update_instance_status(&instance_id, "running", Some(Utc::now()))
+        .update_instance_status(&instance_id, CoreInstanceStatus::Running, Some(Utc::now()))
         .await
         .expect("update_instance_status running failed");
     let record = backend
@@ -320,7 +326,7 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
         .await
         .expect("get_instance after update failed")
         .expect("instance must still exist");
-    assert_eq!(record.status, "running");
+    assert_eq!(record.status, CoreInstanceStatus::Running);
     assert!(record.started_at.is_some());
 
     // --- checkpoints --------------------------------------------------------
@@ -422,14 +428,14 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     // --- events -------------------------------------------------------------
     // Backdated deliberately. `created_at` is the emitter's observation time
     // and must survive the round trip untouched; a backend that defaults the
-    // column to its own write time stamps this event five minutes late. An
+    // field to its own write time stamps this event five minutes late. An
     // event created at `Utc::now()` would read back the same under either
     // behaviour, so it could not tell them apart.
     let emitted_at = Utc::now() - Duration::minutes(5);
     let event = EventRecord {
         id: None,
         instance_id: instance_id.clone(),
-        event_type: "custom".to_string(),
+        event_type: crate::domain::EventType::Custom,
         checkpoint_id: Some(checkpoint_id.to_string()),
         payload: Some(br#"{"note":"hello"}"#.to_vec()),
         created_at: emitted_at,
@@ -458,7 +464,7 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     assert!(
         drift_ms < 1_000,
         "insert_event must persist the caller's created_at: emitted {emitted_at}, \
-         stored {}, drift {drift_ms}ms — a backend defaulting the column to its \
+         stored {}, drift {drift_ms}ms — a backend defaulting the field to its \
          own write time drifts by the full backdate",
         stored.created_at
     );
@@ -472,7 +478,7 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     // --- signals ------------------------------------------------------------
     let signal_payload = br#"{"reason":"parity"}"#.to_vec();
     backend
-        .insert_signal(&instance_id, "cancel", &signal_payload)
+        .insert_signal(&instance_id, CoreSignalType::Cancel, &signal_payload)
         .await
         .expect("insert_signal failed");
     let pending = backend
@@ -480,7 +486,7 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
         .await
         .expect("get_pending_signal failed")
         .expect("signal should be pending after insert");
-    assert_eq!(pending.signal_type, "cancel");
+    assert_eq!(pending.signal_type, CoreSignalType::Cancel);
     backend
         .acknowledge_signal(&instance_id)
         .await
@@ -500,7 +506,7 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     // A genuinely new signal for the same instance is still delivered: the
     // insert resets the acknowledgement.
     backend
-        .insert_signal(&instance_id, "shutdown", b"drain")
+        .insert_signal(&instance_id, CoreSignalType::Shutdown, b"drain")
         .await
         .expect("insert_signal after ack failed");
     let reinserted = backend
@@ -508,7 +514,7 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
         .await
         .expect("get_pending_signal after re-insert failed")
         .expect("a freshly inserted signal must be pending again");
-    assert_eq!(reinserted.signal_type, "shutdown");
+    assert_eq!(reinserted.signal_type, CoreSignalType::Shutdown);
     assert!(reinserted.acknowledged_at.is_none());
 
     // --- custom checkpoint signals -----------------------------------------
@@ -525,8 +531,7 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     assert_eq!(taken.checkpoint_id, checkpoint_id);
     // Reads are non-destructive: a replayed WaitForSignal re-reads the same
     // signal after a drain/resume, so a second read returns the row again
-    // rather than None (the row is reclaimed by ON DELETE CASCADE at instance
-    // deletion).
+    // rather than None. Instance deletion reclaims the signal.
     let taken_again = backend
         .take_pending_custom_signal(&instance_id, checkpoint_id)
         .await
@@ -538,8 +543,7 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     // --- paired records -----------------------------------------------------
     // This harness emits none of this vocabulary's start events, so the paired
     // query must come back empty rather than surfacing this instance's other
-    // events. Content-level coverage of the paired CTE lives in the backend's
-    // own tests (`test_list_step_summaries_*` in `persistence::postgres`).
+    // events. Content-level pairing coverage lives in each backend's tests.
     let vocabulary = EventVocabulary::new(EventVocabularySpec {
         start_subtype: "conformance_start",
         end_subtype: "conformance_end",
@@ -590,7 +594,7 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
         "instance in 'running' must not appear as due to wake"
     );
     backend
-        .update_instance_status(&instance_id, "suspended", None)
+        .update_instance_status(&instance_id, CoreInstanceStatus::Suspended, None)
         .await
         .expect("update_instance_status suspended failed");
     let due = backend
@@ -605,7 +609,7 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     // --- atomic claim (double-launch prevention) ----------------------------
     // The instance is suspended with a past sleep_until (due). The first claim
     // must win and clear sleep_until; a second claim must lose — this is what
-    // stops two wakers (or two Environments sharing this Core DB) from
+    // stops two wakers (or two Environments sharing this store) from
     // launching the same instance twice.
     let first_claim = backend
         .claim_sleeping_instance(&instance_id)
@@ -641,7 +645,7 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     // faster than its launcher returns gets resurrected as `running` with no
     // process behind it — which the container monitor then fails as a crash.
     backend
-        .update_instance_status(&instance_id, "suspended", None)
+        .update_instance_status(&instance_id, CoreInstanceStatus::Suspended, None)
         .await
         .expect("update_instance_status suspended failed (start guard setup)");
     let promoted_parked = backend
@@ -658,12 +662,13 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
         .expect("get_instance failed (start guard)")
         .expect("instance must still exist");
     assert_eq!(
-        parked.status, "suspended",
+        parked.status,
+        CoreInstanceStatus::Suspended,
         "the guarded promotion must leave a parked instance untouched"
     );
 
     backend
-        .update_instance_status(&instance_id, "running", Some(Utc::now()))
+        .update_instance_status(&instance_id, CoreInstanceStatus::Running, Some(Utc::now()))
         .await
         .expect("update_instance_status running failed (start guard reset)");
     let promoted_running = backend
@@ -677,7 +682,7 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
 
     // Hand the next section the `suspended` instance it expects.
     backend
-        .update_instance_status(&instance_id, "suspended", None)
+        .update_instance_status(&instance_id, CoreInstanceStatus::Suspended, None)
         .await
         .expect("update_instance_status suspended failed (start guard teardown)");
 
@@ -747,7 +752,7 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
         .await
         .expect("count_active_instances (suspended) failed");
     backend
-        .update_instance_status(&instance_id, "running", None)
+        .update_instance_status(&instance_id, CoreInstanceStatus::Running, None)
         .await
         .expect("update_instance_status running (re-run) failed");
     let active = backend
@@ -774,7 +779,7 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     // --- completion ---------------------------------------------------------
     backend
         .complete_instance(
-            CompleteInstanceParams::new(&instance_id, "completed")
+            CompleteInstanceParams::new(&instance_id, CoreInstanceStatus::Completed)
                 .with_output(b"{\"result\":42}")
                 .with_checkpoint(checkpoint_id),
         )
@@ -785,7 +790,7 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
         .await
         .expect("get_instance after complete failed")
         .expect("instance must still exist post-complete");
-    assert_eq!(record.status, "completed");
+    assert_eq!(record.status, CoreInstanceStatus::Completed);
 
     // `output` and `error` are REPLACED, not merged: a transition that carries
     // no output clears whatever was there. The fields that do merge are
@@ -794,7 +799,7 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     // was pinned here.
     backend
         .complete_instance(
-            CompleteInstanceParams::new(&instance_id, "failed")
+            CompleteInstanceParams::new(&instance_id, CoreInstanceStatus::Failed)
                 .with_error("boom")
                 .with_termination("crashed", Some(137)),
         )
@@ -820,7 +825,10 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
 
     // The merging fields keep their value when the next transition omits them.
     backend
-        .complete_instance(CompleteInstanceParams::new(&instance_id, "failed"))
+        .complete_instance(CompleteInstanceParams::new(
+            &instance_id,
+            CoreInstanceStatus::Failed,
+        ))
         .await
         .expect("complete_instance (merge) failed");
     let record = backend
@@ -847,8 +855,8 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
 
     // The sweep returns the OLDEST terminal instances first, and this one was
     // just completed, so it sorts last. A limit near the number of terminal
-    // rows already in the database would exclude it for reasons that have
-    // nothing to do with the sweep working — the lib tests share a database
+    // rows already in the store would exclude it for reasons that have
+    // nothing to do with the sweep working — the lib tests share a store
     // and it accumulates. Ask for more than it can plausibly hold instead, and
     // say so if it is ever hit.
     let cutoff = Utc::now() + Duration::seconds(60);

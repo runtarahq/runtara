@@ -363,10 +363,13 @@ impl HeartbeatMonitor {
         // run that was actually stale.
         self.core_persistence
             .complete_instance(
-                CompleteInstanceParams::new(&container.instance_id, "failed")
-                    .if_running()
-                    .with_termination("heartbeat_timeout", None)
-                    .with_error(&error_message),
+                CompleteInstanceParams::new(
+                    &container.instance_id,
+                    runtara_core::domain::InstanceStatus::Failed,
+                )
+                .if_running()
+                .with_termination("heartbeat_timeout", None)
+                .with_error(&error_message),
             )
             .await
             .map_err(|e| crate::error::Error::Other(format!("Core persistence error: {}", e)))?;
@@ -394,7 +397,12 @@ impl HeartbeatMonitor {
         // Get all running instances from Core
         let running_instances = self
             .core_persistence
-            .list_instances(None, Some("running"), 1000, 0)
+            .list_instances(
+                None,
+                Some(runtara_core::domain::InstanceStatus::Running),
+                1000,
+                0,
+            )
             .await
             .map_err(|e| crate::error::Error::Other(format!("Core persistence error: {}", e)))?;
 

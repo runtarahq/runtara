@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Tests for heartbeat_monitor module - detecting and failing stale/orphaned instances.
 
+use runtara_core::domain::InstanceStatus as CoreInstanceStatus;
+
 mod common;
 
 use async_trait::async_trait;
@@ -259,7 +261,7 @@ impl MockPersistence {
             instance_id: instance_id.to_string(),
             tenant_id: tenant_id.to_string(),
             definition_version: 1,
-            status: "running".to_string(),
+            status: CoreInstanceStatus::Running,
             checkpoint_id: None,
             attempt: 1,
             max_attempts: 3,
@@ -304,7 +306,7 @@ impl Persistence for MockPersistence {
     async fn update_instance_status(
         &self,
         _instance_id: &str,
-        _status: &str,
+        _status: CoreInstanceStatus,
         _started_at: Option<DateTime<Utc>>,
     ) -> Result<(), CoreError> {
         Ok(())
@@ -378,7 +380,7 @@ impl Persistence for MockPersistence {
     async fn insert_signal(
         &self,
         _instance_id: &str,
-        _signal_type: &str,
+        _signal_type: runtara_core::domain::SignalType,
         _payload: &[u8],
     ) -> Result<(), CoreError> {
         Ok(())
@@ -425,7 +427,7 @@ impl Persistence for MockPersistence {
     async fn list_instances(
         &self,
         _tenant_id: Option<&str>,
-        status: Option<&str>,
+        status: Option<CoreInstanceStatus>,
         _limit: i64,
         _offset: i64,
     ) -> Result<Vec<InstanceRecord>, CoreError> {
@@ -1046,7 +1048,7 @@ async fn test_completed_instance_in_core_not_flagged() {
             instance_id: instance_id.clone(),
             tenant_id: tenant_id.clone(),
             definition_version: 1,
-            status: "completed".to_string(), // Not "running"
+            status: CoreInstanceStatus::Completed, // Not "running"
             checkpoint_id: None,
             attempt: 1,
             max_attempts: 3,

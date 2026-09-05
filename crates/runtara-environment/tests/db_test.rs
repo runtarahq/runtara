@@ -77,7 +77,10 @@ async fn update_test_instance_status(
 ) {
     let persistence = PostgresPersistence::new(pool.clone());
     if matches!(status, "completed" | "failed" | "cancelled") {
-        let mut params = CompleteInstanceParams::new(instance_id, status);
+        let mut params = CompleteInstanceParams::new(
+            instance_id,
+            runtara_store_postgres::encoding::status_from_str(status).unwrap(),
+        );
         if let Some(checkpoint_id) = checkpoint_id {
             params = params.with_checkpoint(checkpoint_id);
         }
@@ -89,7 +92,11 @@ async fn update_test_instance_status(
     }
     let started_at = (status == "running").then(chrono::Utc::now);
     persistence
-        .update_instance_status(instance_id, status, started_at)
+        .update_instance_status(
+            instance_id,
+            runtara_store_postgres::encoding::status_from_str(status).unwrap(),
+            started_at,
+        )
         .await
         .expect("Failed to update instance status");
     if let Some(cp_id) = checkpoint_id {
@@ -112,7 +119,10 @@ async fn update_test_instance_result(
     stderr: Option<&str>,
 ) {
     let persistence = PostgresPersistence::new(pool.clone());
-    let mut params = CompleteInstanceParams::new(instance_id, status);
+    let mut params = CompleteInstanceParams::new(
+        instance_id,
+        runtara_store_postgres::encoding::status_from_str(status).unwrap(),
+    );
     if let Some(o) = output {
         params = params.with_output(o);
     }

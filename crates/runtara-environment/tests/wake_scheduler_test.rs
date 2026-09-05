@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Tests for wake_scheduler module and related database operations.
 
+use runtara_core::domain::InstanceStatus as CoreInstanceStatus;
+
 mod common;
 
 use chrono::Utc;
@@ -102,7 +104,10 @@ async fn update_test_instance_status(
 ) {
     let persistence = PostgresPersistence::new(pool.clone());
     if matches!(status, "completed" | "failed" | "cancelled") {
-        let mut params = CompleteInstanceParams::new(instance_id, status);
+        let mut params = CompleteInstanceParams::new(
+            instance_id,
+            runtara_store_postgres::encoding::status_from_str(status).unwrap(),
+        );
         if let Some(cp_id) = checkpoint_id {
             params = params.with_checkpoint(cp_id);
         }
@@ -115,7 +120,11 @@ async fn update_test_instance_status(
 
     let started_at = (status == "running").then(Utc::now);
     persistence
-        .update_instance_status(instance_id, status, started_at)
+        .update_instance_status(
+            instance_id,
+            runtara_store_postgres::encoding::status_from_str(status).unwrap(),
+            started_at,
+        )
         .await
         .expect("Failed to update instance status");
     if let Some(cp_id) = checkpoint_id {
@@ -138,7 +147,10 @@ async fn update_test_instance_result(
     stderr: Option<&str>,
 ) {
     let persistence = PostgresPersistence::new(pool.clone());
-    let mut params = CompleteInstanceParams::new(instance_id, status);
+    let mut params = CompleteInstanceParams::new(
+        instance_id,
+        runtara_store_postgres::encoding::status_from_str(status).unwrap(),
+    );
     if let Some(o) = output {
         params = params.with_output(o);
     }
@@ -578,7 +590,7 @@ async fn test_wake_cancels_pending_cancel_and_still_launches_the_rest() {
 
     let persistence = Arc::new(PostgresPersistence::new(pool.clone()));
     persistence
-        .insert_signal(&cancelled_id, "cancel", b"")
+        .insert_signal(&cancelled_id, runtara_core::domain::SignalType::Cancel, b"")
         .await
         .expect("Failed to insert cancel signal");
 
@@ -604,7 +616,7 @@ async fn test_wake_cancels_pending_cancel_and_still_launches_the_rest() {
 
     let launches = LaunchRepository::new(pool.clone());
     let deadline = std::time::Instant::now() + Duration::from_secs(15);
-    let mut status = String::new();
+    let mut status = CoreInstanceStatus::Suspended;
     let mut healthy_queued = false;
     while std::time::Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -621,7 +633,7 @@ async fn test_wake_cancels_pending_cancel_and_still_launches_the_rest() {
             .is_some_and(|launch| {
                 launch.kind == LaunchKind::Wake && launch.state == LaunchState::Queued
             });
-        if status == "cancelled" && healthy_queued {
+        if status == CoreInstanceStatus::Cancelled && healthy_queued {
             break;
         }
     }
@@ -630,7 +642,8 @@ async fn test_wake_cancels_pending_cancel_and_still_launches_the_rest() {
     let _ = handle.await;
 
     assert_eq!(
-        status, "cancelled",
+        status,
+        CoreInstanceStatus::Cancelled,
         "a cancel pending at wake time must land the instance on `cancelled`"
     );
     assert!(
@@ -697,7 +710,7 @@ async fn a_wake_without_an_image_fails_without_a_runner_handoff() {
             .await
             .unwrap()
             .expect("instance must exist");
-        if inst.status == "failed" {
+        if inst.status == CoreInstanceStatus::Failed {
             failed = true;
             break;
         }

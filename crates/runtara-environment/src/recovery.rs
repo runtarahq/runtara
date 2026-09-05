@@ -150,10 +150,13 @@ pub async fn recover_or_fail(
         Decision::Fail { error: err } => {
             if let Err(e) = persistence
                 .complete_instance(
-                    CompleteInstanceParams::new(instance_id, "failed")
-                        .if_running()
-                        .with_termination("environment_restart", None)
-                        .with_error(&err),
+                    CompleteInstanceParams::new(
+                        instance_id,
+                        runtara_core::domain::InstanceStatus::Failed,
+                    )
+                    .if_running()
+                    .with_termination("environment_restart", None)
+                    .with_error(&err),
                 )
                 .await
             {

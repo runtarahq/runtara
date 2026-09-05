@@ -61,7 +61,7 @@ fn workflow_metrics() -> &'static WorkflowMetrics {
 fn metric_attributes(metric: &InstanceCompletionMetrics) -> Vec<KeyValue> {
     vec![
         KeyValue::new("tenant_id", metric.tenant_id.clone()),
-        KeyValue::new("status", metric.status.clone()),
+        KeyValue::new("status", crate::core_types::status_name(metric.status)),
         KeyValue::new(
             "termination_reason",
             metric
@@ -148,7 +148,7 @@ pub async fn record_resources_returning_status(
     instance_id: &str,
     memory_peak_bytes: Option<u64>,
     cpu_usage_usec: Option<u64>,
-) -> Result<Option<(String, Option<String>)>> {
+) -> Result<Option<(runtara_core::domain::InstanceStatus, Option<String>)>> {
     let row: Option<(String, Option<String>)> = sqlx::query_as(
         "UPDATE instances \
          SET memory_peak_bytes = COALESCE(memory_peak_bytes, $2), \
@@ -172,7 +172,13 @@ pub async fn record_resources_returning_status(
         record_resources(metrics, &metric, &attributes);
     }
 
-    Ok(row)
+    row.map(|(status, reason)| {
+        Ok((
+            runtara_store_postgres::encoding::status_from_str(&status)?,
+            reason,
+        ))
+    })
+    .transpose()
 }
 
 /// Store raw stderr captured from the runner, for debugging.
@@ -236,13 +242,16 @@ async fn fetch_completion_metrics(
     .await
     .map_err(|e| Error::Other(format!("fetch_completion_metrics: {e}")))?;
 
-    Ok(row.map(|row| InstanceCompletionMetrics {
-        tenant_id: row.tenant_id,
-        status: row.status,
-        termination_reason: row.termination_reason,
-        started_at: row.started_at,
-        finished_at: row.finished_at,
-        memory_peak_bytes: row.memory_peak_bytes.and_then(|v| u64::try_from(v).ok()),
-        cpu_usage_usec: row.cpu_usage_usec.and_then(|v| u64::try_from(v).ok()),
-    }))
+    row.map(|row| {
+        Ok(InstanceCompletionMetrics {
+            tenant_id: row.tenant_id,
+            status: runtara_store_postgres::encoding::status_from_str(&row.status)?,
+            termination_reason: row.termination_reason,
+            started_at: row.started_at,
+            finished_at: row.finished_at,
+            memory_peak_bytes: row.memory_peak_bytes.and_then(|v| u64::try_from(v).ok()),
+            cpu_usage_usec: row.cpu_usage_usec.and_then(|v| u64::try_from(v).ok()),
+        })
+    })
+    .transpose()
 }

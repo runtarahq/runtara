@@ -530,8 +530,25 @@ impl EnvironmentClient {
         let limit = options.limit.unwrap_or(100);
         let offset = options.offset.unwrap_or(0);
 
+        // Event filters historically accept arbitrary strings. An unknown name
+        // cannot match a domain event, so preserve the empty page response.
+        let event_type = match options.event_type.as_deref() {
+            Some(value) => match parse_event_type(value) {
+                Some(event_type) => Some(event_type),
+                None => {
+                    return Ok(ListEventsResult {
+                        events: Vec::new(),
+                        total_count: 0,
+                        limit,
+                        offset,
+                    });
+                }
+            },
+            None => None,
+        };
+
         let filter = ListEventsFilter {
-            event_type: options.event_type,
+            event_type,
             subtype: options.subtype,
             created_after: options.created_after,
             created_before: options.created_before,
@@ -820,3 +837,96 @@ fn decode_base64_json(encoded: &str) -> Option<serde_json::Value> {
 
 /// Keeps `HashMap` in the signature list honest for callers building env maps.
 pub type EnvMap = HashMap<String, String>;
+
+fn parse_event_type(value: &str) -> Option<runtara_core::domain::EventType> {
+    use runtara_core::domain::EventType;
+    match value {
+        "started" => Some(EventType::Started),
+        "progress" => Some(EventType::Progress),
+        "heartbeat" => Some(EventType::Heartbeat),
+        "completed" => Some(EventType::Completed),
+        "failed" => Some(EventType::Failed),
+        "suspended" => Some(EventType::Suspended),
+        "custom" => Some(EventType::Custom),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use runtara_core::domain::EventType;
+    use runtara_core::persistence::{EventRecord, Persistence, memory::InMemoryPersistence};
+    use runtara_environment::runner::MockRunner;
+
+    #[tokio::test]
+    async fn event_filters_keep_wire_names_and_unknown_names_match_nothing() {
+        let persistence = Arc::new(InMemoryPersistence::new());
+        let events = [
+            ("started", EventType::Started),
+            ("progress", EventType::Progress),
+            ("heartbeat", EventType::Heartbeat),
+            ("completed", EventType::Completed),
+            ("failed", EventType::Failed),
+            ("suspended", EventType::Suspended),
+            ("custom", EventType::Custom),
+        ];
+        for (_, event_type) in events {
+            persistence
+                .insert_event(&EventRecord {
+                    id: None,
+                    instance_id: "event-filter-test".into(),
+                    event_type,
+                    checkpoint_id: None,
+                    payload: None,
+                    created_at: Utc::now(),
+                    subtype: None,
+                })
+                .await
+                .unwrap();
+        }
+        // Event reads must use the injected persistence, with no environment I/O.
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgresql://localhost:1/unused")
+            .unwrap();
+        let client = EnvironmentClient::new(Arc::new(EnvironmentHandlerState::new(
+            pool,
+            persistence,
+            Arc::new(MockRunner::new()),
+            "http://127.0.0.1:1".into(),
+            std::env::temp_dir(),
+        )));
+        for (name, _) in events {
+            let page = client
+                .list_events(
+                    "event-filter-test",
+                    ListEventsOptions::new().with_event_type(name),
+                )
+                .await
+                .unwrap();
+            assert_eq!(page.total_count, 1, "{name}");
+            assert_eq!(page.events.len(), 1, "{name}");
+            assert_eq!(page.events[0].event_type, name);
+        }
+        let all = client
+            .list_events("event-filter-test", ListEventsOptions::new())
+            .await
+            .unwrap();
+        assert_eq!(all.total_count, 7);
+        for name in ["unknown", "CUSTOM", ""] {
+            let page = client
+                .list_events(
+                    "event-filter-test",
+                    ListEventsOptions::new()
+                        .with_event_type(name)
+                        .with_limit(12)
+                        .with_offset(3),
+                )
+                .await
+                .unwrap();
+            assert!(page.events.is_empty(), "{name}");
+            assert_eq!(page.total_count, 0);
+            assert_eq!((page.limit, page.offset), (12, 3));
+        }
+    }
+}

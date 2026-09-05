@@ -39,7 +39,7 @@ macro_rules! impl_event_ops {
                 let sql = <$Dialect>::sql_list_events(order_direction);
                 let records = ::sqlx::query_as::<_, crate::rows::EventRow>(&sql)
                     .bind(instance_id)
-                    .bind(&filter.event_type)
+                    .bind(filter.event_type.map(crate::encoding::event_type_to_str))
                     .bind(&filter.subtype)
                     .bind(filter.created_after)
                     .bind(filter.created_before)
@@ -66,7 +66,7 @@ macro_rules! impl_event_ops {
                 let sql = <$Dialect>::sql_count_events();
                 let count: (i64,) = ::sqlx::query_as(sql)
                     .bind(instance_id)
-                    .bind(&filter.event_type)
+                    .bind(filter.event_type.map(crate::encoding::event_type_to_str))
                     .bind(&filter.subtype)
                     .bind(filter.created_after)
                     .bind(filter.created_before)

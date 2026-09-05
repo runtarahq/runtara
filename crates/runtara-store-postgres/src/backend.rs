@@ -4,6 +4,11 @@
 //!
 //! Provides all durable storage access functions for instances, checkpoints, events, and signals.
 
+#[cfg(all(test, feature = "db-integration-tests"))]
+use runtara_core::domain::EventType as CoreEventType;
+use runtara_core::domain::InstanceStatus as CoreInstanceStatus;
+use runtara_core::domain::SignalType as CoreSignalType;
+
 use std::sync::Arc;
 
 use crate::rows::DbResult;
@@ -55,17 +60,18 @@ struct InstanceMetricRow {
     cpu_usage_usec: Option<i64>,
 }
 
-impl From<InstanceMetricRow> for InstanceCompletionMetrics {
-    fn from(row: InstanceMetricRow) -> Self {
-        Self {
+impl TryFrom<InstanceMetricRow> for InstanceCompletionMetrics {
+    type Error = sqlx::Error;
+    fn try_from(row: InstanceMetricRow) -> Result<Self, Self::Error> {
+        Ok(Self {
             tenant_id: row.tenant_id,
-            status: row.status,
+            status: crate::encoding::status_from_str(&row.status)?,
             termination_reason: row.termination_reason,
             started_at: row.started_at,
             finished_at: row.finished_at,
             memory_peak_bytes: row.memory_peak_bytes.and_then(|v| u64::try_from(v).ok()),
             cpu_usage_usec: row.cpu_usage_usec.and_then(|v| u64::try_from(v).ok()),
-        }
+        })
     }
 }
 
@@ -119,7 +125,10 @@ fn is_reportable_terminal_status(status: &str) -> bool {
 /// fail a completion.
 async fn report_completion(sink: &dyn InstanceMetricsSink, pool: &PgPool, instance_id: &str) {
     match fetch_instance_metric_row(pool, instance_id).await {
-        Ok(Some(row)) => sink.on_terminal(&row.into()),
+        Ok(Some(row)) => match row.try_into() {
+            Ok(metrics) => sink.on_terminal(&metrics),
+            Err(error) => tracing::warn!(%error, "Invalid completion metric state"),
+        },
         Ok(None) => tracing::warn!(
             instance_id = %instance_id,
             "Skipped completion metric because instance row was not found"
@@ -317,7 +326,7 @@ async fn insert_event(pool: &PgPool, event: &EventRecord) -> Result<(), CoreErro
         "#,
     )
     .bind(&event.instance_id)
-    .bind(&event.event_type)
+    .bind(crate::encoding::event_type_to_str(event.event_type))
     .bind(&event.checkpoint_id)
     .bind(&event.payload)
     .bind(event.created_at)
@@ -343,7 +352,7 @@ async fn insert_event(pool: &PgPool, event: &EventRecord) -> Result<(), CoreErro
 async fn insert_signal(
     pool: &PgPool,
     instance_id: &str,
-    signal_type: &str,
+    signal_type: CoreSignalType,
     payload: &[u8],
 ) -> Result<(), CoreError> {
     let payload_opt = if payload.is_empty() {
@@ -364,7 +373,7 @@ async fn insert_signal(
         "#,
     )
     .bind(instance_id)
-    .bind(signal_type)
+    .bind(crate::encoding::signal_type_to_str(signal_type))
     .bind(payload_opt)
     .execute(pool)
     .await
@@ -444,7 +453,7 @@ impl Persistence for PostgresPersistence {
     async fn update_instance_status(
         &self,
         instance_id: &str,
-        status: &str,
+        status: CoreInstanceStatus,
         started_at: Option<DateTime<Utc>>,
     ) -> Result<(), CoreError> {
         Self::op_update_instance_status(&self.pool, instance_id, status, started_at).await
@@ -463,14 +472,14 @@ impl Persistence for PostgresPersistence {
         params: CompleteInstanceParams<'_>,
     ) -> Result<bool, CoreError> {
         let instance_id = params.instance_id.to_string();
-        let target_status = params.status.to_string();
+        let target_status = crate::encoding::status_to_str(params.status);
         // Only read the previous status when it can change the outcome. It exists
         // to stop a completion metric being recorded twice, and that recording
         // is gated on the TARGET status being one we record — so for every
         // other transition, a park above all, the read was fetched and thrown
         // away. A launch that parks pays for it once per instance.
         let records_metric =
-            self.metrics_sink.is_some() && is_reportable_terminal_status(&target_status);
+            self.metrics_sink.is_some() && is_reportable_terminal_status(target_status);
         let previous_was_terminal = if records_metric {
             match fetch_instance_status(&self.pool, &instance_id).await {
                 Ok(Some(status)) => is_reportable_terminal_status(&status),
@@ -561,7 +570,7 @@ impl Persistence for PostgresPersistence {
     async fn insert_signal(
         &self,
         instance_id: &str,
-        signal_type: &str,
+        signal_type: CoreSignalType,
         payload: &[u8],
     ) -> Result<(), CoreError> {
         insert_signal(&self.pool, instance_id, signal_type, payload).await
@@ -615,7 +624,7 @@ impl Persistence for PostgresPersistence {
     async fn list_instances(
         &self,
         tenant_id: Option<&str>,
-        status: Option<&str>,
+        status: Option<CoreInstanceStatus>,
         limit: i64,
         offset: i64,
     ) -> Result<Vec<InstanceRecord>, CoreError> {
@@ -782,7 +791,7 @@ mod tests {
             let id = uuid::Uuid::new_v4().to_string();
             backend.register_instance(&id, &tenant).await.unwrap();
             backend
-                .update_instance_status(&id, "suspended", None)
+                .update_instance_status(&id, CoreInstanceStatus::Suspended, None)
                 .await
                 .unwrap();
             backend.set_instance_sleep(&id, due_at).await.unwrap();
@@ -921,7 +930,7 @@ mod tests {
         let event = |subtype: Option<&str>, event_type: &str, at| EventRecord {
             id: None,
             instance_id: id.clone(),
-            event_type: event_type.to_string(),
+            event_type: crate::encoding::event_type_from_str(event_type).unwrap(),
             checkpoint_id: None,
             payload: Some(b"{}".to_vec()),
             created_at: at,
@@ -977,7 +986,12 @@ mod tests {
         let left = backend.list_events(&id, &filter, 50, 0).await.unwrap();
         let subtypes: Vec<_> = left
             .iter()
-            .map(|e| (e.event_type.as_str(), e.subtype.as_deref()))
+            .map(|e| {
+                (
+                    crate::encoding::event_type_to_str(e.event_type),
+                    e.subtype.as_deref(),
+                )
+            })
             .collect();
         assert_eq!(left.len(), 3, "survivors: {subtypes:?}");
         assert!(
@@ -1053,7 +1067,7 @@ mod tests {
         assert!(instance.is_some());
         let instance = instance.unwrap();
         assert_eq!(instance.tenant_id, "test-tenant");
-        assert_eq!(instance.status, "pending");
+        assert_eq!(instance.status, CoreInstanceStatus::Pending);
 
         cleanup_test_instance(&pool, instance_id).await;
     }
@@ -1068,7 +1082,7 @@ mod tests {
         let result = PostgresPersistence::op_update_instance_status(
             &pool,
             &instance_id.to_string(),
-            "running",
+            CoreInstanceStatus::Running,
             Some(Utc::now()),
         )
         .await;
@@ -1078,7 +1092,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(instance.status, "running");
+        assert_eq!(instance.status, CoreInstanceStatus::Running);
         assert!(instance.started_at.is_some());
 
         cleanup_test_instance(&pool, instance_id).await;
@@ -1119,7 +1133,8 @@ mod tests {
         let instance_id_str = instance_id.to_string();
         let result = PostgresPersistence::op_complete_instance_unified(
             &pool,
-            CompleteInstanceParams::new(&instance_id_str, "completed").with_output(output_data),
+            CompleteInstanceParams::new(&instance_id_str, CoreInstanceStatus::Completed)
+                .with_output(output_data),
         )
         .await;
         assert!(result.is_ok());
@@ -1128,7 +1143,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(instance.status, "completed");
+        assert_eq!(instance.status, CoreInstanceStatus::Completed);
         assert_eq!(instance.output, Some(output_data.to_vec()));
         assert!(instance.finished_at.is_some());
 
@@ -1145,7 +1160,8 @@ mod tests {
         let instance_id_str = instance_id.to_string();
         let result = PostgresPersistence::op_complete_instance_unified(
             &pool,
-            CompleteInstanceParams::new(&instance_id_str, "failed").with_error("test error"),
+            CompleteInstanceParams::new(&instance_id_str, CoreInstanceStatus::Failed)
+                .with_error("test error"),
         )
         .await;
         assert!(result.is_ok());
@@ -1154,7 +1170,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(instance.status, "failed");
+        assert_eq!(instance.status, CoreInstanceStatus::Failed);
         assert_eq!(instance.error, Some("test error".to_string()));
         assert!(instance.finished_at.is_some());
 
@@ -1331,7 +1347,7 @@ mod tests {
         let event = EventRecord {
             id: None,
             instance_id: instance_id.to_string(),
-            event_type: "started".to_string(),
+            event_type: CoreEventType::Started,
             checkpoint_id: None,
             payload: None,
             created_at: Utc::now(),
@@ -1360,7 +1376,13 @@ mod tests {
         let instance_id = Uuid::new_v4();
         create_test_instance(&pool, instance_id, "test-tenant").await;
 
-        let result = insert_signal(&pool, &instance_id.to_string(), "cancel", b"reason").await;
+        let result = insert_signal(
+            &pool,
+            &instance_id.to_string(),
+            CoreSignalType::Cancel,
+            b"reason",
+        )
+        .await;
         assert!(result.is_ok());
 
         let signal = PostgresPersistence::op_get_pending_signal(&pool, &instance_id.to_string())
@@ -1368,7 +1390,7 @@ mod tests {
             .unwrap();
         assert!(signal.is_some());
         let signal = signal.unwrap();
-        assert_eq!(signal.signal_type, "cancel");
+        assert_eq!(signal.signal_type, CoreSignalType::Cancel);
         assert_eq!(signal.payload, Some(b"reason".to_vec()));
 
         cleanup_test_instance(&pool, instance_id).await;
@@ -1381,7 +1403,7 @@ mod tests {
         let instance_id = Uuid::new_v4();
         create_test_instance(&pool, instance_id, "test-tenant").await;
 
-        insert_signal(&pool, &instance_id.to_string(), "pause", b"")
+        insert_signal(&pool, &instance_id.to_string(), CoreSignalType::Pause, b"")
             .await
             .unwrap();
 
@@ -1389,7 +1411,7 @@ mod tests {
             .await
             .unwrap();
         assert!(signal.is_some());
-        assert_eq!(signal.unwrap().signal_type, "pause");
+        assert_eq!(signal.unwrap().signal_type, CoreSignalType::Pause);
 
         cleanup_test_instance(&pool, instance_id).await;
     }
@@ -1416,7 +1438,7 @@ mod tests {
         let instance_id = Uuid::new_v4();
         create_test_instance(&pool, instance_id, "test-tenant").await;
 
-        insert_signal(&pool, &instance_id.to_string(), "cancel", b"")
+        insert_signal(&pool, &instance_id.to_string(), CoreSignalType::Cancel, b"")
             .await
             .unwrap();
         PostgresPersistence::op_acknowledge_signal(&pool, &instance_id.to_string())
@@ -1486,7 +1508,7 @@ mod tests {
         PostgresPersistence::op_update_instance_status(
             &pool,
             &instance1.to_string(),
-            "running",
+            CoreInstanceStatus::Running,
             None,
         )
         .await
@@ -1494,7 +1516,7 @@ mod tests {
         PostgresPersistence::op_update_instance_status(
             &pool,
             &instance2.to_string(),
-            "suspended",
+            CoreInstanceStatus::Suspended,
             None,
         )
         .await
@@ -1537,7 +1559,7 @@ mod tests {
         PostgresPersistence::op_update_instance_status(
             &pool,
             &instance1.to_string(),
-            "suspended",
+            CoreInstanceStatus::Suspended,
             None,
         )
         .await
@@ -1638,7 +1660,7 @@ mod tests {
             .unwrap();
 
         p.complete_instance(
-            CompleteInstanceParams::new(&instance_id, "completed")
+            CompleteInstanceParams::new(&instance_id, CoreInstanceStatus::Completed)
                 .with_output(b"output data")
                 .with_stderr("stderr output")
                 .with_checkpoint("final-checkpoint"),
@@ -1674,13 +1696,13 @@ mod tests {
         p.register_instance(&instance_id, "test-tenant")
             .await
             .unwrap();
-        p.update_instance_status(&instance_id, "running", Some(Utc::now()))
+        p.update_instance_status(&instance_id, CoreInstanceStatus::Running, Some(Utc::now()))
             .await
             .unwrap();
 
         let applied = p
             .complete_instance(
-                CompleteInstanceParams::new(&instance_id, "completed")
+                CompleteInstanceParams::new(&instance_id, CoreInstanceStatus::Completed)
                     .if_running()
                     .with_output(b"done"),
             )
@@ -1690,7 +1712,7 @@ mod tests {
         assert!(applied);
 
         let instance = p.get_instance(&instance_id).await.unwrap().unwrap();
-        assert_eq!(instance.status, "completed");
+        assert_eq!(instance.status, CoreInstanceStatus::Completed);
 
         ci_cleanup(&pool, &instance_id).await;
     }
@@ -1708,7 +1730,7 @@ mod tests {
 
         let applied = p
             .complete_instance(
-                CompleteInstanceParams::new(&instance_id, "completed")
+                CompleteInstanceParams::new(&instance_id, CoreInstanceStatus::Completed)
                     .if_running()
                     .with_output(b"done"),
             )
@@ -1718,7 +1740,7 @@ mod tests {
         assert!(!applied);
 
         let instance = p.get_instance(&instance_id).await.unwrap().unwrap();
-        assert_eq!(instance.status, "pending"); // unchanged
+        assert_eq!(instance.status, CoreInstanceStatus::Pending); // unchanged
 
         ci_cleanup(&pool, &instance_id).await;
     }
@@ -1737,7 +1759,10 @@ mod tests {
         let missing = ci_instance_id();
 
         let err = p
-            .complete_instance(CompleteInstanceParams::new(&missing, "completed"))
+            .complete_instance(CompleteInstanceParams::new(
+                &missing,
+                CoreInstanceStatus::Completed,
+            ))
             .await
             .expect_err("must error when unguarded update finds nothing");
 
@@ -1759,7 +1784,10 @@ mod tests {
             .unwrap();
 
         let applied = p
-            .complete_instance(CompleteInstanceParams::new(&instance_id, "completed"))
+            .complete_instance(CompleteInstanceParams::new(
+                &instance_id,
+                CoreInstanceStatus::Completed,
+            ))
             .await
             .expect("unguarded success should not error");
         assert!(applied, "unguarded update on existing row returns true");
@@ -1780,7 +1808,9 @@ mod tests {
         let missing = ci_instance_id();
 
         let applied = p
-            .complete_instance(CompleteInstanceParams::new(&missing, "completed").if_running())
+            .complete_instance(
+                CompleteInstanceParams::new(&missing, CoreInstanceStatus::Completed).if_running(),
+            )
             .await
             .expect("guarded miss must not error");
         assert!(!applied);
@@ -1799,13 +1829,16 @@ mod tests {
             .unwrap();
 
         let applied = p
-            .complete_instance(CompleteInstanceParams::new(&instance_id, "running"))
+            .complete_instance(CompleteInstanceParams::new(
+                &instance_id,
+                CoreInstanceStatus::Running,
+            ))
             .await
             .expect("non-terminal transition should succeed");
         assert!(applied);
 
         let instance = p.get_instance(&instance_id).await.unwrap().unwrap();
-        assert_eq!(instance.status, "running");
+        assert_eq!(instance.status, CoreInstanceStatus::Running);
         assert!(
             instance.finished_at.is_none(),
             "non-terminal status must not set finished_at"
@@ -1829,7 +1862,7 @@ mod tests {
         p.register_instance(&instance_id, "test-tenant")
             .await
             .unwrap();
-        p.update_instance_status(&instance_id, "running", Some(Utc::now()))
+        p.update_instance_status(&instance_id, CoreInstanceStatus::Running, Some(Utc::now()))
             .await
             .unwrap();
 
@@ -1838,7 +1871,7 @@ mod tests {
         // `termination_reason` ENUM, so the `$3::termination_reason` cast in
         // the unified op resolves.
         p.complete_instance(
-            CompleteInstanceParams::new(&instance_id, "suspended")
+            CompleteInstanceParams::new(&instance_id, CoreInstanceStatus::Suspended)
                 .with_termination("sleeping", None),
         )
         .await
@@ -1850,12 +1883,12 @@ mod tests {
         );
 
         // Relaunch: re-register into running with a later started_at.
-        p.update_instance_status(&instance_id, "running", Some(Utc::now()))
+        p.update_instance_status(&instance_id, CoreInstanceStatus::Running, Some(Utc::now()))
             .await
             .unwrap();
 
         let running = p.get_instance(&instance_id).await.unwrap().unwrap();
-        assert_eq!(running.status, "running");
+        assert_eq!(running.status, CoreInstanceStatus::Running);
         assert!(
             running.finished_at.is_none(),
             "relaunch into running must clear the stale finished_at"
@@ -1883,14 +1916,14 @@ mod tests {
         p.register_instance(&instance_id, "test-tenant")
             .await
             .unwrap();
-        p.update_instance_status(&instance_id, "running", Some(Utc::now()))
+        p.update_instance_status(&instance_id, CoreInstanceStatus::Running, Some(Utc::now()))
             .await
             .unwrap();
 
         // First write sets both termination fields. 'crashed' is a member of
         // the Postgres `termination_reason` ENUM.
         p.complete_instance(
-            CompleteInstanceParams::new(&instance_id, "failed")
+            CompleteInstanceParams::new(&instance_id, CoreInstanceStatus::Failed)
                 .with_termination("crashed", Some(137)),
         )
         .await
@@ -1901,9 +1934,12 @@ mod tests {
         assert_eq!(code, Some(137));
 
         // Second write without termination/exit fields must not clobber.
-        p.complete_instance(CompleteInstanceParams::new(&instance_id, "failed"))
-            .await
-            .expect("second completion should succeed");
+        p.complete_instance(CompleteInstanceParams::new(
+            &instance_id,
+            CoreInstanceStatus::Failed,
+        ))
+        .await
+        .expect("second completion should succeed");
 
         let (reason, code) = ci_read_term_fields(&pool, &instance_id).await;
         assert_eq!(
@@ -2071,8 +2107,10 @@ mod tests {
             .await
             .unwrap();
 
-        p.insert_signal(&instance_id, "pause", b"").await.unwrap();
-        p.insert_signal(&instance_id, "cancel", b"new reason")
+        p.insert_signal(&instance_id, CoreSignalType::Pause, b"")
+            .await
+            .unwrap();
+        p.insert_signal(&instance_id, CoreSignalType::Cancel, b"new reason")
             .await
             .unwrap();
 
@@ -2084,7 +2122,7 @@ mod tests {
 
         // `pending_signals` is keyed by instance_id, so the second insert
         // replaces the first outright — the empty first payload is gone.
-        assert_eq!(signal.signal_type, "cancel");
+        assert_eq!(signal.signal_type, CoreSignalType::Cancel);
         assert_eq!(signal.payload, Some(b"new reason".to_vec()));
 
         cleanup_misc_instance(&pool, &instance_id).await;
@@ -2104,7 +2142,9 @@ mod tests {
         // `&[u8]` to `None` before binding, so the column goes NULL rather
         // than holding a zero-length blob, and a reader sees `None` and never
         // `Some(vec![])`. Nothing else covers that mapping, so pin it here.
-        p.insert_signal(&instance_id, "pause", b"").await.unwrap();
+        p.insert_signal(&instance_id, CoreSignalType::Pause, b"")
+            .await
+            .unwrap();
 
         let signal = p
             .get_pending_signal(&instance_id)
@@ -2112,7 +2152,7 @@ mod tests {
             .unwrap()
             .expect("signal should be pending");
 
-        assert_eq!(signal.signal_type, "pause");
+        assert_eq!(signal.signal_type, CoreSignalType::Pause);
         assert!(
             signal.payload.is_none(),
             "empty payload must round-trip as NULL on Postgres"
@@ -2280,22 +2320,22 @@ mod tests {
         p.register_instance(&instance1, &tenant).await.unwrap();
         p.register_instance(&instance2, &tenant).await.unwrap();
 
-        p.update_instance_status(&instance1, "running", None)
+        p.update_instance_status(&instance1, CoreInstanceStatus::Running, None)
             .await
             .unwrap();
 
         let running = p
-            .list_instances(Some(&tenant), Some("running"), 10, 0)
+            .list_instances(Some(&tenant), Some(CoreInstanceStatus::Running), 10, 0)
             .await
             .expect("Failed to list instances");
 
         assert_eq!(running.len(), 1);
         assert_eq!(running[0].instance_id, instance1);
-        assert_eq!(running[0].status, "running");
+        assert_eq!(running[0].status, CoreInstanceStatus::Running);
 
         // The still-pending sibling is excluded by the status filter.
         let pending = p
-            .list_instances(Some(&tenant), Some("pending"), 10, 0)
+            .list_instances(Some(&tenant), Some(CoreInstanceStatus::Pending), 10, 0)
             .await
             .expect("Failed to list instances");
         assert_eq!(pending.len(), 1);
@@ -2464,7 +2504,7 @@ mod tests {
         let event = EventRecord {
             id: None,
             instance_id: instance_id.to_string(),
-            event_type: "custom".to_string(),
+            event_type: CoreEventType::Custom,
             checkpoint_id: None,
             payload: Some(serde_json::to_vec(&payload).unwrap()),
             created_at: Utc::now(),
@@ -2498,7 +2538,7 @@ mod tests {
         let event = EventRecord {
             id: None,
             instance_id: instance_id.to_string(),
-            event_type: "custom".to_string(),
+            event_type: CoreEventType::Custom,
             checkpoint_id: None,
             payload: Some(serde_json::to_vec(&payload).unwrap()),
             created_at: Utc::now(),
@@ -2559,7 +2599,7 @@ mod tests {
                     .insert_event(&EventRecord {
                         id: None,
                         instance_id,
-                        event_type: "custom".to_string(),
+                        event_type: CoreEventType::Custom,
                         checkpoint_id: None,
                         payload: Some(serde_json::to_vec(&payload).unwrap()),
                         created_at: Utc::now(),
@@ -2801,7 +2841,7 @@ mod tests {
             .insert_event(&EventRecord {
                 id: None,
                 instance_id: instance_id.clone(),
-                event_type: "custom".to_string(),
+                event_type: CoreEventType::Custom,
                 checkpoint_id: None,
                 payload: Some(
                     serde_json::to_vec(&serde_json::json!({
@@ -2820,7 +2860,7 @@ mod tests {
             .insert_event(&EventRecord {
                 id: None,
                 instance_id: instance_id.clone(),
-                event_type: "custom".to_string(),
+                event_type: CoreEventType::Custom,
                 checkpoint_id: None,
                 payload: Some(
                     serde_json::to_vec(&serde_json::json!({
@@ -2890,7 +2930,7 @@ mod tests {
             .insert_event(&EventRecord {
                 id: None,
                 instance_id: instance_id.clone(),
-                event_type: "custom".to_string(),
+                event_type: CoreEventType::Custom,
                 checkpoint_id: None,
                 payload: Some(serde_json::to_vec(&payload).unwrap()),
                 created_at: Utc::now(),

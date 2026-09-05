@@ -227,3 +227,5 @@ pub mod runtime_host;
 pub(crate) mod test_support;
 
 pub use error::Error;
+
+mod core_types;

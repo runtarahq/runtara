@@ -446,7 +446,7 @@ mod tests {
         async fn update_instance_status(
             &self,
             _instance_id: &str,
-            _status: &str,
+            _status: runtara_core::domain::InstanceStatus,
             _started_at: Option<DateTime<Utc>>,
         ) -> Result<(), CoreError> {
             Ok(())
@@ -513,7 +513,7 @@ mod tests {
         async fn insert_signal(
             &self,
             _instance_id: &str,
-            _signal_type: &str,
+            _signal_type: runtara_core::domain::SignalType,
             _payload: &[u8],
         ) -> Result<(), CoreError> {
             Ok(())
@@ -560,7 +560,7 @@ mod tests {
         async fn list_instances(
             &self,
             _tenant_id: Option<&str>,
-            _status: Option<&str>,
+            _status: Option<runtara_core::domain::InstanceStatus>,
             _limit: i64,
             _offset: i64,
         ) -> Result<Vec<InstanceRecord>, CoreError> {

@@ -2,11 +2,12 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Instance event handlers: generic event ingestion and retry-attempt logging.
 
+use crate::domain::InstanceStatus as CoreInstanceStatus;
+
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use tracing::{debug, info, instrument, warn};
 
-use super::mappers::map_event_type;
 use super::state::InstanceHandlerState;
 use super::types::{InstanceEvent, InstanceEventResponse, InstanceEventType, RetryAttemptEvent};
 use crate::error::CoreError;
@@ -40,8 +41,8 @@ pub async fn handle_instance_event(
         "Received instance event"
     );
 
-    // 1. Map proto event type to DB enum
-    let event_type = map_event_type(event.event_type());
+    // 1. Convert the incoming event to a timeline event.
+    let event_type = crate::domain::EventType::from(event.event_type());
 
     // 2. Validate instance_id is not empty
     if event.instance_id.is_empty() {
@@ -59,7 +60,7 @@ pub async fn handle_instance_event(
     let event_record = EventRecord {
         id: None,
         instance_id: event.instance_id.clone(),
-        event_type: event_type.to_string(),
+        event_type,
         checkpoint_id: event.checkpoint_id.clone(),
         payload: if event.payload.is_empty() {
             None
@@ -99,7 +100,8 @@ pub async fn handle_instance_event(
             // "failed", we should not overwrite it with "completed" from a queued
             // SDK event.
             let mut params =
-                CompleteInstanceParams::new(&event.instance_id, "completed").if_running();
+                CompleteInstanceParams::new(&event.instance_id, CoreInstanceStatus::Completed)
+                    .if_running();
             if let Some(o) = output {
                 params = params.with_output(o);
             }
@@ -122,7 +124,7 @@ pub async fn handle_instance_event(
             let applied = state
                 .persistence
                 .complete_instance(
-                    CompleteInstanceParams::new(&event.instance_id, "failed")
+                    CompleteInstanceParams::new(&event.instance_id, CoreInstanceStatus::Failed)
                         .if_running()
                         .with_error(error),
                 )
@@ -154,7 +156,8 @@ pub async fn handle_instance_event(
             let applied = state
                 .persistence
                 .complete_instance(
-                    CompleteInstanceParams::new(&event.instance_id, "suspended").if_running(),
+                    CompleteInstanceParams::new(&event.instance_id, CoreInstanceStatus::Suspended)
+                        .if_running(),
                 )
                 .await?;
             if applied {
@@ -178,8 +181,7 @@ pub async fn handle_instance_event(
 
 /// Handle retry attempt event (fire-and-forget).
 ///
-/// Records a retry attempt for audit trail. Retry attempts are stored
-/// in the checkpoints table with `is_retry_attempt=true`.
+/// Records a retry attempt through [`Persistence::save_retry_attempt`](crate::persistence::Persistence::save_retry_attempt).
 ///
 /// This is sent by the SDK when a durable function fails and is about
 /// to be retried (before the backoff delay).
@@ -232,9 +234,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_event_heartbeat() {
-        let persistence = Arc::new(
-            MockPersistence::new().with_instance(make_instance("inst-1", "tenant-1", "running")),
-        );
+        let persistence = Arc::new(MockPersistence::new().with_instance(make_instance(
+            "inst-1",
+            "tenant-1",
+            CoreInstanceStatus::Running,
+        )));
         let state = InstanceHandlerState::new(persistence.clone());
 
         let event = InstanceEvent {
@@ -252,14 +256,16 @@ mod tests {
         // Verify event was inserted
         let events = persistence.get_events();
         assert!(!events.is_empty());
-        assert_eq!(events[0].event_type, "heartbeat");
+        assert_eq!(events[0].event_type, crate::domain::EventType::Heartbeat);
     }
 
     #[tokio::test]
     async fn test_handle_event_completed() {
-        let persistence = Arc::new(
-            MockPersistence::new().with_instance(make_instance("inst-1", "tenant-1", "running")),
-        );
+        let persistence = Arc::new(MockPersistence::new().with_instance(make_instance(
+            "inst-1",
+            "tenant-1",
+            CoreInstanceStatus::Running,
+        )));
         let state = InstanceHandlerState::new(persistence.clone());
 
         let event = InstanceEvent {
@@ -276,14 +282,16 @@ mod tests {
 
         // Verify instance was completed
         let inst = persistence.get_instance("inst-1").await.unwrap().unwrap();
-        assert_eq!(inst.status, "completed");
+        assert_eq!(inst.status, CoreInstanceStatus::Completed);
     }
 
     #[tokio::test]
     async fn test_handle_event_failed() {
-        let persistence = Arc::new(
-            MockPersistence::new().with_instance(make_instance("inst-1", "tenant-1", "running")),
-        );
+        let persistence = Arc::new(MockPersistence::new().with_instance(make_instance(
+            "inst-1",
+            "tenant-1",
+            CoreInstanceStatus::Running,
+        )));
         let state = InstanceHandlerState::new(persistence.clone());
 
         let event = InstanceEvent {
@@ -300,14 +308,16 @@ mod tests {
 
         // Verify instance was failed
         let inst = persistence.get_instance("inst-1").await.unwrap().unwrap();
-        assert_eq!(inst.status, "failed");
+        assert_eq!(inst.status, CoreInstanceStatus::Failed);
     }
 
     #[tokio::test]
     async fn test_handle_event_suspended() {
-        let persistence = Arc::new(
-            MockPersistence::new().with_instance(make_instance("inst-1", "tenant-1", "running")),
-        );
+        let persistence = Arc::new(MockPersistence::new().with_instance(make_instance(
+            "inst-1",
+            "tenant-1",
+            CoreInstanceStatus::Running,
+        )));
         let state = InstanceHandlerState::new(persistence.clone());
 
         let event = InstanceEvent {
@@ -324,7 +334,7 @@ mod tests {
 
         // Verify instance was suspended
         let inst = persistence.get_instance("inst-1").await.unwrap().unwrap();
-        assert_eq!(inst.status, "suspended");
+        assert_eq!(inst.status, CoreInstanceStatus::Suspended);
     }
 
     /// Every persisted event must reach an observer that is watching, with its
@@ -347,9 +357,11 @@ mod tests {
         }
 
         let observer = Arc::new(Recording(Mutex::new(Vec::new())));
-        let persistence = Arc::new(
-            MockPersistence::new().with_instance(make_instance("inst-1", "tenant-1", "running")),
-        );
+        let persistence = Arc::new(MockPersistence::new().with_instance(make_instance(
+            "inst-1",
+            "tenant-1",
+            CoreInstanceStatus::Running,
+        )));
         let state =
             InstanceHandlerState::new(persistence.clone()).with_event_observer(observer.clone());
 
@@ -387,9 +399,11 @@ mod tests {
     /// and none of them should be forced to supply one.
     #[tokio::test]
     async fn events_are_handled_normally_without_an_observer() {
-        let persistence = Arc::new(
-            MockPersistence::new().with_instance(make_instance("inst-1", "tenant-1", "running")),
-        );
+        let persistence = Arc::new(MockPersistence::new().with_instance(make_instance(
+            "inst-1",
+            "tenant-1",
+            CoreInstanceStatus::Running,
+        )));
         let state = InstanceHandlerState::new(persistence.clone());
 
         let result = handle_instance_event(
@@ -416,9 +430,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_event_custom() {
-        let persistence = Arc::new(
-            MockPersistence::new().with_instance(make_instance("inst-1", "tenant-1", "running")),
-        );
+        let persistence = Arc::new(MockPersistence::new().with_instance(make_instance(
+            "inst-1",
+            "tenant-1",
+            CoreInstanceStatus::Running,
+        )));
         let state = InstanceHandlerState::new(persistence.clone());
 
         let event = InstanceEvent {
@@ -436,15 +452,17 @@ mod tests {
         // Verify event was inserted with subtype
         let events = persistence.get_events();
         assert!(!events.is_empty());
-        assert_eq!(events[0].event_type, "custom");
+        assert_eq!(events[0].event_type, crate::domain::EventType::Custom);
         assert_eq!(events[0].subtype.as_deref(), Some("my_custom_type"));
     }
 
     #[tokio::test]
     async fn test_handle_event_suspended_with_payload_arms_no_sleep() {
-        let persistence = Arc::new(
-            MockPersistence::new().with_instance(make_instance("inst-1", "tenant-1", "running")),
-        );
+        let persistence = Arc::new(MockPersistence::new().with_instance(make_instance(
+            "inst-1",
+            "tenant-1",
+            CoreInstanceStatus::Running,
+        )));
         let state = InstanceHandlerState::new(persistence.clone());
 
         // The shape a stale out-of-tree client would still send. Nothing in the
@@ -469,7 +487,7 @@ mod tests {
         // Plain suspend: no wake armed, no "sleeping" termination, no
         // checkpoint written out of the payload.
         let inst = persistence.get_instance("inst-1").await.unwrap().unwrap();
-        assert_eq!(inst.status, "suspended");
+        assert_eq!(inst.status, CoreInstanceStatus::Suspended);
         assert!(inst.sleep_until.is_none());
         assert_ne!(inst.termination_reason.as_deref(), Some("sleeping"));
         assert!(

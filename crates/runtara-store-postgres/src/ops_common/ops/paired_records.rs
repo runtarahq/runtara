@@ -54,7 +54,8 @@ macro_rules! impl_paired_record_ops {
                     .correlation_ids
                     .as_ref()
                     .map(|ids| ::serde_json::to_string(ids).expect("string vec serializes"));
-                let sql = <$Dialect>::sql_list_paired_records(vocabulary, order_direction);
+                let sql_vocabulary = crate::vocabulary::SqlVocabulary::new(vocabulary)?;
+                let sql = <$Dialect>::sql_list_paired_records(&sql_vocabulary, order_direction);
 
                 let rows = ::sqlx::query(&sql)
                     .bind(instance_id)
@@ -120,7 +121,8 @@ macro_rules! impl_paired_record_ops {
                     .correlation_ids
                     .as_ref()
                     .map(|ids| ::serde_json::to_string(ids).expect("string vec serializes"));
-                let sql = <$Dialect>::sql_count_paired_records(vocabulary);
+                let sql_vocabulary = crate::vocabulary::SqlVocabulary::new(vocabulary)?;
+                let sql = <$Dialect>::sql_count_paired_records(&sql_vocabulary);
                 let count: (i64,) = ::sqlx::query_as(&sql)
                     .bind(instance_id)
                     .bind(status_filter)

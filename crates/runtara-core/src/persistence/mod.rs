@@ -15,6 +15,7 @@ pub mod vocabulary;
 
 pub use self::vocabulary::{EventVocabulary, EventVocabularySpec};
 
+use crate::domain::{EventType, InstanceStatus, SignalType};
 use crate::error::CoreError;
 
 /// Instance record from the persistence layer.
@@ -27,7 +28,7 @@ pub struct InstanceRecord {
     /// Version of the workflow definition.
     pub definition_version: i32,
     /// Current status (pending, running, suspended, completed, failed, cancelled).
-    pub status: String,
+    pub status: InstanceStatus,
     /// Last checkpoint ID if instance was checkpointed.
     pub checkpoint_id: Option<String>,
     /// Current attempt number (for retries).
@@ -54,7 +55,7 @@ pub struct InstanceRecord {
     pub exit_code: Option<i32>,
     /// Consecutive no-progress auto-restarts after an Environment restart.
     /// Reset to 0 when the instance's checkpoint count advances between
-    /// recoveries. See [`Persistence::mark_for_recovery`].
+    /// recoveries. The host owns recovery bookkeeping.
     pub recovery_attempts: i32,
     /// Checkpoint count observed at the last auto-recovery, as text. Compared
     /// against the current count to distinguish "made progress" from "stuck".
@@ -87,7 +88,7 @@ pub struct EventRecord {
     /// Instance this event belongs to.
     pub instance_id: String,
     /// Type of event (heartbeat, completed, failed, suspended, custom).
-    pub event_type: String,
+    pub event_type: EventType,
     /// Associated checkpoint ID if applicable.
     pub checkpoint_id: Option<String>,
     /// Optional event payload data.
@@ -104,7 +105,7 @@ pub struct SignalRecord {
     /// Instance this signal is for.
     pub instance_id: String,
     /// Type of signal (cancel, pause, resume).
-    pub signal_type: String,
+    pub signal_type: SignalType,
     /// Optional signal payload data.
     pub payload: Option<Vec<u8>>,
     /// When the signal was created.
@@ -140,7 +141,7 @@ pub enum EventSortOrder {
 #[derive(Debug, Clone, Default)]
 pub struct ListEventsFilter {
     /// Filter by event type (e.g., "custom", "started", "completed").
-    pub event_type: Option<String>,
+    pub event_type: Option<EventType>,
     /// Filter by the producer's event subtype. Opaque to this crate.
     pub subtype: Option<String>,
     /// Filter events created at or after this time.
@@ -256,7 +257,7 @@ pub struct InstanceCompletionMetrics {
     /// Tenant identifier for the invocation.
     pub tenant_id: String,
     /// Terminal status: completed, failed, or cancelled.
-    pub status: String,
+    pub status: InstanceStatus,
     /// Optional terminal reason such as timeout or heartbeat_timeout.
     pub termination_reason: Option<String>,
     /// When execution began.
@@ -326,19 +327,18 @@ pub enum CompleteInstanceGuard {
 /// **merged**: passing `None` leaves what an earlier transition recorded, so a
 /// later status change does not erase the reason a run ended. Both halves are
 /// pinned by the conformance suite. The required fields
-/// `instance_id` and `status` borrow from the caller; most call sites
-/// already hold `&str` locals and can pass them directly.
+/// Blob and identifier fields borrow from the caller; status is a domain value.
 ///
 /// Build with [`CompleteInstanceParams::new`] and the chained `with_*`
 /// setters.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct CompleteInstanceParams<'a> {
     /// Instance being completed.
     pub instance_id: &'a str,
     /// Target status. One of `completed`, `failed`, `cancelled`,
     /// `suspended`, or `running` (for mid-execution transitions that
     /// carry metadata but don't finalize the instance).
-    pub status: &'a str,
+    pub status: InstanceStatus,
     /// Whether to guard against races by requiring the current status
     /// to be `running`. See [`CompleteInstanceGuard`].
     pub guard: CompleteInstanceGuard,
@@ -359,11 +359,17 @@ pub struct CompleteInstanceParams<'a> {
 
 impl<'a> CompleteInstanceParams<'a> {
     /// Start a minimal completion request targeting `status`.
-    pub fn new(instance_id: &'a str, status: &'a str) -> Self {
+    pub fn new(instance_id: &'a str, status: InstanceStatus) -> Self {
         Self {
             instance_id,
             status,
-            ..Default::default()
+            guard: CompleteInstanceGuard::Any,
+            output: None,
+            error: None,
+            stderr: None,
+            checkpoint_id: None,
+            termination_reason: None,
+            exit_code: None,
         }
     }
 
@@ -475,7 +481,7 @@ pub trait Persistence: Send + Sync {
     async fn update_instance_status(
         &self,
         instance_id: &str,
-        status: &str,
+        status: InstanceStatus,
         started_at: Option<DateTime<Utc>>,
     ) -> Result<(), CoreError>;
 
@@ -555,8 +561,8 @@ pub trait Persistence: Send + Sync {
     ///
     /// `event.created_at` is the time the emitter observed, and an
     /// implementation must store it verbatim — never substituting its own
-    /// write time by defaulting the column. Readers order events by this
-    /// column, and [`Self::list_paired_records`] derives every duration from
+    /// write time. Readers order events by this
+    /// timestamp, and [`Self::list_paired_records`] derives every duration from
     /// the delta between a record's paired start and end events, so a
     /// receive-time stamp silently reorders the timeline and rewrites every
     /// duration into the interval between two writes.
@@ -565,7 +571,7 @@ pub trait Persistence: Send + Sync {
     async fn insert_signal(
         &self,
         instance_id: &str,
-        signal_type: &str,
+        signal_type: SignalType,
         payload: &[u8],
     ) -> Result<(), CoreError>;
 
@@ -600,7 +606,7 @@ pub trait Persistence: Send + Sync {
     async fn list_instances(
         &self,
         tenant_id: Option<&str>,
-        status: Option<&str>,
+        status: Option<InstanceStatus>,
         limit: i64,
         offset: i64,
     ) -> Result<Vec<InstanceRecord>, CoreError>;
@@ -626,8 +632,12 @@ pub trait Persistence: Send + Sync {
             Ok(Some(instance)) => instance.started_at.unwrap_or(started_at),
             _ => started_at,
         };
-        self.update_instance_status(instance_id, "running", Some(started_at))
-            .await
+        self.update_instance_status(
+            instance_id,
+            crate::domain::InstanceStatus::Running,
+            Some(started_at),
+        )
+        .await
     }
 
     /// Promote an instance to `running`, but only if it has not already moved
@@ -651,10 +661,15 @@ pub trait Persistence: Send + Sync {
         started_at: DateTime<Utc>,
     ) -> Result<bool, CoreError> {
         match self.get_instance(instance_id).await? {
-            Some(inst) if matches!(inst.status.as_str(), "pending" | "running") => {
+            Some(inst)
+                if matches!(
+                    inst.status,
+                    InstanceStatus::Pending | InstanceStatus::Running
+                ) =>
+            {
                 self.update_instance_status(
                     instance_id,
-                    "running",
+                    crate::domain::InstanceStatus::Running,
                     Some(inst.started_at.unwrap_or(started_at)),
                 )
                 .await?;
@@ -677,10 +692,10 @@ pub trait Persistence: Send + Sync {
     /// Atomically claim a due sleeping instance before waking it.
     ///
     /// Conditionally clears `sleep_until` only while the instance is still
-    /// `status='suspended'` with a non-null `sleep_until` that is **already
+    /// suspended with a present `sleep_until` that is **already
     /// due** (`sleep_until <= now`), and reports whether
     /// this caller won the claim. Returns `true` if it did, `false` if another
-    /// waker (or a second Environment sharing this Core DB) already took it.
+    /// waker (or another scheduler sharing this store) already took it.
     /// Callers MUST launch only when this returns `true` — this is what
     /// prevents concurrent double-launch of the same instance. On a launch
     /// failure after a successful claim, re-stamp `sleep_until` via
@@ -690,10 +705,9 @@ pub trait Persistence: Send + Sync {
     /// loss against an instance that is no longer claimable but can still let
     /// two concurrent callers both win: each may read a claimable row before
     /// either clears it. **A backend serving more than one waker must override
-    /// this** with an operation whose atomicity it can vouch for -- a single
-    /// conditional update for a SQL backend, a claim taken under the store's
-    /// own lock for an in-memory one. Taking the default and running two
-    /// wakers double-launches instances.
+    /// this** with an operation whose atomicity it can vouch for -- an indivisible
+    /// conditional mutation, such as a claim taken under the store's own lock.
+    /// Taking the default and running two wakers double-launches instances.
     async fn claim_sleeping_instance(&self, instance_id: &str) -> Result<bool, CoreError> {
         match self.get_instance(instance_id).await? {
             // The due-ness check is what makes a lease a lease: a batch claim
@@ -701,7 +715,7 @@ pub trait Persistence: Send + Sync {
             // an instance leased that way must lose a later claim until the
             // lease expires.
             Some(instance)
-                if instance.status == "suspended"
+                if instance.status == crate::domain::InstanceStatus::Suspended
                     && instance.sleep_until.is_some_and(|t| t <= Utc::now()) =>
             {
                 self.clear_instance_sleep(instance_id).await?;
@@ -821,11 +835,9 @@ pub trait Persistence: Send + Sync {
 
     /// Delete instances by their IDs.
     ///
-    /// This deletes from the instances table; child tables with ON DELETE CASCADE
-    /// (checkpoints, events, signals, etc.) are automatically cleaned up.
-    ///
-    /// Environment implementations should override this to clean up environment-specific
-    /// tables (container_registry, instance_images, etc.) before calling the parent.
+    /// Implementations must also remove the instances' checkpoints, events,
+    /// lifecycle signals, custom signals, and retry history. Host-owned
+    /// associations must be cleaned up by the host as part of its deletion flow.
     ///
     /// Returns the count of deleted instances.
     async fn delete_instances_batch(&self, _instance_ids: &[String]) -> Result<u64, CoreError> {
@@ -836,9 +848,9 @@ pub trait Persistence: Send + Sync {
     /// Delete the paired events named by `vocabulary` older than `older_than`,
     /// up to `limit` rows.
     ///
-    /// These payloads dominate `instance_events` — on a large run they are the
+    /// These payloads dominate event storage — on a large run they are the
     /// great majority of rows — but they are only read while a run is recent.
-    /// Ageing them out on their own, shorter window keeps the table bounded
+    /// Ageing them out on their own, shorter window keeps event storage bounded
     /// during a burst without touching the lifecycle events (`completed`,
     /// `failed`, `suspended`) that are the run's durable history, and without
     /// reducing what producers record in the first place.

@@ -14,7 +14,7 @@ pub mod postgres;
 
 pub use self::postgres::PostgresDialect;
 
-use ::runtara_core::persistence::EventVocabulary;
+use crate::vocabulary::SqlVocabulary;
 
 /// Categories of enum-typed columns that Postgres casts with `::name`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,7 +32,7 @@ pub enum EnumKind {
 /// methods to produce the SQL, and the whole-SQL methods carry queries too
 /// complex to assemble fragment-by-fragment (CTEs, scope-filtered event
 /// queries, etc.).
-pub trait Dialect: Send + Sync + 'static {
+pub(crate) trait Dialect: Send + Sync + 'static {
     /// sqlx database type this dialect targets.
     type Database: sqlx::Database;
 
@@ -162,11 +162,11 @@ pub trait Dialect: Send + Sync + 'static {
     /// `status`, `duration_ms`, `launched_at_ms`, `settled_at_ms`,
     /// `started_at`, `completed_at`, `scope_id`, `parent_scope_id` — which is
     /// what keeps the row mapper independent of the vocabulary.
-    fn sql_list_paired_records(vocab: &EventVocabulary, order_direction: &str) -> String;
+    fn sql_list_paired_records(vocab: &SqlVocabulary<'_>, order_direction: &str) -> String;
 
     /// SQL for `count_paired_records`. Binds: instance_id,
     /// status_filter, kind, scope_id, parent_scope_id,
     /// root_scopes_only, correlation_ids. See
     /// [`Self::sql_list_paired_records`] for the `vocab` contract.
-    fn sql_count_paired_records(vocab: &EventVocabulary) -> String;
+    fn sql_count_paired_records(vocab: &SqlVocabulary<'_>) -> String;
 }
