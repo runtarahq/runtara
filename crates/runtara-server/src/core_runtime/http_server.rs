@@ -219,7 +219,7 @@ fn status_for(err: &anyhow::Error) -> StatusCode {
 /// How long a client should wait before retrying, in seconds. Shared with the
 /// drain and concurrency-cap refusals so every "come back later" this server
 /// sends asks for the same delay.
-const RETRY_AFTER_SECONDS: &str = "30";
+pub(crate) const RETRY_AFTER_SECONDS: &str = "30";
 
 /// Render a handler failure: status from the error's own classification, body in
 /// the established `{error, code}` shape carrying the caller's route code.
