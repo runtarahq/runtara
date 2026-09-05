@@ -12,7 +12,7 @@
 //! 2. Wrap sqlx errors from checkpoint writes into
 //!    [`CoreError::CheckpointSaveFailed`] with the instance ID attached —
 //!    the blanket `impl From<sqlx::Error> for CoreError` has no access to
-//!    that context and flattens the failure into a generic `DatabaseError`.
+//!    that context and flattens the failure into a generic `PersistenceError`.
 
 use sqlx::Database;
 
@@ -44,7 +44,7 @@ where
 /// Pair with `.map_err(|e| wrap_checkpoint_save(e, instance_id))` on
 /// `save_checkpoint` / `save_retry_attempt` call sites so failures keep the
 /// instance context instead of falling through the blanket
-/// `impl From<sqlx::Error>` that produces a generic `DatabaseError`.
+/// `impl From<sqlx::Error>` that produces a generic `PersistenceError`.
 pub fn wrap_checkpoint_save(err: sqlx::Error, instance_id: &str) -> CoreError {
     CoreError::CheckpointSaveFailed {
         instance_id: instance_id.to_string(),

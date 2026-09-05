@@ -119,13 +119,13 @@ impl<'r> FromRow<'r, PgRow> for CustomSignalRow {
 /// either. An extension trait on the driver's own `Result` is what is left, and
 /// it has the advantage of being visible at each call site.
 pub(crate) trait DbResult<T> {
-    /// Convert a driver failure into [`CoreError::DatabaseError`].
+    /// Convert a driver failure into [`CoreError::PersistenceError`].
     fn db(self) -> Result<T, runtara_core::error::CoreError>;
 }
 
 impl<T> DbResult<T> for Result<T, sqlx::Error> {
     fn db(self) -> Result<T, runtara_core::error::CoreError> {
-        self.map_err(|e| runtara_core::error::CoreError::DatabaseError {
+        self.map_err(|e| runtara_core::error::CoreError::PersistenceError {
             operation: "postgres".to_string(),
             details: e.to_string(),
         })

@@ -249,7 +249,7 @@ mod tests {
                 result
                     .unwrap_err()
                     .downcast_ref::<crate::error::CoreError>(),
-                Some(crate::error::CoreError::DatabaseError { .. })
+                Some(crate::error::CoreError::PersistenceError { .. })
             ));
         }
     }
