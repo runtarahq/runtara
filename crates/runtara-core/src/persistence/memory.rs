@@ -3,14 +3,14 @@
 //! An in-memory [`Persistence`] backend.
 //!
 //! Written from the [`Persistence`] trait's own documentation — the contract a
-//! backend author actually has — rather than from the SQL backend or the
+//! backend author actually has — rather than from another implementation or the
 //! conformance suite. Where the trait says a default implementation is adequate
 //! for an in-memory backend, this takes the default rather than overriding it,
 //! so any gap between what the docs promise and what the contract requires
 //! shows up as a conformance failure instead of being papered over.
 //!
 //! A single mutex covers the whole store, which is what makes the claim and
-//! guard operations atomic without any SQL.
+//! guard operations atomic.
 
 use crate::domain::InstanceStatus as CoreInstanceStatus;
 
@@ -397,7 +397,7 @@ impl Persistence for InMemoryPersistence {
             .filter(|i| status.is_none_or(|s| i.status == s))
             .cloned()
             .collect();
-        // Newest first, matching the SQL backend's ORDER BY created_at DESC.
+        // Return newest instances first.
         found.sort_by_key(|i| std::cmp::Reverse(i.created_at));
         Ok(found
             .into_iter()
@@ -549,9 +549,7 @@ impl Persistence for InMemoryPersistence {
 
     /// Delete instances and everything hanging off them.
     ///
-    /// The SQL backend gets the cascade from the schema; here the child
-    /// collections are pruned explicitly, which is the same guarantee written
-    /// out by hand.
+    /// Prune every dependent collection under the same store lock.
     async fn delete_instances_batch(&self, instance_ids: &[String]) -> Result<u64, CoreError> {
         let mut store = self.store.lock().unwrap();
         let mut deleted = 0;
@@ -617,8 +615,7 @@ impl Persistence for InMemoryPersistence {
 /// Events for one instance that satisfy `filter`.
 ///
 /// `payload_contains` is a case-insensitive substring match over the decoded
-/// bytes, and the scope predicates read two keys out of the payload — the same
-/// three the SQL backend expresses as `ILIKE` and JSON path lookups.
+/// bytes; scope predicates compare the corresponding payload keys.
 fn filtered_events<'s>(
     store: &'s Store,
     instance_id: &str,
@@ -681,7 +678,7 @@ fn payload_str(event: &EventRecord, key: &str) -> Option<String> {
 /// supplied.
 ///
 /// This function is the reason the in-memory backend is worth having: it
-/// implements the pairing rule with no SQL at all, so a vocabulary key that the
+/// implements the pairing rule independently, so a vocabulary key that the
 /// kernel secretly special-cased would show up here as a name this code had to
 /// know. It knows none of them — every key comes from `vocabulary`.
 ///
@@ -781,7 +778,7 @@ mod tests {
     use super::*;
     use chrono::Duration;
 
-    /// The probe: the backend contract, run against a store with no SQL in it.
+    /// Run the backend contract against the in-memory implementation.
     #[tokio::test]
     async fn in_memory_backend_satisfies_the_conformance_sequence() {
         let backend = InMemoryPersistence::new();

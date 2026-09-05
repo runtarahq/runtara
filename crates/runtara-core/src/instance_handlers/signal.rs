@@ -148,7 +148,7 @@ pub async fn handle_signal_ack(state: &InstanceHandlerState, ack: SignalAck) -> 
         // Acknowledge last, once the status transition above has landed.
         // Acknowledging first consumes the signal whether or not the
         // transition succeeded, and callers log-and-continue on the error, so
-        // a transient database failure would leave an instance that was told
+        // a transient persistence failure would leave an instance that was told
         // to cancel recorded as a clean success: the guest's next poll would
         // no longer see the signal, and the end-of-run cancel backstop would
         // find nothing to enforce. Acking here instead leaves an unhandled

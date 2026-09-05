@@ -132,12 +132,8 @@ pub async fn handle_checkpoint(
 
 /// Validate that an instance exists and is still running.
 ///
-/// Every handler that writes on an instance's behalf owes the caller this
-/// check first. Falling straight through to the write turns "you named an
-/// instance that does not exist" into whatever the storage layer happens to
-/// say — Postgres raises a foreign-key violation (SQLSTATE 23503) that
-/// surfaces as `CheckpointSaveFailed`, which is classified `Transient` and
-/// tells the client to retry a request that can never succeed.
+/// Validate before writing so a missing or terminal instance is reported as a
+/// caller error rather than an implementation-specific storage failure.
 async fn ensure_instance_running(
     persistence: &dyn Persistence,
     instance_id: &str,
@@ -487,12 +483,8 @@ mod tests {
         assert_eq!(cs.payload, b"custom payload");
     }
 
-    /// A sleep against an instance that does not exist is a caller error and
-    /// must say so. It used to fall through to `save_checkpoint`, where
-    /// Postgres answers with a foreign-key violation (SQLSTATE 23503) reported
-    /// as `CheckpointSaveFailed` — classified `Transient`, so the client was
-    /// told to retry a request that can never succeed. `MockPersistence` does
-    /// not enforce the foreign key, so this asserts on the validation itself.
+    /// A missing instance must be rejected before checkpoint persistence,
+    /// regardless of whether the backend itself checks instance existence.
     #[tokio::test(start_paused = true)]
     async fn test_sleep_instance_not_found() {
         let persistence = Arc::new(MockPersistence::new());

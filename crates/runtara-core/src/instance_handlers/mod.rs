@@ -5,13 +5,18 @@
 //! These handlers process requests from instances (registration, checkpoints,
 //! events, signals, etc.), split into focused submodules:
 //!
-//! - [`registration`]: `handle_register_instance`
-//! - [`checkpoint`]: `handle_checkpoint`, `handle_get_checkpoint`, `handle_sleep`
-//! - [`signal`]: `handle_poll_signals`, `handle_signal_ack`
-//! - [`event`]: `handle_instance_event`, `handle_retry_attempt`
-//! - [`status`]: `handle_get_instance_status`
-//! - [`types`]: plain Rust request/response types and enums
-//! - [`state`]: the shared [`InstanceHandlerState`] handed to every handler
+//! - [`crate::instance_handlers::handle_register_instance`] — registration
+//! - [`crate::instance_handlers::handle_checkpoint`] and
+//!   [`crate::instance_handlers::handle_get_checkpoint`] — checkpoint access
+//! - [`crate::instance_handlers::handle_sleep`] — durable sleep
+//! - [`crate::instance_handlers::handle_poll_signals`] and
+//!   [`crate::instance_handlers::handle_signal_ack`] — lifecycle signals
+//! - [`crate::instance_handlers::handle_instance_event`] and
+//!   [`crate::instance_handlers::handle_retry_attempt`] — event ingestion
+//! - [`crate::instance_handlers::handle_get_instance_status`] — status queries
+//!
+//! Request/response types and [`crate::instance_handlers::InstanceHandlerState`]
+//! are re-exported alongside the handlers.
 
 mod checkpoint;
 mod event;
@@ -27,7 +32,7 @@ mod types;
 /// Compiled for this crate's own tests, and for downstream crates that enable
 /// the `test-support` feature — chiefly `runtara-server`, whose instance HTTP
 /// router drives these same handlers and needs to test that wiring without a
-/// database.
+/// external service.
 #[cfg(any(test, feature = "test-support"))]
 pub mod mock_persistence;
 

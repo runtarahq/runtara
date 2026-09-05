@@ -3,9 +3,9 @@
 //! Configuration loading from environment variables.
 //!
 //! Core is a library, so it reads nothing on its own and owns no defaults for
-//! the process it runs in — no database URL, no listen address. What it does
+//! the process it runs in — no storage connection settings, no listen address. What it does
 //! own is the pair of knobs that govern the handlers themselves, and
-//! [`RuntimeOverrides`] hands those to a host in the only shape that keeps the
+//! [`crate::config::RuntimeOverrides`] hands those to a host in the only shape that keeps the
 //! host in charge: `None` where the deployment said nothing.
 
 use std::time::Duration;
