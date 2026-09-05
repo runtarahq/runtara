@@ -893,6 +893,7 @@ mod tests {
             pool,
             persistence,
             Arc::new(MockRunner::new()),
+            "http://127.0.0.1:1".into(),
             std::env::temp_dir(),
         )));
         for (name, _) in events {
