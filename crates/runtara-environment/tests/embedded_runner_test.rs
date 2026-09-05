@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use runtara_core::persistence::{CompleteInstanceParams, Persistence};
+use runtara_core::persistence::Persistence;
 use runtara_environment::runner::{
     EmbeddedWasmRunner, LaunchOptions, Result as RunnerResult, Runner, RunnerError, StartGate,
     StartGateConfirmation, WorkflowRunnerConfig,
@@ -35,19 +35,6 @@ const RUN_OK_WAT: &str = r#"
     (component
         (core module $m
             (func (export "run") (result i32) (i32.const 0))
-        )
-        (core instance $i (instantiate $m))
-        (func $run (result (result)) (canon lift (core func $i "run")))
-        (instance $run_iface (export "run" (func $run)))
-        (export "wasi:cli/run@0.2.3" (instance $run_iface))
-    )
-"#;
-
-/// `wasi:cli/run` returning err — the embedded analogue of exit code 1.
-const RUN_ERR_WAT: &str = r#"
-    (component
-        (core module $m
-            (func (export "run") (result i32) (i32.const 1))
         )
         (core instance $i (instantiate $m))
         (func $run (result (result)) (canon lift (core func $i "run")))
@@ -169,62 +156,7 @@ impl StartGateConfirmation for BlockingGateConfirmation {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn run_maps_completed_guest_to_persisted_output() {
-    let h = harness().await;
-    let inst_id = unique("inst-ok");
-    let wasm = write_component(h.dir.path(), "ok.wasm", RUN_OK_WAT);
-
-    // Seed what the SDK would have reported during execution.
-    h.persistence
-        .register_instance(inst_id.as_str(), "embedded-test")
-        .await
-        .expect("register");
-    h.persistence
-        .complete_instance(
-            CompleteInstanceParams::new(inst_id.as_str(), "completed")
-                .with_output(br#"{"answer":42}"#),
-        )
-        .await
-        .expect("complete");
-
-    let result = h
-        .runner
-        .run(&options(inst_id.as_str(), &wasm), None)
-        .await
-        .expect("run");
-    assert!(result.success, "error: {:?}", result.error);
-    assert_eq!(result.output, Some(serde_json::json!({"answer": 42})));
-    assert!(result.metrics.memory_peak_bytes.is_some());
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn run_maps_guest_error_to_persisted_error_message() {
-    let h = harness().await;
-    let inst_id = unique("inst-err");
-    let wasm = write_component(h.dir.path(), "err.wasm", RUN_ERR_WAT);
-
-    h.persistence
-        .register_instance(inst_id.as_str(), "embedded-test")
-        .await
-        .expect("register");
-    h.persistence
-        .complete_instance(
-            CompleteInstanceParams::new(inst_id.as_str(), "failed").with_error("boom from sdk"),
-        )
-        .await
-        .expect("complete");
-
-    let result = h
-        .runner
-        .run(&options(inst_id.as_str(), &wasm), None)
-        .await
-        .expect("run");
-    assert!(!result.success);
-    assert_eq!(result.error.as_deref(), Some("boom from sdk"));
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn launch_detached_completes_and_clears_registry() {
+async fn try_launch_detached_completes_and_clears_registry() {
     let h = harness().await;
     let inst_id = unique("inst-detached");
     let wasm = write_component(h.dir.path(), "ok.wasm", RUN_OK_WAT);
@@ -232,7 +164,7 @@ async fn launch_detached_completes_and_clears_registry() {
 
     let handle = h
         .runner
-        .launch_detached(&options(inst_id.as_str(), &wasm))
+        .try_launch_detached(&options(inst_id.as_str(), &wasm))
         .await
         .expect("launch");
 
@@ -257,7 +189,7 @@ async fn stop_cancels_spinning_instance() {
 
     let handle = h
         .runner
-        .launch_detached(&options(inst_id.as_str(), &wasm))
+        .try_launch_detached(&options(inst_id.as_str(), &wasm))
         .await
         .expect("launch");
 
@@ -299,7 +231,7 @@ async fn detached_gate_allows_preparation_but_blocks_guest_instantiation() {
     let mut launch = options(inst_id.as_str(), &wasm);
     launch.start_gate = Some(gate.clone());
 
-    let handle = h.runner.launch_detached(&launch).await.expect("launch");
+    let handle = h.runner.try_launch_detached(&launch).await.expect("launch");
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert!(
         h.runner.is_running(&handle).await,
@@ -364,7 +296,7 @@ async fn missing_component_is_binary_not_found() {
     let missing = h.dir.path().join("nope.wasm");
     let err = h
         .runner
-        .launch_detached(&options(inst_id.as_str(), &missing))
+        .try_launch_detached(&options(inst_id.as_str(), &missing))
         .await
         .expect_err("must fail");
     assert!(matches!(err, RunnerError::BinaryNotFound(_)));

@@ -111,31 +111,6 @@ impl InstanceMetricsSink for OtlpMetricsSink {
     }
 }
 
-/// Record resource usage observed after the process exited, and report it.
-///
-/// First writer wins: the columns are only filled when still null, so a
-/// re-reported exit cannot overwrite the original observation. Reporting is
-/// skipped when there was nothing new to write.
-pub async fn record_instance_resources(
-    pool: &PgPool,
-    instance_id: &str,
-    memory_peak_bytes: Option<u64>,
-    cpu_usage_usec: Option<u64>,
-) -> Result<()> {
-    if memory_peak_bytes.is_none() && cpu_usage_usec.is_none() {
-        return Ok(());
-    }
-
-    write_metrics(pool, instance_id, memory_peak_bytes, cpu_usage_usec).await?;
-
-    if let Some(metric) = fetch_completion_metrics(pool, instance_id).await? {
-        let metrics = workflow_metrics();
-        let attributes = metric_attributes(&metric);
-        record_resources(metrics, &metric, &attributes);
-    }
-    Ok(())
-}
-
 /// Write resource usage and read back the status the guest reported, in one
 /// statement.
 ///
@@ -186,27 +161,6 @@ pub async fn record_instance_stderr(pool: &PgPool, instance_id: &str, stderr: &s
         .execute(pool)
         .await
         .map_err(|e| Error::Other(format!("record_instance_stderr: {e}")))?;
-    Ok(())
-}
-
-async fn write_metrics(
-    pool: &PgPool,
-    instance_id: &str,
-    memory_peak_bytes: Option<u64>,
-    cpu_usage_usec: Option<u64>,
-) -> Result<()> {
-    sqlx::query(
-        "UPDATE instances \
-         SET memory_peak_bytes = COALESCE(memory_peak_bytes, $2), \
-             cpu_usage_usec = COALESCE(cpu_usage_usec, $3) \
-         WHERE instance_id = $1",
-    )
-    .bind(instance_id)
-    .bind(memory_peak_bytes.map(|v| v as i64))
-    .bind(cpu_usage_usec.map(|v| v as i64))
-    .execute(pool)
-    .await
-    .map_err(|e| Error::Other(format!("record_instance_resources: {e}")))?;
     Ok(())
 }
 

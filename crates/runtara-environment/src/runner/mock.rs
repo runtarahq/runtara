@@ -32,7 +32,7 @@ struct MockInstance {
 pub struct MockRunner {
     instances: Arc<Mutex<HashMap<String, MockInstance>>>,
     launch_count: Arc<AtomicU64>,
-    /// Every `launch_detached` call's options, in order, so a test can assert
+    /// Every `try_launch_detached` call's options, in order, so a test can assert
     /// on what the handler actually handed the runner.
     launches: Arc<std::sync::Mutex<Vec<LaunchOptions>>>,
     /// Optional delay to simulate execution time (in milliseconds)
@@ -94,7 +94,7 @@ impl MockRunner {
         self.launch_count.load(Ordering::SeqCst)
     }
 
-    /// The options passed to the most recent `launch_detached`.
+    /// The options passed to the most recent `try_launch_detached`.
     pub fn last_launch(&self) -> Option<LaunchOptions> {
         self.launches
             .lock()
@@ -136,54 +136,7 @@ impl Runner for MockRunner {
         "mock"
     }
 
-    async fn run(
-        &self,
-        options: &LaunchOptions,
-        cancel_token: Option<CancelToken>,
-    ) -> Result<LaunchResult> {
-        let start = std::time::Instant::now();
-
-        // Simulate execution
-        if self.execution_delay_ms > 0 {
-            tokio::time::sleep(std::time::Duration::from_millis(self.execution_delay_ms)).await;
-        }
-
-        // Check cancellation
-        if let Some(token) = &cancel_token
-            && token.load(Ordering::SeqCst)
-        {
-            return Err(RunnerError::Cancelled);
-        }
-
-        let duration_ms = start.elapsed().as_millis() as u64;
-
-        if self.fail_by_default {
-            Ok(LaunchResult {
-                instance_id: options.instance_id.clone(),
-                success: false,
-                output: None,
-                error: Some("Mock failure".to_string()),
-                stderr: None,
-                duration_ms,
-                metrics: ContainerMetrics::default(),
-            })
-        } else {
-            Ok(LaunchResult {
-                instance_id: options.instance_id.clone(),
-                success: true,
-                output: Some(serde_json::json!({
-                    "status": "completed",
-                    "result": options.input.clone()
-                })),
-                error: None,
-                stderr: None,
-                duration_ms,
-                metrics: ContainerMetrics::default(),
-            })
-        }
-    }
-
-    async fn launch_detached(&self, options: &LaunchOptions) -> Result<RunnerHandle> {
+    async fn try_launch_detached(&self, options: &LaunchOptions) -> Result<RunnerHandle> {
         self.launch_count.fetch_add(1, Ordering::SeqCst);
         self.launches
             .lock()
@@ -267,13 +220,6 @@ impl Runner for MockRunner {
         Ok(handle)
     }
 
-    async fn try_launch_detached(&self, options: &LaunchOptions) -> Result<RunnerHandle> {
-        // The mock does not impose a capacity bound, so every launch is
-        // immediately available. Keeping the same path makes test launch
-        // accounting reflect what the durable dispatcher requested.
-        self.launch_detached(options).await
-    }
-
     async fn is_running(&self, handle: &RunnerHandle) -> bool {
         let instances = self.instances.lock().await;
         instances
@@ -338,43 +284,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_mock_runner_run_success() {
-        let runner = MockRunner::new();
-        let options = test_options();
-
-        let result = runner.run(&options, None).await.unwrap();
-
-        assert!(result.success);
-        assert!(result.output.is_some());
-        assert!(result.error.is_none());
-    }
-
-    #[tokio::test]
-    async fn test_mock_runner_run_failure() {
-        let runner = MockRunner::failing();
-        let options = test_options();
-
-        let result = runner.run(&options, None).await.unwrap();
-
-        assert!(!result.success);
-        assert!(result.error.is_some());
-    }
-
-    #[tokio::test]
-    async fn test_mock_runner_cancellation() {
-        let runner = MockRunner {
-            execution_delay_ms: 100,
-            ..MockRunner::new()
-        };
-        let options = test_options();
-        let cancel = Arc::new(AtomicBool::new(true));
-
-        let result = runner.run(&options, Some(cancel)).await;
-
-        assert!(matches!(result, Err(RunnerError::Cancelled)));
-    }
-
-    #[tokio::test]
     async fn test_mock_runner_detached() {
         let runner = MockRunner {
             execution_delay_ms: 50,
@@ -382,7 +291,7 @@ mod tests {
         };
         let options = test_options();
 
-        let handle = runner.launch_detached(&options).await.unwrap();
+        let handle = runner.try_launch_detached(&options).await.unwrap();
 
         assert!(runner.is_running(&handle).await);
 
@@ -404,7 +313,7 @@ mod tests {
         };
         let options = test_options();
 
-        let handle = runner.launch_detached(&options).await.unwrap();
+        let handle = runner.try_launch_detached(&options).await.unwrap();
 
         assert!(runner.is_running(&handle).await);
 
@@ -420,8 +329,8 @@ mod tests {
         let mut replacement = old.clone();
         replacement.launch_id = "test-launch-456".to_string();
 
-        let old_handle = runner.launch_detached(&old).await.unwrap();
-        let replacement_handle = runner.launch_detached(&replacement).await.unwrap();
+        let old_handle = runner.try_launch_detached(&old).await.unwrap();
+        let replacement_handle = runner.try_launch_detached(&replacement).await.unwrap();
 
         runner.stop(&old_handle).await.unwrap();
 
@@ -440,7 +349,7 @@ mod tests {
         let runner = MockRunner::never_completing();
         let options = test_options();
 
-        let handle = runner.launch_detached(&options).await.unwrap();
+        let handle = runner.try_launch_detached(&options).await.unwrap();
 
         // Should be running initially
         assert!(runner.is_running(&handle).await);
@@ -464,7 +373,7 @@ mod tests {
         let mut options = test_options();
         options.start_gate = Some(gate.clone());
 
-        let handle = runner.launch_detached(&options).await.unwrap();
+        let handle = runner.try_launch_detached(&options).await.unwrap();
         assert!(
             !runner.is_running(&handle).await,
             "a reserved launch slot must not look like guest execution before its gate opens"

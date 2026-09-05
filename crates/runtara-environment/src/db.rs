@@ -516,16 +516,6 @@ pub async fn get_instance_image_with_env(
     }))
 }
 
-/// Remove instance-image association.
-pub async fn remove_instance_image(pool: &PgPool, instance_id: &str) -> Result<(), sqlx::Error> {
-    sqlx::query("DELETE FROM instance_images WHERE instance_id = $1")
-        .bind(instance_id)
-        .execute(pool)
-        .await?;
-
-    Ok(())
-}
-
 // ============================================================================
 // Tenant Metrics
 // ============================================================================

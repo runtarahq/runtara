@@ -13,7 +13,6 @@ use runtara_environment::runner::{MockRunner, Runner};
 use runtara_environment::wake_scheduler::{WakeScheduler, WakeSchedulerConfig};
 use runtara_store_postgres::PostgresPersistence;
 use sqlx::PgPool;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
@@ -174,8 +173,6 @@ fn test_wake_scheduler_config_default() {
         "in-batch concurrency must be bounded and non-zero: {}",
         config.concurrency
     );
-    assert_eq!(config.core_addr, "127.0.0.1:8001");
-    assert_eq!(config.data_dir, PathBuf::from(".data"));
 }
 
 #[test]
@@ -186,14 +183,11 @@ fn test_wake_scheduler_config_custom() {
         concurrency: 4,
         claim_lease: Duration::from_secs(300),
         failed_wake_retry_delay: Duration::from_millis(200),
-        core_addr: "192.168.1.100:9000".to_string(),
-        data_dir: PathBuf::from("/var/data"),
     };
 
     assert_eq!(config.poll_interval, Duration::from_secs(10));
     assert_eq!(config.batch_size, 50);
-    assert_eq!(config.core_addr, "192.168.1.100:9000");
-    assert_eq!(config.data_dir, PathBuf::from("/var/data"));
+    assert_eq!(config.concurrency, 4);
 }
 
 #[test]
@@ -204,15 +198,12 @@ fn test_wake_scheduler_config_clone() {
         concurrency: 4,
         claim_lease: Duration::from_secs(300),
         failed_wake_retry_delay: Duration::from_millis(200),
-        core_addr: "test:1234".to_string(),
-        data_dir: PathBuf::from("/test"),
     };
 
     let cloned = config.clone();
     assert_eq!(config.poll_interval, cloned.poll_interval);
     assert_eq!(config.batch_size, cloned.batch_size);
-    assert_eq!(config.core_addr, cloned.core_addr);
-    assert_eq!(config.data_dir, cloned.data_dir);
+    assert_eq!(config.claim_lease, cloned.claim_lease);
 }
 
 #[test]
@@ -221,8 +212,7 @@ fn test_wake_scheduler_config_debug() {
     let debug_str = format!("{:?}", config);
     assert!(debug_str.contains("poll_interval"));
     assert!(debug_str.contains("batch_size"));
-    assert!(debug_str.contains("core_addr"));
-    assert!(debug_str.contains("data_dir"));
+    assert!(debug_str.contains("claim_lease"));
 }
 
 // ============================================================================
@@ -510,36 +500,6 @@ fn test_instance_clone() {
 // Wake Scheduler Config Tests
 // ============================================================================
 
-/// Test that WakeSchedulerConfig includes data_dir for container monitoring.
-/// This field is required for the wake scheduler to spawn container monitors.
-#[test]
-fn test_wake_scheduler_config_has_data_dir() {
-    let config = WakeSchedulerConfig::default();
-
-    // data_dir is required for spawn_container_monitor to process output.json
-    assert!(
-        !config.data_dir.as_os_str().is_empty(),
-        "data_dir should have a default value"
-    );
-    assert_eq!(config.data_dir, PathBuf::from(".data"));
-}
-
-/// Test that custom data_dir can be set in WakeSchedulerConfig.
-#[test]
-fn test_wake_scheduler_config_custom_data_dir() {
-    let config = WakeSchedulerConfig {
-        poll_interval: Duration::from_secs(10),
-        batch_size: 5,
-        concurrency: 4,
-        claim_lease: Duration::from_secs(300),
-        failed_wake_retry_delay: Duration::from_millis(200),
-        core_addr: "127.0.0.1:8001".to_string(),
-        data_dir: PathBuf::from("/custom/data/dir"),
-    };
-
-    assert_eq!(config.data_dir, PathBuf::from("/custom/data/dir"));
-}
-
 // ============================================================================
 // Cancel-at-wake (SYN-606)
 // ============================================================================
@@ -588,15 +548,12 @@ async fn test_wake_cancels_pending_cancel_and_still_launches_the_rest() {
     let scheduler = WakeScheduler::new(
         pool.clone(),
         persistence.clone(),
-        runner.clone(),
         WakeSchedulerConfig {
             poll_interval: Duration::from_millis(100),
             batch_size: 10,
             concurrency: 4,
             claim_lease: Duration::from_secs(300),
             failed_wake_retry_delay: Duration::from_millis(200),
-            core_addr: "127.0.0.1:8001".to_string(),
-            data_dir: PathBuf::from(".data"),
         },
     );
     let shutdown = scheduler.shutdown_handle();
@@ -674,15 +631,12 @@ async fn a_wake_without_an_image_fails_without_a_runner_handoff() {
     let scheduler = WakeScheduler::new(
         pool.clone(),
         persistence.clone(),
-        Arc::new(MockRunner::failing()),
         WakeSchedulerConfig {
             poll_interval: Duration::from_millis(50),
             batch_size: 10,
             concurrency: 4,
             claim_lease: Duration::from_secs(300),
             failed_wake_retry_delay: Duration::from_millis(200),
-            core_addr: "127.0.0.1:8001".to_string(),
-            data_dir: PathBuf::from(".data"),
         },
     );
     let shutdown = scheduler.shutdown_handle();
@@ -733,14 +687,7 @@ impl Runner for GatedRunner {
     fn runner_type(&self) -> &'static str {
         "gated"
     }
-    async fn run(
-        &self,
-        _options: &runtara_environment::runner::LaunchOptions,
-        _cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
-    ) -> runtara_environment::runner::Result<runtara_environment::runner::LaunchResult> {
-        unimplemented!("the wake path uses launch_detached")
-    }
-    async fn launch_detached(
+    async fn try_launch_detached(
         &self,
         options: &runtara_environment::runner::LaunchOptions,
     ) -> runtara_environment::runner::Result<runtara_environment::runner::RunnerHandle> {
@@ -760,12 +707,6 @@ impl Runner for GatedRunner {
             started_at: Utc::now(),
             metrics: None,
         })
-    }
-    async fn try_launch_detached(
-        &self,
-        options: &runtara_environment::runner::LaunchOptions,
-    ) -> runtara_environment::runner::Result<runtara_environment::runner::RunnerHandle> {
-        self.launch_detached(options).await
     }
     async fn is_running(&self, _handle: &runtara_environment::runner::RunnerHandle) -> bool {
         true
@@ -809,15 +750,12 @@ async fn a_drain_mid_batch_releases_the_claims_it_will_not_launch() {
     let scheduler = WakeScheduler::new(
         pool.clone(),
         persistence.clone(),
-        Arc::new(MockRunner::never_completing()),
         WakeSchedulerConfig {
             poll_interval: Duration::from_millis(50),
             batch_size: 10,
             concurrency: 1,
             claim_lease: Duration::from_secs(300),
             failed_wake_retry_delay: Duration::from_millis(200),
-            core_addr: "127.0.0.1:8001".to_string(),
-            data_dir: PathBuf::from(".data"),
         },
     )
     .with_drain(drain.clone());
@@ -849,82 +787,13 @@ async fn a_drain_mid_batch_releases_the_claims_it_will_not_launch() {
     cleanup_image(&pool, &image_id).await;
 }
 
-/// A runner that holds each launch open briefly and records how many were in
-/// flight at once, so the test can see whether the batch is actually spread
-/// across tasks or awaited one at a time.
-struct ConcurrencyProbeRunner {
-    in_flight: Arc<std::sync::atomic::AtomicUsize>,
-    peak: Arc<std::sync::atomic::AtomicUsize>,
-}
-
-#[async_trait::async_trait]
-impl Runner for ConcurrencyProbeRunner {
-    fn runner_type(&self) -> &'static str {
-        "concurrency-probe"
-    }
-
-    async fn run(
-        &self,
-        _options: &runtara_environment::runner::LaunchOptions,
-        _cancel: Option<runtara_environment::runner::CancelToken>,
-    ) -> runtara_environment::runner::Result<runtara_environment::runner::LaunchResult> {
-        unimplemented!("the wake path uses launch_detached")
-    }
-
-    async fn launch_detached(
-        &self,
-        options: &runtara_environment::runner::LaunchOptions,
-    ) -> runtara_environment::runner::Result<runtara_environment::runner::RunnerHandle> {
-        use std::sync::atomic::Ordering;
-        let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
-        self.peak.fetch_max(now, Ordering::SeqCst);
-        tokio::time::sleep(Duration::from_millis(120)).await;
-        self.in_flight.fetch_sub(1, Ordering::SeqCst);
-        Ok(runtara_environment::runner::RunnerHandle {
-            launch_id: options.launch_id.clone(),
-            handle_id: format!("probe-{}", options.instance_id),
-            instance_id: options.instance_id.clone(),
-            tenant_id: options.tenant_id.clone(),
-            started_at: Utc::now(),
-            metrics: None,
-        })
-    }
-
-    async fn try_launch_detached(
-        &self,
-        options: &runtara_environment::runner::LaunchOptions,
-    ) -> runtara_environment::runner::Result<runtara_environment::runner::RunnerHandle> {
-        self.launch_detached(options).await
-    }
-
-    async fn is_running(&self, _handle: &runtara_environment::runner::RunnerHandle) -> bool {
-        true
-    }
-
-    async fn stop(
-        &self,
-        _handle: &runtara_environment::runner::RunnerHandle,
-    ) -> runtara_environment::runner::Result<()> {
-        Ok(())
-    }
-
-    async fn collect_result(
-        &self,
-        _handle: &runtara_environment::runner::RunnerHandle,
-    ) -> (
-        Option<serde_json::Value>,
-        Option<String>,
-        runtara_environment::runner::ContainerMetrics,
-    ) {
-        (
-            None,
-            None,
-            runtara_environment::runner::ContainerMetrics::default(),
-        )
-    }
-}
-
-/// A batch wake produces durable queue rows without touching the runner.
+/// A batch wake produces one durable queue row per due sleeper.
+///
+/// The scheduler cannot reach a runner at all — `WakeScheduler::new` takes no
+/// runner — so the property this used to prove with an in-flight probe is now
+/// structural. What is left to check is the durable outcome: every due sleeper
+/// converted to exactly one queued wake generation, none dropped by the batch
+/// boundary and none claimed twice.
 #[tokio::test]
 async fn a_batch_is_woken_concurrently_and_stays_within_its_bound() {
     skip_if_no_db!();
@@ -937,26 +806,18 @@ async fn a_batch_is_woken_concurrently_and_stays_within_its_bound() {
         ids.push(park_due_instance(&pool, tenant_id, &image_id).await);
     }
 
-    let in_flight = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     const BOUND: usize = 6;
 
     let persistence = Arc::new(PostgresPersistence::new(pool.clone()));
     let scheduler = WakeScheduler::new(
         pool.clone(),
         persistence,
-        Arc::new(ConcurrencyProbeRunner {
-            in_flight: Arc::clone(&in_flight),
-            peak: Arc::clone(&peak),
-        }),
         WakeSchedulerConfig {
             poll_interval: Duration::from_millis(50),
             batch_size: 24,
             concurrency: BOUND,
             claim_lease: Duration::from_secs(300),
             failed_wake_retry_delay: Duration::from_millis(200),
-            core_addr: "127.0.0.1:8001".to_string(),
-            data_dir: PathBuf::from(".data"),
         },
     );
     let shutdown = scheduler.shutdown_handle();
@@ -979,8 +840,6 @@ async fn a_batch_is_woken_concurrently_and_stays_within_its_bound() {
             "every due sleeper must be converted to one durable wake generation"
         );
     }
-    assert_eq!(peak.load(std::sync::atomic::Ordering::SeqCst), 0);
-
     for id in &ids {
         cleanup(&pool, id).await;
     }

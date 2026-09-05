@@ -210,7 +210,12 @@ export function handleEntitlementDenial(error: ApiError): boolean {
  */
 export function isEntitlementDenial(error: unknown): boolean {
   const e = error as ApiError | undefined;
-  return e?.response?.status === 403 && !!e?.response?.data?.code;
+  // 403 for standing entitlement decisions, 429 for a transient capacity
+  // refusal such as maxConcurrentExecutions. Both carry the same
+  // `{error, code}` body, and both are already surfaced with a proper message
+  // by the shared mutation handler.
+  const status = e?.response?.status;
+  return (status === 403 || status === 429) && !!e?.response?.data?.code;
 }
 
 /**

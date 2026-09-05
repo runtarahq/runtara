@@ -14,9 +14,7 @@ use runtara_core::persistence::{
 };
 use runtara_environment::container_registry::ContainerRegistry;
 use runtara_environment::heartbeat_monitor::{HeartbeatMonitor, HeartbeatMonitorConfig};
-use runtara_environment::runner::{
-    CancelToken, ContainerMetrics, LaunchOptions, LaunchResult, Runner, RunnerHandle,
-};
+use runtara_environment::runner::{ContainerMetrics, LaunchOptions, Runner, RunnerHandle};
 use sqlx::PgPool;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -36,26 +34,11 @@ impl Runner for MockRunner {
         "mock"
     }
 
-    async fn run(
-        &self,
-        _options: &LaunchOptions,
-        _cancel_token: Option<CancelToken>,
-    ) -> runtara_environment::runner::Result<LaunchResult> {
-        unimplemented!("MockRunner::run not needed for heartbeat monitor tests")
-    }
-
-    async fn launch_detached(
-        &self,
-        _options: &LaunchOptions,
-    ) -> runtara_environment::runner::Result<RunnerHandle> {
-        unimplemented!("MockRunner::launch_detached not needed for heartbeat monitor tests")
-    }
-
     async fn try_launch_detached(
         &self,
-        options: &LaunchOptions,
+        _options: &LaunchOptions,
     ) -> runtara_environment::runner::Result<RunnerHandle> {
-        self.launch_detached(options).await
+        unimplemented!("MockRunner::try_launch_detached not needed for heartbeat monitor tests")
     }
 
     async fn is_running(&self, _handle: &RunnerHandle) -> bool {

@@ -9,11 +9,10 @@ use runtara_core::persistence::{CompleteInstanceParams, Persistence};
 use runtara_environment::container_registry::{ContainerInfo, ContainerRegistry};
 use runtara_environment::db;
 use runtara_environment::handlers::{
-    DrainController, EnvironmentHandlerState, GetCapabilityRequest, MAX_METRIC_BUCKETS,
-    RegisterImageRequest, ResumeInstanceRequest, StartInstanceRequest, StopInstanceRequest,
-    handle_get_capability, handle_get_tenant_metrics, handle_health_check, handle_list_agents,
-    handle_register_image, handle_resume_instance, handle_start_instance, handle_stop_instance,
-    spawn_container_monitor,
+    DrainController, EnvironmentHandlerState, MAX_METRIC_BUCKETS, RegisterImageRequest,
+    ResumeInstanceRequest, StartInstanceRequest, StopInstanceRequest, handle_get_tenant_metrics,
+    handle_health_check, handle_register_image, handle_resume_instance, handle_start_instance,
+    handle_stop_instance, spawn_container_monitor,
 };
 use runtara_environment::image_registry::ImageRegistry;
 use runtara_environment::launch_dispatcher::LaunchLifecycleObservers;
@@ -56,13 +55,7 @@ async fn get_test_pool() -> PgPool {
 fn create_test_state(pool: PgPool, data_dir: PathBuf) -> EnvironmentHandlerState {
     let runner = Arc::new(MockRunner::new());
     let persistence = Arc::new(PostgresPersistence::new(pool.clone()));
-    EnvironmentHandlerState::new(
-        pool,
-        persistence,
-        runner,
-        "127.0.0.1:8001".to_string(),
-        data_dir,
-    )
+    EnvironmentHandlerState::new(pool, persistence, runner, data_dir)
 }
 
 /// A real, cross-platform file for MockRunner image records. Start preflight
@@ -156,7 +149,6 @@ async fn test_handler_state_creation() {
 
     assert!(!state.version.is_empty());
     assert!(state.uptime_ms() >= 0);
-    assert_eq!(state.core_addr, "127.0.0.1:8001");
 }
 
 #[tokio::test]
@@ -417,7 +409,6 @@ async fn test_start_instance_replay_is_deduplicated_without_second_launch() {
         pool.clone(),
         persistence,
         runner.clone(),
-        "127.0.0.1:8001".to_string(),
         temp_dir.path().to_path_buf(),
     );
 
@@ -485,7 +476,6 @@ async fn test_start_instance_hands_runner_the_stored_input() {
         pool.clone(),
         persistence.clone(),
         runner.clone(),
-        "127.0.0.1:8001".to_string(),
         temp_dir.path().to_path_buf(),
     );
 
@@ -570,7 +560,6 @@ async fn test_resume_instance_does_not_prepersist_placeholder_input() {
         pool.clone(),
         persistence,
         runner.clone(),
-        "127.0.0.1:8001".to_string(),
         temp_dir.path().to_path_buf(),
     );
 
@@ -635,7 +624,6 @@ async fn test_start_instance_replay_is_deduplicated_after_artifact_disappears() 
         pool.clone(),
         persistence,
         runner.clone(),
-        "127.0.0.1:8001".to_string(),
         temp_dir.path().to_path_buf(),
     );
 
@@ -761,7 +749,6 @@ async fn test_start_instance_association_failure_does_not_leave_unbound_pending_
         pool.clone(),
         persistence,
         runner,
-        "127.0.0.1:8001".to_string(),
         temp_dir.path().to_path_buf(),
     );
 
@@ -1335,81 +1322,6 @@ async fn test_start_instance_same_tenant_allowed() {
 // Agent Testing Handler Tests
 // ============================================================================
 
-#[tokio::test]
-async fn test_removed_list_agents_handler_fails_with_runtime_route_guidance() {
-    skip_if_no_db!();
-    let pool = get_test_pool().await;
-
-    let temp_dir = tempfile::TempDir::new().unwrap();
-    let state = create_test_state(pool, temp_dir.path().to_path_buf());
-
-    let Err(error) = handle_list_agents(&state).await else {
-        panic!("removed environment agent-list handler unexpectedly succeeded");
-    };
-    assert!(error.to_string().contains("GET /api/runtime/agents"));
-}
-
-#[tokio::test]
-async fn test_removed_get_capability_handler_fails_with_runtime_route_guidance() {
-    skip_if_no_db!();
-    let pool = get_test_pool().await;
-
-    let temp_dir = tempfile::TempDir::new().unwrap();
-    let state = create_test_state(pool, temp_dir.path().to_path_buf());
-
-    // Try to get the utils/random-double capability
-    // Note: In unit tests, agents are not registered (runtara-workflow-stdlib not linked),
-    // so this will return found=false. In E2E tests with full binary, it would work.
-    let request = GetCapabilityRequest {
-        agent_id: "utils".to_string(),
-        capability_id: "random-double".to_string(),
-    };
-
-    let Err(error) = handle_get_capability(&state, request).await else {
-        panic!("removed environment capability handler unexpectedly succeeded");
-    };
-    assert!(error.to_string().contains("GET /api/runtime/agents/"));
-}
-
-#[tokio::test]
-async fn test_get_capability_not_found() {
-    skip_if_no_db!();
-    let pool = get_test_pool().await;
-
-    let temp_dir = tempfile::TempDir::new().unwrap();
-    let state = create_test_state(pool, temp_dir.path().to_path_buf());
-
-    let request = GetCapabilityRequest {
-        agent_id: "nonexistent-agent".to_string(),
-        capability_id: "nonexistent-capability".to_string(),
-    };
-
-    let Err(error) = handle_get_capability(&state, request).await else {
-        panic!("removed environment capability handler unexpectedly succeeded");
-    };
-    assert!(error.to_string().contains("GET /api/runtime/agents/"));
-}
-
-#[tokio::test]
-async fn test_get_capability_wrong_agent() {
-    skip_if_no_db!();
-    let pool = get_test_pool().await;
-
-    let temp_dir = tempfile::TempDir::new().unwrap();
-    let state = create_test_state(pool, temp_dir.path().to_path_buf());
-
-    // Use a valid capability ID but with wrong agent
-    let request = GetCapabilityRequest {
-        agent_id: "http".to_string(),               // Wrong agent
-        capability_id: "random-double".to_string(), // This belongs to utils
-    };
-
-    let Err(error) = handle_get_capability(&state, request).await else {
-        panic!("removed environment capability handler unexpectedly succeeded");
-    };
-    assert!(error.to_string().contains("GET /api/runtime/agents/"));
-}
-
 // ============================================================================
 // Environment Variable Persistence Tests
 // ============================================================================
@@ -1571,7 +1483,7 @@ async fn test_spawn_container_monitor_timeout_enforcement() {
 
     // Register the mock instance in the runner
     runner
-        .launch_detached(&LaunchOptions {
+        .try_launch_detached(&LaunchOptions {
             launch_id: format!("launch-{instance_id}"),
             instance_id: instance_id.clone(),
             tenant_id: tenant_id.to_string(),
@@ -1681,7 +1593,7 @@ async fn test_spawn_container_monitor_no_timeout_on_quick_completion() {
 
     // Launch detached (this will auto-complete in 10ms)
     let handle = runner
-        .launch_detached(&LaunchOptions {
+        .try_launch_detached(&LaunchOptions {
             launch_id: format!("launch-{instance_id}"),
             instance_id: instance_id.clone(),
             tenant_id: tenant_id.to_string(),
@@ -1776,7 +1688,7 @@ async fn test_spawn_container_monitor_timeout_race_condition() {
         .expect("Failed to update instance status");
 
     let handle = runner
-        .launch_detached(&LaunchOptions {
+        .try_launch_detached(&LaunchOptions {
             launch_id: format!("launch-{instance_id}"),
             instance_id: instance_id.clone(),
             tenant_id: tenant_id.to_string(),
@@ -1982,7 +1894,7 @@ async fn test_wait_for_exit_default_impl_returns_on_not_running() {
     let tenant_id = "test-tenant-wait-for-exit";
 
     let handle = runner
-        .launch_detached(&LaunchOptions {
+        .try_launch_detached(&LaunchOptions {
             launch_id: format!("launch-{instance_id}"),
             instance_id: instance_id.clone(),
             tenant_id: tenant_id.to_string(),
@@ -2037,7 +1949,7 @@ async fn test_wait_for_exit_default_impl_returns_on_not_running() {
 // Regression: a run that parks before its launcher returns
 // ============================================================================
 
-/// A runner that parks the instance *inside* `launch_detached`, before it
+/// A runner that parks the instance *inside* `try_launch_detached`, before it
 /// returns — the deterministic version of what a `Delay` or a no-timeout
 /// `WaitForSignal` does in production, where the spawned run reaches
 /// `suspended` in a millisecond or two while the launching caller is still
@@ -2052,15 +1964,7 @@ impl Runner for ParksBeforeReturningRunner {
         "parks-before-returning"
     }
 
-    async fn run(
-        &self,
-        _options: &LaunchOptions,
-        _cancel_token: Option<runtara_environment::runner::CancelToken>,
-    ) -> runtara_environment::runner::Result<runtara_environment::runner::LaunchResult> {
-        unimplemented!("not used by this test")
-    }
-
-    async fn launch_detached(
+    async fn try_launch_detached(
         &self,
         options: &LaunchOptions,
     ) -> runtara_environment::runner::Result<RunnerHandle> {
@@ -2080,13 +1984,6 @@ impl Runner for ParksBeforeReturningRunner {
             started_at: Utc::now(),
             metrics: None,
         })
-    }
-
-    async fn try_launch_detached(
-        &self,
-        options: &LaunchOptions,
-    ) -> runtara_environment::runner::Result<RunnerHandle> {
-        self.launch_detached(options).await
     }
 
     // Keep the monitor spawned by `handle_start_instance` from concluding
@@ -2129,7 +2026,6 @@ async fn test_launch_does_not_resurrect_a_run_that_already_parked() {
         Arc::new(ParksBeforeReturningRunner {
             persistence: persistence.clone(),
         }),
-        "127.0.0.1:8001".to_string(),
         temp_dir.path().to_path_buf(),
     );
 

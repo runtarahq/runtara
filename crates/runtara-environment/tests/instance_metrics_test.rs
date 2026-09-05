@@ -53,9 +53,14 @@ async fn resource_metrics_keep_the_first_observation() {
     let pool = test_pool().await;
     let instance_id = registered_instance(&pool, "resources").await;
 
-    metrics::record_instance_resources(&pool, &instance_id, Some(1024 * 1024), Some(500_000))
-        .await
-        .expect("failed to record resources");
+    metrics::record_resources_returning_status(
+        &pool,
+        &instance_id,
+        Some(1024 * 1024),
+        Some(500_000),
+    )
+    .await
+    .expect("failed to record resources");
 
     let read = |id: String, pool: PgPool| async move {
         sqlx::query_as::<_, (Option<i64>, Option<i64>)>(
@@ -71,7 +76,7 @@ async fn resource_metrics_keep_the_first_observation() {
     assert_eq!(row.0, Some(1024 * 1024));
     assert_eq!(row.1, Some(500_000));
 
-    metrics::record_instance_resources(&pool, &instance_id, Some(9_999_999), Some(1))
+    metrics::record_resources_returning_status(&pool, &instance_id, Some(9_999_999), Some(1))
         .await
         .expect("failed to record resources");
 
@@ -93,16 +98,22 @@ async fn resource_metrics_keep_the_first_observation() {
         .await;
 }
 
-/// Nothing to write means no statement and no report.
+/// A run that reported no resource figures must still leave the columns NULL
+/// rather than writing zeroes — and must still hand back a status, because the
+/// container monitor's crash check reads it on every exit.
 #[tokio::test]
-async fn recording_no_resources_is_a_no_op() {
+async fn recording_no_resources_leaves_the_columns_null() {
     skip_if_no_db!();
     let pool = test_pool().await;
     let instance_id = registered_instance(&pool, "noop").await;
 
-    metrics::record_instance_resources(&pool, &instance_id, None, None)
+    let observed = metrics::record_resources_returning_status(&pool, &instance_id, None, None)
         .await
         .expect("recording nothing must succeed");
+    assert!(
+        observed.is_some(),
+        "a registered instance must still report its status"
+    );
 
     let row: (Option<i64>, Option<i64>) = sqlx::query_as(
         "SELECT memory_peak_bytes, cpu_usage_usec FROM instances WHERE instance_id = $1",
