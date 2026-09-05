@@ -11,7 +11,7 @@
 
 use runtara_server::api::repositories::workflows::{
     CompilationStatus, CompilationSuccessRecord, RegisteredImageRecord, WorkflowRepository,
-    workflow_definition_checksum,
+    compiler_build_id, workflow_definition_checksum,
 };
 use serde_json::{Value, json};
 use sqlx::PgPool;
@@ -97,13 +97,34 @@ async fn seed_workflow(pool: &PgPool, definition: &Value) -> (String, String) {
     (tenant, workflow_id)
 }
 
-/// Record a failed compilation, stamped with `checksum` as its source.
+/// Record a failed compilation, stamped with `checksum` as its source and the
+/// currently running compiler build.
 async fn record_failure(pool: &PgPool, tenant: &str, workflow_id: &str, checksum: Option<&str>) {
+    record_failure_from_build(
+        pool,
+        tenant,
+        workflow_id,
+        checksum,
+        Some(compiler_build_id()),
+    )
+    .await;
+}
+
+/// Record a failed compilation attributed to `build`. `None` is a row written
+/// before the compiler build was tracked at all.
+async fn record_failure_from_build(
+    pool: &PgPool,
+    tenant: &str,
+    workflow_id: &str,
+    checksum: Option<&str>,
+    build: Option<&str>,
+) {
     sqlx::query(
         "INSERT INTO workflow_compilations
             (tenant_id, workflow_id, version, compilation_status, translated_path,
-             error_message, source_checksum, track_events, template_major, lowering_mode)
-         VALUES ($1, $2, 1, 'failed', '', $3, $4, false, $5, $6)",
+             error_message, source_checksum, track_events, template_major, lowering_mode,
+             compiler_build)
+         VALUES ($1, $2, 1, 'failed', '', $3, $4, false, $5, $6, $7)",
     )
     .bind(tenant)
     .bind(workflow_id)
@@ -111,6 +132,7 @@ async fn record_failure(pool: &PgPool, tenant: &str, workflow_id: &str, checksum
     .bind(checksum)
     .bind(runtara_workflows::TEMPLATE_MAJOR_VERSION)
     .bind(runtara_workflows::direct_lowering_tag())
+    .bind(build)
     .execute(pool)
     .await
     .expect("recording a compilation failure must succeed");
@@ -361,6 +383,83 @@ async fn failure_with_stale_compiler_provenance_is_retryable_and_cleared() {
         compilation_row_count(&pool, &tenant, &workflow_id).await,
         0,
         "a stale compiler failure must not block a rebuild"
+    );
+}
+
+/// The regression that kept a fixed compiler from ever running: a failure
+/// recorded by an EARLIER build looked current, because `template_major` and
+/// `lowering_mode` deliberately do not move between releases. The stored error
+/// was replayed as terminal and the new compiler was never invoked.
+#[tokio::test]
+async fn failure_from_another_compiler_build_is_retryable_and_cleared() {
+    skip_if_no_db!();
+    let pool = get_test_pool().await;
+    let definition = stepless_definition();
+    let (tenant, workflow_id) = seed_workflow(&pool, &definition).await;
+    let checksum = workflow_definition_checksum(&definition);
+    record_failure_from_build(
+        &pool,
+        &tenant,
+        &workflow_id,
+        Some(&checksum),
+        Some("8.9.7+0000deadbeef"),
+    )
+    .await;
+    let repo = WorkflowRepository::new(pool.clone());
+
+    let status = repo
+        .ensure_compilation_ready(&tenant, &workflow_id, Some(1))
+        .await
+        .map(|(_, status)| status)
+        .expect("failure lookup must succeed");
+    assert!(
+        matches!(
+            status,
+            CompilationStatus::Failed {
+                terminal: false,
+                ..
+            }
+        ),
+        "a failure from another compiler build must be retried, got {status:?}"
+    );
+    assert_eq!(
+        compilation_row_count(&pool, &tenant, &workflow_id).await,
+        0,
+        "a failure from a superseded build must not block a rebuild"
+    );
+}
+
+/// Rows written before the build column existed carry no attribution at all.
+/// Unknown provenance is never terminal — they retry once under this build.
+#[tokio::test]
+async fn failure_without_a_recorded_build_is_retryable_and_cleared() {
+    skip_if_no_db!();
+    let pool = get_test_pool().await;
+    let definition = stepless_definition();
+    let (tenant, workflow_id) = seed_workflow(&pool, &definition).await;
+    let checksum = workflow_definition_checksum(&definition);
+    record_failure_from_build(&pool, &tenant, &workflow_id, Some(&checksum), None).await;
+    let repo = WorkflowRepository::new(pool.clone());
+
+    let status = repo
+        .ensure_compilation_ready(&tenant, &workflow_id, Some(1))
+        .await
+        .map(|(_, status)| status)
+        .expect("failure lookup must succeed");
+    assert!(
+        matches!(
+            status,
+            CompilationStatus::Failed {
+                terminal: false,
+                ..
+            }
+        ),
+        "a failure with no recorded build must be retried, got {status:?}"
+    );
+    assert_eq!(
+        compilation_row_count(&pool, &tenant, &workflow_id).await,
+        0,
+        "a legacy failure must not block a rebuild"
     );
 }
 

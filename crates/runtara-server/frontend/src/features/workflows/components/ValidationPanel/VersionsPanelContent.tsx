@@ -182,17 +182,16 @@ export function VersionsPanelContent({
                   className="flex flex-shrink-0 items-center gap-2"
                   onClick={(e) => e.stopPropagation()}
                 >
-                  {/* Rebuild button — visible for:
-                       - compiled rows (re-run an already-successful build)
-                       - failed rows (retry after a transient error like a
-                         missing runtara-environment connection)
-                       - rows currently mid-rebuild (so the button doesn't
-                         vanish during the brief window where the handler
-                         has already invalidated the DB row but the worker
-                         hasn't written the new one).
+                  {/* Build button — offered for EVERY version, in all four
+                       badge states. Gating it on compiled-or-failed left the
+                       amber "Not compiled" row (no compilation record at all:
+                       never built, or a rebuild that invalidated the row and
+                       then never landed) with no way to build it from the UI
+                       at all — the state that most needs the button was the
+                       one state that did not get it.
                        The disabled state + spinner provide the debounce —
                        no double-rebuilds. */}
-                  {(isCompiled || isFailed) && onVersionRebuild && (
+                  {onVersionRebuild && (
                     <Button
                       variant="secondary"
                       bordered
@@ -204,12 +203,22 @@ export function VersionsPanelContent({
                         }
                       }}
                       disabled={isLoading || isRebuilding}
-                      title="Force a fresh rebuild of this version"
+                      title={
+                        isCompiled || isFailed
+                          ? 'Force a fresh rebuild of this version'
+                          : 'Compile this version'
+                      }
                     >
                       <RefreshCw
                         className={cn('size-3', isRebuilding && 'animate-spin')}
                       />
-                      <span>{isRebuilding ? 'Rebuilding' : 'Rebuild'}</span>
+                      <span>
+                        {isRebuilding
+                          ? 'Rebuilding'
+                          : isCompiled || isFailed
+                            ? 'Rebuild'
+                            : 'Compile'}
+                      </span>
                     </Button>
                   )}
 

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 
 import type { WorkflowVersionInfoDto } from '@/features/workflows/queries';
 import { VersionsPanelContent } from './VersionsPanelContent';
@@ -42,6 +42,19 @@ function stateOf(versionNumber: number): string | undefined {
     .find((text) => text === 'Active' || text === 'Activate');
 }
 
+/** The build control (Compile/Rebuild) in a given version's row, if rendered. */
+function buildControlOf(versionNumber: number): HTMLButtonElement | undefined {
+  const label = screen
+    .getAllByText(`v${versionNumber}`)
+    .find((node) => node.tagName === 'SPAN');
+  const row = label?.closest('div[class*="border-b"]');
+  return [...(row?.querySelectorAll('button') ?? [])].find((button) =>
+    ['Compile', 'Rebuild', 'Rebuilding'].includes(
+      button.textContent?.trim() ?? ''
+    )
+  ) as HTMLButtonElement | undefined;
+}
+
 describe('VersionsPanelContent', () => {
   it('marks the version the server reports as active', () => {
     // The server resolves the active version as current_version falling back
@@ -75,5 +88,49 @@ describe('VersionsPanelContent', () => {
 
     expect(activeButton).toBeDefined();
     expect((activeButton as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  // A row with no compilation record at all — never built, or a rebuild that
+  // invalidated the row and never landed — renders the amber "Not compiled"
+  // badge. Gating the build control on compiled-or-failed left exactly that
+  // row with no way to build it from the UI.
+  it('offers a build control on a version that has never compiled', () => {
+    const onVersionRebuild = vi.fn();
+    render(
+      <VersionsPanelContent
+        versions={[version(43, true, false)]}
+        onVersionChange={vi.fn()}
+        onVersionActivate={vi.fn()}
+        onVersionRebuild={onVersionRebuild}
+      />
+    );
+
+    expect(screen.getByText('Not compiled')).toBeDefined();
+    const build = buildControlOf(43);
+    expect(build).toBeDefined();
+    expect(build?.textContent?.trim()).toBe('Compile');
+    expect(build?.disabled).toBe(false);
+
+    fireEvent.click(build as HTMLButtonElement);
+    expect(onVersionRebuild).toHaveBeenCalledWith(43);
+  });
+
+  it('still offers a rebuild on compiled and failed versions', () => {
+    const failed: WorkflowVersionInfoDto = {
+      ...version(2, false, false),
+      compilationStatus: 'failed',
+      errorMessage: 'boom',
+    };
+    render(
+      <VersionsPanelContent
+        versions={[version(1, true), failed]}
+        onVersionChange={vi.fn()}
+        onVersionActivate={vi.fn()}
+        onVersionRebuild={vi.fn()}
+      />
+    );
+
+    expect(buildControlOf(1)?.textContent?.trim()).toBe('Rebuild');
+    expect(buildControlOf(2)?.textContent?.trim()).toBe('Rebuild');
   });
 });

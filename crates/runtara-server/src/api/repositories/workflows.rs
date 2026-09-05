@@ -45,6 +45,27 @@ fn compiler_provenance_matches(template_major: Option<&str>, lowering_mode: Opti
         && lowering_mode == Some(current_lowering_mode.as_str())
 }
 
+/// Identity of the compiler binary itself, used to decide whether a recorded
+/// compilation FAILURE is still authoritative.
+///
+/// Deliberately distinct from [`compiler_provenance_matches`]. That describes
+/// the artifact shape and stays stable across releases so a deploy does not
+/// invalidate every successful build. A failure has the opposite requirement:
+/// which graphs compile is a property of the binary, so a failure recorded by
+/// one build says nothing about the next. The commit is the discriminator
+/// because `BUILD_VERSION` falls back to the crate version, which a fix
+/// released without a version bump does not change.
+pub fn compiler_build_id() -> &'static str {
+    concat!(env!("BUILD_VERSION"), "+", env!("BUILD_COMMIT"))
+}
+
+/// Whether a recorded failure came from the compiler now running. `None` is a
+/// row written before the build was recorded: unknown provenance is never
+/// terminal, so it retries once and re-records under this build.
+fn failure_build_is_current(compiled_build: Option<&str>) -> bool {
+    compiled_build == Some(compiler_build_id())
+}
+
 pub struct CompilationSuccessRecord<'a> {
     pub tenant_id: &'a str,
     pub workflow_id: &'a str,
@@ -206,8 +227,8 @@ impl CompilationWriteGuard<'_> {
         let result = sqlx::query(
             r#"
             INSERT INTO workflow_compilations
-                (tenant_id, workflow_id, version, compilation_status, translated_path, compiled_at, error_message, runtara_version, source_checksum, track_events, template_major, lowering_mode)
-            VALUES ($1, $2, $3, 'failed', '', NOW(), $4, $5, $6, $7, $8, $9)
+                (tenant_id, workflow_id, version, compilation_status, translated_path, compiled_at, error_message, runtara_version, source_checksum, track_events, template_major, lowering_mode, compiler_build)
+            VALUES ($1, $2, $3, 'failed', '', NOW(), $4, $5, $6, $7, $8, $9, $10)
             ON CONFLICT (tenant_id, workflow_id, version)
             DO UPDATE SET
                 compilation_status = 'failed',
@@ -220,6 +241,7 @@ impl CompilationWriteGuard<'_> {
                 track_events = $7,
                 template_major = $8,
                 lowering_mode = $9,
+                compiler_build = $10,
                 -- A failed row never attests that a previously registered
                 -- image remains executable.
                 registered_image_id = NULL,
@@ -254,6 +276,7 @@ impl CompilationWriteGuard<'_> {
         .bind(track_events)
         .bind(runtara_workflows::TEMPLATE_MAJOR_VERSION)
         .bind(&lowering_mode)
+        .bind(compiler_build_id())
         .execute(&mut *self.transaction)
         .await?;
 
@@ -2419,6 +2442,7 @@ impl WorkflowRepository {
                    sc.track_events AS compiled_track_events,
                    sc.template_major AS compiled_template_major,
                    sc.lowering_mode AS compiled_lowering_mode,
+                   sc.compiler_build AS compiled_build,
                    wd.definition,
                    wd.track_events AS definition_track_events,
                    wd.version AS resolved_version
@@ -2464,6 +2488,7 @@ impl WorkflowRepository {
                     record.try_get("compiled_template_major")?;
                 let compiled_lowering_mode: Option<String> =
                     record.try_get("compiled_lowering_mode")?;
+                let compiled_build: Option<String> = record.try_get("compiled_build")?;
                 let definition: Value = record.try_get("definition")?;
                 let definition_track_events: bool = record.try_get("definition_track_events")?;
                 let execution_timeout = match execution_timeout_from_definition(&definition) {
@@ -2513,8 +2538,16 @@ impl WorkflowRepository {
                     // would fail identically. Keep the record and report the
                     // failure as terminal; a changed mode may emit different
                     // guest code, so it must retry just like a changed graph.
+                    //
+                    // It must also have come from the compiler now running.
+                    // Which graphs compile is a property of the binary, and
+                    // the artifact-shape provenance above deliberately does
+                    // not move between releases, so without this a build that
+                    // widens what the compiler accepts would keep replaying
+                    // the stored error and never run the new compiler at all.
                     if source_checksum.as_deref() == Some(current_checksum.as_str())
                         && artifact_matches_tracking_mode
+                        && failure_build_is_current(compiled_build.as_deref())
                     {
                         let authoring = is_workflow_authoring_error(&error_msg);
                         // An unrunnable graph is reported to its author, not
@@ -2553,6 +2586,8 @@ impl WorkflowRepository {
                         workflow_id = %workflow_id,
                         version = version,
                         compilation_error = %error_msg,
+                        recorded_build = compiled_build.as_deref().unwrap_or("unknown"),
+                        current_build = compiler_build_id(),
                         "COMPILATION FAILED - deleting record for retry"
                     );
                     // Delete only the exact stale failure that this read
@@ -2573,6 +2608,7 @@ impl WorkflowRepository {
                               AND track_events IS NOT DISTINCT FROM $5
                               AND template_major IS NOT DISTINCT FROM $6
                               AND lowering_mode IS NOT DISTINCT FROM $7
+                              AND compiler_build IS NOT DISTINCT FROM $8
                             "#,
                         )
                         .bind(tenant_id)
@@ -2582,6 +2618,7 @@ impl WorkflowRepository {
                         .bind(compiled_track_events)
                         .bind(compiled_template_major.as_deref())
                         .bind(compiled_lowering_mode.as_deref())
+                        .bind(compiled_build.as_deref())
                         .execute(&self.pool)
                         .await;
                     }
