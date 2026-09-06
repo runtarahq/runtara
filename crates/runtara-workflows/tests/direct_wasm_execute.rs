@@ -27,6 +27,8 @@ use runtara_workflows::{
 };
 use serde_json::Value;
 
+mod wasm_performance_baseline;
+
 // Independent description of the persisted v2 key contract (not a production
 // helper): fixtures that preload checkpoints must name the actual artifact key.
 fn expected_key(
