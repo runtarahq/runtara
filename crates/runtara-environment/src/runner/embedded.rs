@@ -144,6 +144,8 @@ fn remove_task_if_current(registry: &TaskRegistry, launch_id: &str, task: &Arc<I
 /// signal to monitors. Leaving it `finished = false` after a panic makes a
 /// completed generation look permanently live until an unrelated cleanup.
 struct TaskCompletionGuard {
+    // Take/drop this before publishing completion, including an unpolled task.
+    run_slot: Option<RunSlot>,
     task: Arc<InstanceTask>,
     registry: TaskRegistry,
     launch_id: String,
@@ -151,6 +153,7 @@ struct TaskCompletionGuard {
 
 impl Drop for TaskCompletionGuard {
     fn drop(&mut self) {
+        drop(self.run_slot.take());
         self.task.finished.store(true, Ordering::SeqCst);
         remove_task_if_current(&self.registry, &self.launch_id, &self.task);
         self.task.done.notify_waiters();
@@ -1592,6 +1595,7 @@ impl Runner for EmbeddedWasmRunner {
         // map insertion; moving the guard into that future still retires the
         // exact map entry in its Drop implementation.
         let completion = TaskCompletionGuard {
+            run_slot: Some(run_slot),
             task: Arc::clone(&task),
             registry: Arc::clone(&self.tasks),
             launch_id: options.launch_id.clone(),
@@ -1637,7 +1641,6 @@ impl Runner for EmbeddedWasmRunner {
         // allocation. It moves into the task so every completion/error/panic
         // returns capacity and retires its occupancy timestamp together.
         tokio::spawn(async move {
-            let _run_slot = run_slot;
             let _completion = completion;
             if let Some(gate) = start_gate {
                 // The durable dispatcher may open the in-memory gate once it
@@ -2090,6 +2093,67 @@ mod tests {
         assert!(Arc::ptr_eq(&current, &replacement));
     }
 
+    fn completion_test_slot(launch: &str) -> (RunSlot, Arc<tokio::sync::Semaphore>) {
+        let permits = Arc::new(tokio::sync::Semaphore::new(1));
+        let slot = RunSlot {
+            _permit: permits.clone().try_acquire_owned().unwrap(),
+            launch_id: launch.into(),
+            registry: Arc::new(Mutex::new(
+                [(
+                    launch.into(),
+                    RunSlotEntry {
+                        instance_id: "test".into(),
+                        taken_at: Instant::now(),
+                    },
+                )]
+                .into(),
+            )),
+            finished: Arc::new(AtomicU64::new(0)),
+        };
+        (slot, permits)
+    }
+
+    #[test]
+    fn completion_is_never_visible_before_run_capacity_returns() {
+        let registry: TaskRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let task = Arc::new(InstanceTask {
+            cancel: Arc::new(AtomicBool::new(false)),
+            finished: AtomicBool::new(false),
+            done: tokio::sync::Notify::new(),
+        });
+        registry
+            .lock()
+            .unwrap()
+            .insert("ordered".into(), task.clone());
+        let (run_slot, permits) = completion_test_slot("ordered");
+        let completion = TaskCompletionGuard {
+            run_slot: Some(run_slot),
+            task: task.clone(),
+            registry: registry.clone(),
+            launch_id: "ordered".into(),
+        };
+        // Freeze handle removal immediately after its finished flag is set.
+        // This exposes the precise publication window without timing a tiny
+        // race between the task finishing and its permit's later destruction.
+        let hold = registry.lock().unwrap();
+        let dropping = std::thread::spawn(move || drop(completion));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !task.finished.load(Ordering::SeqCst) {
+            assert!(
+                Instant::now() < deadline,
+                "completion flag was never published"
+            );
+            std::thread::yield_now();
+        }
+        let available_at_publication = permits.available_permits();
+        drop(hold);
+        dropping.join().unwrap();
+        assert_eq!(
+            available_at_publication, 1,
+            "exit publication must follow permit return"
+        );
+    }
+
     #[tokio::test]
     async fn panicking_task_still_retires_its_runner_handle() {
         let registry: TaskRegistry = Arc::new(Mutex::new(HashMap::new()));
@@ -2102,7 +2166,9 @@ mod tests {
             .lock()
             .expect("registry")
             .insert("launch-doomed".to_string(), Arc::clone(&task));
+        let (run_slot, permits) = completion_test_slot("launch-doomed");
         let guard = TaskCompletionGuard {
+            run_slot: Some(run_slot),
             task: Arc::clone(&task),
             registry: Arc::clone(&registry),
             launch_id: "launch-doomed".to_string(),
@@ -2113,6 +2179,7 @@ mod tests {
             panic!("runner task panicked before its manual cleanup tail");
         });
         assert!(join.await.is_err(), "test task must panic");
+        assert_eq!(permits.available_permits(), 1);
         assert!(task.finished.load(Ordering::SeqCst));
         assert!(
             registry.lock().expect("registry").is_empty(),
@@ -2135,7 +2202,9 @@ mod tests {
         // This mirrors production: construct the guard before `tokio::spawn`
         // moves it into the task future. Dropping that future before its first
         // poll is what runtime shutdown does for a just-spawned task.
+        let (run_slot, permits) = completion_test_slot("launch-never-polled");
         let completion = TaskCompletionGuard {
+            run_slot: Some(run_slot),
             task: Arc::clone(&task),
             registry: Arc::clone(&registry),
             launch_id: "launch-never-polled".to_string(),
@@ -2146,6 +2215,7 @@ mod tests {
         };
 
         drop(never_polled);
+        assert_eq!(permits.available_permits(), 1);
 
         assert!(task.finished.load(Ordering::SeqCst));
         assert!(
