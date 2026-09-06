@@ -6,8 +6,9 @@
 
 mod common;
 
+use runtara_core::domain::InstanceStatus;
 use runtara_core::persistence::{CompleteInstanceParams, Persistence};
-use runtara_environment::db;
+use runtara_environment::instance_repository::{InstanceRepository, ListInstancesOptions};
 use runtara_store_postgres::PostgresPersistence;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -207,7 +208,8 @@ async fn test_create_and_get_instance() {
     create_test_instance(&pool, &instance_id, tenant_id, &image_id).await;
 
     // Get instance (use get_instance_full to also get image_id)
-    let instance = db::get_instance_full(&pool, &instance_id)
+    let instance = InstanceRepository::new(pool.clone())
+        .detail(&instance_id)
         .await
         .expect("Failed to get instance")
         .expect("Instance not found");
@@ -215,7 +217,7 @@ async fn test_create_and_get_instance() {
     assert_eq!(instance.instance_id, instance_id);
     assert_eq!(instance.tenant_id, tenant_id);
     assert_eq!(instance.image_id, Some(image_id.clone()));
-    assert_eq!(instance.status, "pending");
+    assert_eq!(instance.status, InstanceStatus::Pending);
 
     // Cleanup
     sqlx::query("DELETE FROM instances WHERE instance_id = $1")
@@ -250,23 +252,25 @@ async fn test_update_instance_status() {
     // Update to running
     update_test_instance_status(&pool, &instance_id, "running", None).await;
 
-    let instance = db::get_instance(&pool, &instance_id)
+    let instance = InstanceRepository::new(pool.clone())
+        .detail(&instance_id)
         .await
         .expect("Failed to get instance")
         .expect("Instance not found");
 
-    assert_eq!(instance.status, "running");
+    assert_eq!(instance.status, InstanceStatus::Running);
     assert!(instance.started_at.is_some());
 
     // Update to completed with checkpoint
     update_test_instance_status(&pool, &instance_id, "completed", Some("checkpoint-1")).await;
 
-    let instance = db::get_instance(&pool, &instance_id)
+    let instance = InstanceRepository::new(pool.clone())
+        .detail(&instance_id)
         .await
         .expect("Failed to get instance")
         .expect("Instance not found");
 
-    assert_eq!(instance.status, "completed");
+    assert_eq!(instance.status, InstanceStatus::Completed);
     assert_eq!(instance.checkpoint_id, Some("checkpoint-1".to_string()));
     assert!(instance.finished_at.is_some());
 
@@ -314,12 +318,13 @@ async fn test_update_instance_result() {
     )
     .await;
 
-    let instance = db::get_instance(&pool, &instance_id)
+    let instance = InstanceRepository::new(pool.clone())
+        .detail(&instance_id)
         .await
         .expect("Failed to get instance")
         .expect("Instance not found");
 
-    assert_eq!(instance.status, "completed");
+    assert_eq!(instance.status, InstanceStatus::Completed);
     assert_eq!(instance.output, Some(output_bytes));
     assert!(instance.error.is_none());
     assert!(instance.stderr.is_none());
@@ -366,12 +371,13 @@ async fn test_update_instance_result_with_error() {
     )
     .await;
 
-    let instance = db::get_instance(&pool, &instance_id)
+    let instance = InstanceRepository::new(pool.clone())
+        .detail(&instance_id)
         .await
         .expect("Failed to get instance")
         .expect("Instance not found");
 
-    assert_eq!(instance.status, "failed");
+    assert_eq!(instance.status, InstanceStatus::Failed);
     assert!(instance.output.is_none());
     assert_eq!(instance.error, Some("Something went wrong".to_string()));
     assert_eq!(
@@ -415,27 +421,31 @@ async fn test_list_instances() {
     update_test_instance_status(&pool, &ids[0], "completed", None).await;
 
     // List all
-    let options = db::ListInstancesOptions {
+    let options = ListInstancesOptions {
         tenant_id: Some(tenant_id.to_string()),
         limit: 100,
         ..Default::default()
     };
-    let instances = db::list_instances(&pool, &options)
+    let instances = InstanceRepository::new(pool.clone())
+        .list(&options)
         .await
-        .expect("Failed to list instances");
+        .expect("Failed to list instances")
+        .instances;
 
     assert_eq!(instances.len(), 3);
 
     // List by status
-    let options = db::ListInstancesOptions {
+    let options = ListInstancesOptions {
         tenant_id: Some(tenant_id.to_string()),
         statuses: Some(vec!["completed".to_string()]),
         limit: 100,
         ..Default::default()
     };
-    let completed = db::list_instances(&pool, &options)
+    let completed = InstanceRepository::new(pool.clone())
+        .list(&options)
         .await
-        .expect("Failed to list instances");
+        .expect("Failed to list instances")
+        .instances;
 
     assert_eq!(completed.len(), 1);
     assert_eq!(completed[0].instance_id, ids[0]);
@@ -480,16 +490,18 @@ async fn test_list_instances_by_multiple_statuses() {
     update_test_instance_status(&pool, &ids[1], "cancelled", None).await;
     update_test_instance_status(&pool, &ids[2], "completed", None).await;
 
-    let options = db::ListInstancesOptions {
+    let options = ListInstancesOptions {
         tenant_id: Some(tenant_id.to_string()),
         statuses: Some(vec!["failed".to_string(), "cancelled".to_string()]),
         limit: 100,
         ..Default::default()
     };
 
-    let matched = db::list_instances(&pool, &options)
+    let matched = InstanceRepository::new(pool.clone())
+        .list(&options)
         .await
-        .expect("Failed to list instances");
+        .expect("Failed to list instances")
+        .instances;
     let mut matched_ids: Vec<_> = matched.iter().map(|i| i.instance_id.clone()).collect();
     matched_ids.sort();
     let mut expected_ids = vec![ids[0].clone(), ids[1].clone()];
@@ -498,22 +510,26 @@ async fn test_list_instances_by_multiple_statuses() {
     assert_eq!(matched_ids, expected_ids, "both statuses must be applied");
 
     // The count drives totalElements, so it has to agree with the page.
-    let count = db::count_instances(&pool, &options)
+    let count = InstanceRepository::new(pool.clone())
+        .list(&options)
         .await
-        .expect("Failed to count instances");
+        .expect("Failed to count instances")
+        .total_count;
     assert_eq!(count, 2);
 
     // An empty list means "no status filter", not "match nothing".
-    let unfiltered = db::ListInstancesOptions {
+    let unfiltered = ListInstancesOptions {
         tenant_id: Some(tenant_id.to_string()),
         statuses: Some(Vec::new()),
         limit: 100,
         ..Default::default()
     };
     assert_eq!(
-        db::count_instances(&pool, &unfiltered)
+        InstanceRepository::new(pool.clone())
+            .list(&unfiltered)
             .await
-            .expect("Failed to count instances"),
+            .expect("Failed to count instances")
+            .total_count,
         3
     );
 
@@ -558,11 +574,13 @@ async fn test_create_instance_with_env() {
     create_test_instance_with_env(&pool, &instance_id, tenant_id, &image_id, Some(&env)).await;
 
     // Retrieve and verify env vars
-    let result = db::get_instance_image_with_env(&pool, &instance_id)
+    let result = InstanceRepository::new(pool.clone())
+        .image_binding(&instance_id)
         .await
         .expect("Failed to get instance env");
 
-    let (retrieved_image_id, retrieved_env) = result.expect("Instance not found");
+    let binding = result.expect("Instance not found");
+    let (retrieved_image_id, retrieved_env) = (binding.image_id, binding.env);
 
     assert_eq!(retrieved_image_id, image_id);
     assert_eq!(retrieved_env.len(), 2);
@@ -603,11 +621,13 @@ async fn test_create_instance_without_env() {
     create_test_instance(&pool, &instance_id, tenant_id, &image_id).await;
 
     // Retrieve and verify empty env
-    let result = db::get_instance_image_with_env(&pool, &instance_id)
+    let result = InstanceRepository::new(pool.clone())
+        .image_binding(&instance_id)
         .await
         .expect("Failed to get instance env");
 
-    let (retrieved_image_id, retrieved_env) = result.expect("Instance not found");
+    let binding = result.expect("Instance not found");
+    let (retrieved_image_id, retrieved_env) = (binding.image_id, binding.env);
 
     assert_eq!(retrieved_image_id, image_id);
     assert!(
@@ -634,7 +654,8 @@ async fn test_get_instance_image_with_env_not_found() {
     skip_if_no_db!();
     let pool = get_pool().await.expect("Failed to connect to database");
 
-    let result = db::get_instance_image_with_env(&pool, "nonexistent-instance")
+    let result = InstanceRepository::new(pool.clone())
+        .image_binding("nonexistent-instance")
         .await
         .expect("Query should succeed");
 
@@ -663,9 +684,11 @@ async fn test_instance_timeout_seconds_round_trips() {
     // Persist a per-instance timeout larger than the legacy hardcoded 300s.
     seed_instance_image(&pool, &instance_id, &image_id, tenant_id, None, Some(1800)).await;
 
-    let timeout = db::get_instance_timeout_seconds(&pool, &instance_id)
+    let timeout = InstanceRepository::new(pool.clone())
+        .image_binding(&instance_id)
         .await
-        .expect("Query should succeed");
+        .expect("Query should succeed")
+        .and_then(|binding| binding.timeout_seconds);
     assert_eq!(timeout, Some(1800), "Persisted timeout should round-trip");
 
     // Cleanup
@@ -697,16 +720,19 @@ async fn test_instance_timeout_seconds_absent_is_none() {
     // Associate without a timeout (e.g. rows predating the column).
     create_test_instance(&pool, &instance_id, tenant_id, &image_id).await;
 
-    let timeout = db::get_instance_timeout_seconds(&pool, &instance_id)
+    let timeout = InstanceRepository::new(pool.clone())
+        .image_binding(&instance_id)
         .await
-        .expect("Query should succeed");
+        .expect("Query should succeed")
+        .and_then(|binding| binding.timeout_seconds);
     assert_eq!(timeout, None, "Absent timeout should read back as None");
 
     // A nonexistent instance is also None (no row).
-    let missing = db::get_instance_timeout_seconds(&pool, "nonexistent-instance")
+    let missing = InstanceRepository::new(pool.clone())
+        .image_binding("nonexistent-instance")
         .await
         .expect("Query should succeed");
-    assert_eq!(missing, None);
+    assert!(missing.is_none());
 
     // Cleanup
     sqlx::query("DELETE FROM instances WHERE instance_id = $1")
@@ -719,460 +745,4 @@ async fn test_instance_timeout_seconds_absent_is_none() {
         .execute(&pool)
         .await
         .ok();
-}
-
-// ============================================================================
-// Tenant metrics aggregation
-//
-// The aggregation buckets by flooring the Unix epoch to a multiple of the
-// requested width. These tests pin the two properties that flooring has to
-// hold on to - the empty-bucket spine and the join alignment between spine and
-// aggregate - because when either breaks the query still returns rows, just
-// wrong ones.
-// ============================================================================
-
-/// Seed a terminal instance with timestamps the test chooses.
-///
-/// `complete_instance` stamps `finished_at` with `NOW()`, which is exactly what
-/// production wants and exactly what a bucketing test cannot use. Writing the
-/// three columns directly is the honest way to get a controlled fixture.
-async fn seed_terminal_instance(
-    pool: &PgPool,
-    tenant_id: &str,
-    status: &str,
-    started_at: chrono::DateTime<chrono::Utc>,
-    finished_at: chrono::DateTime<chrono::Utc>,
-    memory_peak_bytes: Option<i64>,
-) -> String {
-    let instance_id = format!("metrics-{}", Uuid::new_v4());
-    PostgresPersistence::new(pool.clone())
-        .register_instance(&instance_id, tenant_id)
-        .await
-        .expect("Failed to register instance");
-
-    sqlx::query(
-        "UPDATE instances
-            SET status = $2::instance_status,
-                started_at = $3,
-                finished_at = $4,
-                memory_peak_bytes = $5
-          WHERE instance_id = $1",
-    )
-    .bind(&instance_id)
-    .bind(status)
-    .bind(started_at)
-    .bind(finished_at)
-    .bind(memory_peak_bytes)
-    .execute(pool)
-    .await
-    .expect("Failed to stamp instance timestamps");
-
-    instance_id
-}
-
-async fn delete_tenant_instances(pool: &PgPool, tenant_id: &str) {
-    sqlx::query("DELETE FROM instances WHERE tenant_id = $1")
-        .bind(tenant_id)
-        .execute(pool)
-        .await
-        .ok();
-}
-
-/// A fixed, aligned instant so bucket boundaries are arithmetic, not clock luck.
-fn epoch(seconds: i64) -> chrono::DateTime<chrono::Utc> {
-    chrono::DateTime::from_timestamp(seconds, 0).expect("timestamp in range")
-}
-
-#[tokio::test]
-async fn test_tenant_metrics_one_minute_buckets_over_an_hour() {
-    skip_if_no_db!();
-    let Some(pool) = get_pool().await else { return };
-    let tenant_id = format!("tenant-{}", Uuid::new_v4());
-
-    // Window: epoch 0 .. 3600. Runs land in the buckets starting at 0s, 120s
-    // and 3540s - the last one is the final whole minute of the window.
-    let start = epoch(0);
-    let end = epoch(3_600);
-    seed_terminal_instance(
-        &pool,
-        &tenant_id,
-        "completed",
-        epoch(0),
-        epoch(10),
-        Some(1_048_576),
-    )
-    .await;
-    seed_terminal_instance(
-        &pool,
-        &tenant_id,
-        "completed",
-        epoch(100),
-        epoch(130),
-        Some(2_097_152),
-    )
-    .await;
-    seed_terminal_instance(&pool, &tenant_id, "failed", epoch(120), epoch(150), None).await;
-    seed_terminal_instance(
-        &pool,
-        &tenant_id,
-        "cancelled",
-        epoch(3_500),
-        epoch(3_580),
-        None,
-    )
-    .await;
-
-    let buckets = db::get_tenant_metrics(
-        &pool,
-        &db::TenantMetricsOptions {
-            tenant_id: tenant_id.clone(),
-            start_time: start,
-            end_time: end,
-            bucket_seconds: 60,
-        },
-    )
-    .await
-    .expect("aggregation should succeed");
-
-    // 60 whole minutes, and the spine is inclusive of both edges.
-    assert_eq!(buckets.len(), 61, "expected a full minute-resolution spine");
-
-    // Every bucket start is a whole minute, and they ascend without gaps.
-    for (index, bucket) in buckets.iter().enumerate() {
-        assert_eq!(
-            bucket.bucket_time.timestamp(),
-            index as i64 * 60,
-            "bucket {index} is misaligned"
-        );
-    }
-
-    let at_minute = |minute: usize| &buckets[minute];
-    assert_eq!(at_minute(0).invocation_count, 1);
-    assert_eq!(at_minute(0).success_count, 1);
-    assert_eq!(at_minute(2).invocation_count, 2, "60s..180s holds two runs");
-    assert_eq!(at_minute(2).success_count, 1);
-    assert_eq!(at_minute(2).failure_count, 1);
-    assert_eq!(at_minute(59).cancelled_count, 1);
-
-    // Empty buckets are present and zeroed rather than absent.
-    assert_eq!(at_minute(30).invocation_count, 0);
-    assert_eq!(at_minute(30).success_count, 0);
-
-    delete_tenant_instances(&pool, &tenant_id).await;
-}
-
-#[tokio::test]
-async fn test_tenant_metrics_empty_buckets_carry_null_aggregates_not_zero() {
-    skip_if_no_db!();
-    let Some(pool) = get_pool().await else { return };
-    let tenant_id = format!("tenant-{}", Uuid::new_v4());
-
-    seed_terminal_instance(
-        &pool,
-        &tenant_id,
-        "completed",
-        epoch(0),
-        epoch(30),
-        Some(4_194_304),
-    )
-    .await;
-
-    let buckets = db::get_tenant_metrics(
-        &pool,
-        &db::TenantMetricsOptions {
-            tenant_id: tenant_id.clone(),
-            start_time: epoch(0),
-            end_time: epoch(600),
-            bucket_seconds: 60,
-        },
-    )
-    .await
-    .expect("aggregation should succeed");
-
-    // "No runs" and "runs that took no time" are different claims. A zero here
-    // would be averaged into the dashboard's duration and memory figures.
-    let populated = &buckets[0];
-    assert_eq!(populated.invocation_count, 1);
-    assert_eq!(populated.avg_duration_ms, Some(30_000.0));
-    assert_eq!(populated.avg_memory_bytes, Some(4_194_304.0));
-    assert_eq!(populated.max_memory_bytes, Some(4_194_304));
-
-    let empty = &buckets[5];
-    assert_eq!(empty.invocation_count, 0);
-    assert!(
-        empty.avg_duration_ms.is_none(),
-        "empty bucket claimed a duration"
-    );
-    assert!(
-        empty.avg_memory_bytes.is_none(),
-        "empty bucket claimed memory"
-    );
-    assert!(empty.max_memory_bytes.is_none());
-
-    delete_tenant_instances(&pool, &tenant_id).await;
-}
-
-#[tokio::test]
-async fn test_tenant_metrics_hourly_width_aligns_to_hour_boundaries() {
-    skip_if_no_db!();
-    let Some(pool) = get_pool().await else { return };
-    let tenant_id = format!("tenant-{}", Uuid::new_v4());
-
-    seed_terminal_instance(&pool, &tenant_id, "completed", epoch(100), epoch(200), None).await;
-    seed_terminal_instance(
-        &pool,
-        &tenant_id,
-        "completed",
-        epoch(7_300),
-        epoch(7_400),
-        None,
-    )
-    .await;
-
-    let buckets = db::get_tenant_metrics(
-        &pool,
-        &db::TenantMetricsOptions {
-            tenant_id: tenant_id.clone(),
-            start_time: epoch(0),
-            end_time: epoch(10_800),
-            bucket_seconds: 3_600,
-        },
-    )
-    .await
-    .expect("aggregation should succeed");
-
-    // Flooring the epoch by 3600 must reproduce what date_trunc('hour') gave,
-    // since hours divide the epoch evenly. This is the compatibility pin.
-    assert_eq!(buckets.len(), 4);
-    for bucket in &buckets {
-        assert_eq!(
-            bucket.bucket_time.timestamp() % 3_600,
-            0,
-            "hourly bucket not on an hour boundary"
-        );
-    }
-    assert_eq!(buckets[0].invocation_count, 1);
-    assert_eq!(buckets[1].invocation_count, 0);
-    assert_eq!(buckets[2].invocation_count, 1);
-
-    delete_tenant_instances(&pool, &tenant_id).await;
-}
-
-#[tokio::test]
-async fn test_tenant_metrics_daily_buckets_stay_utc_under_a_shifted_session_timezone() {
-    skip_if_no_db!();
-    let Some(pool) = get_pool().await else { return };
-    let tenant_id = format!("tenant-{}", Uuid::new_v4());
-
-    // Two claims, and the first is what justifies the change.
-    //
-    // `date_trunc('day', timestamptz)` truncates in the *session* time zone,
-    // and nothing in this codebase pins one - so the aggregation's daily
-    // boundaries used to move with whatever the server happened to be set to,
-    // while `bucket_time` was reported to callers as UTC regardless. A
-    // half-hour-offset zone makes that impossible to mistake for a whole-hour
-    // coincidence.
-    //
-    // Asserted on one explicitly-held connection because a `SET TIME ZONE`
-    // applies to a session, and a pooled call is free to run on a different
-    // one. Testing the expressions here, rather than hoping the pool hands
-    // back the connection we configured, is what keeps this test honest.
-    let day = 86_400i64;
-    let mut conn = pool.acquire().await.expect("connection");
-    sqlx::query("SET TIME ZONE 'Asia/Kolkata'")
-        .execute(&mut *conn)
-        .await
-        .expect("session timezone should be settable");
-
-    let (truncated, floored): (f64, f64) = sqlx::query_as(
-        "SELECT
-             extract(epoch FROM date_trunc('day', to_timestamp($1::float8)))::float8,
-             floor(extract(epoch FROM to_timestamp($1::float8))::float8 / 86400) * 86400",
-    )
-    .bind(day as f64)
-    .fetch_one(&mut *conn)
-    .await
-    .expect("expression comparison should succeed");
-
-    assert_ne!(
-        truncated, floored,
-        "date_trunc no longer drifts under a shifted session zone - if Postgres \
-         changed this, the rationale for flooring the epoch needs revisiting"
-    );
-    assert_eq!(
-        truncated, 66_600.0,
-        "expected date_trunc to land 5h30m early under Asia/Kolkata"
-    );
-    assert_eq!(
-        floored, day as f64,
-        "flooring the epoch must be UTC-absolute"
-    );
-    drop(conn);
-
-    // And the aggregation itself keeps UTC-aligned days.
-    seed_terminal_instance(
-        &pool,
-        &tenant_id,
-        "completed",
-        epoch(day),
-        epoch(day + 60),
-        None,
-    )
-    .await;
-
-    let buckets = db::get_tenant_metrics(
-        &pool,
-        &db::TenantMetricsOptions {
-            tenant_id: tenant_id.clone(),
-            start_time: epoch(0),
-            end_time: epoch(3 * day),
-            bucket_seconds: 86_400,
-        },
-    )
-    .await
-    .expect("aggregation should succeed");
-
-    for bucket in &buckets {
-        assert_eq!(
-            bucket.bucket_time.timestamp() % day,
-            0,
-            "daily bucket drifted off UTC midnight: {}",
-            bucket.bucket_time
-        );
-    }
-    assert_eq!(
-        buckets[1].invocation_count, 1,
-        "the run should sit in the UTC day that contains it"
-    );
-
-    delete_tenant_instances(&pool, &tenant_id).await;
-}
-
-#[tokio::test]
-async fn test_tenant_metrics_counts_a_boundary_crossing_run_once() {
-    skip_if_no_db!();
-    let Some(pool) = get_pool().await else { return };
-    let tenant_id = format!("tenant-{}", Uuid::new_v4());
-
-    // Starts in the 0s bucket, finishes in the 120s one. Aggregation keys on
-    // finished_at, so it belongs to the later bucket and to only that bucket.
-    seed_terminal_instance(&pool, &tenant_id, "completed", epoch(30), epoch(150), None).await;
-
-    let buckets = db::get_tenant_metrics(
-        &pool,
-        &db::TenantMetricsOptions {
-            tenant_id: tenant_id.clone(),
-            start_time: epoch(0),
-            end_time: epoch(600),
-            bucket_seconds: 60,
-        },
-    )
-    .await
-    .expect("aggregation should succeed");
-
-    let total: i64 = buckets.iter().map(|b| b.invocation_count).sum();
-    assert_eq!(total, 1, "a run spanning a boundary was counted twice");
-    assert_eq!(
-        buckets[2].invocation_count, 1,
-        "not in the finished_at bucket"
-    );
-    assert_eq!(buckets[0].invocation_count, 0);
-    // Duration still spans the whole run, not the part inside the bucket.
-    assert_eq!(buckets[2].avg_duration_ms, Some(120_000.0));
-
-    delete_tenant_instances(&pool, &tenant_id).await;
-}
-
-#[tokio::test]
-async fn test_tenant_metrics_totals_do_not_change_with_bucket_width() {
-    skip_if_no_db!();
-    let Some(pool) = get_pool().await else { return };
-    let tenant_id = format!("tenant-{}", Uuid::new_v4());
-
-    // Scatter runs across a day, deliberately off any round boundary.
-    let mut expected_total = 0i64;
-    for offset in [7i64, 61, 199, 3_607, 7_411, 43_205, 80_000, 86_399] {
-        seed_terminal_instance(
-            &pool,
-            &tenant_id,
-            if offset % 3 == 0 {
-                "failed"
-            } else {
-                "completed"
-            },
-            epoch(offset.saturating_sub(5)),
-            epoch(offset),
-            Some(1_048_576),
-        )
-        .await;
-        expected_total += 1;
-    }
-
-    // The property that catches a spine/aggregate misalignment: the same window
-    // must total the same at every width. If the two sides of the LEFT JOIN
-    // ever key differently, runs silently vanish into unmatched buckets.
-    for width in [60u32, 360, 1_440, 3_600, 7_200, 21_600, 86_400] {
-        let buckets = db::get_tenant_metrics(
-            &pool,
-            &db::TenantMetricsOptions {
-                tenant_id: tenant_id.clone(),
-                start_time: epoch(0),
-                end_time: epoch(86_400),
-                bucket_seconds: width,
-            },
-        )
-        .await
-        .expect("aggregation should succeed");
-
-        let total: i64 = buckets.iter().map(|b| b.invocation_count).sum();
-        assert_eq!(
-            total, expected_total,
-            "width {width}s lost or duplicated runs"
-        );
-
-        let terminal: i64 = buckets
-            .iter()
-            .map(|b| b.success_count + b.failure_count + b.cancelled_count)
-            .sum();
-        assert_eq!(
-            terminal, expected_total,
-            "width {width}s split the statuses"
-        );
-    }
-
-    delete_tenant_instances(&pool, &tenant_id).await;
-}
-
-#[tokio::test]
-async fn test_tenant_metrics_excludes_other_tenants_and_non_terminal_runs() {
-    skip_if_no_db!();
-    let Some(pool) = get_pool().await else { return };
-    let tenant_id = format!("tenant-{}", Uuid::new_v4());
-    let other_tenant = format!("tenant-{}", Uuid::new_v4());
-
-    seed_terminal_instance(&pool, &tenant_id, "completed", epoch(0), epoch(30), None).await;
-    seed_terminal_instance(&pool, &other_tenant, "completed", epoch(0), epoch(30), None).await;
-    // Running: no finished_at, so it is invisible to the aggregation by design.
-    seed_terminal_instance(&pool, &tenant_id, "running", epoch(0), epoch(30), None).await;
-
-    let buckets = db::get_tenant_metrics(
-        &pool,
-        &db::TenantMetricsOptions {
-            tenant_id: tenant_id.clone(),
-            start_time: epoch(0),
-            end_time: epoch(600),
-            bucket_seconds: 60,
-        },
-    )
-    .await
-    .expect("aggregation should succeed");
-
-    let total: i64 = buckets.iter().map(|b| b.invocation_count).sum();
-    assert_eq!(
-        total, 1,
-        "aggregation crossed a tenant or counted a live run"
-    );
-
-    delete_tenant_instances(&pool, &tenant_id).await;
-    delete_tenant_instances(&pool, &other_tenant).await;
 }

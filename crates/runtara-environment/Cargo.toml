@@ -55,7 +55,6 @@ chrono = { version = "0.4", features = ["serde"] }
 getrandom = "0.3"
 
 # Base64 for the wire-shaped payloads the management protocol reports.
-base64 = "0.22"
 
 # Async trait
 async-trait = "0.1"
@@ -69,6 +68,10 @@ wat = "1"
 # Testcontainers for automatic PostgreSQL setup in tests
 testcontainers = "0.27"
 testcontainers-modules = { version = "0.15", features = ["postgres"] }
+# The signal-handler tests drive `handle_send_signal` against core's in-memory
+# persistence so they need no database; that backend is gated behind this
+# feature.
+runtara-core = { path = "../runtara-core", features = ["test-support"] }
 
 [[test]]
 name = "container_registry_test"

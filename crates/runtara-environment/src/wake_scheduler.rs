@@ -19,8 +19,8 @@ use std::time::Duration;
 use tokio::sync::Notify;
 use tracing::{debug, error, info, warn};
 
-use crate::db;
 use crate::handlers::DrainController;
+use crate::instance_repository::InstanceRepository;
 use crate::launch_dispatcher::{DEFAULT_LAUNCH_QUEUE_TIMEOUT, LaunchLifecycleObservers};
 use crate::launch_queue::{
     EnqueueOutcome, EnqueueRequest, LaunchKind, LaunchQueueError, LaunchRepository,
@@ -450,10 +450,11 @@ impl WakeScheduler {
             return Ok(());
         }
 
-        let image_id = match db::get_instance_image_with_env(&self.pool, &instance.instance_id)
+        let image_id = match InstanceRepository::new(self.pool.clone())
+            .image_binding(&instance.instance_id)
             .await?
         {
-            Some((image_id, _)) => image_id,
+            Some(binding) => binding.image_id,
             None => {
                 let message = "Instance has no associated image";
                 warn!(instance_id = %instance.instance_id, "Failing wake without image association");

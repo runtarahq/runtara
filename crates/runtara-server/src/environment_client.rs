@@ -7,24 +7,25 @@
 //! [`runtara_environment::handlers`] as functions. There is no socket, no JSON
 //! round trip, and nothing to connect to or reconnect to.
 //!
-//! What remains is the shape conversion the old HTTP client did after
-//! deserializing: environment reports wire-shaped values (`*_ms` timestamps,
-//! base64 bodies, statuses as strings) and [`crate::runtime_types`] holds the
-//! richer forms the server's handlers want (`DateTime`, decoded JSON, enums).
-//! Every method here is that mapping and nothing else.
+//! What remains is a vocabulary translation, not a shape conversion.
+//! Environment answers in `runtara-core`'s terms — `DateTime<Utc>`, the bytes
+//! it stored, core's own status enums — and [`crate::runtime_types`] holds the
+//! forms the server's handlers speak. Nothing round-trips through epoch
+//! milliseconds, base64 or status strings any more; the mappings left here are
+//! total, so no reading of a stored row can fall through one.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use base64::Engine;
-use chrono::{TimeZone, Utc};
-use runtara_environment::db;
+use chrono::Utc;
 use runtara_environment::handlers::{
     self, EnvironmentHandlerState, ResumeInstanceRequest, SendCustomSignalOutcome,
     SendSignalOutcome, StartInstanceRequest, StartRejection, StopInstanceRequest,
 };
+use runtara_environment::image_registry::{Image, ImageFilter, ImageRegistry};
+use runtara_environment::instance_repository::{self, InstanceRepository};
 use thiserror::Error;
-use tracing::{debug, info, instrument};
+use tracing::{debug, info, instrument, warn};
 
 use crate::runtime_types::{
     CheckpointSummary, EventSummary, GetTenantMetricsOptions, ImageSummary, InstanceInfo,
@@ -90,6 +91,21 @@ impl EnvironmentClient {
         Self { state }
     }
 
+    /// The registry that owns the `images` table.
+    ///
+    /// Image reads go straight to it. They used to pass through a pair of
+    /// handlers that only re-shaped the row, which is a layer worth having when
+    /// something has to cross a socket and not when the caller is linked
+    /// against the same crate.
+    fn image_registry(&self) -> ImageRegistry {
+        ImageRegistry::new(self.state.pool.clone())
+    }
+
+    /// The repository that owns the `instances` row.
+    fn instances(&self) -> InstanceRepository {
+        InstanceRepository::new(self.state.pool.clone())
+    }
+
     // =========================================================================
     // Instance operations
     // =========================================================================
@@ -99,37 +115,32 @@ impl EnvironmentClient {
     pub async fn get_instance_status(&self, instance_id: &str) -> Result<InstanceInfo> {
         debug!("Getting instance status");
 
-        let json = handlers::handle_get_instance_status(&self.state, instance_id).await?;
-
-        if !json.found {
+        let Some(inst) = self.instances().detail(instance_id).await? else {
             return Err(EnvironmentError::InstanceNotFound(instance_id.to_string()));
-        }
+        };
 
         Ok(InstanceInfo {
-            instance_id: json.instance_id,
-            image_id: json.image_id.unwrap_or_default(),
-            image_name: json.image_name.unwrap_or_default(),
-            tenant_id: json.tenant_id.unwrap_or_default(),
-            status: instance_status_from_string(json.status.as_deref().unwrap_or("unknown")),
-            checkpoint_id: json.checkpoint_id,
-            created_at: json
-                .created_at_ms
-                .map(ms_to_datetime)
-                .unwrap_or_else(Utc::now),
-            started_at: opt_ms_to_datetime(json.started_at_ms),
-            finished_at: opt_ms_to_datetime(json.finished_at_ms),
-            input: json.input.as_deref().and_then(decode_base64_json),
-            output: json.output.as_deref().and_then(decode_base64_json),
-            error: json.error,
-            stderr: json.stderr,
-            retry_count: json.retry_count.unwrap_or(0),
-            max_retries: json.max_retries.unwrap_or(0),
-            memory_peak_bytes: json.memory_peak_bytes,
-            cpu_usage_usec: json.cpu_usage_usec,
-            termination_reason: json
+            instance_id: inst.instance_id,
+            image_id: inst.image_id.unwrap_or_default(),
+            image_name: inst.image_name.unwrap_or_default(),
+            tenant_id: inst.tenant_id,
+            status: instance_status_from_core(inst.status),
+            checkpoint_id: inst.checkpoint_id,
+            created_at: inst.created_at,
+            started_at: inst.started_at,
+            finished_at: inst.finished_at,
+            input: decode_json_body(inst.input.as_deref(), instance_id, "input"),
+            output: decode_json_body(inst.output.as_deref(), instance_id, "output"),
+            error: inst.error,
+            stderr: inst.stderr,
+            retry_count: inst.retry_count,
+            max_retries: inst.max_retries,
+            memory_peak_bytes: inst.memory_peak_bytes,
+            cpu_usage_usec: inst.cpu_usage_usec,
+            termination_reason: inst
                 .termination_reason
                 .and_then(|s| TerminationReason::from_str(&s)),
-            exit_code: json.exit_code,
+            exit_code: inst.exit_code,
         })
     }
 
@@ -141,10 +152,10 @@ impl EnvironmentClient {
         statuses: &[String],
         ceiling: i64,
     ) -> Result<i64> {
-        Ok(
-            handlers::handle_count_instances_by_status(&self.state, tenant_id, statuses, ceiling)
-                .await?,
-        )
+        Ok(self
+            .instances()
+            .count_by_status(tenant_id, statuses, ceiling)
+            .await?)
     }
 
     /// List instances with optional filtering.
@@ -155,8 +166,10 @@ impl EnvironmentClient {
     ) -> Result<ListInstancesResult> {
         debug!("Listing instances");
 
-        let result =
-            handlers::handle_list_instances(&self.state, &list_instances_options(&options)).await?;
+        let result = self
+            .instances()
+            .list(&list_instances_options(&options))
+            .await?;
 
         Ok(ListInstancesResult {
             instances: result
@@ -167,10 +180,10 @@ impl EnvironmentClient {
                     tenant_id: inst.tenant_id,
                     image_id: inst.image_id.unwrap_or_default(),
                     image_name: inst.image_name.unwrap_or_default(),
-                    status: instance_status_from_string(&inst.status),
-                    created_at: ms_to_datetime(inst.created_at_ms),
-                    started_at: opt_ms_to_datetime(inst.started_at_ms),
-                    finished_at: opt_ms_to_datetime(inst.finished_at_ms),
+                    status: instance_status_from_core(inst.status),
+                    created_at: inst.created_at,
+                    started_at: inst.started_at,
+                    finished_at: inst.finished_at,
                     has_error: inst.has_error,
                 })
                 .collect(),
@@ -283,16 +296,7 @@ impl EnvironmentClient {
             SignalType::Shutdown => "shutdown",
         };
 
-        let payload_str = payload.map(|p| String::from_utf8_lossy(p).to_string());
-
-        match handlers::handle_send_signal(
-            &self.state,
-            instance_id,
-            signal_str,
-            payload_str.as_deref(),
-        )
-        .await?
-        {
+        match handlers::handle_send_signal(&self.state, instance_id, signal_str, payload).await? {
             SendSignalOutcome::Delivered => Ok(()),
             SendSignalOutcome::InstanceNotFound => {
                 Err(EnvironmentError::InstanceNotFound(instance_id.to_string()))
@@ -317,15 +321,8 @@ impl EnvironmentClient {
     ) -> Result<String> {
         info!("Sending custom signal to instance");
 
-        let payload_str = payload.map(|p| String::from_utf8_lossy(p).to_string());
-
-        match handlers::handle_send_custom_signal(
-            &self.state,
-            instance_id,
-            checkpoint_id,
-            payload_str.as_deref(),
-        )
-        .await?
+        match handlers::handle_send_custom_signal(&self.state, instance_id, checkpoint_id, payload)
+            .await?
         {
             SendCustomSignalOutcome::Delivered { signal_id } => Ok(signal_id),
             SendCustomSignalOutcome::InstanceNotFound => {
@@ -343,16 +340,15 @@ impl EnvironmentClient {
     pub async fn list_images(&self, options: ListImagesOptions) -> Result<ListImagesResult> {
         debug!("Listing images");
 
-        let images = handlers::handle_list_images(
-            &self.state,
-            &handlers::ListImagesParams {
+        let images = self
+            .image_registry()
+            .list_filtered(&ImageFilter {
                 tenant_id: options.tenant_id,
                 name: None,
                 limit: i64::from(options.limit),
                 offset: i64::from(options.offset),
-            },
-        )
-        .await?;
+            })
+            .await?;
 
         let total_count = images.len() as u32;
         Ok(ListImagesResult {
@@ -375,19 +371,18 @@ impl EnvironmentClient {
     ) -> Result<Option<ImageSummary>> {
         debug!("Finding image by name");
 
-        Ok(handlers::handle_list_images(
-            &self.state,
-            &handlers::ListImagesParams {
+        Ok(self
+            .image_registry()
+            .list_filtered(&ImageFilter {
                 tenant_id: Some(tenant_id.to_string()),
                 name: Some(name.to_string()),
                 limit: 1,
                 offset: 0,
-            },
-        )
-        .await?
-        .into_iter()
-        .next()
-        .map(image_summary))
+            })
+            .await?
+            .into_iter()
+            .next()
+            .map(image_summary))
     }
 
     /// Get one image, scoped to a tenant.
@@ -395,11 +390,11 @@ impl EnvironmentClient {
     pub async fn get_image(&self, image_id: &str, tenant_id: &str) -> Result<Option<ImageSummary>> {
         debug!("Getting image");
 
-        Ok(
-            handlers::handle_get_image(&self.state, image_id, Some(tenant_id))
-                .await?
-                .map(image_summary),
-        )
+        Ok(self
+            .image_registry()
+            .get_scoped(image_id, Some(tenant_id))
+            .await?
+            .map(image_summary))
     }
 
     /// Store an uploaded image artifact and register (or replace) its row.
@@ -508,7 +503,7 @@ impl EnvironmentClient {
                 .map(|cp| CheckpointSummary {
                     checkpoint_id: cp.checkpoint_id,
                     instance_id: cp.instance_id,
-                    created_at: ms_to_datetime(cp.created_at_ms),
+                    created_at: cp.created_at,
                     data_size_bytes: cp.data_size_bytes,
                 })
                 .collect(),
@@ -582,8 +577,8 @@ impl EnvironmentClient {
                     instance_id: ev.instance_id,
                     event_type: ev.event_type,
                     checkpoint_id: ev.checkpoint_id,
-                    payload: ev.payload.as_deref().and_then(decode_base64_json),
-                    created_at: ms_to_datetime(ev.created_at_ms),
+                    payload: decode_json_body(ev.payload.as_deref(), instance_id, "event payload"),
+                    created_at: ev.created_at,
                     subtype: ev.subtype,
                 })
                 .collect(),
@@ -644,9 +639,9 @@ impl EnvironmentClient {
                     step_id: step.step_id,
                     step_name: step.step_name,
                     step_type: step.step_type,
-                    status: step_status_from_string(&step.status),
-                    started_at: ms_to_datetime(step.started_at_ms),
-                    completed_at: opt_ms_to_datetime(step.completed_at_ms),
+                    status: step_status_from_core(step.status),
+                    started_at: step.started_at,
+                    completed_at: step.completed_at,
                     duration_ms: step.duration_ms,
                     launched_at_ms: step.launched_at_ms,
                     settled_at_ms: step.settled_at_ms,
@@ -683,7 +678,7 @@ impl EnvironmentClient {
                     step_name: info.step_name,
                     step_type: info.step_type,
                     index: info.index,
-                    created_at: ms_to_datetime(info.created_at_ms),
+                    created_at: info.created_at,
                 })
                 .collect(),
         )
@@ -713,7 +708,7 @@ impl EnvironmentClient {
 
         let buckets = handlers::handle_get_tenant_metrics(
             &self.state,
-            &db::TenantMetricsOptions {
+            &handlers::TenantMetricsOptions {
                 tenant_id: options.tenant_id.clone(),
                 start_time,
                 end_time,
@@ -730,7 +725,7 @@ impl EnvironmentClient {
             buckets: buckets
                 .into_iter()
                 .map(|b| MetricsBucket {
-                    bucket_time: ms_to_datetime(b.bucket_time_ms),
+                    bucket_time: b.bucket_time,
                     invocation_count: b.invocation_count,
                     success_count: b.success_count,
                     failure_count: b.failure_count,
@@ -759,26 +754,37 @@ fn failed_unless(success: bool, code: &str, error: Option<String>) -> Result<()>
     })
 }
 
-fn image_summary(img: runtara_environment::handlers::ImageSummary) -> ImageSummary {
+/// The image fields the server reports, dropping the ones only environment
+/// uses (where the artifact sits on disk, when its row was last rewritten).
+fn image_summary(img: Image) -> ImageSummary {
     ImageSummary {
         image_id: img.image_id,
         tenant_id: img.tenant_id,
         name: img.name,
         description: img.description,
-        created_at: ms_to_datetime(img.created_at_ms),
+        created_at: img.created_at,
         metadata: img.metadata,
     }
 }
 
-fn instance_status_from_string(s: &str) -> InstanceStatus {
-    match s {
-        "pending" => InstanceStatus::Pending,
-        "running" => InstanceStatus::Running,
-        "suspended" | "sleeping" => InstanceStatus::Suspended,
-        "completed" => InstanceStatus::Completed,
-        "failed" => InstanceStatus::Failed,
-        "cancelled" => InstanceStatus::Cancelled,
-        _ => InstanceStatus::Unknown,
+/// Core's lifecycle status in the server's vocabulary.
+///
+/// Total, so nothing falls through. The string version this replaces carried
+/// two arms that could never be taken: `instance_status` is a six-label
+/// Postgres enum declared in `001_initial_schema.sql` and never altered since,
+/// so the `"sleeping"` alias (a `termination_reason` label, a different column)
+/// and the `_ => Unknown` catch-all were both unreachable. `Unknown` stays in
+/// the server's own enum for callers that model "not observed yet"; no
+/// conversion produces it from a stored row.
+fn instance_status_from_core(status: runtara_core::domain::InstanceStatus) -> InstanceStatus {
+    use runtara_core::domain::InstanceStatus as Core;
+    match status {
+        Core::Pending => InstanceStatus::Pending,
+        Core::Running => InstanceStatus::Running,
+        Core::Suspended => InstanceStatus::Suspended,
+        Core::Completed => InstanceStatus::Completed,
+        Core::Failed => InstanceStatus::Failed,
+        Core::Cancelled => InstanceStatus::Cancelled,
     }
 }
 
@@ -786,8 +792,10 @@ fn instance_status_from_string(s: &str) -> InstanceStatus {
 ///
 /// An empty status list means "no filter", not "match nothing" — the same
 /// normalization the query-string form used to do on the way in.
-fn list_instances_options(options: &ListInstancesOptions) -> db::ListInstancesOptions {
-    db::ListInstancesOptions {
+fn list_instances_options(
+    options: &ListInstancesOptions,
+) -> instance_repository::ListInstancesOptions {
+    instance_repository::ListInstancesOptions {
         tenant_id: options.tenant_id.clone(),
         statuses: (!options.statuses.is_empty()).then(|| {
             options
@@ -808,33 +816,45 @@ fn list_instances_options(options: &ListInstancesOptions) -> db::ListInstancesOp
     }
 }
 
-fn step_status_from_string(s: &str) -> StepStatus {
-    match s {
-        "completed" => StepStatus::Completed,
-        "failed" => StepStatus::Failed,
-        _ => StepStatus::Running,
+fn step_status_from_core(status: runtara_core::persistence::PairedRecordStatus) -> StepStatus {
+    use runtara_core::persistence::PairedRecordStatus as Core;
+    match status {
+        Core::Running => StepStatus::Running,
+        Core::Completed => StepStatus::Completed,
+        Core::Failed => StepStatus::Failed,
     }
 }
 
-fn ms_to_datetime(ms: i64) -> chrono::DateTime<Utc> {
-    Utc.timestamp_millis_opt(ms)
-        .single()
-        .unwrap_or_else(Utc::now)
-}
-
-fn opt_ms_to_datetime(ms: Option<i64>) -> Option<chrono::DateTime<Utc>> {
-    ms.and_then(|ms| Utc.timestamp_millis_opt(ms).single())
-}
-
-/// Decode a base64-encoded string to JSON Value, or None if empty/invalid.
-fn decode_base64_json(encoded: &str) -> Option<serde_json::Value> {
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(encoded)
-        .ok()?;
+/// Parse a stored body as JSON, or `None` when there is nothing to parse.
+///
+/// The server's types model these as `Option<Value>`, so a body that is not
+/// JSON has to come back as `None` — which is also what "no body at all" looks
+/// like. That collapse used to happen behind a bare `.ok()`, silently: a
+/// workflow whose output failed to parse was indistinguishable from one that
+/// produced no output, with nothing anywhere to say so. It still collapses, but
+/// it says so first.
+fn decode_json_body(
+    bytes: Option<&[u8]>,
+    instance_id: &str,
+    what: &str,
+) -> Option<serde_json::Value> {
+    let bytes = bytes?;
     if bytes.is_empty() {
         return None;
     }
-    serde_json::from_slice(&bytes).ok()
+    match serde_json::from_slice(bytes) {
+        Ok(value) => Some(value),
+        Err(error) => {
+            warn!(
+                instance_id = %instance_id,
+                body = what,
+                byte_len = bytes.len(),
+                %error,
+                "Stored body is not JSON; reporting it as absent"
+            );
+            None
+        }
+    }
 }
 
 /// Keeps `HashMap` in the signature list honest for callers building env maps.
@@ -860,6 +880,55 @@ mod tests {
     use runtara_core::domain::EventType;
     use runtara_core::persistence::{EventRecord, Persistence, memory::InMemoryPersistence};
     use runtara_environment::runner::MockRunner;
+
+    /// A signal payload must reach the store byte for byte.
+    ///
+    /// This path used to run the bytes through `String::from_utf8_lossy` and
+    /// back, because the handler took `Option<&str>`. Every caller happens to
+    /// pass `serde_json::to_vec`, so it was lossless in practice — but any byte
+    /// sequence that is not valid UTF-8 was silently rewritten to U+FFFD on the
+    /// way through, and nothing in the types said so.
+    #[tokio::test]
+    async fn a_signal_payload_is_stored_byte_for_byte() {
+        let persistence = Arc::new(InMemoryPersistence::new());
+        persistence
+            .register_instance("signal-bytes", "tenant-1")
+            .await
+            .unwrap();
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgresql://localhost:1/unused")
+            .unwrap();
+        let client = EnvironmentClient::new(Arc::new(EnvironmentHandlerState::new(
+            pool,
+            persistence.clone(),
+            Arc::new(MockRunner::new()),
+            std::env::temp_dir(),
+        )));
+
+        // Lone continuation bytes and an interior NUL: not valid UTF-8, so
+        // `from_utf8_lossy` would substitute replacement characters here.
+        let payload: Vec<u8> = vec![0xff, 0xfe, 0x00, 0x01, 0x80, b'{'];
+        assert!(
+            std::str::from_utf8(&payload).is_err(),
+            "the fixture must be invalid UTF-8 or it proves nothing"
+        );
+
+        client
+            .send_custom_signal("signal-bytes", "cp-1", Some(&payload))
+            .await
+            .expect("send custom signal");
+
+        let stored = persistence
+            .get_custom_signal("signal-bytes", "cp-1")
+            .await
+            .expect("read back")
+            .expect("a sent signal is retained");
+        assert_eq!(
+            stored.payload.as_deref(),
+            Some(payload.as_slice()),
+            "the payload must arrive as it was sent, not as lossy UTF-8"
+        );
+    }
 
     #[tokio::test]
     async fn event_filters_keep_wire_names_and_unknown_names_match_nothing() {

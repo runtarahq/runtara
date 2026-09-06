@@ -8,34 +8,7 @@
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 
-/// Instance record from the database (matches Core's schema).
-#[derive(Debug, Clone, sqlx::FromRow)]
-pub struct Instance {
-    /// Unique identifier for the instance.
-    pub instance_id: String,
-    /// Tenant identifier for multi-tenancy isolation.
-    pub tenant_id: String,
-    /// Current status (pending, running, suspended, completed, failed, cancelled).
-    pub status: String,
-    /// Last checkpoint ID if instance was checkpointed.
-    pub checkpoint_id: Option<String>,
-    /// Current attempt number.
-    pub attempt: i32,
-    /// Maximum allowed attempts.
-    pub max_attempts: i32,
-    /// When the instance was created.
-    pub created_at: DateTime<Utc>,
-    /// When the instance started running.
-    pub started_at: Option<DateTime<Utc>>,
-    /// When the instance finished (completed, failed, or cancelled).
-    pub finished_at: Option<DateTime<Utc>>,
-    /// Output data from successful completion.
-    pub output: Option<Vec<u8>>,
-    /// Error message from failure (user-facing).
-    pub error: Option<String>,
-    /// Raw stderr output from the container (for debugging/logging).
-    pub stderr: Option<String>,
-}
+use crate::instance_repository::ListInstancesOptions;
 
 /// Instance with image info (joined from instance_images).
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -46,24 +19,14 @@ pub struct InstanceWithImage {
     pub tenant_id: String,
     /// Current status.
     pub status: String,
-    /// Last checkpoint ID.
-    pub checkpoint_id: Option<String>,
-    /// Current attempt number.
-    pub attempt: i32,
-    /// Maximum allowed attempts.
-    pub max_attempts: i32,
     /// When the instance was created.
     pub created_at: DateTime<Utc>,
     /// When the instance started running.
     pub started_at: Option<DateTime<Utc>>,
     /// When the instance finished.
     pub finished_at: Option<DateTime<Utc>>,
-    /// Output data.
-    pub output: Option<Vec<u8>>,
     /// Error message (user-facing).
     pub error: Option<String>,
-    /// Raw stderr output from the container (for debugging/logging).
-    pub stderr: Option<String>,
     /// Image ID (from instance_images table).
     pub image_id: Option<String>,
     /// Image name (from images table).
@@ -113,23 +76,21 @@ pub struct InstanceFull {
     pub exit_code: Option<i32>,
 }
 
-/// Get an instance by ID.
-pub async fn get_instance(
+/// The stored status and owning tenant of one instance.
+///
+/// Returns the status as the column spells it rather than a decoded enum:
+/// its one caller interpolates the label into a message a user reads.
+pub async fn instance_identity(
     pool: &PgPool,
     instance_id: &str,
-) -> Result<Option<Instance>, sqlx::Error> {
-    sqlx::query_as::<_, Instance>(
-        r#"
-        SELECT instance_id, tenant_id, status::TEXT as status, checkpoint_id,
-               attempt, max_attempts, created_at, started_at, finished_at,
-               output, error, stderr
-        FROM instances
-        WHERE instance_id = $1
-        "#,
-    )
-    .bind(instance_id)
-    .fetch_optional(pool)
-    .await
+) -> Result<Option<(String, String)>, sqlx::Error> {
+    let row: Option<(String, String)> =
+        sqlx::query_as("SELECT status::TEXT, tenant_id FROM instances WHERE instance_id = $1")
+            .bind(instance_id)
+            .fetch_optional(pool)
+            .await?;
+
+    Ok(row)
 }
 
 /// Get full instance details including image name and heartbeat.
@@ -160,35 +121,6 @@ pub async fn get_instance_full(
 // are delegated to the Core Persistence trait. The atomic start claim below is
 // the narrow exception: it must write Core's instance row and Environment's
 // image binding as one database transaction. Join reads remain here too.
-
-/// Options for listing instances.
-#[derive(Debug, Clone, Default)]
-pub struct ListInstancesOptions {
-    /// Filter by tenant ID.
-    pub tenant_id: Option<String>,
-    /// Filter by status — a row matches if it holds any one of these. `None`
-    /// (or an empty list) leaves the status unfiltered.
-    pub statuses: Option<Vec<String>>,
-    /// Filter by image ID (exact match).
-    pub image_id: Option<String>,
-    /// Filter by image name prefix (e.g., `"workflow_id:"` matches every
-    /// version and artifact of that workflow).
-    pub image_name_prefix: Option<String>,
-    /// Filter by created_at >= value.
-    pub created_after: Option<DateTime<Utc>>,
-    /// Filter by created_at < value.
-    pub created_before: Option<DateTime<Utc>>,
-    /// Filter by finished_at >= value.
-    pub finished_after: Option<DateTime<Utc>>,
-    /// Filter by finished_at < value.
-    pub finished_before: Option<DateTime<Utc>>,
-    /// Order by field and direction.
-    pub order_by: Option<String>,
-    /// Maximum results to return.
-    pub limit: i64,
-    /// Pagination offset.
-    pub offset: i64,
-}
 
 /// Status filter as a bindable array. An empty list means "no status filter"
 /// rather than "match nothing", so callers can pass a filtered/deduped vector
@@ -221,9 +153,9 @@ pub async fn list_instances(
 
     let query = format!(
         r#"
-        SELECT i.instance_id, i.tenant_id, i.status::TEXT as status, i.checkpoint_id,
-               i.attempt, i.max_attempts, i.created_at, i.started_at, i.finished_at,
-               i.output, i.error, i.stderr, ii.image_id, img.name as image_name
+        SELECT i.instance_id, i.tenant_id, i.status::TEXT as status,
+               i.created_at, i.started_at, i.finished_at,
+               i.error, ii.image_id, img.name as image_name
         FROM instances i
         LEFT JOIN instance_images ii ON i.instance_id = ii.instance_id
         LEFT JOIN images img ON ii.image_id = img.image_id
@@ -347,82 +279,9 @@ pub async fn count_instances(
 // Instance Images
 // ============================================================================
 
-/// Get the effective per-instance execution timeout recorded at first launch.
-///
-/// Returns `None` when no value was persisted (e.g. instances created before
-/// this column existed); callers should fall back to a configured default.
-pub async fn get_instance_timeout_seconds(
-    pool: &PgPool,
-    instance_id: &str,
-) -> Result<Option<i64>, sqlx::Error> {
-    let result: Option<(Option<i64>,)> =
-        sqlx::query_as("SELECT timeout_seconds FROM instance_images WHERE instance_id = $1")
-            .bind(instance_id)
-            .fetch_optional(pool)
-            .await?;
-
-    Ok(result.and_then(|(timeout,)| timeout))
-}
-
-/// Get the image ID for an instance.
-pub async fn get_instance_image_id(
-    pool: &PgPool,
-    instance_id: &str,
-) -> Result<Option<String>, sqlx::Error> {
-    let result: Option<(String,)> = sqlx::query_as(
-        r#"
-        SELECT image_id FROM instance_images WHERE instance_id = $1
-        "#,
-    )
-    .bind(instance_id)
-    .fetch_optional(pool)
-    .await?;
-
-    Ok(result.map(|(id,)| id))
-}
-
-/// Get the image ID and custom env vars for an instance.
-pub async fn get_instance_image_with_env(
-    pool: &PgPool,
-    instance_id: &str,
-) -> Result<Option<(String, std::collections::HashMap<String, String>)>, sqlx::Error> {
-    let result: Option<(String, Option<serde_json::Value>)> = sqlx::query_as(
-        r#"
-        SELECT image_id, env FROM instance_images WHERE instance_id = $1
-        "#,
-    )
-    .bind(instance_id)
-    .fetch_optional(pool)
-    .await?;
-
-    Ok(result.map(|(image_id, env_json)| {
-        let env = env_json
-            .and_then(|v| serde_json::from_value(v).ok())
-            .unwrap_or_default();
-        (image_id, env)
-    }))
-}
-
 // ============================================================================
 // Tenant Metrics
 // ============================================================================
-
-/// Options for tenant metrics aggregation.
-#[derive(Debug, Clone)]
-pub struct TenantMetricsOptions {
-    /// Tenant ID.
-    pub tenant_id: String,
-    /// Start of time range.
-    pub start_time: DateTime<Utc>,
-    /// End of time range.
-    pub end_time: DateTime<Utc>,
-    /// Bucket width in seconds.
-    ///
-    /// A plain number rather than an enum: the aggregation query only ever needs
-    /// the width, and the named granularities callers speak in (`hourly`,
-    /// `daily`) belong at the API boundary that has to parse them.
-    pub bucket_seconds: u32,
-}
 
 /// Aggregated metrics bucket from database.
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -452,7 +311,7 @@ pub struct MetricsBucketRow {
 /// Get aggregated tenant metrics.
 ///
 /// Aggregates instance execution metrics into time buckets of
-/// `options.bucket_seconds`, using aggregate functions for statistics.
+/// `bucket_seconds`, using aggregate functions for statistics.
 ///
 /// Buckets are aligned by flooring the Unix epoch to a multiple of the width
 /// rather than by `date_trunc`. That admits widths `date_trunc` has no unit for -
@@ -464,12 +323,15 @@ pub struct MetricsBucketRow {
 /// Returns all buckets in the time range, including empty ones (with zero counts).
 pub async fn get_tenant_metrics(
     pool: &PgPool,
-    options: &TenantMetricsOptions,
+    tenant_id: &str,
+    start_time: DateTime<Utc>,
+    end_time: DateTime<Utc>,
+    bucket_seconds: u32,
 ) -> Result<Vec<MetricsBucketRow>, sqlx::Error> {
     // A zero width divides by zero inside the query. Callers are validated at
     // both the HTTP boundary and in `handle_get_tenant_metrics`, so reaching
     // here with one is a bug rather than bad input; clamp instead of panicking.
-    let bucket_seconds = f64::from(options.bucket_seconds.max(1));
+    let bucket_seconds = f64::from(bucket_seconds.max(1));
 
     // The spine and the aggregate derive their bucket key with the same
     // expression, so the join keys align by construction. Getting that wrong is
@@ -525,13 +387,16 @@ pub async fn get_tenant_metrics(
     "#;
 
     sqlx::query_as::<_, MetricsBucketRow>(query)
-        .bind(&options.tenant_id)
-        .bind(options.start_time)
-        .bind(options.end_time)
+        .bind(tenant_id)
+        .bind(start_time)
+        .bind(end_time)
         .bind(bucket_seconds)
         .fetch_all(pool)
         .await
 }
+
+#[cfg(all(test, feature = "db-integration-tests"))]
+mod integration_tests;
 
 #[cfg(test)]
 mod tests {
@@ -722,80 +587,6 @@ mod tests {
     // Instance struct tests
     // ==========================================================================
 
-    #[test]
-    fn test_instance_debug() {
-        let instance = Instance {
-            instance_id: "inst-1".to_string(),
-            tenant_id: "tenant-1".to_string(),
-            status: "running".to_string(),
-            checkpoint_id: Some("cp-1".to_string()),
-            attempt: 1,
-            max_attempts: 3,
-            created_at: Utc::now(),
-            started_at: Some(Utc::now()),
-            finished_at: None,
-            output: None,
-            error: None,
-            stderr: None,
-        };
-
-        let debug_str = format!("{:?}", instance);
-        assert!(debug_str.contains("Instance"));
-        assert!(debug_str.contains("inst-1"));
-        assert!(debug_str.contains("running"));
-    }
-
-    #[test]
-    fn test_instance_clone() {
-        let instance = Instance {
-            instance_id: "inst-1".to_string(),
-            tenant_id: "tenant-1".to_string(),
-            status: "completed".to_string(),
-            checkpoint_id: Some("cp-1".to_string()),
-            attempt: 2,
-            max_attempts: 3,
-            created_at: Utc::now(),
-            started_at: Some(Utc::now()),
-            finished_at: Some(Utc::now()),
-            output: Some(b"result".to_vec()),
-            error: None,
-            stderr: None,
-        };
-
-        let cloned = instance.clone();
-
-        assert_eq!(instance.instance_id, cloned.instance_id);
-        assert_eq!(instance.tenant_id, cloned.tenant_id);
-        assert_eq!(instance.status, cloned.status);
-        assert_eq!(instance.checkpoint_id, cloned.checkpoint_id);
-        assert_eq!(instance.attempt, cloned.attempt);
-        assert_eq!(instance.max_attempts, cloned.max_attempts);
-        assert_eq!(instance.output, cloned.output);
-    }
-
-    #[test]
-    fn test_instance_with_error() {
-        let instance = Instance {
-            instance_id: "inst-1".to_string(),
-            tenant_id: "tenant-1".to_string(),
-            status: "failed".to_string(),
-            checkpoint_id: None,
-            attempt: 3,
-            max_attempts: 3,
-            created_at: Utc::now(),
-            started_at: Some(Utc::now()),
-            finished_at: Some(Utc::now()),
-            output: None,
-            error: Some("Something went wrong".to_string()),
-            stderr: Some("thread 'main' panicked".to_string()),
-        };
-
-        assert_eq!(instance.status, "failed");
-        assert_eq!(instance.error, Some("Something went wrong".to_string()));
-        assert!(instance.output.is_none());
-        assert!(instance.stderr.is_some());
-    }
-
     // ==========================================================================
     // InstanceWithImage struct tests
     // ==========================================================================
@@ -806,15 +597,10 @@ mod tests {
             instance_id: "inst-1".to_string(),
             tenant_id: "tenant-1".to_string(),
             status: "running".to_string(),
-            checkpoint_id: None,
-            attempt: 1,
-            max_attempts: 3,
             created_at: Utc::now(),
             started_at: Some(Utc::now()),
             finished_at: None,
-            output: None,
             error: None,
-            stderr: None,
             image_id: Some("img-123".to_string()),
             image_name: Some("my-workflow:v1".to_string()),
         };
@@ -831,15 +617,10 @@ mod tests {
             instance_id: "inst-1".to_string(),
             tenant_id: "tenant-1".to_string(),
             status: "running".to_string(),
-            checkpoint_id: None,
-            attempt: 1,
-            max_attempts: 3,
             created_at: Utc::now(),
             started_at: None,
             finished_at: None,
-            output: None,
             error: None,
-            stderr: None,
             image_id: Some("img-123".to_string()),
             image_name: Some("my-workflow".to_string()),
         };
@@ -856,15 +637,10 @@ mod tests {
             instance_id: "inst-1".to_string(),
             tenant_id: "tenant-1".to_string(),
             status: "pending".to_string(),
-            checkpoint_id: None,
-            attempt: 0,
-            max_attempts: 3,
             created_at: Utc::now(),
             started_at: None,
             finished_at: None,
-            output: None,
             error: None,
-            stderr: None,
             image_id: None,
             image_name: None,
         };

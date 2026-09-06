@@ -140,7 +140,8 @@
 //!   state machine, and the only worker that hands one to a runner
 //! - [`runner`]: the in-process wasmtime execution backend and its trait
 //! - [`runtime_host`]: guest host imports, served straight from persistence
-//! - [`db`] / [`image_registry`] / [`container_registry`]: PostgreSQL access
+//! - [`instance_repository`] / [`image_registry`] / [`container_registry`]:
+//!   PostgreSQL access, each owning the table it reads and writes
 //! - [`wake_scheduler`] / [`heartbeat_monitor`] / [`recovery`]: reconcilers
 //! - [`cleanup_worker`] / [`db_cleanup_worker`] / [`image_cleanup_worker`]:
 //!   retention
@@ -164,8 +165,12 @@ pub mod migrations;
 /// Typed, bounded active-execution timeout policy.
 pub mod execution_timeout;
 
-/// PostgreSQL database operations for images, instances, and wake queue.
-pub mod db;
+/// Raw SQL behind the repositories.
+///
+/// Crate-private: callers go through the module that owns the table —
+/// [`instance_repository`], [`image_registry`], [`container_registry`] — so a
+/// query is reachable only where its invariants are.
+pub(crate) mod db;
 
 /// Durable queue state and transactions for runner launch generations.
 pub mod launch_queue;
