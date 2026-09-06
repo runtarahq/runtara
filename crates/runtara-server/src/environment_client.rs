@@ -8,15 +8,15 @@
 //! round trip, and nothing to connect to or reconnect to.
 //!
 //! What remains is the shape conversion the old HTTP client did after
-//! deserializing: environment reports base64 bodies and statuses as strings,
-//! and [`crate::runtime_types`] holds the richer forms the server's handlers
-//! want (decoded JSON, enums). Timestamps no longer round-trip through epoch
-//! milliseconds — environment hands over the `DateTime<Utc>` it read.
+//! deserializing: environment reports statuses as strings and bodies as the
+//! bytes it stored, and [`crate::runtime_types`] holds the richer forms the
+//! server's handlers want (enums, parsed JSON). Timestamps and bodies no longer
+//! round-trip through epoch milliseconds and base64 — environment hands over
+//! the `DateTime<Utc>` and the `Vec<u8>` it read.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use base64::Engine;
 use chrono::Utc;
 use runtara_environment::db;
 use runtara_environment::handlers::{
@@ -24,7 +24,7 @@ use runtara_environment::handlers::{
     SendSignalOutcome, StartInstanceRequest, StartRejection, StopInstanceRequest,
 };
 use thiserror::Error;
-use tracing::{debug, info, instrument};
+use tracing::{debug, info, instrument, warn};
 
 use crate::runtime_types::{
     CheckpointSummary, EventSummary, GetTenantMetricsOptions, ImageSummary, InstanceInfo,
@@ -118,8 +118,8 @@ impl EnvironmentClient {
             created_at: json.created_at.unwrap_or_else(Utc::now),
             started_at: json.started_at,
             finished_at: json.finished_at,
-            input: json.input.as_deref().and_then(decode_base64_json),
-            output: json.output.as_deref().and_then(decode_base64_json),
+            input: decode_json_body(json.input.as_deref(), instance_id, "input"),
+            output: decode_json_body(json.output.as_deref(), instance_id, "output"),
             error: json.error,
             stderr: json.stderr,
             retry_count: json.retry_count.unwrap_or(0),
@@ -283,16 +283,7 @@ impl EnvironmentClient {
             SignalType::Shutdown => "shutdown",
         };
 
-        let payload_str = payload.map(|p| String::from_utf8_lossy(p).to_string());
-
-        match handlers::handle_send_signal(
-            &self.state,
-            instance_id,
-            signal_str,
-            payload_str.as_deref(),
-        )
-        .await?
-        {
+        match handlers::handle_send_signal(&self.state, instance_id, signal_str, payload).await? {
             SendSignalOutcome::Delivered => Ok(()),
             SendSignalOutcome::InstanceNotFound => {
                 Err(EnvironmentError::InstanceNotFound(instance_id.to_string()))
@@ -317,15 +308,8 @@ impl EnvironmentClient {
     ) -> Result<String> {
         info!("Sending custom signal to instance");
 
-        let payload_str = payload.map(|p| String::from_utf8_lossy(p).to_string());
-
-        match handlers::handle_send_custom_signal(
-            &self.state,
-            instance_id,
-            checkpoint_id,
-            payload_str.as_deref(),
-        )
-        .await?
+        match handlers::handle_send_custom_signal(&self.state, instance_id, checkpoint_id, payload)
+            .await?
         {
             SendCustomSignalOutcome::Delivered { signal_id } => Ok(signal_id),
             SendCustomSignalOutcome::InstanceNotFound => {
@@ -582,7 +566,7 @@ impl EnvironmentClient {
                     instance_id: ev.instance_id,
                     event_type: ev.event_type,
                     checkpoint_id: ev.checkpoint_id,
-                    payload: ev.payload.as_deref().and_then(decode_base64_json),
+                    payload: decode_json_body(ev.payload.as_deref(), instance_id, "event payload"),
                     created_at: ev.created_at,
                     subtype: ev.subtype,
                 })
@@ -816,15 +800,36 @@ fn step_status_from_string(s: &str) -> StepStatus {
     }
 }
 
-/// Decode a base64-encoded string to JSON Value, or None if empty/invalid.
-fn decode_base64_json(encoded: &str) -> Option<serde_json::Value> {
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(encoded)
-        .ok()?;
+/// Parse a stored body as JSON, or `None` when there is nothing to parse.
+///
+/// The server's types model these as `Option<Value>`, so a body that is not
+/// JSON has to come back as `None` — which is also what "no body at all" looks
+/// like. That collapse used to happen behind a bare `.ok()`, silently: a
+/// workflow whose output failed to parse was indistinguishable from one that
+/// produced no output, with nothing anywhere to say so. It still collapses, but
+/// it says so first.
+fn decode_json_body(
+    bytes: Option<&[u8]>,
+    instance_id: &str,
+    what: &str,
+) -> Option<serde_json::Value> {
+    let bytes = bytes?;
     if bytes.is_empty() {
         return None;
     }
-    serde_json::from_slice(&bytes).ok()
+    match serde_json::from_slice(bytes) {
+        Ok(value) => Some(value),
+        Err(error) => {
+            warn!(
+                instance_id = %instance_id,
+                body = what,
+                byte_len = bytes.len(),
+                %error,
+                "Stored body is not JSON; reporting it as absent"
+            );
+            None
+        }
+    }
 }
 
 /// Keeps `HashMap` in the signature list honest for callers building env maps.
@@ -850,6 +855,55 @@ mod tests {
     use runtara_core::domain::EventType;
     use runtara_core::persistence::{EventRecord, Persistence, memory::InMemoryPersistence};
     use runtara_environment::runner::MockRunner;
+
+    /// A signal payload must reach the store byte for byte.
+    ///
+    /// This path used to run the bytes through `String::from_utf8_lossy` and
+    /// back, because the handler took `Option<&str>`. Every caller happens to
+    /// pass `serde_json::to_vec`, so it was lossless in practice — but any byte
+    /// sequence that is not valid UTF-8 was silently rewritten to U+FFFD on the
+    /// way through, and nothing in the types said so.
+    #[tokio::test]
+    async fn a_signal_payload_is_stored_byte_for_byte() {
+        let persistence = Arc::new(InMemoryPersistence::new());
+        persistence
+            .register_instance("signal-bytes", "tenant-1")
+            .await
+            .unwrap();
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgresql://localhost:1/unused")
+            .unwrap();
+        let client = EnvironmentClient::new(Arc::new(EnvironmentHandlerState::new(
+            pool,
+            persistence.clone(),
+            Arc::new(MockRunner::new()),
+            std::env::temp_dir(),
+        )));
+
+        // Lone continuation bytes and an interior NUL: not valid UTF-8, so
+        // `from_utf8_lossy` would substitute replacement characters here.
+        let payload: Vec<u8> = vec![0xff, 0xfe, 0x00, 0x01, 0x80, b'{'];
+        assert!(
+            std::str::from_utf8(&payload).is_err(),
+            "the fixture must be invalid UTF-8 or it proves nothing"
+        );
+
+        client
+            .send_custom_signal("signal-bytes", "cp-1", Some(&payload))
+            .await
+            .expect("send custom signal");
+
+        let stored = persistence
+            .get_custom_signal("signal-bytes", "cp-1")
+            .await
+            .expect("read back")
+            .expect("a sent signal is retained");
+        assert_eq!(
+            stored.payload.as_deref(),
+            Some(payload.as_slice()),
+            "the payload must arrive as it was sent, not as lossy UTF-8"
+        );
+    }
 
     #[tokio::test]
     async fn event_filters_keep_wire_names_and_unknown_names_match_nothing() {

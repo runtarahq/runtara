@@ -1524,9 +1524,10 @@ pub fn spawn_container_monitor(
 // same reason the lifecycle handlers above are: the HTTP layer should decode,
 // call, and map, and nothing more.
 //
-// The response types are wire-shaped on purpose (`*_ms` timestamps, base64
-// bodies): they are what the management protocol already promises, and keeping
-// them identical is what makes this a move rather than a rewrite.
+// The response types report what the store holds — instants as instants, bodies
+// as the bytes that were written. They used to be wire-shaped (`*_ms`
+// timestamps, base64 bodies) because a socket used to carry them; nothing has
+// serialized them since environment became a library the server links.
 // ============================================================================
 
 /// Image summary as the management protocol reports it.
@@ -1660,12 +1661,12 @@ pub struct InstanceStatusResponse {
     /// Terminal time.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub finished_at: Option<DateTime<Utc>>,
-    /// Base64-encoded output.
+    /// Output bytes exactly as the guest wrote them.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub output: Option<String>,
-    /// Base64-encoded input.
+    pub output: Option<Vec<u8>>,
+    /// Input bytes exactly as they were stored.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub input: Option<String>,
+    pub input: Option<Vec<u8>>,
     /// Failure message, when the instance failed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -1726,8 +1727,6 @@ pub async fn handle_get_instance_status(
     state: &EnvironmentHandlerState,
     instance_id: &str,
 ) -> Result<InstanceStatusResponse> {
-    use base64::Engine;
-
     let Some(inst) = db::get_instance_full(&state.pool, instance_id).await? else {
         return Ok(InstanceStatusResponse::not_found(instance_id.to_string()));
     };
@@ -1743,12 +1742,8 @@ pub async fn handle_get_instance_status(
         created_at: Some(inst.created_at),
         started_at: inst.started_at,
         finished_at: inst.finished_at,
-        output: inst
-            .output
-            .map(|o| base64::engine::general_purpose::STANDARD.encode(&o)),
-        input: inst
-            .input
-            .map(|i| base64::engine::general_purpose::STANDARD.encode(&i)),
+        output: inst.output,
+        input: inst.input,
         error: inst.error,
         stderr: inst.stderr,
         retry_count: Some(inst.attempt as u32),
@@ -1879,7 +1874,7 @@ pub async fn handle_send_signal(
     state: &EnvironmentHandlerState,
     instance_id: &str,
     signal_type: &str,
-    payload: Option<&str>,
+    payload: Option<&[u8]>,
 ) -> Result<SendSignalOutcome> {
     let Some(instance) = state.persistence.get_instance_meta(instance_id).await? else {
         return Ok(SendSignalOutcome::InstanceNotFound);
@@ -1905,10 +1900,9 @@ pub async fn handle_send_signal(
         });
     };
 
-    let payload = payload.map(|p| p.as_bytes().to_vec()).unwrap_or_default();
     state
         .persistence
-        .insert_signal(instance_id, signal_type, &payload)
+        .insert_signal(instance_id, signal_type, payload.unwrap_or_default())
         .await?;
 
     if signal_type == runtara_core::domain::SignalType::Cancel {
@@ -1944,7 +1938,7 @@ pub async fn handle_send_custom_signal(
     state: &EnvironmentHandlerState,
     instance_id: &str,
     checkpoint_id: &str,
-    payload: Option<&str>,
+    payload: Option<&[u8]>,
 ) -> Result<SendCustomSignalOutcome> {
     if state
         .persistence
@@ -1961,10 +1955,9 @@ pub async fn handle_send_custom_signal(
         ));
     }
 
-    let payload = payload.map(|p| p.as_bytes().to_vec()).unwrap_or_default();
     let signal_id = state
         .persistence
-        .put_custom_signal(instance_id, checkpoint_id, &payload)
+        .put_custom_signal(instance_id, checkpoint_id, payload.unwrap_or_default())
         .await?;
 
     wake_suspended_on_signal(state.persistence.as_ref(), instance_id).await;
@@ -2103,9 +2096,9 @@ pub struct EventSummary {
     /// Checkpoint the event belongs to, when it has one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub checkpoint_id: Option<String>,
-    /// Base64-encoded payload.
+    /// Payload bytes exactly as the emitter wrote them.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub payload: Option<String>,
+    pub payload: Option<Vec<u8>>,
     /// Creation time.
     pub created_at: DateTime<Utc>,
     /// Event subtype.
@@ -2130,8 +2123,6 @@ pub async fn handle_list_events(
     limit: i64,
     offset: i64,
 ) -> Result<ListEventsResult> {
-    use base64::Engine;
-
     let events = state
         .persistence
         .list_events(instance_id, filter, limit, offset)
@@ -2151,9 +2142,7 @@ pub async fn handle_list_events(
                 instance_id: ev.instance_id,
                 event_type: crate::core_types::event_name(ev.event_type).to_owned(),
                 checkpoint_id: ev.checkpoint_id,
-                payload: ev
-                    .payload
-                    .map(|p| base64::engine::general_purpose::STANDARD.encode(&p)),
+                payload: ev.payload,
                 created_at: ev.created_at,
                 subtype: ev.subtype,
             })
@@ -2868,6 +2857,50 @@ mod tests {
         assert_eq!(
             page.events[0].created_at, precise,
             "the handler must report the stored instant, not a rounded copy"
+        );
+    }
+
+    /// A stored body crosses as the bytes that were written, whatever they are.
+    ///
+    /// Bodies used to be base64-encoded here and decoded again by the server
+    /// with `serde_json::from_slice(..).ok()`, so anything that was not JSON
+    /// arrived as `None` — the same answer as "there was no body". Environment
+    /// stores opaque bytes and has no business deciding they are JSON; whether
+    /// they parse is the reader's question to ask, and now it can.
+    #[tokio::test]
+    async fn a_body_that_is_not_json_still_crosses_intact() {
+        use runtara_core::domain::EventType;
+        use runtara_core::persistence::{EventRecord, ListEventsFilter};
+
+        let (state, persistence) = in_memory_state();
+        let raw: Vec<u8> = vec![0x00, 0xff, b'n', b'o', b't', 0x80, b'{'];
+        assert!(
+            serde_json::from_slice::<serde_json::Value>(&raw).is_err(),
+            "the fixture must not be JSON or it proves nothing"
+        );
+
+        persistence
+            .insert_event(&EventRecord {
+                id: None,
+                instance_id: "opaque-1".to_string(),
+                event_type: EventType::Custom,
+                checkpoint_id: None,
+                payload: Some(raw.clone()),
+                created_at: Utc::now(),
+                subtype: None,
+            })
+            .await
+            .expect("insert event");
+
+        let page = handle_list_events(&state, "opaque-1", &ListEventsFilter::default(), 10, 0)
+            .await
+            .expect("list events");
+
+        assert_eq!(page.events.len(), 1);
+        assert_eq!(
+            page.events[0].payload.as_deref(),
+            Some(raw.as_slice()),
+            "the handler must hand back the bytes it was given"
         );
     }
 
