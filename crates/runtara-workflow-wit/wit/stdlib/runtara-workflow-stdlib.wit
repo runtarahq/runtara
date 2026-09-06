@@ -302,6 +302,12 @@ interface json {
         step-id: string,
     ) -> result<u64, string>;
 
+    /// Graph-qualified variant; legacy callers retain wait-poll-interval-ms.
+    wait-poll-interval-ms-scoped: func(
+        step-id: string,
+        source: list<u8>,
+    ) -> result<u64, string>;
+
     wait-event: func(
         step-id: string,
         signal-id: string,
@@ -365,6 +371,13 @@ interface json {
 
     embed-workflow-error: func(
         step-id: string,
+        child-error: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    /// Graph-qualified variant for the current EmbedWorkflow call site.
+    embed-workflow-error-scoped: func(
+        step-id: string,
+        source: list<u8>,
         child-error: list<u8>,
     ) -> result<list<u8>, string>;
 

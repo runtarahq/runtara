@@ -5,22 +5,22 @@ Scope: DSL validation, direct-WASM manifest/planning/lowering, JSON stdlib,
 and durable suspend/resume through the production invoke ABI.
 
 **Update 2026-09-06:** AUDIT-01 is committed as `2b6bf542` and AUDIT-02 as
-`d787556e`. AUDIT-03 is fixed in the audit worktree. AUDIT-04 through AUDIT-07
-remain open. See the verification record for checks and limitations.
+`d787556e`, and AUDIT-03 as `a0629d99`. AUDIT-04 is fixed in the audit
+worktree. AUDIT-05 through AUDIT-07 remain open. See the verification record for checks and limitations.
 
 [Open the interactive pattern guide](wasm-emitter-patterns.html) to compare tested
 controls, recorded failures, and proposed fixes with step-through diagrams and
 exportable example DSL. The guide is a standalone, offline HTML/CSS/JS page;
 its traces illustrate the audit evidence and do not run WASM.
 
-Seven findings are documented below. The accompanying **42 audit tests** now
-include **33 passing tests** and **9 known-defect regressions**. There are also
-**8 passing graph-analysis unit tests** for AUDIT-01 and **6 arena unit tests**
-for AUDIT-02, plus **7 identity unit tests and 1 compiler-version test** for
-AUDIT-03. Two remaining regressions
-execute composed WASM; seven exercise validation, compilation, or manifest/stdlib
-behavior natively. The original AUDIT-01, AUDIT-02 and AUDIT-03 regressions now run normally; their ignores
-were removed after the fixes.
+Seven findings are documented below. The accompanying **46 audit tests** now
+include **39 passing tests** and **7 known-defect regressions**. There are also
+**29 passing unit tests**: 8 graph-analysis tests for AUDIT-01, 6 arena tests for
+AUDIT-02, 7 identity tests and 1 compiler-version test for AUDIT-03, and 6 scoped
+configuration tests and 1 compiler-version test for AUDIT-04. Two remaining
+regressions execute composed WASM; five exercise validation or compilation
+natively. The original AUDIT-01 through AUDIT-04 regressions now run normally;
+their ignores were removed after the fixes.
 
 The known-defect tests assert the **desired correct behavior** and currently fail.
 They carry explicit `#[ignore = "AUDIT-XX: ..."]` reasons so normal CI stays green
@@ -248,8 +248,8 @@ the compiler-owned version or loop path.
 The shared identity applies to WaitForSignal, AI wait tools, Delay sleeps,
 breakpoints, Agent and Split caches, embedded workflow caches, AI turn snapshots,
 and embedded/composed child namespaces. Attempt/retry suffixes derive from the
-complete structured base key. This does **not** fix AUDIT-04's separate flat
-runtime configuration registry.
+complete structured base key. Configuration lookup uses the separate lexical
+graph identity introduced by AUDIT-04 below.
 
 **Compatibility:** manifest version 3 opts newly compiled workflows into key
 version 2. Version 1/2 manifests retain the legacy key builders when compiled;
@@ -294,29 +294,94 @@ RUSTC_WRAPPER= cargo test -p runtara-workflows --features direct-wasm-integratio
 
 ## AUDIT-04 · P2 — repeated step IDs select another scope's runtime configuration
 
-Two sibling loop bodies define `wait` with timeoutMs 100 and 200. Validation and
-the support gate accept them; both runtime lookups resolve to 100. This is
-separate from durable-key collisions: fixing keys alone does not fix configuration.
+**Fixed on 2026-09-06.** Sibling loop bodies and embedded children can each
+use a local `wait` with different settings. Both original regressions are enabled:
+the second timeout resolves to 200 ms, rather than the first graph's 100 ms.
 
-The runtime recursively flattens graph steps into a single `BTreeMap<String,...>`
-and retains the first definition via `or_insert_with`. Embedded child graphs
-share this registry too; a separate manifest/stdlib test reproduces the same
-timeout substitution across two embedded children. Wait timeout/action/schema
-and other step-ID-based lookups cannot distinguish the definitions.
+The previous registry flattened graph definitions into a map keyed by local step
+ID, retaining the first match. Debug metadata independently searched flattened
+configuration tables by the same ID. Durable invocation keys from AUDIT-03 could
+separate responses while still selecting the wrong timeout, action, schema or
+step type.
 
-Source: [stdlib registry](../crates/runtara-workflow-stdlib/src/direct_json.rs) (`DirectJsonManifest::parse`, `collect_graph_manifest`, `wait_timeout_ms`).
+The registry now indexes definitions by **lexical graph path plus local ID**:
 
-Fix direction: use globally allocated manifest step identities or graph-qualified
-lookup keys. Do not depend on graph-local user IDs being globally unique.
+```text
+root:                         []
+While body:                   [["while.subgraph", "a"]]
+Split inside that body:       [["while.subgraph", "a"], ["split.subgraph", "items"]]
+Wait notification graph:      [["waitForSignal.onWait", "approval"]]
+Preloaded embedded child:     [["embedWorkflow", "call"]]
+lookup = registry[(graphPath, localStepId)]
+```
 
-Tests:
+The compiler initializes `_manifest_graph_path` to the root. Loop entry and
+`onWait` append the defining role and owner; embedded calls select their preloaded
+child graph. Returning restores the enclosing source. This path describes where
+a step is **defined**, so it excludes iteration indices. AUDIT-03's durable path
+continues to identify individual invocations. Authored start/iteration variables
+cannot replace the private graph path; large interned paths are resolved before
+lookup. A scoped lookup miss or malformed path errors instead of falling back to
+a same-named step elsewhere.
 
-| Test | Status on audited code |
+Every definition also binds to the exact numeric mapping/condition/configuration
+IDs from its own graph. Wait settings, breakpoint/debug metadata, and embedded
+result/error envelopes select that definition. AI debug events select the main
+agent record rather than a same-owner memory/tool record. Debug timers include
+graph and invocation scope, so overlapping same-name spans do not overwrite one
+another. Legacy aliases share the same definition allocation; configuration bodies
+are not cloned into a second registry.
+
+**Compatibility:** manifest version 4 opts newly compiled workflows into graph
+paths; version 3's durable-key format is unchanged. Source without a graph path
+retains legacy lookup. Additive WIT exports `wait-poll-interval-ms-scoped` and
+`embed-workflow-error-scoped` carry the source required for selection; the old
+exports remain available. Rebuild the stdlib and compiler together, then recompile
+future workflow artifacts. Keep already parked instances on their original
+artifacts. No authored DSL schema or stored-data migration is introduced.
+
+The existing child-preload contract still requires unique EmbedWorkflow call-site
+IDs across the preload bundle and rejects duplicates at the support gate. This fix
+supports repeated **local IDs inside different child graphs**; it does not broaden
+that separately enforced child-binding contract.
+
+Source: [registry, scope propagation and metadata bindings](../crates/runtara-workflow-stdlib/src/direct_json.rs),
+[compiler version selection](../crates/runtara-workflows/src/direct_wasm/static_data.rs),
+[WIT exports](../crates/runtara-workflow-wit/wit/stdlib/runtara-workflow-stdlib.wit).
+
+Native tests in [`wasm_emitter_audit.rs`](../crates/runtara-workflows/tests/wasm_emitter_audit.rs)
+(all enabled and passing):
+
+| Test | Contract verified |
 | --- | --- |
-| [`audit_04_distinct_loop_step_ids_keep_their_configuration`](../crates/runtara-workflows/tests/wasm_emitter_audit.rs) | Passing control |
-| [`audit_04_duplicate_loop_step_ids_keep_their_configuration`](../crates/runtara-workflows/tests/wasm_emitter_audit.rs) | Known defect; ignored by default, fails when selected |
-| [`audit_04_distinct_child_step_ids_keep_their_configuration`](../crates/runtara-workflows/tests/wasm_emitter_audit.rs) | Passing control |
-| [`audit_04_duplicate_child_step_ids_keep_their_configuration`](../crates/runtara-workflows/tests/wasm_emitter_audit.rs) | Known defect; ignored by default, fails when selected |
+| `audit_04_distinct_loop_step_ids_keep_their_configuration` | Distinct loop-body IDs retain their timeouts |
+| `audit_04_duplicate_loop_step_ids_keep_their_configuration` | Same loop-body IDs retain their timeouts; original regression |
+| `audit_04_distinct_child_step_ids_keep_their_configuration` | Distinct child-local IDs retain their timeouts |
+| `audit_04_duplicate_child_step_ids_keep_their_configuration` | Same child-local IDs retain their timeouts; original regression |
+
+Invoke tests in [`execution.rs`](../crates/runtara-workflows/tests/wasm_emitter_audit/execution.rs)
+(all enabled and passing):
+
+| Test | Contract verified |
+| --- | --- |
+| `audit_04_sibling_loop_wait_settings_and_events_follow_their_graph` | All four While/Split sibling pairs: separate deadlines, poll settings, names, actions, correlation/context, response schemas and stable replay |
+| `audit_04_embedded_wait_settings_and_events_follow_the_child_graph` | The same settings and replay assertions across two preloaded children |
+| `audit_04_on_wait_graph_can_shadow_its_parent_step_type` | An onWait Finish can share its enclosing Wait's ID; debug output and parent resume remain correct |
+| `audit_04_nested_step_type_and_debug_mapping_are_graph_local` | Root Finish and nested Filter share an ID while retaining their own types, mappings and outputs |
+
+[Six stdlib unit tests](../crates/runtara-workflow-stdlib/src/direct_json_audit04_tests.rs)
+cover strict scoped lookup and legacy fallback selection, authored-variable override
+protection, Finish/breakpoint mapping selection, AI record binding, overlapping
+debug spans, and an 80 KB interned path with delimiter/Unicode coverage. The compiler
+test `audit_04_manifest_version_selects_compiler_owned_graph_path` pins the version
+boundary and compiler ownership.
+
+```sh
+RUSTC_WRAPPER= cargo test -p runtara-workflow-stdlib --lib audit_04
+RUSTC_WRAPPER= cargo test -p runtara-workflows --lib audit_04
+RUSTC_WRAPPER= cargo test -p runtara-workflows --test wasm_emitter_audit audit_04
+RUSTC_WRAPPER= cargo test -p runtara-workflows --features direct-wasm-integration-tests --test direct_wasm_execute wasm_emitter_audit::audit_04
+```
 
 <a id="audit-05"></a>
 
@@ -426,7 +491,7 @@ The AUDIT-01 verification update below records the later checks.
 Source review suggests broader exposure worth covering during fixes:
 
 - AUDIT-03: production rollout with real persisted instances across artifact versions remains an operational integration check; local coverage now includes cached Agent/Split outputs, nested paths, version selection, and exact legacy addresses.
-- AUDIT-04: repeated step IDs with different types, wait actions, or response schemas.
+- AUDIT-04: local coverage now includes repeated IDs with different types, wait actions and response schemas; the existing global child-preload call-site uniqueness gate remains in force.
 - AUDIT-05: enclosing-deadline wake clamping and timeout overrun in the final iteration without suspension.
 - AUDIT-06: release-profile behavior and other arithmetic limits in timeout/backoff lowering.
 
@@ -486,7 +551,7 @@ component composition, guest arena collection, and invoke execution.
 ### AUDIT-03 verification update · 2026-09-06
 
 - Committed the preceding AUDIT-02 change as `d787556e`; its pre-commit formatting
-  and workspace Clippy checks passed. AUDIT-03 remains uncommitted for review.
+  and workspace Clippy checks passed. AUDIT-03 was subsequently committed as `a0629d99` before starting AUDIT-04.
 - Before the fix, the distinct-ID control passed and the original same-ID wait
   regression failed: the second invoke completed instead of suspending.
 - Rebuilt **27 agent components and both shared workflow components** into the
@@ -518,3 +583,40 @@ worktree. Database/server E2E, a live migration of parked production instances,
 and deployment were not run. Deploy the updated shared stdlib together with the
 compiler, recompile future workflow artifacts, and retain the old artifacts for
 already parked instances. No checkpoint or signal data migration is performed.
+
+### AUDIT-04 verification update · 2026-09-06
+
+- Committed AUDIT-03 as `a0629d99`; its pre-commit formatting and workspace
+  Clippy checks passed. AUDIT-04 is left uncommitted for review.
+- Before the fix, both distinct-ID controls passed and both duplicate-ID native
+  regressions failed at the expected second-timeout assertion (100 instead of 200).
+  After the fix, all **4 native AUDIT-04 tests pass**, with both ignores removed.
+- Added **4 passing invoke tests** for sibling While/Split settings, embedded-child
+  settings, onWait shadowing, and different step types/debug mappings. Added
+  **6 passing stdlib unit tests** and **1 passing compiler-version test**.
+- Rebuilt **27 agent components and both shared workflow components** using
+  `scripts/build-agent-components.sh` in this worktree.
+- `cargo test -p runtara-workflow-stdlib --lib`: **226 passed**, with 1 existing
+  performance benchmark ignored.
+- `cargo test -p runtara-workflows`: **558 library tests and 30 native integration
+  tests passed**; 5 remaining audit defects and 1 existing doctest ignored.
+- `cargo test -p runtara-component-host --features component-integration-tests --tests`:
+  **45 passed** across library and component integration targets.
+- Full `direct_wasm_execute` suite with `direct-wasm-integration-tests`: **205 passed,
+  0 failed, 2 ignored** (the remaining AUDIT-05 timeout regressions). This includes
+  existing AI wait tools, child error/retry paths, breakpoints, parallel loops,
+  durable replay and bounded-memory tests.
+- Clippy for stdlib, workflow WIT and workflows, all targets with the direct-WASM
+  integration feature and `-D warnings`: passed. Formatting and diff checks passed.
+- Interactive guide: **45 DOM scenarios passed**, including supported/historical/
+  fixed views, same/distinct local IDs in loops and children, DSL output, trace
+  navigation/reset, and links to both native and execution tests. Browser inspection
+  confirmed the implemented-solution view and graph-qualified lookup explanation.
+  Embedded example bundles now use the valid `latest` child-version selector.
+
+Rust 1.97.0 and `RUSTC_WRAPPER=` were used. An initial shared-cache execution attempt
+loaded runtime WIT 0.2 bindings from the main checkout into this WIT 0.1 worktree,
+causing component composition to fail before execution. All final checks above
+use this worktree's own host target directory and staged guest components. Use
+separate Cargo target directories when these worktrees have different WIT inputs.
+No database/server E2E, production artifact migration or deployment was run.

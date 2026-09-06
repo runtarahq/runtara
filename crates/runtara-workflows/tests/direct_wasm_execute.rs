@@ -7310,6 +7310,7 @@ fn spawn_retry_http_proxy(
 /// `durable-sleep-checkpoint` calls (never fired on the store-freeing path).
 struct CheckpointingRuntimeHost {
     input: Vec<u8>,
+    custom_events: Mutex<Vec<(String, Vec<u8>)>>,
     checkpoints: Mutex<HashMap<String, Vec<u8>>>,
     completed: Mutex<Option<Vec<u8>>>,
     sleeps: Mutex<Vec<String>>,
@@ -7348,6 +7349,7 @@ impl CheckpointingRuntimeHost {
     fn new(input: &[u8]) -> Self {
         Self {
             input: input.to_vec(),
+            custom_events: Mutex::new(Vec::new()),
             checkpoints: Mutex::new(HashMap::new()),
             completed: Mutex::new(None),
             sleeps: Mutex::new(Vec::new()),
@@ -7436,7 +7438,8 @@ impl runtara_component_host::runtime_host::RuntimeHost for CheckpointingRuntimeH
         *self.failed.lock().unwrap() = Some(error);
         Ok(())
     }
-    async fn custom_event(&self, _kind: String, _payload: Vec<u8>) -> Result<(), String> {
+    async fn custom_event(&self, kind: String, payload: Vec<u8>) -> Result<(), String> {
+        self.custom_events.lock().unwrap().push((kind, payload));
         Ok(())
     }
     fn debug_mode_enabled(&self) -> Result<bool, String> {

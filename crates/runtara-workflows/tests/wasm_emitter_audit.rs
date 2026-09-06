@@ -101,6 +101,7 @@ fn assert_wait_configuration(second_id: &str, embedded: bool) {
     let source = |scope: &str| {
         serde_json::to_vec(&json!({"variables": {
             "_scope_id": format!("sc_{scope}_0"), "_loop_indices": [0],
+            "_manifest_graph_path": [[if embedded {"embedWorkflow"} else {"while.subgraph"}, scope]],
             "_cache_key_prefix": if embedded {format!("audit::{scope}")} else {String::new()}
         }}))
         .unwrap()
@@ -122,7 +123,6 @@ fn audit_04_distinct_loop_step_ids_keep_their_configuration() {
 }
 
 #[test]
-#[ignore = "AUDIT-04: runtime step registry discards duplicate graph-local IDs"]
 fn audit_04_duplicate_loop_step_ids_keep_their_configuration() {
     assert_wait_configuration("wait", false);
 }
@@ -133,7 +133,6 @@ fn audit_04_distinct_child_step_ids_keep_their_configuration() {
 }
 
 #[test]
-#[ignore = "AUDIT-04: embedded children share the unqualified step registry"]
 fn audit_04_duplicate_child_step_ids_keep_their_configuration() {
     assert_wait_configuration("wait", true);
 }

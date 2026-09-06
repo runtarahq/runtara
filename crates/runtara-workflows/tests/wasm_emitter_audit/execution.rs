@@ -52,6 +52,16 @@ fn compile_configured(
     children: Vec<ChildWorkflowInput>,
     catalog: Option<Arc<AgentCatalog>>,
 ) -> (tempfile::TempDir, DirectCompilationResult) {
+    compile_configured_tracking(id, value, children, catalog, false)
+}
+
+fn compile_configured_tracking(
+    id: &str,
+    value: Value,
+    children: Vec<ChildWorkflowInput>,
+    catalog: Option<Arc<AgentCatalog>>,
+    track_events: bool,
+) -> (tempfile::TempDir, DirectCompilationResult) {
     let graph: ExecutionGraph = serde_json::from_value(value).expect("audit graph parses");
     let empty = AgentCatalog::default();
     let validation = validate_workflow(&graph, catalog.as_deref().unwrap_or(&empty));
@@ -69,7 +79,7 @@ fn compile_configured(
             execution_graph: graph,
             child_workflows: children,
             output_dir: temp.path().into(),
-            track_events: false,
+            track_events,
             agent_catalog: catalog,
             agent_slug: None,
         },
@@ -806,6 +816,204 @@ fn audit_03_durable_agent_and_split_caches_keep_sibling_results_on_replay() {
             2
         );
     }
+}
+
+fn configured_wait_body(timeout: u64, poll: u64, label: &str) -> Value {
+    json!({"entryPoint":"wait","steps":{
+        "wait":{"id":"wait","stepType":"WaitForSignal","name":label,
+            "timeoutMs":immediate(json!(timeout)),"pollIntervalMs":poll,
+            "responseSchema":{"decision":{"type":"string","enum":[label]}},
+            "action":{"key":label,"correlation":{"site":immediate(json!(label))},"context":{"label":immediate(json!(label))}}},
+        "done":finish("done")
+    },"executionPlan":[{"fromStep":"wait","toStep":"done"}]})
+}
+
+fn assert_configured_waits(artifact: &DirectCompilationResult, labels: [&str; 2]) {
+    let host = Arc::new(CheckpointingRuntimeHost::new(b"{}"));
+    *host.pinned_clock_ms.lock().unwrap() = Some(1_000_000);
+    let invoke = || run_invoke_once(&artifact.wasm_path, host.clone(), b"{}".to_vec());
+    for (label, timeout, poll) in [(labels[0], 60_000, 11), (labels[1], 120_000, 22)] {
+        let exit = invoke();
+        let InvokeExit::Suspended(ref wakes) = exit else {
+            panic!("expected configured wait, got {exit:?}");
+        };
+        let WorkflowWake::OnSignal(ref wait) = wakes[0] else {
+            panic!("expected signal wake");
+        };
+        assert_eq!(
+            wait.deadline_ms,
+            Some(1_000_000 + timeout),
+            "the selected graph's timeout sets the deadline"
+        );
+        let key = signal_key(exit);
+        let events = host.custom_events.lock().unwrap();
+        let payloads = events
+            .iter()
+            .map(|(kind, bytes)| (kind, serde_json::from_slice::<Value>(bytes).unwrap()))
+            .collect::<Vec<_>>();
+        let event = payloads
+            .iter()
+            .rev()
+            .find(|(_, value)| value["type"] == "external_input_requested")
+            .expect("pending-input event");
+        assert_eq!(event.1["step_id"], "wait");
+        assert_eq!(event.1["step_name"], label);
+        assert_eq!(event.1["signal_id"], key);
+        assert_eq!(event.1["action_key"], label);
+        assert_eq!(event.1["correlation"]["site"], label);
+        assert_eq!(event.1["context"]["label"], label);
+        assert_eq!(
+            event.1["response_schema"]["decision"]["enum"],
+            json!([label])
+        );
+        let debug = payloads
+            .iter()
+            .rev()
+            .find(|(kind, value)| kind.as_str() == "step_debug_start" && value["step_id"] == "wait")
+            .expect("wait debug start");
+        assert_eq!(debug.1["step_name"], label);
+        assert_eq!(debug.1["inputs"]["timeout_ms"], timeout);
+        assert_eq!(debug.1["inputs"]["poll_interval_ms"], poll);
+        drop(events);
+        // Recreate the Store with identical source; a pending wait keeps its key/deadline.
+        assert_eq!(signal_key(invoke()), key);
+        host.deliver_signal(
+            &key,
+            &serde_json::to_vec(&json!({"decision":label})).unwrap(),
+        );
+    }
+    assert_eq!(completed(invoke()), json!({"ok":true}));
+}
+
+#[test]
+fn audit_04_sibling_loop_wait_settings_and_events_follow_their_graph() {
+    for (left, right) in [
+        ("While", "While"),
+        ("While", "Split"),
+        ("Split", "While"),
+        ("Split", "Split"),
+    ] {
+        let graph = json!({"entryPoint":"a","steps":{
+            "a":audit_loop("a",left,1,configured_wait_body(60_000,11,"First approval")),
+            "b":audit_loop("b",right,1,configured_wait_body(120_000,22,"Second approval")),
+            "finish":finish("finish")
+        },"executionPlan":[{"fromStep":"a","toStep":"b"},{"fromStep":"b","toStep":"finish"}]});
+        let (_temp, artifact) =
+            compile_configured_tracking("audit-registry-loops", graph, vec![], None, true);
+        assert_configured_waits(&artifact, ["First approval", "Second approval"]);
+    }
+}
+
+#[test]
+fn audit_04_embedded_wait_settings_and_events_follow_the_child_graph() {
+    let graph = json!({"entryPoint":"a","steps":{
+        "a":{"id":"a","stepType":"EmbedWorkflow","childWorkflowId":"child-a","childVersion":"latest"},
+        "b":{"id":"b","stepType":"EmbedWorkflow","childWorkflowId":"child-b","childVersion":"latest"},
+        "finish":finish("finish")
+    },"executionPlan":[{"fromStep":"a","toStep":"b"},{"fromStep":"b","toStep":"finish"}]});
+    let children = [("a", 60_000, 11, "Child A"), ("b", 120_000, 22, "Child B")]
+        .into_iter()
+        .map(|(id, timeout, poll, label)| ChildWorkflowInput {
+            step_id: id.into(),
+            workflow_id: format!("child-{id}"),
+            version_requested: "latest".into(),
+            version_resolved: 1,
+            execution_graph: serde_json::from_value(configured_wait_body(timeout, poll, label))
+                .unwrap(),
+        })
+        .collect();
+    let (_temp, artifact) =
+        compile_configured_tracking("audit-registry-children", graph, children, None, true);
+    assert_configured_waits(&artifact, ["Child A", "Child B"]);
+}
+
+#[test]
+fn audit_04_on_wait_graph_can_shadow_its_parent_step_type() {
+    let mut graph = configured_wait_body(60_000, 11, "Parent wait");
+    graph["steps"]["wait"]["onWait"] = json!({"entryPoint":"wait","steps":{
+        "wait":{"id":"wait","stepType":"Finish","name":"Notification finish","inputMapping":{"notification":immediate(json!("sent"))}}
+    }});
+    let (_temp, artifact) =
+        compile_configured_tracking("audit-registry-onwait", graph, vec![], None, true);
+    let host = Arc::new(CheckpointingRuntimeHost::new(b"{}"));
+    *host.pinned_clock_ms.lock().unwrap() = Some(1_000_000);
+    let key = signal_key(run_invoke_once(
+        &artifact.wasm_path,
+        host.clone(),
+        b"{}".to_vec(),
+    ));
+    let events = host
+        .custom_events
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(kind, bytes)| {
+            (
+                kind.clone(),
+                serde_json::from_slice::<Value>(bytes).unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let notification = events
+        .iter()
+        .find(|(kind, value)| {
+            kind == "step_debug_end" && value["step_name"] == "Notification finish"
+        })
+        .expect("onWait Finish event");
+    assert_eq!(notification.1["step_type"], "Finish");
+    assert_eq!(notification.1["outputs"]["outputs"]["notification"], "sent");
+    host.deliver_signal(&key, b"{}");
+    assert_eq!(
+        completed(run_invoke_once(&artifact.wasm_path, host, b"{}".to_vec())),
+        json!({"ok":true})
+    );
+}
+
+#[test]
+fn audit_04_nested_step_type_and_debug_mapping_are_graph_local() {
+    let body = json!({"entryPoint":"same","steps":{
+        "same":{"id":"same","stepType":"Filter","name":"Nested filter","config":{"value":immediate(json!([1,2,3])),"condition":condition(true)}},
+        "done":finish("done")
+    },"executionPlan":[{"fromStep":"same","toStep":"done"}]});
+    let graph = json!({"entryPoint":"loop","steps":{
+        "loop":loop_step("loop",body),
+        "same":{"id":"same","stepType":"Finish","name":"Root finish","inputMapping":{"result":immediate(json!("root"))}}
+    },"executionPlan":[{"fromStep":"loop","toStep":"same"}]});
+    let (_temp, artifact) =
+        compile_configured_tracking("audit-registry-types", graph, vec![], None, true);
+    let host = Arc::new(CheckpointingRuntimeHost::new(b"{}"));
+    assert_eq!(
+        completed(run_invoke_once(
+            &artifact.wasm_path,
+            host.clone(),
+            b"{}".to_vec()
+        )),
+        json!({"result":"root"})
+    );
+    let events = host
+        .custom_events
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(kind, bytes)| {
+            (
+                kind.clone(),
+                serde_json::from_slice::<Value>(bytes).unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let nested = events
+        .iter()
+        .find(|(kind, value)| kind == "step_debug_start" && value["step_name"] == "Nested filter")
+        .expect("nested filter start");
+    assert_eq!(nested.1["step_type"], "Filter");
+    assert_eq!(nested.1["inputs"], json!([1, 2, 3]));
+    let root = events
+        .iter()
+        .find(|(kind, value)| kind == "step_debug_end" && value["step_name"] == "Root finish")
+        .expect("root Finish end");
+    assert_eq!(root.1["step_type"], "Finish");
+    assert_eq!(root.1["outputs"]["outputs"], json!({"result":"root"}));
 }
 
 fn timeout_graph(delay_ms: u64, split: bool) -> Value {

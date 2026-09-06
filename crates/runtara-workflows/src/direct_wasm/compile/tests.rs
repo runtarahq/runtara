@@ -8994,7 +8994,7 @@ fn direct_core_run_lowers_wait_for_signal_finish_through_runtime_polling() {
                             }
                             (
                                 "cm32p2|runtara:workflow-stdlib/json@0.1",
-                                "wait-poll-interval-ms",
+                                "wait-poll-interval-ms-scoped",
                             ) => wait_poll_interval_index = Some(next_function_index),
                             ("cm32p2|runtara:workflow-stdlib/json@0.1", "wait-event") => {
                                 wait_event_index = Some(next_function_index)

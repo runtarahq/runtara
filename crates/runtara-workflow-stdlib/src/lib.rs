@@ -622,6 +622,16 @@ mod component {
             })
         }
 
+        fn wait_poll_interval_ms_scoped(step_id: String, source: Vec<u8>) -> Result<u64, String> {
+            MANIFEST.with(|slot| {
+                let slot = slot.borrow();
+                let manifest = slot
+                    .as_ref()
+                    .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
+                manifest.wait_poll_interval_ms_scoped(&step_id, &source)
+            })
+        }
+
         fn wait_event(
             step_id: String,
             signal_id: String,
@@ -757,6 +767,20 @@ mod component {
                     .as_ref()
                     .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
                 manifest.embed_workflow_error(&step_id, &child_error)
+            })
+        }
+
+        fn embed_workflow_error_scoped(
+            step_id: String,
+            source: Vec<u8>,
+            child_error: Vec<u8>,
+        ) -> Result<Vec<u8>, String> {
+            MANIFEST.with(|slot| {
+                let slot = slot.borrow();
+                let manifest = slot
+                    .as_ref()
+                    .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
+                manifest.embed_workflow_error_scoped(&step_id, &source, &child_error)
             })
         }
 

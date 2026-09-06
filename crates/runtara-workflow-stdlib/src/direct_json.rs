@@ -347,7 +347,8 @@ fn materialize(value: Value) -> Value {
 /// Parsed direct-workflow manifest data needed by JSON stdlib calls.
 #[derive(Debug, Clone)]
 pub struct DirectJsonManifest {
-    steps: BTreeMap<String, DirectJsonStep>,
+    steps: BTreeMap<String, Rc<DirectJsonStep>>,
+    scoped_steps: BTreeMap<(String, String), Rc<DirectJsonStep>>,
     child_workflows: BTreeMap<String, DirectJsonChildWorkflow>,
     mappings: BTreeMap<u32, DirectJsonMapping>,
     conditions: BTreeMap<u32, DirectJsonCondition>,
@@ -394,7 +395,7 @@ impl DirectJsonManifest {
         let manifest: ManifestWire = serde_json::from_slice(bytes)
             .map_err(|err| format!("failed to parse direct manifest: {err}"))?;
         let mut collections = DirectJsonManifestCollections::default();
-        collect_graph_manifest(&manifest.graph, &mut collections)?;
+        collect_graph_manifest(&manifest.graph, &serde_json::json!([]), &mut collections)?;
         for child in &manifest.child_workflows {
             if collections
                 .child_workflows
@@ -414,10 +415,15 @@ impl DirectJsonManifest {
                     child.step_id
                 ));
             }
-            collect_graph_manifest(&child.graph, &mut collections)?;
+            collect_graph_manifest(
+                &child.graph,
+                &serde_json::json!([["embedWorkflow", child.step_id]]),
+                &mut collections,
+            )?;
         }
         Ok(Self {
             steps: collections.steps,
+            scoped_steps: collections.scoped_steps,
             child_workflows: collections.child_workflows,
             mappings: collections.mappings,
             conditions: collections.conditions,
@@ -1076,9 +1082,7 @@ impl DirectJsonManifest {
     pub fn breakpoint_key(&self, step_id: &str, source: &[u8]) -> Result<String, String> {
         let source: Value = serde_json::from_slice(source)
             .map_err(|err| format!("failed to parse breakpoint-key source: {err}"))?;
-        self.steps
-            .get(step_id)
-            .ok_or_else(|| format!("unknown direct breakpoint step '{step_id}'"))?;
+        self.step(step_id, &source)?;
         if let Some(key) = durable_key_v2(&source, "breakpoint", serde_json::json!([step_id])) {
             return Ok(key);
         }
@@ -1113,9 +1117,7 @@ impl DirectJsonManifest {
     pub fn delay_sleep_key(&self, step_id: &str, source: &[u8]) -> Result<String, String> {
         let source: Value = serde_json::from_slice(source)
             .map_err(|err| format!("failed to parse delay-sleep-key source: {err}"))?;
-        self.steps
-            .get(step_id)
-            .ok_or_else(|| format!("unknown direct delay step '{step_id}'"))?;
+        self.step(step_id, &source)?;
         if let Some(key) = durable_key_v2(&source, "delay", serde_json::json!([step_id])) {
             return Ok(key);
         }
@@ -1149,10 +1151,7 @@ impl DirectJsonManifest {
     pub fn breakpoint_event(&self, step_id: &str, source: &[u8]) -> Result<Vec<u8>, String> {
         let source: Value = serde_json::from_slice(source)
             .map_err(|err| format!("failed to parse breakpoint-event source: {err}"))?;
-        let step = self
-            .steps
-            .get(step_id)
-            .ok_or_else(|| format!("unknown direct breakpoint step '{step_id}'"))?;
+        let step = self.step(step_id, &source)?;
         let steps_context = source
             .get("steps")
             .and_then(Value::as_object)
@@ -1161,13 +1160,13 @@ impl DirectJsonManifest {
         let inputs = match step.step_type.as_str() {
             "Conditional" => source.clone(),
             "Finish" => self
-                .finish_mapping(step.id.as_str())
+                .finish_mapping(step)
                 .map(|mapping| apply_input_mapping(&mapping.value, &source))
                 .transpose()?
                 .unwrap_or_else(|| Value::Object(Map::new())),
             "Filter" => {
                 let filter = self
-                    .filter_by_step(step.id.as_str())
+                    .filter_by_step(step)
                     .ok_or_else(|| format!("missing direct Filter config for '{}'", step.id))?;
                 filter
                     .value
@@ -1177,13 +1176,13 @@ impl DirectJsonManifest {
             }
             "Switch" => {
                 let switch = self
-                    .switch_by_step(step.id.as_str())
+                    .switch_by_step(step)
                     .ok_or_else(|| format!("missing direct Switch config for '{}'", step.id))?;
                 switch_debug_inputs(&switch.value, &source)?
             }
             "GroupBy" => {
                 let group_by = self
-                    .group_by_by_step(step.id.as_str())
+                    .group_by_by_step(step)
                     .ok_or_else(|| format!("missing direct GroupBy config for '{}'", step.id))?;
                 group_by
                     .value
@@ -1193,31 +1192,31 @@ impl DirectJsonManifest {
             }
             "Split" => {
                 let split = self
-                    .split_by_step(step.id.as_str())
+                    .split_by_step(step)
                     .ok_or_else(|| format!("missing direct Split config for '{}'", step.id))?;
                 split_debug_inputs(split, &source)?
             }
             "While" => {
                 let while_step = self
-                    .while_by_step(step.id.as_str())
+                    .while_by_step(step)
                     .ok_or_else(|| format!("missing direct While config for '{}'", step.id))?;
                 while_debug_inputs(while_step, &source)?
             }
             "Log" => {
                 let log = self
-                    .log_by_step(step.id.as_str())
+                    .log_by_step(step)
                     .ok_or_else(|| format!("missing direct Log config for '{}'", step.id))?;
                 apply_log(&log.value, &source)?.context
             }
             "Error" => {
                 let error = self
-                    .error_by_step(step.id.as_str())
+                    .error_by_step(step)
                     .ok_or_else(|| format!("missing direct Error config for '{}'", step.id))?;
                 apply_error(&error.value, &source)?.context
             }
             "Agent" | "AiAgent" => {
                 let agent = self
-                    .agent_by_step(step.id.as_str())
+                    .agent_by_step(step)
                     .ok_or_else(|| format!("missing direct Agent config for '{}'", step.id))?;
                 let mapping = self.mappings.get(&agent.input_mapping_id).ok_or_else(|| {
                     format!(
@@ -1255,7 +1254,7 @@ impl DirectJsonManifest {
     ) -> Result<String, String> {
         let source: Value = serde_json::from_slice(source)
             .map_err(|err| format!("failed to parse wait-signal-id source: {err}"))?;
-        self.wait_step(step_id)?;
+        self.wait_step_scoped(step_id, &source)?;
         if let Some(key) =
             durable_key_v2(&source, "wait", serde_json::json!([instance_id, step_id]))
         {
@@ -1334,7 +1333,7 @@ impl DirectJsonManifest {
     pub fn wait_timeout_ms(&self, step_id: &str, source: &[u8]) -> Result<Option<u64>, String> {
         let source: Value = serde_json::from_slice(source)
             .map_err(|err| format!("failed to parse wait-timeout source: {err}"))?;
-        let step = self.wait_step(step_id)?;
+        let step = self.wait_step_scoped(step_id, &source)?;
         let Some(timeout_mapping) = step.body.get("timeoutMs") else {
             return Ok(None);
         };
@@ -1357,7 +1356,7 @@ impl DirectJsonManifest {
         signal_id: &str,
         timeout_ms: u64,
     ) -> Result<Vec<u8>, String> {
-        self.wait_step(step_id)?;
+        self.require_wait_id(step_id)?;
         Ok(format!(
             "WaitForSignal step '{step_id}' timed out after {timeout_ms}ms waiting for signal '{signal_id}'"
         )
@@ -1374,7 +1373,7 @@ impl DirectJsonManifest {
         signal_id: &str,
         timeout_ms: u64,
     ) -> Result<Vec<u8>, String> {
-        self.wait_step(step_id)?;
+        self.require_wait_id(step_id)?;
         serde_json::to_vec(&serde_json::json!({
             "code": "WAIT_TIMEOUT",
             "message": format!(
@@ -1394,14 +1393,15 @@ impl DirectJsonManifest {
         signal_id: &str,
         source: &[u8],
     ) -> Result<Vec<u8>, String> {
-        self.wait_step(step_id)?;
         let source: Value = serde_json::from_slice(source)
             .map_err(|err| format!("failed to parse wait-on-wait source: {err}"))?;
+        self.wait_step_scoped(step_id, &source)?;
         let mut variables = source
             .get("variables")
             .and_then(Value::as_object)
             .cloned()
             .unwrap_or_default();
+        enter_manifest_graph(&mut variables, &source, "waitForSignal.onWait", step_id);
         variables.insert(
             "_signal_id".to_string(),
             Value::String(signal_id.to_string()),
@@ -1416,14 +1416,28 @@ impl DirectJsonManifest {
 
     /// Wrap a nested `onWait` graph failure exactly like generated Rust code.
     pub fn wait_on_wait_error(&self, step_id: &str, error: &[u8]) -> Result<Vec<u8>, String> {
-        self.wait_step(step_id)?;
+        self.require_wait_id(step_id)?;
         let error = String::from_utf8_lossy(error);
         Ok(format!("WaitForSignal step '{step_id}' on_wait failed: {error}").into_bytes())
     }
 
     /// Return the configured WaitForSignal poll interval, defaulting to 1000ms.
     pub fn wait_poll_interval_ms(&self, step_id: &str) -> Result<u64, String> {
-        let step = self.wait_step(step_id)?;
+        Self::wait_poll_interval(self.wait_step(step_id)?)
+    }
+
+    pub fn wait_poll_interval_ms_scoped(
+        &self,
+        step_id: &str,
+        source: &[u8],
+    ) -> Result<u64, String> {
+        let source: Value = serde_json::from_slice(source)
+            .map_err(|err| format!("failed to parse wait-poll source: {err}"))?;
+        Self::wait_poll_interval(self.wait_step_scoped(step_id, &source)?)
+    }
+
+    fn wait_poll_interval(step: &DirectJsonStep) -> Result<u64, String> {
+        let step_id = &step.id;
         match step.body.get("pollIntervalMs") {
             Some(Value::Number(number)) => number.as_u64().ok_or_else(|| {
                 format!(
@@ -1446,7 +1460,7 @@ impl DirectJsonManifest {
     ) -> Result<Vec<u8>, String> {
         let source: Value = serde_json::from_slice(source)
             .map_err(|err| format!("failed to parse wait-event source: {err}"))?;
-        let step = self.wait_step(step_id)?;
+        let step = self.wait_step_scoped(step_id, &source)?;
         let action = step.body.get("action").and_then(Value::as_object);
         let action_key = action
             .and_then(|action| action.get("key"))
@@ -1481,11 +1495,11 @@ impl DirectJsonManifest {
     ) -> Result<Vec<u8>, String> {
         let source: Value = serde_json::from_slice(source)
             .map_err(|err| format!("failed to parse wait-debug-start source: {err}"))?;
-        let step = self.wait_step(step_id)?;
+        let step = self.wait_step_scoped(step_id, &source)?;
         let timestamp = timestamp_ms();
         self.debug_start_ms
             .borrow_mut()
-            .insert(step_id.to_string(), timestamp);
+            .insert(debug_timer_key(step_id, &source), timestamp);
 
         let mut payload = debug_event_base(step, &source, timestamp);
         payload.insert(
@@ -1493,7 +1507,7 @@ impl DirectJsonManifest {
             serde_json::json!({
                 "signal_id": signal_id,
                 "timeout_ms": timeout_ms,
-                "poll_interval_ms": self.wait_poll_interval_ms(step_id)?,
+                "poll_interval_ms": Self::wait_poll_interval(step)?,
                 "response_schema": step.body.get("responseSchema").cloned().unwrap_or(Value::Null),
             }),
         );
@@ -1512,7 +1526,7 @@ impl DirectJsonManifest {
     ) -> Result<Vec<u8>, String> {
         let source: Value = serde_json::from_slice(source)
             .map_err(|err| format!("failed to parse wait-output source: {err}"))?;
-        let step = self.wait_step(step_id)?;
+        let step = self.wait_step_scoped(step_id, &source)?;
         let signal_payload = serde_json::from_slice(signal_payload)
             .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(signal_payload).to_string()));
         let mut steps = source
@@ -1537,7 +1551,7 @@ impl DirectJsonManifest {
     ) -> Result<Vec<u8>, String> {
         let source: Value = serde_json::from_slice(source)
             .map_err(|err| format!("failed to parse EmbedWorkflow source: {err}"))?;
-        self.embed_workflow_step(step_id)?;
+        self.embed_step_scoped(step_id, &source)?;
         Ok(embed_workflow_cache_key(step_id, &source).into_bytes())
     }
 
@@ -1553,6 +1567,7 @@ impl DirectJsonManifest {
             .map_err(|err| format!("failed to parse EmbedWorkflow source: {err}"))?;
         let child_input: Value = serde_json::from_slice(child_input)
             .map_err(|err| format!("failed to parse EmbedWorkflow child input: {err}"))?;
+        self.embed_step_scoped(step_id, &source)?;
         let child = self.child_workflow(step_id)?;
         validate_embed_child_inputs(child, &child_input)?;
         let variables = embed_child_variables(step_id, child, &source);
@@ -1565,12 +1580,14 @@ impl DirectJsonManifest {
     pub fn embed_workflow_result(
         &self,
         step_id: &str,
-        _source: &[u8],
+        source: &[u8],
         child_output: &[u8],
     ) -> Result<Vec<u8>, String> {
+        let source: Value = serde_json::from_slice(source)
+            .map_err(|err| format!("failed to parse EmbedWorkflow source: {err}"))?;
         let child_output: Value = serde_json::from_slice(child_output)
             .map_err(|err| format!("failed to parse EmbedWorkflow child output: {err}"))?;
-        let step = self.embed_workflow_step(step_id)?;
+        let step = self.embed_step_scoped(step_id, &source)?;
         let child = self.child_workflow(step_id)?;
         let result = embed_workflow_step_value(step, child, child_output);
         serde_json::to_vec(&result)
@@ -1589,7 +1606,7 @@ impl DirectJsonManifest {
             .map_err(|err| format!("failed to parse EmbedWorkflow source: {err}"))?;
         let step_result: Value = serde_json::from_slice(step_result)
             .map_err(|err| format!("failed to parse EmbedWorkflow result: {err}"))?;
-        self.embed_workflow_step(step_id)?;
+        self.embed_step_scoped(step_id, &source)?;
         let mut steps = source
             .get("steps")
             .and_then(Value::as_object)
@@ -1613,6 +1630,22 @@ impl DirectJsonManifest {
         let child = self.child_workflow(step_id)?;
         let result = embed_workflow_error_value(step, child, child_error);
         serde_json::to_vec(&result)
+            .map_err(|err| format!("failed to serialize EmbedWorkflow child error: {err}"))
+    }
+
+    pub fn embed_workflow_error_scoped(
+        &self,
+        step_id: &str,
+        source: &[u8],
+        child_error: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        let source: Value = serde_json::from_slice(source)
+            .map_err(|err| format!("failed to parse EmbedWorkflow source: {err}"))?;
+        let child_error: Value = serde_json::from_slice(child_error)
+            .map_err(|err| format!("failed to parse EmbedWorkflow child error: {err}"))?;
+        let step = self.embed_step_scoped(step_id, &source)?;
+        let child = self.child_workflow(step_id)?;
+        serde_json::to_vec(&embed_workflow_error_value(step, child, child_error))
             .map_err(|err| format!("failed to serialize EmbedWorkflow child error: {err}"))
     }
 
@@ -2068,7 +2101,7 @@ impl DirectJsonManifest {
         let timestamp = timestamp_ms();
         self.debug_start_ms
             .borrow_mut()
-            .insert(step.id.clone(), timestamp);
+            .insert(debug_timer_key(&step.id, &source), timestamp);
 
         let mut payload = debug_event_base(&step, &source, timestamp);
         payload.insert(
@@ -2108,7 +2141,7 @@ impl DirectJsonManifest {
         let duration_ms = self
             .debug_start_ms
             .borrow_mut()
-            .remove(&step.id)
+            .remove(&debug_timer_key(&step.id, &source))
             .map(|start| timestamp.saturating_sub(start).max(0))
             .unwrap_or(0);
 
@@ -2187,7 +2220,7 @@ impl DirectJsonManifest {
         let timestamp = timestamp_ms();
         self.debug_start_ms
             .borrow_mut()
-            .insert(step.id.clone(), timestamp);
+            .insert(debug_timer_key(&step.id, &source), timestamp);
         let mut payload = debug_event_base(&step, &source, timestamp);
         payload.insert("inputs".to_string(), inputs);
         serde_json::to_vec(&Value::Object(payload))
@@ -2260,7 +2293,7 @@ impl DirectJsonManifest {
         let duration_ms = self
             .debug_start_ms
             .borrow_mut()
-            .remove(&step.id)
+            .remove(&debug_timer_key(&step.id, &source))
             .map(|start| timestamp.saturating_sub(start).max(0))
             .unwrap_or(0);
         let mut payload = debug_event_base(&step, &source, timestamp);
@@ -2288,6 +2321,8 @@ impl DirectJsonManifest {
             step_type: phase.step_type().to_string(),
             name: Some(phase.step_name().to_string()),
             body: Value::Null,
+            graph_scope: String::new(),
+            bindings: BTreeMap::new(),
         })
     }
 
@@ -2324,6 +2359,8 @@ impl DirectJsonManifest {
             step_type: "AiAgentToolCall".to_string(),
             name: Some(format!("Tool: {tool_name}")),
             body: Value::Null,
+            graph_scope: String::new(),
+            bindings: BTreeMap::new(),
         };
         Ok((step, tool_name, arguments))
     }
@@ -2783,15 +2820,12 @@ impl DirectJsonManifest {
             .agents
             .get(&agent_id)
             .ok_or_else(|| format!("unknown direct Agent id {agent_id}"))?;
-        let step = self
-            .steps
-            .get(&agent.step_id)
-            .ok_or_else(|| format!("unknown direct Agent step '{}'", agent.step_id))?;
+        let step = self.step(&agent.step_id, &source)?;
         let timestamp = timestamp_ms();
         let duration_ms = self
             .debug_start_ms
             .borrow_mut()
-            .remove(&agent.step_id)
+            .remove(&debug_timer_key(&agent.step_id, &source))
             .map(|start| timestamp.saturating_sub(start).max(0))
             .unwrap_or(0);
         let error = String::from_utf8_lossy(error).to_string();
@@ -2828,15 +2862,12 @@ impl DirectJsonManifest {
     ) -> Result<Vec<u8>, String> {
         let source: Value = serde_json::from_slice(source)
             .map_err(|err| format!("failed to parse step-debug-error source: {err}"))?;
-        let step = self
-            .steps
-            .get(step_id)
-            .ok_or_else(|| format!("unknown direct debug step '{step_id}'"))?;
+        let step = self.step(step_id, &source)?;
         let timestamp = timestamp_ms();
         let duration_ms = self
             .debug_start_ms
             .borrow_mut()
-            .remove(step_id)
+            .remove(&debug_timer_key(step_id, &source))
             .map(|start| timestamp.saturating_sub(start).max(0))
             .unwrap_or(0);
         let error = String::from_utf8_lossy(error).to_string();
@@ -2968,14 +2999,11 @@ impl DirectJsonManifest {
     pub fn step_debug_start(&self, step_id: &str, source: &[u8]) -> Result<Vec<u8>, String> {
         let source: Value = serde_json::from_slice(source)
             .map_err(|err| format!("failed to parse step-debug-start source: {err}"))?;
-        let step = self
-            .steps
-            .get(step_id)
-            .ok_or_else(|| format!("unknown direct debug step '{step_id}'"))?;
+        let step = self.step(step_id, &source)?;
         let timestamp = timestamp_ms();
         self.debug_start_ms
             .borrow_mut()
-            .insert(step_id.to_string(), timestamp);
+            .insert(debug_timer_key(step_id, &source), timestamp);
 
         let mut payload = debug_event_base(step, &source, timestamp);
         let (inputs, input_mapping) = self.debug_start_data(step, &source)?;
@@ -3010,15 +3038,12 @@ impl DirectJsonManifest {
     ) -> Result<Vec<u8>, String> {
         let source: Value = serde_json::from_slice(source)
             .map_err(|err| format!("failed to parse step-debug-end source: {err}"))?;
-        let step = self
-            .steps
-            .get(step_id)
-            .ok_or_else(|| format!("unknown direct debug step '{step_id}'"))?;
+        let step = self.step(step_id, &source)?;
         let timestamp = timestamp_ms();
         let duration_ms = self
             .debug_start_ms
             .borrow_mut()
-            .remove(step_id)
+            .remove(&debug_timer_key(step_id, &source))
             .map(|start| timestamp.saturating_sub(start).max(0))
             .unwrap_or(0);
 
@@ -3055,7 +3080,7 @@ impl DirectJsonManifest {
     ) -> Result<(Value, Option<Value>), String> {
         match step.step_type.as_str() {
             "Finish" => {
-                let mapping = self.finish_mapping(step.id.as_str());
+                let mapping = self.finish_mapping(step);
                 Ok((
                     serde_json::json!({ "finishing": true }),
                     mapping.and_then(|mapping| {
@@ -3065,7 +3090,7 @@ impl DirectJsonManifest {
                 ))
             }
             "Conditional" => {
-                let condition = self.conditional_condition(step.id.as_str());
+                let condition = self.conditional_condition(step);
                 Ok((
                     serde_json::json!({ "condition": "evaluating" }),
                     condition.cloned(),
@@ -3073,7 +3098,7 @@ impl DirectJsonManifest {
             }
             "Filter" => {
                 let filter = self
-                    .filter_by_step(step.id.as_str())
+                    .filter_by_step(step)
                     .ok_or_else(|| format!("missing direct Filter config for '{}'", step.id))?;
                 // Tolerate an unresolvable input (see the Agent arm): the failing
                 // step's start must still emit so the resolution failure can be
@@ -3087,7 +3112,7 @@ impl DirectJsonManifest {
             }
             "Switch" => {
                 let switch = self
-                    .switch_by_step(step.id.as_str())
+                    .switch_by_step(step)
                     .ok_or_else(|| format!("missing direct Switch config for '{}'", step.id))?;
                 Ok((
                     switch_debug_inputs(&switch.value, source).unwrap_or(Value::Null),
@@ -3096,7 +3121,7 @@ impl DirectJsonManifest {
             }
             "GroupBy" => {
                 let group_by = self
-                    .group_by_by_step(step.id.as_str())
+                    .group_by_by_step(step)
                     .ok_or_else(|| format!("missing direct GroupBy config for '{}'", step.id))?;
                 let input = group_by
                     .value
@@ -3107,7 +3132,7 @@ impl DirectJsonManifest {
             }
             "Delay" => {
                 let delay = self
-                    .delay_by_step(step.id.as_str())
+                    .delay_by_step(step)
                     .ok_or_else(|| format!("missing direct Delay config for '{}'", step.id))?;
                 // Tolerate an unresolvable duration (see the Agent arm) so the
                 // start emits and the resolution failure is attributed to the step.
@@ -3120,7 +3145,7 @@ impl DirectJsonManifest {
             }
             "Agent" | "AiAgent" => {
                 let agent = self
-                    .agent_by_step(step.id.as_str())
+                    .agent_by_step(step)
                     .ok_or_else(|| format!("missing direct Agent config for '{}'", step.id))?;
                 let mapping = self.mappings.get(&agent.input_mapping_id).ok_or_else(|| {
                     format!(
@@ -3144,7 +3169,7 @@ impl DirectJsonManifest {
                 ))
             }
             "EmbedWorkflow" => {
-                let mapping = self.embed_workflow_mapping(step.id.as_str());
+                let mapping = self.embed_workflow_mapping(step);
                 let inputs = mapping
                     .and_then(|mapping| apply_input_mapping(&mapping.value, source).ok())
                     .unwrap_or_else(|| Value::Object(Map::new()));
@@ -3171,8 +3196,7 @@ impl DirectJsonManifest {
                     .unwrap_or(Value::Null);
                 // Tolerate a malformed poll interval (see the Agent arm) rather
                 // than failing the start; the paired end carries the real error.
-                let poll_interval_ms = self
-                    .wait_poll_interval_ms(step.id.as_str())
+                let poll_interval_ms = Self::wait_poll_interval(step)
                     .map_or(Value::Null, |ms| Value::Number(ms.into()));
                 Ok((
                     serde_json::json!({
@@ -3190,7 +3214,7 @@ impl DirectJsonManifest {
             "Error" => Ok((Value::Null, None)),
             "Log" => {
                 let log = self
-                    .log_by_step(step.id.as_str())
+                    .log_by_step(step)
                     .ok_or_else(|| format!("missing direct Log config for '{}'", step.id))?;
                 // Tolerate an unresolvable log payload (see the Agent arm): a Log
                 // emits no start normally, but the emitter fires one on the
@@ -3202,14 +3226,14 @@ impl DirectJsonManifest {
             }
             "Split" => {
                 let split = self
-                    .split_by_step(step.id.as_str())
+                    .split_by_step(step)
                     .ok_or_else(|| format!("missing direct Split config for '{}'", step.id))?;
                 let inputs = split_debug_inputs(split, source).unwrap_or(Value::Null);
                 Ok((inputs, None))
             }
             "While" => {
                 let while_step = self
-                    .while_by_step(step.id.as_str())
+                    .while_by_step(step)
                     .ok_or_else(|| format!("missing direct While config for '{}'", step.id))?;
                 let inputs = while_debug_inputs(while_step, source)?;
                 Ok((inputs, None))
@@ -3229,17 +3253,15 @@ impl DirectJsonManifest {
         match step.step_type.as_str() {
             "Finish" => {
                 let mapping = self
-                    .finish_mapping(step.id.as_str())
+                    .finish_mapping(step)
                     .ok_or_else(|| format!("missing direct Finish mapping for '{}'", step.id))?;
                 let output = unwrap_finish_outputs(apply_input_mapping(&mapping.value, source)?);
                 Ok(step_output_envelope(step, output, None))
             }
             "Conditional" => {
-                let condition = self
-                    .conditional_condition(step.id.as_str())
-                    .ok_or_else(|| {
-                        format!("missing direct Conditional condition for '{}'", step.id)
-                    })?;
+                let condition = self.conditional_condition(step).ok_or_else(|| {
+                    format!("missing direct Conditional condition for '{}'", step.id)
+                })?;
                 let result = eval_condition_expression(condition, source)?;
                 Ok(step_output_envelope(
                     step,
@@ -3263,7 +3285,7 @@ impl DirectJsonManifest {
                     return Ok(stored);
                 }
                 let filter = self
-                    .filter_by_step(step.id.as_str())
+                    .filter_by_step(step)
                     .ok_or_else(|| format!("missing direct Filter config for '{}'", step.id))?;
                 Ok(step_output_envelope(
                     step,
@@ -3279,7 +3301,7 @@ impl DirectJsonManifest {
                     return Ok(stored);
                 }
                 let switch = self
-                    .switch_by_step(step.id.as_str())
+                    .switch_by_step(step)
                     .ok_or_else(|| format!("missing direct Switch config for '{}'", step.id))?;
                 let result = apply_switch(&switch.value, source)?;
                 let route = switch_is_routing(&switch.value).then_some(result.route.as_str());
@@ -3293,7 +3315,7 @@ impl DirectJsonManifest {
                     return Ok(stored);
                 }
                 let group_by = self
-                    .group_by_by_step(step.id.as_str())
+                    .group_by_by_step(step)
                     .ok_or_else(|| format!("missing direct GroupBy config for '{}'", step.id))?;
                 Ok(step_output_envelope(
                     step,
@@ -3305,7 +3327,7 @@ impl DirectJsonManifest {
                 .pointer(&format!("/steps/{}", escape_json_pointer_token(&step.id)))
                 .cloned()
                 .or_else(|| {
-                    self.delay_by_step(step.id.as_str()).and_then(|delay| {
+                    self.delay_by_step(step).and_then(|delay| {
                         let duration = apply_mapping_value(&delay.duration_ms, source).ok()?;
                         let duration_ms = duration
                             .as_u64()
@@ -3316,7 +3338,7 @@ impl DirectJsonManifest {
                 .ok_or_else(|| format!("missing direct Delay output for '{}'", step.id)),
             "Log" => {
                 let log = self
-                    .log_by_step(step.id.as_str())
+                    .log_by_step(step)
                     .ok_or_else(|| format!("missing direct Log config for '{}'", step.id))?;
                 let details = apply_log(&log.value, source)?;
                 Ok(step_output_envelope(
@@ -3342,7 +3364,7 @@ impl DirectJsonManifest {
                 .ok_or_else(|| format!("missing direct WaitForSignal output for '{}'", step.id)),
             "Error" => {
                 let error = self
-                    .error_by_step(step.id.as_str())
+                    .error_by_step(step)
                     .ok_or_else(|| format!("missing direct Error config for '{}'", step.id))?;
                 let details = apply_error(&error.value, source)?;
                 Ok(serde_json::json!({
@@ -3367,69 +3389,115 @@ impl DirectJsonManifest {
         }
     }
 
-    fn finish_mapping(&self, step_id: &str) -> Option<&DirectJsonMapping> {
+    fn step(&self, step_id: &str, source: &Value) -> Result<&DirectJsonStep, String> {
+        if source
+            .get("variables")
+            .and_then(|vars| vars.get("_manifest_graph_path"))
+            .is_some()
+        {
+            let path = identity_variable(source, "_manifest_graph_path");
+            if !path.is_array() {
+                return Err("direct manifest graph path must be an array".to_string());
+            }
+            return self
+                .scoped_steps
+                .get(&(path.to_string(), step_id.to_string()))
+                .map(Rc::as_ref)
+                .ok_or_else(|| format!("unknown direct step '{step_id}' in graph {path}"));
+        }
+        self.steps
+            .get(step_id)
+            .map(Rc::as_ref)
+            .ok_or_else(|| format!("unknown direct step '{step_id}'"))
+    }
+
+    fn wait_step_scoped(&self, step_id: &str, source: &Value) -> Result<&DirectJsonStep, String> {
+        let step = self.step(step_id, source)?;
+        if step.step_type == "WaitForSignal" {
+            Ok(step)
+        } else {
+            Err(format!(
+                "direct step '{step_id}' is {}, not WaitForSignal",
+                step.step_type
+            ))
+        }
+    }
+
+    fn embed_step_scoped(&self, step_id: &str, source: &Value) -> Result<&DirectJsonStep, String> {
+        let step = self.step(step_id, source)?;
+        if step.step_type == "EmbedWorkflow" {
+            Ok(step)
+        } else {
+            Err(format!(
+                "direct step '{step_id}' is {}, not EmbedWorkflow",
+                step.step_type
+            ))
+        }
+    }
+
+    // Error text has no configuration dependency. Do not let a same-named
+    // step of another type in another graph prevent formatting a wait error.
+    fn require_wait_id(&self, step_id: &str) -> Result<(), String> {
+        if self
+            .scoped_steps
+            .values()
+            .any(|step| step.id == step_id && step.step_type == "WaitForSignal")
+        {
+            Ok(())
+        } else {
+            Err(format!("unknown direct WaitForSignal step '{step_id}'"))
+        }
+    }
+
+    fn finish_mapping(&self, step: &DirectJsonStep) -> Option<&DirectJsonMapping> {
+        self.mappings.get(step.bindings.get("finish.inputMapping")?)
+    }
+
+    fn embed_workflow_mapping(&self, step: &DirectJsonStep) -> Option<&DirectJsonMapping> {
         self.mappings
-            .values()
-            .find(|mapping| mapping.step_id == step_id && mapping.purpose == "finish.inputMapping")
+            .get(step.bindings.get("embedWorkflow.inputMapping")?)
     }
 
-    fn embed_workflow_mapping(&self, step_id: &str) -> Option<&DirectJsonMapping> {
-        self.mappings.values().find(|mapping| {
-            mapping.step_id == step_id && mapping.purpose == "embedWorkflow.inputMapping"
-        })
-    }
-
-    fn conditional_condition(&self, step_id: &str) -> Option<&Value> {
+    fn conditional_condition(&self, step: &DirectJsonStep) -> Option<&Value> {
         self.conditions
-            .values()
-            .find(|condition| {
-                condition.owner_id == step_id && condition.purpose == "conditional.condition"
-            })
-            .map(|condition| &condition.value)
+            .get(step.bindings.get("conditional.condition")?)
+            .map(|item| &item.value)
     }
 
-    fn filter_by_step(&self, step_id: &str) -> Option<&DirectJsonFilter> {
-        self.filters
-            .values()
-            .find(|filter| filter.step_id == step_id)
+    fn filter_by_step(&self, step: &DirectJsonStep) -> Option<&DirectJsonFilter> {
+        self.filters.get(step.bindings.get("filters")?)
     }
 
-    fn split_by_step(&self, step_id: &str) -> Option<&DirectJsonSplit> {
-        self.splits.values().find(|split| split.step_id == step_id)
+    fn split_by_step(&self, step: &DirectJsonStep) -> Option<&DirectJsonSplit> {
+        self.splits.get(step.bindings.get("splits")?)
     }
 
-    fn while_by_step(&self, step_id: &str) -> Option<&DirectJsonWhile> {
-        self.whiles
-            .values()
-            .find(|while_step| while_step.step_id == step_id)
+    fn while_by_step(&self, step: &DirectJsonStep) -> Option<&DirectJsonWhile> {
+        self.whiles.get(step.bindings.get("whiles")?)
     }
 
-    fn switch_by_step(&self, step_id: &str) -> Option<&DirectJsonSwitch> {
-        self.switches
-            .values()
-            .find(|switch| switch.step_id == step_id)
+    fn switch_by_step(&self, step: &DirectJsonStep) -> Option<&DirectJsonSwitch> {
+        self.switches.get(step.bindings.get("switches")?)
     }
 
-    fn group_by_by_step(&self, step_id: &str) -> Option<&DirectJsonGroupBy> {
-        self.group_bys
-            .values()
-            .find(|group_by| group_by.step_id == step_id)
+    fn group_by_by_step(&self, step: &DirectJsonStep) -> Option<&DirectJsonGroupBy> {
+        self.group_bys.get(step.bindings.get("group_bys")?)
     }
 
-    fn delay_by_step(&self, step_id: &str) -> Option<&DirectJsonDelay> {
-        self.delays.values().find(|delay| delay.step_id == step_id)
+    fn delay_by_step(&self, step: &DirectJsonStep) -> Option<&DirectJsonDelay> {
+        self.delays.get(step.bindings.get("delays")?)
     }
 
-    fn log_by_step(&self, step_id: &str) -> Option<&DirectJsonLog> {
-        self.logs.values().find(|log| log.step_id == step_id)
+    fn log_by_step(&self, step: &DirectJsonStep) -> Option<&DirectJsonLog> {
+        self.logs.get(step.bindings.get("logs")?)
     }
 
-    fn error_by_step(&self, step_id: &str) -> Option<&DirectJsonError> {
-        self.errors.values().find(|error| error.step_id == step_id)
+    fn error_by_step(&self, step: &DirectJsonStep) -> Option<&DirectJsonError> {
+        self.errors.get(step.bindings.get("errors")?)
     }
 
-    fn agent_by_step(&self, step_id: &str) -> Option<&DirectJsonAgent> {
-        self.agents.values().find(|agent| agent.step_id == step_id)
+    fn agent_by_step(&self, step: &DirectJsonStep) -> Option<&DirectJsonAgent> {
+        self.agents.get(step.bindings.get("agents")?)
     }
 
     fn wait_step(&self, step_id: &str) -> Result<&DirectJsonStep, String> {
@@ -3739,6 +3807,44 @@ fn child_scope_v2(source: &Value, kind: &str, parts: Value) -> Option<String> {
     })
 }
 
+/// Keep overlapping debug spans independent across graph and invocation scopes.
+fn debug_timer_key(step_id: &str, source: &Value) -> String {
+    if source
+        .get("variables")
+        .and_then(|vars| vars.get("_manifest_graph_path"))
+        .is_none()
+    {
+        return step_id.to_string();
+    }
+    serde_json::json!([
+        identity_variable(source, "_manifest_graph_path"),
+        identity_variable(source, "_loop_path"),
+        identity_variable(source, "_cache_key_prefix"),
+        step_id
+    ])
+    .to_string()
+}
+
+fn enter_manifest_graph(
+    variables: &mut Map<String, Value>,
+    source: &Value,
+    role: &str,
+    owner: &str,
+) {
+    if source
+        .get("variables")
+        .and_then(|vars| vars.get("_manifest_graph_path"))
+        .is_some()
+    {
+        let mut path = identity_variable(source, "_manifest_graph_path")
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        path.push(serde_json::json!([role, owner]));
+        variables.insert("_manifest_graph_path".into(), Value::Array(path));
+    }
+}
+
 /// Restore compiler/parent-owned identity after authored iteration variables,
 /// then append the actual enclosing loop site and its deterministic index.
 fn iteration_identity(
@@ -3755,11 +3861,12 @@ fn iteration_identity(
             "_loop_path",
             "_cache_key_prefix",
             "_workflow_id",
+            "_manifest_graph_path",
         ]
     } else {
         // Legacy authored prefix/workflow overrides retain their old behavior;
         // authored fields must never opt a legacy invocation into v2 mid-loop.
-        &["_durable_key_version", "_loop_path"]
+        &["_durable_key_version", "_loop_path", "_manifest_graph_path"]
     };
     for &name in managed {
         match source.get("variables").and_then(|vars| vars.get(name)) {
@@ -3852,7 +3959,8 @@ fn split_cache_key(split: &DirectJsonSplit, source: &Value) -> String {
 
 #[derive(Default)]
 struct DirectJsonManifestCollections {
-    steps: BTreeMap<String, DirectJsonStep>,
+    steps: BTreeMap<String, Rc<DirectJsonStep>>,
+    scoped_steps: BTreeMap<(String, String), Rc<DirectJsonStep>>,
     child_workflows: BTreeMap<String, DirectJsonChildWorkflow>,
     mappings: BTreeMap<u32, DirectJsonMapping>,
     conditions: BTreeMap<u32, DirectJsonCondition>,
@@ -3869,18 +3977,101 @@ struct DirectJsonManifestCollections {
 
 fn collect_graph_manifest(
     graph: &GraphWire,
+    path: &Value,
     collections: &mut DirectJsonManifestCollections,
 ) -> Result<(), String> {
+    let mut bindings_by_step: BTreeMap<String, BTreeMap<String, u32>> = BTreeMap::new();
+    for mapping in &graph.mappings {
+        bindings_by_step
+            .entry(mapping.step_id.clone())
+            .or_default()
+            .insert(mapping.purpose.clone(), mapping.id);
+    }
+    for condition in &graph.conditions {
+        bindings_by_step
+            .entry(condition.owner_id.clone())
+            .or_default()
+            .insert(condition.purpose.clone(), condition.id);
+    }
+    for item in &graph.splits {
+        bindings_by_step
+            .entry(item.step_id.clone())
+            .or_default()
+            .insert("splits".to_string(), item.id);
+    }
+    for item in &graph.whiles {
+        bindings_by_step
+            .entry(item.step_id.clone())
+            .or_default()
+            .insert("whiles".to_string(), item.id);
+    }
+    for item in &graph.filters {
+        bindings_by_step
+            .entry(item.step_id.clone())
+            .or_default()
+            .insert("filters".to_string(), item.id);
+    }
+    for item in &graph.switches {
+        bindings_by_step
+            .entry(item.step_id.clone())
+            .or_default()
+            .insert("switches".to_string(), item.id);
+    }
+    for item in &graph.group_bys {
+        bindings_by_step
+            .entry(item.step_id.clone())
+            .or_default()
+            .insert("group_bys".to_string(), item.id);
+    }
+    for item in &graph.delays {
+        bindings_by_step
+            .entry(item.step_id.clone())
+            .or_default()
+            .insert("delays".to_string(), item.id);
+    }
+    for item in &graph.logs {
+        bindings_by_step
+            .entry(item.step_id.clone())
+            .or_default()
+            .insert("logs".to_string(), item.id);
+    }
+    for item in &graph.errors {
+        bindings_by_step
+            .entry(item.step_id.clone())
+            .or_default()
+            .insert("errors".to_string(), item.id);
+    }
+    for item in graph
+        .agents
+        .iter()
+        .filter(|item| item.purpose.is_empty() || item.purpose == "agent.config")
+    {
+        bindings_by_step
+            .entry(item.step_id.clone())
+            .or_default()
+            .insert("agents".to_string(), item.id);
+    }
     for step in &graph.steps {
-        collections
-            .steps
-            .entry(step.id.clone())
-            .or_insert_with(|| DirectJsonStep {
-                id: step.id.clone(),
-                step_type: step.step_type.clone(),
-                name: step.name.clone(),
-                body: step.body.clone(),
-            });
+        let bindings = bindings_by_step.remove(&step.id).unwrap_or_default();
+        let step = Rc::new(DirectJsonStep {
+            id: step.id.clone(),
+            step_type: step.step_type.clone(),
+            name: step.name.clone(),
+            body: step.body.clone(),
+            graph_scope: path.to_string(),
+            bindings,
+        });
+        if collections
+            .scoped_steps
+            .insert((step.graph_scope.clone(), step.id.clone()), step.clone())
+            .is_some()
+        {
+            return Err(format!(
+                "duplicate direct step '{}' in graph {}",
+                step.id, path
+            ));
+        }
+        collections.steps.entry(step.id.clone()).or_insert(step);
     }
     for mapping in &graph.mappings {
         if collections
@@ -3888,7 +4079,6 @@ fn collect_graph_manifest(
             .insert(
                 mapping.id,
                 DirectJsonMapping {
-                    step_id: mapping.step_id.clone(),
                     purpose: mapping.purpose.clone(),
                     value: mapping.value.clone(),
                 },
@@ -3904,8 +4094,6 @@ fn collect_graph_manifest(
             .insert(
                 condition.id,
                 DirectJsonCondition {
-                    owner_id: condition.owner_id.clone(),
-                    purpose: condition.purpose.clone(),
                     value: condition.value.clone(),
                 },
             )
@@ -4068,7 +4256,9 @@ fn collect_graph_manifest(
     }
     for step in &graph.steps {
         for nested in &step.nested_graphs {
-            collect_graph_manifest(&nested.graph, collections)?;
+            let mut nested_path = path.as_array().cloned().unwrap_or_default();
+            nested_path.push(serde_json::json!([nested.role, step.id]));
+            collect_graph_manifest(&nested.graph, &Value::Array(nested_path), collections)?;
         }
     }
     Ok(())
@@ -4275,6 +4465,7 @@ fn split_iteration_variables(
     }
 
     iteration_identity(&mut variables, source, "Split", &split.step_id, index);
+    enter_manifest_graph(&mut variables, source, "split.subgraph", &split.step_id);
     let mut loop_indices = parent_indices;
     loop_indices.push(serde_json::json!(index));
     variables.insert("_loop_indices".to_string(), Value::Array(loop_indices));
@@ -4395,6 +4586,8 @@ fn split_result(split: &DirectJsonSplit, source: &Value, results: Value) -> Resu
             step_type: "Split".to_string(),
             name: split.name.clone(),
             body: Value::Null,
+            graph_scope: String::new(),
+            bindings: BTreeMap::new(),
         };
         Ok(step_output_envelope(&step, results, None))
     }
@@ -4519,6 +4712,12 @@ fn while_iteration_variables(
         "While",
         &while_step.step_id,
         state.index,
+    );
+    enter_manifest_graph(
+        &mut variables,
+        source,
+        "while.subgraph",
+        &while_step.step_id,
     );
     let mut loop_indices = parent_indices;
     loop_indices.push(serde_json::json!(state.index));
@@ -5379,6 +5578,8 @@ fn insert_step_output(
         step_type: step_type.to_string(),
         name: step_name.map(str::to_string),
         body: Value::Null,
+        graph_scope: String::new(),
+        bindings: BTreeMap::new(),
     };
     steps.insert(
         step_id.to_string(),
@@ -5485,6 +5686,16 @@ fn embed_child_variables(
         .unwrap_or_else(|| format!("sc_{step_id}"));
 
     let mut variables = Map::new();
+    if source
+        .get("variables")
+        .and_then(|vars| vars.get("_manifest_graph_path"))
+        .is_some()
+    {
+        variables.insert(
+            "_manifest_graph_path".into(),
+            serde_json::json!([["embedWorkflow", step_id]]),
+        );
+    }
     if durable_keys_v2(source) {
         variables.insert("_durable_key_version".into(), serde_json::json!(2));
         variables.insert("_loop_path".into(), serde_json::json!([]));
@@ -7014,6 +7225,8 @@ struct StepWire {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct NestedGraphWire {
+    #[serde(default)]
+    role: String,
     graph: GraphWire,
 }
 
@@ -7125,6 +7338,8 @@ struct ErrorWire {
 #[serde(rename_all = "camelCase")]
 struct AgentWire {
     id: u32,
+    #[serde(default)]
+    purpose: String,
     step_id: String,
     #[serde(default)]
     name: Option<String>,
@@ -7143,15 +7358,12 @@ struct AgentWire {
 
 #[derive(Debug, Clone)]
 struct DirectJsonMapping {
-    step_id: String,
     purpose: String,
     value: Value,
 }
 
 #[derive(Debug, Clone)]
 struct DirectJsonCondition {
-    owner_id: String,
-    purpose: String,
     value: Value,
 }
 
@@ -7174,6 +7386,8 @@ struct DirectJsonWhile {
 
 #[derive(Debug, Clone)]
 struct DirectJsonStep {
+    graph_scope: String,
+    bindings: BTreeMap<String, u32>,
     id: String,
     step_type: String,
     name: Option<String>,
@@ -13256,3 +13470,7 @@ mod invoke_error_and_delay_key_tests {
 #[cfg(test)]
 #[path = "direct_json_audit03_tests.rs"]
 mod audit03_tests;
+
+#[cfg(test)]
+#[path = "direct_json_audit04_tests.rs"]
+mod audit04_tests;

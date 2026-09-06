@@ -72,6 +72,14 @@ pub(super) fn direct_core_variables_json(
         map.remove("_loop_path");
     }
 
+    if let Some(map) = variables.as_object_mut() {
+        if manifest_version >= 4 {
+            map.insert("_manifest_graph_path".into(), serde_json::json!([]));
+        } else {
+            map.remove("_manifest_graph_path");
+        }
+    }
+
     let Some(workflow_id) = workflow_id else {
         return serde_json::to_vec(&variables).map_err(DirectCompileError::Serialize);
     };
@@ -591,6 +599,22 @@ mod tests {
             2
         );
         assert!(wasm_pages_for_bytes(-1).is_err());
+    }
+
+    #[test]
+    fn audit_04_manifest_version_selects_compiler_owned_graph_path() {
+        let authored = serde_json::json!({"_manifest_graph_path": [["forged", "scope"]]});
+        for version in [2, 3, 4] {
+            let vars: serde_json::Value = serde_json::from_slice(
+                &direct_core_variables_json(&authored, Some("wf"), version).unwrap(),
+            )
+            .unwrap();
+            if version >= 4 {
+                assert_eq!(vars["_manifest_graph_path"], serde_json::json!([]));
+            } else {
+                assert!(vars.get("_manifest_graph_path").is_none());
+            }
+        }
     }
 
     #[test]

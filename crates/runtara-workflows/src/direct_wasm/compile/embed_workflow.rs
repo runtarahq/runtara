@@ -158,6 +158,8 @@ fn emit_wrapped_child_error(
     output_len_local: u32,
 ) {
     push_segment_args(body, step_id_segment);
+    body.instruction(&Instruction::LocalGet(DIRECT_EMBED_PARENT_SOURCE_PTR_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_EMBED_PARENT_SOURCE_LEN_LOCAL));
     body.instruction(&Instruction::LocalGet(DIRECT_EMBED_CHILD_ERROR_PTR_LOCAL));
     body.instruction(&Instruction::LocalGet(DIRECT_EMBED_CHILD_ERROR_LEN_LOCAL));
     push_retptr_arg(body);

@@ -402,7 +402,7 @@ impl DirectCoreImportIndices {
             )?,
             stdlib_wait_poll_interval_ms: require_import(
                 self.stdlib_wait_poll_interval_ms,
-                "stdlib.wait-poll-interval-ms",
+                "stdlib.wait-poll-interval-ms-scoped",
             )?,
             stdlib_wait_event: require_import(self.stdlib_wait_event, "stdlib.wait-event")?,
             stdlib_wait_debug_start: require_import(
@@ -436,7 +436,7 @@ impl DirectCoreImportIndices {
             )?,
             stdlib_embed_workflow_error: require_import(
                 self.stdlib_embed_workflow_error,
-                "stdlib.embed-workflow-error",
+                "stdlib.embed-workflow-error-scoped",
             )?,
             stdlib_retry_sleep_key: require_import(
                 self.stdlib_retry_sleep_key,
@@ -1084,7 +1084,7 @@ pub(super) fn import_core_function(
         import_indices.stdlib_wait_on_wait_variables = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "wait-on-wait-error") {
         import_indices.stdlib_wait_on_wait_error = Some(function_index);
-    } else if is_stdlib_import(resolve, interface, function, "wait-poll-interval-ms") {
+    } else if is_stdlib_import(resolve, interface, function, "wait-poll-interval-ms-scoped") {
         import_indices.stdlib_wait_poll_interval_ms = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "wait-event") {
         import_indices.stdlib_wait_event = Some(function_index);
@@ -1109,7 +1109,7 @@ pub(super) fn import_core_function(
         "embed-workflow-output-from-result",
     ) {
         import_indices.stdlib_embed_workflow_output_from_result = Some(function_index);
-    } else if is_stdlib_import(resolve, interface, function, "embed-workflow-error") {
+    } else if is_stdlib_import(resolve, interface, function, "embed-workflow-error-scoped") {
         import_indices.stdlib_embed_workflow_error = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "retry-sleep-key") {
         import_indices.stdlib_retry_sleep_key = Some(function_index);
