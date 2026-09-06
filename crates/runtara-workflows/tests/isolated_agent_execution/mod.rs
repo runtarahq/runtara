@@ -61,6 +61,7 @@ impl InvocationScopeFactory for Scopes {
             .push((request.context.path.clone(), request.context.attempt));
         let starts = self.starts.clone();
         Ok(ChildInvocationScope {
+            lifecycle: None,
             make_spec: Box::new(move |_| {
                 starts.fetch_add(1, Ordering::SeqCst);
                 Ok(spec().into())

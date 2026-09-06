@@ -65,6 +65,7 @@ impl InvocationScopeFactory for Scopes {
         }
         let starts = self.starts.clone();
         Ok(ChildInvocationScope {
+            lifecycle: None,
             make_spec: Box::new(move |_| {
                 if let Some(starts) = starts {
                     starts.fetch_add(1, Ordering::Relaxed);

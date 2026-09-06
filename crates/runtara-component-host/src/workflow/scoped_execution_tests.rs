@@ -58,6 +58,7 @@ impl InvocationLauncher for Launcher {
         let signals = self.signals.clone();
         let (hold, fail) = (self.hold_cleanup, self.fail_cleanup);
         Ok(PreparedInvocation {
+            lifecycle: None,
             run,
             cleanup: Some(Box::pin(async move {
                 signals.cleanup_entered.notify_one();

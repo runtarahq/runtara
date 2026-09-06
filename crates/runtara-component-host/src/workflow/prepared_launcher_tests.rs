@@ -63,6 +63,7 @@ impl InvocationScopeFactory for Scopes {
             None
         };
         Ok(ChildInvocationScope {
+            lifecycle: None,
             make_spec: Box::new(move |token| {
                 if signals.reject_setup.load(Ordering::Acquire) {
                     return Err("scope closed during admission".into());
@@ -177,11 +178,9 @@ impl Fixture {
     }
     fn spawn(&self, launcher: &impl InvocationLauncher, request: StartRequest) -> TaskId {
         let invocation = launcher.prepare(request).unwrap();
-        match invocation.cleanup {
-            Some(cleanup) => self.tasks.spawn_scoped(invocation.run, cleanup),
-            None => self.tasks.spawn(invocation.run),
-        }
-        .unwrap()
+        self.tasks
+            .spawn_managed(invocation.run, invocation.cleanup, invocation.lifecycle)
+            .unwrap()
     }
 }
 fn request(binding: &str, entry: Entry, input: Vec<u8>) -> StartRequest {

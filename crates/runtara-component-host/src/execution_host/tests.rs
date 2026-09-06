@@ -524,6 +524,7 @@ async fn scoped_wire_join_waits_for_cleanup_and_surfaces_cleanup_failure() {
             let cleaned = self.cleaned.clone();
             let fail = self.fail;
             Ok(PreparedInvocation {
+                lifecycle: None,
                 run: Box::new(|_| Box::pin(async { InvokeExit::Completed(vec![42]) })),
                 cleanup: Some(Box::pin(async move {
                     cleaned.store(true, Ordering::Release);

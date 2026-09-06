@@ -16,6 +16,7 @@ use crate::{
     InvokeExit,
     isolated_tasks::{
         CancelResult, IsolatedTasks, TaskCancellation, TaskCleanup, TaskError, TaskId,
+        TaskLifecycle,
     },
 };
 
@@ -164,15 +165,22 @@ pub type ExecutionFuture = Pin<Box<dyn Future<Output = InvokeExit> + Send + 'sta
 pub type InvocationFactory = Box<dyn FnOnce(TaskCancellation) -> ExecutionFuture + Send + 'static>;
 
 /// An execution future and optional separately owned descendant teardown.
-/// Cleanup must not live inside `run`: cancelling that future would skip it.
+/// Cleanup and durable settlement must not live inside `run`: cancellation
+/// would skip them. Launch this through `spawn_managed` to retain both.
 pub struct PreparedInvocation {
     pub run: InvocationFactory,
     pub cleanup: Option<TaskCleanup>,
+    /// Optional asynchronous admission and durable settlement owned by the supervisor.
+    pub lifecycle: Option<Arc<dyn TaskLifecycle>>,
 }
 
 impl PreparedInvocation {
     pub fn leaf(run: InvocationFactory) -> Self {
-        Self { run, cleanup: None }
+        Self {
+            run,
+            cleanup: None,
+            lifecycle: None,
+        }
     }
 }
 
@@ -299,10 +307,10 @@ pub fn add_execution_to_linker<T: ExecutionView>(linker: &mut Linker<T>) -> anyh
                 Err(TryAcquireError::Closed) => return Ok((Err(ExecutionError::Closed),)),
                 Err(TryAcquireError::NoPermits) => return Ok((Err(ExecutionError::Capacity),)),
             };
-            let started = match factory.cleanup {
-                Some(cleanup) => owner.tasks.spawn_scoped(factory.run, cleanup),
-                None => owner.tasks.spawn(factory.run),
-            };
+            let started =
+                owner
+                    .tasks
+                    .spawn_managed(factory.run, factory.cleanup, factory.lifecycle);
             let id = match started {
                 Ok(id) => id,
                 Err(error) => return Ok((Err(ExecutionError::from(error)),)),

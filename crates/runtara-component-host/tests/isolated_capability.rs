@@ -25,6 +25,7 @@ impl InvocationScopeFactory for CachedChildScope {
             return Err(ExecutionError::InvalidContext);
         }
         Ok(ChildInvocationScope {
+            lifecycle: None,
             make_spec: Box::new(|_| Ok(spec().into())),
             execution: None,
         })
@@ -372,7 +373,9 @@ async fn prepared_catalog_survives_queue_and_enabled_cache() {
         2
     );
     assert!(invocation.cleanup.is_none());
-    let id = tasks.spawn(invocation.run).unwrap();
+    let id = tasks
+        .spawn_managed(invocation.run, invocation.cleanup, invocation.lifecycle)
+        .unwrap();
     drop(launcher);
     let outcome = tokio::time::timeout(Duration::from_secs(5), tasks.join(id))
         .await

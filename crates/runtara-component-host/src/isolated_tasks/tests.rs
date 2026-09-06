@@ -486,3 +486,246 @@ async fn repeated_and_concurrent_shutdown_cannot_forget_failed_cleanup() {
     );
     assert_eq!(tasks.retained_result_bytes(), 0);
 }
+
+#[derive(Default)]
+struct LifecycleProbe {
+    admissions: std::sync::atomic::AtomicUsize,
+    settlements: std::sync::atomic::AtomicUsize,
+    admission_entered: Notify,
+    settlement_entered: Notify,
+    release_settlement: Notify,
+    hold_admission: bool,
+    hold_settlement: bool,
+    fail_admission: bool,
+    panic_admission: bool,
+    fail_settlement: bool,
+    panic_settlement: bool,
+    promote_failure: bool,
+    early_cancel: bool,
+    admission_dropped: Arc<AtomicBool>,
+    received_failure: AtomicBool,
+    received_cancel: AtomicBool,
+}
+#[async_trait::async_trait]
+impl TaskLifecycle for LifecycleProbe {
+    async fn admit(&self, _: TaskCancellation) -> Result<Option<InvokeExit>, TaskError> {
+        self.admissions.fetch_add(1, Ordering::AcqRel);
+        let _guard = Dropped(self.admission_dropped.clone());
+        self.admission_entered.notify_one();
+        assert!(!self.panic_admission, "admission panic fixture");
+        if self.fail_admission {
+            return Err(TaskError::WorkerLost);
+        }
+        if self.hold_admission {
+            std::future::pending::<()>().await;
+        }
+        Ok(self.early_cancel.then_some(InvokeExit::Cancelled))
+    }
+    async fn settle(
+        &self,
+        outcome: Result<InvokeExit, TaskError>,
+        _: TaskCancellation,
+    ) -> Result<InvokeExit, TaskError> {
+        self.settlements.fetch_add(1, Ordering::AcqRel);
+        self.received_failure
+            .store(outcome.is_err(), Ordering::Release);
+        self.received_cancel.store(
+            matches!(outcome, Ok(InvokeExit::Cancelled)),
+            Ordering::Release,
+        );
+        self.settlement_entered.notify_one();
+        if self.hold_settlement {
+            self.release_settlement.notified().await;
+        }
+        assert!(!self.panic_settlement, "settlement panic fixture");
+        if self.fail_settlement {
+            return Err(TaskError::WorkerLost);
+        }
+        if self.promote_failure {
+            return Ok(InvokeExit::Completed(vec![]));
+        }
+        outcome
+    }
+}
+
+#[tokio::test]
+async fn managed_prestart_cancellation_skips_admission_but_still_settles() {
+    let tasks = registry(1, 1024);
+    let hooks = Arc::new(LifecycleProbe::default());
+    let ran = Arc::new(AtomicBool::new(false));
+    let flag = ran.clone();
+    let id = tasks
+        .spawn_managed(
+            move |_| async move {
+                flag.store(true, Ordering::Release);
+                InvokeExit::Completed(vec![])
+            },
+            None,
+            Some(hooks.clone()),
+        )
+        .unwrap();
+    tasks.cancel(id).unwrap();
+    assert!(matches!(
+        tasks.join(id).await.unwrap().outcome(),
+        InvokeExit::Cancelled
+    ));
+    assert!(!ran.load(Ordering::Acquire));
+    assert_eq!(hooks.admissions.load(Ordering::Acquire), 0);
+    assert_eq!(hooks.settlements.load(Ordering::Acquire), 1);
+    assert!(hooks.received_cancel.load(Ordering::Acquire));
+    tasks.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn managed_admission_tombstone_skips_execution() {
+    let tasks = registry(1, 1024);
+    let hooks = Arc::new(LifecycleProbe {
+        early_cancel: true,
+        ..Default::default()
+    });
+    let id = tasks
+        .spawn_managed(
+            |_| async { panic!("cancelled admission must not construct execution") },
+            None,
+            Some(hooks.clone()),
+        )
+        .unwrap();
+    assert!(matches!(
+        tasks.join(id).await.unwrap().outcome(),
+        InvokeExit::Cancelled
+    ));
+    assert_eq!(hooks.admissions.load(Ordering::Acquire), 1);
+    assert_eq!(hooks.settlements.load(Ordering::Acquire), 1);
+    tasks.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn managed_cancel_drops_pending_admission_then_retains_capacity_through_settlement() {
+    let tasks = registry(1, 1024);
+    let hooks = Arc::new(LifecycleProbe {
+        hold_admission: true,
+        hold_settlement: true,
+        ..Default::default()
+    });
+    let cleaned = Arc::new(AtomicBool::new(false));
+    let flag = cleaned.clone();
+    let id = tasks
+        .spawn_managed(
+            |_| async { panic!("cancelled admission must not run") },
+            Some(Box::pin(async move {
+                flag.store(true, Ordering::Release);
+                Ok(())
+            })),
+            Some(hooks.clone()),
+        )
+        .unwrap();
+    hooks.admission_entered.notified().await;
+    tasks.cancel(id).unwrap();
+    hooks.settlement_entered.notified().await;
+    assert!(hooks.admission_dropped.load(Ordering::Acquire));
+    assert!(cleaned.load(Ordering::Acquire));
+    assert!(matches!(
+        tasks.spawn(|_| async { InvokeExit::Completed(vec![]) }),
+        Err(TaskError::AtCapacity)
+    ));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), tasks.join(id))
+            .await
+            .is_err()
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), tasks.shutdown())
+            .await
+            .is_err()
+    );
+    hooks.release_settlement.notify_one();
+    tasks.shutdown().await.unwrap();
+    assert_eq!(hooks.settlements.load(Ordering::Acquire), 1);
+}
+
+#[tokio::test]
+async fn managed_settlement_winner_is_not_overwritten_by_late_local_cancel() {
+    let tasks = registry(1, 1024);
+    let hooks = Arc::new(LifecycleProbe {
+        hold_settlement: true,
+        ..Default::default()
+    });
+    let id = tasks
+        .spawn_managed(
+            |_| async { InvokeExit::Completed(vec![42]) },
+            None,
+            Some(hooks.clone()),
+        )
+        .unwrap();
+    hooks.settlement_entered.notified().await;
+    // The hook owns race arbitration now; a request cannot overwrite its result.
+    assert_eq!(tasks.cancel(id).unwrap(), CancelResult::Requested);
+    hooks.release_settlement.notify_one();
+    assert!(
+        matches!(tasks.join(id).await.unwrap().outcome(),InvokeExit::Completed(bytes) if bytes == &[42])
+    );
+    assert_eq!(tasks.cancel(id).unwrap(), CancelResult::AlreadyTerminal);
+    tasks.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn managed_failures_never_publish_a_result_or_hide_failed_cleanup() {
+    for case in [
+        "admission",
+        "settlement",
+        "settlement-panic",
+        "cleanup",
+        "promote",
+    ] {
+        let tasks = registry(1, 1024);
+        let hooks = Arc::new(LifecycleProbe {
+            fail_admission: matches!(case, "admission" | "promote"),
+            fail_settlement: case == "settlement",
+            panic_settlement: case == "settlement-panic",
+            promote_failure: matches!(case, "cleanup" | "promote"),
+            ..Default::default()
+        });
+        let cleanup: TaskCleanup = Box::pin(async move {
+            if case == "cleanup" {
+                Err(TaskError::WorkerLost)
+            } else {
+                Ok(())
+            }
+        });
+        let id = tasks
+            .spawn_managed(
+                |_| async { InvokeExit::Completed(vec![]) },
+                Some(cleanup),
+                Some(hooks.clone()),
+            )
+            .unwrap();
+        assert!(
+            matches!(tasks.join(id).await, Err(TaskError::WorkerLost)),
+            "{case}"
+        );
+        assert_eq!(hooks.settlements.load(Ordering::Acquire), 1);
+        assert!(matches!(tasks.shutdown().await, Err(TaskError::WorkerLost)));
+        assert!(matches!(tasks.shutdown().await, Err(TaskError::WorkerLost)));
+    }
+}
+
+#[tokio::test]
+async fn managed_admission_panic_is_settled_and_budget_failure_is_not_a_guest_retry() {
+    for panic_admission in [true, false] {
+        let tasks = registry(1, if panic_admission { 1024 } else { 0 });
+        let hooks = Arc::new(LifecycleProbe {
+            panic_admission,
+            ..Default::default()
+        });
+        let id = tasks
+            .spawn_managed(
+                |_| async { InvokeExit::Completed(vec![1]) },
+                None,
+                Some(hooks.clone()),
+            )
+            .unwrap();
+        assert!(matches!(tasks.join(id).await, Err(TaskError::WorkerLost)));
+        assert!(matches!(tasks.shutdown().await, Err(TaskError::WorkerLost)));
+        assert_eq!(hooks.settlements.load(Ordering::Acquire), 1);
+    }
+}

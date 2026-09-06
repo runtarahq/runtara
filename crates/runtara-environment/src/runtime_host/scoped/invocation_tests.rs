@@ -273,7 +273,10 @@ async fn scope_factory_real_launcher_validates_child_results_without_root_effect
         let req = request(cap);
         let input = req.input.clone();
         let launch = launcher.prepare(req).unwrap();
-        let id = fx.tasks.spawn(launch.run).unwrap();
+        let id = fx
+            .tasks
+            .spawn_managed(launch.run, launch.cleanup, launch.lifecycle)
+            .unwrap();
         let result = tokio::time::timeout(Duration::from_secs(5), fx.tasks.join(id))
             .await
             .unwrap()
@@ -338,7 +341,10 @@ async fn scope_factory_root_cancel_deadline_and_task_cancel_prevent_initializers
         );
         let launcher = launcher(&fx, scopes).await;
         let launch = launcher.prepare(request("copy")).unwrap();
-        let id = fx.tasks.spawn(launch.run).unwrap();
+        let id = fx
+            .tasks
+            .spawn_managed(launch.run, launch.cleanup, launch.lifecycle)
+            .unwrap();
         if mode == "task-cancel" {
             fx.tasks.cancel(id).unwrap();
         }
@@ -554,7 +560,10 @@ async fn compiler_checkpoint_contracts_bind_real_children_and_persistence() {
         let launcher =
             PreparedInvocationLauncher::new(fx.executor.clone(), catalog, scopes).unwrap();
         let launch = launcher.prepare(make_request(input.clone())).unwrap();
-        let id = fx.tasks.spawn(launch.run).unwrap();
+        let id = fx
+            .tasks
+            .spawn_managed(launch.run, launch.cleanup, launch.lifecycle)
+            .unwrap();
         let result = tokio::time::timeout(Duration::from_secs(5), fx.tasks.join(id))
             .await
             .unwrap()

@@ -24,6 +24,30 @@ use crate::InvokeExit;
 /// is published when cleanup fails or panics.
 pub type TaskCleanup = Pin<Box<dyn Future<Output = Result<(), TaskError>> + Send + 'static>>;
 
+/// Optional host-only durable admission and outcome arbitration. The guest still
+/// chooses graph successors and retries. Ordinary tasks install no lifecycle.
+#[async_trait::async_trait]
+pub trait TaskLifecycle: Send + Sync {
+    /// Runs inside cancellable execution before its factory/Store starts. None
+    /// admits execution; Some returns an existing control outcome without a Store.
+    /// Cancellation can drop this future after an external transaction commits:
+    /// implementations must retain an idempotent identity outside this future.
+    async fn admit(&self, cancel: TaskCancellation) -> Result<Option<InvokeExit>, TaskError>;
+    /// Runs exactly once under the supervisor after execution and descendant
+    /// cleanup, including pre-start cancellation, admission failure and panic.
+    /// It must resolve uncertain admission and durable races before returning.
+    /// The result is authoritative: cancellation arriving during settlement is
+    /// a request, not permission to overwrite an already committed outcome.
+    /// An incoming host failure cannot be promoted to success. Errors/panics
+    /// suppress publication and fail root shutdown; callers must fence the root.
+    /// Bound storage/cleanup time here. No Store or graph work may be started.
+    async fn settle(
+        &self,
+        outcome: Result<InvokeExit, TaskError>,
+        cancel: TaskCancellation,
+    ) -> Result<InvokeExit, TaskError>;
+}
+
 static NEXT_OWNER: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -244,7 +268,7 @@ impl IsolatedTasks {
         F: FnOnce(TaskCancellation) -> Fut + Send + 'static,
         Fut: Future<Output = InvokeExit> + Send + 'static,
     {
-        self.spawn_inner(run, None)
+        self.spawn_inner(run, None, None)
     }
 
     /// Run descendant teardown after dropping execution, even on pre-start
@@ -255,10 +279,30 @@ impl IsolatedTasks {
         F: FnOnce(TaskCancellation) -> Fut + Send + 'static,
         Fut: Future<Output = InvokeExit> + Send + 'static,
     {
-        self.spawn_inner(run, Some(cleanup))
+        self.spawn_inner(run, Some(cleanup), None)
     }
 
-    fn spawn_inner<F, Fut>(&self, run: F, cleanup: Option<TaskCleanup>) -> Result<TaskId, TaskError>
+    /// Attach host-only async admission/settlement while keeping teardown outside
+    /// cancellable execution. No lifecycle preserves ordinary task semantics.
+    pub fn spawn_managed<F, Fut>(
+        &self,
+        run: F,
+        cleanup: Option<TaskCleanup>,
+        lifecycle: Option<Arc<dyn TaskLifecycle>>,
+    ) -> Result<TaskId, TaskError>
+    where
+        F: FnOnce(TaskCancellation) -> Fut + Send + 'static,
+        Fut: Future<Output = InvokeExit> + Send + 'static,
+    {
+        self.spawn_inner(run, cleanup, lifecycle)
+    }
+
+    fn spawn_inner<F, Fut>(
+        &self,
+        run: F,
+        cleanup: Option<TaskCleanup>,
+        lifecycle: Option<Arc<dyn TaskLifecycle>>,
+    ) -> Result<TaskId, TaskError>
     where
         F: FnOnce(TaskCancellation) -> Fut + Send + 'static,
         Fut: Future<Output = InvokeExit> + Send + 'static,
@@ -283,18 +327,35 @@ impl IsolatedTasks {
         });
         let (tx, rx) = watch::channel(None);
         let runner_control = control.clone();
+        let admission = lifecycle.clone();
+        let admitting = lifecycle.as_ref().map(|_| Arc::new(AtomicBool::new(false)));
+        let worker_admitting = admitting.clone();
         let worker = runtime.spawn(async move {
             let cancel = TaskCancellation(runner_control.clone());
             if cancel.is_requested() {
-                return InvokeExit::Cancelled;
+                return Ok(InvokeExit::Cancelled);
             }
-            let mut run = Box::pin(run(cancel));
+            let mut run = Box::pin(async move {
+                if let Some(admission) = admission {
+                    let admitting = worker_admitting.as_ref().expect("managed admission state");
+                    admitting.store(true, Ordering::Release);
+                    let result = admission.admit(cancel.clone()).await;
+                    admitting.store(false, Ordering::Release);
+                    if let Some(outcome) = result? {
+                        return Ok(outcome);
+                    }
+                    if cancel.is_requested() {
+                        return Ok(InvokeExit::Cancelled);
+                    }
+                }
+                Ok(run(cancel).await)
+            });
             let outcome = tokio::select! {
                 biased;
-                _=runner_control.wake.notified()=>InvokeExit::Cancelled,
+                _=runner_control.wake.notified()=>Ok(InvokeExit::Cancelled),
                 outcome=&mut run=>outcome,
             };
-            // Includes the child Store and its pending host futures.
+            // Includes admission, the child Store and its pending host futures.
             drop(run);
             outcome
         });
@@ -304,24 +365,51 @@ impl IsolatedTasks {
         let supervisor = runtime.spawn(async move {
             // Join also observes native panics and waits for task-owned values
             // to be dropped; an executor panic cannot strand join indefinitely.
-            let mut outcome = worker.await.unwrap_or_else(|_| InvokeExit::Trapped {
-                reason: "isolated execution worker failed".into(),
-            });
-            if let Some(cleanup) = cleanup {
-                // A distinct owned task converts a cleanup panic into a host
-                // failure. Leaves do not allocate this task. Do not publish a
-                // cancelled/trapped guest result if teardown is unconfirmed.
-                if !matches!(cleanup_runtime.spawn(cleanup).await, Ok(Ok(()))) {
-                    return; // closes the result channel: join reports WorkerLost
+            let mut candidate = worker.await.unwrap_or_else(|_| {
+                if admitting
+                    .as_ref()
+                    .is_some_and(|flag| flag.load(Ordering::Acquire))
+                {
+                    Err(TaskError::WorkerLost)
+                } else {
+                    Ok(InvokeExit::Trapped {
+                        reason: "isolated execution worker failed".into(),
+                    })
                 }
+            });
+            if let Some(cleanup) = cleanup
+                && !matches!(cleanup_runtime.spawn(cleanup).await, Ok(Ok(())))
+            {
+                candidate = Err(TaskError::WorkerLost);
             }
+            if *finish_control.phase.lock().unwrap() == Phase::Stopping && candidate.is_ok() {
+                candidate = Ok(InvokeExit::Cancelled);
+            }
+            let managed = lifecycle.is_some();
+            if let Some(lifecycle) = lifecycle {
+                let failed = candidate.is_err();
+                let token = TaskCancellation(finish_control.clone());
+                candidate = cleanup_runtime
+                    .spawn(async move { lifecycle.settle(candidate, token).await })
+                    .await
+                    .unwrap_or(Err(TaskError::WorkerLost));
+                if failed {
+                    return;
+                } // a finalizer cannot erase unconfirmed cleanup/admission
+            }
+            let Ok(mut outcome) = candidate else {
+                return;
+            };
             let mut phase = finish_control.phase.lock().unwrap();
-            if *phase == Phase::Stopping {
+            if !managed && *phase == Phase::Stopping {
                 outcome = InvokeExit::Cancelled;
             }
             let mut bytes = retained_bytes(&outcome);
             let mut used = budget.used.lock().unwrap();
             if bytes > budget.limit.saturating_sub(*used) {
+                if managed {
+                    return;
+                } // never replace a durable winner with a recoverable guest trap
                 // Fixed-size fallback is charged as task metadata, not payload.
                 outcome = InvokeExit::Trapped {
                     reason: "isolated result budget exceeded".into(),

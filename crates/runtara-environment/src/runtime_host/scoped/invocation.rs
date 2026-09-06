@@ -82,6 +82,7 @@ impl InvocationScopeFactory for ScopedInvocationFactory {
         let input = request.input.clone();
         let path = request.context.path.clone();
         Ok(ChildInvocationScope {
+            lifecycle: None,
             make_spec: Box::new(move |cancel| {
                 // Recheck the root admission fence inside the actual task,
                 // including a close between authorization and task start.

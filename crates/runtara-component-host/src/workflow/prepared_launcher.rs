@@ -3,11 +3,12 @@ use super::*;
 use crate::execution_host::{
     Entry, ExecutionError, InvocationLauncher, PreparedInvocation, StartRequest,
 };
-use crate::isolated_tasks::TaskCancellation;
+use crate::isolated_tasks::{TaskCancellation, TaskLifecycle};
 use runtara_workflow_wit::isolation_package::NamespaceFrame;
 
 /// Runtime authority for one invocation. Constructing the spec happens inside
-/// the owned task, after the registry's pre-start cancellation check, so its
+/// the owned task, after the registry's cancellation check and optional async
+/// admission, so its
 /// runtime adapter can use the actual task token. Do not copy an unrestricted
 /// root RuntimeHost into this scope.
 ///
@@ -18,6 +19,8 @@ pub struct ChildInvocationScope {
     pub make_spec:
         Box<dyn FnOnce(TaskCancellation) -> Result<ChildInvocationSpec, String> + Send + 'static>,
     pub execution: Option<Arc<ExecutionContext>>,
+    /// Durable admission and settlement, kept outside cancellable Store execution.
+    pub lifecycle: Option<Arc<dyn TaskLifecycle>>,
 }
 
 /// A successfully admitted child and optional local outcome validation. The
@@ -184,6 +187,7 @@ impl InvocationLauncher for PreparedInvocationLauncher {
                 })
             }),
             cleanup,
+            lifecycle: scope.lifecycle,
         })
     }
 }
