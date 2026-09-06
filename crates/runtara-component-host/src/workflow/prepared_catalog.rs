@@ -3,7 +3,10 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use anyhow::{Result, ensure};
 use runtara_workflow_wit::isolation_package::Binding;
-use wasmtime::component::{Component, InstancePre, Linker, types::ComponentItem};
+use wasmtime::{
+    Engine,
+    component::{Component, InstancePre, Linker, types::ComponentItem},
+};
 
 use super::WorkflowState;
 
@@ -21,6 +24,16 @@ pub struct PreparedChildCatalog {
 impl PreparedChildCatalog {
     pub fn artifact_count(&self) -> usize {
         self.artifacts.len()
+    }
+
+    pub(super) fn validate_engine(&self, engine: &Engine) -> Result<()> {
+        ensure!(
+            self.artifacts
+                .values()
+                .all(|pre| Engine::same(pre.component().engine(), engine)),
+            "isolated catalog belongs to a different execution engine"
+        );
+        Ok(())
     }
 
     pub fn binding_count(&self) -> usize {

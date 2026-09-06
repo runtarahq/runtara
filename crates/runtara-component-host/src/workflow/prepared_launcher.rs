@@ -1,0 +1,118 @@
+//! Resolve only prepared package bindings; orchestration stays in the guest.
+use super::*;
+use crate::execution_host::{
+    Entry, ExecutionError, InvocationLauncher, PreparedInvocation, StartRequest,
+};
+use crate::isolated_tasks::TaskCancellation;
+
+/// Runtime authority for one invocation. Constructing the spec happens inside
+/// the owned task, after the registry's pre-start cancellation check, so its
+/// runtime adapter can use the actual task token. Do not copy an unrestricted
+/// root RuntimeHost into this scope.
+///
+/// `execution`, when present, is a fresh context for this child's descendants.
+/// The launcher transfers its cleanup to the supervisor, outside the execution
+/// future. Scope construction must not start any descendant work.
+pub struct ChildInvocationScope {
+    pub make_spec: Box<dyn FnOnce(TaskCancellation) -> WorkflowRunSpec + Send + 'static>,
+    pub execution: Option<Arc<ExecutionContext>>,
+}
+
+/// Bound to immutable parent/root/tenant authority by the embedding. Validate
+/// relative invocation identity and authorize the binding/entry against that
+/// scope. Input bytes and guest metadata must never select a different tenant,
+/// root RuntimeHost, prepared catalog, or credential channel.
+///
+/// No I/O, compilation, guest execution or descendant launch is allowed here.
+/// This interface supplies authority; it does not choose graph successors,
+/// retries, recovery, or suspension policy.
+pub trait InvocationScopeFactory: Send + Sync {
+    fn prepare_child(&self, request: &StartRequest)
+    -> Result<ChildInvocationScope, ExecutionError>;
+}
+
+/// A production launcher over the catalog retained by the verified preparation
+/// token. Every Store is fresh; only immutable prepared code is shared. The
+/// scope factory is required, so enabling task imports cannot accidentally
+/// inherit the parent's unrestricted runtime authority.
+pub struct PreparedInvocationLauncher {
+    executor: Arc<WorkflowExecutor>,
+    catalog: Arc<PreparedChildCatalog>,
+    scopes: Arc<dyn InvocationScopeFactory>,
+}
+
+impl PreparedInvocationLauncher {
+    pub fn new(
+        executor: Arc<WorkflowExecutor>,
+        catalog: Arc<PreparedChildCatalog>,
+        scopes: Arc<dyn InvocationScopeFactory>,
+    ) -> Result<Self> {
+        catalog.validate_engine(executor.engine())?;
+        Ok(Self {
+            executor,
+            catalog,
+            scopes,
+        })
+    }
+}
+
+impl InvocationLauncher for PreparedInvocationLauncher {
+    fn prepare(&self, request: StartRequest) -> Result<PreparedInvocation, ExecutionError> {
+        let (binding, pre) = self
+            .catalog
+            .resolve(&request.binding)
+            .ok_or(ExecutionError::InvalidBinding)?;
+        let lifecycle = matches!(
+            binding.interface.as_str(),
+            runtara_workflow_wit::LIFECYCLE_INTERFACE_NAME
+                | runtara_workflow_wit::LIFECYCLE_INTERFACE_NAME_V1
+        );
+        if lifecycle != matches!(request.entry, Entry::Workflow) {
+            return Err(ExecutionError::InvalidBinding);
+        }
+        let scope = self.scopes.prepare_child(&request)?;
+        let cleanup = scope
+            .execution
+            .as_ref()
+            .map(|execution| execution.clone().into_cleanup());
+        let pre = pre.clone();
+        let interface = binding.interface.clone();
+        let executor = self.executor.clone();
+        Ok(PreparedInvocation {
+            run: Box::new(move |token| {
+                Box::pin(async move {
+                    let spec = (scope.make_spec)(token.clone());
+                    let entry = match &request.entry {
+                        Entry::Capability(capability) => InvocationEntry::Capability {
+                            interface: &interface,
+                            capability,
+                        },
+                        Entry::Workflow => InvocationEntry::Lifecycle {
+                            interface: Some(&interface),
+                        },
+                    };
+                    executor
+                        .execute_entry(
+                            &pre,
+                            spec,
+                            request.input,
+                            None,
+                            entry,
+                            InvocationControl {
+                                task_cancel: Some(token),
+                                execution: scope.execution,
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .exit
+                })
+            }),
+            cleanup,
+        })
+    }
+}
+
+#[cfg(test)]
+#[path = "prepared_launcher_tests.rs"]
+mod tests;

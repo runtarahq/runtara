@@ -43,7 +43,8 @@ pub use engine::{EPOCH_TICK, EngineConfig, build_engine, spawn_epoch_ticker};
 pub use host_state::{CallContext, HostState};
 pub use registry::{LoadedAgent, build_linker, instantiate, load_agent};
 pub use workflow::{
-    CapabilityInvocation, InvokeExit, InvokeRunResult, PreparedChildCatalog, PreparedWorkflow,
+    CapabilityInvocation, ChildInvocationScope, InvocationScopeFactory, InvokeExit,
+    InvokeRunResult, PreparedChildCatalog, PreparedInvocationLauncher, PreparedWorkflow,
     WorkflowExecutor, WorkflowExit, WorkflowLimits, WorkflowRunResult, WorkflowRunSpec,
     WorkflowStartConfirmation, WorkflowState,
 };

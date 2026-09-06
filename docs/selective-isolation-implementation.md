@@ -253,10 +253,41 @@ passed, followed by the full **112-test component-host suite** and focused
 all-target Clippy with both integration/PoC features. This is a live ownership
 fix; durable root fencing remains a separate required integration.
 
+### Prepared package invocation launcher
+
+`PreparedInvocationLauncher` now resolves Agent and child-workflow invocations
+from the catalog owned by the verified preparation token. It rejects absent
+bindings, mismatched entry kinds and catalogs from a different engine before
+constructing an invocation scope. The selected interface comes from the package,
+not guest input; lifecycle bindings select their exact exported version even
+when a component offers both lifecycle versions.
+
+The embedding must supply an `InvocationScopeFactory` bound to parent/root/tenant
+authority. There is deliberately no default that copies the root RuntimeHost.
+The factory validates relative invocation metadata and constructs child scope;
+its spec factory runs only inside the admitted task and receives that task's
+cancellation token. Any descendant context is retained separately by the task
+supervisor for cleanup after execution. The production persistence-backed scope
+factory and child runtime adapter still need implementation.
+
+Six new tests passed: binding/entry/scope rejection before initialization,
+repeated fresh component state with owned large byte payloads, pre-start cancel
+without spec/Store construction, child-scope cleanup, parent-WASM cancellation
+through the real launcher, inherited root cancellation, engine mismatch, exact
+lifecycle version and completion/error/suspension outcomes. The existing raw
+package/worker/cache integration test now invokes the actual random-double agent
+through this launcher after deleting its source and dropping the preparation
+owner; cache-enabled and cache-disabled subprocess cases both passed.
+
+The full component-host suite passed **118 tests** with one manual benchmark
+ignored; all-target Clippy passed with both integration/PoC features. Generated
+DSL workflows still use the legacy backend, and server launch selection remains
+unchanged until scoped runtime authority and the compiler are wired.
+
 ## Remaining required work
 
 - P0: add explicit legacy/isolated differential selection and coverage counters.
-- P1: production scoped launcher and environment ownership integration, aggregate
+- P1: production invocation-scope factory and environment ownership integration, aggregate
   input/transport/guest resource reservations and root fencing on cleanup failure.
 - P2: sequential/parallel Agent call backend and every AI auxiliary invocation,
   preserving package state eligibility and existing invocation semantics.

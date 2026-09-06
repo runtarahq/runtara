@@ -63,7 +63,7 @@ impl WorkflowExecutor {
                     duration: overall_started.elapsed(),
                 },
                 result = executor.execute_entry(
-                    &pre, spec, input, start_confirmation, InvocationEntry::Lifecycle, control,
+                    &pre, spec, input, start_confirmation, InvocationEntry::Lifecycle { interface: None }, control,
                 ) => result,
             }
         });

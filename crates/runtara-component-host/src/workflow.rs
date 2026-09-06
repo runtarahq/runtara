@@ -42,6 +42,11 @@ use wasmtime_wasi_http::{
 #[path = "workflow/prepared_catalog.rs"]
 mod prepared_catalog;
 pub use prepared_catalog::PreparedChildCatalog;
+#[path = "workflow/prepared_launcher.rs"]
+mod prepared_launcher;
+pub use prepared_launcher::{
+    ChildInvocationScope, InvocationScopeFactory, PreparedInvocationLauncher,
+};
 
 use crate::engine::EPOCH_TICK;
 use crate::execution_host::{ExecutionContext, ExecutionView};
@@ -150,7 +155,9 @@ pub struct CapabilityInvocation<'a> {
 }
 
 enum InvocationEntry<'a> {
-    Lifecycle,
+    Lifecycle {
+        interface: Option<&'a str>,
+    },
     Capability {
         interface: &'a str,
         capability: &'a str,
@@ -823,7 +830,7 @@ impl WorkflowExecutor {
             spec,
             input,
             start_confirmation,
-            InvocationEntry::Lifecycle,
+            InvocationEntry::Lifecycle { interface: None },
             InvocationControl::default(),
         )
         .await
@@ -890,7 +897,7 @@ impl WorkflowExecutor {
             spec,
             input,
             None,
-            InvocationEntry::Lifecycle,
+            InvocationEntry::Lifecycle { interface: None },
             InvocationControl {
                 task_cancel: Some(cancellation),
                 execution,
@@ -999,91 +1006,91 @@ impl WorkflowExecutor {
             } else {
                 store.data_mut().begin_active_execution(timeout);
                 let active_started = Instant::now();
-                let run =
-                    async {
-                        // Check before entering any guest initializer, including
-                        // short initializers that would not hit an epoch check.
-                        if spec
-                            .cancel
+                let run = async {
+                    // Check before entering any guest initializer, including
+                    // short initializers that would not hit an epoch check.
+                    if spec
+                        .cancel
+                        .as_ref()
+                        .is_some_and(|flag| flag.load(Ordering::Relaxed))
+                        || abandoned
                             .as_ref()
-                            .is_some_and(|flag| flag.load(Ordering::Relaxed))
-                            || abandoned
-                                .as_ref()
-                                .is_some_and(|flag| flag.load(Ordering::Acquire))
-                            || task_cancel
-                                .as_ref()
-                                .is_some_and(|token| token.is_requested())
-                        {
-                            store.data_mut().termination = Some(Termination::Cancelled);
-                            anyhow::bail!("execution cancelled before instantiation");
-                        }
-                        let instance = pre.instantiate_async(&mut store).await?;
-                        if let InvocationEntry::Capability {
-                            interface,
-                            capability,
-                            ..
-                        } = &entry
-                        {
-                            let interface_index = instance
-                                .get_export_index(&mut store, None, interface)
-                                .ok_or_else(|| {
-                                    anyhow::anyhow!("missing capability interface `{interface}`")
-                                })?;
-                            let invoke_index = instance
-                                .get_export_index(&mut store, Some(&interface_index), "invoke")
-                                .ok_or_else(|| {
-                                    anyhow::anyhow!("capability interface has no `invoke` export")
-                                })?;
-                            type CapabilityFunc = wasmtime::component::TypedFunc<
-                                (String, Vec<u8>),
-                                (Result<Vec<u8>, crate::lifecycle::WorkflowErrorInfo>,),
-                            >;
-                            let invoke: CapabilityFunc =
-                                instance.get_typed_func(&mut store, invoke_index)?;
-                            let (result,) = invoke
-                                .call_async(&mut store, ((*capability).to_owned(), input))
-                                .await?;
-                            return Ok(result.map(crate::lifecycle::WorkflowOutcome::Completed));
-                        }
-                        // v2 (0.2.0, async-typed invoke) is the current compile shape;
-                        // 0.1.0 (sync-typed) artifacts from before ABI v2 keep working.
-                        let iface_idx = instance
-                    .get_export_index(&mut store, None, crate::lifecycle::LIFECYCLE_INTERFACE_NAME)
-                    .or_else(|| {
-                        instance.get_export_index(
-                            &mut store,
-                            None,
-                            runtara_workflow_wit::LIFECYCLE_INTERFACE_NAME_V1,
-                        )
-                    })
-                    .ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "workflow component does not export {} (or the 0.1.0 variant) — \
-                             not an invoke-shaped artifact (use execute() for wasi:cli/run \
-                             artifacts)",
-                            crate::lifecycle::LIFECYCLE_INTERFACE_NAME
-                        )
-                    })?;
-                        let invoke_idx = instance
-                            .get_export_index(&mut store, Some(&iface_idx), "invoke")
+                            .is_some_and(|flag| flag.load(Ordering::Acquire))
+                        || task_cancel
+                            .as_ref()
+                            .is_some_and(|token| token.is_requested())
+                    {
+                        store.data_mut().termination = Some(Termination::Cancelled);
+                        anyhow::bail!("execution cancelled before instantiation");
+                    }
+                    let instance = pre.instantiate_async(&mut store).await?;
+                    if let InvocationEntry::Capability {
+                        interface,
+                        capability,
+                        ..
+                    } = &entry
+                    {
+                        let interface_index = instance
+                            .get_export_index(&mut store, None, interface)
                             .ok_or_else(|| {
-                                anyhow::anyhow!("lifecycle interface has no `invoke` export")
+                                anyhow::anyhow!("missing capability interface `{interface}`")
                             })?;
-                        type InvokeFunc = wasmtime::component::TypedFunc<
-                            (Vec<u8>,),
-                            (
-                                Result<
-                                    crate::lifecycle::WorkflowOutcome,
-                                    crate::lifecycle::WorkflowErrorInfo,
-                                >,
-                            ),
+                        let invoke_index = instance
+                            .get_export_index(&mut store, Some(&interface_index), "invoke")
+                            .ok_or_else(|| {
+                                anyhow::anyhow!("capability interface has no `invoke` export")
+                            })?;
+                        type CapabilityFunc = wasmtime::component::TypedFunc<
+                            (String, Vec<u8>),
+                            (Result<Vec<u8>, crate::lifecycle::WorkflowErrorInfo>,),
                         >;
-                        let invoke: InvokeFunc = instance.get_typed_func(&mut store, invoke_idx)?;
-                        let (result,) = invoke.call_async(&mut store, (input,)).await?;
-                        // post-return is driven automatically by wasmtime 44's typed
-                        // call path; the store is single-use anyway (fresh per run).
-                        Ok::<_, anyhow::Error>(result)
+                        let invoke: CapabilityFunc =
+                            instance.get_typed_func(&mut store, invoke_index)?;
+                        let (result,) = invoke
+                            .call_async(&mut store, ((*capability).to_owned(), input))
+                            .await?;
+                        return Ok(result.map(crate::lifecycle::WorkflowOutcome::Completed));
+                    }
+                    // v2 (0.2.0, async-typed invoke) is the current compile shape;
+                    // 0.1.0 (sync-typed) artifacts from before ABI v2 keep working.
+                    let iface_idx = if let InvocationEntry::Lifecycle {
+                        interface: Some(interface),
+                    } = &entry
+                    {
+                        instance
+                            .get_export_index(&mut store, None, interface)
+                            .ok_or_else(|| {
+                                anyhow::anyhow!("missing lifecycle interface `{interface}`")
+                            })?
+                    } else {
+                        instance.get_export_index(&mut store, None, crate::lifecycle::LIFECYCLE_INTERFACE_NAME)
+                                .or_else(|| instance.get_export_index(&mut store, None, runtara_workflow_wit::LIFECYCLE_INTERFACE_NAME_V1))
+                                .ok_or_else(|| anyhow::anyhow!(
+                                    "workflow component does not export {} (or the 0.1.0 variant) — \
+                                     not an invoke-shaped artifact (use execute() for wasi:cli/run artifacts)",
+                                    crate::lifecycle::LIFECYCLE_INTERFACE_NAME
+                                ))?
                     };
+                    let invoke_idx = instance
+                        .get_export_index(&mut store, Some(&iface_idx), "invoke")
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("lifecycle interface has no `invoke` export")
+                        })?;
+                    type InvokeFunc = wasmtime::component::TypedFunc<
+                        (Vec<u8>,),
+                        (
+                            Result<
+                                crate::lifecycle::WorkflowOutcome,
+                                crate::lifecycle::WorkflowErrorInfo,
+                            >,
+                        ),
+                    >;
+                    let invoke: InvokeFunc = instance.get_typed_func(&mut store, invoke_idx)?;
+                    let (result,) = invoke.call_async(&mut store, (input,)).await?;
+                    // post-return is driven automatically by wasmtime 44's typed
+                    // call path; the store is single-use anyway (fresh per run).
+                    Ok::<_, anyhow::Error>(result)
+                };
                 tokio::pin!(run);
                 let watchdog = async {
                     loop {
@@ -1441,3 +1448,7 @@ mod isolated_capability_tests;
 
 #[path = "workflow/scoped_execution.rs"]
 mod scoped_execution;
+
+#[cfg(test)]
+#[path = "workflow/test_support.rs"]
+mod test_support;

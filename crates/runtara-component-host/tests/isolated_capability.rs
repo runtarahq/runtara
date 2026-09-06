@@ -1,7 +1,29 @@
 //! Actual built Agent components through the guarded isolated Store runner.
 #![cfg(feature = "component-integration-tests")]
 
+use runtara_component_host::execution_host::{
+    Entry, ExecutionError, InvocationContext, InvocationLauncher, StartRequest,
+};
 use runtara_component_host::isolated_tasks::IsolatedTasks;
+use runtara_component_host::{
+    ChildInvocationScope, InvocationScopeFactory, PreparedInvocationLauncher,
+};
+
+struct CachedChildScope;
+impl InvocationScopeFactory for CachedChildScope {
+    fn prepare_child(
+        &self,
+        request: &StartRequest,
+    ) -> Result<ChildInvocationScope, ExecutionError> {
+        if request.context.path != "cache-test/random" || request.context.attempt != 1 {
+            return Err(ExecutionError::InvalidContext);
+        }
+        Ok(ChildInvocationScope {
+            make_spec: Box::new(|_| spec()),
+            execution: None,
+        })
+    }
+}
 use runtara_component_host::{
     CapabilityInvocation, EngineConfig, InvokeExit, WorkflowExecutor, WorkflowLimits,
     WorkflowRunSpec, build_engine,
@@ -225,32 +247,28 @@ async fn prepared_catalog_survives_queue_and_enabled_cache() {
         root_result.exit,
         runtara_component_host::WorkflowExit::Completed
     ));
-    let (binding, child_pre) = prepared
-        .child_catalog()
-        .unwrap()
-        .resolve("random-child")
-        .unwrap();
-    let interface = binding.interface.clone();
-    let child_pre = child_pre.clone();
+    let launcher = PreparedInvocationLauncher::new(
+        executor,
+        prepared.child_catalog().unwrap().clone(),
+        Arc::new(CachedChildScope),
+    )
+    .unwrap();
     drop(prepared);
     let tasks = IsolatedTasks::new(engine, 1, 1024).unwrap();
-    let id = tasks
-        .spawn(move |token| async move {
-            executor
-                .execute_isolated_capability(
-                    &child_pre,
-                    spec(),
-                    CapabilityInvocation {
-                        interface: &interface,
-                        capability: "random-double",
-                        input: b"{}".to_vec(),
-                    },
-                    token,
-                )
-                .await
-                .exit
+    let invocation = launcher
+        .prepare(StartRequest {
+            binding: "random-child".into(),
+            entry: Entry::Capability("random-double".into()),
+            input: b"{}".to_vec(),
+            context: InvocationContext {
+                path: "cache-test/random".into(),
+                attempt: 1,
+            },
         })
         .unwrap();
+    assert!(invocation.cleanup.is_none());
+    let id = tasks.spawn(invocation.run).unwrap();
+    drop(launcher);
     let outcome = tokio::time::timeout(Duration::from_secs(5), tasks.join(id))
         .await
         .unwrap()
