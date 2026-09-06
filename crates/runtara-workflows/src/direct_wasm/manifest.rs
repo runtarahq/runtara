@@ -29,7 +29,8 @@ use crate::workflow_features::{
 };
 
 /// Current direct workflow manifest schema version.
-pub const DIRECT_WORKFLOW_MANIFEST_VERSION: u32 = 2;
+/// Version 3 opts newly compiled artifacts into structured durable key v2.
+pub const DIRECT_WORKFLOW_MANIFEST_VERSION: u32 = 3;
 
 /// Versioned, deterministic manifest for a workflow graph.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]

@@ -645,6 +645,9 @@ fn assert_independent_waits(second_id: &str) {
     let host = Arc::new(CheckpointingRuntimeHost::new(b"{}"));
     let invoke = || run_invoke_once(&artifact.wasm_path, host.clone(), b"{}".to_vec());
     let first = signal_key(invoke());
+    let fields = super::key_fields(&first);
+    let old_key = format!("{}/audit-waits/wait/[0]", fields[4][0].as_str().unwrap());
+    host.deliver_signal(&old_key, br#"{"stale":true}"#);
     // A replay with no response must address the same first waiter.
     assert_eq!(signal_key(invoke()), first);
     host.deliver_signal(&first, br#"{"approved":true}"#);
@@ -663,9 +666,146 @@ fn audit_03_distinct_wait_ids_suspend_independently_and_replay_stably() {
 }
 
 #[test]
-#[ignore = "AUDIT-03: sibling loops reuse the same wait signal at index zero"]
 fn audit_03_same_local_wait_id_suspends_independently() {
     assert_independent_waits("wait");
+}
+
+fn audit_loop(id: &str, kind: &str, count: usize, body: Value) -> Value {
+    if kind == "While" {
+        let mut step = loop_step(id, body);
+        step["config"]["maxIterations"] = json!(count);
+        step
+    } else {
+        json!({"id":id,"stepType":"Split","config":{"value":immediate(json!(vec![0;count])),"sequential":true},"subgraph":body})
+    }
+}
+
+fn assert_sequential_signals(graph: Value, count: usize) {
+    let (_temp, artifact) = compile("audit-scoped-waits", graph);
+    let host = Arc::new(CheckpointingRuntimeHost::new(b"{}"));
+    let invoke = || run_invoke_once(&artifact.wasm_path, host.clone(), b"{}".to_vec());
+    let mut keys = std::collections::HashSet::new();
+    for n in 0..count {
+        let key = signal_key(invoke());
+        assert_eq!(signal_key(invoke()), key, "replay stays at waiter {n}");
+        assert!(
+            keys.insert(key.clone()),
+            "each invocation must own its signal: {key}"
+        );
+        host.deliver_signal(&key, &serde_json::to_vec(&json!({"response":n})).unwrap());
+    }
+    assert_eq!(completed(invoke()), json!({"ok":true}));
+}
+
+#[test]
+fn audit_03_sibling_mixed_loops_and_repeated_iterations_wait_independently() {
+    for (left, right) in [
+        ("While", "While"),
+        ("While", "Split"),
+        ("Split", "While"),
+        ("Split", "Split"),
+    ] {
+        let mut graph = waits_graph("wait");
+        let body = graph["steps"]["a"]["subgraph"].clone();
+        graph["steps"]["a"] = audit_loop("a", left, 2, body.clone());
+        graph["steps"]["b"] = audit_loop("b", right, 2, body);
+        assert_sequential_signals(graph, 4);
+    }
+}
+
+#[test]
+fn audit_03_nested_sibling_loops_keep_the_complete_path() {
+    let mut graph = waits_graph("wait");
+    for id in ["a", "b"] {
+        let leaf = graph["steps"][id]["subgraph"].clone();
+        graph["steps"][id]["subgraph"] = json!({"entryPoint":"inner","steps":{
+            "inner":audit_loop("inner", "Split", 2, leaf),"inner_done":finish("inner_done")
+        },"executionPlan":[{"fromStep":"inner","toStep":"inner_done"}]});
+    }
+    assert_sequential_signals(graph, 4);
+}
+
+#[test]
+fn audit_03_sibling_delays_checkpoint_independent_deadlines() {
+    let mut graph = waits_graph("wait");
+    graph["durable"] = json!(true);
+    for id in ["a", "b"] {
+        graph["steps"][id]["subgraph"]["steps"]["wait"] =
+            json!({"id":"wait","stepType":"Delay","durationMs":immediate(json!(60_000))});
+    }
+    let (_temp, artifact) = compile("audit-delays", graph);
+    let host = Arc::new(CheckpointingRuntimeHost::new(b"{}"));
+    let invoke = || run_invoke_once(&artifact.wasm_path, host.clone(), b"{}".to_vec());
+    *host.pinned_clock_ms.lock().unwrap() = Some(1_000_000);
+    assert!(matches!(invoke(), InvokeExit::Suspended(_)));
+    let first = host.checkpoints.lock().unwrap().clone();
+    assert!(matches!(invoke(), InvokeExit::Suspended(_)));
+    assert_eq!(*host.checkpoints.lock().unwrap(), first);
+    *host.pinned_clock_ms.lock().unwrap() = Some(1_060_001);
+    assert!(
+        matches!(invoke(), InvokeExit::Suspended(_)),
+        "second site must establish its own deadline"
+    );
+    let keys = host
+        .checkpoints
+        .lock()
+        .unwrap()
+        .keys()
+        .filter(|key| key.starts_with("runtara:v2:[\"delay\""))
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(keys.len(), 2);
+    *host.pinned_clock_ms.lock().unwrap() = Some(1_120_002);
+    assert_eq!(completed(invoke()), json!({"ok":true}));
+}
+
+#[test]
+fn audit_03_durable_agent_and_split_caches_keep_sibling_results_on_replay() {
+    let reference = |value| json!({"valueType":"reference","value":value});
+    let agent_body = json!({"entryPoint":"invoke","steps":{
+        "invoke":{"id":"invoke","stepType":"Agent","agentId":"utils","capabilityId":"return-input","inputMapping":{"value":immediate(json!("A"))}},
+        "agent_done":{"id":"agent_done","stepType":"Finish","inputMapping":{"value":reference("steps.invoke.outputs")}}
+    },"executionPlan":[{"fromStep":"invoke","toStep":"agent_done"}]});
+    let body = json!({"entryPoint":"items","steps":{
+        "items":audit_loop("items", "Split", 1, agent_body),
+        "body_done":{"id":"body_done","stepType":"Finish","inputMapping":{"value":reference("steps.items.outputs.0.value")}}
+    },"executionPlan":[{"fromStep":"items","toStep":"body_done"}]});
+    let a = loop_step("a", body.clone());
+    let mut b = loop_step("b", body);
+    b["subgraph"]["steps"]["items"]["subgraph"]["steps"]["invoke"]["inputMapping"]["value"] =
+        immediate(json!("B"));
+    let graph = json!({"durable":true,"entryPoint":"a","steps":{
+        "a":a,"b":b,"done":{"id":"done","stepType":"Finish","inputMapping":{
+            "a":reference("steps.a.outputs.outputs.value"),"b":reference("steps.b.outputs.outputs.value")
+        }}
+    },"executionPlan":[{"fromStep":"a","toStep":"b"},{"fromStep":"b","toStep":"done"}]});
+    let meta =
+        std::fs::read(direct_e2e_components_dir().join("runtara_agent_utils.meta.json")).unwrap();
+    let catalog = Arc::new(AgentCatalog::from_agents(vec![
+        serde_json::from_slice(&meta).unwrap(),
+    ]));
+    let (_temp, artifact) = compile_configured("audit-cache-sites", graph, vec![], Some(catalog));
+    let host = Arc::new(CheckpointingRuntimeHost::new(b"{}"));
+    for _ in 0..2 {
+        assert_eq!(
+            completed(run_invoke_once(
+                &artifact.wasm_path,
+                host.clone(),
+                b"{}".to_vec()
+            )),
+            json!({"a":"A","b":"B"})
+        );
+    }
+    let checkpoints = host.checkpoints.lock().unwrap();
+    for kind in ["agent", "split"] {
+        assert_eq!(
+            checkpoints
+                .keys()
+                .filter(|key| key.starts_with(&format!("runtara:v2:[\"{kind}\"")))
+                .count(),
+            2
+        );
+    }
 }
 
 fn timeout_graph(delay_ms: u64, split: bool) -> Value {

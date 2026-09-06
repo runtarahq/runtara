@@ -27,6 +27,43 @@ use runtara_workflows::{
 };
 use serde_json::Value;
 
+// Independent description of the persisted v2 key contract (not a production
+// helper): fixtures that preload checkpoints must name the actual artifact key.
+fn expected_key(
+    kind: &str,
+    workflow: &str,
+    parts: Value,
+    loops: Value,
+    namespace: Value,
+) -> String {
+    format!(
+        "runtara:v2:{}",
+        serde_json::json!([kind, workflow, namespace, loops, parts])
+    )
+}
+
+fn root_key(kind: &str, workflow: &str, parts: Value) -> String {
+    expected_key(
+        kind,
+        workflow,
+        parts,
+        serde_json::json!([]),
+        serde_json::json!([]),
+    )
+}
+
+fn key_fields(key: &str) -> Value {
+    // Attempt/retry keys append a suffix after the complete JSON base tuple.
+    serde_json::Deserializer::from_str(
+        key.strip_prefix("runtara:v2:")
+            .expect("versioned durable key"),
+    )
+    .into_iter::<Value>()
+    .next()
+    .expect("key tuple")
+    .expect("structured key")
+}
+
 const SIMPLE_PASSTHROUGH: &str = include_str!("fixtures/simple_passthrough.json");
 const CONDITIONAL_WORKFLOW: &str = include_str!("fixtures/conditional_workflow.json");
 const CONDITIONAL_NESTED: &str = include_str!("fixtures/conditional_nested.json");
@@ -3759,11 +3796,11 @@ fn direct_wasm_execute_durable_agent_retry_per_iteration_isolation_across_resume
     );
     let item0_keys = attempt_checkpoints
         .iter()
-        .filter(|(id, _)| id.contains("[0]"))
+        .filter(|(id, _)| key_fields(id)[3][0][2] == 0)
         .count();
     let item1_keys = attempt_checkpoints
         .iter()
-        .filter(|(id, _)| id.contains("[1]"))
+        .filter(|(id, _)| key_fields(id)[3][0][2] == 1)
         .count();
     assert_eq!(
         (item0_keys, item1_keys),
@@ -3899,7 +3936,12 @@ fn direct_wasm_execute_ai_agent_loop_breakpoint_pauses_before_first_llm_call() {
         result
             .checkpoints
             .iter()
-            .any(|checkpoint| checkpoint.checkpoint_id == "breakpoint::ai"),
+            .any(|checkpoint| checkpoint.checkpoint_id
+                == root_key(
+                    "breakpoint",
+                    "ai-loop-breakpoint-pause",
+                    serde_json::json!(["ai"])
+                )),
         "breakpoint-hit checkpoint must be stored: {:?}",
         result
             .checkpoints
@@ -3931,7 +3973,11 @@ fn direct_wasm_execute_ai_agent_loop_breakpoint_resumes_with_checkpoint() {
         br#"{}"#,
         false,
         vec![(
-            "breakpoint::ai".to_string(),
+            root_key(
+                "breakpoint",
+                "ai-loop-breakpoint-resume",
+                serde_json::json!(["ai"]),
+            ),
             br#""breakpoint_hit""#.to_vec(),
         )],
         vec![
@@ -4380,7 +4426,7 @@ fn ai_agent_tool_loop_durable_graph_json(durable: bool) -> String {
 fn direct_wasm_execute_ai_agent_loop_replays_completed_turns_without_rebilling() {
     let components_dir = direct_e2e_components_dir();
 
-    // GAP-04: each completed turn is checkpointed under {step}.turn.{n}.
+    // Each completed turn is checkpointed under its versioned invocation key.
     // Run 1 completes the tool-call turn (turn 1: LLM + echo tool dispatch)
     // and then dies on a provider error at turn 2 - a mid-loop crash.
     let crashed = run_direct_workflow_with_llm_script(
@@ -4401,12 +4447,20 @@ fn direct_wasm_execute_ai_agent_loop_replays_completed_turns_without_rebilling()
         .checkpoints
         .iter()
         .filter(|checkpoint| {
-            checkpoint.checkpoint_id.starts_with("ai.turn.") && !checkpoint.state.is_empty()
+            checkpoint
+                .checkpoint_id
+                .starts_with("runtara:v2:[\"ai_turn\"")
+                && !checkpoint.state.is_empty()
         })
         .map(|checkpoint| (checkpoint.checkpoint_id.clone(), checkpoint.state.clone()))
         .collect();
     assert!(
-        turn_checkpoints.iter().any(|(id, _)| id == "ai.turn.1"),
+        turn_checkpoints.iter().any(|(id, _)| id
+            == &root_key(
+                "ai_turn",
+                "ai-loop-durability",
+                serde_json::json!(["ai", 1])
+            )),
         "turn 1 must be checkpointed before the crash: {:?}",
         crashed
             .checkpoints
@@ -4478,10 +4532,9 @@ fn direct_wasm_execute_ai_agent_loop_non_durable_skips_turn_checkpoints() {
     assert!(result.status_success, "stderr: {}", result.stderr);
     assert_eq!(result.llm_requests.len(), 2);
     assert!(
-        !result
-            .checkpoints
-            .iter()
-            .any(|checkpoint| checkpoint.checkpoint_id.starts_with("ai.turn.")),
+        !result.checkpoints.iter().any(|checkpoint| checkpoint
+            .checkpoint_id
+            .starts_with("runtara:v2:[\"ai_turn\"")),
         "non-durable loop must not write turn checkpoints: {:?}",
         result
             .checkpoints
@@ -4772,7 +4825,15 @@ fn direct_wasm_execute_durable_delay_parks_and_completes() {
     let parked_deadlines: Vec<_> = result
         .checkpoints
         .iter()
-        .filter(|checkpoint| checkpoint.checkpoint_id == "delay" && checkpoint.state.len() == 8)
+        .filter(|checkpoint| {
+            checkpoint.checkpoint_id
+                == root_key(
+                    "delay",
+                    "direct-wasm-execute-delay-durable",
+                    serde_json::json!(["delay"]),
+                )
+                && checkpoint.state.len() == 8
+        })
         .collect();
     assert_eq!(
         parked_deadlines.len(),
@@ -4821,7 +4882,11 @@ fn direct_wasm_execute_sync_parallel_branches_diamond_runs_both_branches() {
     parked_ids.sort_unstable();
     assert_eq!(
         parked_ids,
-        vec!["branch_a", "branch_b", "entry"],
+        ["branch_a", "branch_b", "entry"].map(|id| root_key(
+            "delay",
+            "direct-wasm-execute-sync-parallel-diamond",
+            serde_json::json!([id])
+        )),
         "both branch Delays plus the entry Delay must park; got {:?}",
         result.checkpoints
     );
@@ -4887,12 +4952,17 @@ fn direct_wasm_execute_wait_delay_finish_resumes_after_drain() {
         first.checkpoints
     );
     assert!(
-        deadline_ids.iter().any(|id| id.ends_with("/wait")),
+        deadline_ids
+            .iter()
+            .any(|id| key_fields(id)[0] == "wait" && key_fields(id)[4][1] == "wait"),
         "one deadline must be keyed by the wait's deterministic signal id, got: {:?}",
         deadline_ids
     );
     assert!(
-        deadline_ids.contains(&"delay"),
+        deadline_ids
+            .iter()
+            .any(|id| key_fields(id)[0] == "delay"
+                && key_fields(id)[4] == serde_json::json!(["delay"])),
         "one deadline must be keyed by the durable Delay, got: {:?}",
         deadline_ids
     );
@@ -5001,7 +5071,11 @@ fn direct_wasm_execute_wait_wait_finish_resumes_after_drain() {
 fn direct_wasm_execute_durable_agent_invokes_and_saves_checkpoint() {
     let components_dir = direct_e2e_components_dir();
     let workflow_id = "direct-wasm-execute-agent-fresh-checkpoint";
-    let checkpoint_id = format!("{workflow_id}::agent::utils::return-input::agent");
+    let checkpoint_id = root_key(
+        "agent",
+        workflow_id,
+        serde_json::json!(["utils", "return-input", "agent"]),
+    );
 
     let result = run_direct_workflow_with_events(
         &components_dir,
@@ -5143,7 +5217,11 @@ fn direct_wasm_execute_template_tojson_filter() {
 fn direct_wasm_execute_durable_agent_uses_cached_checkpoint() {
     let components_dir = direct_e2e_components_dir();
     let workflow_id = "direct-wasm-execute-agent-cached-replay";
-    let checkpoint_id = format!("{workflow_id}::agent::utils::return-input::agent");
+    let checkpoint_id = root_key(
+        "agent",
+        workflow_id,
+        serde_json::json!(["utils", "return-input", "agent"]),
+    );
 
     let captured = run_direct_workflow_capture_with_preloaded_checkpoints(
         &components_dir,
@@ -6869,11 +6947,8 @@ fn direct_wasm_execute_invoke_abi_runs_durable_agent_step() {
     assert_eq!(output_json, serde_json::json!({ "result": "invoke-agent" }));
 }
 
-/// Durable per-item delays inside a Split get PER-ITERATION park-checkpoint
-/// keys (`{step}::{index}`) — without the loop-index fold every iteration
-/// collides on one key, the hazard flagged (and deferred) by the unify plan.
-/// Top-level durable delays keep the bare step id (asserted by the existing
-/// delay tests' parked-checkpoint expectations).
+/// Durable per-item delays encode the Split site and iteration in their keys.
+/// Root delays use the same versioned format with an empty loop path.
 #[test]
 fn direct_wasm_execute_split_durable_delay_keys_are_per_iteration() {
     let components_dir = direct_e2e_components_dir();
@@ -6950,7 +7025,13 @@ fn direct_wasm_execute_split_durable_delay_keys_are_per_iteration() {
     parked_keys.sort_unstable();
     assert_eq!(
         parked_keys,
-        vec!["tick::0", "tick::1"],
+        [0, 1].map(|index| expected_key(
+            "delay",
+            "split-durable-delay-keys",
+            serde_json::json!(["tick"]),
+            serde_json::json!([["Split", "split", index]]),
+            serde_json::json!([])
+        )),
         "per-item durable delays must not collide on one park key"
     );
 }
@@ -7659,7 +7740,11 @@ fn direct_wasm_execute_invoke_one_millisecond_delay_parks_then_resumes_once() {
     // The deadline was persisted under the top-level delay key, and NO blocking
     // sleep fired.
     assert!(
-        host.checkpoints.lock().unwrap().contains_key("delay"),
+        host.checkpoints.lock().unwrap().contains_key(&root_key(
+            "delay",
+            "delay-park-one-millisecond",
+            serde_json::json!(["delay"])
+        )),
         "a park must checkpoint its deadline under the delay key"
     );
     assert!(
@@ -8129,13 +8214,21 @@ fn direct_wasm_execute_cli_run_abi_blocks_a_long_delay() {
 
     assert_eq!(
         host.sleeps.lock().unwrap().as_slice(),
-        &["delay".to_string()],
+        &[root_key(
+            "delay",
+            "delay-cli-run-blocks",
+            serde_json::json!(["delay"])
+        )],
         "under cli-run even an hours-long Delay must block on durable-sleep-checkpoint"
     );
     // The blocking sleep leaves core's empty checkpoint behind, but never an
     // 8-byte deadline: cli-run has no wake that could carry one.
     assert_eq!(
-        host.checkpoints.lock().unwrap().get("delay"),
+        host.checkpoints.lock().unwrap().get(&root_key(
+            "delay",
+            "delay-cli-run-blocks",
+            serde_json::json!(["delay"])
+        )),
         Some(&Vec::new()),
         "cli-run must record only the blocking sleep's empty checkpoint, never a deadline"
     );
@@ -8364,10 +8457,10 @@ fn direct_wasm_execute_invoke_blocking_sleep_checkpoint_reads_as_a_served_wait()
     let host = Arc::new(CheckpointingRuntimeHost::new(&input));
     // Seed the key exactly as a prior BLOCKING pass through this step would
     // have, via core's handle_sleep.
-    host.checkpoints
-        .lock()
-        .unwrap()
-        .insert("delay".to_string(), Vec::new());
+    host.checkpoints.lock().unwrap().insert(
+        root_key("delay", "delay-key-aliasing", serde_json::json!(["delay"])),
+        Vec::new(),
+    );
 
     let exit = run_invoke_once(&artifact.wasm_path, host.clone(), input.clone());
     let output = match exit {
@@ -8388,7 +8481,11 @@ fn direct_wasm_execute_invoke_blocking_sleep_checkpoint_reads_as_a_served_wait()
     // The empty state is left exactly as it was: nothing overwrote it, which is
     // precisely why the length check has to happen before the deadline read.
     assert_eq!(
-        host.checkpoints.lock().unwrap().get("delay"),
+        host.checkpoints.lock().unwrap().get(&root_key(
+            "delay",
+            "delay-key-aliasing",
+            serde_json::json!(["delay"])
+        )),
         Some(&Vec::new()),
         "a get-or-set checkpoint store leaves the blocking arm's empty state in place"
     );
@@ -9254,11 +9351,18 @@ fn composed_durable_child_checkpoints_are_namespaced_per_invocation_site() {
     let sleeps = host.sleep_ids.lock().unwrap().clone();
     assert_eq!(
         sleeps,
-        vec![
-            "ns-parent-wf::call[0]::call".to_string(),
-            "ns-parent-wf::call[1]::call".to_string(),
-            "ns-parent-wf::call[2]::call".to_string(),
-        ],
+        [0, 1, 2].map(|index| expected_key(
+            "delay",
+            "ns-child-wf",
+            serde_json::json!(["call"]),
+            serde_json::json!([]),
+            serde_json::json!([[
+                "child",
+                "ns-parent-wf",
+                [["Split", "split", index]],
+                ["call"]
+            ]])
+        )),
         "each invocation site must own a distinct child sleep key"
     );
     // ...and stay disjoint from the parent's own durable writes for the
@@ -9518,7 +9622,16 @@ fn nested_composed_workflow_agents_chain_checkpoint_namespaces() {
     // nested embeds use. One site, one key, however deep the nesting.
     assert_eq!(
         host.sleep_ids.lock().unwrap().clone(),
-        vec!["ns-top-wf::call__gcall::delay".to_string()],
+        vec![expected_key(
+            "delay",
+            "ns-grandchild-wf",
+            serde_json::json!(["delay"]),
+            serde_json::json!([]),
+            serde_json::json!([
+                ["child", "ns-top-wf", [], ["call"]],
+                ["child", "ns-mid-wf", [], ["gcall"]]
+            ])
+        )],
         "the grandchild sleep key must chain the full invocation path"
     );
     assert_eq!(
@@ -9956,8 +10069,20 @@ fn composed_children_waiting_on_same_step_get_per_site_signal_ids() {
     // sender does after discovering the ids from the two
     // `external_input_requested` events.
     let host = Arc::new(PersistingRuntimeHost::new(b"{}"));
-    let site1 = "checkpoint-ns-e2e/sig-child-wf/sig-parent-wf::call::approve";
-    let site2 = "checkpoint-ns-e2e/sig-child-wf/sig-parent-wf::call2::approve";
+    let site1 = &expected_key(
+        "wait",
+        "sig-child-wf",
+        serde_json::json!(["checkpoint-ns-e2e", "approve"]),
+        serde_json::json!([]),
+        serde_json::json!([["child", "sig-parent-wf", [], ["call"]]]),
+    );
+    let site2 = &expected_key(
+        "wait",
+        "sig-child-wf",
+        serde_json::json!(["checkpoint-ns-e2e", "approve"]),
+        serde_json::json!([]),
+        serde_json::json!([["child", "sig-parent-wf", [], ["call2"]]]),
+    );
     host.deliver_signal(site1, br#"{"decision":"approve-first"}"#);
     host.deliver_signal(site2, br#"{"decision":"approve-second"}"#);
 
@@ -10113,8 +10238,20 @@ fn embedded_children_waiting_on_same_step_get_per_site_signal_ids() {
     let host = Arc::new(PersistingRuntimeHost::new(b"{}"));
     // Embedded children keep the PARENT's workflow id in the second segment;
     // the site scope disambiguates the third.
-    let site1 = "checkpoint-ns-e2e/sig-embed-parent/sig-embed-parent::embed1::approve";
-    let site2 = "checkpoint-ns-e2e/sig-embed-parent/sig-embed-parent::embed2::approve";
+    let site1 = &expected_key(
+        "wait",
+        "sig-embed-parent",
+        serde_json::json!(["checkpoint-ns-e2e", "approve"]),
+        serde_json::json!([]),
+        serde_json::json!([["child", "sig-embed-parent", [], ["embed1"]]]),
+    );
+    let site2 = &expected_key(
+        "wait",
+        "sig-embed-parent",
+        serde_json::json!(["checkpoint-ns-e2e", "approve"]),
+        serde_json::json!([]),
+        serde_json::json!([["child", "sig-embed-parent", [], ["embed2"]]]),
+    );
     host.deliver_signal(site1, br#"{"decision":"embed-first"}"#);
     host.deliver_signal(site2, br#"{"decision":"embed-second"}"#);
 
@@ -10296,7 +10433,13 @@ fn scoped_signal_wait_survives_drain_and_resume() {
     .expect("parent composes the waiting child");
 
     let host = Arc::new(PersistingRuntimeHost::new(b"{}"));
-    let site = "checkpoint-ns-e2e/sigdrain-child-wf/sigdrain-parent-wf::call::approve";
+    let site = &expected_key(
+        "wait",
+        "sigdrain-child-wf",
+        serde_json::json!(["checkpoint-ns-e2e", "approve"]),
+        serde_json::json!([]),
+        serde_json::json!([["child", "sigdrain-parent-wf", [], ["call"]]]),
+    );
     // Surviving state from the pre-drain incarnation: the wait's absolute
     // deadline (raw little-endian i64 ms, far in the future) stored under the
     // SCOPED signal id, plus the signal a sender posted while the instance
@@ -10489,7 +10632,13 @@ fn pause_during_composed_child_wait_suspends_and_resumes() {
     .expect("parent composes the waiting child");
 
     let host = Arc::new(PersistingRuntimeHost::new(b"{}"));
-    let site = "checkpoint-ns-e2e/pause-child-wf/pause-parent-wf::call::approve";
+    let site = &expected_key(
+        "wait",
+        "pause-child-wf",
+        serde_json::json!(["checkpoint-ns-e2e", "approve"]),
+        serde_json::json!([]),
+        serde_json::json!([["child", "pause-parent-wf", [], ["call"]]]),
+    );
     let executor = embedded_executor();
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
     let run_once = |host: Arc<PersistingRuntimeHost>| {
@@ -10763,7 +10912,16 @@ fn pause_inside_nested_composed_agents_chains_the_suspend() {
     .expect("top composes the mid agent");
 
     let host = Arc::new(PersistingRuntimeHost::new(b"{}"));
-    let site = "checkpoint-ns-e2e/pause-gc-wf/pause-top-wf::call__gcall::approve";
+    let site = &expected_key(
+        "wait",
+        "pause-gc-wf",
+        serde_json::json!(["checkpoint-ns-e2e", "approve"]),
+        serde_json::json!([]),
+        serde_json::json!([
+            ["child", "pause-top-wf", [], ["call"]],
+            ["child", "pause-mid-wf", [], ["gcall"]]
+        ]),
+    );
     let executor = embedded_executor();
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
     let run_once = |host: Arc<PersistingRuntimeHost>| {
@@ -11034,10 +11192,18 @@ fn workflow_agent_tool_calls_get_per_call_checkpoint_scopes() {
     let sleeps = host.sleep_ids.lock().unwrap().clone();
     assert_eq!(
         sleeps,
-        vec![
-            "aitool-parent-wf::ai.tool.wf_echo.0::call".to_string(),
-            "aitool-parent-wf::ai.tool.wf_echo.1::call".to_string(),
-        ],
+        [0, 1].map(|counter| expected_key(
+            "delay",
+            "tool-child-wf",
+            serde_json::json!(["call"]),
+            serde_json::json!([]),
+            serde_json::json!([[
+                "tool-child",
+                "aitool-parent-wf",
+                [],
+                ["ai", "wf_echo", counter]
+            ]])
+        )),
         "each tool call must own a per-call child checkpoint scope"
     );
     std::mem::forget(temp);
@@ -12082,14 +12248,18 @@ fn direct_wasm_execute_breakpoint_in_parallel_branch_fires_and_resumes() {
     assert!(
         run1.checkpoints
             .iter()
-            .any(|c| c.checkpoint_id.contains("breakpoint::b")),
+            .any(|c| key_fields(&c.checkpoint_id)[0] == "breakpoint"
+                && key_fields(&c.checkpoint_id)[4] == serde_json::json!(["b"])),
         "run 1 must write the breakpoint checkpoint for `b`: {cp_ids:?}"
     );
     // The sibling `c` ran in parallel and checkpointed BEFORE the suspend...
     assert!(
         run1.checkpoints
             .iter()
-            .any(|c| c.checkpoint_id.contains("http-request::c") && !c.state.is_empty()),
+            .any(|c| key_fields(&c.checkpoint_id)[0] == "agent"
+                && key_fields(&c.checkpoint_id)[4][1] == "http-request"
+                && key_fields(&c.checkpoint_id)[4][2] == "c"
+                && !c.state.is_empty()),
         "sibling branch `c` must complete + checkpoint before the breakpoint suspend: {cp_ids:?}"
     );
     // ...while `b`'s invoke was SKIPPED (pause-before-run): exactly one HTTP arrival
@@ -12103,7 +12273,10 @@ fn direct_wasm_execute_breakpoint_in_parallel_branch_fires_and_resumes() {
         !run1
             .checkpoints
             .iter()
-            .any(|c| c.checkpoint_id.contains("http-request::b") && !c.state.is_empty()),
+            .any(|c| key_fields(&c.checkpoint_id)[0] == "agent"
+                && key_fields(&c.checkpoint_id)[4][1] == "http-request"
+                && key_fields(&c.checkpoint_id)[4][2] == "b"
+                && !c.state.is_empty()),
         "`b`'s invoke must NOT have run before the breakpoint suspend: {cp_ids:?}"
     );
 
@@ -12568,7 +12741,11 @@ fn direct_wasm_execute_delay_observes_cancel_and_suspends() {
     let sleeps = host.sleeps.lock().unwrap().clone();
     assert_eq!(
         sleeps,
-        vec!["delay_1".to_string()],
+        vec![root_key(
+            "delay",
+            "syn606-cancel-during-delay",
+            serde_json::json!(["delay_1"])
+        )],
         "the run must stop at the Delay the cancel arrived during, not run the whole chain"
     );
     assert!(

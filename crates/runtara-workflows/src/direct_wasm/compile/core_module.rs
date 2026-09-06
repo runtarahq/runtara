@@ -101,7 +101,8 @@ impl DirectCoreConfig {
         track_events: bool,
         workflow_id: Option<&str>,
     ) -> Result<Self, DirectCompileError> {
-        let variables_json = direct_core_variables_json(&manifest.graph.variables, workflow_id)?;
+        let variables_json =
+            direct_core_variables_json(&manifest.graph.variables, workflow_id, manifest.version)?;
         Ok(Self {
             abi: crate::direct_wasm::component::WorkflowAbi::default(),
             omit_runtime: false,

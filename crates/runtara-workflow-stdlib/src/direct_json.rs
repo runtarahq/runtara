@@ -1062,10 +1062,7 @@ impl DirectJsonManifest {
             .map_err(|err| format!("failed to serialize delay steps context: {err}"))
     }
 
-    /// Build the generated-code-compatible checkpoint key for a step breakpoint.
-    /// The inherited checkpoint-namespace prefix, when running as a child
-    /// (embedded or composed). Empty at the top level — every builder that
-    /// folds this stays byte-identical for plain workflows.
+    /// Legacy inherited namespace, used only by the v1 key builders below.
     fn source_cache_key_prefix(source: &Value) -> Option<String> {
         source
             .get("variables")
@@ -1082,6 +1079,9 @@ impl DirectJsonManifest {
         self.steps
             .get(step_id)
             .ok_or_else(|| format!("unknown direct breakpoint step '{step_id}'"))?;
+        if let Some(key) = durable_key_v2(&source, "breakpoint", serde_json::json!([step_id])) {
+            return Ok(key);
+        }
 
         let loop_indices = source
             .get("variables")
@@ -1108,22 +1108,17 @@ impl DirectJsonManifest {
         })
     }
 
-    /// Per-scope durability key for a durable Delay's sleep checkpoint.
-    ///
-    /// The bare step id at top level — byte-identical to the legacy static
-    /// key, so existing checkpoint rows and assertions are unaffected — and
-    /// `{step_id}::{indices}` inside Split/While iterations (folding
-    /// `variables._loop_indices` exactly like [`Self::breakpoint_key`]).
-    /// Without the fold, per-item durable delays collide on one key. A child
-    /// scope's `_cache_key_prefix` (embedded or composed) prepends as
-    /// `{prefix}::` so a durable child's delays never collide with the
-    /// parent's — or with another invocation of the same child.
+    /// Per-invocation durable Delay identity. New artifacts use structured v2
+    /// keys; legacy artifacts retain bare root IDs and numeric loop suffixes.
     pub fn delay_sleep_key(&self, step_id: &str, source: &[u8]) -> Result<String, String> {
         let source: Value = serde_json::from_slice(source)
             .map_err(|err| format!("failed to parse delay-sleep-key source: {err}"))?;
         self.steps
             .get(step_id)
             .ok_or_else(|| format!("unknown direct delay step '{step_id}'"))?;
+        if let Some(key) = durable_key_v2(&source, "delay", serde_json::json!([step_id])) {
+            return Ok(key);
+        }
 
         let loop_indices = source
             .get("variables")
@@ -1248,18 +1243,10 @@ impl DirectJsonManifest {
 
     /// Build the deterministic signal id used by generated WaitForSignal code.
     ///
-    /// Unlike checkpoint ids, signal ids are EXTERNAL addressing — a sender
-    /// posts to `(instance, signal_id)` — but they must be equally
-    /// collision-free: the wait's timeout deadline is checkpointed under this
-    /// very string, and two waiters sharing one id both wake on one signal.
-    /// A child scope's `_cache_key_prefix` (embedded or composed
-    /// workflow-agent) therefore scopes the step segment as
-    /// `{prefix}::{step_id}`, exactly like the durable key builders — two
-    /// children waiting on the same step id get distinct, per-invocation-site
-    /// ids. Top-level ids are byte-identical to the legacy shape. Senders
-    /// discover the scoped id verbatim from the `external_input_requested`
-    /// event / pending-input listing, and every host-side consumer matches it
-    /// as an opaque string.
+    /// Signal IDs are external addresses and also key timeout checkpoints.
+    /// V2 includes the complete invocation path. V1 retains the original
+    /// delimiter-based format. Senders use the opaque ID from the pending-input
+    /// event/listing; no v2 lookup falls back to an ambiguous legacy address.
     pub fn wait_signal_id(
         &self,
         step_id: &str,
@@ -1269,6 +1256,11 @@ impl DirectJsonManifest {
         let source: Value = serde_json::from_slice(source)
             .map_err(|err| format!("failed to parse wait-signal-id source: {err}"))?;
         self.wait_step(step_id)?;
+        if let Some(key) =
+            durable_key_v2(&source, "wait", serde_json::json!([instance_id, step_id]))
+        {
+            return Ok(key);
+        }
         let workflow_id = source
             .get("variables")
             .and_then(Value::as_object)
@@ -1285,9 +1277,8 @@ impl DirectJsonManifest {
         ))
     }
 
-    /// Build the per-call signal id for a WaitForSignal step used as an AiAgent
-    /// tool, matching the generated tool arm's
-    /// `{instance}/{workflow}/{step}.tool.{label}.{call}{indices}`.
+    /// Per-call signal ID for an AI wait tool. V2 encodes step, label and
+    /// counter in separate fields; v1 retains the generated legacy shape.
     pub fn ai_wait_tool_signal_id(
         &self,
         step_id: &str,
@@ -1301,6 +1292,13 @@ impl DirectJsonManifest {
         // against the wait-step registry.
         let source: Value = serde_json::from_slice(source)
             .map_err(|err| format!("failed to parse ai-wait-tool-signal-id source: {err}"))?;
+        if let Some(key) = durable_key_v2(
+            &source,
+            "wait_tool",
+            serde_json::json!([instance_id, step_id, label, call_counter]),
+        ) {
+            return Ok(key);
+        }
         let workflow_id = source
             .get("variables")
             .and_then(Value::as_object)
@@ -1738,11 +1736,8 @@ impl DirectJsonManifest {
             .map_err(|err| format!("failed to serialize ai-turn input: {err}"))
     }
 
-    /// True when the turn output's `action` is `complete`.
-    /// Per-turn durability: the checkpoint key for one AiAgent loop turn —
-    /// `{step_id}.turn.{iteration}`, scoped by `variables._loop_indices` like
-    /// the breakpoint and agent cache keys, so Split/While-nested loops get
-    /// distinct keys per iteration scope.
+    /// Per-turn checkpoint key, scoped to its enclosing invocation. V2 keeps
+    /// step and iteration in separate fields; v1 uses `.turn.` and index suffixes.
     pub fn ai_turn_cache_key(
         step_id: &str,
         iteration: u32,
@@ -1750,6 +1745,11 @@ impl DirectJsonManifest {
     ) -> Result<String, String> {
         let source: Value = serde_json::from_slice(source)
             .map_err(|err| format!("failed to parse ai-turn-cache-key source: {err}"))?;
+        if let Some(key) =
+            durable_key_v2(&source, "ai_turn", serde_json::json!([step_id, iteration]))
+        {
+            return Ok(key);
+        }
         let indices_suffix = wait_loop_indices_suffix(&source);
         let base = format!("{step_id}.turn.{iteration}{indices_suffix}");
         Ok(match Self::source_cache_key_prefix(&source) {
@@ -2495,10 +2495,20 @@ impl DirectJsonManifest {
         let source: Value = serde_json::from_slice(source)
             .map_err(|err| format!("failed to parse source for tool scoping: {err}"))?;
 
-        let site = format!("{ai_step_id}.tool.{label}.{call_counter}");
+        let prefix = child_scope_v2(
+            &source,
+            "tool-child",
+            serde_json::json!([ai_step_id, label, call_counter]),
+        )
+        .unwrap_or_else(|| {
+            child_cache_prefix(
+                &format!("{ai_step_id}.tool.{label}.{call_counter}"),
+                &source,
+            )
+        });
         let envelope = serde_json::json!({
             "data": input,
-            "variables": { "_cache_key_prefix": child_cache_prefix(&site, &source) }
+            "variables": { "_cache_key_prefix": prefix }
         });
         serde_json::to_vec(&envelope)
             .map_err(|err| format!("failed to serialize scoped tool input: {err}"))
@@ -3663,7 +3673,122 @@ fn ensure_step_id(mut value: Value, step_id: &str) -> Value {
     value
 }
 
+const DURABLE_KEY_V2_PREFIX: &str = "runtara:v2:";
+const CHILD_SCOPE_V2_PREFIX: &str = "runtara:scope:v2:";
+
+fn identity_variable(source: &Value, name: &str) -> Value {
+    source
+        .get("variables")
+        .and_then(|vars| vars.get(name))
+        .map(|value| deref_handle(value).into_owned())
+        .unwrap_or(Value::Null)
+}
+
+fn durable_keys_v2(source: &Value) -> bool {
+    identity_variable(source, "_durable_key_version") == serde_json::json!(2)
+}
+
+fn durable_namespace(source: &Value) -> Vec<Value> {
+    let prefix = identity_variable(source, "_cache_key_prefix");
+    let Some(prefix) = prefix.as_str().filter(|prefix| !prefix.is_empty()) else {
+        return Vec::new();
+    };
+    if let Some(encoded) = prefix.strip_prefix(CHILD_SCOPE_V2_PREFIX)
+        && let Ok(Value::Array(frames)) = serde_json::from_str::<Value>(encoded)
+        && serde_json::to_string(&frames).expect("JSON values") == encoded
+    {
+        return frames;
+    }
+    // Legacy/externally supplied prefixes remain an opaque namespace segment.
+    vec![Value::String(prefix.to_string())]
+}
+
+fn durable_workflow(source: &Value) -> Value {
+    match identity_variable(source, "_workflow_id") {
+        value @ Value::String(_) => value,
+        _ => serde_json::json!("root"),
+    }
+}
+
+/// Version 2 keys encode operation, workflow, child ancestry, loop ancestry,
+/// and operation-specific fields separately. No authored ID is concatenated
+/// with delimiters. Version 1 artifacts keep the exact legacy builders below.
+fn durable_key_v2(source: &Value, kind: &str, parts: Value) -> Option<String> {
+    durable_keys_v2(source).then(|| {
+        let tuple = serde_json::json!([
+            kind,
+            durable_workflow(source),
+            durable_namespace(source),
+            identity_variable(source, "_loop_path"),
+            parts
+        ]);
+        format!("{DURABLE_KEY_V2_PREFIX}{tuple}")
+    })
+}
+
+fn child_scope_v2(source: &Value, kind: &str, parts: Value) -> Option<String> {
+    durable_keys_v2(source).then(|| {
+        let mut frames = durable_namespace(source);
+        frames.push(serde_json::json!([
+            kind,
+            durable_workflow(source),
+            identity_variable(source, "_loop_path"),
+            parts
+        ]));
+        format!("{CHILD_SCOPE_V2_PREFIX}{}", Value::Array(frames))
+    })
+}
+
+/// Restore compiler/parent-owned identity after authored iteration variables,
+/// then append the actual enclosing loop site and its deterministic index.
+fn iteration_identity(
+    variables: &mut Map<String, Value>,
+    source: &Value,
+    kind: &str,
+    step_id: &str,
+    index: u32,
+) {
+    let v2 = durable_keys_v2(source);
+    let managed: &[&str] = if v2 {
+        &[
+            "_durable_key_version",
+            "_loop_path",
+            "_cache_key_prefix",
+            "_workflow_id",
+        ]
+    } else {
+        // Legacy authored prefix/workflow overrides retain their old behavior;
+        // authored fields must never opt a legacy invocation into v2 mid-loop.
+        &["_durable_key_version", "_loop_path"]
+    };
+    for &name in managed {
+        match source.get("variables").and_then(|vars| vars.get(name)) {
+            Some(value) => {
+                variables.insert(name.into(), value.clone());
+            }
+            None => {
+                variables.remove(name);
+            }
+        }
+    }
+    if v2 {
+        let mut path = identity_variable(source, "_loop_path")
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        path.push(serde_json::json!([kind, step_id, index]));
+        variables.insert("_loop_path".into(), Value::Array(path));
+    }
+}
+
 fn agent_cache_key(agent: &DirectJsonAgent, source: &Value) -> String {
+    if let Some(key) = durable_key_v2(
+        source,
+        "agent",
+        serde_json::json!([agent.agent_id, agent.capability_id, agent.step_id]),
+    ) {
+        return key;
+    }
     let variables = source.get("variables").and_then(Value::as_object);
     let prefix = variables
         .and_then(|vars| vars.get("_cache_key_prefix"))
@@ -3695,6 +3820,9 @@ fn agent_cache_key(agent: &DirectJsonAgent, source: &Value) -> String {
 }
 
 fn split_cache_key(split: &DirectJsonSplit, source: &Value) -> String {
+    if let Some(key) = durable_key_v2(source, "split", serde_json::json!([split.step_id])) {
+        return key;
+    }
     let variables = source.get("variables").and_then(Value::as_object);
     let prefix = variables
         .and_then(|vars| vars.get("_cache_key_prefix"))
@@ -4146,6 +4274,7 @@ fn split_iteration_variables(
         variables.remove("_loop");
     }
 
+    iteration_identity(&mut variables, source, "Split", &split.step_id, index);
     let mut loop_indices = parent_indices;
     loop_indices.push(serde_json::json!(index));
     variables.insert("_loop_indices".to_string(), Value::Array(loop_indices));
@@ -4384,6 +4513,13 @@ fn while_iteration_variables(
     } else {
         variables.remove("_item");
     }
+    iteration_identity(
+        &mut variables,
+        source,
+        "While",
+        &while_step.step_id,
+        state.index,
+    );
     let mut loop_indices = parent_indices;
     loop_indices.push(serde_json::json!(state.index));
     variables.insert("_loop_indices".to_string(), Value::Array(loop_indices));
@@ -5275,6 +5411,9 @@ fn wait_loop_indices_suffix(source: &Value) -> String {
 }
 
 fn embed_workflow_cache_key(step_id: &str, source: &Value) -> String {
+    if let Some(key) = durable_key_v2(source, "embed_workflow", serde_json::json!([step_id])) {
+        return key;
+    }
     let variables = source.get("variables").and_then(Value::as_object);
     let prefix = variables
         .and_then(|vars| vars.get("_cache_key_prefix"))
@@ -5297,17 +5436,14 @@ fn embed_workflow_cache_key(step_id: &str, source: &Value) -> String {
     }
 }
 
-/// The checkpoint-namespace prefix for a CHILD invoked at `step_id` of the
-/// current scope — the compositional site scope every durable key builder
-/// honors via `variables._cache_key_prefix`:
-/// `{inherited_prefix}__{step_id}[loop,indices]`, falling back to
-/// `{workflow_id}::{step_id}[...]` at the root. Replay-stable by construction
-/// (compile-time step id + deterministic loop indices + recursion). One
-/// definition shared by EmbedWorkflow children (inlined; prefix rides the
-/// in-process variables) and composed workflow-agent children (prefix rides
-/// the child's input envelope) — so both child kinds are indistinguishable in
-/// checkpoint key-space.
+/// Replay-stable namespace for a child invocation, shared by inlined
+/// EmbedWorkflow and composed workflow-agent calls. V2 captures the parent's
+/// full loop path and appends a structured site frame to a flat ancestry list;
+/// v1 retains the delimiter-based namespace for legacy artifacts.
 pub fn child_cache_prefix(step_id: &str, source: &Value) -> String {
+    if let Some(key) = child_scope_v2(source, "child", serde_json::json!([step_id])) {
+        return key;
+    }
     let parent_variables = source.get("variables").and_then(Value::as_object);
     let loop_indices_suffix = parent_variables
         .and_then(|vars| vars.get("_loop_indices"))
@@ -5349,6 +5485,10 @@ fn embed_child_variables(
         .unwrap_or_else(|| format!("sc_{step_id}"));
 
     let mut variables = Map::new();
+    if durable_keys_v2(source) {
+        variables.insert("_durable_key_version".into(), serde_json::json!(2));
+        variables.insert("_loop_path".into(), serde_json::json!([]));
+    }
     variables.insert("_scope_id".to_string(), Value::String(child_scope_id));
 
     if let Some(workflow_id) = parent_variables
@@ -13112,3 +13252,7 @@ mod invoke_error_and_delay_key_tests {
         assert!(manifest.delay_sleep_key("nope", b"{}").is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "direct_json_audit03_tests.rs"]
+mod audit03_tests;

@@ -4,20 +4,22 @@ Audited 2026-09-05 against `cdcf9ee4ee0e5f28c0600b524c4984f89cbfe700`.
 Scope: DSL validation, direct-WASM manifest/planning/lowering, JSON stdlib,
 and durable suspend/resume through the production invoke ABI.
 
-**Update 2026-09-06:** AUDIT-01 is committed as `2b6bf542`. AUDIT-02 is also
-fixed and verified in the audit worktree. AUDIT-03 through AUDIT-07 remain open.
+**Update 2026-09-06:** AUDIT-01 is committed as `2b6bf542` and AUDIT-02 as
+`d787556e`. AUDIT-03 is fixed in the audit worktree. AUDIT-04 through AUDIT-07
+remain open. See the verification record for checks and limitations.
 
 [Open the interactive pattern guide](wasm-emitter-patterns.html) to compare tested
 controls, recorded failures, and proposed fixes with step-through diagrams and
 exportable example DSL. The guide is a standalone, offline HTML/CSS/JS page;
 its traces illustrate the audit evidence and do not run WASM.
 
-Seven findings are documented below. The accompanying **38 audit tests** now
-include **28 passing tests** and **10 known-defect regressions**. There are also
+Seven findings are documented below. The accompanying **42 audit tests** now
+include **33 passing tests** and **9 known-defect regressions**. There are also
 **8 passing graph-analysis unit tests** for AUDIT-01 and **6 arena unit tests**
-for AUDIT-02. Three remaining regressions
+for AUDIT-02, plus **7 identity unit tests and 1 compiler-version test** for
+AUDIT-03. Two remaining regressions
 execute composed WASM; seven exercise validation, compilation, or manifest/stdlib
-behavior natively. The original AUDIT-01 and AUDIT-02 regressions now run normally; their ignores
+behavior natively. The original AUDIT-01, AUDIT-02 and AUDIT-03 regressions now run normally; their ignores
 were removed after the fixes.
 
 The known-defect tests assert the **desired correct behavior** and currently fail.
@@ -216,26 +218,77 @@ RUSTC_WRAPPER= cargo test -p runtara-workflows --features direct-wasm-integratio
 
 ## AUDIT-03 · P1 — sibling loop waits consume the same signal
 
-Two successive While bodies each contain a locally named `wait`, both at index 0.
-First invoke suspends for `.../wait/[0]`. Delivering that signal causes the next
-invoke to complete both loops: the second wait never requests a separate response.
+**Fixed on 2026-09-06.** Two successive While bodies can now each contain a
+locally named `wait` at index 0. The first response resumes only the first loop;
+the second requests its own response. Replaying without a response preserves the
+same address. Mixed While/Split nesting and repeated iterations use the same rule.
 
-Loop ancestry includes numeric indices but omits loop step identities. The
-distinct `_scope_id` values do not participate in signal-key generation. Agent
-and Split cache-key builders have the analogous omission, so they also warrant
-replay regression coverage; actual agent-cache reuse was not executed in this audit.
+Before the fix, numeric ancestry omitted loop step identities. Both waits used
+`.../wait/[0]`; delivering one response completed both loops. Agent and Split
+checkpoints had the same omission. The new execution tests also check their
+actual cached outputs (`A` and `B`) before and after replay, plus separate durable
+Delay deadlines.
 
-Source: [stdlib key builders](../crates/runtara-workflow-stdlib/src/direct_json.rs) (`wait_signal_id`, `agent_cache_key`, `split_cache_key`, `split_iteration_variables`, `while_iteration_variables`).
+New artifacts use a structured key:
 
-Fix direction: include a collision-free structural path of loop IDs and indices
-in every durable/signal key. Handle compatibility with existing parked instances.
+```text
+runtara:v2:[operation, workflow, childNamespace, loopPath, operationFields]
+loopPath = [["While", "a", 0], ["Split", "items", 2]]
+```
 
-Tests:
+Every loop frame records kind, local ID, and iteration. Child namespaces capture
+the parent's loop path and invocation site before resetting the child's local
+path. AI tool sites encode the AI step, label, and call counter as separate
+fields. JSON encoding preserves delimiter-like IDs, quotes, and Unicode without
+ambiguous concatenation. Child ancestry is a flat list, avoiding repeated
+escaping of parent key strings. Large arena-backed identity values are resolved
+before building keys. Authored loop variables and start inputs cannot replace
+the compiler-owned version or loop path.
 
-| Test | Status on audited code |
+The shared identity applies to WaitForSignal, AI wait tools, Delay sleeps,
+breakpoints, Agent and Split caches, embedded workflow caches, AI turn snapshots,
+and embedded/composed child namespaces. Attempt/retry suffixes derive from the
+complete structured base key. This does **not** fix AUDIT-04's separate flat
+runtime configuration registry.
+
+**Compatibility:** manifest version 3 opts newly compiled workflows into key
+version 2. Version 1/2 manifests retain the legacy key builders when compiled;
+existing artifacts continue using their original compiled variables and keys.
+Keep parked instances on their original artifact. Recompile workflows to obtain
+the fix for future runs; do not replace a parked instance's artifact with a new
+key version. There is no fallback from a v2 key to a legacy key, because doing so
+would allow two new waits to consume the same old response. Signal senders should
+use the opaque ID from the pending-input event/listing, rather than constructing
+an address. An older composed child retains its internal legacy addressing and
+must also be recompiled to fix collisions inside its own loops.
+
+Source: [stdlib identity and key builders](../crates/runtara-workflow-stdlib/src/direct_json.rs),
+[compiler version selection](../crates/runtara-workflows/src/direct_wasm/static_data.rs).
+
+Execution tests in [the audit harness](../crates/runtara-workflows/tests/wasm_emitter_audit/execution.rs):
+
+| Test | Verified contract |
 | --- | --- |
-| [`audit_03_distinct_wait_ids_suspend_independently_and_replay_stably`](../crates/runtara-workflows/tests/wasm_emitter_audit/execution.rs) | Passing control |
-| [`audit_03_same_local_wait_id_suspends_independently`](../crates/runtara-workflows/tests/wasm_emitter_audit/execution.rs) | Known defect; ignored by default, fails when selected |
+| `audit_03_distinct_wait_ids_suspend_independently_and_replay_stably` | Distinct local IDs and stable replay; legacy signals are not consumed |
+| `audit_03_same_local_wait_id_suspends_independently` | Original collision regression; now enabled |
+| `audit_03_sibling_mixed_loops_and_repeated_iterations_wait_independently` | All four While/Split sibling combinations, two iterations each |
+| `audit_03_nested_sibling_loops_keep_the_complete_path` | Identically named inner loops under different outer loops |
+| `audit_03_sibling_delays_checkpoint_independent_deadlines` | Two independent deadlines, unchanged on early replay |
+| `audit_03_durable_agent_and_split_caches_keep_sibling_results_on_replay` | Different cached values survive fresh execution and replay |
+
+[Seven stdlib identity tests](../crates/runtara-workflow-stdlib/src/direct_json_audit03_tests.rs)
+cover all key builders, kind/site/index/ancestry separation, hostile delimiters,
+tool fields, parent-to-child propagation, authored-variable overrides, large
+interned paths/prefixes, and byte-exact legacy addresses. The compiler test
+`audit_03_manifest_version_selects_compiler_owned_identity` pins version selection
+and overrides authored identity defaults. Existing composed-child, AI tool,
+breakpoint, retry, and delay tests assert the new key format and replay behavior.
+
+```sh
+RUSTC_WRAPPER= cargo test -p runtara-workflow-stdlib --lib audit_03
+RUSTC_WRAPPER= cargo test -p runtara-workflows --lib audit_03
+RUSTC_WRAPPER= cargo test -p runtara-workflows --features direct-wasm-integration-tests --test direct_wasm_execute wasm_emitter_audit::audit_03
+```
 
 <a id="audit-04"></a>
 
@@ -372,7 +425,7 @@ rebuilds, and release-profile overflow execution were not run during the origina
 The AUDIT-01 verification update below records the later checks.
 Source review suggests broader exposure worth covering during fixes:
 
-- AUDIT-03: Agent/Split checkpoint collisions, nested loop paths, and compatibility with already parked instances.
+- AUDIT-03: production rollout with real persisted instances across artifact versions remains an operational integration check; local coverage now includes cached Agent/Split outputs, nested paths, version selection, and exact legacy addresses.
 - AUDIT-04: repeated step IDs with different types, wait actions, or response schemas.
 - AUDIT-05: enclosing-deadline wake clamping and timeout overrun in the final iteration without suspension.
 - AUDIT-06: release-profile behavior and other arithmetic limits in timeout/backoff lowering.
@@ -429,3 +482,39 @@ reused the original checkout's Cargo target cache; WASM components were built an
 loaded from the audit worktree to keep its new stdlib separate. Database/server
 E2E and production deployment were not run; the changed boundary is DSL compilation,
 component composition, guest arena collection, and invoke execution.
+
+### AUDIT-03 verification update · 2026-09-06
+
+- Committed the preceding AUDIT-02 change as `d787556e`; its pre-commit formatting
+  and workspace Clippy checks passed. AUDIT-03 remains uncommitted for review.
+- Before the fix, the distinct-ID control passed and the original same-ID wait
+  regression failed: the second invoke completed instead of suspending.
+- Rebuilt **27 agent components and both shared workflow components** into the
+  audit worktree with `scripts/build-agent-components.sh`.
+- AUDIT-03 invoke tests: **6 passed, none ignored**. Original same-ID regression
+  enabled; the tests cover sibling/mixed/nested loops, repeat iterations, stale
+  legacy signals, Delay deadlines, and actual Agent/Split cached outputs on replay.
+- Identity unit tests: **7 passed**. Compiler version selection: **1 passed**.
+- `cargo test -p runtara-workflow-stdlib --lib`: **220 passed**, 1 existing
+  performance benchmark ignored.
+- `cargo test -p runtara-workflows`: **557 library tests passed**, plus **28 native
+  integration tests passed**; 7 remaining audit defects and 1 doctest ignored.
+- `cargo test -p runtara-component-host --features component-integration-tests --tests`:
+  **45 passed** across library and component integration targets.
+- Full `direct_wasm_execute` suite with `direct-wasm-integration-tests`:
+  **201 passed, 0 failed, 2 ignored** (the existing AUDIT-05 timeout regressions).
+  This includes composed/embedded child signal replay, nested child namespaces,
+  AI tool call scopes, AI turn replay, breakpoint resume, and retry isolation.
+- Clippy for stdlib, workflow WIT, and workflows, all targets with the direct-WASM
+  integration feature and `-D warnings`: passed. Formatting and diff checks passed.
+- Interactive guide: **43 DOM scenarios passed**, including matching/distinct
+  wait IDs, supported/historical/fixed views, DSL output, step navigation and
+  reset. Browser inspection confirmed the layout, solution text, and independent
+  second-wait trace.
+
+Rust 1.97.0 and `RUSTC_WRAPPER=` were used. Host builds reused the original
+checkout's Cargo target cache; guest components were built and loaded from this
+worktree. Database/server E2E, a live migration of parked production instances,
+and deployment were not run. Deploy the updated shared stdlib together with the
+compiler, recompile future workflow artifacts, and retain the old artifacts for
+already parked instances. No checkpoint or signal data migration is performed.

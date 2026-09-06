@@ -51,6 +51,7 @@ const DIRECT_STATIC_DATA_OFFSET: i32 = 256;
 pub(super) fn direct_core_variables_json(
     variables: &serde_json::Value,
     workflow_id: Option<&str>,
+    manifest_version: u32,
 ) -> Result<Vec<u8>, DirectCompileError> {
     // Declared workflow variables arrive as `{name: {"type": ..., "value": ...}}`
     // (the DSL `Variable` struct). Workflow logic references them as
@@ -58,6 +59,18 @@ pub(super) fn direct_core_variables_json(
     // declaration to its `value`. Entries that are not `{type, value}` structs
     // are already bare values and kept unchanged.
     let mut variables = flatten_declared_variables(variables);
+    if manifest_version >= 3 {
+        if !variables.is_object() {
+            variables = serde_json::json!({"_variables": variables});
+        }
+        let map = variables.as_object_mut().expect("object above");
+        // Identity is compiler-owned, never authored workflow data.
+        map.insert("_durable_key_version".into(), serde_json::json!(2));
+        map.insert("_loop_path".into(), serde_json::json!([]));
+    } else if let Some(map) = variables.as_object_mut() {
+        map.remove("_durable_key_version");
+        map.remove("_loop_path");
+    }
 
     let Some(workflow_id) = workflow_id else {
         return serde_json::to_vec(&variables).map_err(DirectCompileError::Serialize);
@@ -581,14 +594,33 @@ mod tests {
     }
 
     #[test]
+    fn audit_03_manifest_version_selects_compiler_owned_identity() {
+        let authored = serde_json::json!({"_durable_key_version": 1, "_loop_path": ["forged"]});
+        for version in [1, 2, 3] {
+            let variables: serde_json::Value = serde_json::from_slice(
+                &direct_core_variables_json(&authored, None, version).unwrap(),
+            )
+            .unwrap();
+            if version >= 3 {
+                assert_eq!(variables["_durable_key_version"], 2);
+                assert_eq!(variables["_loop_path"], serde_json::json!([]));
+            } else {
+                assert!(variables.get("_durable_key_version").is_none());
+                assert!(variables.get("_loop_path").is_none());
+            }
+        }
+    }
+
+    #[test]
     fn variables_json_injects_workflow_id_and_wraps_non_object_variables() {
-        let bytes = direct_core_variables_json(&serde_json::json!({"existing": true}), Some("wf"))
-            .expect("object variables");
+        let bytes =
+            direct_core_variables_json(&serde_json::json!({"existing": true}), Some("wf"), 2)
+                .expect("object variables");
         let variables: serde_json::Value = serde_json::from_slice(&bytes).expect("object json");
         assert_eq!(variables["_workflow_id"], "wf");
         assert_eq!(variables["existing"], true);
 
-        let bytes = direct_core_variables_json(&serde_json::json!(["value"]), Some("wf"))
+        let bytes = direct_core_variables_json(&serde_json::json!(["value"]), Some("wf"), 2)
             .expect("array variables");
         let variables: serde_json::Value = serde_json::from_slice(&bytes).expect("array json");
         assert_eq!(variables["_workflow_id"], "wf");
@@ -597,7 +629,7 @@ mod tests {
 
     #[test]
     fn variables_json_preserves_variables_without_compile_workflow_id() {
-        let bytes = direct_core_variables_json(&serde_json::json!({"user": "value"}), None)
+        let bytes = direct_core_variables_json(&serde_json::json!({"user": "value"}), None, 2)
             .expect("variables");
         let variables: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
         assert_eq!(variables, serde_json::json!({"user": "value"}));
@@ -614,7 +646,7 @@ mod tests {
             "count": { "type": "integer", "value": 3, "description": "n" },
             "nested": { "type": "object", "value": { "value": "inner", "k": 1 } }
         });
-        let bytes = direct_core_variables_json(&declared, Some("wf")).expect("variables");
+        let bytes = direct_core_variables_json(&declared, Some("wf"), 2).expect("variables");
         let variables: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
         assert_eq!(variables["greeting"], "hello");
         assert_eq!(variables["count"], 3);
