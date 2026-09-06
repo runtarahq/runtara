@@ -11,12 +11,10 @@ use runtara_core::persistence::{CompleteInstanceParams, Persistence};
 use runtara_environment::container_registry::{ContainerInfo, ContainerRegistry};
 use runtara_environment::db;
 use runtara_environment::handlers::{
-    DrainController, EnvironmentHandlerState, MAX_METRIC_BUCKETS, RegisterImageRequest,
-    ResumeInstanceRequest, StartInstanceRequest, StopInstanceRequest, handle_get_tenant_metrics,
-    handle_health_check, handle_register_image, handle_resume_instance, handle_start_instance,
-    handle_stop_instance, spawn_container_monitor,
+    DrainController, EnvironmentHandlerState, MAX_METRIC_BUCKETS, ResumeInstanceRequest,
+    StartInstanceRequest, StartRejection, StopInstanceRequest, handle_get_tenant_metrics,
+    handle_resume_instance, handle_start_instance, handle_stop_instance, spawn_container_monitor,
 };
-use runtara_environment::image_registry::ImageRegistry;
 use runtara_environment::launch_dispatcher::LaunchLifecycleObservers;
 use runtara_environment::launch_queue::{LaunchKind, LaunchRepository, LaunchState};
 use runtara_environment::runner::MockRunner;
@@ -111,9 +109,20 @@ async fn create_test_instance(pool: &PgPool, instance_id: &str, tenant_id: &str,
         .register_instance(instance_id, tenant_id)
         .await
         .expect("Failed to register instance");
-    db::associate_instance_image(pool, instance_id, image_id, tenant_id, None, None)
-        .await
-        .expect("Failed to associate instance image");
+    // The production path writes this row inside `LaunchRepository::claim_initial`;
+    // a fixture seeds it directly rather than keeping a `db` helper alive that
+    // nothing but tests would call.
+    sqlx::query(
+        "INSERT INTO instance_images \
+             (instance_id, image_id, tenant_id, env, timeout_seconds, created_at) \
+         VALUES ($1, $2, $3, NULL, NULL, NOW())",
+    )
+    .bind(instance_id)
+    .bind(image_id)
+    .bind(tenant_id)
+    .execute(pool)
+    .await
+    .expect("Failed to associate instance image");
 }
 
 /// Helper to update instance status using the Persistence trait.
@@ -173,134 +182,6 @@ async fn test_handler_state_uptime() {
 }
 
 // ============================================================================
-// Health Check Tests
-// ============================================================================
-
-#[tokio::test]
-async fn test_health_check_handler() {
-    skip_if_no_db!();
-    let pool = get_test_pool().await;
-
-    let temp_dir = tempfile::TempDir::new().unwrap();
-    let state = create_test_state(pool, temp_dir.path().to_path_buf());
-
-    let response = handle_health_check(&state)
-        .await
-        .expect("Health check should succeed");
-
-    assert!(response.healthy);
-    assert!(!response.version.is_empty());
-    assert!(response.uptime_ms >= 0);
-}
-
-// ============================================================================
-// Register Image Tests
-// ============================================================================
-
-#[tokio::test]
-async fn test_register_image_success() {
-    skip_if_no_db!();
-    let pool = get_test_pool().await;
-
-    let temp_dir = tempfile::TempDir::new().unwrap();
-    let state = create_test_state(pool.clone(), temp_dir.path().to_path_buf());
-
-    let request = RegisterImageRequest {
-        tenant_id: "test-tenant".to_string(),
-        name: "test-image".to_string(),
-        description: Some("Test image description".to_string()),
-        binary: vec![0x7f, 0x45, 0x4c, 0x46], // ELF magic bytes
-        metadata: Some(serde_json::json!({"key": "value"})),
-    };
-
-    let response = handle_register_image(&state, request)
-        .await
-        .expect("Register should succeed");
-
-    assert!(response.success, "Error: {:?}", response.error);
-    assert!(!response.image_id.is_empty());
-
-    // Verify image was created
-    let image_registry = ImageRegistry::new(pool.clone());
-    let image = image_registry
-        .get(&response.image_id)
-        .await
-        .unwrap()
-        .unwrap();
-
-    assert_eq!(image.tenant_id, "test-tenant");
-    assert_eq!(image.name, "test-image");
-
-    cleanup(&pool, None, Some(&response.image_id)).await;
-}
-
-#[tokio::test]
-async fn test_register_image_empty_tenant_id() {
-    skip_if_no_db!();
-    let pool = get_test_pool().await;
-
-    let temp_dir = tempfile::TempDir::new().unwrap();
-    let state = create_test_state(pool, temp_dir.path().to_path_buf());
-
-    let request = RegisterImageRequest {
-        tenant_id: String::new(), // Empty
-        name: "test-image".to_string(),
-        description: None,
-        binary: vec![1, 2, 3],
-        metadata: None,
-    };
-
-    let response = handle_register_image(&state, request).await.unwrap();
-
-    assert!(!response.success);
-    assert!(response.error.as_ref().unwrap().contains("tenant_id"));
-}
-
-#[tokio::test]
-async fn test_register_image_empty_name() {
-    skip_if_no_db!();
-    let pool = get_test_pool().await;
-
-    let temp_dir = tempfile::TempDir::new().unwrap();
-    let state = create_test_state(pool, temp_dir.path().to_path_buf());
-
-    let request = RegisterImageRequest {
-        tenant_id: "test-tenant".to_string(),
-        name: String::new(), // Empty
-        description: None,
-        binary: vec![1, 2, 3],
-        metadata: None,
-    };
-
-    let response = handle_register_image(&state, request).await.unwrap();
-
-    assert!(!response.success);
-    assert!(response.error.as_ref().unwrap().contains("name"));
-}
-
-#[tokio::test]
-async fn test_register_image_empty_binary() {
-    skip_if_no_db!();
-    let pool = get_test_pool().await;
-
-    let temp_dir = tempfile::TempDir::new().unwrap();
-    let state = create_test_state(pool, temp_dir.path().to_path_buf());
-
-    let request = RegisterImageRequest {
-        tenant_id: "test-tenant".to_string(),
-        name: "test-image".to_string(),
-        description: None,
-        binary: vec![], // Empty
-        metadata: None,
-    };
-
-    let response = handle_register_image(&state, request).await.unwrap();
-
-    assert!(!response.success);
-    assert!(response.error.as_ref().unwrap().contains("binary"));
-}
-
-// ============================================================================
 // Start Instance Tests
 // ============================================================================
 
@@ -341,7 +222,7 @@ async fn test_start_instance_success() {
         .await
         .expect("Start should succeed");
 
-    assert!(response.success, "Error: {:?}", response.error);
+    assert!(response.is_accepted(), "Error: {:?}", response.rejection);
     assert!(!response.instance_id.is_empty());
 
     // Verify instance was created in DB
@@ -397,7 +278,7 @@ async fn test_start_instance_with_custom_id() {
 
     let response = handle_start_instance(&state, request).await.unwrap();
 
-    assert!(response.success, "Error: {:?}", response.error);
+    assert!(response.is_accepted(), "Error: {:?}", response.rejection);
     assert_eq!(response.instance_id, custom_instance_id);
 
     cleanup(&pool, Some(&response.instance_id), Some(&image_id)).await;
@@ -444,11 +325,19 @@ async fn test_start_instance_replay_is_deduplicated_without_second_launch() {
     };
 
     let first = handle_start_instance(&state, request()).await.unwrap();
-    assert!(first.success, "first start failed: {:?}", first.error);
+    assert!(
+        first.is_accepted(),
+        "first start failed: {:?}",
+        first.rejection
+    );
     assert!(!first.deduplicated);
 
     let replay = handle_start_instance(&state, request()).await.unwrap();
-    assert!(replay.success, "replay failed: {:?}", replay.error);
+    assert!(
+        replay.is_accepted(),
+        "replay failed: {:?}",
+        replay.rejection
+    );
     assert!(replay.deduplicated);
     assert_eq!(replay.instance_id, instance_id);
     assert_eq!(
@@ -519,7 +408,11 @@ async fn test_start_instance_hands_runner_the_stored_input() {
     )
     .await
     .unwrap();
-    assert!(response.success, "start failed: {:?}", response.error);
+    assert!(
+        response.is_accepted(),
+        "start failed: {:?}",
+        response.rejection
+    );
 
     let stored = persistence
         .get_instance(&instance_id)
@@ -663,16 +556,20 @@ async fn test_start_instance_replay_is_deduplicated_after_artifact_disappears() 
     };
 
     let first = handle_start_instance(&state, request()).await.unwrap();
-    assert!(first.success, "first start failed: {:?}", first.error);
+    assert!(
+        first.is_accepted(),
+        "first start failed: {:?}",
+        first.rejection
+    );
     assert!(!first.deduplicated);
 
     std::fs::remove_file(&artifact).unwrap();
 
     let replay = handle_start_instance(&state, request()).await.unwrap();
     assert!(
-        replay.success,
+        replay.is_accepted(),
         "replay after the artifact vanished must still be deduplicated, got: {:?}",
-        replay.error
+        replay.rejection
     );
     assert!(replay.deduplicated);
     assert_eq!(replay.instance_id, instance_id);
@@ -723,9 +620,12 @@ async fn test_start_instance_missing_artifact_does_not_reserve_instance_id() {
     .await
     .unwrap();
 
-    assert!(!response.success);
+    assert!(!response.is_accepted());
     assert!(!response.deduplicated);
-    assert!(response.error.unwrap().contains("artifact not found"));
+    assert!(matches!(
+        response.rejection,
+        Some(StartRejection::ImageNotRunnable { .. })
+    ));
     assert!(
         db::get_instance(&pool, &instance_id)
             .await
@@ -832,7 +732,7 @@ async fn test_start_instance_association_failure_does_not_leave_unbound_pending_
         .await
         .expect("failed to remove association-failure injector");
 
-    assert!(!failed.success);
+    assert!(!failed.is_accepted());
     assert!(!failed.deduplicated);
     assert!(
         after_failed_start.is_none(),
@@ -845,7 +745,11 @@ async fn test_start_instance_association_failure_does_not_leave_unbound_pending_
     let retried = handle_start_instance(&state, request())
         .await
         .expect("retry should complete normally after the injector is removed");
-    assert!(retried.success, "retry failed: {:?}", retried.error);
+    assert!(
+        retried.is_accepted(),
+        "retry failed: {:?}",
+        retried.rejection
+    );
     assert!(!retried.deduplicated);
     assert_eq!(retried.instance_id, instance_id);
     assert_eq!(
@@ -896,14 +800,17 @@ async fn test_start_instance_rejects_same_id_for_different_image() {
     let first = handle_start_instance(&state, start(first_image_id.clone()))
         .await
         .unwrap();
-    assert!(first.success);
+    assert!(first.is_accepted());
 
     let conflict = handle_start_instance(&state, start(second_image_id.clone()))
         .await
         .unwrap();
-    assert!(!conflict.success);
+    assert!(!conflict.is_accepted());
     assert!(!conflict.deduplicated);
-    assert!(conflict.error.unwrap().contains("already exists"));
+    assert!(matches!(
+        conflict.rejection,
+        Some(StartRejection::InstanceAlreadyExists { .. })
+    ));
 
     cleanup(&pool, Some(&instance_id), Some(&first_image_id)).await;
     cleanup(&pool, None, Some(&second_image_id)).await;
@@ -928,14 +835,11 @@ async fn test_start_instance_empty_image_id() {
 
     let response = handle_start_instance(&state, request).await.unwrap();
 
-    assert!(!response.success);
-    assert!(
-        response
-            .error
-            .as_ref()
-            .unwrap()
-            .contains("image_id is required")
-    );
+    assert!(!response.is_accepted());
+    assert!(matches!(
+        response.rejection,
+        Some(StartRejection::InvalidRequest(_))
+    ));
 }
 
 #[tokio::test]
@@ -957,8 +861,52 @@ async fn test_start_instance_image_not_found() {
 
     let response = handle_start_instance(&state, request).await.unwrap();
 
-    assert!(!response.success);
-    assert!(response.error.as_ref().unwrap().contains("not found"));
+    assert!(!response.is_accepted());
+    assert!(matches!(
+        response.rejection,
+        Some(StartRejection::ImageNotFound { .. })
+    ));
+}
+
+/// A database failure looking up the image must not be reported as a missing
+/// image. The server reacts to `ImageNotFound` by deleting the workflow's
+/// compilation record and forcing a rebuild, so misreading a transient
+/// database error as one discards a compilation that was never at fault.
+///
+/// This was reachable before the rejection was typed: the caller recovered the
+/// category by testing the message for "not found", and a Postgres error
+/// mentioning a missing relation matched.
+#[tokio::test]
+async fn a_database_failure_is_not_reported_as_a_missing_image() {
+    skip_if_no_db!();
+
+    // A pool pointed at a port nothing listens on: every query fails, which is
+    // the closest stand-in for the transient database trouble at issue.
+    let unreachable = sqlx::postgres::PgPoolOptions::new()
+        .acquire_timeout(std::time::Duration::from_millis(250))
+        .connect_lazy("postgresql://127.0.0.1:1/unreachable")
+        .expect("a lazy pool never connects up front");
+
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let state = create_test_state(unreachable, temp_dir.path().to_path_buf());
+
+    let request = StartInstanceRequest {
+        image_id: "some-image-id".to_string(),
+        tenant_id: "test-tenant".to_string(),
+        instance_id: None,
+        input: None,
+        timeout_seconds: None,
+        env: std::collections::HashMap::new(),
+    };
+
+    let response = handle_start_instance(&state, request).await.unwrap();
+
+    assert!(!response.is_accepted());
+    assert!(
+        matches!(response.rejection, Some(StartRejection::Internal(_))),
+        "a database failure must be Internal, not an image refusal: {:?}",
+        response.rejection
+    );
 }
 
 // ============================================================================
@@ -1212,19 +1160,6 @@ async fn test_resume_instance_success() {
 // Response Type Tests
 // ============================================================================
 
-#[test]
-fn test_health_check_response_debug() {
-    let response = runtara_environment::handlers::HealthCheckResponse {
-        healthy: true,
-        version: "1.0.0".to_string(),
-        uptime_ms: 12345,
-    };
-    let debug_str = format!("{:?}", response);
-    assert!(debug_str.contains("healthy"));
-    assert!(debug_str.contains("1.0.0"));
-    assert!(debug_str.contains("12345"));
-}
-
 // ============================================================================
 // Multi-Tenant Isolation Tests (Issue #1)
 // ============================================================================
@@ -1269,12 +1204,16 @@ async fn test_start_instance_tenant_isolation() {
 
     // Should fail - tenant-B should not be able to use tenant-A's image
     assert!(
-        !response.success,
+        !response.is_accepted(),
         "Tenant isolation breach: tenant-B should not be able to use tenant-A's image"
     );
     assert!(
-        response.error.as_ref().unwrap().contains("not found"),
-        "Error should indicate image not found (hiding existence from wrong tenant)"
+        matches!(
+            response.rejection,
+            Some(StartRejection::ImageNotFound { .. })
+        ),
+        "A foreign tenant's image must be refused as simply absent, so the \
+         refusal cannot confirm that the image exists"
     );
 
     cleanup(&pool, None, Some(&image_id)).await;
@@ -1318,7 +1257,7 @@ async fn test_start_instance_same_tenant_allowed() {
     let response = handle_start_instance(&state, request).await.unwrap();
 
     // Should succeed
-    assert!(response.success, "Error: {:?}", response.error);
+    assert!(response.is_accepted(), "Error: {:?}", response.rejection);
     assert!(!response.instance_id.is_empty());
 
     cleanup(&pool, Some(&response.instance_id), Some(&image_id)).await;
@@ -1372,7 +1311,7 @@ async fn test_start_instance_stores_env() {
     };
 
     let response = handle_start_instance(&state, request).await.unwrap();
-    assert!(response.success, "Error: {:?}", response.error);
+    assert!(response.is_accepted(), "Error: {:?}", response.rejection);
 
     // Verify env vars were stored in the database
     let result = db::get_instance_image_with_env(&pool, &response.instance_id)
@@ -1426,7 +1365,7 @@ async fn test_start_instance_empty_env() {
     };
 
     let response = handle_start_instance(&state, request).await.unwrap();
-    assert!(response.success, "Error: {:?}", response.error);
+    assert!(response.is_accepted(), "Error: {:?}", response.rejection);
 
     // Verify empty env is stored correctly (should return empty HashMap)
     let result = db::get_instance_image_with_env(&pool, &response.instance_id)
@@ -2064,7 +2003,7 @@ async fn test_launch_does_not_resurrect_a_run_that_already_parked() {
     )
     .await
     .expect("start should succeed");
-    assert!(response.success, "error: {:?}", response.error);
+    assert!(response.is_accepted(), "error: {:?}", response.rejection);
 
     let instance = persistence
         .get_instance(&response.instance_id)

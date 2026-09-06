@@ -8,9 +8,9 @@
 //! still speaks.
 
 use runtara_server::runtime_types::{
-    HealthStatus, InstanceStatus, ListImagesOptions, ListInstancesOptions, RegisterImageOptions,
-    RegisterImageResult, RegisterImageStreamOptions, SignalType, StartInstanceOptions,
-    StartInstanceResult, StopInstanceOptions,
+    HealthStatus, InstanceStatus, ListImagesOptions, ListInstancesOptions, RegisterImageResult,
+    RegisterImageStreamOptions, SignalType, StartInstanceOptions, StartInstanceResult,
+    StopInstanceOptions,
 };
 
 #[test]
@@ -121,20 +121,6 @@ fn test_list_instances_options_defaults() {
     assert!(opts.statuses.is_empty());
     assert_eq!(opts.limit, 100);
     assert_eq!(opts.offset, 0);
-}
-
-#[test]
-fn test_register_image_options_builder() {
-    let binary = vec![0, 1, 2, 3, 4];
-    let opts = RegisterImageOptions::new("tenant-abc", "my-image", binary.clone())
-        .with_description("Test image")
-        .with_metadata(serde_json::json!({"version": "1.0"}));
-
-    assert_eq!(opts.tenant_id, "tenant-abc");
-    assert_eq!(opts.name, "my-image");
-    assert_eq!(opts.binary, binary);
-    assert_eq!(opts.description, Some("Test image".to_string()));
-    assert!(opts.metadata.is_some());
 }
 
 #[test]

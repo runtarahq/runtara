@@ -36,6 +36,36 @@ async fn get_pool() -> Option<sqlx::PgPool> {
     Some(pool)
 }
 
+/// Seed the instance/image association a fixture needs.
+///
+/// Production writes this row inside `LaunchRepository::claim_initial`; keeping
+/// a `db` helper alive for test setup alone is what this replaces.
+async fn seed_instance_image(
+    pool: &PgPool,
+    instance_id: &str,
+    image_id: &str,
+    tenant_id: &str,
+    env: Option<&std::collections::HashMap<String, String>>,
+    timeout_seconds: Option<i64>,
+) {
+    let env = env
+        .filter(|values| !values.is_empty())
+        .map(|values| serde_json::to_value(values).expect("env must serialize"));
+    sqlx::query(
+        "INSERT INTO instance_images \
+             (instance_id, image_id, tenant_id, env, timeout_seconds, created_at) \
+         VALUES ($1, $2, $3, $4, $5, NOW())",
+    )
+    .bind(instance_id)
+    .bind(image_id)
+    .bind(tenant_id)
+    .bind(env)
+    .bind(timeout_seconds)
+    .execute(pool)
+    .await
+    .expect("Failed to associate instance image");
+}
+
 /// Helper to create a test instance using the Persistence trait.
 /// This replaces the old `db::create_instance` function that was removed.
 async fn create_test_instance(pool: &PgPool, instance_id: &str, tenant_id: &str, image_id: &str) {
@@ -44,9 +74,7 @@ async fn create_test_instance(pool: &PgPool, instance_id: &str, tenant_id: &str,
         .register_instance(instance_id, tenant_id)
         .await
         .expect("Failed to register instance");
-    db::associate_instance_image(pool, instance_id, image_id, tenant_id, None, None)
-        .await
-        .expect("Failed to associate instance image");
+    seed_instance_image(pool, instance_id, image_id, tenant_id, None, None).await;
 }
 
 /// Helper to create a test instance with env vars using the Persistence trait.
@@ -62,9 +90,7 @@ async fn create_test_instance_with_env(
         .register_instance(instance_id, tenant_id)
         .await
         .expect("Failed to register instance");
-    db::associate_instance_image(pool, instance_id, image_id, tenant_id, env, None)
-        .await
-        .expect("Failed to associate instance image");
+    seed_instance_image(pool, instance_id, image_id, tenant_id, env, None).await;
 }
 
 /// Helper to update instance status using the Persistence trait.
@@ -507,20 +533,6 @@ async fn test_list_instances_by_multiple_statuses() {
 }
 
 // ============================================================================
-// Health Check Test
-// ============================================================================
-
-#[tokio::test]
-async fn test_health_check() {
-    skip_if_no_db!();
-    let pool = get_pool().await.expect("Failed to connect to database");
-
-    let healthy = db::health_check(&pool).await.expect("Health check failed");
-
-    assert!(healthy);
-}
-
-// ============================================================================
 // Environment Variable Persistence Tests
 // ============================================================================
 
@@ -649,9 +661,7 @@ async fn test_instance_timeout_seconds_round_trips() {
         .expect("Failed to register instance");
 
     // Persist a per-instance timeout larger than the legacy hardcoded 300s.
-    db::associate_instance_image(&pool, &instance_id, &image_id, tenant_id, None, Some(1800))
-        .await
-        .expect("Failed to associate instance image");
+    seed_instance_image(&pool, &instance_id, &image_id, tenant_id, None, Some(1800)).await;
 
     let timeout = db::get_instance_timeout_seconds(&pool, &instance_id)
         .await

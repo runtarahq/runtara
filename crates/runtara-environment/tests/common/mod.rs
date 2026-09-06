@@ -202,10 +202,30 @@ impl TestContext {
 const POSTGRES_TEST_IMAGE_TAG: &str = "16-alpine";
 
 /// Get database URL - either from environment or by starting a testcontainer.
+///
+/// `TEST_RUNTARA_DATABASE_URL` names a database to use as-is. Otherwise
+/// `TEST_ENVIRONMENT_DATABASE_URL` — the variable CI actually sets for this
+/// crate — is used, with `_it` appended, and the database is created on first
+/// use. Reading neither meant every `TestContext` started its own Docker
+/// Postgres beside the service container CI had already provisioned: under
+/// `--test-threads=1`, one container per test, for a suite that had a database
+/// waiting for it the whole time.
+///
+/// The suffix is not cosmetic. Nine of this crate's test files open
+/// `TEST_ENVIRONMENT_DATABASE_URL` directly, while `TestContext` backs only
+/// `launch_queue_test` and `workflow_launch_lease_test` — and those drive the
+/// dispatcher, whose scan counts every dispatchable row in the database.
+/// Pointing both groups at one database makes a launch enqueued by any other
+/// file show up in `dispatch_once`, so the two are kept apart exactly as
+/// `test_support` keeps the inline unit tests on a `_unit` database of their
+/// own.
 async fn get_database_url() -> Result<(String, Option<ContainerAsync<Postgres>>), String> {
-    // First, check if TEST_RUNTARA_DATABASE_URL is set
     if let Ok(url) = std::env::var("TEST_RUNTARA_DATABASE_URL") {
         return Ok((url, None));
+    }
+
+    if let Ok(url) = std::env::var("TEST_ENVIRONMENT_DATABASE_URL") {
+        return integration_database(&url).await.map(|url| (url, None));
     }
 
     // Otherwise, start a PostgreSQL container. `Postgres::default()` ships
@@ -240,4 +260,28 @@ macro_rules! skip_if_no_env_db {
     () => {
         // No-op: tests now auto-start containers if no DB URL is set
     };
+}
+
+/// Derive and create this suite's own database beside the one the variable
+/// names, so it never shares a table with the files that open that variable
+/// directly. Mirrors how `test_support` provisions its `_unit` database.
+async fn integration_database(base_url: &str) -> Result<String, String> {
+    use sqlx::ConnectOptions;
+
+    let base: sqlx::postgres::PgConnectOptions = base_url
+        .parse()
+        .map_err(|e| format!("TEST_ENVIRONMENT_DATABASE_URL must parse: {e}"))?;
+    let name = format!("{}_it", base.get_database().unwrap_or("runtara_test"));
+
+    // Created on first use so a developer provisions only the one database the
+    // suite already documents. A duplicate-database error means a concurrent
+    // test binary won the race, which is success by another route.
+    if let Ok(mut conn) = base.clone().database("postgres").connect().await {
+        use sqlx::Executor;
+        let _ = conn
+            .execute(format!("CREATE DATABASE \"{name}\"").as_str())
+            .await;
+    }
+
+    Ok(base.database(&name).to_url_lossy().to_string())
 }

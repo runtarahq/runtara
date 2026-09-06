@@ -7,6 +7,7 @@ mod common;
 use std::{sync::Arc, time::Duration};
 
 use common::TestContext;
+use runtara_core::persistence::Persistence;
 use runtara_environment::runner::{MockRunner, Runner, RunnerHandle};
 use runtara_environment::{
     db,
@@ -35,19 +36,32 @@ async fn fixture(context: &TestContext) -> LaunchFixture {
         .await
         .to_string();
     let instance_id = Uuid::new_v4().to_string();
-    assert!(
-        db::claim_instance_with_image(
-            &context.pool,
-            &instance_id,
-            &image_id,
-            &tenant_id,
-            Some(br#"{}"#),
-            None,
-            None,
-        )
+    // Seed the pending instance and its image binding the way
+    // `LaunchRepository::claim_initial` does, without going through the
+    // repository this file is testing.
+    let persistence = PostgresPersistence::new(context.pool.clone());
+    persistence
+        .register_instance(&instance_id, &tenant_id)
         .await
-        .expect("instance/image claim must succeed"),
-    );
+        .expect("instance must register");
+    // The dispatcher's preflight reads the durable input before it will hand a
+    // generation to a runner, so a fixture that registers without one leaves the
+    // launch stuck in the queue rather than failing loudly.
+    persistence
+        .store_instance_input(&instance_id, br#"{}"#)
+        .await
+        .expect("durable input must persist");
+    sqlx::query(
+        "INSERT INTO instance_images \
+             (instance_id, image_id, tenant_id, env, timeout_seconds, created_at) \
+         VALUES ($1, $2, $3, NULL, NULL, NOW())",
+    )
+    .bind(&instance_id)
+    .bind(&image_id)
+    .bind(&tenant_id)
+    .execute(&context.pool)
+    .await
+    .expect("image binding must persist");
 
     LaunchFixture {
         tenant_id,

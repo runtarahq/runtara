@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Shared Postgres fixtures for this crate's database-backed unit tests.
 //!
-//! The unit tests in [`crate::runtime_host`], [`crate::runner::embedded`] and
-//! [`crate::http_server`] do not merely orchestrate: they assert what the
+//! The unit tests in [`crate::runtime_host`] and [`crate::runner::embedded`]
+//! do not merely orchestrate: they assert what the
 //! database is left holding after a write — that an acknowledged signal stops
 //! being pending, that `complete_instance` COALESCEs termination fields, that a
 //! terminal status survives a late suspend. Those are properties of the real
