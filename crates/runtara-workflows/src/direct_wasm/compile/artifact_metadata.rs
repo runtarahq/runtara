@@ -67,10 +67,28 @@ pub struct DirectArtifactMetadata {
     pub shared_components: Vec<DirectComponentDependencyMetadata>,
     /// Agent components required for static composition.
     pub agent_components: Vec<DirectComponentDependencyMetadata>,
+    /// Explicit experimental isolated Agent selection; absent for legacy artifacts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub isolation: Option<DirectIsolationMetadata>,
     /// Preloaded child workflows that will be statically inlined by the direct
     /// emitter once `EmbedWorkflow` lowering is enabled.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub child_workflows: Vec<DirectChildWorkflowDependencyMetadata>,
+}
+
+/// Composition-stage isolated Agent inventory. Contexts identify live adapter
+/// calls, not replay-stable logical step/attempt cancellation addresses.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectIsolationMetadata {
+    /// Guest bridge contract version.
+    pub adapter_version: u32,
+    /// Identity semantics supplied to the scoped launcher.
+    pub context_contract: String,
+    /// Exact packaged components and their invocation interfaces.
+    pub bindings: Vec<runtara_workflow_wit::isolation_package::Binding>,
+    /// Packages left with their original component lifetime.
+    pub legacy_agents: Vec<String>,
 }
 
 /// File identity captured in direct artifact metadata.
@@ -188,6 +206,7 @@ pub(super) fn initial_artifact_metadata(
             size_bytes: input.workflow_logic_size as u64,
         },
         composed_wasm: None,
+        isolation: None,
         shared_components: input
             .component_artifacts
             .shared_components

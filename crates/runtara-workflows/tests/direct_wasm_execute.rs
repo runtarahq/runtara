@@ -27,6 +27,7 @@ use runtara_workflows::{
 };
 use serde_json::Value;
 
+mod isolated_agent_execution;
 mod wasm_performance_baseline;
 
 // Independent description of the persisted v2 key contract (not a production

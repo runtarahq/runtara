@@ -1787,6 +1787,7 @@ mod tests {
             support_report_checksum: "support-sha256".to_string(),
             workflow_logic_wasm: wasm("workflow-logic.wasm", "logic-sha256"),
             composed_wasm: Some(wasm("workflow.wasm", "composed-sha256")),
+            isolation: None,
             shared_components: vec![DirectComponentDependencyMetadata {
                 kind: "shared".to_string(),
                 agent_id: None,

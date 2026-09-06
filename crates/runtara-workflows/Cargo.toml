@@ -13,6 +13,7 @@ categories = ["development-tools"]
 default = ["compiler"]
 compiler = [
     "dep:runtara-workflow-wit",
+    "runtara-workflow-wit/isolation-package",
     "dep:wasm-encoder",
     "dep:wit-component",
     "dep:wit-parser",

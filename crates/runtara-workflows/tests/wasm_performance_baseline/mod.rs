@@ -20,7 +20,7 @@ fn reference(path: &str) -> Value {
     json!({"valueType":"reference","value":path})
 }
 
-fn random_chain(count: usize, durable: bool) -> Value {
+pub(super) fn random_chain(count: usize, durable: bool) -> Value {
     let mut steps = serde_json::Map::new();
     let mut outputs = serde_json::Map::new();
     let mut edges = Vec::new();
@@ -112,7 +112,7 @@ fn cases() -> Vec<Case> {
     cases
 }
 
-fn host(input: &[u8]) -> (Arc<CapturingRuntimeHost>, mpsc::Receiver<CapturedMessage>) {
+pub(super) fn host(input: &[u8]) -> (Arc<CapturingRuntimeHost>, mpsc::Receiver<CapturedMessage>) {
     let (tx, rx) = mpsc::channel();
     let state = ServerState {
         checkpoints: Mutex::new(HashMap::new()),

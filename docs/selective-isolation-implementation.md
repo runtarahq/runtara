@@ -309,13 +309,64 @@ focused all-target Clippy passed with both integration/PoC features.
 This validation applies to the new isolated package bindings. Legacy artifacts
 retain their existing execution path and accepted DSL support.
 
+### First emitted isolated Agent execution path
+
+The explicit `compose_direct_workflow_with_isolated_agents` API replaces selected
+Agent dependencies with small guest components that keep the existing Agent
+`invoke` ABI and perform task start/join/release in WASM. Existing parent lowering
+continues to own mapping, retry/error handling, edges and parallel pools. The
+complete distributable artifact embeds each selected component once in the raw
+package catalog; result size/checksum metadata covers that complete artifact.
+
+Selection pins caller-reviewed, reset-safe component bytes by SHA-256. Unknown
+selection keys and changed reviewed bytes are rejected. Unselected dependencies
+retain their existing component lifetime; an empty selection preserves legacy
+artifact bytes and metadata. Optional artifact metadata lists isolated bindings,
+legacy Agent IDs, adapter version and the current `live-adapter-call:1` context
+contract. The server metadata test fixture accepts this additive field.
+
+This first context identifies a live call by its binding and adapter-local call
+ordinal. It is **not** a replay-stable logical step/attempt address; pool instances
+have separate ordinals. Host task ownership still distinguishes live resources,
+but durable targeted cancellation must wait for compiler-generated logical scope
+propagation and the production scope factory. No server/default selector changed.
+
+New execution tests run actual compiled DSL through the worker/prepared-package
+path and production child launcher: random-double chains of 1/10/100 calls,
+parallel Split, and a 1 MiB Unicode input/output round trip. Counts verify actual
+child invocation rather than fallback. Catalog assertions verify deduplication;
+small handle limits with repeated calls and retained-result checks verify release.
+Large payload and failure results are compared with legacy execution. A mixed
+utils/datetime graph verifies that an unselected Agent still executes and appears
+in the metadata as using its existing component lifetime.
+
+Direct emitted-adapter tests cover raw output bytes and every error-info field,
+including `retry-after-ms = u64::MAX` and Unicode attributes. Cancellation and
+timeout become nonretryable errors; child traps, unsupported capability suspension
+and host execution errors remain fatal traps. The guest arena grows with checked
+32-bit bounds and resets after canonical post-return when calls have completed.
+
+Verification: the full workflow run passed **847 tests** (568 library, 225 emitted
+WASM executions and 54 other integration tests); the manual performance benchmark
+and existing doctest remained ignored. A subsequent focused run passed all five
+emitted-isolation tests, including the added mixed selected/unselected Agent case,
+package-limit failure preserving the previous artifact, and metadata round trips.
+The three direct adapter ABI tests also passed. Rebuilding all 27 Agent components
+and both shared components succeeded; staged WASM hashes were unchanged. All five
+emitted-isolation tests passed again against the rebuilt bundle.
+The component-host suite passed **119 tests** with its manual benchmark ignored;
+a missing worktree build-output link caused one initial fixture-location failure
+and was restored before that successful run. Focused all-target workflow Clippy
+passed with the integration feature and `-D warnings`.
+
 ## Remaining required work
 
-- P0: add explicit legacy/isolated differential selection and coverage counters.
+- P0: extend explicit differential selection and invocation-count evidence to all
+  required constructs and production artifact inspection.
 - P1: production invocation-scope factory and environment ownership integration, aggregate
   input/transport/guest resource reservations and root fencing on cleanup failure.
-- P2: sequential/parallel Agent call backend and every AI auxiliary invocation,
-  preserving package state eligibility and existing invocation semantics.
+- P2: propagate logical step/attempt scopes through the Agent backend, qualify
+  every AI auxiliary invocation and certify package reset/state eligibility.
 - P3: recursive Embed extraction and scoped child runtime, suspension/wake sets,
   scopes, deadlines, checkpoint keys and existing reference ABI modes.
 - P4: durable attempt transitions, root and targeted command routing, crash/lease
@@ -325,5 +376,6 @@ retain their existing execution path and accepted DSL support.
 - P6: controlled opt-in and artifact-compatible rollback; no default enablement
   before all gates above pass.
 
-No local server has been launched yet. No isolated DSL backend result has been
-measured. Do not treat the task-ownership tests as proof of the full implementation.
+No local server has been launched yet. The experimental emitted Agent path has
+correctness evidence, but no paired performance measurements yet. Those tests do
+not establish durable targeted cancellation or completion of the full plan.

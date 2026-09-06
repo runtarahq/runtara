@@ -40,6 +40,9 @@ mod edge_route;
 mod embed_retry;
 mod embed_workflow;
 mod error_step;
+mod isolation_adapter;
+#[cfg(test)]
+mod isolation_adapter_tests;
 mod log;
 mod loop_deadline;
 mod mapping;
@@ -75,7 +78,7 @@ use super::child_workflows::resolve_direct_child_workflow_metadata;
 use abi::push_retptr_arg;
 pub use artifact_metadata::{
     DirectArtifactFileMetadata, DirectArtifactMetadata, DirectComponentDependencyMetadata,
-    DirectComponentSidecarMetadata,
+    DirectComponentSidecarMetadata, DirectIsolationMetadata,
 };
 use artifact_metadata::{
     InitialArtifactMetadataInput, initial_artifact_metadata, resolve_agent_component_dependencies,
@@ -623,7 +626,42 @@ pub fn compose_direct_workflow_with_extra_dirs(
     components_dir: impl AsRef<Path>,
     extra_component_dirs: &[PathBuf],
 ) -> Result<PathBuf, DirectCompileError> {
-    let components_dir = components_dir.as_ref();
+    compose_direct_workflow_selected(result, components_dir.as_ref(), extra_component_dirs, None)
+}
+
+/// Experimental backend for reviewed, reset-safe Agent components. Keys are
+/// Agent IDs; values pin the reviewed SHA-256 bytes. Unselected packages retain
+/// their original component lifetime. Graph control stays in the parent guest.
+///
+/// Execution requires a scoped invocation launcher. Contexts currently identify
+/// live adapter calls, not durable logical steps; this API does not enable durable
+/// targeted cancellation or change the default backend.
+pub fn compose_direct_workflow_with_isolated_agents(
+    result: &mut DirectCompilationResult,
+    components_dir: impl AsRef<Path>,
+    extra_component_dirs: &[PathBuf],
+    reviewed_agents: &std::collections::BTreeMap<String, String>,
+    limits: runtara_workflow_wit::isolation_package::PackageLimits,
+) -> Result<PathBuf, DirectCompileError> {
+    compose_direct_workflow_selected(
+        result,
+        components_dir.as_ref(),
+        extra_component_dirs,
+        Some((reviewed_agents, limits)),
+    )
+}
+
+type IsolationSelection<'a> = (
+    &'a std::collections::BTreeMap<String, String>,
+    runtara_workflow_wit::isolation_package::PackageLimits,
+);
+
+fn compose_direct_workflow_selected(
+    result: &mut DirectCompilationResult,
+    components_dir: &Path,
+    extra_component_dirs: &[PathBuf],
+    selection: Option<IsolationSelection<'_>>,
+) -> Result<PathBuf, DirectCompileError> {
     let composed_path = result.build_dir.join("workflow.wasm");
     let resolve_deps_start = Instant::now();
     let shared_components = resolve_shared_component_dependencies(
@@ -655,6 +693,43 @@ pub fn compose_direct_workflow_with_extra_dirs(
         overrides.insert(component.package.clone(), component.wasm_path.clone());
     }
 
+    let mut children = Vec::new();
+    let mut bindings = Vec::new();
+    if let Some((reviewed, _)) = selection {
+        for (agent, digest) in reviewed {
+            let component = agent_components
+                .iter()
+                .find(|c| c.metadata.agent_id.as_ref() == Some(agent))
+                .ok_or_else(|| {
+                    component_error(format!(
+                        "isolated Agent `{agent}` is not a workflow dependency"
+                    ))
+                })?;
+            let child = fs::read(&component.wasm_path)?;
+            if sha256_hex(&child) != *digest
+                || component.metadata.wasm.as_ref().map(|w| &w.sha256) != Some(digest)
+            {
+                return Err(component_error(format!(
+                    "isolated Agent `{agent}` differs from its reviewed digest"
+                )));
+            }
+            let binding = runtara_workflow_wit::isolation_package::Binding {
+                id: format!("agent:{agent}"),
+                artifact: digest.clone(),
+                interface: format!("runtara:agent-{agent}/capabilities@{AGENT_WIT_VERSION}"),
+            };
+            let adapter = isolation_adapter::emit_adapter(agent, &binding.id)?;
+            // Caller-provided text never becomes a filesystem path.
+            let adapter_path = result
+                .build_dir
+                .join(format!("isolated-agent-{}.wasm", bindings.len()));
+            fs::write(&adapter_path, adapter)?;
+            overrides.insert(component.package.clone(), adapter_path);
+            children.push(child);
+            bindings.push(binding);
+        }
+    }
+
     let compose_start = Instant::now();
     let composed_wasm = compose_workflow_component_in_process(
         &result.component_artifacts.wac_source,
@@ -667,7 +742,30 @@ pub fn compose_direct_workflow_with_extra_dirs(
         composed_bytes = composed_wasm.len(),
         "compose: in-process wac-graph composition complete",
     );
+    let isolation = if bindings.is_empty() {
+        None
+    } else {
+        Some(DirectIsolationMetadata {
+            adapter_version: 1,
+            context_contract: "live-adapter-call:1".into(),
+            bindings: bindings.clone(),
+            legacy_agents: agent_components
+                .iter()
+                .filter_map(|c| c.metadata.agent_id.as_ref())
+                .filter(|agent| !selection.unwrap().0.contains_key(*agent))
+                .cloned()
+                .collect(),
+        })
+    };
+    let composed_wasm = if let Some((_, limits)) = selection.filter(|_| !bindings.is_empty()) {
+        let refs: Vec<&[u8]> = children.iter().map(Vec::as_slice).collect();
+        runtara_workflow_wit::isolation_package::append(&composed_wasm, &refs, bindings, limits)
+            .map_err(component_error)?
+    } else {
+        composed_wasm
+    };
     fs::write(&composed_path, &composed_wasm)?;
+    result.artifact_metadata.isolation = isolation;
 
     let composed_wasm_size = composed_wasm.len();
     let composed_wasm_checksum = sha256_hex(&composed_wasm);
