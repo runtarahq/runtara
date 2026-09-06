@@ -1166,6 +1166,11 @@ async fn record_exit_diagnostics(
 ) {
     let (_output, stderr, metrics) = runner.collect_result(handle).await;
 
+    // Store metrics and pick up the status the guest reported in the same
+    // statement: this monitor needs both, and they are the same row. Kept even
+    // when there are no metrics to write, so the crash check the caller runs
+    // always has a status to look at.
+
     let observed_status = match crate::metrics::record_resources_returning_status(
         pool,
         instance_id,
@@ -1490,12 +1495,13 @@ pub fn spawn_container_monitor(
 
     tokio::spawn(async move {
         if let Some((gate, attempt_count)) = start_gate {
-            let opened = matches!(
-                gate.wait_for_runner_confirmation().await,
-                StartGateOutcome::Opened
-            );
-            if !opened
-                && matches!(
+            // Matched exhaustively rather than tested for `Opened`: a variant
+            // added later must not silently join the failure set.
+            let next = match gate.wait_for_runner_confirmation().await {
+                StartGateOutcome::Opened => AfterFailedGate::Watch,
+                StartGateOutcome::Cancelled
+                | StartGateOutcome::TimedOut
+                | StartGateOutcome::ConfirmationFailed => {
                     settle_failed_start_gate(
                         &pool,
                         &runner,
@@ -1504,10 +1510,10 @@ pub fn spawn_container_monitor(
                         &instance_id,
                         attempt_count,
                     )
-                    .await,
-                    AfterFailedGate::Done
-                )
-            {
+                    .await
+                }
+            };
+            if matches!(next, AfterFailedGate::Done) {
                 return;
             }
         }
