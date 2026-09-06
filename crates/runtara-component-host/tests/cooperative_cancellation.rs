@@ -235,3 +235,25 @@ async fn async_typing_with_synchronous_bindings_does_not_acknowledge_cancellatio
 #[cfg(feature = "component-integration-tests")]
 #[path = "cooperative_cancellation/real_agent.rs"]
 mod real_agent;
+
+#[tokio::test]
+async fn cancelling_a_queued_call_resolves_before_entry_and_can_be_dropped() -> anyhow::Result<()> {
+    // Hold this component's next entry using standard backpressure. The queued
+    // call must never invoke host I/O, increment the agent's counter or disturb
+    // either live call. The original proof also checks reuse after cancellation.
+    let source = COMPOSED
+        .replace("(core func $cancelled (canon task.cancel))", "(core func $cancelled (canon task.cancel))\n(core func $inc (canon backpressure.inc))\n(core func $dec (canon backpressure.dec))")
+        .replace("(import \"h\" \"cancelled\" (func $cancelled))", "(import \"h\" \"cancelled\" (func $cancelled))\n(import \"h\" \"inc\" (func $inc))\n(import \"h\" \"dec\" (func $dec))")
+        .replace("(export \"cancelled\" (func $cancelled))", "(export \"cancelled\" (func $cancelled))\n(export \"inc\" (func $inc))\n(export \"dec\" (func $dec))")
+        .replace("(func (export \"run\") (result i32) (local $status i32)", "(func (export \"run\") (result i32) (local $status i32)\n(call $inc)")
+        .replace("(call $return ", "(call $dec)\n(call $return ")
+        .replace("(call $cancelled)", "(call $dec)\n(call $cancelled)")
+        .replace("(local $target i32) (local $sibling i32)", "(local $target i32) (local $sibling i32) (local $queued i32)")
+        .replace("(call $trace (i32.const 13))", r#"(call $trace (i32.const 13))
+            (local.set $queued (call $target (i32.const 8)))
+            (if (i32.and (local.get $queued) (i32.const 15)) (then unreachable))
+            (local.set $queued (i32.shr_u (local.get $queued) (i32.const 4)))
+            (if (i32.ne (call $cancel (local.get $queued)) (i32.const 3)) (then unreachable))
+            (call $drop (local.get $queued))"#);
+    run_proof(&source, None, Arc::new(Notify::new())).await
+}

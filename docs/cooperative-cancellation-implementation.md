@@ -1,10 +1,10 @@
 # Cooperative cancellation implementation record
 
-Status: sequential emitted cancellation, 2026-09-06. Governing contract:
+Status: sequential and parallel emitted root cancellation, 2026-09-06. Governing contract:
 [cooperative cancellation plan](selective-isolation-plan.md). Update the existing
 implementation directly; no new product feature flags or alternate backend.
-Parallel/nested cancellation, timeouts and the remaining plan gates are still
-incomplete.
+Nested workflow-agent cancellation, timeouts and the remaining plan gates are
+still incomplete.
 
 ## P0: initial ABI inventory
 
@@ -291,10 +291,109 @@ cargo test -p runtara-workflows --features direct-wasm-integration-tests --test 
 cargo clippy -p runtara-workflows --all-targets --features direct-wasm-integration-tests -- -D warnings
 ```
 
-Remaining: replace the parallel drains/scheduler's consuming signal checks and
+Remaining at the sequential stage: replace the parallel drains/scheduler's consuming signal checks and
 cancel every active peer before root acknowledgement; qualify sequential waits
 inside those schedulers, pause/shutdown observation and superseding commands;
 migrate the other Agent/export bindings and compiled workflow-agent cancellation
 delivery; implement deadline selection, independent emergency grace and terminal
 race rules; then complete persistence/server E2E, size/timing and capacity gates.
 Sequential helpers do not establish cancellation of parallel or nested scopes.
+
+
+## Parallel generated waits and deferred acknowledgement
+
+The normal Split window, branch scheduler and depth-wavefront now use the same
+read-only lifecycle observation and standard Component Model cancellation path.
+The compiler stores standard call handles in the existing guest result slots;
+it adds no host task registry, per-call Store, task interface or product flag.
+The existing normal component bundle and instance pools are used unchanged.
+
+Each active window includes a one-second polling timer in its waitable set. Timer
+completion only triggers another observation; it cannot decrement the active
+Agent count or advance a branch. Returned handles are removed from their slots
+before another call can reuse those handles. On root Cancel, WASM detaches,
+cancels and drops every retained call and polling timer, drops the waitable set,
+and only then acknowledges the exact lifecycle command. Sequential invocation
+helpers also close an active peer window before their cancellation/error return.
+Signal/heartbeat failures use the same cleanup before reporting failure.
+
+Checkpoint responses use this handling too: a completed branch may save a
+checkpoint while another branch is blocked. A Cancel carried by that response
+must clean the pending sibling before acknowledgement; the saved checkpoint
+remains intact. Pause and shutdown are retained in guest locals until completed
+results have been assembled and checkpointed at the window boundary. A later
+rate-limited `None` observation does not erase the receipt. A newer Cancel can
+supersede it. Nested assembly deferral uses a depth counter so an inner boundary
+cannot release an outer boundary's deferred acknowledgement. The shared
+checkpoint helper's consuming polls run only after that deferral ends; other
+composite/loop boundaries still require broader qualification.
+
+Additional emitted DSL tests (normal HTTP Agent and native host I/O):
+
+| Test | Evidence |
+|---|---|
+| `emitted_cancel_cleans_every_parallel_split_call` | Both requests remain hung; both connections close before the command is acknowledged. |
+| `emitted_cancel_cleans_every_scheduled_branch` | The independent branch scheduler closes every pending peer before acknowledgement. |
+| `emitted_cancel_cleans_every_wavefront_branch` | Two branches containing later waits exercise the wavefront path; cancellation closes both initial calls. |
+| `emitted_signal_poll_failure_cleans_every_parallel_call` | A failed signal read closes every pending call before workflow failure. |
+| `emitted_checkpoint_cancel_cleans_pending_sibling_before_ack` | One call completes and checkpoints; its returned Cancel command cleans the still-hung sibling before acknowledgement. |
+| `emitted_pause_observed_once_checkpoints_every_sibling_before_ack` | A single observation survives subsequent `None` reads; both sibling checkpoints precede acknowledgement and replay sends no new HTTP requests. |
+| `emitted_shutdown_observed_once_checkpoints_every_sibling_before_ack` | Shutdown has the same drain/checkpoint/replay ordering without becoming Cancel. |
+| `emitted_cancel_supersedes_pause_while_parallel_calls_hang` | A retained Pause does not hide a newer Cancel; both hung calls are cleaned and only Cancel is acknowledged. |
+
+These are controlled-runtime integration tests, not public API/Core/server E2E.
+The ten-second test watchdog is a failure bound, not the cancellation mechanism;
+all runs use `cancel: None`. Only the HTTP Agent currently has qualified
+cancellation-capable bindings. Other Agents and compiled workflow-agents can
+still delay standard synchronous cancellation indefinitely.
+
+The cancellation result check accepts all three terminal resolutions: returned
+(2), cancelled before entry (3), and cancelled after entry (4). The added standard
+Component Model proof
+`cancelling_a_queued_call_resolves_before_entry_and_can_be_dropped` applies
+backpressure to queue a second call, cancels and drops it before Agent entry,
+and verifies unchanged sibling behavior and reuse of the Agent instance. This
+is a standard-mechanism proof; the emitted HTTP cases exercise entered calls.
+
+Performance remains unmeasured for this stage. Returned-handle removal currently
+scans the window's slot array, so a drain of K calls can perform O(K²) comparisons;
+this must be measured and addressed before claiming scalable unlimited windows.
+Polling and emitted cleanup instructions also add work and binary bytes. The
+planned revision-to-revision measurements must quantify those costs; the older
+isolated-execution reports are not evidence for this implementation.
+
+Remaining gates include nested workflow-agent delivery, other Agent bindings,
+sequential fallback/retry and wider pause/shutdown qualification, cooperative
+step deadlines, independent emergency grace, accepted-completion races,
+server/persistence E2E and the complete size/timing/capacity comparison. E128
+Agent/Embed timeout rejection remains in place.
+
+
+Verification for this stage:
+
+- 573 compiler unit tests passed.
+- The full emitted-workflow suite passed 262 tests with four test threads; the
+  two existing manual performance benchmarks remained ignored. The initial
+  default-concurrency run passed 258 tests but hit the five-second final-join
+  watchdog in four historical isolation cancellation tests. Those four passed
+  in a focused run and in the full four-thread run. No assertions, deadlines or
+  production settings were relaxed.
+- After adding the pre-entry cancellation result, the 12 focused emitted
+  cancellation tests and all 573 compiler unit tests passed again.
+- All 10 standard cancellation/real HTTP component proofs passed, including
+  queued-call cancellation and the negative synchronous-binding test.
+- All-target Clippy for the compiler and component host, with their existing
+  integration test features and `-D warnings`, passed. Formatting and diff
+  whitespace checks passed.
+
+```sh
+cargo test -p runtara-workflows --lib
+cargo test -p runtara-workflows --features direct-wasm-integration-tests --test direct_wasm_execute -- --test-threads=4
+cargo test -p runtara-workflows --features direct-wasm-integration-tests --test direct_wasm_execute cooperative_workflow_cancellation
+cargo test -p runtara-component-host --features component-integration-tests --test cooperative_cancellation
+cargo clippy -p runtara-workflows -p runtara-component-host --all-targets --features runtara-workflows/direct-wasm-integration-tests,runtara-component-host/component-integration-tests -- -D warnings
+```
+
+Guest sources and WIT were unchanged; these checks used the existing normal
+release bundle. No database/server E2E, release performance measurements or
+Linux qualification was run in this stage.

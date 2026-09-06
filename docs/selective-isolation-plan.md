@@ -65,7 +65,8 @@ online docs or enable experimental ABI extensions silently.
 - Verify whether cancellation itself can block the waiting guest, which async
   cancellation forms the pinned runtime supports, and how the emergency host
   grace timer remains effective during that wait. Do not depend on optional
-  async-cancel extensions unless explicitly qualified and capability-gated.
+  async-cancel extensions unless qualified on the pinned stack. Do not add an
+  opt-in backend or product flag to select them.
 - WASI P2 pollables can wait on I/O and timers inside cooperating agents. P2
   resource polling does not by itself cancel an arbitrary component call.
 - Keep existing P2 I/O imports where they can participate safely. Adopt P3 I/O

@@ -177,9 +177,6 @@ const DIRECT_RESULT_OPTION_LIST_LEN_OFFSET: u64 = 12;
 const DIRECT_CHECKPOINT_FOUND_OFFSET: u64 = 4;
 const DIRECT_CHECKPOINT_PENDING_SIGNAL_TAG_OFFSET: u64 = 16;
 const DIRECT_CHECKPOINT_SIGNAL_TYPE_PTR_OFFSET: u64 = 20;
-const DIRECT_CHECKPOINT_SIGNAL_TYPE_LEN_OFFSET: u64 = 24;
-const DIRECT_CHECKPOINT_COMMAND_ID_PTR_OFFSET: u64 = 28;
-const DIRECT_CHECKPOINT_COMMAND_ID_LEN_OFFSET: u64 = 32;
 /// Fixed 8-byte scratch slot in the reserved 256-byte low-memory region (past
 /// the retptr scratch at 0 and the agent-args scratch at 128, below the static
 /// data base at 256). Used to marshal a `WaitForSignal` absolute timeout
@@ -404,10 +401,6 @@ const DIRECT_AGENT_ATTEMPT_ENV_LEN_LOCAL: u32 = 115;
 // parallel split is ever ACTIVE at a time (eligible bodies are single Agent
 // steps, so parallel splits cannot nest), so these are plain fixed locals with
 // no save/restore frame.
-/// Sticky suspend/cancel flag observed by the drain loop's per-wakeup polls;
-/// acted on only at the chunk boundary (after assemble), never with live
-/// subtasks. Lives in the spare slot below the PSPLIT block.
-const DIRECT_PSPLIT_SIGNAL_LOCAL: u32 = 116;
 /// Set when a durable wait's deadline came from a checkpoint HIT — i.e. this
 /// pass is a RELAUNCH of a parked wait rather than its first reach. Gates
 /// [`DIRECT_DEADLINE_SKEW_TOLERANCE_MS`], which is only meaningful once a

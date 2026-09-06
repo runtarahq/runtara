@@ -13,14 +13,10 @@
 use wasm_encoder::{BlockType, Function as WasmFunction, Instruction};
 
 use super::abi::{
-    emit_get_checkpoint_has_value, load_retptr_option_list, load_retptr_tag, push_retptr_arg,
-    push_retptr_i32_load, push_retptr_u8_load, return_if_retptr_error,
+    emit_get_checkpoint_has_value, load_retptr_option_list, push_retptr_arg, push_retptr_u8_load,
+    return_if_retptr_error,
 };
-use super::{
-    DIRECT_CHECKPOINT_COMMAND_ID_LEN_OFFSET, DIRECT_CHECKPOINT_COMMAND_ID_PTR_OFFSET,
-    DIRECT_CHECKPOINT_PENDING_SIGNAL_TAG_OFFSET, DIRECT_CHECKPOINT_SIGNAL_TYPE_LEN_OFFSET,
-    DIRECT_CHECKPOINT_SIGNAL_TYPE_PTR_OFFSET, DIRECT_RET_BOOL_OK_OFFSET, DirectCoreFunctionIndices,
-};
+use super::{DIRECT_RET_BOOL_OK_OFFSET, DirectCoreFunctionIndices};
 
 pub(super) fn emit_checkpoint_lookup(
     body: &mut WasmFunction,
@@ -68,6 +64,7 @@ pub(super) fn emit_check_signals_and_suspend(
     body: &mut WasmFunction,
     indices: &DirectCoreFunctionIndices,
 ) {
+    super::cooperative_wait::emit_if_safe_boundary(body, indices);
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.runtime_check_signals));
     return_if_retptr_error(body, indices);
@@ -76,26 +73,9 @@ pub(super) fn emit_check_signals_and_suspend(
     // Suspend-and-exit: ABI-aware (clean-run tag vs suspended outcome).
     super::abi::emit_entry_suspend_return(body, indices);
     body.instruction(&Instruction::End);
+    body.instruction(&Instruction::End); // if safe boundary
 }
 
 fn emit_checkpoint_signal_handling(body: &mut WasmFunction, indices: &DirectCoreFunctionIndices) {
-    load_retptr_tag(body);
-    body.instruction(&Instruction::I32Eqz);
-    body.instruction(&Instruction::If(BlockType::Empty));
-    push_retptr_u8_load(body, DIRECT_CHECKPOINT_PENDING_SIGNAL_TAG_OFFSET);
-    body.instruction(&Instruction::If(BlockType::Empty));
-    push_retptr_i32_load(body, DIRECT_CHECKPOINT_SIGNAL_TYPE_PTR_OFFSET);
-    push_retptr_i32_load(body, DIRECT_CHECKPOINT_SIGNAL_TYPE_LEN_OFFSET);
-    push_retptr_i32_load(body, DIRECT_CHECKPOINT_COMMAND_ID_PTR_OFFSET);
-    push_retptr_i32_load(body, DIRECT_CHECKPOINT_COMMAND_ID_LEN_OFFSET);
-    push_retptr_arg(body);
-    body.instruction(&Instruction::Call(indices.runtime_handle_checkpoint_signal));
-    return_if_retptr_error(body, indices);
-    push_retptr_u8_load(body, DIRECT_RET_BOOL_OK_OFFSET);
-    body.instruction(&Instruction::If(BlockType::Empty));
-    // Suspend-and-exit: ABI-aware (clean-run tag vs suspended outcome).
-    super::abi::emit_entry_suspend_return(body, indices);
-    body.instruction(&Instruction::End);
-    body.instruction(&Instruction::End);
-    body.instruction(&Instruction::End);
+    super::cooperative_wait::emit_checkpoint_signal(body, indices);
 }

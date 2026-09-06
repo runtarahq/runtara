@@ -735,6 +735,8 @@ pub(super) const CANONICAL_LOCAL_GROUPS: &[(u32, ValType)] = &[
     (2, ValType::I64),
     // 142-145: sequential cooperative wait handle, set, timer, packed status.
     (4, ValType::I32),
+    // 146-157: cooperative window bounds/handles and retained lifecycle receipt.
+    (12, ValType::I32),
 ];
 
 /// Drop `n` leading local slots from `groups`, splitting (never merging) the

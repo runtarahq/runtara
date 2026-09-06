@@ -47,9 +47,8 @@
 use wasm_encoder::{BlockType, Function as WasmFunction, Instruction};
 
 use super::abi::{
-    emit_entry_suspend_return, emit_get_checkpoint_has_value, emit_retptr_error_or_return,
-    load_retptr_list, load_retptr_tag, push_retptr_arg, push_retptr_i64_load, push_retptr_u8_load,
-    push_segment_args,
+    emit_get_checkpoint_has_value, load_retptr_list, load_retptr_tag, push_retptr_arg,
+    push_retptr_i64_load, push_segment_args,
 };
 use std::collections::BTreeMap;
 
@@ -60,15 +59,14 @@ use super::split_parallel::{
 };
 use super::{
     DIRECT_PSPLIT_CHUNK_START_LOCAL, DIRECT_PSPLIT_EVENT_OFFSET, DIRECT_PSPLIT_LAUNCH_LOCAL,
-    DIRECT_PSPLIT_PENDING_LOCAL, DIRECT_PSPLIT_ROUND_CURSOR_LOCAL, DIRECT_PSPLIT_SIGNAL_LOCAL,
+    DIRECT_PSPLIT_PENDING_LOCAL, DIRECT_PSPLIT_ROUND_CURSOR_LOCAL,
     DIRECT_PSPLIT_SLOT_CURSOR_OFFSET, DIRECT_PSPLIT_SLOT_LAUNCH_TS_OFFSET,
     DIRECT_PSPLIT_SLOT_RESULT_OFFSET, DIRECT_PSPLIT_SLOT_SCHED_OFFSET,
     DIRECT_PSPLIT_SLOT_SETTLE_TS_OFFSET, DIRECT_PSPLIT_SLOT_STRIDE,
     DIRECT_PSPLIT_SLOT_SUBTASK_OFFSET, DIRECT_PSPLIT_SLOTS_LOCAL, DIRECT_PSPLIT_TIMERS_FIRED_LOCAL,
-    DIRECT_PSPLIT_WS_LOCAL, DIRECT_RET_BOOL_OK_OFFSET, DIRECT_RET_U64_OK_OFFSET,
-    DirectCoreFunctionIndices, DirectCoreStaticData, DirectDataSegment, DirectErrorRoutePlan,
-    DirectFailureTarget, DirectHandledTarget, DirectRunPlan, DirectVariables, node_body_suspends,
-    node_has_breakpoint,
+    DIRECT_PSPLIT_WS_LOCAL, DIRECT_RET_U64_OK_OFFSET, DirectCoreFunctionIndices,
+    DirectCoreStaticData, DirectDataSegment, DirectErrorRoutePlan, DirectFailureTarget,
+    DirectHandledTarget, DirectRunPlan, DirectVariables, node_body_suspends, node_has_breakpoint,
 };
 
 /// The waitable-set event code for a settled subtask (mirrors
@@ -732,12 +730,6 @@ fn emit_branch_scheduler(
     let ws_new = indices
         .waitable_set_new
         .expect("scheduler imports waitable builtins");
-    let ws_wait = indices
-        .waitable_set_wait
-        .expect("scheduler imports waitable builtins");
-    let ws_drop = indices
-        .waitable_set_drop
-        .expect("scheduler imports waitable builtins");
     let waitable_join = indices
         .waitable_join
         .expect("scheduler imports waitable builtins");
@@ -771,8 +763,11 @@ fn emit_branch_scheduler(
     body.instruction(&Instruction::LocalSet(DIRECT_PSPLIT_WS_LOCAL));
     body.instruction(&Instruction::I32Const(0));
     body.instruction(&Instruction::LocalSet(DIRECT_PSPLIT_PENDING_LOCAL));
-    body.instruction(&Instruction::I32Const(0));
-    body.instruction(&Instruction::LocalSet(DIRECT_PSPLIT_SIGNAL_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_SLOTS_LOCAL));
+    body.instruction(&Instruction::I32Const(slots_bytes));
+    body.instruction(&Instruction::I32Add);
+    super::cooperative_wait::emit_window_open(body);
+    super::cooperative_wait::emit_poll_before_call(body, indices);
 
     // ── SCHEDULER LOOP ────────────────────────────────────────────────────────
     body.instruction(&Instruction::Block(BlockType::Empty)); // $sched_done
@@ -981,26 +976,8 @@ fn emit_branch_scheduler(
     body.instruction(&Instruction::I32Eqz);
     body.instruction(&Instruction::BrIf(1)); // -> $sched_done (Br 1: Loop $sched, Block $sched_done)
 
-    // WAIT for ANY settle. Poll pause/cancel at the wakeup (flag into SIGNAL, acted
-    // on at the loop exit — a replay-safe boundary, every subtask resolved).
-    if !indices.omit_runtime {
-        push_retptr_arg(body);
-        body.instruction(&Instruction::Call(indices.runtime_heartbeat));
-        for poll in [indices.runtime_is_cancelled, indices.runtime_check_signals] {
-            push_retptr_arg(body);
-            body.instruction(&Instruction::Call(poll));
-            load_retptr_tag(body);
-            push_retptr_u8_load(body, DIRECT_RET_BOOL_OK_OFFSET);
-            body.instruction(&Instruction::I32Or);
-            body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_SIGNAL_LOCAL));
-            body.instruction(&Instruction::I32Or);
-            body.instruction(&Instruction::LocalSet(DIRECT_PSPLIT_SIGNAL_LOCAL));
-        }
-    }
-    body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_WS_LOCAL));
-    body.instruction(&Instruction::I32Const(DIRECT_PSPLIT_EVENT_OFFSET));
-    body.instruction(&Instruction::Call(ws_wait));
-    body.instruction(&Instruction::Drop);
+    // Poll without publishing terminal state while peer calls remain active.
+    super::cooperative_wait::emit_window_wait(body, indices);
     // Only a settled subtask advances a branch.
     body.instruction(&Instruction::I32Const(DIRECT_PSPLIT_EVENT_OFFSET + 4));
     body.instruction(&Instruction::I32Load(mem32()));
@@ -1053,32 +1030,16 @@ fn emit_branch_scheduler(
         );
         body.instruction(&Instruction::End);
     }
+    super::cooperative_wait::emit_forget_returned(body);
     body.instruction(&Instruction::End); // if SUBTASK_RETURNED
 
     body.instruction(&Instruction::Br(0)); // continue $sched
     body.instruction(&Instruction::End); // Loop $sched
     body.instruction(&Instruction::End); // Block $sched_done
 
-    body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_WS_LOCAL));
-    body.instruction(&Instruction::Call(ws_drop));
+    super::cooperative_wait::emit_window_close(body, indices);
 
-    // Act on a pause/cancel observed during the wait — a replay-safe suspend point.
-    if !indices.omit_runtime {
-        body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_SIGNAL_LOCAL));
-        body.instruction(&Instruction::If(BlockType::Empty));
-        for poll in [indices.runtime_is_cancelled, indices.runtime_check_signals] {
-            push_retptr_arg(body);
-            body.instruction(&Instruction::Call(poll));
-            emit_retptr_error_or_return(body, indices, None, route_ptr_local, route_len_local);
-            push_retptr_u8_load(body, DIRECT_RET_BOOL_OK_OFFSET);
-            body.instruction(&Instruction::If(BlockType::Empty));
-            emit_entry_suspend_return(body, indices);
-            body.instruction(&Instruction::End);
-        }
-        body.instruction(&Instruction::I32Const(0));
-        body.instruction(&Instruction::LocalSet(DIRECT_PSPLIT_SIGNAL_LOCAL));
-        body.instruction(&Instruction::End);
-    }
+    super::cooperative_wait::emit_window_boundary(body, indices);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1316,12 +1277,6 @@ fn emit_concurrent_branches(
     let ws_new = indices
         .waitable_set_new
         .expect("parallel-branch compiles import the waitable builtins");
-    let ws_wait = indices
-        .waitable_set_wait
-        .expect("parallel-branch compiles import the waitable builtins");
-    let ws_drop = indices
-        .waitable_set_drop
-        .expect("parallel-branch compiles import the waitable builtins");
     let waitable_join = indices
         .waitable_join
         .expect("parallel-branch compiles import the waitable builtins");
@@ -1357,11 +1312,6 @@ fn emit_concurrent_branches(
     body.instruction(&Instruction::I32Const(slots_bytes));
     body.instruction(&Instruction::MemoryFill(0));
 
-    // signal = 0 (accumulated across every depth's drain; the suspend fires once
-    // after the window quiesces).
-    body.instruction(&Instruction::I32Const(0));
-    body.instruction(&Instruction::LocalSet(DIRECT_PSPLIT_SIGNAL_LOCAL));
-
     // ── DEPTH-WAVEFRONT ──────────────────────────────────────────────────────
     // At each depth, launch → drain → assemble the depth-d step of every branch
     // that still has one. Assemble runs each step with `next = Join` (the next
@@ -1376,6 +1326,11 @@ fn emit_concurrent_branches(
         body.instruction(&Instruction::LocalSet(DIRECT_PSPLIT_WS_LOCAL));
         body.instruction(&Instruction::I32Const(0));
         body.instruction(&Instruction::LocalSet(DIRECT_PSPLIT_PENDING_LOCAL));
+        body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_SLOTS_LOCAL));
+        body.instruction(&Instruction::I32Const(slots_bytes));
+        body.instruction(&Instruction::I32Add);
+        super::cooperative_wait::emit_window_open(body);
+        super::cooperative_wait::emit_poll_before_call(body, indices);
 
         // LAUNCH depth d — only Agent steps have an async invoke; sync steps
         // (Log/Filter/…) run in assemble with no launch. A BREAKPOINTED agent is
@@ -1408,9 +1363,8 @@ fn emit_concurrent_branches(
         }
 
         // DRAIN depth d.
-        emit_drain_pending(body, indices, ws_wait, subtask_drop);
-        body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_WS_LOCAL));
-        body.instruction(&Instruction::Call(ws_drop));
+        emit_drain_pending(body, indices, subtask_drop);
+        super::cooperative_wait::emit_window_close(body, indices);
 
         // ASSEMBLE depth d in TWO passes: non-suspending nodes first, then
         // suspending nodes (Wait/durable-Delay) last — so every sibling at this
@@ -1485,26 +1439,7 @@ fn emit_concurrent_branches(
                 }
             }
         }
-    }
-
-    // Act on a pause/cancel flagged during the drain. Every subtask has resolved
-    // and assemble has run, so this is a replay-safe suspend point — mirror the
-    // Split chunk boundary.
-    if !indices.omit_runtime {
-        body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_SIGNAL_LOCAL));
-        body.instruction(&Instruction::If(BlockType::Empty));
-        for poll in [indices.runtime_is_cancelled, indices.runtime_check_signals] {
-            push_retptr_arg(body);
-            body.instruction(&Instruction::Call(poll));
-            emit_retptr_error_or_return(body, indices, None, route_ptr_local, route_len_local);
-            push_retptr_u8_load(body, DIRECT_RET_BOOL_OK_OFFSET);
-            body.instruction(&Instruction::If(BlockType::Empty));
-            emit_entry_suspend_return(body, indices);
-            body.instruction(&Instruction::End);
-        }
-        body.instruction(&Instruction::I32Const(0));
-        body.instruction(&Instruction::LocalSet(DIRECT_PSPLIT_SIGNAL_LOCAL));
-        body.instruction(&Instruction::End);
+        super::cooperative_wait::emit_window_boundary(body, indices);
     }
 }
 
@@ -1677,7 +1612,12 @@ fn emit_branch_launch(
     body.instruction(&Instruction::Call(invoke.function_index));
     body.instruction(&Instruction::LocalSet(route_len_local)); // status
     match sched_pending_flag {
-        None => emit_join_if_pending(body, route_len_local, waitable_join),
+        None => emit_join_if_pending(
+            body,
+            route_len_local,
+            DIRECT_PSPLIT_LAUNCH_LOCAL,
+            waitable_join,
+        ),
         Some(flag) => {
             // Pending (low nibble != SUBTASK_RETURNED): store the subtask handle in
             // slot.SUBTASK, join it, bump PENDING, and flag the branch as waiting.

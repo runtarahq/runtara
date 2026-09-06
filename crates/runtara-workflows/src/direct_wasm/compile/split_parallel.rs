@@ -39,9 +39,8 @@ use std::collections::BTreeMap;
 use wasm_encoder::{BlockType, Function as WasmFunction, Instruction};
 
 use super::abi::{
-    emit_entry_suspend_return, emit_get_checkpoint_has_value, emit_retptr_error_or_return,
-    load_retptr_list, load_retptr_option_list, load_retptr_tag, push_retptr_arg,
-    push_retptr_u8_load, push_segment_args, push_variables_args, return_if_retptr_error,
+    emit_get_checkpoint_has_value, load_retptr_list, load_retptr_option_list, load_retptr_tag,
+    push_retptr_arg, push_segment_args, push_variables_args, return_if_retptr_error,
 };
 use super::agent::emit_agent_plan;
 use super::agent_io::emit_agent_cache_key;
@@ -61,14 +60,14 @@ use super::{
     DIRECT_AGENT_RETRY_SLEEP_TAG_LOCAL, DIRECT_AGENT_RETRYABLE_LOCAL,
     DIRECT_PSPLIT_CHUNK_END_LOCAL, DIRECT_PSPLIT_CHUNK_START_LOCAL, DIRECT_PSPLIT_EVENT_OFFSET,
     DIRECT_PSPLIT_LAUNCH_LOCAL, DIRECT_PSPLIT_PENDING_LOCAL, DIRECT_PSPLIT_ROUND_CURSOR_LOCAL,
-    DIRECT_PSPLIT_SIGNAL_LOCAL, DIRECT_PSPLIT_SLOT_ATTEMPTS_OFFSET, DIRECT_PSPLIT_SLOT_HIT_OFFSET,
+    DIRECT_PSPLIT_SLOT_ATTEMPTS_OFFSET, DIRECT_PSPLIT_SLOT_HIT_OFFSET,
     DIRECT_PSPLIT_SLOT_INPUT_LEN_OFFSET, DIRECT_PSPLIT_SLOT_INPUT_PTR_OFFSET,
     DIRECT_PSPLIT_SLOT_KEY_LEN_OFFSET, DIRECT_PSPLIT_SLOT_KEY_PTR_OFFSET,
     DIRECT_PSPLIT_SLOT_RESULT_LEN, DIRECT_PSPLIT_SLOT_RESULT_OFFSET, DIRECT_PSPLIT_SLOT_STRIDE,
     DIRECT_PSPLIT_SLOT_WAIT_TOTAL_OFFSET, DIRECT_PSPLIT_SLOTS_LOCAL,
-    DIRECT_PSPLIT_TIMERS_FIRED_LOCAL, DIRECT_PSPLIT_WS_LOCAL, DIRECT_RET_BOOL_OK_OFFSET,
-    DIRECT_SPLIT_COUNT_LOCAL, DIRECT_SPLIT_HEAP_BASE_LOCAL, DIRECT_SPLIT_INDEX_LOCAL,
-    DIRECT_SPLIT_ITEM_LEN_LOCAL, DIRECT_SPLIT_ITEM_PTR_LOCAL, DIRECT_SPLIT_PARENT_SOURCE_LEN_LOCAL,
+    DIRECT_PSPLIT_TIMERS_FIRED_LOCAL, DIRECT_PSPLIT_WS_LOCAL, DIRECT_SPLIT_COUNT_LOCAL,
+    DIRECT_SPLIT_HEAP_BASE_LOCAL, DIRECT_SPLIT_INDEX_LOCAL, DIRECT_SPLIT_ITEM_LEN_LOCAL,
+    DIRECT_SPLIT_ITEM_PTR_LOCAL, DIRECT_SPLIT_PARENT_SOURCE_LEN_LOCAL,
     DIRECT_SPLIT_PARENT_SOURCE_PTR_LOCAL, DIRECT_SPLIT_RESULTS_LEN_LOCAL,
     DIRECT_SPLIT_RESULTS_PTR_LOCAL, DIRECT_SPLIT_VARIABLES_LEN_LOCAL,
     DIRECT_SPLIT_VARIABLES_PTR_LOCAL, DirectCoreFunctionIndices, DirectCoreStaticData,
@@ -444,13 +443,25 @@ fn emit_slot_ptr(
 /// Given an async-lowered call status in `status_local`: if the callee did not
 /// return eagerly, join its subtask into the window's waitable-set and bump the
 /// pending count. `SUBTASK_RETURNED` (packed low nibble == 2) means eager.
-pub(super) fn emit_join_if_pending(body: &mut WasmFunction, status_local: u32, waitable_join: u32) {
+pub(super) fn emit_join_if_pending(
+    body: &mut WasmFunction,
+    status_local: u32,
+    slot_local: u32,
+    waitable_join: u32,
+) {
     body.instruction(&Instruction::LocalGet(status_local));
     body.instruction(&Instruction::I32Const(0xF));
     body.instruction(&Instruction::I32And);
     body.instruction(&Instruction::I32Const(SUBTASK_RETURNED));
     body.instruction(&Instruction::I32Ne);
     body.instruction(&Instruction::If(BlockType::Empty));
+    body.instruction(&Instruction::LocalGet(slot_local));
+    body.instruction(&Instruction::LocalGet(status_local));
+    body.instruction(&Instruction::I32Const(4));
+    body.instruction(&Instruction::I32ShrU);
+    body.instruction(&Instruction::I32Store(slot_mem(
+        super::DIRECT_PSPLIT_SLOT_SUBTASK_OFFSET,
+    )));
     body.instruction(&Instruction::LocalGet(status_local));
     body.instruction(&Instruction::I32Const(4));
     body.instruction(&Instruction::I32ShrU);
@@ -465,12 +476,12 @@ pub(super) fn emit_join_if_pending(body: &mut WasmFunction, status_local: u32, w
 
 /// Drain the window's waitable-set until `pending == 0`, dropping each
 /// completed subtask (agent invoke OR backoff timer — both are subtasks whose
-/// completion decrements pending). Emits the §4.3 lifecycle polls at each
-/// wakeup (flag-only; the suspend fires at the chunk boundary).
+/// completion decrements pending). The separate lifecycle timer wakes signal
+/// observation; root Cancel cleans all peers immediately, while pause/shutdown
+/// acknowledgement waits for the assembly boundary.
 pub(super) fn emit_drain_pending(
     body: &mut WasmFunction,
     indices: &DirectCoreFunctionIndices,
-    ws_wait: u32,
     subtask_drop: u32,
 ) {
     body.instruction(&Instruction::Block(BlockType::Empty)); // $drained
@@ -478,24 +489,7 @@ pub(super) fn emit_drain_pending(
     body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_PENDING_LOCAL));
     body.instruction(&Instruction::I32Eqz);
     body.instruction(&Instruction::BrIf(1));
-    if !indices.omit_runtime {
-        push_retptr_arg(body);
-        body.instruction(&Instruction::Call(indices.runtime_heartbeat));
-        for poll in [indices.runtime_is_cancelled, indices.runtime_check_signals] {
-            push_retptr_arg(body);
-            body.instruction(&Instruction::Call(poll));
-            load_retptr_tag(body);
-            push_retptr_u8_load(body, DIRECT_RET_BOOL_OK_OFFSET);
-            body.instruction(&Instruction::I32Or);
-            body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_SIGNAL_LOCAL));
-            body.instruction(&Instruction::I32Or);
-            body.instruction(&Instruction::LocalSet(DIRECT_PSPLIT_SIGNAL_LOCAL));
-        }
-    }
-    body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_WS_LOCAL));
-    body.instruction(&Instruction::I32Const(DIRECT_PSPLIT_EVENT_OFFSET));
-    body.instruction(&Instruction::Call(ws_wait));
-    body.instruction(&Instruction::Drop);
+    super::cooperative_wait::emit_window_wait(body, indices);
     body.instruction(&Instruction::I32Const(DIRECT_PSPLIT_EVENT_OFFSET + 4));
     body.instruction(&Instruction::I32Load(mem32()));
     body.instruction(&Instruction::I32Const(SUBTASK_RETURNED));
@@ -504,6 +498,7 @@ pub(super) fn emit_drain_pending(
     body.instruction(&Instruction::I32Const(DIRECT_PSPLIT_EVENT_OFFSET));
     body.instruction(&Instruction::I32Load(mem32()));
     body.instruction(&Instruction::Call(subtask_drop));
+    super::cooperative_wait::emit_forget_returned(body);
     body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_PENDING_LOCAL));
     body.instruction(&Instruction::I32Const(1));
     body.instruction(&Instruction::I32Sub);
@@ -733,12 +728,6 @@ pub(super) fn emit_parallel_split_items(
     let ws_new = indices
         .waitable_set_new
         .expect("parallel split compiles import the waitable builtins");
-    let ws_wait = indices
-        .waitable_set_wait
-        .expect("parallel split compiles import the waitable builtins");
-    let ws_drop = indices
-        .waitable_set_drop
-        .expect("parallel split compiles import the waitable builtins");
     let waitable_join = indices
         .waitable_join
         .expect("parallel split compiles import the waitable builtins");
@@ -747,8 +736,6 @@ pub(super) fn emit_parallel_split_items(
         .expect("parallel split compiles import the waitable builtins");
 
     // item cursor starts at 0 (set by the caller, mirroring sequential).
-    body.instruction(&Instruction::I32Const(0));
-    body.instruction(&Instruction::LocalSet(DIRECT_PSPLIT_SIGNAL_LOCAL));
     body.instruction(&Instruction::Block(BlockType::Empty)); // $chunks_done
     body.instruction(&Instruction::Loop(BlockType::Empty)); // $chunks
     body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_INDEX_LOCAL));
@@ -824,6 +811,9 @@ pub(super) fn emit_parallel_split_items(
     body.instruction(&Instruction::LocalSet(DIRECT_PSPLIT_WS_LOCAL));
     body.instruction(&Instruction::I32Const(0));
     body.instruction(&Instruction::LocalSet(DIRECT_PSPLIT_PENDING_LOCAL));
+    body.instruction(&Instruction::GlobalGet(0));
+    super::cooperative_wait::emit_window_open(body);
+    super::cooperative_wait::emit_poll_before_call(body, indices);
 
     // ── LAUNCH pass ─────────────────────────────────────────────────────────
     body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_CHUNK_START_LOCAL));
@@ -1051,7 +1041,7 @@ pub(super) fn emit_parallel_split_items(
             route_ptr_local,
             route_len_local,
         );
-        emit_join_if_pending(body, route_len_local, waitable_join);
+        emit_join_if_pending(body, route_len_local, route_ptr_local, waitable_join);
         body.instruction(&Instruction::End);
     } else {
         emit_pool_reinvoke(
@@ -1066,7 +1056,7 @@ pub(super) fn emit_parallel_split_items(
             route_ptr_local,
             route_len_local,
         );
-        emit_join_if_pending(body, route_len_local, waitable_join);
+        emit_join_if_pending(body, route_len_local, route_ptr_local, waitable_join);
     }
 
     body.instruction(&Instruction::End); // $skip
@@ -1081,8 +1071,8 @@ pub(super) fn emit_parallel_split_items(
     // ── DRAIN ───────────────────────────────────────────────────────────────
     // Wait until every launched subtask has RETURNED. Results are written
     // through the slot retptrs by the runtime before the completion event. The
-    // lifecycle polls (§4.3) fire at each wakeup, flag-only.
-    emit_drain_pending(body, indices, ws_wait, subtask_drop);
+    // Cooperative signal observation remains live while every call is pending.
+    emit_drain_pending(body, indices, subtask_drop);
 
     // ── CONCURRENT RETRY ROUNDS (§3.4) ───────────────────────────────────────
     // Non-durable retrying items back off in the SAME waitable-set: each round
@@ -1292,7 +1282,7 @@ pub(super) fn emit_parallel_split_items(
                     body.instruction(&Instruction::LocalGet(DIRECT_AGENT_RETRY_SLEEP_MS_LOCAL));
                     body.instruction(&Instruction::Call(timer_sleep));
                     body.instruction(&Instruction::LocalSet(route_len_local)); // status
-                    emit_join_if_pending(body, route_len_local, waitable_join);
+                    emit_join_if_pending(body, route_len_local, route_ptr_local, waitable_join);
 
                     if hit_reinvoke {
                         body.instruction(&Instruction::End); // hit / fresh
@@ -1328,7 +1318,7 @@ pub(super) fn emit_parallel_split_items(
         body.instruction(&Instruction::BrIf(1)); // -> $rounds_done
 
         // ---- drain the backoff timers (they overlap here) ----
-        emit_drain_pending(body, indices, ws_wait, subtask_drop);
+        emit_drain_pending(body, indices, subtask_drop);
 
         // ---- re-invoke the timed-out items CONCURRENTLY ----
         body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_CHUNK_START_LOCAL));
@@ -1392,7 +1382,7 @@ pub(super) fn emit_parallel_split_items(
                     route_ptr_local,
                     route_len_local,
                 );
-                emit_join_if_pending(body, route_len_local, waitable_join);
+                emit_join_if_pending(body, route_len_local, route_ptr_local, waitable_join);
                 body.instruction(&Instruction::End);
             } else {
                 emit_pool_reinvoke(
@@ -1407,7 +1397,7 @@ pub(super) fn emit_parallel_split_items(
                     route_ptr_local,
                     route_len_local,
                 );
-                emit_join_if_pending(body, route_len_local, waitable_join);
+                emit_join_if_pending(body, route_len_local, route_ptr_local, waitable_join);
             }
             body.instruction(&Instruction::LocalGet(route_ptr_local));
             body.instruction(&Instruction::I32Const(SLOT_AGENT_READY));
@@ -1424,14 +1414,13 @@ pub(super) fn emit_parallel_split_items(
         body.instruction(&Instruction::End); // $reinvoke_done
 
         // ---- drain the re-invokes, then classify again ----
-        emit_drain_pending(body, indices, ws_wait, subtask_drop);
+        emit_drain_pending(body, indices, subtask_drop);
         body.instruction(&Instruction::Br(0)); // -> $rounds
         body.instruction(&Instruction::End); // loop $rounds
         body.instruction(&Instruction::End); // $rounds_done
     }
 
-    body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_WS_LOCAL));
-    body.instruction(&Instruction::Call(ws_drop));
+    super::cooperative_wait::emit_window_close(body, indices);
 
     // ── ASSEMBLE pass ───────────────────────────────────────────────────────
     // The EXACT sequential per-item pipeline, in input order, with the invoke
@@ -1477,29 +1466,8 @@ pub(super) fn emit_parallel_split_items(
     body.instruction(&Instruction::End);
     body.instruction(&Instruction::End); // $assemble_done
 
-    // Chunk boundary: act on a suspend/cancel flagged during the drain. All
-    // subtasks are resolved and dropped, and assemble has run (durable items
-    // are checkpointed), so this is a replay-safe point — mirror the While
-    // loop-head sequence, with full error handling this time.
-    if !indices.omit_runtime {
-        body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_SIGNAL_LOCAL));
-        body.instruction(&Instruction::If(BlockType::Empty));
-        for poll in [indices.runtime_is_cancelled, indices.runtime_check_signals] {
-            push_retptr_arg(body);
-            body.instruction(&Instruction::Call(poll));
-            emit_retptr_error_or_return(body, indices, None, route_ptr_local, route_len_local);
-            push_retptr_u8_load(body, DIRECT_RET_BOOL_OK_OFFSET);
-            body.instruction(&Instruction::If(BlockType::Empty));
-            // Suspend-and-exit: ABI-aware (clean-run tag vs suspended outcome).
-            emit_entry_suspend_return(body, indices);
-            body.instruction(&Instruction::End);
-        }
-        // Spurious flag (transient poll error, or the signal was withdrawn):
-        // clear it and keep going.
-        body.instruction(&Instruction::I32Const(0));
-        body.instruction(&Instruction::LocalSet(DIRECT_PSPLIT_SIGNAL_LOCAL));
-        body.instruction(&Instruction::End);
-    }
+    // All results have been assembled and checkpointed before pause/shutdown.
+    super::cooperative_wait::emit_window_boundary(body, indices);
 
     body.instruction(&Instruction::Br(0)); // -> $chunks
     body.instruction(&Instruction::End); // loop $chunks
