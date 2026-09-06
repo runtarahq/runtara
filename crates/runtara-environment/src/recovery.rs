@@ -176,9 +176,9 @@ pub async fn recover_or_fail(
             RecoveryOutcome::Failed
         }
         Decision::Recover { attempt } => {
-            if let Err(e) =
-                crate::recovery_marks::mark_for_recovery(pool, instance_id, attempt, Some(&marker))
-                    .await
+            if let Err(e) = crate::instance_repository::InstanceRepository::new(pool.clone())
+                .mark_for_recovery(instance_id, attempt, Some(&marker))
+                .await
             {
                 error!(
                     instance_id = %instance_id,

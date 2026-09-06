@@ -185,6 +185,9 @@ pub mod image_registry;
 /// Running container tracking and management.
 pub mod container_registry;
 
+/// The instance columns Environment owns, and the only place it writes them.
+pub mod instance_repository;
+
 /// In-process WASM execution backend.
 pub mod runner;
 
@@ -203,7 +206,6 @@ pub mod cleanup_worker;
 /// Background worker for cleaning up old database records.
 pub mod db_cleanup_worker;
 pub mod metrics;
-pub mod recovery_marks;
 
 /// Background worker for cleaning up unused images.
 pub mod image_cleanup_worker;
