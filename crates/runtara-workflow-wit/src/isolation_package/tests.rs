@@ -63,6 +63,7 @@ fn rewritten_from(original: Vec<u8>, mutate: impl FnOnce(&mut Manifest)) -> Vec<
 
 fn invocations() -> InvocationManifest {
     InvocationManifest {
+        call_durability: Default::default(),
         checkpoint_contracts: Default::default(),
         scope_paths: Default::default(),
         call_sites: Vec::new(),
@@ -126,7 +127,7 @@ fn invocation_authority_versions_references_domains_and_duplicate_identities_are
             _ => {
                 let inv = m.invocations.as_mut().unwrap();
                 match mode {
-                    "version" => inv.version = 5,
+                    "version" => inv.version = INVOCATION_MANIFEST_VERSION + 1,
                     "binding" => inv.agent_calls[0].binding = "agent:missing".into(),
                     "agent" => inv.agent_calls[0].agent_id = "missing".into(),
                     "duplicate" => inv.agent_calls.push(inv.agent_calls[0].clone()),
@@ -724,4 +725,69 @@ fn checkpoint_overlap_detection_catches_equal_and_ancestor_grants_without_rekeyi
         .unwrap()
         .step_id = "disjoint".into();
     assert!(inventory.checkpoint_conflicts().is_empty());
+}
+
+#[test]
+fn invocation_durability_is_complete_versioned_and_never_inferred_for_old_packages() {
+    let mut inventory = scoped_invocations();
+    inventory.version = INVOCATION_MANIFEST_VERSION;
+    inventory.checkpoint_contracts = inventory
+        .call_sites
+        .iter()
+        .map(|s| (s.token, CheckpointContract::None))
+        .collect();
+    inventory.call_durability = inventory
+        .call_sites
+        .iter()
+        .map(|s| (s.token, s.domain == 0))
+        .collect();
+    assert!(inventory.call_durability.values().any(|value| *value));
+    assert!(inventory.call_durability.values().any(|value| !value));
+    let valid = rewritten_from(package_v2(), |m| m.invocations = Some(inventory.clone()));
+    assert_eq!(
+        parse(&valid, limits()).unwrap().unwrap().invocations(),
+        Some(&inventory)
+    );
+    for mode in ["old-version", "missing", "extra", "wrong-token"] {
+        let bytes = rewritten_from(valid.clone(), |m| {
+            let inv = m.invocations.as_mut().unwrap();
+            match mode {
+                "old-version" => inv.version = 4,
+                "missing" => {
+                    inv.call_durability.remove(&7);
+                }
+                "extra" => {
+                    inv.call_durability.insert(u32::MAX, true);
+                }
+                "wrong-token" => {
+                    inv.call_durability.remove(&7);
+                    inv.call_durability.insert(u32::MAX, false);
+                }
+                _ => unreachable!(),
+            }
+        });
+        assert!(parse(&bytes, limits()).is_err(), "accepted {mode}");
+    }
+    let mut old = inventory.clone();
+    old.version = 4;
+    old.call_durability.clear();
+    let bytes = rewritten_from(package_v2(), |m| m.invocations = Some(old));
+    let parsed = parse(&bytes, limits()).unwrap().unwrap();
+    assert!(parsed.invocations().unwrap().call_durability.is_empty());
+    assert!(
+        serde_json::to_value(parsed.invocations().unwrap())
+            .unwrap()
+            .get("call_durability")
+            .is_none()
+    );
+    let json = serde_json::to_string(&inventory).unwrap();
+    let duplicate = json.replacen(
+        "\"call_durability\":{",
+        "\"call_durability\":{\"7\":false,",
+        1,
+    );
+    assert!(serde_json::from_str::<InvocationManifest>(&duplicate).is_err());
+    let mut malformed = serde_json::to_value(&inventory).unwrap();
+    malformed["call_durability"]["7"] = serde_json::Value::Null;
+    assert!(serde_json::from_value::<InvocationManifest>(malformed).is_err());
 }

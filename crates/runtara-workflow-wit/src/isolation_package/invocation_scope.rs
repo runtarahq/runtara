@@ -61,7 +61,7 @@ impl InvocationManifest {
         attempt: u64,
         inherited: &[NamespaceFrame],
     ) -> Result<AgentInvocationPath, InvocationPathError> {
-        if !matches!(self.version, 3 | 4) {
+        if !matches!(self.version, 3..=super::INVOCATION_MANIFEST_VERSION) {
             return Err(InvocationPathError::UnknownCall);
         }
         let path = self.resolve_agent_invocation(binding, capability, path, attempt)?;

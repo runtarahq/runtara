@@ -9,6 +9,9 @@ use std::collections::HashMap;
 
 /// Result of authorizing one child against its parent and verified package.
 pub struct AuthorizedChild {
+    /// Compiler-owned caller durability. Older inventories have no such fact.
+    /// None must not be interpreted as authority to enable durable fencing.
+    pub durable: Option<bool>,
     /// Authority over already-derived checkpoint addresses; never a second prefix.
     pub checkpoints: Arc<dyn CheckpointAuthority>,
     /// Fresh, unstarted ownership context for this child's descendants, if any.
@@ -93,6 +96,9 @@ impl ScopedInvocationFactory {
             return Err(ExecutionError::InvalidContext);
         }
         let authorized = self.authority.authorize(request)?;
+        if io.is_some() && authorized.durable != Some(true) {
+            return Err(ExecutionError::InvalidContext);
+        }
         let owner = self.owner.clone();
         let settings = self.settings.clone();
         let input = request.input.clone();

@@ -166,7 +166,7 @@ impl InvocationManifest {
         let path = AgentInvocationPath::decode(path)?;
         let (domain, required_identity) = match (self.version, path.selector) {
             (1, InvocationSelector::Domain(domain)) => (domain, None),
-            (2..=4, InvocationSelector::CallSite(token)) => {
+            (2..=super::INVOCATION_MANIFEST_VERSION, InvocationSelector::CallSite(token)) => {
                 let index = self
                     .call_sites
                     .binary_search_by_key(&token, |site| site.token)

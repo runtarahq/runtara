@@ -379,14 +379,23 @@ uses its original format. The sidecar reports `packageVersion` for inspection,
 but execution must use the inventory bound to the verified package.
 
 This inventory identifies workflow, binding, Agent, capability, step and allowed
-AI invocation domains. The prepared launcher now validates those static identity
-parts before asking the scope factory for runtime authority. Its shared decoder
-requires canonical v2 paths, structured child/loop frames and valid counters;
-auxiliary AI calls retain their compiler-defined attempt/activation convention.
-Decoding a frame does not prove permission to use it. The remaining production
-policy must validate namespace/loop membership against the compiled call site,
-authorize checkpoint addresses and fence durable attempts. Do not enable the
-scoped production runner based only on a successful static identity check.
+AI invocation domains. The current adapter uses canonical v3 paths and call-site
+tokens, with structured child/loop frames and valid counters; historical path
+versions retain their versioned decoders. The prepared launcher validates static
+identity and compiler-defined namespace/loop membership before the scope factory
+grants checkpoint authority. Auxiliary AI calls retain their compiler-defined
+attempt/activation convention.
+
+Inventory v5 additionally records effective durability for every emitted caller,
+including AI tool and auxiliary calls. The value comes from the normalized
+compiler definition, never from runtime input or the target tool's step setting.
+Missing, extra or duplicate durability entries are rejected. Runtime admission
+retains inventory v4 support with unknown durability; unknown and explicit false
+cannot authorize durable fencing. New compilation uses a distinct cache provenance
+tag, without changing the guest ABI or raw/native envelope versions. Ordinary
+execution still creates no invocation ledger entries. Production initial admission,
+root lease ownership, root/parent write fencing and targeted command routing remain
+required before durable cancellation can be enabled.
 
 | Existing entry/runtime mode | Compatibility policy |
 |---|---|

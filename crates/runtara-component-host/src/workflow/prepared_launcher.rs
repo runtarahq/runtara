@@ -114,7 +114,10 @@ impl InvocationLauncher for PreparedInvocationLauncher {
             };
             // Compiler namespace membership is checked before scope allocation.
             // Checkpoint grants and durable attempt fencing remain mandatory.
-            let resolved = if matches!(invocations.version, 3 | 4) {
+            let resolved = if matches!(
+                invocations.version,
+                3..=runtara_workflow_wit::isolation_package::INVOCATION_MANIFEST_VERSION
+            ) {
                 invocations.resolve_scoped_agent_invocation(
                     &request.binding,
                     capability,

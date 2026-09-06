@@ -23,7 +23,7 @@ fn input(graph: Value, dir: &Path) -> DirectCompilationInput {
 fn approved(components: &Path) -> AgentIsolationPolicy {
     AgentIsolationPolicy {
         enabled: true,
-        runtime_supports_inventory_v4: true,
+        runtime_supports_inventory_v5: true,
         reviews: selected(components)
             .into_iter()
             .map(|(id, sha256)| (id, review(sha256)))
@@ -78,7 +78,7 @@ fn policy_fallback_preserves_legacy_wasm_bytes_and_reports_each_gate() {
         let mut policy = approved(&components);
         match reason {
             Reason::Disabled => policy = AgentIsolationPolicy::default(),
-            Reason::RuntimeUnavailable => policy.runtime_supports_inventory_v4 = false,
+            Reason::RuntimeUnavailable => policy.runtime_supports_inventory_v5 = false,
             Reason::UnreviewedPackage => policy.reviews.clear(),
             Reason::ResetNotApproved => policy.reviews.get_mut("utils").unwrap().reset_safe = false,
             Reason::CheckpointContractNotApproved => {

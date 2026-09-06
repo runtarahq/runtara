@@ -1304,6 +1304,51 @@ select the explicit path, the runner must own/revoke root leases, and parent/roo
 writes need fencing. These APIs do not yet expose targeted commands, remove E128,
 or complete local-server and performance qualification.
 
+## Compiler-owned invocation durability
+
+Inventory v5 records the normalized effective durability of each emitted caller.
+This preserves graph/step overrides and distinguishes same-named definitions in
+nested graphs. AI tool dispatch uses the AI caller's setting because it bypasses
+the target Agent step's execution plan; memory, summarization and MCP auxiliary
+definitions retain their owning AI step's setting. The metadata authorizes attempt
+fencing, not result memoization or additional checkpoint IO.
+
+Raw and native package validation require exactly one Boolean flag per call token
+and reject missing, extra, substituted or duplicate entries. Inventory v4 remains
+readable and executable with unknown durability. The explicit fenced scope factory
+accepts only compiler-authorized `Some(true)`; neither unknown durability nor
+`durable: true` fields in runtime input can enable it. Ordinary preparation retains
+its unfenced path for every setting. The server's compilation provenance includes
+the new inventory version so fresh output cannot reuse a v4 compilation cache
+entry. The guest ABI, adapter v3, raw package v2 and native `RTRNP002` stay unchanged.
+
+Four new compiler tests cover graph/step inheritance, duplicate nested identities,
+all six AI call domains, static Embed children and WaitForSignal callbacks. Package
+tests cover malformed flags and old-format compatibility; native package transport
+round-trips v1 through v5. A PostgreSQL-backed authority test checks all three
+durability states, and the scoped runner executes legacy, current and historical
+v4 packages. These tests do not activate production initial admission or root
+leases. Non-durable zero-ledger-IO and current-format performance measurements
+remain qualification requirements when that integration is added.
+
+## Runner completion and capacity ordering
+
+The scoped-runner suite exposed a race where exit was observable before the run
+permit returned. The completion guard now owns the permit and releases it before
+publishing completion or notifying waiters, including panic and pre-start task
+destruction. A regression test blocks registry cleanup at the publication boundary
+and checks available capacity; temporarily restoring the old ordering made this
+test fail. The corrected ordering passes all 13 embedded-runner unit tests and
+seven scoped-runner integration tests.
+
+Verification for the durability metadata and runner fix passed 31 package/WIT unit
+tests, 573 workflow compiler unit tests, 109 component-host unit tests, 38 scoped
+runtime tests against PostgreSQL, 24 emitted isolation tests, four server policy
+tests, 13 embedded-runner unit tests and seven scoped-runner integration tests
+(799 distinct tests). Feature-enabled all-target Clippy passed. Existing guest
+components were reused because no guest implementation or WIT interface changed.
+No local-server E2E or new performance measurements ran for these changes.
+
 ## Remaining required work
 
 - P0: extend explicit differential selection and invocation-count evidence to all

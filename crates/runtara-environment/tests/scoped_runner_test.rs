@@ -50,6 +50,30 @@ fn random_graph() -> Value {
         "executionPlan":[{"fromStep":"call","toStep":"finish"}]})
 }
 fn compile(graph: Value, dir: &Path, agent: &str, backend: &str) -> DirectCompilationResult {
+    if backend == "inventory-v4" {
+        // The guest ABI is unchanged; retain the preceding inventory format
+        // to prove pinned packages still execute with unknown durability.
+        let mut compiled = compile(graph, &dir.join("current"), agent, "scoped");
+        let bytes = std::fs::read(&compiled.wasm_path).unwrap();
+        let package = runtara_workflow_wit::isolation_package::parse(&bytes, limits())
+            .unwrap()
+            .unwrap();
+        let mut inventory = package.invocations().unwrap().clone();
+        inventory.version = 4;
+        inventory.call_durability.clear();
+        let legacy = runtara_workflow_wit::isolation_package::append_with_invocations(
+            package.root,
+            &package.artifacts().values().copied().collect::<Vec<_>>(),
+            package.bindings().values().cloned().collect(),
+            inventory.clone(),
+            limits(),
+        )
+        .unwrap();
+        compiled.wasm_path = dir.join("inventory-v4.wasm");
+        compiled.invocation_manifest = Some(inventory);
+        std::fs::write(&compiled.wasm_path, legacy).unwrap();
+        return compiled;
+    }
     if backend == "no-runtime" {
         // A valid package envelope around a runtime-less root must not obtain
         // the scoped execution path merely by carrying reviewed child bytes.
@@ -103,7 +127,7 @@ fn compile(graph: Value, dir: &Path, agent: &str, backend: &str) -> DirectCompil
             &[],
             AgentIsolationPolicy {
                 enabled: true,
-                runtime_supports_inventory_v4: true,
+                runtime_supports_inventory_v5: true,
                 reviews: bounds(agent)
                     .reviewed_agents
                     .into_iter()
@@ -203,7 +227,7 @@ impl Harness {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn scoped_runner_admits_reviewed_packages_and_keeps_legacy_execution() {
     let h = Harness::new().await;
-    for backend in ["legacy", "scoped"] {
+    for backend in ["legacy", "scoped", "inventory-v4"] {
         let artifact = compile(
             random_graph(),
             &h.dir.path().join(backend),

@@ -17,6 +17,7 @@ impl InvocationAuthority for Authority {
             return Err(ExecutionError::InvalidContext);
         }
         Ok(AuthorizedChild {
+            durable: Some(true),
             checkpoints: Arc::new(Keys("child/")),
             execution: None,
         })
@@ -397,6 +398,7 @@ async fn compiler_checkpoint_contracts_bind_real_children_and_persistence() {
         let tool = matches!(contract, CheckpointContract::Tool { .. });
         let domain = if tool { 3 } else { 0 };
         let inventory = InvocationManifest {
+            call_durability: Default::default(),
             version: 4,
             workflow_id: "root".into(),
             agent_calls: vec![AgentCallSite {
@@ -580,3 +582,89 @@ mod durable_lifecycle_tests;
 
 #[path = "fenced_invocation_tests.rs"]
 mod fenced_invocation_tests;
+
+#[tokio::test]
+async fn compiler_durability_authorizes_only_explicit_durable_fencing() {
+    use runtara_workflow_wit::isolation_package::{
+        AgentCallSite, CheckpointContract, InvocationCallSite, InvocationManifest,
+    };
+    for durable in [None, Some(false), Some(true)] {
+        let fx = Fixture::new().await;
+        let inventory = InvocationManifest {
+            version: if durable.is_some() { 5 } else { 4 },
+            workflow_id: "root".into(),
+            agent_calls: vec![AgentCallSite {
+                binding: "agent:test".into(),
+                agent_id: "test".into(),
+                capability: "copy".into(),
+                step_id: "call".into(),
+                domains: vec![0],
+            }],
+            call_sites: vec![InvocationCallSite {
+                token: 7,
+                identity: 0,
+                agent_reference: 0,
+                caller_reference: 0,
+                domain: 0,
+            }],
+            scope_paths: [(7, vec![Default::default()])].into(),
+            checkpoint_contracts: [(7, CheckpointContract::None)].into(),
+            call_durability: durable.map(|value| [(7, value)].into()).unwrap_or_default(),
+        };
+        let authority = Arc::new(
+            CompilerInvocationAuthority::new(catalog(&fx, Some(inventory)).await, vec![]).unwrap(),
+        );
+        let req = StartRequest {
+            binding: "agent:test".into(),
+            entry: Entry::Capability("copy".into()),
+            input: br#"{"durable":true,"variables":{"durable":true}}"#.to_vec(),
+            context: InvocationContext {
+                path: format!(
+                    "runtara:v3:{}:aaaaaaah:aaaaaaaa",
+                    serde_json::json!(["agent", "root", [], [], ["test", "copy", "call"]])
+                ),
+                attempt: 1,
+            },
+        };
+        assert_eq!(authority.authorize(&req).unwrap().durable, durable);
+        let scopes = ScopedInvocationFactory::new(
+            fx.owner.clone(),
+            authority,
+            settings(
+                Instant::now() + Duration::from_secs(5),
+                Arc::new(AtomicBool::new(false)),
+            ),
+        );
+        assert!(scopes.prepare_child(&req).unwrap().lifecycle.is_none());
+        let fences = fx.persistence.invocation_fences().unwrap();
+        let root = fx.persistence.get_instance(&fx.id).await.unwrap().unwrap();
+        let lease = fences
+            .claim_invocation_lease(&root.tenant_id, &fx.id, "durability-test", None)
+            .await
+            .unwrap();
+        let attempt = fences
+            .begin_invocation_attempt(&lease, &req.context.path, "one")
+            .await
+            .unwrap();
+        let io = Arc::new(
+            InvocationIo::new(
+                fx.persistence.clone(),
+                attempt.fence,
+                Duration::from_secs(5),
+            )
+            .unwrap(),
+        );
+        let prepared = scopes.prepare_fenced_child(&req, io.clone());
+        if durable == Some(true) {
+            assert!(prepared.unwrap().lifecycle.is_some());
+        } else {
+            assert!(matches!(prepared, Err(ExecutionError::InvalidContext)));
+        }
+        fences
+            .settle_invocation_attempt(io.fence(), None)
+            .await
+            .unwrap();
+        fx.close().await;
+        fences.revoke_invocation_lease(&lease).await.unwrap();
+    }
+}

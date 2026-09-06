@@ -20,7 +20,7 @@ impl CompilerInvocationAuthority {
         inherited: Vec<NamespaceFrame>,
     ) -> Result<Self, ExecutionError> {
         if catalog.invocations().is_none_or(|inventory| {
-            inventory.version != 4 || !inventory.checkpoint_conflicts().is_empty()
+            !matches!(inventory.version, 4 | 5) || !inventory.checkpoint_conflicts().is_empty()
         }) {
             return Err(ExecutionError::InvalidContext);
         }
@@ -66,7 +66,18 @@ impl InvocationAuthority for CompilerInvocationAuthority {
         let checkpoints = contract
             .grant(&invocation, &request.input)
             .map_err(|_| ExecutionError::InvalidContext)?;
+        let durable = if inventory.version >= 5 {
+            Some(
+                *inventory
+                    .call_durability
+                    .get(&token)
+                    .ok_or(ExecutionError::InvalidContext)?,
+            )
+        } else {
+            None
+        };
         Ok(AuthorizedChild {
+            durable,
             checkpoints: Arc::new(Checkpoints(checkpoints)),
             execution: None,
         })

@@ -8,9 +8,9 @@ use std::collections::{BTreeMap, BTreeSet};
 pub struct AgentIsolationPolicy {
     /// Enable selective lowering for reviewed dependencies.
     pub enabled: bool,
-    /// The chosen runner supports inventory v4 and compiler checkpoint authority.
+    /// The chosen runner supports inventory v5 and compiler checkpoint authority.
     /// This is a capability assertion, not a request to enable the runner.
-    pub runtime_supports_inventory_v4: bool,
+    pub runtime_supports_inventory_v5: bool,
     /// Canonical Agent IDs mapped to reviews of exact component bytes.
     pub reviews: BTreeMap<String, AgentIsolationReview>,
 }
@@ -175,7 +175,7 @@ impl AgentLoweringSelection {
                 use AgentIsolationReason::*;
                 let reason = if !policy.enabled {
                     Disabled
-                } else if !policy.runtime_supports_inventory_v4 {
+                } else if !policy.runtime_supports_inventory_v5 {
                     RuntimeUnavailable
                 } else if !root_supports_isolation {
                     UnsupportedRootRuntime
@@ -402,7 +402,7 @@ mod tests {
                 extra_component_dirs: vec![],
                 policy: AgentIsolationPolicy {
                     enabled: true,
-                    runtime_supports_inventory_v4: true,
+                    runtime_supports_inventory_v5: true,
                     reviews: [(
                         "utils".into(),
                         AgentIsolationReview {

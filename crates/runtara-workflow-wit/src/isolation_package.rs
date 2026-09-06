@@ -16,7 +16,9 @@ pub use checkpoint_namespace::{CheckpointContract, CheckpointNamespace};
 mod invocation_manifest;
 mod invocation_path;
 mod invocation_scope;
-pub use invocation_manifest::{AgentCallSite, InvocationCallSite, InvocationManifest};
+pub use invocation_manifest::{
+    AgentCallSite, INVOCATION_MANIFEST_VERSION, InvocationCallSite, InvocationManifest,
+};
 pub use invocation_path::{
     AgentInvocationPath, InvocationPathError, InvocationSelector, LoopFrame, LoopKind,
     NamespaceFrame,

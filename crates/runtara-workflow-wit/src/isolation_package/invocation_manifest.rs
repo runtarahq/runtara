@@ -4,6 +4,9 @@ use super::{Binding, CheckpointContract, InvocationScopePattern, PackageError};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Current compiler inventory contract, including per-call durability.
+pub const INVOCATION_MANIFEST_VERSION: u32 = 5;
+
 /// One Agent identity emitted by a scoped logical Agent bridge. Namespace and
 /// loop ancestry remain in the invocation path, separate from these static parts.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -35,6 +38,15 @@ pub struct InvocationManifest {
     pub scope_paths: BTreeMap<u32, Vec<InvocationScopePattern>>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub checkpoint_contracts: BTreeMap<u32, CheckpointContract>,
+    /// Version 5 records the effective durability of each emitted caller.
+    /// Empty on older inventories means unknown, never implicitly false.
+    /// This controls attempt fencing; it does not authorize result memoization.
+    #[serde(
+        default,
+        deserialize_with = "unique_durability",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    pub call_durability: BTreeMap<u32, bool>,
 }
 
 /// A compiler definition and caller, independent of authored step IDs. `token`
@@ -53,7 +65,7 @@ impl InvocationManifest {
     /// Validate references and deterministic, unambiguous encoding before
     /// admission. Byte/allocation bounds come from the enclosing package limit.
     pub fn validate(&self, bindings: &BTreeMap<String, Binding>) -> Result<(), PackageError> {
-        if !matches!(self.version, 1..=4) {
+        if !matches!(self.version, 1..=INVOCATION_MANIFEST_VERSION) {
             return Err(PackageError::UnsupportedVersion);
         }
         let mut used = BTreeSet::new();
@@ -157,6 +169,46 @@ impl InvocationManifest {
                 }
             }
         }
+        if self.version < 5 {
+            if !self.call_durability.is_empty() {
+                return Err(PackageError::InvalidManifest);
+            }
+        } else if self.call_durability.len() != self.call_sites.len()
+            || self
+                .call_sites
+                .iter()
+                .any(|site| !self.call_durability.contains_key(&site.token))
+        {
+            return Err(PackageError::InvalidManifest);
+        }
         Ok(())
     }
+}
+
+// Do not let duplicate JSON keys choose a durability policy by parser order.
+fn unique_durability<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<BTreeMap<u32, bool>, D::Error> {
+    struct Unique;
+    impl<'de> serde::de::Visitor<'de> for Unique {
+        type Value = BTreeMap<u32, bool>;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("one durability flag per call token")
+        }
+        fn visit_map<M: serde::de::MapAccess<'de>>(
+            self,
+            mut map: M,
+        ) -> Result<Self::Value, M::Error> {
+            let mut flags = BTreeMap::new();
+            while let Some((token, value)) = map.next_entry::<u32, bool>()? {
+                if flags.insert(token, value).is_some() {
+                    return Err(serde::de::Error::custom(
+                        "duplicate invocation durability token",
+                    ));
+                }
+            }
+            Ok(flags)
+        }
+    }
+    deserializer.deserialize_map(Unique)
 }

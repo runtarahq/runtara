@@ -253,9 +253,14 @@ mod tests {
         })
         .unwrap();
         let child = root();
-        for version in [1, 2, 3, 4] {
+        for version in [1, 2, 3, 4, 5] {
             let expected = InvocationManifest {
-                checkpoint_contracts: if version == 4 {
+                call_durability: if version == 5 {
+                    [(7, true), (8, false)].into()
+                } else {
+                    Default::default()
+                },
+                checkpoint_contracts: if version >= 4 {
                     [
                         (
                             7,
@@ -330,7 +335,10 @@ mod tests {
             // SAFETY: our own engine just produced this entire native response.
             let loaded = unsafe { deserialize(&engine, &native) }.unwrap();
             assert_eq!(loaded.invocations, Some(expected));
-            for mode in ["missing", "binding", "version"] {
+            for mode in ["missing", "binding", "version", "durability"] {
+                if mode == "durability" && version < 5 {
+                    continue;
+                }
                 let end = 12 + u32::from_le_bytes(native[8..12].try_into().unwrap()) as usize;
                 let mut index: Index = serde_json::from_slice(&native[12..end]).unwrap();
                 match mode {
@@ -339,7 +347,11 @@ mod tests {
                         index.invocations.as_mut().unwrap().agent_calls[0].binding =
                             "agent:other".into()
                     }
-                    _ => index.invocations.as_mut().unwrap().version = 5,
+                    "durability" => index.invocations.as_mut().unwrap().call_durability.clear(),
+                    _ => {
+                        index.invocations.as_mut().unwrap().version =
+                            runtara_workflow_wit::isolation_package::INVOCATION_MANIFEST_VERSION + 1
+                    }
                 }
                 let json = serde_json::to_vec(&index).unwrap();
                 let mut changed = MAGIC_V2.to_vec();

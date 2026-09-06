@@ -1011,7 +1011,7 @@ fn compiler_checkpoint_contracts_match_existing_workflow_agent_scope_helpers() {
     .unwrap();
     let direct = DirectJsonManifest::parse(&fs::read(&compiled.manifest_path).unwrap()).unwrap();
     let inventory = compiled.invocation_manifest.unwrap();
-    assert_eq!(inventory.version, 4);
+    assert_eq!(inventory.version, 5);
     let source = serde_json::to_vec(&json!({"variables":{"_workflow_id":"contract-root","_durable_key_version":2,"_loop_path":[]}})).unwrap();
     assert_eq!(inventory.checkpoint_contracts.len(), 2);
     for site in &inventory.call_sites {

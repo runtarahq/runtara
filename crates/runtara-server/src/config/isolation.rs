@@ -112,7 +112,7 @@ impl IsolationPolicy {
             (
                 AgentIsolationPolicy {
                     enabled: true,
-                    runtime_supports_inventory_v4: true,
+                    runtime_supports_inventory_v5: true,
                     reviews: self
                         .reviews
                         .iter()
@@ -178,7 +178,7 @@ impl IsolationPolicy {
         let bytes = serde_json::to_vec(&(
             1,
             DIRECT_WORKFLOW_INVOKE_ABI_VERSION,
-            4,
+            runtara_workflow_wit::isolation_package::INVOCATION_MANIFEST_VERSION,
             &self.runtime_binding,
             &self.reviews,
         ))
@@ -221,7 +221,22 @@ mod tests {
     #[test]
     fn cache_identity_changes_with_review_and_runtime_contract_but_not_runtime_only_controls() {
         let value = config();
-        let original = parsed(&value).lowering_tag("base");
+        let policy = parsed(&value);
+        let original = policy.lowering_tag("base");
+        // The preceding compiler emitted inventory v4 under this provenance.
+        // New v5 packages must not reuse those cached images as fresh output.
+        let prior = serde_json::to_vec(&(
+            1,
+            DIRECT_WORKFLOW_INVOKE_ABI_VERSION,
+            4,
+            &policy.runtime_binding,
+            &policy.reviews,
+        ))
+        .unwrap();
+        assert_ne!(
+            original,
+            format!("base,isolation=v1-{:x}", Sha256::digest(prior))
+        );
         for field in ["sha256", "resetSafe", "compilerCheckpointContract"] {
             let mut changed = value.clone();
             changed["reviews"]["utils"][field] = if field == "sha256" {
