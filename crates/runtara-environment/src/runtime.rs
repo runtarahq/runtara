@@ -433,10 +433,12 @@ impl EnvironmentRuntimeConfig {
         cleanup_config.data_dir = self.data_dir.clone();
         cleanup_config.poll_interval = self.cleanup_poll_interval;
         cleanup_config.max_age = self.cleanup_max_age;
+        let cleanup_enabled = cleanup_config.enabled;
         let cleanup_worker = CleanupWorker::new(cleanup_config);
-        let cleanup = Worker::spawn(
+        let cleanup = Worker::spawn_configurable(
             "run-dir cleanup",
             cleanup_worker.shutdown_handle(),
+            cleanup_enabled,
             async move {
                 cleanup_worker.run().await;
             },
@@ -463,14 +465,16 @@ impl EnvironmentRuntimeConfig {
         );
 
         // Create database cleanup worker
+        let db_cleanup_enabled = self.db_cleanup_config.enabled;
         let db_cleanup_worker = DbCleanupWorker::new(
             self.pool.clone(),
             self.persistence.clone(),
             self.db_cleanup_config,
         );
-        let db_cleanup = Worker::spawn(
+        let db_cleanup = Worker::spawn_configurable(
             "database cleanup",
             db_cleanup_worker.shutdown_handle(),
+            db_cleanup_enabled,
             async move {
                 db_cleanup_worker.run().await;
             },
@@ -479,10 +483,12 @@ impl EnvironmentRuntimeConfig {
         // Create image cleanup worker
         let mut image_cleanup_config = self.image_cleanup_config;
         image_cleanup_config.data_dir = self.data_dir.clone();
+        let image_cleanup_enabled = image_cleanup_config.enabled;
         let image_cleanup_worker = ImageCleanupWorker::new(self.pool.clone(), image_cleanup_config);
-        let image_cleanup = Worker::spawn(
+        let image_cleanup = Worker::spawn_configurable(
             "image cleanup",
             image_cleanup_worker.shutdown_handle(),
+            image_cleanup_enabled,
             async move {
                 image_cleanup_worker.run().await;
             },
@@ -513,25 +519,49 @@ struct Worker {
     name: &'static str,
     shutdown: Arc<Notify>,
     handle: JoinHandle<()>,
+    /// Whether this worker's configuration has it doing anything.
+    ///
+    /// A disabled retention worker returns from `run()` immediately, so its
+    /// handle is finished almost as soon as it is spawned. That is the
+    /// configured outcome, not a stopped worker.
+    enabled: bool,
 }
 
 impl Worker {
-    /// Spawn `task` and keep the pieces needed to stop and join it.
+    /// Spawn `task` for a worker the runtime expects to keep running.
     fn spawn(
         name: &'static str,
         shutdown: Arc<Notify>,
+        task: impl std::future::Future<Output = ()> + Send + 'static,
+    ) -> Self {
+        Self::spawn_configurable(name, shutdown, true, task)
+    }
+
+    /// Spawn `task` for a worker its configuration may have turned off.
+    fn spawn_configurable(
+        name: &'static str,
+        shutdown: Arc<Notify>,
+        enabled: bool,
         task: impl std::future::Future<Output = ()> + Send + 'static,
     ) -> Self {
         Self {
             name,
             shutdown,
             handle: tokio::spawn(task),
+            enabled,
         }
     }
 
     /// Ask the worker to stop. It finishes the pass it is on.
     fn stop(&self) {
         self.shutdown.notify_one();
+    }
+
+    /// Whether this worker is in the state its configuration calls for.
+    ///
+    /// A disabled worker is live precisely because it has finished.
+    fn is_live(&self) -> bool {
+        !self.enabled || !self.handle.is_finished()
     }
 }
 
@@ -863,7 +893,7 @@ impl EnvironmentRuntime {
         std::iter::once(&self.wake)
             .chain(std::iter::once(&self.launch_dispatcher))
             .chain(self.workers.iter())
-            .all(|worker| !worker.handle.is_finished())
+            .all(Worker::is_live)
     }
 }
 
@@ -1103,6 +1133,38 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A worker its configuration disabled has finished on purpose.
+    ///
+    /// `is_running()` ANDs every worker's liveness, so before this a single
+    /// disabled retention worker — `RUNTARA_RUN_DIR_CLEANUP_ENABLED=false`, say
+    /// — made the whole runtime report itself stopped for its entire life, and
+    /// `EmbeddedRuntara::is_running()` with it. Disabling a cleanup worker is a
+    /// supported configuration, not a fault.
+    #[tokio::test]
+    async fn a_disabled_worker_does_not_make_the_runtime_look_stopped() {
+        // A task that returns immediately: exactly what `run()` does when its
+        // config says the worker is off.
+        let finished =
+            || Worker::spawn_configurable("test", Arc::new(Notify::new()), false, async {});
+        let worker = finished();
+        // Let the task actually complete before asking.
+        tokio::task::yield_now().await;
+        assert!(worker.handle.is_finished(), "fixture must have finished");
+        assert!(
+            worker.is_live(),
+            "a disabled worker is live precisely because it finished"
+        );
+
+        // The same finished handle, but for a worker that was meant to run.
+        let enabled = Worker::spawn_configurable("test", Arc::new(Notify::new()), true, async {});
+        tokio::task::yield_now().await;
+        assert!(enabled.handle.is_finished());
+        assert!(
+            !enabled.is_live(),
+            "an enabled worker that finished early has stopped"
+        );
+    }
 
     /// A drain that cannot read the registry has no idea what to park, so every
     /// guest runs on into teardown and dies with the process. That used to be
