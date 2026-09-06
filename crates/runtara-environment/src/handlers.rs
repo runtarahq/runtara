@@ -1556,8 +1556,10 @@ pub enum SendSignalOutcome {
 /// Send a lifecycle signal (`cancel`, `pause`, `shutdown`) to an instance.
 ///
 /// `shutdown` is how a draining host asks a guest to checkpoint and exit so it
-/// can be resumed after the restart; [`crate::runtime::EnvironmentRuntime::drain`]
-/// writes the same signal straight through `Persistence`.
+/// can be resumed after the restart. The drain that runs today,
+/// [`crate::runtime::EnvironmentRuntime::drain`], writes that signal straight
+/// through `Persistence` and never arrives here — which is how this handler
+/// came to disagree with the rest of the crate about what a signal type is.
 pub async fn handle_send_signal(
     state: &EnvironmentHandlerState,
     instance_id: &str,
@@ -1579,8 +1581,11 @@ pub async fn handle_send_signal(
 
     // Decoded with the storage layer's own parser rather than a match here, so
     // the set this accepts is by construction the set the column can hold. The
-    // local match had drifted from it: it never admitted `shutdown`, so every
-    // graceful-drain signal write was refused as an unknown type.
+    // local match had drifted from it: it never admitted `shutdown`, though
+    // `signal_type_to_str` writes it, the column holds it and `runtime_host`
+    // decodes it. `ShutdownCoordinator::drain_executions` is the caller that
+    // would have hit the refusal; its map is unpopulated today, so this was
+    // latent rather than live.
     let Ok(signal_type) = runtara_store_postgres::encoding::signal_type_from_str(signal_type)
     else {
         return Ok(SendSignalOutcome::UnknownSignalType {

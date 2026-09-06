@@ -59,11 +59,24 @@ PROBE signal=shutdown  outcome=UnknownSignalType { signal_type: "shutdown" }
 ```
 
 `shutdown.rs::drain_executions` calls `RuntimeClient::signal_shutdown` for every
-running synchronous execution so the guest checkpoints and exits cleanly. That
-call always failed, the error was swallowed as a `warn!`, and the drain then
-waited out the grace period. The `cancel_flag` still tripped, so executions did
-unwind — but the durable `shutdown` signal that lets the SDK checkpoint first
-was never written.
+entry in its `running_executions` map, so the guest checkpoints and exits
+cleanly. That call could never succeed.
+
+**How much this mattered, stated precisely.** Nothing currently inserts into
+`running_executions`. It is created in `server.rs`, cloned into five places, and
+only ever read — `execution_engine`'s copy is `#[allow(dead_code)]  // Reserved
+for future in-memory cancellation tracking` and `trigger_worker`'s parameter is
+`_running_executions`. So `drain_executions` always returns at its `is_empty()`
+early exit and `signal_shutdown` is not reached on any path today. This was a
+latent defect, not an outage: the drain that actually runs is
+`EnvironmentRuntime::drain`, which writes `SignalType::Shutdown` straight
+through `Persistence` and never goes near the handler.
+
+It is still worth fixing, and not only for whenever that map gets populated. The
+handler refused a signal that `runtara-store-postgres` encodes, that the
+`signals` column holds, and that `runtime_host` decodes — it was the single
+place in the crate that disagreed about what a signal type is, which is exactly
+the drift a stringly-typed argument invites.
 
 The rest of the crate understood the signal: `runtime_host.rs:519` decodes
 `"shutdown"`, and `runtime.rs:632` writes `SignalType::Shutdown` straight
@@ -188,7 +201,8 @@ changes the crate's public surface and wants its own review.
 ### Fixed along the way
 
 - `signal_shutdown` never worked (section 2.1), confirmed by a failing test
-  before the fix.
+  before the fix. Latent rather than live: the map it iterates is never
+  populated, so the path is unreachable today.
 - Instance timestamps were truncated from Postgres microseconds to milliseconds.
 - A non-JSON body was indistinguishable from no body; it is now logged.
 - Signal payloads no longer pass through `String::from_utf8_lossy`.
