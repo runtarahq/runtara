@@ -100,7 +100,14 @@ fn tail_chars(s: &str, max: usize) -> String {
 /// Contains database connection, runner, and configuration shared across all handlers.
 pub struct EnvironmentHandlerState {
     /// PostgreSQL connection pool (for Environment-specific tables: images, containers, etc.).
-    pub pool: PgPool,
+    ///
+    /// Crate-private: a pool is authority over every table in the database, so
+    /// handing one out makes anything reachable from it part of this crate's
+    /// public surface whether or not that was intended. Callers outside the
+    /// crate take a repository instead — see [`Self::instances`],
+    /// [`Self::images`] and [`Self::launches`] — which grant exactly the reads
+    /// and writes their table owner has thought about.
+    pub(crate) pool: PgPool,
     /// Core persistence layer (for instance lifecycle, checkpoints, signals).
     ///
     /// Everything core reasons about — status, termination, sleep — changes
@@ -141,6 +148,21 @@ const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const START_GATE_MONITOR_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 
 impl EnvironmentHandlerState {
+    /// The repository that owns the `instances` row.
+    pub fn instances(&self) -> InstanceRepository {
+        InstanceRepository::new(self.pool.clone())
+    }
+
+    /// The registry that owns the `images` table.
+    pub fn images(&self) -> ImageRegistry {
+        ImageRegistry::new(self.pool.clone())
+    }
+
+    /// The repository that owns the durable launch queue.
+    pub fn launches(&self) -> LaunchRepository {
+        LaunchRepository::new(self.pool.clone())
+    }
+
     /// Create a new environment handler state.
     ///
     /// # Arguments

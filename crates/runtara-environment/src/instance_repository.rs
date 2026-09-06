@@ -278,6 +278,20 @@ impl InstanceRepository {
         Ok(crate::db::count_instances_by_status(&self.pool, tenant_id, statuses, ceiling).await?)
     }
 
+    /// Count a tenant's instances in the given statuses, with no ceiling.
+    ///
+    /// [`Self::count_by_status`] bounds its scan because the admission gate
+    /// only needs to know whether the cap is reached. A viewer reporting how
+    /// many instances are parked needs the actual number, and this is the read
+    /// that costs what that answer costs — O(matching rows), for a slow tick.
+    pub async fn count_by_status_unbounded(
+        &self,
+        tenant_id: &str,
+        statuses: &[String],
+    ) -> Result<i64> {
+        Ok(crate::db::count_instances_by_status_unbounded(&self.pool, tenant_id, statuses).await?)
+    }
+
     /// Record what the process used, and read back the status the guest
     /// reported, in one statement.
     ///

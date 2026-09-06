@@ -2349,3 +2349,65 @@ async fn every_stored_status_reads_back_as_itself() {
         cleanup(&pool, Some(instance_id), None).await;
     }
 }
+
+/// The unbounded count reports the real figure; the capped one stops early.
+///
+/// These two exist for different callers and the difference is the whole point:
+/// the admission gate only needs to know whether a ceiling is reached, while a
+/// viewer showing "N parked" needs N. A single implementation would either
+/// throttle intake on a large parked population or display a number that
+/// silently stops climbing.
+#[tokio::test]
+async fn the_unbounded_status_count_ignores_the_ceiling_the_capped_one_obeys() {
+    skip_if_no_db!();
+    let pool = get_test_pool().await;
+    let instances = InstanceRepository::new(pool.clone());
+    let persistence = PostgresPersistence::new(pool.clone());
+    let tenant_id = format!("count-tenant-{}", Uuid::new_v4());
+
+    let mut created = Vec::new();
+    for _ in 0..5 {
+        let instance_id = format!("count-{}", Uuid::new_v4());
+        persistence
+            .register_instance(&instance_id, &tenant_id)
+            .await
+            .expect("register instance");
+        persistence
+            .update_instance_status(&instance_id, CoreInstanceStatus::Suspended, None)
+            .await
+            .expect("park it");
+        created.push(instance_id);
+    }
+
+    let statuses = vec!["suspended".to_string()];
+
+    let capped = instances
+        .count_by_status(Some(&tenant_id), &statuses, 3)
+        .await
+        .expect("capped count");
+    assert_eq!(
+        capped, 3,
+        "the capped count must stop at its ceiling, not report the true total"
+    );
+
+    let unbounded = instances
+        .count_by_status_unbounded(&tenant_id, &statuses)
+        .await
+        .expect("unbounded count");
+    assert_eq!(
+        unbounded, 5,
+        "the unbounded count must report every matching row"
+    );
+
+    // Both must agree on WHICH rows match, so a tenant with none reads zero
+    // rather than picking up another tenant's parked instances.
+    let other = instances
+        .count_by_status_unbounded(&format!("count-tenant-{}", Uuid::new_v4()), &statuses)
+        .await
+        .expect("unbounded count for an empty tenant");
+    assert_eq!(other, 0);
+
+    for instance_id in &created {
+        cleanup(&pool, Some(instance_id), None).await;
+    }
+}

@@ -234,6 +234,36 @@ pub async fn count_instances_by_status(
     Ok(count.0)
 }
 
+/// Count a tenant's instances in the given statuses, with no ceiling.
+///
+/// The sibling above stops at a bound because its caller only needs to know
+/// whether a cap is reached. A viewer wants the real figure and pays for it:
+/// this is O(matching rows), which for `suspended` means the largest set in the
+/// table. It belongs on a slow tick, never on an intake path.
+pub async fn count_instances_by_status_unbounded(
+    pool: &PgPool,
+    tenant_id: &str,
+    statuses: &[String],
+) -> Result<i64, sqlx::Error> {
+    // Same predicate and the same `idx_instances_status` plan as the capped
+    // form, minus the LIMIT subquery — so the two cannot drift apart on which
+    // rows they consider.
+    let count: (i64,) = sqlx::query_as(
+        r#"
+        SELECT COUNT(*)
+        FROM instances
+        WHERE tenant_id = $1
+          AND status = ANY($2::instance_status[])
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(statuses)
+    .fetch_one(pool)
+    .await?;
+
+    Ok(count.0)
+}
+
 /// Count instances matching filters (for pagination total_count).
 pub async fn count_instances(
     pool: &PgPool,
