@@ -581,6 +581,36 @@ baseline. The local macOS medians are not those budgets. Any proposed default
 rollout must include the completed comparison and explanations of regressions,
 as well as passing compatibility gates.
 
+### Measurement checkpoints in the implementation plan
+
+Performance evidence is a deliverable at each affected phase, with the final
+comparison required before enablement:
+
+| Checkpoint | Required evidence |
+|---|---|
+| P0, before switching execution paths | Preserve the current measured baseline and fixture hashes. Add direct single-step spans and capture a fresh legacy run on the qualification host. Record missing metrics explicitly. |
+| P1, executor and package foundations | Measure complete package/native-cache size, child creation and teardown, transfer costs and cancellation latency. These component measurements explain costs but cannot replace emitted-workflow measurements. |
+| P2, first emitted isolated Agent | Run the exact single random-double + Finish workflow through both backends. Publish raw/gzip/native bytes, Agent service time, parent step time, prepared full-run time and cold first-result time, with absolute and percentage deltas. |
+| P3, nested and parallel workflows | Repeat the comparison for chains, Split, nested Embed and payload sweeps. Verify dependency deduplication, actual isolated call counts, overlap and aggregate memory. |
+| P4/P5, persistence and local server | Compare first execution, replay, retries and cancellation using isolated persistence and controlled services. Include submission-to-persisted-result latency, throughput and tail latency under load. |
+| P6, enablement decision | Publish the paired report, raw samples, agreed budgets and pass/fail results. Explain regressions and retain the legacy default until qualification passes. |
+
+For the single random-double reference, the current evidence and remaining work
+must stay visible together:
+
+| Measurement | Recorded legacy baseline | Remaining comparison work |
+|---|---|---|
+| Complete `.wasm` / gzip bytes | 3,308,070 / 848,296 bytes | Measure the complete isolated package, including every unique child. |
+| Prepared full workflow p50 | 0.143–0.148 ms | Measure the same Agent + Finish graph with actual isolation. |
+| DSL → first result p50 | 230.1–231.5 ms | Repeat compilation, preparation and execution for both backends in the same session. |
+| Agent-only / parent step time | Not separately measured | Add spans to both backends; do not relabel the full workflow timing. |
+| Local-server full execution | Not measured | Include queueing, real persistence and terminal publication. |
+
+These historical macOS results are reference evidence, not a fresh comparison
+against the implementation branch. A comparison is complete only when both
+backends have run under the recorded matching conditions and correctness checks
+pass; pending measurements must never appear as zero overhead.
+
 ### Reproduction
 
 Build the real components with `scripts/build-agent-components.sh` if they are
