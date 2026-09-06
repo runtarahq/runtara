@@ -2,6 +2,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Canonical WIT contracts for direct-emitted workflow components.
 
+#[cfg(feature = "isolation-package")]
+pub mod isolation_package;
+
 /// First workflow WIT ABI version.
 pub const WORKFLOW_WIT_VERSION: &str = "0.1.0";
 

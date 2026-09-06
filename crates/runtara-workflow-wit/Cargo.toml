@@ -12,5 +12,14 @@ categories = ["development-tools"]
 [lib]
 path = "src/lib.rs"
 
+[features]
+# Host/compiler package contract; guest users of the WIT constants remain light.
+isolation-package = ["dep:serde", "dep:serde_json", "dep:sha2"]
+
+[dependencies]
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
+
 [dev-dependencies]
 wit-parser = "0.246"

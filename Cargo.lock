@@ -5040,6 +5040,9 @@ dependencies = [
 name = "runtara-workflow-wit"
 version = "8.9.9"
 dependencies = [
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
  "wit-parser 0.246.2",
 ]
 
