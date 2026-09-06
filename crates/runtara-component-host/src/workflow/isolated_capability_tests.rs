@@ -318,3 +318,105 @@ async fn capability_keeps_structured_error_retry_metadata() {
     assert_eq!(error.attributes.as_deref(), Some("boom"));
     fx.tasks.shutdown().await.unwrap();
 }
+
+fn compiled_package(
+    fx: &Fixture,
+    child: &InstancePre<WorkflowState>,
+    interface: &str,
+) -> crate::precompile::CompiledWorkflowPackage {
+    crate::precompile::CompiledWorkflowPackage {
+        root: Component::new(
+            fx.executor.engine(),
+            r#"(component
+          (core module $m (func (export "run") (result i32) i32.const 0))
+          (core instance $m (instantiate $m))
+          (func $run (result (result)) (canon lift (core func $m "run")))
+          (instance $api (export "run" (func $run)))
+          (export "wasi:cli/run@0.2.3" (instance $api)))"#,
+        )
+        .unwrap(),
+        artifacts: std::collections::BTreeMap::from([(
+            "fixture-digest".into(),
+            child.component().clone(),
+        )]),
+        bindings: vec![runtara_workflow_wit::isolation_package::Binding {
+            id: "child".into(),
+            artifact: "fixture-digest".into(),
+            interface: interface.into(),
+        }],
+    }
+}
+
+#[tokio::test]
+async fn prepared_catalog_deduplicates_without_executing_initializers() {
+    let fx = Fixture::new(false);
+    let child = fx.pre("", "call $probe unreachable");
+    let mut package = compiled_package(&fx, &child, INTERFACE);
+    for i in 0..99 {
+        let mut binding = package.bindings[0].clone();
+        binding.id = format!("child-{i}");
+        package.bindings.push(binding);
+    }
+    let prepared = fx
+        .executor
+        .prepare_precompiled_package(package)
+        .await
+        .unwrap();
+    let catalog = prepared.child_catalog().unwrap();
+    assert_eq!(catalog.artifact_count(), 1);
+    assert_eq!(catalog.binding_count(), 100);
+    assert!(Arc::ptr_eq(
+        catalog.resolve("child").unwrap().1,
+        catalog.resolve("child-98").unwrap().1
+    ));
+    assert!(catalog.resolve("not-in-package").is_none());
+    assert_eq!(
+        fx.calls.load(Ordering::Acquire),
+        0,
+        "preparation executed guest code"
+    );
+    let clone = prepared.clone();
+    assert!(Arc::ptr_eq(catalog, clone.child_catalog().unwrap()));
+    drop(prepared);
+    assert_eq!(clone.child_catalog().unwrap().binding_count(), 100);
+    fx.tasks.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn prepared_catalog_rejects_invalid_bindings_before_initialization() {
+    let fx = Fixture::new(false);
+    let child = fx.pre("", "call $probe unreachable");
+    let package = compiled_package(&fx, &child, "missing-interface");
+    assert!(
+        fx.executor
+            .prepare_precompiled_package(package)
+            .await
+            .is_err()
+    );
+    let mut package = compiled_package(&fx, &child, INTERFACE);
+    package.bindings.push(package.bindings[0].clone());
+    assert!(
+        fx.executor
+            .prepare_precompiled_package(package)
+            .await
+            .is_err()
+    );
+    let mut package = compiled_package(&fx, &child, INTERFACE);
+    package.bindings[0].artifact = "not-present".into();
+    assert!(
+        fx.executor
+            .prepare_precompiled_package(package)
+            .await
+            .is_err()
+    );
+    let mut package = compiled_package(&fx, &child, INTERFACE);
+    package.bindings.clear();
+    assert!(
+        fx.executor
+            .prepare_precompiled_package(package)
+            .await
+            .is_err()
+    );
+    assert_eq!(fx.calls.load(Ordering::Acquire), 0);
+    fx.tasks.shutdown().await.unwrap();
+}

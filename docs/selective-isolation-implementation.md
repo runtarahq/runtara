@@ -79,8 +79,8 @@ precompilation, rejects a wrong nonce and checks the root-only decoder rejection
 The complete component-host suite with integration/PoC features passed **76 tests**,
 with one manual benchmark ignored; focused all-target Clippy passed.
 
-The environment's package-aware prepared cache and child execution imports remain
-to be connected. Native compilation stays in the worker, never in `start`.
+Native compilation stays in the worker, never in `start`. The prepared catalog
+transport is described below; child execution imports remain to be connected.
 
 ### Guarded capability Store execution
 
@@ -99,17 +99,46 @@ limits and traps. A real-component integration test invokes `random-double` whil
 an actual HTTP Agent is blocked against a local endpoint, then cancels the HTTP
 child while preserving the random result. These focused tests passed. The complete component-host suite with both
 integration/PoC features passed **84 tests**, with one manual benchmark ignored;
-focused all-target Clippy passed.
+focused all-target Clippy passed. After this shared-runner change, the full
+workflow suite passed **840 tests** (565 library, 221 composed execution and 54
+other integration tests); the manual benchmark and existing doctest were ignored.
 
 This runner is not yet wired to generated workflow imports. The compiler backend,
 child runtime authority adapter, aggregate resource accounting and durable attempt
 fencing remain required; the execution method alone does not provide them.
 
+### Prepared catalog lifetime through launch and cache
+
+The environment now decodes the complete trusted worker package and links its
+unique children alongside the root. `PreparedWorkflow` owns an immutable catalog;
+queued tokens and opt-in cache hits share its prepared definitions. Bindings can
+resolve only package-local child ids and the catalog's declared interface. Linking
+rejects missing/duplicate bindings, missing interfaces and unreferenced members
+without constructing a Store. The guarded invocation still type-checks the full
+entry ABI when it obtains the typed function.
+
+Two catalog fixture tests check deduplication, token cloning, invalid references
+and the absence of initializer execution. The real-component cache test runs in
+separate processes with caching both disabled and enabled. It precompiles a raw
+package through the worker, verifies its digest on cache reuse, deletes the source,
+drops the original executor/cache and executes the retained root and random-double
+child using a new executor sharing the engine.
+
+Verification: **87 component-host tests passed**, with one manual benchmark
+ignored. All **12 environment embedded-runner unit tests passed**. All-target
+Clippy passed for component-host with both integration/PoC features and environment
+with its database-test feature. Database integration tests and a server launched
+through its actual worker subprocess have not yet been run for this change; they
+remain part of the final local-server gate.
+
+This connects preparation and ownership, not the generated execution imports or
+root-to-child invocation context. No production backend default has changed.
+
 ## Remaining required work
 
 - P0: add explicit legacy/isolated differential selection and coverage counters.
-- P1: versioned execution imports, immutable package catalog, prepared child code,
-  Store runner integration, aggregate guest resource reservations and teardown.
+- P1: versioned execution imports, root/child context wiring, aggregate guest
+  resource reservations and tree teardown.
 - P2: sequential/parallel Agent call backend and every AI auxiliary invocation,
   preserving package state eligibility and existing invocation semantics.
 - P3: recursive Embed extraction and scoped child runtime, suspension/wake sets,

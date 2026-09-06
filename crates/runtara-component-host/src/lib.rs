@@ -42,9 +42,9 @@ pub use engine::{EPOCH_TICK, EngineConfig, build_engine, spawn_epoch_ticker};
 pub use host_state::{CallContext, HostState};
 pub use registry::{LoadedAgent, build_linker, instantiate, load_agent};
 pub use workflow::{
-    CapabilityInvocation, InvokeExit, InvokeRunResult, PreparedWorkflow, WorkflowExecutor,
-    WorkflowExit, WorkflowLimits, WorkflowRunResult, WorkflowRunSpec, WorkflowStartConfirmation,
-    WorkflowState,
+    CapabilityInvocation, InvokeExit, InvokeRunResult, PreparedChildCatalog, PreparedWorkflow,
+    WorkflowExecutor, WorkflowExit, WorkflowLimits, WorkflowRunResult, WorkflowRunSpec,
+    WorkflowStartConfirmation, WorkflowState,
 };
 
 /// Agent metadata loaded from a sidecar `<agent>.meta.json` next to the

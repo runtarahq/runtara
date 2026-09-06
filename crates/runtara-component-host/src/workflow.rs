@@ -39,6 +39,10 @@ use wasmtime_wasi_http::{
     },
 };
 
+#[path = "workflow/prepared_catalog.rs"]
+mod prepared_catalog;
+pub use prepared_catalog::PreparedChildCatalog;
+
 use crate::engine::EPOCH_TICK;
 use crate::host_io::{DEFAULT_HTTP_TIMEOUT, HostIoContext};
 
@@ -317,6 +321,7 @@ struct CachedComponent {
     /// Lazily-derived `wasi:cli/run` wrapper — present only once a legacy
     /// (run-shaped) artifact has been loaded through [`WorkflowExecutor::load`].
     command: Option<Arc<CommandPre<WorkflowState>>>,
+    child_catalog: Option<Arc<PreparedChildCatalog>>,
 }
 
 /// A linked workflow artifact prepared from an exact, verified child result.
@@ -330,9 +335,15 @@ struct CachedComponent {
 pub struct PreparedWorkflow {
     instance_pre: Arc<wasmtime::component::InstancePre<WorkflowState>>,
     command: Option<Arc<CommandPre<WorkflowState>>>,
+    child_catalog: Option<Arc<PreparedChildCatalog>>,
 }
 
 impl PreparedWorkflow {
+    /// Immutable dependencies compiled from the same verified source as the root.
+    pub fn child_catalog(&self) -> Option<&Arc<PreparedChildCatalog>> {
+        self.child_catalog.as_ref()
+    }
+
     /// Whether this artifact uses the lifecycle `invoke` export rather than
     /// the retired `wasi:cli/run` entrypoint.
     pub fn is_lifecycle_invoke(&self, engine: &Arc<Engine>) -> bool {
@@ -465,6 +476,7 @@ impl WorkflowExecutor {
                 source_digest: None,
                 instance_pre: Arc::clone(&instance_pre),
                 command: None,
+                child_catalog: None,
             },
         );
         if cache.len() > COMPONENT_CACHE_MAX {
@@ -505,7 +517,24 @@ impl WorkflowExecutor {
         Ok(PreparedWorkflow {
             instance_pre,
             command,
+            child_catalog: None,
         })
+    }
+
+    /// Link all members from one trusted worker response, retaining them with
+    /// the root through queueing and optional prepared-cache reuse. This method
+    /// does not read artifacts, compile code or execute guest initializers.
+    pub async fn prepare_precompiled_package(
+        &self,
+        package: crate::precompile::CompiledWorkflowPackage,
+    ) -> Result<PreparedWorkflow> {
+        let catalog =
+            PreparedChildCatalog::prepare(&self.linker, package.artifacts, package.bindings)?;
+        let mut root = self.prepare_precompiled(package.root).await?;
+        if catalog.binding_count() != 0 {
+            root.child_catalog = Some(Arc::new(catalog));
+        }
+        Ok(root)
     }
 
     /// Look up a previously prepared artifact for `wasm_path`.
@@ -537,6 +566,7 @@ impl WorkflowExecutor {
             PreparedWorkflow {
                 instance_pre: Arc::clone(&entry.instance_pre),
                 command: entry.command.clone(),
+                child_catalog: entry.child_catalog.clone(),
             },
             digest,
         ))
@@ -569,6 +599,7 @@ impl WorkflowExecutor {
                 source_digest: Some(source_digest),
                 instance_pre: Arc::clone(&prepared.instance_pre),
                 command: prepared.command.clone(),
+                child_catalog: prepared.child_catalog.clone(),
             },
         );
         if cache.len() > COMPONENT_CACHE_MAX {

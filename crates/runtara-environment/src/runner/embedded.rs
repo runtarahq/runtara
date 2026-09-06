@@ -37,7 +37,7 @@ use tracing::{debug, error, info, warn};
 
 use runtara_component_host::precompile::{
     PRECOMPILE_NONCE_BYTES, PRECOMPILE_WORKER_ARGUMENT, PrecompileRequest, PrecompileResponse,
-    deserialize_trusted_precompiled_component, read_precompile_response_async,
+    deserialize_trusted_precompiled_package, read_precompile_response_async,
     validate_precompile_response, write_precompile_request_async,
 };
 use runtara_component_host::{
@@ -493,11 +493,11 @@ impl ComponentPrecompiler for ChildComponentPrecompiler {
         // the component-host protocol writer. The protocol validation checks
         // its nonce, digest, and engine fingerprint before Wasmtime sees it.
         let component = unsafe {
-            deserialize_trusted_precompiled_component(executor.engine(), &request, &response)
+            deserialize_trusted_precompiled_package(executor.engine(), &request, &response)
         }
         .map_err(|error| map_precompile_error(&options.wasm_path, error))?;
         let workflow = executor
-            .prepare_precompiled(component)
+            .prepare_precompiled_package(component)
             .await
             .map_err(|error| {
                 RunnerError::StartFailed(format!("link precompiled workflow: {error:#}"))
@@ -567,11 +567,11 @@ impl ComponentPrecompiler for InProcessTestComponentPrecompiler {
         // function in-process and immediately wraps its exact output in the
         // protocol response used by production.
         let component = unsafe {
-            deserialize_trusted_precompiled_component(executor.engine(), &request, &response)
+            deserialize_trusted_precompiled_package(executor.engine(), &request, &response)
         }
         .map_err(|error| map_precompile_error(&options.wasm_path, error))?;
         let workflow = executor
-            .prepare_precompiled(component)
+            .prepare_precompiled_package(component)
             .await
             .map_err(|error| {
                 RunnerError::StartFailed(format!("link test precompiled workflow: {error:#}"))
