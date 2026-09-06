@@ -1,7 +1,7 @@
 //! Immutable child code retained with the verified root preparation token.
 use std::{collections::BTreeMap, sync::Arc};
 
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use runtara_workflow_wit::isolation_package::Binding;
 use wasmtime::{
     Engine,
@@ -9,6 +9,9 @@ use wasmtime::{
 };
 
 use super::WorkflowState;
+
+#[path = "invocation_abi.rs"]
+mod invocation_abi;
 
 type ChildPre = Arc<InstancePre<WorkflowState>>;
 
@@ -78,13 +81,17 @@ impl PreparedChildCatalog {
                 matches!(item, ComponentItem::ComponentInstance(_)),
                 "isolated binding export is not an interface"
             );
-            ensure!(
-                matches!(
-                    pre.component().get_export(Some(&interface), "invoke"),
-                    Some((ComponentItem::ComponentFunc(_), _))
-                ),
-                "isolated binding interface has no invoke function"
-            );
+            let Some((ComponentItem::ComponentFunc(invoke), _)) =
+                pre.component().get_export(Some(&interface), "invoke")
+            else {
+                anyhow::bail!("isolated binding interface has no invoke function");
+            };
+            invocation_abi::validate(&invoke, &binding.interface).with_context(|| {
+                format!(
+                    "invalid isolated binding `{}` ({})",
+                    binding.id, binding.interface
+                )
+            })?;
             used.insert(binding.artifact.clone());
             ensure!(
                 catalog

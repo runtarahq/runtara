@@ -114,8 +114,9 @@ unique children alongside the root. `PreparedWorkflow` owns an immutable catalog
 queued tokens and opt-in cache hits share its prepared definitions. Bindings can
 resolve only package-local child ids and the catalog's declared interface. Linking
 rejects missing/duplicate bindings, missing interfaces and unreferenced members
-without constructing a Store. The guarded invocation still type-checks the full
-entry ABI when it obtains the typed function.
+without constructing a Store. The initial implementation checked the full entry
+ABI when obtaining the typed function; the preparation-time check described below
+now rejects incompatible signatures before initialization as well.
 
 Two catalog fixture tests check deduplication, token cloning, invalid references
 and the absence of initializer execution. The real-component cache test runs in
@@ -280,9 +281,33 @@ through this launcher after deleting its source and dropping the preparation
 owner; cache-enabled and cache-disabled subprocess cases both passed.
 
 The full component-host suite passed **118 tests** with one manual benchmark
-ignored; all-target Clippy passed with both integration/PoC features. Generated
+ignored; all-target Clippy passed with both integration/PoC features. The workflow
+regression suite passed **840 tests**, including all 221 emitted WASM executions,
+with its manual benchmark and existing doctest ignored. Generated
 DSL workflows still use the legacy backend, and server launch selection remains
 unchanged until scoped runtime authority and the compiler are wired.
+
+### Reject incompatible child ABIs before initialization
+
+Preparation now validates the complete invocation signature using Wasmtime's
+prepared type metadata. Capability entries require a string capability argument
+and byte-list input/result; lifecycle entries require byte-list input and the
+full completed/suspended outcome. Error fields, optional payloads, signal waits,
+and wake variants must match the canonical host/WIT contract, including order.
+Both sync and async function shapes remain supported. Wasmtime still checks the
+typed function at invocation as a second check.
+
+The regression test first demonstrated that preparation accepted a component
+with an incompatible input element type. After the fix, nine valid-component
+fixtures with incompatible argument counts, return forms, input/output element
+types, error fields/payloads, outcome ordering and wake deadlines are rejected
+without executing an initializer. Positive coverage includes actual built utils
+through the worker/package/cache path and both lifecycle versions. The full
+component-host suite passed **119 tests** with one manual benchmark ignored;
+focused all-target Clippy passed with both integration/PoC features.
+
+This validation applies to the new isolated package bindings. Legacy artifacts
+retain their existing execution path and accepted DSL support.
 
 ## Remaining required work
 

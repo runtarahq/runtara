@@ -470,3 +470,100 @@ fn launcher_rejects_catalog_from_a_different_engine_before_scope_construction() 
     assert_eq!(fx.signals.specs.load(Ordering::Acquire), 0);
     assert_eq!(fx.signals.initialized.load(Ordering::Acquire), 0);
 }
+
+#[test]
+fn malformed_child_signatures_are_rejected_before_any_initializer() {
+    let fx = Fixture::new(false);
+    let cap = capability();
+    let flow = lifecycle();
+    let cases = [
+        (
+            "extra capability argument",
+            CAPABILITY,
+            cap.replace(
+                "(func (export \"invoke\") (param i32 i32 i32 i32)",
+                "(func (export \"invoke\") (param i32 i32 i32 i32 i32)",
+            )
+            .replace(
+                "(param \"input\" (list u8))",
+                "(param \"input\" (list u8)) (param \"extra\" u32)",
+            ),
+        ),
+        (
+            "non-result return",
+            CAPABILITY,
+            cap.replace("(result (result (list u8) (error $error)))", "(result u32)"),
+        ),
+        (
+            "absent error payload",
+            CAPABILITY,
+            cap.replace(
+                "(result (result (list u8) (error $error)))",
+                "(result (result (list u8)))",
+            ),
+        ),
+        (
+            "capability input element",
+            CAPABILITY,
+            cap.replace(
+                "(param \"input\" (list u8))",
+                "(param \"input\" (list u16))",
+            ),
+        ),
+        (
+            "capability output element",
+            CAPABILITY,
+            cap.replace("(result (result (list u8)", "(result (result (list u16)"),
+        ),
+        (
+            "error field name",
+            CAPABILITY,
+            cap.replace("\"retry-after-ms\"", "\"renamed-retry-after-ms\""),
+        ),
+        (
+            "error optional payload",
+            CAPABILITY,
+            cap.replace("(option u64)", "(option u32)"),
+        ),
+        (
+            "lifecycle outcome order",
+            runtara_workflow_wit::LIFECYCLE_INTERFACE_NAME,
+            flow.replace(
+                "(case \"completed\" (list u8)) (case \"suspended\" (list $wake))",
+                "(case \"suspended\" (list $wake)) (case \"completed\" (list u8))",
+            ),
+        ),
+        (
+            "wake deadline type",
+            runtara_workflow_wit::LIFECYCLE_INTERFACE_NAME,
+            flow.replace(
+                "(field \"deadline-ms\" (option u64))",
+                "(field \"deadline-ms\" (option u32))",
+            ),
+        ),
+    ];
+    for (case, interface, source) in cases {
+        assert_ne!(
+            source,
+            if interface == CAPABILITY {
+                cap.clone()
+            } else {
+                flow.clone()
+            },
+            "mutation did not apply: {case}"
+        );
+        // Each input is a valid component, with an invalid execution ABI.
+        let component = Component::new(fx.executor.engine(), source).unwrap();
+        let result = PreparedChildCatalog::prepare(
+            &fx.executor.linker,
+            BTreeMap::from([("child".into(), component)]),
+            vec![Binding {
+                id: "child".into(),
+                artifact: "child".into(),
+                interface: interface.into(),
+            }],
+        );
+        assert!(result.is_err(), "accepted malformed {case}");
+        assert_eq!(fx.signals.initialized.load(Ordering::Acquire), 0);
+    }
+}
