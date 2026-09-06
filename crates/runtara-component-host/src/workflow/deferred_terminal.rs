@@ -43,9 +43,28 @@ impl DeferredTerminal {
         }
         Ok(())
     }
+    pub(super) fn validate(&self, exit: &InvokeExit) -> Result<(), String> {
+        let pending = self
+            .pending
+            .lock()
+            .map_err(|_| "root terminal staging poisoned")?;
+        if pending.conflict {
+            return Err("conflicting root terminal callbacks".into());
+        }
+        match (&pending.terminal, exit) {
+            (None, _) | (Some(Terminal::Fail(_)), InvokeExit::Failed(_)) => Ok(()),
+            (Some(Terminal::Complete(expected)), InvokeExit::Completed(actual))
+                if expected == actual =>
+            {
+                Ok(())
+            }
+            _ => Err("root terminal callback disagrees with invocation outcome".into()),
+        }
+    }
     /// Only the root supervisor calls this, after mandatory descendant cleanup.
     /// Preserve the original fail payload (it can carry extra error metadata).
     pub(super) async fn publish(&self, exit: &InvokeExit) -> Result<(), String> {
+        self.validate(exit)?;
         let terminal = {
             let mut pending = self
                 .pending

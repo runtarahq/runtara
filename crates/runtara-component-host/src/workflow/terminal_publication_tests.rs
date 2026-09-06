@@ -102,9 +102,20 @@ fn run_publishing(
 fn run_publishing_as(
     fx: &Fixture,
     exit: &str,
+    config: WorkflowRunSpec,
+    publication: Arc<Publication>,
+    failed: bool,
+) -> tokio::task::JoinHandle<InvokeRunResult> {
+    run_publishing_coordinated(fx, exit, config, publication, failed, None)
+}
+
+fn run_publishing_coordinated(
+    fx: &Fixture,
+    exit: &str,
     mut config: WorkflowRunSpec,
     publication: Arc<Publication>,
     failed: bool,
+    coordinator: Option<Arc<dyn RootExecutionCoordinator>>,
 ) -> tokio::task::JoinHandle<InvokeRunResult> {
     let terminal = r#"
     (import "runtara:workflow-runtime/runtime@0.3.0" (instance $runtime
@@ -143,12 +154,195 @@ fn run_publishing_as(
     config.runtime = Some(publication);
     tokio::spawn(async move {
         executor
-            .execute_invoke_with_context(&pre, config, vec![], None, context)
+            .execute_invoke_with_coordinator(&pre, config, vec![], None, context, coordinator)
             .await
     })
 }
 const COMPLETE: &str =
     "(call $complete (i32.const 3500) (i32.const 2) (i32.const 3000)) i32.const 42 return";
+
+struct Coordinator {
+    signals: Arc<Signals>,
+    closes: Mutex<Vec<bool>>,
+    close_error: bool,
+    finalize_error: bool,
+    pending: bool,
+    entered: Notify,
+    dropped: Arc<AtomicBool>,
+    finalized: AtomicBool,
+}
+impl Coordinator {
+    fn new(fx: &Fixture, mode: &str) -> Arc<Self> {
+        Arc::new(Self {
+            signals: fx.signals.clone(),
+            closes: Mutex::new(vec![]),
+            close_error: mode == "close-error",
+            finalize_error: mode == "finalize-error",
+            pending: matches!(mode, "timeout" | "cancel" | "abandon"),
+            entered: Notify::new(),
+            dropped: Arc::new(AtomicBool::new(false)),
+            finalized: AtomicBool::new(false),
+        })
+    }
+}
+#[async_trait]
+impl RootExecutionCoordinator for Coordinator {
+    fn close(&self, success: bool) -> Result<(), String> {
+        assert!(self.signals.cleanup_done.load(Ordering::Acquire));
+        self.closes.lock().unwrap().push(success);
+        if self.close_error {
+            Err("close failed".into())
+        } else {
+            Ok(())
+        }
+    }
+    async fn finalize(&self) -> Result<RootLifecycleDecision, String> {
+        assert_eq!(*self.closes.lock().unwrap(), vec![true]);
+        self.finalized.store(true, Ordering::Release);
+        let _dropped = Dropped(self.dropped.clone());
+        self.entered.notify_one();
+        if self.pending {
+            std::future::pending::<()>().await;
+        }
+        if self.finalize_error {
+            Err("finalization failed".into())
+        } else {
+            Ok(RootLifecycleDecision::Preserve)
+        }
+    }
+}
+
+#[tokio::test]
+async fn root_coordinator_closes_after_cleanup_and_cannot_publish_on_failure() {
+    for mode in [
+        "success",
+        "cleanup-error",
+        "close-error",
+        "finalize-error",
+        "trap",
+    ] {
+        let fx = Fixture::new(false, mode == "cleanup-error");
+        let publication = Arc::new(Publication::default());
+        let coordinator = Coordinator::new(&fx, mode);
+        let exit = if mode == "trap" {
+            "unreachable"
+        } else {
+            COMPLETE
+        };
+        let result = bounded(run_publishing_coordinated(
+            &fx,
+            exit,
+            spec(),
+            publication.clone(),
+            false,
+            Some(coordinator.clone()),
+        ))
+        .await
+        .unwrap();
+        assert_eq!(
+            *coordinator.closes.lock().unwrap(),
+            vec![mode != "cleanup-error"]
+        );
+        assert_eq!(
+            coordinator.finalized.load(Ordering::Acquire),
+            matches!(mode, "success" | "finalize-error")
+        );
+        if mode == "success" {
+            assert!(matches!(result.exit, InvokeExit::Completed(_)));
+            assert_eq!(*publication.calls.lock().unwrap(), vec![b"42".to_vec()]);
+        } else {
+            assert!(matches!(result.exit, InvokeExit::Trapped { .. }));
+            assert!(publication.calls.lock().unwrap().is_empty());
+        }
+    }
+}
+
+#[tokio::test]
+async fn root_coordinator_native_stop_precedes_terminal_validation_after_cleanup() {
+    for timeout in [false, true] {
+        let fx = Fixture::new(true, false);
+        let publication = Arc::new(Publication::default());
+        let coordinator = Coordinator::new(&fx, "success");
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut config = spec();
+        config.cancel = Some(cancel.clone());
+        if timeout {
+            config.timeout = Duration::from_millis(100);
+        }
+        let mismatched =
+            "(call $complete (i32.const 3500) (i32.const 1) (i32.const 3000)) i32.const 42 return";
+        let running = run_publishing_coordinated(
+            &fx,
+            mismatched,
+            config,
+            publication.clone(),
+            false,
+            Some(coordinator.clone()),
+        );
+        bounded(fx.signals.cleanup_entered.notified()).await;
+        if timeout {
+            tokio::time::sleep(Duration::from_millis(120)).await;
+        } else {
+            cancel.store(true, Ordering::Release);
+        }
+        fx.signals.cleanup_release.notify_one();
+        let result = bounded(running).await.unwrap();
+        assert!(matches!(
+            (timeout, result.exit),
+            (true, InvokeExit::Timeout) | (false, InvokeExit::Cancelled)
+        ));
+        assert_eq!(*coordinator.closes.lock().unwrap(), vec![true]);
+        assert!(!coordinator.finalized.load(Ordering::Acquire));
+        assert!(publication.calls.lock().unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn root_coordinator_pending_io_is_bounded_by_timeout_cancel_and_abandonment() {
+    for mode in ["timeout", "cancel", "abandon"] {
+        let fx = Fixture::new(false, false);
+        let publication = Arc::new(Publication::default());
+        let coordinator = Coordinator::new(&fx, mode);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut config = spec();
+        config.cancel = Some(cancel.clone());
+        if mode == "timeout" {
+            config.timeout = Duration::from_millis(250);
+        }
+        let running = run_publishing_coordinated(
+            &fx,
+            COMPLETE,
+            config,
+            publication.clone(),
+            false,
+            Some(coordinator.clone()),
+        );
+        bounded(coordinator.entered.notified()).await;
+        match mode {
+            "cancel" => cancel.store(true, Ordering::Release),
+            "abandon" => running.abort(),
+            _ => {}
+        }
+        if mode == "abandon" {
+            assert!(bounded(running).await.unwrap_err().is_cancelled());
+            bounded(async {
+                while !coordinator.dropped.load(Ordering::Acquire) {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await;
+        } else {
+            let result = bounded(running).await.unwrap();
+            assert!(matches!(
+                (mode, result.exit),
+                ("timeout", InvokeExit::Timeout) | ("cancel", InvokeExit::Cancelled)
+            ));
+        }
+        assert!(coordinator.dropped.load(Ordering::Acquire));
+        assert_eq!(*coordinator.closes.lock().unwrap(), vec![true]);
+        assert!(publication.calls.lock().unwrap().is_empty());
+    }
+}
 
 #[tokio::test]
 async fn terminal_callback_waits_for_descendant_cleanup_and_is_discarded_on_failure() {

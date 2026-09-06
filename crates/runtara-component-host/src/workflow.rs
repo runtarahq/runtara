@@ -1461,6 +1461,7 @@ mod isolated_capability_tests;
 
 #[path = "workflow/scoped_execution.rs"]
 mod scoped_execution;
+pub use scoped_execution::{RootExecutionCoordinator, RootLifecycleDecision};
 
 #[cfg(test)]
 #[path = "workflow/test_support.rs"]

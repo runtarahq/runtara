@@ -6,6 +6,30 @@ mod deferred_terminal;
 use deferred_terminal::DeferredTerminal;
 use wasmtime::component::InstancePre;
 
+/// Root lifecycle disposition after guest and descendant teardown. This cannot
+/// choose a graph successor or supply a successful workflow output.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RootLifecycleDecision {
+    #[default]
+    Preserve,
+    Cancelled,
+    Suspended,
+}
+
+/// Native root lifecycle coordination, separate from guest runtime imports.
+/// Closing always follows attempted cleanup. Finalization runs only after
+/// successful cleanup, under the original budget and cancellation guards.
+/// Persistent fences remain the embedding's responsibility.
+#[async_trait]
+pub trait RootExecutionCoordinator: Send + Sync {
+    /// Fence new calls without IO. A false value forbids lifecycle publication.
+    fn close(&self, cleanup_succeeded: bool) -> Result<(), String>;
+    /// Apply root control receipts, never graph scheduling or child recovery.
+    /// Cancellation/expiry may skip or interrupt this call; the embedding must
+    /// retain durable commands for recovery in that case.
+    async fn finalize(&self) -> Result<RootLifecycleDecision, String>;
+}
+
 struct Abandonment {
     requested: Arc<AtomicBool>,
     wake: Arc<Notify>,
@@ -40,10 +64,25 @@ impl WorkflowExecutor {
     pub async fn execute_invoke_with_context(
         self: &Arc<Self>,
         pre: &InstancePre<WorkflowState>,
+        spec: WorkflowRunSpec,
+        input: Vec<u8>,
+        start_confirmation: Option<Arc<dyn WorkflowStartConfirmation>>,
+        execution: Arc<ExecutionContext>,
+    ) -> InvokeRunResult {
+        self.execute_invoke_with_coordinator(pre, spec, input, start_confirmation, execution, None)
+            .await
+    }
+
+    /// Coordinate root lifecycle after cleanup, before staged terminal publication.
+    /// Suspension preserves all guest-returned wakes; native coordination invents none.
+    pub async fn execute_invoke_with_coordinator(
+        self: &Arc<Self>,
+        pre: &InstancePre<WorkflowState>,
         mut spec: WorkflowRunSpec,
         input: Vec<u8>,
         start_confirmation: Option<Arc<dyn WorkflowStartConfirmation>>,
         execution: Arc<ExecutionContext>,
+        coordinator: Option<Arc<dyn RootExecutionCoordinator>>,
     ) -> InvokeRunResult {
         let overall_started = Instant::now();
         let mut abandonment = Abandonment {
@@ -92,29 +131,98 @@ impl WorkflowExecutor {
             };
             // A panic in cleanup must also become a root host failure. It must
             // never expose the successful guest result retained above.
+            let mut cleanup_succeeded = true;
             match tokio::spawn(async move { execution.shutdown().await }).await {
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => {
+                    cleanup_succeeded = false;
                     result.exit = InvokeExit::Trapped {
                         reason: format!("root descendant cleanup failed: {error:?}"),
                     };
                 }
                 Err(error) => {
+                    cleanup_succeeded = false;
                     result.exit = InvokeExit::Trapped {
                         reason: format!("root descendant cleanup worker lost: {error}"),
                     };
+                }
+            }
+            if let Some(coordinator) = coordinator.as_ref()
+                && let Err(reason) = coordinator.close(cleanup_succeeded)
+            {
+                cleanup_succeeded = false;
+                result.exit = InvokeExit::Trapped {
+                    reason: format!("root coordination close failed: {reason}"),
+                };
+            }
+            let cancelled = || {
+                abandoned.load(Ordering::Acquire)
+                    || root_cancel
+                        .as_ref()
+                        .is_some_and(|flag| flag.load(Ordering::Acquire))
+            };
+            // A control receipt must not mask an inconsistent terminal result.
+            // Validate staged callbacks before allowing durable coordination.
+            if coordinator.is_some()
+                && !cancelled()
+                && overall_started.elapsed() < timeout
+                && matches!(
+                    &result.exit,
+                    InvokeExit::Completed(_) | InvokeExit::Failed(_)
+                )
+                && let Some(terminal) = terminal.as_ref()
+                && let Err(reason) = terminal.validate(&result.exit)
+            {
+                result.exit = InvokeExit::Trapped {
+                    reason: format!("root terminal validation failed: {reason}"),
+                };
+            }
+            if cleanup_succeeded
+                && let Some(coordinator) = coordinator
+                && matches!(
+                    &result.exit,
+                    InvokeExit::Completed(_)
+                        | InvokeExit::Failed(_)
+                        | InvokeExit::Suspended(_)
+                        | InvokeExit::Cancelled
+                )
+            {
+                let remaining = timeout.saturating_sub(overall_started.elapsed());
+                let cancellation = async {
+                    loop {
+                        if cancelled() {
+                            break;
+                        }
+                        tokio::time::sleep(EPOCH_TICK).await;
+                    }
+                };
+                let decision = if cancelled() {
+                    Err(InvokeExit::Cancelled)
+                } else if remaining.is_zero() {
+                    Err(InvokeExit::Timeout)
+                } else {
+                    tokio::select! {
+                        biased;
+                        _ = cancellation => Err(InvokeExit::Cancelled),
+                        _ = tokio::time::sleep(remaining) => Err(InvokeExit::Timeout),
+                        result = coordinator.finalize() => result.map_err(|reason| InvokeExit::Trapped { reason: format!("root coordination failed: {reason}") }),
+                    }
+                };
+                match decision {
+                    Ok(RootLifecycleDecision::Preserve) => {}
+                    Ok(RootLifecycleDecision::Cancelled) => result.exit = InvokeExit::Cancelled,
+                    Ok(RootLifecycleDecision::Suspended) => {
+                        if !matches!(&result.exit, InvokeExit::Suspended(_)) {
+                            result.exit = InvokeExit::Suspended(Vec::new());
+                        }
+                    }
+                    Err(exit) => result.exit = exit,
                 }
             }
             if matches!(
                 &result.exit,
                 InvokeExit::Completed(_) | InvokeExit::Failed(_)
             ) {
-                let cancelled = || {
-                    abandoned.load(Ordering::Acquire)
-                        || root_cancel
-                            .as_ref()
-                            .is_some_and(|flag| flag.load(Ordering::Acquire))
-                };
                 if cancelled() {
                     result.exit = InvokeExit::Cancelled;
                 } else if overall_started.elapsed() >= timeout {
