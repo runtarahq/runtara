@@ -12,6 +12,8 @@
 //! A single mutex covers the whole store, which is what makes the claim and
 //! guard operations atomic.
 
+mod invocations;
+
 use crate::domain::InstanceStatus as CoreInstanceStatus;
 use crate::lifecycle::{
     self, Change, Decision, Receipt, SuspensionReason, Transition, WakeDeadline,
@@ -32,6 +34,8 @@ use crate::persistence::{
 
 #[derive(Default)]
 struct Store {
+    invocation_leases: HashMap<String, (crate::persistence::invocations::InvocationLease, bool)>,
+    invocation_attempts: Vec<crate::persistence::invocations::InvocationAttempt>,
     instances: HashMap<String, InstanceRecord>,
     /// Ordered by insertion; `(instance_id, checkpoint_id)` is unique.
     checkpoints: Vec<CheckpointRecord>,
@@ -149,6 +153,10 @@ fn stamps_finished_at(status: CoreInstanceStatus) -> bool {
 
 #[async_trait]
 impl Persistence for InMemoryPersistence {
+    fn invocation_fences(&self) -> Option<&dyn crate::persistence::invocations::InvocationFences> {
+        Some(self)
+    }
+
     async fn register_instance(&self, instance_id: &str, tenant_id: &str) -> Result<(), CoreError> {
         let mut store = self.store.lock().unwrap();
         if store.instances.contains_key(instance_id) {
@@ -709,6 +717,10 @@ impl Persistence for InMemoryPersistence {
             store.events.retain(|e| &e.instance_id != id);
             store.signals.remove(id);
             store.custom_signals.retain(|(inst, _), _| inst != id);
+            store.invocation_leases.remove(id);
+            store
+                .invocation_attempts
+                .retain(|a| &a.fence.lease.instance_id != id);
         }
         Ok(deleted)
     }

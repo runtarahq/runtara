@@ -1431,3 +1431,6 @@ pub async fn run_wake_reason_sequence<P: Persistence>(backend: &P) {
         backend.delete_instances_batch(&[id]).await.unwrap();
     }
 }
+
+/// Atomic isolated-invocation contract cases shared by all capable backends.
+pub mod invocations;

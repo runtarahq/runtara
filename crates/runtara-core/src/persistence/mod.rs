@@ -13,6 +13,9 @@ pub mod conformance;
 
 pub mod vocabulary;
 
+/// Atomic optional ownership for isolated invocation persistence.
+pub mod invocations;
+
 pub use self::vocabulary::{EventVocabulary, EventVocabularySpec};
 
 use crate::domain::{EventType, InstanceStatus, SignalType};
@@ -449,6 +452,13 @@ impl<'a> CompleteInstanceParams<'a> {
 #[allow(missing_docs)]
 #[async_trait]
 pub trait Persistence: Send + Sync {
+    /// Optional atomic invocation fencing. Callers requiring durable fences must
+    /// reject absence rather than use check-then-write persistence. Legacy calls
+    /// are unchanged.
+    fn invocation_fences(&self) -> Option<&dyn invocations::InvocationFences> {
+        None
+    }
+
     async fn register_instance(&self, instance_id: &str, tenant_id: &str) -> Result<(), CoreError>;
 
     /// Register an instance, reporting whether this call created the row.
