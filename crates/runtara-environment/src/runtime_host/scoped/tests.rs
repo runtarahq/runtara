@@ -3,6 +3,9 @@ use runtara_component_host::isolated_tasks::{IsolatedTasks, TaskId};
 use runtara_core::domain::{InstanceStatus, SignalType as CoreSignal};
 use runtara_core::persistence::ListEventsFilter;
 
+#[path = "invocation_tests.rs"]
+mod invocation_tests;
+
 struct Keys(&'static str);
 impl CheckpointAuthority for Keys {
     fn authorize(&self, key: &str) -> Result<(), String> {
@@ -18,7 +21,7 @@ struct Fixture {
     id: String,
     owner: Arc<ScopedRuntimeOwner>,
     tasks: Arc<IsolatedTasks>,
-    executor: runtara_component_host::WorkflowExecutor,
+    executor: Arc<runtara_component_host::WorkflowExecutor>,
     completions:
         Mutex<BTreeMap<TaskId, tokio::sync::oneshot::Sender<runtara_component_host::InvokeExit>>>,
 }
@@ -37,7 +40,8 @@ impl Fixture {
             ..Default::default()
         })
         .unwrap();
-        let executor = runtara_component_host::WorkflowExecutor::new(engine.clone()).unwrap();
+        let executor =
+            Arc::new(runtara_component_host::WorkflowExecutor::new(engine.clone()).unwrap());
         let tasks = Arc::new(IsolatedTasks::new(engine, 8, 1024 * 1024).unwrap());
         Self {
             persistence,

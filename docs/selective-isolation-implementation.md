@@ -553,11 +553,50 @@ attempt fencing, and the complete parking/wake protocol remain required. Linker
 sleep aliases also need qualification with that production scope. These tests
 do not satisfy the final local-server or all-construct compatibility gates.
 
+### Persistence-backed invocation scope factory
+
+`ScopedInvocationFactory` now connects the child runtime adapter to
+`PreparedInvocationLauncher`. It binds host-approved input, environment, limits,
+checkpoint authority, the real admitted task token and independent root
+cancellation. Authorization is mandatory and runs against the parent/package
+policy; there is no permissive fallback. The owner is checked again inside the
+admitted task, so closing between authorization and start prevents execution.
+Any fresh descendant context is transferred to the launcher's existing cleanup
+supervisor. Setup failure and outcome-check failure still reap that context.
+
+After the child Store is dropped, the launcher checks captured callbacks against
+the exported outcome. Conflicting callbacks or mismatched success bytes become
+host failures. Trap/cancel/timeout/suspension retain their typed outcomes and
+discard the captured completion. The factory does not publish root state or
+choose graph successors, retries or recovery.
+
+The inherited absolute deadline now reaches the Store, epoch/watchdog and HTTP
+deadline. Store setup cannot reset it. A new real-WASM test exposed that an
+already-expired budget could complete before the first watchdog tick; invocation
+now checks the active deadline before entering an initializer.
+
+Verification: **35 database-backed runtime tests passed**, including four new
+factory tests with real prepared WASM child execution, forged input identity,
+callback conflicts/mismatch, closed-scope races and cancellation/deadline before
+initialization. All **11 emitted Agent isolation tests** and the comparison smoke
+over both backends and all 11 workloads passed. Feature-enabled all-target Clippy
+passed for environment, component host and workflows. The full component-host
+suite passed **127 tests**, with one manual benchmark ignored; its new launcher
+test checks that setup/outcome rejection closes descendant ownership. After adding
+an independent inherited-deadline check (30-second child timeout with an expired
+root deadline), all **nine focused launcher tests passed**.
+
+The tested authority policy uses explicit fixture identities. The production
+compiler-backed policy, root runner/command coordination, durable attempt fences,
+aggregate resource reservations and recursive child-graph extraction still need
+integration and qualification. No backend default changed and the final local
+server gate remains outstanding.
+
 ## Remaining required work
 
 - P0: extend explicit differential selection and invocation-count evidence to all
   required constructs and production artifact inspection.
-- P1: production invocation-scope factory and environment ownership integration, aggregate
+- P1: compiler-backed invocation authority and environment ownership integration, aggregate
   input/transport/guest resource reservations and root fencing on cleanup failure.
 - P2: qualify logical scopes across every AI auxiliary invocation and nested
   construct, integrate the production scope factory and certify package reset/state

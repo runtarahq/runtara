@@ -6,6 +6,11 @@ use runtara_component_host::isolated_tasks::TaskCancellation;
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
+mod invocation;
+pub use invocation::{
+    AuthorizedChild, InvocationAuthority, ScopedInvocationFactory, ScopedRunSettings,
+};
+
 /// Supplied by the host scope factory, never by a child input envelope. Keys
 /// already contain their compiler-generated ancestry; authorization must not
 /// prepend another namespace or rewrite the checkpoint/signal address.

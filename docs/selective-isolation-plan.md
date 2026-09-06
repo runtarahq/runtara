@@ -239,12 +239,13 @@ register an independent root execution for each child. Production isolated child
 graphs use the scoped host binding; legacy composed runtime behavior remains on
 the legacy backend for its supported reference/migration uses.
 
-An initial native child adapter now implements the trait with explicit checkpoint
-authority, local terminal capture and root-owned deferred command receipts. Real
-PostgreSQL tests include a WASM caller and preserve the legacy runtime checks.
-Production factory/root integration, compiler namespace authorization, persistent
-attempt fencing and parking/wake qualification are still pending; see the
-[implementation record](selective-isolation-implementation.md#child-runtime-authority-and-deferred-root-commands).
+The native child adapter and prepared-launch scope factory now implement explicit
+checkpoint authority, local terminal validation, inherited absolute deadlines and
+root-owned deferred command receipts. Real PostgreSQL tests include prepared WASM
+children and preserve the legacy runtime checks. Production root integration,
+compiler namespace authorization, persistent attempt fencing and parking/wake
+qualification are still pending; see the
+[implementation record](selective-isolation-implementation.md#persistence-backed-invocation-scope-factory).
 
 Suspending a child returns the lifecycle **wake set**, including absolute timed
 wakes, signal addresses/deadlines and on-resume. Parent WASM follows the existing
