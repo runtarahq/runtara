@@ -476,6 +476,44 @@ persistent attempt fences. No targeted command routing or cancellation API is
 being enabled by this compiler change. Full AI runtime qualification, nested
 Embed extraction and final local-server testing remain required.
 
+### Root completion waits for descendant cleanup
+
+Inspection of the production runtime boundary exposed a gap in the earlier
+supervision guarantee: delaying the returned `InvokeExit` did not delay the
+root's `RuntimeHost.complete`/`fail` calls. A guest could already persist success
+before an unreleased child's cleanup failed.
+
+`execute_invoke_with_context` now stages these two callbacks in a per-run host
+wrapper. All other runtime methods retain their underlying host behavior. After
+the root Store and every registered descendant are reaped, the supervisor
+publishes a matching terminal callback once. Identical duplicates are idempotent;
+conflicting callbacks or a success payload that disagrees with the exported
+result become host failures without publishing the staged terminal value. Failure
+callbacks retain their original bytes, including additional error metadata.
+Cleanup failure, root trap, timeout and cancellation discard staged callbacks.
+The legacy entry points are unchanged.
+
+Final publication is still supervised native IO. It uses the original execution
+timeout, including time spent in cleanup, and observes root cancellation and
+caller abandonment. A pending callback is dropped on those conditions; a
+publication error becomes a host failure after guest execution, rather than
+re-entering the completed graph. Mandatory cleanup itself is still awaited even
+when the timeout expires. This cannot roll back a database request already
+committed, intercept an internally composed legacy SDK runtime, or replace the
+persistent generation fences required by P4. Root command acknowledgement and
+the separate child runtime authority adapter remain outstanding.
+
+Six new real-WASM fixture tests call the actual runtime imports and cover held
+and failed cleanup, root trap, duplicate/conflicting callbacks, output mismatch,
+raw failure payloads, late cancellation, pending-publication cancellation/timeout/
+abandonment, publication errors and timeout consumption during cleanup. The full
+component-host suite passed **126 tests**, with one manual benchmark ignored.
+All **11 emitted Agent isolation checks** passed, as did the comparison smoke
+across both backends and all 11 workload definitions. Component-host all-target
+Clippy with both integration/PoC features passed with `-D warnings`. These are
+host/WASM boundary tests; database fencing and the final local server gate are
+not yet satisfied.
+
 ## Remaining required work
 
 - P0: extend explicit differential selection and invocation-count evidence to all

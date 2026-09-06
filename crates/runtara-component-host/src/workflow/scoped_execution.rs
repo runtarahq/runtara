@@ -1,6 +1,9 @@
 //! Root execution owns supervision outside its Store and its caller's future.
 use super::*;
 use tokio::sync::Notify;
+#[path = "deferred_terminal.rs"]
+mod deferred_terminal;
+use deferred_terminal::DeferredTerminal;
 use wasmtime::component::InstancePre;
 
 struct Abandonment {
@@ -23,6 +26,11 @@ impl Drop for Abandonment {
 impl WorkflowExecutor {
     /// Run a root with child-execution imports enabled for its owned context.
     /// Return only after the root Store and every registered child are reaped.
+    /// Host RuntimeHost complete/fail callbacks are staged until then. They are
+    /// discarded on cleanup failure, cancellation, timeout or outcome mismatch;
+    /// final publication remains supervised under the original run budget.
+    /// This cannot intercept lifecycle writes made through an internally composed
+    /// legacy SDK runtime, which belongs on the legacy execution path.
     /// The context is single-run: it is closed even on failed start confirmation.
     ///
     /// Abandoning the caller future requests root cancellation; the supervisor
@@ -32,7 +40,7 @@ impl WorkflowExecutor {
     pub async fn execute_invoke_with_context(
         self: &Arc<Self>,
         pre: &InstancePre<WorkflowState>,
-        spec: WorkflowRunSpec,
+        mut spec: WorkflowRunSpec,
         input: Vec<u8>,
         start_confirmation: Option<Arc<dyn WorkflowStartConfirmation>>,
         execution: Arc<ExecutionContext>,
@@ -44,6 +52,16 @@ impl WorkflowExecutor {
             engine: self.engine.clone(),
             armed: true,
         };
+        let timeout = spec.timeout;
+        let root_cancel = spec.cancel.clone();
+        let abandoned = abandonment.requested.clone();
+        let terminal = spec
+            .runtime
+            .take()
+            .map(|host| Arc::new(DeferredTerminal::new(host)));
+        spec.runtime = terminal
+            .as_ref()
+            .map(|host| host.clone() as Arc<dyn crate::runtime_host::RuntimeHost>);
         let executor = self.clone();
         let pre = pre.clone();
         let wake = abandonment.wake.clone();
@@ -85,6 +103,45 @@ impl WorkflowExecutor {
                     result.exit = InvokeExit::Trapped {
                         reason: format!("root descendant cleanup worker lost: {error}"),
                     };
+                }
+            }
+            if matches!(
+                &result.exit,
+                InvokeExit::Completed(_) | InvokeExit::Failed(_)
+            ) {
+                let cancelled = || {
+                    abandoned.load(Ordering::Acquire)
+                        || root_cancel
+                            .as_ref()
+                            .is_some_and(|flag| flag.load(Ordering::Acquire))
+                };
+                if cancelled() {
+                    result.exit = InvokeExit::Cancelled;
+                } else if overall_started.elapsed() >= timeout {
+                    result.exit = InvokeExit::Timeout;
+                } else if let Some(terminal) = terminal {
+                    // Publication remains supervised IO under the original run
+                    // budget. Caller abandonment and root cancellation can drop
+                    // an in-flight callback; persistent commit fencing is still
+                    // the embedding's responsibility.
+                    let cancellation = async {
+                        loop {
+                            if cancelled() {
+                                break;
+                            }
+                            tokio::time::sleep(EPOCH_TICK).await;
+                        }
+                    };
+                    let remaining = timeout.saturating_sub(overall_started.elapsed());
+                    let published = tokio::select! {
+                        biased;
+                        _ = cancellation => Err(InvokeExit::Cancelled),
+                        _ = tokio::time::sleep(remaining) => Err(InvokeExit::Timeout),
+                        result = terminal.publish(&result.exit) => result.map_err(|reason| InvokeExit::Trapped { reason: format!("root terminal publication failed: {reason}") }),
+                    };
+                    if let Err(exit) = published {
+                        result.exit = exit;
+                    }
                 }
             }
             result.duration = overall_started.elapsed();

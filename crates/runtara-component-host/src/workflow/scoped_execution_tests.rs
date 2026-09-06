@@ -385,3 +385,6 @@ async fn isolated_lifecycle_entry_uses_task_and_root_cancellation_with_separate_
         registry.shutdown().await.unwrap();
     }
 }
+
+#[path = "terminal_publication_tests.rs"]
+mod terminal_publication_tests;
