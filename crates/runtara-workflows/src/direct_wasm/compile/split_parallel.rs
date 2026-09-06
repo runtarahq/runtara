@@ -630,6 +630,22 @@ fn emit_pool_reinvoke(
         push_segment_args(body, capability_id);
         body.instruction(&Instruction::LocalGet(input_ptr_local));
         body.instruction(&Instruction::LocalGet(input_len_local));
+        if member.is_scoped() {
+            for offset in [
+                DIRECT_PSPLIT_SLOT_KEY_PTR_OFFSET,
+                DIRECT_PSPLIT_SLOT_KEY_LEN_OFFSET,
+            ] {
+                body.instruction(&Instruction::LocalGet(slot_ptr_local));
+                body.instruction(&Instruction::I32Load(slot_mem(offset)));
+            }
+            body.instruction(&Instruction::I32Const(0)); // Step domain
+            body.instruction(&Instruction::I32Const(0)); // activation carried by key
+            body.instruction(&Instruction::LocalGet(slot_ptr_local));
+            body.instruction(&Instruction::I32Load(slot_mem(
+                DIRECT_PSPLIT_SLOT_ATTEMPTS_OFFSET,
+            )));
+            body.instruction(&Instruction::I64ExtendI32U);
+        }
         body.instruction(&Instruction::LocalGet(slot_ptr_local));
         body.instruction(&Instruction::I32Const(DIRECT_PSPLIT_SLOT_RESULT_OFFSET));
         body.instruction(&Instruction::I32Add);
@@ -992,7 +1008,7 @@ pub(super) fn emit_parallel_split_items(
         DIRECT_PSPLIT_SLOT_ATTEMPTS_OFFSET,
     )));
 
-    if parallel.durable_checkpoint {
+    if parallel.durable_checkpoint || invoke_pool[0].is_scoped() {
         // Durable: compute the step cache key from the item source and stash
         // it (base for every attempt::N key). Then gate attempt-1's invoke on
         // its checkpoint — a HIT (resumed run) skips the invoke so the agent
@@ -1016,6 +1032,8 @@ pub(super) fn emit_parallel_split_items(
         body.instruction(&Instruction::I32Store(slot_mem(
             DIRECT_PSPLIT_SLOT_KEY_LEN_OFFSET,
         )));
+    }
+    if parallel.durable_checkpoint {
         emit_durable_attempt_lookup(body, indices, route_ptr_local);
         body.instruction(&Instruction::LocalGet(DIRECT_AGENT_ATTEMPT_HIT_FLAG_LOCAL));
         body.instruction(&Instruction::I32Eqz);

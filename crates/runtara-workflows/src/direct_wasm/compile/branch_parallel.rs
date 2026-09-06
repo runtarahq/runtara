@@ -1660,6 +1660,16 @@ fn emit_branch_launch(
     push_segment_args(body, capability_id);
     body.instruction(&Instruction::LocalGet(output_ptr_local));
     body.instruction(&Instruction::LocalGet(output_len_local));
+    if invoke.is_scoped() {
+        super::agent_invoke::emit_agent_context(
+            body,
+            indices,
+            branch.agent_id,
+            source_ptr_local,
+            source_len_local,
+            super::agent_invoke::AgentInvocationSite::Step(None),
+        );
+    }
     body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_LAUNCH_LOCAL));
     body.instruction(&Instruction::I32Const(DIRECT_PSPLIT_SLOT_RESULT_OFFSET));
     body.instruction(&Instruction::I32Add);

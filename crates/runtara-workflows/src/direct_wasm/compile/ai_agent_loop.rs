@@ -193,6 +193,7 @@ pub(super) fn emit_ai_agent_loop_plan(
             DIRECT_AI_CONV_LEN_LOCAL,
             source_ptr_local,
             source_len_local,
+            super::agent_invoke::AgentInvocationSite::MemoryLoad,
         );
         emit_agent_invoke_error_branch(
             body,
@@ -446,6 +447,7 @@ pub(super) fn emit_ai_agent_loop_plan(
         DIRECT_AI_TURN_INPUT_LEN_LOCAL,
         source_ptr_local,
         source_len_local,
+        super::agent_invoke::AgentInvocationSite::AiTurn,
     );
     emit_agent_invoke_error_branch(
         body,
@@ -707,6 +709,7 @@ pub(super) fn emit_ai_agent_loop_plan(
                     DIRECT_AI_TOOL_ARGS_LEN_LOCAL,
                     source_ptr_local,
                     source_len_local,
+                    super::agent_invoke::AgentInvocationSite::AiTool,
                 );
                 // A tool failure is fed back to the LLM as the tool result (the
                 // error envelope) and the loop continues, rather than failing the
@@ -942,6 +945,7 @@ pub(super) fn emit_ai_agent_loop_plan(
                 DIRECT_AI_TURN_INPUT_LEN_LOCAL,
                 source_ptr_local,
                 source_len_local,
+                super::agent_invoke::AgentInvocationSite::Summarize,
             );
             emit_agent_invoke_error_branch(
                 body,
@@ -1064,6 +1068,7 @@ pub(super) fn emit_ai_agent_loop_plan(
             DIRECT_AI_TURN_INPUT_LEN_LOCAL,
             source_ptr_local,
             source_len_local,
+            super::agent_invoke::AgentInvocationSite::MemorySave,
         );
         emit_agent_invoke_error_branch(
             body,

@@ -41,8 +41,9 @@ pub use compile::{
     DirectCompilationResult, DirectComponentDependencyMetadata, DirectComponentSidecarMetadata,
     DirectIsolationMetadata, compile_direct_workflow, compile_direct_workflow_composed,
     compile_direct_workflow_composed_configured, compile_direct_workflow_composed_with_binding,
-    compile_direct_workflow_with_abi, compose_direct_workflow,
-    compose_direct_workflow_with_extra_dirs, compose_direct_workflow_with_isolated_agents,
+    compile_direct_workflow_with_abi, compile_direct_workflow_with_scoped_agents,
+    compose_direct_workflow, compose_direct_workflow_with_extra_dirs,
+    compose_direct_workflow_with_isolated_agents,
 };
 #[cfg(feature = "compiler")]
 pub use component::{

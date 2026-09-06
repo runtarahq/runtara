@@ -739,8 +739,9 @@ tool, not a performance acceptance gate.
 ### Required candidate comparison
 
 The first Agent-only comparison now runs the real composed adapter backend.
-Extend it as P2/P3 add logical invocation scopes, all auxiliary calls and isolated
-child graphs, without changing the reference workload definitions or correctness
+The opt-in logical-context adapter v2 now has compiler wiring; the recorded
+comparison still measures adapter v1. Repeat it for v2 and extend it as P2/P3
+qualify all auxiliary calls and add isolated child graphs, without changing the reference workload definitions or correctness
 checks. Continue asserting actual invocation counts and boundary identity; an
 inline Embed or an absent Agent boundary cannot claim child-graph isolation.
 Re-run baseline and candidate together on the deployment Linux host; retain the

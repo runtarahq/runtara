@@ -425,14 +425,66 @@ is retained separately because its preparation boundary differs. Direct Agent
 and parent-step spans, full aggregate resource accounting and server timings are
 still pending; the candidate is not production qualification.
 
+### Compiler-owned Agent call identity
+
+The opt-in `compile_direct_workflow_with_scoped_agents` API emits a private
+`scoped-capabilities` interface for explicitly selected dependencies. Composition
+requires exactly the same reviewed SHA-256 selection; metadata records adapter
+version 2 and `logical-agent-call:2`. The ordinary compiler and adapter-v1
+composition APIs retain their defaults. Public Agent capabilities still receive
+only their capability name and original input bytes.
+
+The parent guest derives the relative path from its existing structured Agent
+checkpoint key, including workflow, inherited namespace and loop ancestry. A
+fixed-width suffix distinguishes ordinary steps, memory load, LLM turns, Agent
+tools, summarization and memory save. Turn/tool activation indices come from
+existing guest counters; attempts remain a separate `u64`. Sequential retries
+use the retry local; parallel retries read each item's saved key and attempt.
+Pool-member identity and live call order do not contribute to the path.
+
+The larger private signature requires an indirect argument record for canonical
+async lowering. A small core shim owns a 40-byte record in the parent arena,
+reserving 48 bytes to accommodate alignment. Its lifetime matches other pending
+call input buffers. The legacy backend does not emit this shim or allocate its
+records. Adapter-v2 path construction adds the base path length plus 18 bytes
+per live call; its existing arena resets once all active calls return. These are
+allocation shapes, **not** a replacement for measured execution or aggregate
+memory results. The committed performance comparison still measures adapter v1;
+repeat paired measurements for v2 and the complete backend before qualification.
+
+Execution checks cover distinct step and parallel-item paths, stable identities
+across fresh runs, checkpoint replay with zero child starts, and sequential and
+parallel retries that retain one path through attempts 1/2/3. A retry fixture
+supplies initial errors; the final attempt executes the actual prepared utils
+Agent. Direct adapter tests preserve Unicode paths, all bits of `u64::MAX`
+attempts and `u32::MAX` activation fields, repeated identities and 1 MiB raw bytes.
+
+Verification: the full workflow suite passed **854 tests** (569 library, 231
+emitted execution, 54 other integration tests); the two manual benchmarks and
+existing doctest were ignored. The expanded focused set then passed all **11
+checks**, including AI single-shot/tool-loop/memory/summarization composition and
+protected input-variable identities. All four direct adapter ABI tests passed.
+After the async argument overflow guard, the 11 focused checks passed again.
+All **120 component-host tests passed**, with one manual benchmark ignored.
+All 27 Agent and both shared components rebuilt successfully; integration-feature
+all-target Clippy passed with `-D warnings`. AI composition checks validate the
+emitted ABI and package wiring, not provider execution or all AI replay semantics.
+
+These paths remain **relative guest metadata**. The production scope factory must
+bind them to immutable tenant/root authority, validate their use and apply
+persistent attempt fences. No targeted command routing or cancellation API is
+being enabled by this compiler change. Full AI runtime qualification, nested
+Embed extraction and final local-server testing remain required.
+
 ## Remaining required work
 
 - P0: extend explicit differential selection and invocation-count evidence to all
   required constructs and production artifact inspection.
 - P1: production invocation-scope factory and environment ownership integration, aggregate
   input/transport/guest resource reservations and root fencing on cleanup failure.
-- P2: propagate logical step/attempt scopes through the Agent backend, qualify
-  every AI auxiliary invocation and certify package reset/state eligibility.
+- P2: qualify logical scopes across every AI auxiliary invocation and nested
+  construct, integrate the production scope factory and certify package reset/state
+  eligibility. Basic emitted Agent paths and attempts are wired above.
 - P3: recursive Embed extraction and scoped child runtime, suspension/wake sets,
   scopes, deadlines, checkpoint keys and existing reference ABI modes.
 - P4: durable attempt transitions, root and targeted command routing, crash/lease

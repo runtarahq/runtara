@@ -812,6 +812,13 @@ pub(super) struct DirectAgentInvokeImport {
     pub(super) params: Vec<WasmType>,
 }
 
+impl DirectAgentInvokeImport {
+    /// Private scoped-capabilities has nine flattened arguments plus retptr.
+    pub(super) fn is_scoped(&self) -> bool {
+        self.params.len() == 10
+    }
+}
+
 fn require_import(value: Option<u32>, name: &str) -> Result<u32, DirectCompileError> {
     value.ok_or_else(|| {
         DirectCompileError::Component(format!("missing {name} import in direct world"))

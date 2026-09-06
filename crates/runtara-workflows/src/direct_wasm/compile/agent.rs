@@ -309,6 +309,11 @@ pub(super) fn emit_agent_plan(
                 output_len_local,
                 source_ptr_local,
                 source_len_local,
+                super::agent_invoke::AgentInvocationSite::Step(if max_retries > 0 {
+                    Some(DIRECT_AGENT_RETRY_ATTEMPT_LOCAL)
+                } else {
+                    None
+                }),
             );
             if memo_slot_ptr_local.is_some() {
                 body.instruction(&Instruction::End);
@@ -412,6 +417,11 @@ pub(super) fn emit_agent_plan(
                 output_len_local,
                 source_ptr_local,
                 source_len_local,
+                super::agent_invoke::AgentInvocationSite::Step(if max_retries > 0 {
+                    Some(DIRECT_AGENT_RETRY_ATTEMPT_LOCAL)
+                } else {
+                    None
+                }),
             );
             if memo_slot_ptr_local.is_some() {
                 body.instruction(&Instruction::End);
@@ -599,6 +609,11 @@ pub(super) fn emit_agent_plan(
                 output_len_local,
                 source_ptr_local,
                 source_len_local,
+                super::agent_invoke::AgentInvocationSite::Step(if max_retries > 0 {
+                    Some(DIRECT_AGENT_RETRY_ATTEMPT_LOCAL)
+                } else {
+                    None
+                }),
             );
             body.instruction(&Instruction::End);
         } else {
@@ -613,6 +628,11 @@ pub(super) fn emit_agent_plan(
                 output_len_local,
                 source_ptr_local,
                 source_len_local,
+                super::agent_invoke::AgentInvocationSite::Step(if max_retries > 0 {
+                    Some(DIRECT_AGENT_RETRY_ATTEMPT_LOCAL)
+                } else {
+                    None
+                }),
             );
         }
         emit_agent_invoke_error_branch(

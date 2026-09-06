@@ -1,7 +1,7 @@
 //! Real emitted workflow -> guest adapter -> prepared fresh child Store.
 use super::*;
 use runtara_component_host::execution_host::{
-    Entry, ExecutionContext, ExecutionError, StartRequest,
+    Entry, ExecutionContext, ExecutionError, InvocationLauncher, PreparedInvocation, StartRequest,
 };
 use runtara_component_host::isolated_tasks::IsolatedTasks;
 use runtara_component_host::precompile::{
@@ -39,6 +39,7 @@ fn spec() -> WorkflowRunSpec {
 }
 struct Scopes {
     starts: Arc<AtomicUsize>,
+    contexts: Arc<Mutex<Vec<(String, u64)>>>,
 }
 impl InvocationScopeFactory for Scopes {
     fn prepare_child(
@@ -46,12 +47,16 @@ impl InvocationScopeFactory for Scopes {
         request: &StartRequest,
     ) -> Result<ChildInvocationScope, ExecutionError> {
         if request.binding != "agent:utils"
-            || request.context.path != "agent:utils"
+            || request.context.path.is_empty()
             || request.context.attempt == 0
             || !matches!(&request.entry, Entry::Capability(_))
         {
             return Err(ExecutionError::InvalidBinding);
         }
+        self.contexts
+            .lock()
+            .unwrap()
+            .push((request.context.path.clone(), request.context.attempt));
         let starts = self.starts.clone();
         Ok(ChildInvocationScope {
             make_spec: Box::new(move |_| {
@@ -62,8 +67,44 @@ impl InvocationScopeFactory for Scopes {
         })
     }
 }
+// Inject a retryable child outcome, then delegate to the real prepared Agent.
+// Policy remains in the emitted guest; this fixture only supplies IO outcomes.
+struct RetryFixture {
+    inner: PreparedInvocationLauncher,
+    contexts: Arc<Mutex<Vec<(String, u64)>>>,
+    succeed_at: u64,
+}
+impl InvocationLauncher for RetryFixture {
+    fn prepare(&self, request: StartRequest) -> Result<PreparedInvocation, ExecutionError> {
+        if request.context.attempt < self.succeed_at {
+            self.contexts
+                .lock()
+                .unwrap()
+                .push((request.context.path, request.context.attempt));
+            Ok(PreparedInvocation::leaf(Box::new(|_| {
+                Box::pin(async {
+                    InvokeExit::Failed(runtara_component_host::lifecycle::WorkflowErrorInfo {
+                        code: "RETRY_FIXTURE".into(),
+                        message: "retry fixture".into(),
+                        category: "transient".into(),
+                        severity: "error".into(),
+                        retryable: true,
+                        retry_after_ms: None,
+                        attributes: None,
+                    })
+                })
+            })))
+        } else {
+            self.inner.prepare(request)
+        }
+    }
+}
+
 fn compile(graph: Value, dir: &Path) -> DirectCompilationResult {
-    compile_direct_workflow(DirectCompilationInput {
+    compile_selected(graph, dir, false)
+}
+fn compile_selected(graph: Value, dir: &Path, scoped: bool) -> DirectCompilationResult {
+    let input = DirectCompilationInput {
         workflow_id: "isolated-agent-test".into(),
         version: 1,
         source_checksum: None,
@@ -73,7 +114,17 @@ fn compile(graph: Value, dir: &Path) -> DirectCompilationResult {
         track_events: false,
         agent_catalog: None,
         agent_slug: None,
-    })
+    };
+    if scoped {
+        runtara_workflows::direct_wasm::compile_direct_workflow_with_scoped_agents(
+            input,
+            runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
+            false,
+            ["utils".into()].into(),
+        )
+    } else {
+        compile_direct_workflow(input)
+    }
     .unwrap()
 }
 fn selected(components: &Path) -> BTreeMap<String, String> {
@@ -149,9 +200,29 @@ fn isolated_agent_selection_checks_digest_and_preserves_empty_legacy_backend() {
 }
 
 async fn run_graph(graph: Value, input: Value, isolate: bool) -> (InvokeExit, usize) {
+    let (exit, starts, _) = run_graph_contexts(graph, input, isolate, false).await;
+    (exit, starts)
+}
+
+async fn run_graph_contexts(
+    graph: Value,
+    input: Value,
+    isolate: bool,
+    replay: bool,
+) -> (InvokeExit, usize, Vec<(String, u64)>) {
+    run_graph_faults(graph, input, isolate, replay, 1).await
+}
+
+async fn run_graph_faults(
+    graph: Value,
+    input: Value,
+    isolate: bool,
+    replay: bool,
+    succeed_at: u64,
+) -> (InvokeExit, usize, Vec<(String, u64)>) {
     let components = direct_e2e_components_dir();
     let dir = tempfile::tempdir().unwrap();
-    let mut compiled = compile(graph, dir.path());
+    let mut compiled = compile_selected(graph, dir.path(), isolate);
     if isolate {
         compose_direct_workflow_with_isolated_agents(
             &mut compiled,
@@ -182,7 +253,7 @@ async fn run_graph(graph: Value, input: Value, isolate: bool) -> (InvokeExit, us
                 .as_ref()
                 .unwrap()
                 .context_contract,
-            "live-adapter-call:1"
+            "logical-agent-call:2"
         );
     }
     let sidecar: DirectArtifactMetadata =
@@ -214,6 +285,7 @@ async fn run_graph(graph: Value, input: Value, isolate: bool) -> (InvokeExit, us
         .await
         .unwrap();
     let starts = Arc::new(AtomicUsize::new(0));
+    let contexts = Arc::new(Mutex::new(Vec::new()));
     let tasks = Arc::new(IsolatedTasks::new(engine.clone(), 4, 8 * 1024 * 1024).unwrap());
     let context = if isolate {
         let launcher = PreparedInvocationLauncher::new(
@@ -221,10 +293,22 @@ async fn run_graph(graph: Value, input: Value, isolate: bool) -> (InvokeExit, us
             prepared.child_catalog().unwrap().clone(),
             Arc::new(Scopes {
                 starts: starts.clone(),
+                contexts: contexts.clone(),
             }),
         )
         .unwrap();
-        Some(ExecutionContext::new(tasks.clone(), Arc::new(launcher), 4).unwrap())
+        Some(
+            ExecutionContext::new(
+                tasks.clone(),
+                Arc::new(RetryFixture {
+                    inner: launcher,
+                    contexts: contexts.clone(),
+                    succeed_at,
+                }),
+                4,
+            )
+            .unwrap(),
+        )
     } else {
         None
     };
@@ -237,24 +321,62 @@ async fn run_graph(graph: Value, input: Value, isolate: bool) -> (InvokeExit, us
             engine.increment_epoch();
         }
     });
-    let spec = WorkflowRunSpec {
-        runtime: Some(host),
+    let run_spec = WorkflowRunSpec {
+        runtime: Some(host.clone()),
         ..spec()
     };
+    let replay_input = input.clone();
     let result = if let Some(context) = context {
         executor
-            .execute_invoke_with_context(prepared.instance_pre(), spec, input, None, context)
+            .execute_invoke_with_context(prepared.instance_pre(), run_spec, input, None, context)
             .await
     } else {
         executor
-            .execute_invoke(prepared.instance_pre(), spec, input)
+            .execute_invoke(prepared.instance_pre(), run_spec, input)
             .await
     };
+    if replay {
+        let before = contexts.lock().unwrap().clone();
+        let launcher = PreparedInvocationLauncher::new(
+            executor.clone(),
+            prepared.child_catalog().unwrap().clone(),
+            Arc::new(Scopes {
+                starts: starts.clone(),
+                contexts: contexts.clone(),
+            }),
+        )
+        .unwrap();
+        let context = ExecutionContext::new(tasks.clone(), Arc::new(launcher), 4).unwrap();
+        let replayed = executor
+            .execute_invoke_with_context(
+                prepared.instance_pre(),
+                WorkflowRunSpec {
+                    runtime: Some(host),
+                    ..spec()
+                },
+                replay_input,
+                None,
+                context,
+            )
+            .await;
+        let (InvokeExit::Completed(first), InvokeExit::Completed(second)) =
+            (&result.exit, replayed.exit)
+        else {
+            panic!("expected completed durable replay")
+        };
+        assert_eq!(first, &second);
+        assert_eq!(
+            before,
+            *contexts.lock().unwrap(),
+            "checkpoint replay must launch no children"
+        );
+    }
     ticker.abort();
     let _ = ticker.await;
     tasks.shutdown().await.unwrap();
     assert_eq!(tasks.retained_result_bytes(), 0);
-    (result.exit, starts.load(Ordering::SeqCst))
+    let recorded = contexts.lock().unwrap().clone();
+    (result.exit, starts.load(Ordering::SeqCst), recorded)
 }
 
 fn completed(exit: InvokeExit) -> Value {
@@ -345,4 +467,222 @@ async fn isolated_agent_selection_keeps_unselected_agent_execution() {
         starts, 1,
         "only the reviewed utils package should be isolated"
     );
+}
+
+#[test]
+fn scoped_agent_composition_requires_matching_reviewed_selection() {
+    let dir = tempfile::tempdir().unwrap();
+    let components = direct_e2e_components_dir();
+    let mut compiled = compile_selected(
+        super::wasm_performance_baseline::random_chain(1, false),
+        dir.path(),
+        true,
+    );
+    for selection in [
+        BTreeMap::new(),
+        BTreeMap::from([("datetime".into(), "0".repeat(64))]),
+    ] {
+        let error = compose_direct_workflow_with_isolated_agents(
+            &mut compiled,
+            &components,
+            &[],
+            &selection,
+            limits(),
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("same reviewed isolation selection")
+        );
+    }
+    assert!(compose_direct_workflow(&mut compiled, &components).is_err());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn scoped_agent_contexts_distinguish_steps_iterations_and_survive_replay() {
+    for (graph, count, replay) in [
+        (
+            super::wasm_performance_baseline::random_chain(10, false),
+            10,
+            false,
+        ),
+        (
+            super::wasm_performance_baseline::random_chain(10, true),
+            10,
+            true,
+        ),
+        (
+            serde_json::json!({"name":"parallel-identities", "entryPoint":"split", "steps": {
+            "split":{"stepType":"Split","id":"split","config":{"value":{"valueType":"reference","value":"data.items"},"parallelism":4,"sequential":false},"subgraph":super::wasm_performance_baseline::random_chain(1,false)},
+            "finish":{"stepType":"Finish","id":"finish","inputMapping":{}}
+        },"executionPlan":[{"fromStep":"split","toStep":"finish"}]}),
+            20,
+            false,
+        ),
+    ] {
+        let input =
+            serde_json::json!({"data":{"items":(0..20).collect::<Vec<_>>()},"variables":{}});
+        let (exit, starts, mut first) =
+            run_graph_contexts(graph.clone(), input.clone(), true, replay).await;
+        completed(exit);
+        assert_eq!(starts, count);
+        assert!(
+            first
+                .iter()
+                .all(|(path, attempt)| path != "agent:utils" && *attempt == 1)
+        );
+        first.sort();
+        let mut unique = first.clone();
+        unique.dedup();
+        assert_eq!(
+            unique.len(),
+            count,
+            "distinct logical steps/items must never alias"
+        );
+        let (exit, _, mut second) = run_graph_contexts(graph, input, true, false).await;
+        completed(exit);
+        second.sort();
+        assert_eq!(
+            first, second,
+            "identities must not depend on live pool instance or start order"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn scoped_agent_retries_keep_path_and_increment_attempt_per_item() {
+    for parallel in [false, true] {
+        let mut inner = super::wasm_performance_baseline::random_chain(1, false);
+        inner["steps"]["r0"]["maxRetries"] = serde_json::json!(2);
+        inner["steps"]["r0"]["retryDelay"] = serde_json::json!(1);
+        let graph = if parallel {
+            serde_json::json!({"name":"parallel-retry-identities", "durable":false, "entryPoint":"split", "steps": {
+            "split":{"stepType":"Split","id":"split","config":{"value":{"valueType":"reference","value":"data.items"},"parallelism":4,"sequential":false},"subgraph":inner},
+            "finish":{"stepType":"Finish","id":"finish","inputMapping":{}}
+        },"executionPlan":[{"fromStep":"split","toStep":"finish"}]})
+        } else {
+            inner
+        };
+        let (exit, starts, contexts) = run_graph_faults(
+            graph,
+            serde_json::json!({"data":{"items":[1,2,3,4,5]},"variables":{}}),
+            true,
+            false,
+            3,
+        )
+        .await;
+        completed(exit);
+        assert_eq!(starts, if parallel { 5 } else { 1 });
+        let mut attempts: BTreeMap<String, Vec<u64>> = BTreeMap::new();
+        for (path, attempt) in contexts {
+            attempts.entry(path).or_default().push(attempt);
+        }
+        assert_eq!(attempts.len(), starts);
+        for values in attempts.values_mut() {
+            values.sort();
+            assert_eq!(values, &[1, 2, 3]);
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn scoped_agent_parallel_branches_have_distinct_stable_contexts() {
+    let mut graph = super::wasm_performance_baseline::random_chain(3, false);
+    graph["executionPlan"] = serde_json::json!([
+        {"fromStep":"r0","toStep":"r1"}, {"fromStep":"r0","toStep":"r2"},
+        {"fromStep":"r1","toStep":"finish"}, {"fromStep":"r2","toStep":"finish"}
+    ]);
+    let (first_exit, starts, mut first) =
+        run_graph_contexts(graph.clone(), serde_json::json!({}), true, false).await;
+    let (second_exit, _, mut second) =
+        run_graph_contexts(graph, serde_json::json!({}), true, false).await;
+    completed(first_exit);
+    completed(second_exit);
+    assert_eq!(starts, 3);
+    first.sort();
+    second.sort();
+    assert_eq!(first, second);
+    first.dedup();
+    assert_eq!(first.len(), 3);
+}
+
+#[test]
+fn scoped_agent_ai_auxiliary_call_sites_validate_and_compose() {
+    let components = direct_e2e_components_dir();
+    let mut summarize: Value = serde_json::from_str(&super::ai_agent_memory_graph_json()).unwrap();
+    summarize["steps"]["ai"]["config"]["memory"]["compaction"]["strategy"] =
+        serde_json::json!("summarize");
+    for graph in [
+        serde_json::from_str(&super::single_shot_ai_agent_graph_json("")).unwrap(),
+        serde_json::from_str(&super::ai_agent_tool_loop_graph_json()).unwrap(),
+        serde_json::from_str(&super::ai_agent_memory_graph_json()).unwrap(),
+        summarize,
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy = compile(graph.clone(), dir.path());
+        let agents: std::collections::BTreeSet<String> = legacy
+            .component_artifacts
+            .agent_components
+            .iter()
+            .map(|c| c.agent_id.clone())
+            .collect();
+        let reviewed = legacy
+            .component_artifacts
+            .agent_components
+            .iter()
+            .map(|c| {
+                (
+                    c.agent_id.clone(),
+                    artifact_digest(&fs::read(components.join(&c.bundle_wasm_filename)).unwrap()),
+                )
+            })
+            .collect();
+        let mut compiled =
+            runtara_workflows::direct_wasm::compile_direct_workflow_with_scoped_agents(
+                DirectCompilationInput {
+                    workflow_id: "scoped-ai-compile".into(),
+                    version: 1,
+                    source_checksum: None,
+                    execution_graph: serde_json::from_value(graph).unwrap(),
+                    child_workflows: vec![],
+                    output_dir: dir.path().to_owned(),
+                    track_events: false,
+                    agent_catalog: None,
+                    agent_slug: None,
+                },
+                runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
+                false,
+                agents.clone(),
+            )
+            .unwrap();
+        compose_direct_workflow_with_isolated_agents(
+            &mut compiled,
+            &components,
+            &[],
+            &reviewed,
+            limits(),
+        )
+        .unwrap();
+        let metadata = compiled.artifact_metadata.isolation.unwrap();
+        assert_eq!(metadata.adapter_version, 2);
+        assert_eq!(metadata.bindings.len(), agents.len());
+        assert!(metadata.legacy_agents.is_empty());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn scoped_agent_context_cannot_be_replaced_by_workflow_input_variables() {
+    let graph = super::wasm_performance_baseline::random_chain(1, false);
+    let (exit, _, expected) = run_graph_contexts(
+        graph.clone(),
+        serde_json::json!({"data":{},"variables":{}}),
+        true,
+        false,
+    )
+    .await;
+    completed(exit);
+    let (exit, _, actual) = run_graph_contexts(graph, serde_json::json!({"data":{"path":"forged","attempt":999},"variables":{"_workflow_id":"forged","_durable_key_version":1,"_loop_path":["forged"],"_loop_indices":[999],"_manifest_graph_path":"forged","attempt":999}}), true, false).await;
+    completed(exit);
+    assert_eq!(expected, actual);
 }

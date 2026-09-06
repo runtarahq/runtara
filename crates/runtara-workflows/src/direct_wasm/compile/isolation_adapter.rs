@@ -1,5 +1,6 @@
 //! Guest bridge from the Agent ABI to owned execution resources. Graph control
-//! stays in the parent. Contexts identify live calls, not durable step addresses.
+//! stays in the parent. V1 identifies live calls; V2 accepts compiler-generated
+//! logical call-site and attempt identity through a private interface.
 use super::*;
 use std::collections::BTreeMap;
 use wasm_encoder::{
@@ -23,21 +24,21 @@ fn mem(offset: u64) -> MemArg {
         memory_index: 0,
     }
 }
-fn address(body: &mut WasmFunction, offset: i32) {
+fn address(body: &mut WasmFunction, frame: u32, offset: i32) {
     emit(
         body,
         [
-            Instruction::LocalGet(4),
+            Instruction::LocalGet(frame),
             Instruction::I32Const(offset),
             Instruction::I32Add,
         ],
     );
 }
-fn check_result(body: &mut WasmFunction, offset: u64) {
+fn check_result(body: &mut WasmFunction, frame: u32, offset: u64) {
     emit(
         body,
         [
-            Instruction::LocalGet(4),
+            Instruction::LocalGet(frame),
             Instruction::I32Load8U(mem(offset)),
             Instruction::If(BlockType::Empty),
             Instruction::Unreachable,
@@ -47,6 +48,14 @@ fn check_result(body: &mut WasmFunction, offset: u64) {
 }
 
 pub(super) fn emit_adapter(agent: &str, binding: &str) -> Result<Vec<u8>, DirectCompileError> {
+    emit_adapter_configured(agent, binding, false)
+}
+
+pub(super) fn emit_adapter_configured(
+    agent: &str,
+    binding: &str,
+    scoped: bool,
+) -> Result<Vec<u8>, DirectCompileError> {
     use runtara_workflow_wit::{EXECUTION_INTERFACE_NAME, EXECUTION_WIT};
     let mut resolve = Resolve::default();
     for (name, source) in [
@@ -58,10 +67,15 @@ pub(super) fn emit_adapter(agent: &str, binding: &str) -> Result<Vec<u8>, Direct
         resolve.push_str(name, source).map_err(component_error)?;
     }
     resolve
-        .push_str("agent.wit", &agent_wit_package(agent))
+        .push_str("agent.wit", &agent_wit_package_configured(agent, scoped))
         .map_err(component_error)?;
+    let interface = if scoped {
+        "scoped-capabilities"
+    } else {
+        "capabilities"
+    };
     let package = resolve.push_str("adapter.wit", &format!(
-        "package runtara:isolated-adapter; world adapter {{ import {EXECUTION_INTERFACE_NAME}; export runtara:agent-{agent}/capabilities@{AGENT_WIT_VERSION}; }}"
+        "package runtara:isolated-adapter; world adapter {{ import {EXECUTION_INTERFACE_NAME}; export runtara:agent-{agent}/{interface}@{AGENT_WIT_VERSION}; }}"
     )).map_err(component_error)?;
     let world = resolve
         .select_world(&[package], Some("adapter"))
@@ -174,7 +188,9 @@ pub(super) fn emit_adapter(agent: &str, binding: &str) -> Result<Vec<u8>, Direct
                 ExportKind::Func,
                 index,
             );
-            let mut body = WasmFunction::new([(2, ValType::I32)]);
+            let frame = if scoped { 9 } else { 4 };
+            let handle = frame + 1;
+            let mut body = WasmFunction::new([(if scoped { 3 } else { 2 }, ValType::I32)]);
             emit(
                 &mut body,
                 [
@@ -187,17 +203,31 @@ pub(super) fn emit_adapter(agent: &str, binding: &str) -> Result<Vec<u8>, Direct
                     Instruction::I32Const(8),
                     Instruction::I32Const(384),
                     Instruction::Call(realloc_index),
-                    Instruction::LocalSet(4),
-                    Instruction::GlobalGet(1),
-                    Instruction::I64Const(-1),
-                    Instruction::I64Eq,
-                    Instruction::If(BlockType::Empty),
-                    Instruction::Unreachable,
-                    Instruction::End,
-                    Instruction::GlobalGet(1),
-                    Instruction::I64Const(1),
-                    Instruction::I64Add,
-                    Instruction::GlobalSet(1),
+                    Instruction::LocalSet(frame),
+                ],
+            );
+            if scoped {
+                emit_context_path(&mut body, frame + 2, realloc_index);
+            } else {
+                emit(
+                    &mut body,
+                    [
+                        Instruction::GlobalGet(1),
+                        Instruction::I64Const(-1),
+                        Instruction::I64Eq,
+                        Instruction::If(BlockType::Empty),
+                        Instruction::Unreachable,
+                        Instruction::End,
+                        Instruction::GlobalGet(1),
+                        Instruction::I64Const(1),
+                        Instruction::I64Add,
+                        Instruction::GlobalSet(1),
+                    ],
+                );
+            }
+            emit(
+                &mut body,
+                [
                     Instruction::I32Const(binding.0),
                     Instruction::I32Const(binding.1),
                     Instruction::I32Const(0),
@@ -205,27 +235,50 @@ pub(super) fn emit_adapter(agent: &str, binding: &str) -> Result<Vec<u8>, Direct
                     Instruction::LocalGet(1),
                     Instruction::LocalGet(2),
                     Instruction::LocalGet(3),
-                    Instruction::I32Const(binding.0),
-                    Instruction::I32Const(binding.1),
-                    Instruction::GlobalGet(1),
-                    Instruction::LocalGet(4),
-                    Instruction::Call(calls["start"]),
                 ],
             );
-            check_result(&mut body, 0);
+            if scoped {
+                emit(
+                    &mut body,
+                    [
+                        Instruction::LocalGet(frame + 2),
+                        Instruction::LocalGet(5),
+                        Instruction::I32Const(18),
+                        Instruction::I32Add,
+                        Instruction::LocalGet(8),
+                    ],
+                );
+            } else {
+                emit(
+                    &mut body,
+                    [
+                        Instruction::I32Const(binding.0),
+                        Instruction::I32Const(binding.1),
+                        Instruction::GlobalGet(1),
+                    ],
+                );
+            }
             emit(
                 &mut body,
                 [
-                    Instruction::LocalGet(4),
-                    Instruction::I32Load(mem(4)),
-                    Instruction::LocalSet(5),
-                    Instruction::LocalGet(5),
+                    Instruction::LocalGet(frame),
+                    Instruction::Call(calls["start"]),
                 ],
             );
-            address(&mut body, 32);
+            check_result(&mut body, frame, 0);
+            emit(
+                &mut body,
+                [
+                    Instruction::LocalGet(frame),
+                    Instruction::I32Load(mem(4)),
+                    Instruction::LocalSet(handle),
+                    Instruction::LocalGet(handle),
+                ],
+            );
+            address(&mut body, frame, 32);
             emit(&mut body, [Instruction::Call(calls["join"])]);
-            check_result(&mut body, 32);
-            address(&mut body, 192);
+            check_result(&mut body, frame, 32);
+            address(&mut body, frame, 192);
             emit(
                 &mut body,
                 [
@@ -238,14 +291,14 @@ pub(super) fn emit_adapter(agent: &str, binding: &str) -> Result<Vec<u8>, Direct
             emit(
                 &mut body,
                 [
-                    Instruction::LocalGet(4),
+                    Instruction::LocalGet(frame),
                     Instruction::I32Load8U(mem(40)),
                     Instruction::I32Eqz,
                     Instruction::If(BlockType::Empty),
                 ],
             );
-            address(&mut body, 200);
-            address(&mut body, 48);
+            address(&mut body, frame, 200);
+            address(&mut body, frame, 48);
             emit(
                 &mut body,
                 [
@@ -255,20 +308,20 @@ pub(super) fn emit_adapter(agent: &str, binding: &str) -> Result<Vec<u8>, Direct
                         dst_mem: 0,
                     },
                     Instruction::Else,
-                    Instruction::LocalGet(4),
+                    Instruction::LocalGet(frame),
                     Instruction::I32Load8U(mem(40)),
                     Instruction::I32Const(1),
                     Instruction::I32Eq,
                     Instruction::If(BlockType::Empty),
                 ],
             );
-            address(&mut body, 192);
+            address(&mut body, frame, 192);
             emit(
                 &mut body,
                 [Instruction::I32Const(1), Instruction::I32Store(mem(0))],
             );
-            address(&mut body, 200);
-            address(&mut body, 48);
+            address(&mut body, frame, 200);
+            address(&mut body, frame, 48);
             emit(
                 &mut body,
                 [
@@ -284,25 +337,25 @@ pub(super) fn emit_adapter(agent: &str, binding: &str) -> Result<Vec<u8>, Direct
                 emit(
                     &mut body,
                     [
-                        Instruction::LocalGet(4),
+                        Instruction::LocalGet(frame),
                         Instruction::I32Load8U(mem(40)),
                         Instruction::I32Const(tag),
                         Instruction::I32Eq,
                         Instruction::If(BlockType::Empty),
                     ],
                 );
-                address(&mut body, 192);
+                address(&mut body, frame, 192);
                 emit(
                     &mut body,
                     [Instruction::I32Const(1), Instruction::I32Store(mem(0))],
                 );
                 for (n, (ptr, len)) in fields.into_iter().enumerate() {
-                    address(&mut body, 200 + n as i32 * 8);
+                    address(&mut body, frame, 200 + n as i32 * 8);
                     emit(
                         &mut body,
                         [Instruction::I32Const(ptr), Instruction::I32Store(mem(0))],
                     );
-                    address(&mut body, 204 + n as i32 * 8);
+                    address(&mut body, frame, 204 + n as i32 * 8);
                     emit(
                         &mut body,
                         [Instruction::I32Const(len), Instruction::I32Store(mem(0))],
@@ -320,17 +373,20 @@ pub(super) fn emit_adapter(agent: &str, binding: &str) -> Result<Vec<u8>, Direct
                     Instruction::End,
                     Instruction::End,
                     Instruction::End,
-                    Instruction::LocalGet(5),
+                    Instruction::LocalGet(handle),
                 ],
             );
-            address(&mut body, 128);
+            address(&mut body, frame, 128);
             emit(&mut body, [Instruction::Call(calls["release"])]);
-            check_result(&mut body, 128);
+            check_result(&mut body, frame, 128);
             emit(
                 &mut body,
-                [Instruction::LocalGet(5), Instruction::Call(calls["drop"])],
+                [
+                    Instruction::LocalGet(handle),
+                    Instruction::Call(calls["drop"]),
+                ],
             );
-            address(&mut body, 192);
+            address(&mut body, frame, 192);
             emit(&mut body, [Instruction::End]);
             code.function(&body);
             let post_ty = abi::push_core_type(&mut types, &mut type_count, &signature.results, &[]);
@@ -519,4 +575,67 @@ fn realloc() -> WasmFunction {
         ],
     );
     body
+}
+
+/// The compiler supplies the durable Agent key plus a call-site domain and
+/// activation index. Fixed-width base-16 (a–p) keeps the suffix injective without JSON
+/// parsing or host policy. The attempt stays a separate u64 in the task context.
+fn emit_context_path(body: &mut WasmFunction, path: u32, realloc: u32) {
+    emit(
+        body,
+        [
+            Instruction::LocalGet(5),
+            Instruction::I32Const(-19),
+            Instruction::I32GtU,
+            Instruction::If(BlockType::Empty),
+            Instruction::Unreachable,
+            Instruction::End,
+            Instruction::I32Const(0),
+            Instruction::I32Const(0),
+            Instruction::I32Const(1),
+            Instruction::LocalGet(5),
+            Instruction::I32Const(18),
+            Instruction::I32Add,
+            Instruction::Call(realloc),
+            Instruction::LocalSet(path),
+            Instruction::LocalGet(path),
+            Instruction::LocalGet(4),
+            Instruction::LocalGet(5),
+            Instruction::MemoryCopy {
+                src_mem: 0,
+                dst_mem: 0,
+            },
+        ],
+    );
+    for (field, offset) in [(6, 0), (7, 9)] {
+        emit(
+            body,
+            [
+                Instruction::LocalGet(path),
+                Instruction::LocalGet(5),
+                Instruction::I32Add,
+                Instruction::I32Const(58),
+                Instruction::I32Store8(mem(offset)),
+            ],
+        );
+        for digit in 0..8 {
+            emit(
+                body,
+                [
+                    Instruction::LocalGet(path),
+                    Instruction::LocalGet(5),
+                    Instruction::I32Add,
+                    Instruction::LocalGet(field),
+                    Instruction::I32Const((7 - digit) * 4),
+                    Instruction::I32ShrU,
+                    Instruction::I32Const(15),
+                    Instruction::I32And,
+                    // Encode 0..15 as 'a'..'p': equally injective, no branch/table.
+                    Instruction::I32Const(97),
+                    Instruction::I32Add,
+                    Instruction::I32Store8(mem(offset + 1 + digit as u64)),
+                ],
+            );
+        }
+    }
 }

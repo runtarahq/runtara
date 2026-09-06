@@ -548,6 +548,9 @@ pub struct DirectCompilationInput {
 /// Result of opt-in direct workflow compilation.
 #[derive(Debug, Clone)]
 pub struct DirectCompilationResult {
+    /// Agent dependencies emitted with the private logical-context interface.
+    /// Composition must bind every selected dependency to a reviewed adapter.
+    pub scoped_agents: std::collections::BTreeSet<String>,
     /// Path to the primary emitted Wasm artifact.
     ///
     /// Before static composition this is the directly emitted
@@ -633,9 +636,10 @@ pub fn compose_direct_workflow_with_extra_dirs(
 /// Agent IDs; values pin the reviewed SHA-256 bytes. Unselected packages retain
 /// their original component lifetime. Graph control stays in the parent guest.
 ///
-/// Execution requires a scoped invocation launcher. Contexts currently identify
-/// live adapter calls, not durable logical steps; this API does not enable durable
-/// targeted cancellation or change the default backend.
+/// Execution requires a scoped invocation launcher. Legacy compilation uses live
+/// adapter call contexts; [`compile_direct_workflow_with_scoped_agents`] emits
+/// logical call contexts and requires a matching reviewed selection here.
+/// Neither mode alone enables durable targeted cancellation or changes the default.
 pub fn compose_direct_workflow_with_isolated_agents(
     result: &mut DirectCompilationResult,
     components_dir: impl AsRef<Path>,
@@ -662,6 +666,17 @@ fn compose_direct_workflow_selected(
     extra_component_dirs: &[PathBuf],
     selection: Option<IsolationSelection<'_>>,
 ) -> Result<PathBuf, DirectCompileError> {
+    if !result.scoped_agents.is_empty()
+        && selection.as_ref().map(|s| {
+            s.0.keys()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>()
+        }) != Some(result.scoped_agents.clone())
+    {
+        return Err(component_error(
+            "scoped Agent lowering requires exactly the same reviewed isolation selection",
+        ));
+    }
     let composed_path = result.build_dir.join("workflow.wasm");
     let resolve_deps_start = Instant::now();
     let shared_components = resolve_shared_component_dependencies(
@@ -718,7 +733,11 @@ fn compose_direct_workflow_selected(
                 artifact: digest.clone(),
                 interface: format!("runtara:agent-{agent}/capabilities@{AGENT_WIT_VERSION}"),
             };
-            let adapter = isolation_adapter::emit_adapter(agent, &binding.id)?;
+            let adapter = if result.scoped_agents.contains(agent) {
+                isolation_adapter::emit_adapter_configured(agent, &binding.id, true)?
+            } else {
+                isolation_adapter::emit_adapter(agent, &binding.id)?
+            };
             // Caller-provided text never becomes a filesystem path.
             let adapter_path = result
                 .build_dir
@@ -746,8 +765,17 @@ fn compose_direct_workflow_selected(
         None
     } else {
         Some(DirectIsolationMetadata {
-            adapter_version: 1,
-            context_contract: "live-adapter-call:1".into(),
+            adapter_version: if result.scoped_agents.is_empty() {
+                1
+            } else {
+                2
+            },
+            context_contract: if result.scoped_agents.is_empty() {
+                "live-adapter-call:1"
+            } else {
+                "logical-agent-call:2"
+            }
+            .into(),
             bindings: bindings.clone(),
             legacy_agents: agent_components
                 .iter()
@@ -1124,13 +1152,25 @@ pub fn compile_direct_workflow_with_abi(
     abi: super::component::WorkflowAbi,
     omit_runtime: bool,
 ) -> Result<DirectCompilationResult, DirectCompileError> {
+    compile_direct_workflow_with_scoped_agents(input, abi, omit_runtime, Default::default())
+}
+
+/// Opt-in lowering of reviewed Agent dependencies with compiler-owned logical
+/// invocation contexts. Must be composed with the same isolation selection.
+/// This leaves the DSL, public Agent ABI and legacy compiler default unchanged.
+pub fn compile_direct_workflow_with_scoped_agents(
+    input: DirectCompilationInput,
+    abi: super::component::WorkflowAbi,
+    omit_runtime: bool,
+    scoped_agents: std::collections::BTreeSet<String>,
+) -> Result<DirectCompilationResult, DirectCompileError> {
     let span = tracing::Span::current();
     let handle = std::thread::Builder::new()
         .name("direct-compile".to_string())
         .stack_size(DIRECT_COMPILE_STACK_SIZE)
         .spawn(move || {
             let _span = span.entered();
-            compile_direct_workflow_inner(input, abi, omit_runtime)
+            compile_direct_workflow_inner(input, abi, omit_runtime, scoped_agents)
         })
         .map_err(DirectCompileError::Io)?;
     match handle.join() {
@@ -1143,6 +1183,7 @@ fn compile_direct_workflow_inner(
     input: DirectCompilationInput,
     abi: super::component::WorkflowAbi,
     omit_runtime_requested: bool,
+    scoped_agents: std::collections::BTreeSet<String>,
 ) -> Result<DirectCompilationResult, DirectCompileError> {
     // The agent catalog is supplied by the caller (the server passes the
     // runtime catalog loaded from component `meta.json`). When absent, the
@@ -1226,6 +1267,13 @@ fn compile_direct_workflow_inner(
         _ => None,
     };
 
+    for agent in &scoped_agents {
+        if !manifest.feature_summary.agent_ids.contains(agent) {
+            return Err(component_error(format!(
+                "scoped Agent `{agent}` is not a workflow dependency"
+            )));
+        }
+    }
     let manifest_json = manifest.to_canonical_json()?;
     let support_json = serde_json::to_vec(&support_report)?;
     let (wasm, parallel_pools) = emit_direct_artifact(
@@ -1237,6 +1285,7 @@ fn compile_direct_workflow_inner(
         abi,
         omit_runtime,
         export_agent_id.as_deref(),
+        &scoped_agents,
     )?;
     let wasm_checksum = sha256_hex(&wasm);
     let support_report_checksum = sha256_hex(&support_json);
@@ -1247,16 +1296,16 @@ fn compile_direct_workflow_inner(
             .is_some_and(|id| !id.is_empty())
             || agent.connection_ref.is_some()
     });
-    let component_artifacts =
-        super::component::emit_direct_component_artifacts_with_pools_and_connections(
-            &manifest.feature_summary.agent_ids,
-            runtime_binding_from_env(),
-            abi,
-            omit_runtime,
-            export_agent_id.as_deref(),
-            &parallel_pools,
-            has_connections,
-        );
+    let component_artifacts = super::component::emit_direct_component_artifacts_scoped(
+        &manifest.feature_summary.agent_ids,
+        runtime_binding_from_env(),
+        abi,
+        omit_runtime,
+        export_agent_id.as_deref(),
+        &parallel_pools,
+        has_connections,
+        &scoped_agents,
+    );
 
     let build_dir = input.output_dir.join(format!(
         "{}-v{}-direct",
@@ -1295,6 +1344,7 @@ fn compile_direct_workflow_inner(
     fs::write(&wac_path, &component_artifacts.wac_source)?;
 
     Ok(DirectCompilationResult {
+        scoped_agents,
         wasm_path,
         workflow_logic_wasm_path: build_dir.join("workflow-logic.wasm"),
         manifest_path,
@@ -1337,6 +1387,7 @@ fn emit_direct_artifact(
     abi: super::component::WorkflowAbi,
     omit_runtime: bool,
     export_agent_id: Option<&str>,
+    scoped_agents: &std::collections::BTreeSet<String>,
 ) -> Result<(Vec<u8>, std::collections::BTreeMap<String, u32>), DirectCompileError> {
     let abi_json = match abi {
         super::component::WorkflowAbi::CliRunHttp => serde_json::to_vec(&serde_json::json!({
@@ -1389,6 +1440,7 @@ fn emit_direct_artifact(
         abi,
         omit_runtime,
         export_agent_id,
+        scoped_agents,
     )?;
     append_component_custom_section(&mut component, DIRECT_WORKFLOW_ABI_SECTION, &abi_json);
     append_component_custom_section(
@@ -1414,6 +1466,7 @@ fn emit_direct_component(
     abi: super::component::WorkflowAbi,
     omit_runtime: bool,
     export_agent_id: Option<&str>,
+    scoped_agents: &std::collections::BTreeSet<String>,
 ) -> Result<(Vec<u8>, std::collections::BTreeMap<String, u32>), DirectCompileError> {
     let core_config =
         DirectCoreConfig::new_with_workflow_id(manifest, manifest_json, track_events, workflow_id)?
@@ -1425,13 +1478,14 @@ fn emit_direct_component(
     let parallel_pools =
         split_parallel::parallel_agent_pools(&core_config.static_data, &core_config.run_plan);
     let has_connections = core_config.static_data.has_connections();
-    let (resolve, world) = build_direct_component_resolve_configured(
+    let (resolve, world) = build_direct_component_resolve_scoped(
         &manifest.feature_summary.agent_ids,
         abi,
         omit_runtime,
         export_agent_id,
         &parallel_pools,
         has_connections,
+        scoped_agents,
     )?;
     let mut core_module = emit_direct_core_module(&resolve, world, &core_config)?;
     embed_component_metadata(&mut core_module, &resolve, world, StringEncoding::UTF8)
@@ -1475,6 +1529,7 @@ fn build_direct_component_resolve_with_agents(
     )
 }
 
+#[cfg(test)]
 fn build_direct_component_resolve_configured(
     agents: &[String],
     abi: super::component::WorkflowAbi,
@@ -1482,6 +1537,26 @@ fn build_direct_component_resolve_configured(
     export_agent_id: Option<&str>,
     parallel_pools: &std::collections::BTreeMap<String, u32>,
     has_connections: bool,
+) -> Result<(Resolve, WorldId), DirectCompileError> {
+    build_direct_component_resolve_scoped(
+        agents,
+        abi,
+        omit_runtime,
+        export_agent_id,
+        parallel_pools,
+        has_connections,
+        &Default::default(),
+    )
+}
+
+fn build_direct_component_resolve_scoped(
+    agents: &[String],
+    abi: super::component::WorkflowAbi,
+    omit_runtime: bool,
+    export_agent_id: Option<&str>,
+    parallel_pools: &std::collections::BTreeMap<String, u32>,
+    has_connections: bool,
+    scoped_agents: &std::collections::BTreeSet<String>,
 ) -> Result<(Resolve, WorldId), DirectCompileError> {
     let mut resolve = Resolve::default();
     resolve
@@ -1540,7 +1615,7 @@ fn build_direct_component_resolve_configured(
             resolve
                 .push_str(
                     format!("runtara-agent-{agent}.wit"),
-                    &agent_wit_package(agent),
+                    &agent_wit_package_configured(agent, scoped_agents.contains(agent)),
                 )
                 .map_err(component_error)?;
             // Phantom pool-member packages (structurally identical interface
@@ -1551,7 +1626,7 @@ fn build_direct_component_resolve_configured(
                     resolve
                         .push_str(
                             format!("runtara-agent-{phantom}.wit"),
-                            &agent_wit_package(&phantom),
+                            &agent_wit_package_configured(&phantom, scoped_agents.contains(agent)),
                         )
                         .map_err(component_error)?;
                 }
@@ -1575,14 +1650,19 @@ fn build_direct_component_resolve_configured(
         workflow_wit.push_str("    import runtara:host-io/timers@0.1.0;\n");
     }
     for agent in agents {
+        let interface = if scoped_agents.contains(agent) {
+            "scoped-capabilities"
+        } else {
+            "capabilities"
+        };
         workflow_wit.push_str(&format!(
-            "    import runtara:agent-{agent}/capabilities@{AGENT_WIT_VERSION};\n",
+            "    import runtara:agent-{agent}/{interface}@{AGENT_WIT_VERSION};\n",
         ));
         if let Some(pool) = parallel_pools.get(agent) {
             for member in 1..*pool {
                 let phantom = split_parallel::pool_member_component_id(agent, member);
                 workflow_wit.push_str(&format!(
-                    "    import runtara:agent-{phantom}/capabilities@{AGENT_WIT_VERSION};\n",
+                    "    import runtara:agent-{phantom}/{interface}@{AGENT_WIT_VERSION};\n",
                 ));
             }
         }
@@ -1613,19 +1693,34 @@ fn build_direct_component_resolve_configured(
 }
 
 fn agent_wit_package(agent: &str) -> String {
+    agent_wit_package_configured(agent, false)
+}
+
+fn agent_wit_package_configured(agent: &str, scoped: bool) -> String {
+    let interface = if scoped {
+        "scoped-capabilities"
+    } else {
+        "capabilities"
+    };
+    let context = if scoped {
+        "path: string, domain: u32, activation: u32, attempt: u64,"
+    } else {
+        ""
+    };
     format!(
         "package runtara:agent-{agent}@{AGENT_WIT_VERSION};\n\
          \n\
-         interface capabilities {{\n\
+         interface {interface} {{\n\
              use runtara:agent/types@{AGENT_WIT_VERSION}.{{error-info}};\n\
              invoke: async func(\n\
                  capability-id: string,\n\
                  input: list<u8>,\n\
+                 {context}\n\
              ) -> result<list<u8>, error-info>;\n\
          }}\n\
          \n\
          world agent {{\n\
-             export capabilities;\n\
+             export {interface};\n\
          }}\n"
     )
 }

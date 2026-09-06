@@ -154,3 +154,109 @@ async fn isolated_adapter_traps_on_child_trap_suspension_or_host_failure() {
         );
     }
 }
+
+#[tokio::test]
+async fn scoped_adapter_preserves_context_bits_payload_and_repeated_call_identity() {
+    use runtara_component_host::execution_host::ExecutionView;
+    use wasmtime::component::{Component, Linker, ResourceTable};
+    struct State {
+        table: ResourceTable,
+        context: Arc<ExecutionContext>,
+    }
+    impl ExecutionView for State {
+        fn execution_table(&mut self) -> &mut ResourceTable {
+            &mut self.table
+        }
+        fn execution_context(&self) -> Option<&Arc<ExecutionContext>> {
+            Some(&self.context)
+        }
+    }
+    struct Echo(Arc<Mutex<Vec<(String, u64)>>>);
+    impl InvocationLauncher for Echo {
+        fn prepare(&self, request: StartRequest) -> Result<PreparedInvocation, ExecutionError> {
+            assert_eq!(request.binding, "agent:utils");
+            self.0
+                .lock()
+                .unwrap()
+                .push((request.context.path, request.context.attempt));
+            Ok(PreparedInvocation::leaf(Box::new(move |_| {
+                Box::pin(async move { InvokeExit::Completed(request.input) })
+            })))
+        }
+    }
+    let bytes =
+        super::isolation_adapter::emit_adapter_configured("utils", "agent:utils", true).unwrap();
+    let engine = runtara_component_host::build_engine(&EngineConfig {
+        cache_dir: None,
+        ..Default::default()
+    })
+    .unwrap();
+    let component = Component::new(&engine, bytes).unwrap();
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let tasks = Arc::new(IsolatedTasks::new(engine.clone(), 1, 2 * 1024 * 1024).unwrap());
+    let context = ExecutionContext::new(tasks.clone(), Arc::new(Echo(calls.clone())), 1).unwrap();
+    let mut linker = Linker::new(&engine);
+    add_execution_to_linker(&mut linker).unwrap();
+    let mut store = wasmtime::Store::new(
+        &engine,
+        State {
+            table: ResourceTable::new(),
+            context: context.clone(),
+        },
+    );
+    store.set_epoch_deadline(1 << 40);
+    let instance = linker
+        .instantiate_async(&mut store, &component)
+        .await
+        .unwrap();
+    let interface = instance
+        .get_export_index(
+            &mut store,
+            None,
+            "runtara:agent-utils/scoped-capabilities@0.4.0",
+        )
+        .unwrap();
+    let index = instance
+        .get_export_index(&mut store, Some(&interface), "invoke")
+        .unwrap();
+    let invoke = instance.get_typed_func::<(String, Vec<u8>, String, u32, u32, u64), (Result<Vec<u8>, WorkflowErrorInfo>,)>(&mut store, index).unwrap();
+    let path = "workflow/🦀/step:with:delimiters";
+    let input = vec![255; 1024 * 1024];
+    for (domain, activation, attempt) in [
+        (0, 0, 1),
+        (0, 1, u64::MAX),
+        (u32::MAX, u32::MAX, 9),
+        (0, 0, 1),
+    ] {
+        let (result,) = tokio::time::timeout(
+            Duration::from_secs(10),
+            invoke.call_async(
+                &mut store,
+                (
+                    "echo".into(),
+                    input.clone(),
+                    path.into(),
+                    domain,
+                    activation,
+                    attempt,
+                ),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(result.unwrap(), input);
+    }
+    assert_eq!(
+        *calls.lock().unwrap(),
+        vec![
+            (format!("{path}:aaaaaaaa:aaaaaaaa"), 1),
+            (format!("{path}:aaaaaaaa:aaaaaaab"), u64::MAX),
+            (format!("{path}:pppppppp:pppppppp"), 9),
+            (format!("{path}:aaaaaaaa:aaaaaaaa"), 1),
+        ]
+    );
+    drop(store);
+    context.shutdown().await.unwrap();
+    assert_eq!(tasks.retained_result_bytes(), 0);
+}
