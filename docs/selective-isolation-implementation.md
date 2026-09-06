@@ -592,6 +592,44 @@ aggregate resource reservations and recursive child-graph extraction still need
 integration and qualification. No backend default changed and the final local
 server gate remains outstanding.
 
+### Supervised root lifecycle coordination
+
+`execute_invoke_with_coordinator` now closes the root's runtime authority after
+descendant cleanup and runs root lifecycle finalization before staged terminal
+publication. `ScopedRootRuntime` implements both the parent runtime interface and
+that coordinator, sharing the children's receipt owner. Parent/child polls retain
+the same exact command for one post-cleanup acknowledgement. Root breakpoints are
+coalesced with child breakpoints. An accepted Cancel replaces completion with a
+cancelled result; Pause/Shutdown suspend without discarding guest-returned wakes.
+Core still owns the distinct durable Pause/Shutdown wake and reason fields.
+
+Cleanup failure closes access but forbids lifecycle finalization and publication.
+Root traps and inconsistent terminal callbacks likewise do not publish control
+effects. Native cancellation/timeout during cleanup takes priority over callback
+validation. Finalization IO is supervised by the original budget and root/caller
+cancellation; if skipped or interrupted, pending durable commands remain for
+runner/scheduler recovery. This does not fence an already committed database
+request. An ordinary execution entry using the scoped root runtime cannot publish
+terminal callbacks before successful coordinator finalization.
+
+Verification: **39 database-backed runtime tests passed**, including four new
+real-WASM root tests covering held cleanup, shared command observations,
+Pause/Cancel/Shutdown, root completion, breakpoint coalescing, retained on-resume
+wakes, cleanup failure, traps and conflicting callbacks. Shutdown's recovery wake
+and reason remain distinct from Pause. The full component-host suite passed
+**130 tests**, with one manual benchmark ignored; after adding native-stop
+precedence coverage, all **18 focused supervision tests passed**. These include
+pending finalization timeout/cancel/abandonment, close/finalization errors and
+cleanup ordering. All **11 emitted Agent isolation checks** passed, as did the
+comparison smoke across both backends and all 11 workloads. Feature-enabled
+all-target Clippy for environment and component host passed with `-D warnings`.
+
+This supplies the root coordinator used by the scoped execution API. The
+environment runner still needs to select and construct it from the approved
+artifact/authority policy. Bounded shared signal polling, durable root/attempt
+fences, aggregate reservations, extracted child graphs and final local-server
+qualification remain required; the production default is unchanged.
+
 ## Remaining required work
 
 - P0: extend explicit differential selection and invocation-count evidence to all
@@ -603,7 +641,7 @@ server gate remains outstanding.
   eligibility. Basic emitted Agent paths and attempts are wired above.
 - P3: recursive Embed extraction and production scoped-runtime integration, suspension/wake sets,
   scopes, deadlines, checkpoint keys and existing reference ABI modes.
-- P4: durable attempt transitions, root and targeted command routing, crash/lease
+- P4: durable attempt transitions, production root-coordinator and targeted command routing, crash/lease
   fencing, resource/tenant ownership and parked invocation handling.
 - P5: all compatibility gates, extend the paired Agent measurements to direct
   step spans, aggregate resources and production qualification; full unit and

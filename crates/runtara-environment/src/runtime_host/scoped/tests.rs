@@ -5,6 +5,8 @@ use runtara_core::persistence::ListEventsFilter;
 
 #[path = "invocation_tests.rs"]
 mod invocation_tests;
+#[path = "root_tests.rs"]
+mod root_tests;
 
 struct Keys(&'static str);
 impl CheckpointAuthority for Keys {

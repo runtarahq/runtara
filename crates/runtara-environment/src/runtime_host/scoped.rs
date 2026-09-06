@@ -2,14 +2,17 @@
 //! No graph policy lives here. The root owner applies observed lifecycle effects
 //! only after reaping the run; children never acknowledge commands themselves.
 use super::*;
+use runtara_component_host::RootLifecycleDecision;
 use runtara_component_host::isolated_tasks::TaskCancellation;
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
 mod invocation;
+mod root;
 pub use invocation::{
     AuthorizedChild, InvocationAuthority, ScopedInvocationFactory, ScopedRunSettings,
 };
+pub use root::ScopedRootRuntime;
 
 /// Supplied by the host scope factory, never by a child input envelope. Keys
 /// already contain their compiler-generated ancestry; authorization must not
@@ -24,6 +27,8 @@ struct Observed {
     closed: bool,
     commands: BTreeMap<String, String>,
     breakpoints: Vec<TaskCancellation>,
+    root_breakpoint: bool,
+    action: RootLifecycleDecision,
 }
 
 /// Bound to one immutable root host. It contains no tenant/instance selector
@@ -45,6 +50,11 @@ pub struct AppliedRootEffects {
 }
 
 impl ScopedRuntimeOwner {
+    /// Runtime and coordinator for this root's supervised execution. Install
+    /// the same returned object in the run spec and root coordinator slot.
+    pub fn root_runtime(self: &Arc<Self>) -> Arc<ScopedRootRuntime> {
+        Arc::new(ScopedRootRuntime::new(self.clone()))
+    }
     /// Bind child runtime authority to this root host.
     pub fn new(root: Arc<PersistenceRuntimeHost>) -> Self {
         Self {
@@ -157,10 +167,11 @@ impl ScopedRuntimeOwner {
             }
             (
                 observed.commands.clone(),
-                observed
-                    .breakpoints
-                    .iter()
-                    .any(|token| !token.is_requested()),
+                observed.root_breakpoint
+                    || observed
+                        .breakpoints
+                        .iter()
+                        .any(|token| !token.is_requested()),
             )
         };
         let mut applied = AppliedRootEffects::default();
@@ -178,14 +189,20 @@ impl ScopedRuntimeOwner {
                     self.root.cancelled.store(true, Ordering::SeqCst);
                 }
                 applied.command_ids.push(id.clone());
+                let mut observed = self
+                    .observed
+                    .lock()
+                    .map_err(|_| "child runtime owner poisoned")?;
+                observed.action = if kind == SignalType::SignalCancel {
+                    RootLifecycleDecision::Cancelled
+                } else {
+                    RootLifecycleDecision::Suspended
+                };
+                observed.root_breakpoint = false;
                 // An accepted lifecycle command already determines the root
                 // transition. Discard breakpoints even if a later receipt
                 // fails and finalization needs to be retried.
-                self.observed
-                    .lock()
-                    .map_err(|_| "child runtime owner poisoned")?
-                    .breakpoints
-                    .clear();
+                observed.breakpoints.clear();
             }
             self.observed
                 .lock()
@@ -198,13 +215,18 @@ impl ScopedRuntimeOwner {
             // Global command receipts remain root-owned independently of which
             // child observed them. Core guards terminal roots against suspension.
             self.root.suspended_event().await?;
+            self.observed
+                .lock()
+                .map_err(|_| "child runtime owner poisoned")?
+                .action = RootLifecycleDecision::Suspended;
             applied.breakpoint = true;
         }
-        self.observed
+        let mut observed = self
+            .observed
             .lock()
-            .map_err(|_| "child runtime owner poisoned")?
-            .breakpoints
-            .clear();
+            .map_err(|_| "child runtime owner poisoned")?;
+        observed.breakpoints.clear();
+        observed.root_breakpoint = false;
         Ok(applied)
     }
 }
