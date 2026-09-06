@@ -314,7 +314,7 @@ async fn typed_signals_round_trip_through_poll_checkpoint_and_ack() {
         assert_eq!(checkpoint["signal"], poll["signal"]);
         client
             .post(format!("{url}/signals/ack"))
-            .json(&json!({"signal_type": label}))
+            .json(&json!({"signal_type": label, "command_id": poll["signal"]["command_id"]}))
             .send()
             .await
             .unwrap()

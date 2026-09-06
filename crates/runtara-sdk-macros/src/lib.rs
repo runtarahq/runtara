@@ -286,18 +286,27 @@ fn generate_no_retry_wrapper(
                                 drop(__sdk_guard);
 
                                 // Check for pending pause/cancel/shutdown signals
-                                if checkpoint_result.should_cancel() {
+                                if checkpoint_result.should_cancel()
+                                    && ::runtara_sdk::acknowledge_cancellation(
+                                        &checkpoint_result.pending_signal.as_ref().unwrap().command_id
+                                    ).map_err(|error| error.to_string())? {
                                     // Acknowledge cancellation to core (sets status to "cancelled")
                                     // and trigger local cancellation flag
-                                    ::runtara_sdk::acknowledge_cancellation();
+
                                     // Return error immediately to stop execution
                                     return Err("Instance cancelled".to_string().into());
-                                } else if checkpoint_result.should_suspend_on_shutdown() {
+                                } else if checkpoint_result.should_suspend_on_shutdown()
+                                    && ::runtara_sdk::acknowledge_shutdown(
+                                        &checkpoint_result.pending_signal.as_ref().unwrap().command_id
+                                    ).map_err(|error| error.to_string())? {
                                     // Ack to core (status -> suspended, termination_reason="shutdown_requested")
                                     // and flip local cancellation flag so remaining cooperative work exits
-                                    ::runtara_sdk::acknowledge_shutdown();
+
                                     return Err("Instance suspended for shutdown".to_string().into());
-                                } else if checkpoint_result.should_pause() {
+                                } else if checkpoint_result.should_pause()
+                                    && ::runtara_sdk::acknowledge_pause(
+                                        &checkpoint_result.pending_signal.as_ref().unwrap().command_id
+                                    ).map_err(|error| error.to_string())? {
                                     // Return error to trigger exit; caller should call sdk.suspended()
                                     return Err("Instance paused".to_string().into());
                                 }
@@ -587,17 +596,26 @@ fn generate_retry_wrapper(
                                         drop(__sdk_guard);
 
                                         // Check for pending pause/cancel/shutdown signals
-                                        if checkpoint_result.should_cancel() {
+                                        if checkpoint_result.should_cancel()
+                                    && ::runtara_sdk::acknowledge_cancellation(
+                                        &checkpoint_result.pending_signal.as_ref().unwrap().command_id
+                                    ).map_err(|error| error.to_string())? {
                                             // Acknowledge cancellation to core (sets status to "cancelled")
                                             // and trigger local cancellation flag
-                                            ::runtara_sdk::acknowledge_cancellation();
+
                                             // Return error immediately to stop execution
                                             return Err("Instance cancelled".to_string().into());
-                                        } else if checkpoint_result.should_suspend_on_shutdown() {
+                                        } else if checkpoint_result.should_suspend_on_shutdown()
+                                    && ::runtara_sdk::acknowledge_shutdown(
+                                        &checkpoint_result.pending_signal.as_ref().unwrap().command_id
+                                    ).map_err(|error| error.to_string())? {
                                             // Ack to core (status -> suspended, termination_reason="shutdown_requested")
-                                            ::runtara_sdk::acknowledge_shutdown();
+
                                             return Err("Instance suspended for shutdown".to_string().into());
-                                        } else if checkpoint_result.should_pause() {
+                                        } else if checkpoint_result.should_pause()
+                                    && ::runtara_sdk::acknowledge_pause(
+                                        &checkpoint_result.pending_signal.as_ref().unwrap().command_id
+                                    ).map_err(|error| error.to_string())? {
                                             // Return error to trigger exit; caller should call sdk.suspended()
                                             return Err("Instance paused".to_string().into());
                                         }

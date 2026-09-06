@@ -169,6 +169,7 @@ pub fn make_checkpoint(instance_id: &str, checkpoint_id: &str, state: &[u8]) -> 
 /// Build an unacknowledged `SignalRecord` with no payload.
 pub fn make_signal(instance_id: &str, signal_type: crate::domain::SignalType) -> SignalRecord {
     SignalRecord {
+        command_id: uuid::Uuid::new_v4().to_string(),
         instance_id: instance_id.to_string(),
         signal_type,
         payload: None,
@@ -362,9 +363,56 @@ impl Persistence for MockPersistence {
         Ok(self.signals.lock().unwrap().get(instance_id).cloned())
     }
 
-    async fn acknowledge_signal(&self, instance_id: &str) -> std::result::Result<(), CoreError> {
-        self.signals.lock().unwrap().remove(instance_id);
-        Ok(())
+    async fn acknowledge_signal(
+        &self,
+        instance_id: &str,
+        command_id: &str,
+        signal_type: crate::domain::SignalType,
+    ) -> std::result::Result<bool, CoreError> {
+        use crate::domain::SignalType;
+        let mut instances = self.instances.lock().unwrap();
+        let mut signals = self.signals.lock().unwrap();
+        let Some(signal) = signals.get(instance_id) else {
+            return Ok(false);
+        };
+        if signal.command_id != command_id || signal.signal_type != signal_type {
+            return Ok(false);
+        }
+        let instance =
+            instances
+                .get_mut(instance_id)
+                .ok_or_else(|| CoreError::InstanceNotFound {
+                    instance_id: instance_id.into(),
+                })?;
+        if instance.status.is_terminal() && signal_type != SignalType::Cancel {
+            return Ok(false);
+        }
+        match signal_type {
+            SignalType::Cancel => {
+                instance.status = CoreInstanceStatus::Cancelled;
+                instance.finished_at = Some(Utc::now());
+                instance.sleep_until = None;
+            }
+            SignalType::Pause | SignalType::Shutdown => {
+                instance.status = CoreInstanceStatus::Suspended;
+                instance.finished_at = Some(Utc::now());
+                instance.sleep_until = (signal_type == SignalType::Shutdown).then(Utc::now);
+                instance.termination_reason =
+                    (signal_type == SignalType::Shutdown).then(|| "shutdown_requested".into());
+            }
+            SignalType::Resume => {}
+        }
+        signals.remove(instance_id);
+        Ok(true)
+    }
+
+    async fn cancel_suspended_instances(
+        &self,
+        _instance_id: Option<&str>,
+        _limit: i64,
+    ) -> std::result::Result<Vec<crate::persistence::CancelledInstance>, crate::error::CoreError>
+    {
+        Ok(Vec::new())
     }
 
     async fn insert_custom_signal(

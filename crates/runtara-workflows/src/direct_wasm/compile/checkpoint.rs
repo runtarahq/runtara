@@ -17,6 +17,7 @@ use super::abi::{
     push_retptr_i32_load, push_retptr_u8_load, return_if_retptr_error,
 };
 use super::{
+    DIRECT_CHECKPOINT_COMMAND_ID_LEN_OFFSET, DIRECT_CHECKPOINT_COMMAND_ID_PTR_OFFSET,
     DIRECT_CHECKPOINT_PENDING_SIGNAL_TAG_OFFSET, DIRECT_CHECKPOINT_SIGNAL_TYPE_LEN_OFFSET,
     DIRECT_CHECKPOINT_SIGNAL_TYPE_PTR_OFFSET, DIRECT_RET_BOOL_OK_OFFSET, DirectCoreFunctionIndices,
 };
@@ -85,6 +86,8 @@ fn emit_checkpoint_signal_handling(body: &mut WasmFunction, indices: &DirectCore
     body.instruction(&Instruction::If(BlockType::Empty));
     push_retptr_i32_load(body, DIRECT_CHECKPOINT_SIGNAL_TYPE_PTR_OFFSET);
     push_retptr_i32_load(body, DIRECT_CHECKPOINT_SIGNAL_TYPE_LEN_OFFSET);
+    push_retptr_i32_load(body, DIRECT_CHECKPOINT_COMMAND_ID_PTR_OFFSET);
+    push_retptr_i32_load(body, DIRECT_CHECKPOINT_COMMAND_ID_LEN_OFFSET);
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.runtime_handle_checkpoint_signal));
     return_if_retptr_error(body, indices);

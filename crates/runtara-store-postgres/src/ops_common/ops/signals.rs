@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Signal-family operations.
 //!
-//! Hosts: `get_pending_signal`, `acknowledge_signal`,
+//! Hosts: `get_pending_signal`,
 //! `take_pending_custom_signal`.
 //!
 //! Not hosted here: `insert_signal` / `insert_custom_signal` stay inline
@@ -44,26 +44,6 @@ macro_rules! impl_signal_ops {
                         details: e.to_string(),
                     })?;
                 Ok(record.map(|r| r.0))
-            }
-
-            /// UPDATE `acknowledged_at = NOW()` for the pending signal.
-            /// Non-error if no pending row exists (by design — acks are
-            /// idempotent).
-            pub(crate) async fn op_acknowledge_signal(
-                pool: &$Pool,
-                instance_id: &str,
-            ) -> ::core::result::Result<(), ::runtara_core::error::CoreError> {
-                use crate::dialect::Dialect;
-                let sql = <$Dialect>::sql_acknowledge_signal();
-                ::sqlx::query(sql)
-                    .bind(instance_id)
-                    .execute(pool)
-                    .await
-                    .map_err(|e| ::runtara_core::error::CoreError::PersistenceError {
-                        operation: "acknowledge_signal".into(),
-                        details: e.to_string(),
-                    })?;
-                Ok(())
             }
 
             /// Read (non-destructively) the pending custom signal for

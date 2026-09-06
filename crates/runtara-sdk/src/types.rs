@@ -38,6 +38,8 @@ pub enum SignalType {
 /// A signal received from runtara-core.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Signal {
+    /// Opaque receipt for this lifecycle command.
+    pub command_id: String,
     /// The type of signal
     pub signal_type: SignalType,
     /// Signal-specific payload data
@@ -239,6 +241,7 @@ mod tests {
     #[test]
     fn test_signal_creation() {
         let signal = Signal {
+            command_id: "test-command".into(),
             signal_type: SignalType::Cancel,
             payload: vec![1, 2, 3],
             checkpoint_id: Some("checkpoint-1".to_string()),
@@ -252,6 +255,7 @@ mod tests {
     #[test]
     fn test_signal_without_checkpoint() {
         let signal = Signal {
+            command_id: "test-command".into(),
             signal_type: SignalType::Pause,
             payload: vec![],
             checkpoint_id: None,
@@ -265,6 +269,7 @@ mod tests {
     #[test]
     fn test_signal_clone() {
         let signal = Signal {
+            command_id: "test-command".into(),
             signal_type: SignalType::Resume,
             payload: vec![42],
             checkpoint_id: Some("cp".to_string()),
@@ -277,6 +282,7 @@ mod tests {
     #[test]
     fn test_signal_debug() {
         let signal = Signal {
+            command_id: "test-command".into(),
             signal_type: SignalType::Cancel,
             payload: vec![1],
             checkpoint_id: None,
@@ -321,6 +327,7 @@ mod tests {
             found: false,
             state: vec![],
             pending_signal: Some(Signal {
+                command_id: "test-command".into(),
                 signal_type: SignalType::Pause,
                 payload: vec![],
                 checkpoint_id: None,
@@ -339,6 +346,7 @@ mod tests {
             found: false,
             state: vec![],
             pending_signal: Some(Signal {
+                command_id: "test-command".into(),
                 signal_type: SignalType::Cancel,
                 payload: vec![],
                 checkpoint_id: None,
@@ -357,6 +365,7 @@ mod tests {
             found: false,
             state: vec![],
             pending_signal: Some(Signal {
+                command_id: "test-command".into(),
                 signal_type: SignalType::Resume,
                 payload: vec![],
                 checkpoint_id: None,
@@ -412,6 +421,7 @@ mod tests {
             found: true,
             state: vec![1, 2, 3],
             pending_signal: Some(Signal {
+                command_id: "test-command".into(),
                 signal_type: SignalType::Pause,
                 payload: vec![4],
                 checkpoint_id: Some("cp".to_string()),

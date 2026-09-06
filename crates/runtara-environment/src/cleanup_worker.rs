@@ -12,8 +12,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::config::parse_enabled;
 use chrono::{DateTime, Utc};
-use runtara_core::config::parse_enabled_env;
 use tokio::sync::Notify;
 use tracing::{debug, error, info, warn};
 
@@ -52,7 +52,11 @@ impl CleanupWorkerConfig {
     /// - `RUNTARA_RUN_DIR_CLEANUP_POLL_INTERVAL_SECS`: seconds between scans (default: 3600)
     /// - `RUNTARA_RUN_DIR_CLEANUP_MAX_AGE_DAYS`: days before run dirs are removed (default: 3)
     pub fn from_env() -> Self {
-        let enabled = parse_enabled_env("RUNTARA_RUN_DIR_CLEANUP_ENABLED");
+        let enabled = parse_enabled(
+            std::env::var("RUNTARA_RUN_DIR_CLEANUP_ENABLED")
+                .ok()
+                .as_deref(),
+        );
 
         let poll_interval_secs = std::env::var("RUNTARA_RUN_DIR_CLEANUP_POLL_INTERVAL_SECS")
             .ok()

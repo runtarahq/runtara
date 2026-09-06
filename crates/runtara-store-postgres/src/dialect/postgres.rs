@@ -113,14 +113,8 @@ impl Dialect for PostgresDialect {
     }
 
     fn sql_get_pending_signal() -> &'static str {
-        "SELECT instance_id, signal_type::text as signal_type, payload, created_at, acknowledged_at \
+        "SELECT instance_id, command_id::text as command_id, signal_type::text as signal_type, payload, created_at, acknowledged_at \
          FROM pending_signals \
-         WHERE instance_id = $1 AND acknowledged_at IS NULL"
-    }
-
-    fn sql_acknowledge_signal() -> &'static str {
-        "UPDATE pending_signals \
-         SET acknowledged_at = NOW() \
          WHERE instance_id = $1 AND acknowledged_at IS NULL"
     }
 

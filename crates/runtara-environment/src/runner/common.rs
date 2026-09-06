@@ -31,7 +31,7 @@ fn truncate_preview(preview: String, max: usize) -> String {
 /// Parse a boolean env var accepting the common opt-in forms: `true/false`,
 /// `1/0`, `yes/no`, `on/off` (case-insensitive). Unknown values are `false`.
 ///
-/// Deliberately the inverse of `runtara_core::config::parse_enabled_env`, which
+/// Deliberately the inverse of `crate::config::parse_enabled`, which
 /// backs the `*_ENABLED` opt-outs: this one guards a setting that must stay off
 /// unless a deployment explicitly asks for it.
 fn parse_bool_lenient(s: &str) -> bool {

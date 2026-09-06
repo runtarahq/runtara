@@ -389,7 +389,7 @@ fn test_acknowledge_cancellation_no_registry() {
     runtara_sdk::reset_cancellation();
 
     // This should not panic even if no SDK is registered
-    runtara_sdk::acknowledge_cancellation();
+    runtara_sdk::acknowledge_cancellation("test-command").unwrap();
 
     // It flips the local flag before trying to reach core, so the ack is
     // observable even with no SDK registered.
@@ -407,7 +407,7 @@ fn test_acknowledge_cancellation_triggers_token() {
     assert!(!runtara_sdk::is_cancelled(), "reset clears the flag");
 
     // Call acknowledge_cancellation - this should trigger local cancellation
-    runtara_sdk::acknowledge_cancellation();
+    runtara_sdk::acknowledge_cancellation("test-command").unwrap();
 
     assert!(
         runtara_sdk::is_cancelled(),
@@ -425,9 +425,9 @@ fn test_acknowledge_cancellation_idempotent() {
     runtara_sdk::reset_cancellation();
 
     // Call multiple times - should not panic
-    runtara_sdk::acknowledge_cancellation();
-    runtara_sdk::acknowledge_cancellation();
-    runtara_sdk::acknowledge_cancellation();
+    runtara_sdk::acknowledge_cancellation("test-command").unwrap();
+    runtara_sdk::acknowledge_cancellation("test-command").unwrap();
+    runtara_sdk::acknowledge_cancellation("test-command").unwrap();
 
     // Repeated acks land on the same terminal state.
     assert!(runtara_sdk::is_cancelled());
@@ -509,7 +509,7 @@ fn test_acknowledge_pause_no_registry() {
     runtara_sdk::reset_cancellation();
 
     // This should not panic even if no SDK is registered
-    runtara_sdk::acknowledge_pause();
+    runtara_sdk::acknowledge_pause("test-command").unwrap();
 
     // Verify we can still call other functions
     assert!(!runtara_sdk::is_cancelled());
@@ -522,9 +522,9 @@ fn test_acknowledge_pause_idempotent() {
     runtara_sdk::reset_cancellation();
 
     // Call multiple times - should not panic
-    runtara_sdk::acknowledge_pause();
-    runtara_sdk::acknowledge_pause();
-    runtara_sdk::acknowledge_pause();
+    runtara_sdk::acknowledge_pause("test-command").unwrap();
+    runtara_sdk::acknowledge_pause("test-command").unwrap();
+    runtara_sdk::acknowledge_pause("test-command").unwrap();
 
     // Should still work after multiple calls
     assert!(!runtara_sdk::is_cancelled());
@@ -539,7 +539,7 @@ fn test_acknowledge_pause_does_not_cancel() {
     assert!(!runtara_sdk::is_cancelled());
 
     // Acknowledge pause
-    runtara_sdk::acknowledge_pause();
+    runtara_sdk::acknowledge_pause("test-command").unwrap();
 
     // The key invariant: unlike acknowledge_cancellation, a pause ack must not
     // touch the cancellation flag.

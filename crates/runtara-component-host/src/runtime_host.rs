@@ -33,11 +33,11 @@ use crate::workflow::WorkflowState;
 
 /// Fully-qualified component import name of the runtime interface.
 ///
-/// Must match `runtara:workflow-runtime@0.1.0`'s `runtime` interface as
+/// Must match `runtara:workflow-runtime@0.2.0`'s `runtime` interface as
 /// emitted into the workflow world by `runtara-workflows::direct_wasm`
 /// (`emit_world_wit`) — the Spike-B integration test asserts a HostImport
 /// composition surfaces exactly this name.
-pub const RUNTIME_INTERFACE_NAME: &str = "runtara:workflow-runtime/runtime@0.1.0";
+pub use runtara_workflow_wit::RUNTIME_INTERFACE_NAME;
 
 /// Checkpoint id the guest runtime component uses for plain `durable-sleep`
 /// (see `runtara-workflow-runtime/src/lib.rs::durable_sleep`). The host glue
@@ -57,6 +57,9 @@ pub struct RuntimeSignalInfo {
     /// One of "cancel" | "pause" | "resume" | "shutdown".
     #[component(name = "signal-type")]
     pub signal_type: String,
+    /// Identity of the delivered lifecycle command.
+    #[component(name = "command-id")]
+    pub command_id: String,
     /// Signal payload bytes.
     pub payload: Vec<u8>,
     /// Checkpoint the signal targets, when scoped.
@@ -147,7 +150,11 @@ pub trait RuntimeHost: Send + Sync {
     ) -> Result<RuntimeCheckpointResult, String>;
     /// React to a pending signal reported by a checkpoint result; true when a
     /// stop-like signal was handled and the guest should return.
-    async fn handle_checkpoint_signal(&self, signal_type: String) -> Result<bool, String>;
+    async fn handle_checkpoint_signal(
+        &self,
+        signal_type: String,
+        command_id: String,
+    ) -> Result<bool, String>;
     /// Record a retry attempt (write-only audit trail).
     async fn record_retry_attempt(
         &self,
@@ -368,9 +375,14 @@ pub fn add_runtime_to_linker(linker: &mut Linker<WorkflowState>) -> anyhow::Resu
 
     inst.func_wrap_async(
         "handle-checkpoint-signal",
-        |mut store: StoreContextMut<'_, WorkflowState>, (signal_type,): (String,)| {
+        |mut store: StoreContextMut<'_, WorkflowState>,
+         (signal_type, command_id): (String, String)| {
             let host = require_host(&mut store);
-            Box::new(async move { Ok((host?.handle_checkpoint_signal(signal_type).await,)) })
+            Box::new(async move {
+                Ok((host?
+                    .handle_checkpoint_signal(signal_type, command_id)
+                    .await,))
+            })
         },
     )?;
 
