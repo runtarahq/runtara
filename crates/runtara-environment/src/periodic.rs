@@ -8,6 +8,17 @@
 //! only in what they logged and which pass they called, so a fix to the loop —
 //! the `biased` that makes shutdown win a ready race, say — had to be made
 //! three times or it was made once and drifted.
+//!
+//! One thing this moved: tracing takes an event's target from `module_path!()`
+//! at the callsite, so the lines emitted here now arrive under
+//! `runtara_environment::periodic` rather than under each worker's own module.
+//! The rendered text is unchanged and still names the worker, and every log
+//! filter in this repo is crate-level (`runtara_environment=info`), so nothing
+//! in tree is affected — but the split is deliberate and worth knowing: a
+//! worker's `disabled` and `started` lines stay behind in its own module
+//! because they carry per-worker configuration fields, while the shutdown,
+//! stopped and pass-failure lines come from here. A module-scoped filter set
+//! on one worker will therefore see it start and not see it stop.
 
 use std::fmt::Display;
 use std::future::Future;
