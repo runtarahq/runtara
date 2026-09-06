@@ -3,19 +3,21 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Result, ensure};
-use runtara_workflow_wit::isolation_package::{Binding, PackageLimits, parse};
+use runtara_workflow_wit::isolation_package::{Binding, InvocationManifest, PackageLimits, parse};
 use serde::{Deserialize, Serialize};
 use wasmtime::{Engine, component::Component};
 
 use super::{MAX_PRECOMPILE_COMPONENT_BYTES, MAX_PRECOMPILED_COMPONENT_BYTES};
 
 const MAGIC: &[u8; 8] = b"RTRNP001";
+const MAGIC_V2: &[u8; 8] = b"RTRNP002";
 
 /// Prepared native definitions; all mutable guest state is still per Store.
 pub struct CompiledWorkflowPackage {
     pub root: Component,
     pub artifacts: BTreeMap<String, Component>,
     pub bindings: Vec<Binding>,
+    pub invocations: Option<InvocationManifest>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -32,10 +34,12 @@ struct Index {
     root_length: usize,
     members: Vec<Member>,
     bindings: Vec<Binding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    invocations: Option<InvocationManifest>,
 }
 
 pub(super) fn is_bundle(bytes: &[u8]) -> bool {
-    bytes.starts_with(MAGIC)
+    bytes.starts_with(MAGIC) || bytes.starts_with(MAGIC_V2)
 }
 
 pub(super) fn precompile(engine: &Engine, source: &[u8]) -> Result<Vec<u8>> {
@@ -79,6 +83,7 @@ pub(super) fn precompile(engine: &Engine, source: &[u8]) -> Result<Vec<u8>> {
         root_length,
         members,
         bindings: package.bindings().values().cloned().collect(),
+        invocations: package.invocations().cloned(),
     })?;
     ensure!(
         index.len() <= MAX_PRECOMPILE_COMPONENT_BYTES,
@@ -90,7 +95,11 @@ pub(super) fn precompile(engine: &Engine, source: &[u8]) -> Result<Vec<u8>> {
         .filter(|n| *n <= MAX_PRECOMPILED_COMPONENT_BYTES)
         .ok_or_else(|| anyhow::anyhow!("precompiled package frame exceeds output limit"))?;
     let mut encoded = Vec::with_capacity(total);
-    encoded.extend_from_slice(MAGIC);
+    encoded.extend_from_slice(if package.invocations().is_some() {
+        MAGIC_V2
+    } else {
+        MAGIC
+    });
     encoded.extend_from_slice(&u32::try_from(index.len())?.to_le_bytes());
     encoded.extend_from_slice(&index);
     for body in bodies {
@@ -103,6 +112,7 @@ struct View<'a> {
     root: &'a [u8],
     members: BTreeMap<String, &'a [u8]>,
     bindings: Vec<Binding>,
+    invocations: Option<InvocationManifest>,
 }
 
 fn decode(bytes: &[u8]) -> Result<View<'_>> {
@@ -124,6 +134,10 @@ fn decode(bytes: &[u8]) -> Result<View<'_>> {
         .filter(|n| *n <= bytes.len())
         .ok_or_else(|| anyhow::anyhow!("truncated precompiled package index"))?;
     let index: Index = serde_json::from_slice(&bytes[12..index_end])?;
+    ensure!(
+        bytes.starts_with(MAGIC_V2) == index.invocations.is_some(),
+        "native invocation authority version mismatch"
+    );
     let bodies = &bytes[index_end..];
     let root = bodies
         .get(..index.root_length)
@@ -174,10 +188,20 @@ fn decode(bytes: &[u8]) -> Result<View<'_>> {
         used.insert(&binding.artifact);
     }
     ensure!(used.len() == members.len(), "unused precompiled member");
+    if let Some(invocations) = &index.invocations {
+        invocations.validate(
+            &index
+                .bindings
+                .iter()
+                .map(|binding| (binding.id.clone(), binding.clone()))
+                .collect(),
+        )?;
+    }
     Ok(View {
         root,
         members,
         bindings: index.bindings,
+        invocations: index.invocations,
     })
 }
 
@@ -189,6 +213,7 @@ pub(super) unsafe fn deserialize(engine: &Engine, bytes: &[u8]) -> Result<Compil
             root: unsafe { Component::deserialize(engine, bytes)? },
             artifacts: BTreeMap::new(),
             bindings: Vec::new(),
+            invocations: None,
         });
     }
     let view = decode(bytes)?;
@@ -203,6 +228,7 @@ pub(super) unsafe fn deserialize(engine: &Engine, bytes: &[u8]) -> Result<Compil
         root,
         artifacts,
         bindings: view.bindings,
+        invocations: view.invocations,
     })
 }
 
@@ -214,6 +240,71 @@ mod tests {
 
     fn root() -> Vec<u8> {
         wat::parse_str("(component)").unwrap()
+    }
+
+    #[test]
+    fn invocation_authority_survives_native_transport_and_cannot_be_silently_dropped() {
+        use runtara_workflow_wit::isolation_package::{AgentCallSite, append_with_invocations};
+        let engine = build_engine(&EngineConfig {
+            cache_dir: None,
+            ..Default::default()
+        })
+        .unwrap();
+        let child = root();
+        let expected = InvocationManifest {
+            version: 1,
+            workflow_id: "root".into(),
+            agent_calls: vec![AgentCallSite {
+                binding: "agent:test".into(),
+                agent_id: "test".into(),
+                capability: "copy".into(),
+                step_id: "s".into(),
+                domains: vec![0, 3],
+            }],
+        };
+        let package = append_with_invocations(
+            &root(),
+            &[&child],
+            vec![Binding {
+                id: "agent:test".into(),
+                artifact: artifact_digest(&child),
+                interface: "test".into(),
+            }],
+            expected.clone(),
+            PackageLimits {
+                total_bytes: 65536,
+                manifest_bytes: 32768,
+                artifacts: 1,
+                bindings: 1,
+            },
+        )
+        .unwrap();
+        let native = precompile(&engine, &package).unwrap();
+        assert!(native.starts_with(MAGIC_V2));
+        // SAFETY: our own engine just produced this entire native response.
+        let loaded = unsafe { deserialize(&engine, &native) }.unwrap();
+        assert_eq!(loaded.invocations, Some(expected));
+        for mode in ["missing", "binding", "version"] {
+            let end = 12 + u32::from_le_bytes(native[8..12].try_into().unwrap()) as usize;
+            let mut index: Index = serde_json::from_slice(&native[12..end]).unwrap();
+            match mode {
+                "missing" => index.invocations = None,
+                "binding" => {
+                    index.invocations.as_mut().unwrap().agent_calls[0].binding =
+                        "agent:other".into()
+                }
+                _ => index.invocations.as_mut().unwrap().version = 2,
+            }
+            let json = serde_json::to_vec(&index).unwrap();
+            let mut changed = MAGIC_V2.to_vec();
+            changed.extend_from_slice(&(json.len() as u32).to_le_bytes());
+            changed.extend_from_slice(&json);
+            changed.extend_from_slice(&native[end..]);
+            assert!(decode(&changed).is_err(), "accepted {mode}");
+        }
+        let mut old_header = native;
+        old_header[..8].copy_from_slice(MAGIC);
+        assert!(decode(&old_header).is_err());
     }
 
     #[test]
@@ -229,6 +320,7 @@ mod tests {
         let loaded = unsafe { deserialize(&engine, &bytes) }.unwrap();
         assert!(loaded.artifacts.is_empty());
         assert!(loaded.bindings.is_empty());
+        assert!(loaded.invocations.is_none());
     }
 
     #[test]

@@ -39,7 +39,10 @@ fn package() -> Vec<u8> {
 }
 
 fn rewritten(mutate: impl FnOnce(&mut Manifest)) -> Vec<u8> {
-    let original = package();
+    rewritten_from(package(), mutate)
+}
+
+fn rewritten_from(original: Vec<u8>, mutate: impl FnOnce(&mut Manifest)) -> Vec<u8> {
     let (_, section) = catalog_section(&original).unwrap().unwrap();
     let len = u32::from_le_bytes(section[..4].try_into().unwrap()) as usize;
     let mut manifest: Manifest = serde_json::from_slice(&section[4..4 + len]).unwrap();
@@ -56,6 +59,100 @@ fn rewritten(mutate: impl FnOnce(&mut Manifest)) -> Vec<u8> {
     write_u32(payload.len() as u32, &mut out);
     out.extend_from_slice(&payload);
     out
+}
+
+fn invocations() -> InvocationManifest {
+    InvocationManifest {
+        version: 1,
+        workflow_id: "workflow::雪".into(),
+        agent_calls: vec![AgentCallSite {
+            binding: "agent:utils".into(),
+            agent_id: "utils".into(),
+            capability: "random-double".into(),
+            step_id: "step::雪".into(),
+            domains: vec![0, 3],
+        }],
+    }
+}
+fn package_v2() -> Vec<u8> {
+    let child = component("utils");
+    append_with_invocations(
+        COMPONENT_HEADER,
+        &[&child],
+        vec![binding("agent:utils", &child)],
+        invocations(),
+        limits(),
+    )
+    .unwrap()
+}
+
+#[test]
+fn invocation_manifest_roundtrips_with_digested_code_and_legacy_encoding_is_unchanged() {
+    let bytes = package_v2();
+    let parsed = parse(&bytes, limits()).unwrap().unwrap();
+    assert_eq!(parsed.invocations(), Some(&invocations()));
+    assert_eq!(parsed.artifacts().len(), 1);
+    assert_eq!(bytes, package_v2());
+    let legacy = package();
+    let legacy_parsed = parse(&legacy, limits()).unwrap().unwrap();
+    assert!(legacy_parsed.invocations().is_none());
+    let (_, section) = catalog_section(&legacy).unwrap().unwrap();
+    let len = u32::from_le_bytes(section[..4].try_into().unwrap()) as usize;
+    let json: serde_json::Value = serde_json::from_slice(&section[4..4 + len]).unwrap();
+    assert_eq!(json["version"], 1);
+    assert!(json.get("invocations").is_none());
+}
+
+#[test]
+fn invocation_authority_versions_references_domains_and_duplicate_identities_are_checked() {
+    for mode in [
+        "version",
+        "absent",
+        "old-envelope",
+        "binding",
+        "agent",
+        "duplicate",
+        "overlap",
+        "domain",
+        "domain-order",
+        "empty",
+    ] {
+        let bytes = rewritten_from(package_v2(), |m| match mode {
+            "absent" => m.invocations = None,
+            "old-envelope" => m.version = 1,
+            _ => {
+                let inv = m.invocations.as_mut().unwrap();
+                match mode {
+                    "version" => inv.version = 2,
+                    "binding" => inv.agent_calls[0].binding = "agent:missing".into(),
+                    "agent" => inv.agent_calls[0].agent_id = "missing".into(),
+                    "duplicate" => inv.agent_calls.push(inv.agent_calls[0].clone()),
+                    "overlap" => {
+                        let mut site = inv.agent_calls[0].clone();
+                        site.domains = vec![4];
+                        inv.agent_calls.push(site);
+                    }
+                    "domain" => inv.agent_calls[0].domains = vec![6],
+                    "domain-order" => inv.agent_calls[0].domains = vec![3, 0],
+                    "empty" => inv.agent_calls.clear(),
+                    _ => unreachable!(),
+                }
+            }
+        });
+        assert!(parse(&bytes, limits()).is_err(), "accepted {mode}");
+    }
+    assert!(
+        parse(
+            &rewritten_from(package_v2(), |m| m
+                .invocations
+                .as_mut()
+                .unwrap()
+                .agent_calls[0]
+                .step_id = "x".repeat(10000)),
+            limits()
+        )
+        .is_err()
+    );
 }
 
 #[test]

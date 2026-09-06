@@ -11,6 +11,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+mod invocation_manifest;
+pub use invocation_manifest::{AgentCallSite, InvocationManifest};
+
 pub const SECTION_NAME: &str = "runtara:isolated-package@1";
 const COMPONENT_HEADER: &[u8; 8] = b"\0asm\x0d\0\x01\0";
 
@@ -44,6 +47,8 @@ struct Manifest {
     version: u32,
     artifacts: Vec<Artifact>,
     bindings: Vec<Binding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    invocations: Option<InvocationManifest>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -76,9 +81,14 @@ pub struct ParsedPackage<'a> {
     pub root: &'a [u8],
     bindings: BTreeMap<String, Binding>,
     artifacts: BTreeMap<String, &'a [u8]>,
+    invocations: Option<InvocationManifest>,
 }
 
 impl<'a> ParsedPackage<'a> {
+    /// Compiler call-site authority covered by the enclosing raw artifact digest.
+    pub fn invocations(&self) -> Option<&InvocationManifest> {
+        self.invocations.as_ref()
+    }
     pub fn bindings(&self) -> &BTreeMap<String, Binding> {
         &self.bindings
     }
@@ -200,7 +210,10 @@ pub fn parse(
         .ok_or(PackageError::InvalidFraming)?;
     let manifest: Manifest = serde_json::from_slice(&section[4..manifest_end])
         .map_err(|_| PackageError::InvalidManifest)?;
-    if manifest.version != 1 {
+    if !matches!(
+        (manifest.version, manifest.invocations.is_some()),
+        (1, false) | (2, true)
+    ) {
         return Err(PackageError::UnsupportedVersion);
     }
     if manifest.artifacts.len() > limits.artifacts || manifest.bindings.len() > limits.bindings {
@@ -243,6 +256,9 @@ pub fn parse(
         return Err(PackageError::InvalidLayout);
     }
     let bindings = checked_bindings(manifest.bindings, &artifacts)?;
+    if let Some(invocations) = &manifest.invocations {
+        invocations.validate(&bindings)?;
+    }
     if bindings
         .values()
         .map(|binding| &binding.artifact)
@@ -256,6 +272,7 @@ pub fn parse(
         root: &bytes[..root_end],
         artifacts,
         bindings,
+        invocations: manifest.invocations,
     }))
 }
 
@@ -265,6 +282,28 @@ pub fn append(
     root: &[u8],
     components: &[&[u8]],
     bindings: Vec<Binding>,
+    limits: PackageLimits,
+) -> Result<Vec<u8>, PackageError> {
+    append_inner(root, components, bindings, None, limits)
+}
+
+/// Version 2 carries compiler invocation authority. Legacy `append` keeps the
+/// exact v1 encoding; older readers reject v2 instead of discarding authority.
+pub fn append_with_invocations(
+    root: &[u8],
+    components: &[&[u8]],
+    bindings: Vec<Binding>,
+    invocations: InvocationManifest,
+    limits: PackageLimits,
+) -> Result<Vec<u8>, PackageError> {
+    append_inner(root, components, bindings, Some(invocations), limits)
+}
+
+fn append_inner(
+    root: &[u8],
+    components: &[&[u8]],
+    bindings: Vec<Binding>,
+    invocations: Option<InvocationManifest>,
     limits: PackageLimits,
 ) -> Result<Vec<u8>, PackageError> {
     if root.len() > limits.total_bytes || bindings.len() > limits.bindings {
@@ -294,6 +333,9 @@ pub fn append(
         }
     }
     let bindings = checked_bindings(bindings, &unique)?;
+    if let Some(invocations) = &invocations {
+        invocations.validate(&bindings)?;
+    }
     let used: BTreeSet<_> = bindings.values().map(|binding| &binding.artifact).collect();
     if used.len() != unique.len() {
         return Err(PackageError::MissingArtifact);
@@ -312,9 +354,10 @@ pub fn append(
         })
         .collect();
     let manifest = serde_json::to_vec(&Manifest {
-        version: 1,
+        version: if invocations.is_some() { 2 } else { 1 },
         artifacts,
         bindings: bindings.into_values().collect(),
+        invocations,
     })
     .map_err(|_| PackageError::InvalidManifest)?;
     if manifest.len() > limits.manifest_bytes {

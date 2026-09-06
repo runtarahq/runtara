@@ -160,6 +160,7 @@ async fn launcher(
     let child = compiled.pop().unwrap();
     let root = compiled.pop().unwrap();
     let package = CompiledWorkflowPackage {
+        invocations: None,
         root,
         artifacts: BTreeMap::from([("fixture-child".into(), child)]),
         bindings: serde_json::from_value(

@@ -325,6 +325,7 @@ fn compiled_package(
     interface: &str,
 ) -> crate::precompile::CompiledWorkflowPackage {
     crate::precompile::CompiledWorkflowPackage {
+        invocations: None,
         root: Component::new(
             fx.executor.engine(),
             r#"(component

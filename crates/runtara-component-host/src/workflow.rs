@@ -555,8 +555,9 @@ impl WorkflowExecutor {
         &self,
         package: crate::precompile::CompiledWorkflowPackage,
     ) -> Result<PreparedWorkflow> {
-        let catalog =
+        let mut catalog =
             PreparedChildCatalog::prepare(&self.linker, package.artifacts, package.bindings)?;
+        catalog.set_invocations(package.invocations)?;
         let mut root = self.prepare_precompiled(package.root).await?;
         if catalog.binding_count() != 0 {
             root.child_catalog = Some(Arc::new(catalog));

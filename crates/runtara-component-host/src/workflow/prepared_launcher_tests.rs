@@ -361,6 +361,7 @@ async fn prepared_root_parent_controls_cancellation_through_real_launcher() {
     let fx = Fixture::new(true);
     let root = Component::new(fx.executor.engine(), parent_wat("")).unwrap();
     let package = crate::precompile::CompiledWorkflowPackage {
+        invocations: None,
         root,
         artifacts: BTreeMap::from([(
             "compiled-child".into(),

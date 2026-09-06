@@ -2,7 +2,7 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use anyhow::{Context, Result, ensure};
-use runtara_workflow_wit::isolation_package::Binding;
+use runtara_workflow_wit::isolation_package::{Binding, InvocationManifest};
 use wasmtime::{
     Engine,
     component::{Component, InstancePre, Linker, types::ComponentItem},
@@ -22,9 +22,24 @@ type ChildPre = Arc<InstancePre<WorkflowState>>;
 pub struct PreparedChildCatalog {
     artifacts: BTreeMap<String, ChildPre>,
     bindings: BTreeMap<String, Binding>,
+    invocations: Option<InvocationManifest>,
 }
 
 impl PreparedChildCatalog {
+    pub(super) fn set_invocations(
+        &mut self,
+        invocations: Option<InvocationManifest>,
+    ) -> Result<()> {
+        if let Some(invocations) = &invocations {
+            invocations.validate(&self.bindings)?;
+        }
+        self.invocations = invocations;
+        Ok(())
+    }
+    /// Compiler invocation authority from the same trusted package as this code.
+    pub fn invocations(&self) -> Option<&InvocationManifest> {
+        self.invocations.as_ref()
+    }
     pub fn artifact_count(&self) -> usize {
         self.artifacts.len()
     }

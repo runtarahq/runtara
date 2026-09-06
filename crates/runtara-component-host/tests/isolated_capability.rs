@@ -10,12 +10,13 @@ use runtara_component_host::{
 };
 
 struct CachedChildScope;
+const CACHE_CALL_PATH: &str = r#"runtara:v2:["agent","cache-test",[],[],["utils","random-double","random"]]:aaaaaaaa:aaaaaaaa"#;
 impl InvocationScopeFactory for CachedChildScope {
     fn prepare_child(
         &self,
         request: &StartRequest,
     ) -> Result<ChildInvocationScope, ExecutionError> {
-        if request.context.path != "cache-test/random" || request.context.attempt != 1 {
+        if request.context.path != CACHE_CALL_PATH || request.context.attempt != 1 {
             return Err(ExecutionError::InvalidContext);
         }
         Ok(ChildInvocationScope {
@@ -176,7 +177,8 @@ async fn prepared_catalog_survives_queue_and_enabled_cache() {
         precompile_artifact,
     };
     use runtara_workflow_wit::isolation_package::{
-        Binding, PackageLimits, append, artifact_digest,
+        AgentCallSite, Binding, InvocationManifest, PackageLimits, append_with_invocations,
+        artifact_digest,
     };
     let engine = build_engine(&EngineConfig {
         cache_dir: None,
@@ -194,14 +196,26 @@ async fn prepared_catalog_survives_queue_and_enabled_cache() {
     )
     .unwrap();
     let child = std::fs::read(component_path("utils")).unwrap();
-    let package = append(
+    let invocations = InvocationManifest {
+        version: 1,
+        workflow_id: "cache-test".into(),
+        agent_calls: vec![AgentCallSite {
+            binding: "agent:utils".into(),
+            agent_id: "utils".into(),
+            capability: "random-double".into(),
+            step_id: "random".into(),
+            domains: vec![0],
+        }],
+    };
+    let package = append_with_invocations(
         &root,
         &[&child],
         vec![Binding {
-            id: "random-child".into(),
+            id: "agent:utils".into(),
             artifact: artifact_digest(&child),
             interface: "runtara:agent-utils/capabilities@0.4.0".into(),
         }],
+        invocations.clone(),
         PackageLimits {
             total_bytes: 8 * 1024 * 1024,
             manifest_bytes: 65536,
@@ -225,6 +239,10 @@ async fn prepared_catalog_survives_queue_and_enabled_cache() {
         .await
         .unwrap();
     executor.cache_prepared(&path, digest, &prepared).await;
+    assert_eq!(
+        prepared.child_catalog().unwrap().invocations(),
+        Some(&invocations)
+    );
     let cached = executor.cached_prepared(&path).await;
     if std::env::var("RUNTARA_PREPARED_COMPONENT_CACHE").unwrap() == "1" {
         let (cached, hash) = cached.unwrap();
@@ -257,11 +275,11 @@ async fn prepared_catalog_survives_queue_and_enabled_cache() {
     let tasks = IsolatedTasks::new(engine, 1, 1024).unwrap();
     let invocation = launcher
         .prepare(StartRequest {
-            binding: "random-child".into(),
+            binding: "agent:utils".into(),
             entry: Entry::Capability("random-double".into()),
             input: b"{}".to_vec(),
             context: InvocationContext {
-                path: "cache-test/random".into(),
+                path: CACHE_CALL_PATH.into(),
                 attempt: 1,
             },
         })
