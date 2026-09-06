@@ -22,8 +22,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::config::parse_enabled;
 use chrono::Utc;
-use runtara_core::config::parse_enabled_env;
 use sqlx::PgPool;
 use tokio::sync::Notify;
 use tracing::{debug, error, info, warn};
@@ -69,7 +69,11 @@ impl ImageCleanupWorkerConfig {
     /// - `RUNTARA_IMAGE_CLEANUP_MAX_AGE_DAYS`: days before stale images are deleted (default: 3)
     /// - `RUNTARA_IMAGE_CLEANUP_BATCH_SIZE`: max images per cycle (default: 50)
     pub fn from_env() -> Self {
-        let enabled = parse_enabled_env("RUNTARA_IMAGE_CLEANUP_ENABLED");
+        let enabled = parse_enabled(
+            std::env::var("RUNTARA_IMAGE_CLEANUP_ENABLED")
+                .ok()
+                .as_deref(),
+        );
 
         let poll_interval_secs = std::env::var("RUNTARA_IMAGE_CLEANUP_POLL_INTERVAL_SECS")
             .ok()

@@ -136,18 +136,14 @@
 //!
 //! # Configuration
 //!
-//! Core owns two knobs, both read by the host through
-//! [`config::RuntimeOverrides::from_env`] and applied to whatever it builds
-//! around the handlers. Unset means "leave the host's own default alone":
-//!
-//! | Variable | Default | Description |
-//! |----------|---------|-------------|
-//! | `RUNTARA_MAX_CONCURRENT_INSTANCES` | uncapped | Max instances in `running` at once. Enforced at `register_instance`; fresh registrations past the cap are refused (`429 Too Many Requests` over HTTP). Neither resumes nor `suspended` instances count against it, so work parked in a durable sleep or a signal-wait never holds the cap closed. Set to `0` to disable. |
-//! | `RUNTARA_CORE_SHUTDOWN_GRACE_MS` | `5000` | How long the host waits for in-flight instance-protocol requests before it stops waiting. Not to be confused with `RUNTARA_SHUTDOWN_GRACE_MS` and `RUNTARA_SHUTDOWN_INTAKE_GRACE_MS`, which belong to the host processes and bound the execution drain that precedes it. |
+//! Hosts pass settings explicitly; core never reads the process environment.
+//! [`instance_handlers::InstanceHandlerState::with_limits`] accepts a concurrency
+//! cap (`0` disables it). Only running instances count, and resumes are exempt.
+//! Transport settings, shutdown grace, and deployment configuration belong to
+//! the host application.
 //!
 //! # Modules
 //!
-//! - [`config`] — Runtime knobs read from environment variables
 //! - [`domain`] — Typed instance statuses, signals, and timeline events
 //! - [`persistence`] — Storage contracts for instances, checkpoints, events, and signals
 //! - [`error`] — Error types and transport-independent classifications
@@ -166,9 +162,6 @@ pub mod persistence;
 
 /// Error types for Core operations with RPC error code mapping.
 pub mod error;
-
-/// Runtime knobs loaded from environment variables.
-pub mod config;
 
 /// Instance protocol handlers (registration, checkpoints, events, signals).
 pub mod instance_handlers;

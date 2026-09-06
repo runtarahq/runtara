@@ -15,7 +15,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use runtara_core::config::RuntimeOverrides;
+use crate::config::RuntimeOverrides;
 use runtara_core::persistence::Persistence;
 use runtara_environment::execution_timeout::ExecutionTimeoutPolicy;
 use runtara_environment::runtime::EnvironmentRuntime;
@@ -39,9 +39,8 @@ pub struct EmbeddedRuntaraConfig {
     /// Optional bind address for runtara-core's HTTP instance API.
     /// When set, an HTTP server is started alongside QUIC for the instance protocol.
     pub core_http_bind_addr: Option<SocketAddr>,
-    /// runtara-core's own environment configuration (concurrency cap, shutdown
-    /// grace). Nothing else here carries it, so without this the embedded core
-    /// runs on builder defaults no matter how the deployment is configured.
+    /// Instance-runtime overrides supplied by the host (concurrency cap and
+    /// shutdown grace). Unset fields preserve the runtime builder's defaults.
     pub core_overrides: RuntimeOverrides,
     /// Bounded active-execution timeout policy shared with the server runtime
     /// client and Environment lifecycle handlers.
@@ -255,11 +254,10 @@ pub async fn create_runtara_pool()
 /// - `RUNTARA_CORE_HTTP_PORT` (default: 8003) - Port for core's instance API
 /// - `DATA_DIR` (default: .data) - Directory for images and instance I/O
 ///
-/// runtara-core's own variables (`RUNTARA_MAX_CONCURRENT_INSTANCES`,
-/// `RUNTARA_CORE_SHUTDOWN_GRACE_MS`) are read here too and applied to the
-/// embedded core. Neither has a default of its own in this host: unset leaves
-/// the runtime's builder default, so the cap stays disabled unless a
-/// deployment asks for one.
+/// The server's instance-runtime variables (`RUNTARA_MAX_CONCURRENT_INSTANCES`,
+/// `RUNTARA_CORE_SHUTDOWN_GRACE_MS`) are read here and applied to the runtime
+/// builder. Unset values preserve the builder's defaults, so the cap stays
+/// disabled unless a deployment asks for one.
 pub async fn maybe_start_embedded(
     execution_timeout_policy: ExecutionTimeoutPolicy,
     event_observer: Option<Arc<dyn runtara_core::instance_handlers::InstanceEventObserver>>,
@@ -273,8 +271,8 @@ pub async fn maybe_start_embedded(
         return Ok(None);
     }
 
-    // Read core's own configuration before opening the pool, so a malformed
-    // value is caught before migrations run rather than after. It aborts the
+    // Read the server's instance-runtime overrides before opening the pool,
+    // so a malformed value is caught before migrations run. It aborts the
     // embedded start, which the caller reports and survives without workflow
     // execution — the same treatment every other failure here gets.
     let core_overrides = RuntimeOverrides::from_env()?;

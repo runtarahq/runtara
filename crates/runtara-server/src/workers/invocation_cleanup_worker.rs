@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use chrono::Utc;
 use runtara_connections::repository::oauth::OAuthRepository;
-use runtara_core::config::parse_enabled_env;
+use runtara_environment::config::parse_enabled;
 use sqlx::PgPool;
 use tracing::{debug, error, info, warn};
 
@@ -56,7 +56,11 @@ impl InvocationCleanupWorkerConfig {
     /// - `RUNTARA_INVOCATION_CLEANUP_METRICS_MAX_AGE_DAYS`: days before metrics are deleted (default: 365)
     /// - `RUNTARA_INVOCATION_CLEANUP_BATCH_SIZE`: max executions per batch (default: 500)
     pub fn from_env() -> Self {
-        let enabled = parse_enabled_env("RUNTARA_INVOCATION_CLEANUP_ENABLED");
+        let enabled = parse_enabled(
+            std::env::var("RUNTARA_INVOCATION_CLEANUP_ENABLED")
+                .ok()
+                .as_deref(),
+        );
 
         let poll_interval_secs = std::env::var("RUNTARA_INVOCATION_CLEANUP_POLL_INTERVAL_SECS")
             .ok()
