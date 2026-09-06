@@ -1259,6 +1259,51 @@ No new migration, guest component or default-path database call is introduced.
 The performance plan now explicitly requires transaction counts/timing, root-lock
 contention, ledger growth/retention, and a separate non-durable zero-ledger-IO check.
 
+## Runtime IO bound to supervised durable attempts
+
+`InvocationIo` now carries an admitted attempt's fence through scoped checkpoint
+reads/writes, retry records, custom events and heartbeats. The explicit
+`ScopedInvocationFactory::prepare_fenced_child` entry point applies the existing
+binding/checkpoint authority and attaches the same object to the child runtime
+and its `TaskLifecycle`. It rejects an IO authority from another persistence
+handle, root or logical path. The ordinary factory entry point still uses live
+scopes and creates no invocation lease.
+
+The lifecycle revalidates the already-admitted start identity before constructing
+a Store, then settles after execution and descendant cleanup. Persisted
+cancellation suppresses a child's attempted success without becoming a storage
+failure. Other persistence failures are sticky: a guest cannot catch an error and
+publish success. Failed admission, IO or cleanup causes settlement to attempt
+root-lease revocation and return host failure. Each control transaction has an
+explicit timeout. If revocation also times out/fails, shutdown remains failed;
+the runner must retain ownership/capacity and retry fencing before release or
+relaunch. Initial admission, uncertain admission replies, root ownership and
+recovery remain the embedding's responsibility.
+
+Fenced sleep uses the shared core polling interval and preserves in-process sleep,
+literal empty checkpoint state, zero-duration behavior and non-consuming command
+polls. Each heartbeat is fenced; cancellation or revocation therefore prevents a
+late heartbeat instead of letting it keep an obsolete attempt alive. A fenced
+heartbeat storage failure stops the attempt and sets its failure latch. No root
+wake or terminal transition is created. Checkpoint responses preserve first-write
+replay and the missing-probe/custom-signal distinction. Event observers run only
+after successful persistence.
+
+Nine new tests cover those runtime semantics, denial of late writes, failure
+latching even when execution returns success, cancellation overriding a caught
+error, bounded control IO under a held database lock, default-path lease absence,
+and real prepared WASM execution through the explicit factory. The WASM test
+also verifies initializer suppression for cancellation/revocation and preservation
+of the factory's authority checks. Verification passed 60 runtime-host tests
+against PostgreSQL, seven scoped-runner tests and 24 emitted isolation tests (91
+total), plus feature-enabled Clippy. Guest components were reused; no guest or WIT
+implementation changed.
+
+Production selection is still pending: trusted compiler durability metadata must
+select the explicit path, the runner must own/revoke root leases, and parent/root
+writes need fencing. These APIs do not yet expose targeted commands, remove E128,
+or complete local-server and performance qualification.
+
 ## Remaining required work
 
 - P0: extend explicit differential selection and invocation-count evidence to all

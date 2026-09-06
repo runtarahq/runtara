@@ -577,3 +577,6 @@ async fn compiler_checkpoint_contracts_bind_real_children_and_persistence() {
 
 #[path = "durable_lifecycle_tests.rs"]
 mod durable_lifecycle_tests;
+
+#[path = "fenced_invocation_tests.rs"]
+mod fenced_invocation_tests;
