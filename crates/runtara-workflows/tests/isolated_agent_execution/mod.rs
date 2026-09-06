@@ -1,5 +1,6 @@
 //! Real emitted workflow -> guest adapter -> prepared fresh child Store.
 use super::*;
+mod cancellation;
 mod selection;
 use runtara_component_host::execution_host::{
     Entry, ExecutionContext, ExecutionError, InvocationLauncher, PreparedInvocation, StartRequest,

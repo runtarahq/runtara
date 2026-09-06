@@ -200,6 +200,14 @@ The underlying notification, task wakeup and atomic race arbitration are generic
 host services. Ancestor cancellation propagates to descendants, while an exact
 attempt command cannot cancel a later retry or a sibling with the same step ID.
 
+Current execution evidence covers the receiving side of this contract: compiled
+WASM handles a native child cancellation as non-retryable, runs its authored
+onError handler, and preserves an unfinished parallel Split sibling. Separate
+coverage proves that root Stop suppresses ordinary recovery publication. These
+tests use live scopes and real hanging HTTP Agents without database transactions.
+The test driver supplies the selected native guard; production command addressing,
+delivery and generated WASM notification selection are still pending.
+
 | Command target/state | Required result |
 |---|---|
 | Active isolated invocation | Record the command, fence the target attempt, stop/join it, then allow the owning WASM handler to continue. |

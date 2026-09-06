@@ -1390,6 +1390,42 @@ The new factory mode is not enabled by the production runner. Runner lease
 ownership/recovery, parent/root write fencing, targeted command routing, final
 server E2E and current-format performance qualification remain required.
 
+## Live cancellation through compiled workflows
+
+Four integration tests now execute compiled DSL, the scoped guest adapter and
+real HTTP Agent components against a controlled local endpoint. They use ordinary
+live child scopes with no invocation ledger or database. The test driver signals
+only the selected child's native cancellation guard; error routing, retry policy,
+Split scheduling and result assembly execute in WASM.
+
+- `emitted_agent_cancellation_uses_wasm_on_error_without_retrying_http` cancels a
+  request waiting for headers with three retries configured. Exactly one request
+  runs, and the authored handler receives `CANCELLED`, category `cancellation` and
+  `retryable: false`.
+- `emitted_agent_unhandled_cancellation_remains_nonretryable` verifies the same
+  invocation count without recovery. It preserves the established root ABI:
+  unhandled Agent errors carry a text prefix and nested JSON envelope in `message`,
+  while the outer error's code/category are empty. Isolation does not change that
+  existing representation.
+- `emitted_parallel_split_recovers_cancelled_item_and_preserves_live_sibling`
+  observes both HTTP requests before cancelling item zero. Both items use the
+  same authored step ID but distinct compiler paths. The sibling cannot receive
+  its response until the target's Store has exited; it then completes normally,
+  and WASM returns the recovered first item and successful second item in input
+  order. A sequential fallback cannot pass this handshake.
+- `emitted_root_stop_bypasses_local_recovery_and_reaps_both_http_children` stops
+  the parent while both requests are pending. Neither endpoint sends a response,
+  the run returns root cancellation, and no ordinary success/failure callback is
+  published. This retains the distinction between stopping one child and the root.
+
+All 28 emitted isolation tests passed, including these four; feature-enabled
+all-target Clippy passed. Existing guest components were reused because this
+change adds only tests and documentation. This is compiled-workflow evidence for
+live cancellation handling, not a shipped targeted Cancel command: activity
+addresses, authenticated command routing/deduplication and the generated WASM
+notification wait/selection remain required. No final application-server E2E or
+new performance measurements ran in this change.
+
 ## Remaining required work
 
 - P0: extend explicit differential selection and invocation-count evidence to all
