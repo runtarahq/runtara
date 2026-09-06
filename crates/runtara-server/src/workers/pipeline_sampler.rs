@@ -469,6 +469,16 @@ impl PipelineLatest {
     }
 }
 
+/// The runtime-database readers the sampler needs, through the repositories
+/// that own those tables.
+#[derive(Clone)]
+pub struct RuntimeReaders {
+    /// Owner of the `instances` row; answers the parked count.
+    pub instances: runtara_environment::instance_repository::InstanceRepository,
+    /// Owner of the durable launch queue; answers the per-stage telemetry.
+    pub launches: runtara_environment::launch_queue::LaunchRepository,
+}
+
 /// What the sampler needs to read the world.
 pub struct SamplerInputs {
     /// Intake counters.
@@ -481,16 +491,15 @@ pub struct SamplerInputs {
     pub valkey: Option<redis::aio::ConnectionManager>,
     /// Trigger stream key and consumer group.
     pub stream: Option<(String, String)>,
-    /// Readers for the two runtime tables this samples, taken from the
-    /// embedded environment rather than built from a pool of our own.
+    /// Readers for the two runtime tables this samples, taken from the embedded
+    /// environment rather than built from a pool of our own.
     ///
-    /// These used to be one `PgPool`, which meant this worker held authority
-    /// over every table in the runtime database in order to run two counts.
-    /// `None` when the embedded environment is disabled, which is what makes
-    /// both readings absent rather than zero.
-    pub instances: Option<runtara_environment::instance_repository::InstanceRepository>,
-    /// See [`Self::instances`].
-    pub launches: Option<runtara_environment::launch_queue::LaunchRepository>,
+    /// This used to be one `PgPool`, which meant the worker held authority over
+    /// every table in the runtime database in order to run two counts. One
+    /// `Option` around both, not one each: they come from the same embedded
+    /// environment and are absent for the same reason, so a half-configured
+    /// sampler should not be representable.
+    pub runtime: Option<RuntimeReaders>,
     /// Tenant whose instances are counted.
     pub tenant_id: String,
     /// Composed admission cap.
@@ -534,8 +543,8 @@ pub async fn run(
         // carry its last value between slow ticks.
         if last_slow.elapsed() >= SLOW_TICK {
             last_slow = Instant::now();
-            parked = match inputs.instances.as_ref() {
-                Some(instances) => count_parked(instances, &inputs.tenant_id).await,
+            parked = match inputs.runtime.as_ref() {
+                Some(runtime) => count_parked(&runtime.instances, &inputs.tenant_id).await,
                 None => None,
             };
         }
@@ -545,8 +554,8 @@ pub async fn run(
         // with no launch owner at all. Read the durable generation state
         // instead, including its queue deadline outcome and the workflows
         // responsible for the current backlog.
-        let launches = match inputs.launches.as_ref() {
-            Some(launches) => count_launch_telemetry(launches, &inputs.tenant_id).await,
+        let launches = match inputs.runtime.as_ref() {
+            Some(runtime) => count_launch_telemetry(&runtime.launches, &inputs.tenant_id).await,
             None => None,
         };
 
@@ -751,12 +760,11 @@ async fn count_parked(
     tenant_id: &str,
 ) -> Option<u64> {
     let started = Instant::now();
-    // The predicate lives with the table now. This used to be a raw
-    // `SELECT COUNT(*) FROM instances` here — a second spelling of a status
-    // the environment crate owns, in a crate that does not own the table.
-    let result = instances
-        .count_by_status_unbounded(tenant_id, &["suspended".to_string()])
-        .await;
+    // Both the predicate and the vocabulary live with the table now. This used
+    // to be a raw `SELECT COUNT(*) FROM instances ... status = 'suspended'`
+    // here — the query and the status name both spelled in a crate that owns
+    // neither.
+    let result = instances.count_parked(tenant_id).await;
 
     match result {
         Ok(count) => {

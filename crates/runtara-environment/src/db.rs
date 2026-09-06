@@ -245,9 +245,13 @@ pub async fn count_instances_by_status_unbounded(
     tenant_id: &str,
     statuses: &[String],
 ) -> Result<i64, sqlx::Error> {
-    // Same predicate and the same `idx_instances_status` plan as the capped
-    // form, minus the LIMIT subquery — so the two cannot drift apart on which
-    // rows they consider.
+    // Same predicate as the capped form minus its LIMIT subquery, so the two
+    // cannot drift apart on which rows they consider. Not the same plan,
+    // though: `idx_instances_status` is a plain index on `status`, and the
+    // caller that wants this asks for `suspended` — the value that dominates
+    // the table — so the planner will reasonably prefer a sequential scan.
+    // That cost is the point of the ceiling on the capped form, and the reason
+    // this one belongs on a slow tick behind a slow-query warning.
     let count: (i64,) = sqlx::query_as(
         r#"
         SELECT COUNT(*)

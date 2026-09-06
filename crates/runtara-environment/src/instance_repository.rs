@@ -292,6 +292,24 @@ impl InstanceRepository {
         Ok(crate::db::count_instances_by_status_unbounded(&self.pool, tenant_id, statuses).await?)
     }
 
+    /// How many of a tenant's instances are parked.
+    ///
+    /// Which statuses count as parked is this crate's knowledge, so it is
+    /// spelled here rather than at the call site: a viewer asking "how many are
+    /// waiting" should not have to know that the answer is `suspended`, and a
+    /// server crate holding that literal is a second spelling of a vocabulary
+    /// it does not own.
+    ///
+    /// Unbounded, and deliberately so — see [`Self::count_by_status_unbounded`]
+    /// for what that costs.
+    pub async fn count_parked(&self, tenant_id: &str) -> Result<i64> {
+        self.count_by_status_unbounded(
+            tenant_id,
+            &[crate::core_types::status_name(InstanceStatus::Suspended).to_string()],
+        )
+        .await
+    }
+
     /// Record what the process used, and read back the status the guest
     /// reported, in one statement.
     ///

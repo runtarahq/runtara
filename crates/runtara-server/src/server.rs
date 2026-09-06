@@ -1726,12 +1726,12 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             // Readers for the runtime database, where `instances` and
             // `instance_launches` live — not the server pool that most of this
             // function passes around.
-            instances: embedded_runtara
+            runtime: embedded_runtara
                 .as_ref()
-                .map(|r| r.environment_state().instances()),
-            launches: embedded_runtara
-                .as_ref()
-                .map(|r| r.environment_state().launches()),
+                .map(|r| workers::pipeline_sampler::RuntimeReaders {
+                    instances: r.environment_state().instances(),
+                    launches: r.environment_state().launches(),
+                }),
             tenant_id: tenant_id.clone(),
             admission_limit: config::max_concurrent_executions() as u64,
             engine: Some(Arc::clone(&execution_engine)),
