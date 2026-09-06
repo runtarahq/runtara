@@ -44,6 +44,7 @@ mod prepared_catalog;
 pub use prepared_catalog::PreparedChildCatalog;
 
 use crate::engine::EPOCH_TICK;
+use crate::execution_host::{ExecutionContext, ExecutionView};
 use crate::host_io::{DEFAULT_HTTP_TIMEOUT, HostIoContext};
 
 /// Outgoing-body stream tuning, kept identical to the flags `WasmRunner`
@@ -153,8 +154,14 @@ enum InvocationEntry<'a> {
     Capability {
         interface: &'a str,
         capability: &'a str,
-        cancellation: crate::isolated_tasks::TaskCancellation,
     },
+}
+
+#[derive(Default)]
+struct InvocationControl {
+    task_cancel: Option<crate::isolated_tasks::TaskCancellation>,
+    abandoned: Option<Arc<AtomicBool>>,
+    execution: Option<Arc<ExecutionContext>>,
 }
 
 /// One final durable handoff confirmation immediately before guest
@@ -255,8 +262,19 @@ pub struct WorkflowState {
     /// Present when the artifact imports the runtime interface (HostImport
     /// binding); `None` for legacy composed artifacts.
     runtime: Option<Arc<dyn crate::runtime_host::RuntimeHost>>,
+    execution: Option<Arc<ExecutionContext>>,
     connection_resolver:
         Result<Arc<dyn crate::connection_resolver_host::ConnectionResolverHost>, String>,
+}
+
+impl ExecutionView for WorkflowState {
+    fn execution_table(&mut self) -> &mut ResourceTable {
+        &mut self.table
+    }
+
+    fn execution_context(&self) -> Option<&Arc<ExecutionContext>> {
+        self.execution.as_ref()
+    }
 }
 
 impl HostIoContext for WorkflowState {
@@ -385,6 +403,7 @@ impl WorkflowExecutor {
         // Concurrent HTTP hop for agent requests (wasip3 route (b)) — bound
         // func_wrap_concurrent so parallel Split subtasks overlap their I/O.
         crate::host_io::add_host_io_to_linker(&mut linker)?;
+        crate::execution_host::add_execution_to_linker(&mut linker)?;
         Ok(Self {
             engine,
             linker,
@@ -664,6 +683,7 @@ impl WorkflowExecutor {
             },
             termination: None,
             runtime: spec.runtime.clone(),
+            execution: None,
             connection_resolver: crate::connection_resolver_host::resolver_from_env(&spec.env),
         };
 
@@ -804,6 +824,7 @@ impl WorkflowExecutor {
             input,
             start_confirmation,
             InvocationEntry::Lifecycle,
+            InvocationControl::default(),
         )
         .await
     }
@@ -820,6 +841,20 @@ impl WorkflowExecutor {
         call: CapabilityInvocation<'_>,
         cancellation: crate::isolated_tasks::TaskCancellation,
     ) -> InvokeRunResult {
+        self.execute_isolated_capability_with_context(pre, spec, call, cancellation, None)
+            .await
+    }
+
+    /// Capability entry with its own descendant scope. The owning task must
+    /// retain `execution.into_cleanup()` outside this cancellable future.
+    pub async fn execute_isolated_capability_with_context(
+        &self,
+        pre: &wasmtime::component::InstancePre<WorkflowState>,
+        spec: WorkflowRunSpec,
+        call: CapabilityInvocation<'_>,
+        cancellation: crate::isolated_tasks::TaskCancellation,
+        execution: Option<Arc<ExecutionContext>>,
+    ) -> InvokeRunResult {
         self.execute_entry(
             pre,
             spec,
@@ -828,7 +863,38 @@ impl WorkflowExecutor {
             InvocationEntry::Capability {
                 interface: call.interface,
                 capability: call.capability,
-                cancellation,
+            },
+            InvocationControl {
+                task_cancel: Some(cancellation),
+                execution,
+                ..Default::default()
+            },
+        )
+        .await
+    }
+
+    /// Lifecycle entry for an isolated child graph. Root cancellation and the
+    /// task token both apply before initialization and throughout execution.
+    /// The caller supplies scoped runtime authority and separately owns cleanup
+    /// of `execution`; dropping this future alone cannot await descendants.
+    pub async fn execute_isolated_workflow(
+        &self,
+        pre: &wasmtime::component::InstancePre<WorkflowState>,
+        spec: WorkflowRunSpec,
+        input: Vec<u8>,
+        cancellation: crate::isolated_tasks::TaskCancellation,
+        execution: Option<Arc<ExecutionContext>>,
+    ) -> InvokeRunResult {
+        self.execute_entry(
+            pre,
+            spec,
+            input,
+            None,
+            InvocationEntry::Lifecycle,
+            InvocationControl {
+                task_cancel: Some(cancellation),
+                execution,
+                ..Default::default()
             },
         )
         .await
@@ -841,6 +907,7 @@ impl WorkflowExecutor {
         input: Vec<u8>,
         start_confirmation: Option<Arc<dyn WorkflowStartConfirmation>>,
         entry: InvocationEntry<'_>,
+        control: InvocationControl,
     ) -> InvokeRunResult {
         // Keep the externally reported duration, but do not begin the active
         // guest timeout until the runner has durably crossed its start gate.
@@ -879,6 +946,7 @@ impl WorkflowExecutor {
             },
             termination: None,
             runtime: spec.runtime.clone(),
+            execution: control.execution,
             connection_resolver: crate::connection_resolver_host::resolver_from_env(&spec.env),
         };
 
@@ -886,16 +954,18 @@ impl WorkflowExecutor {
         store.limiter(|s| &mut s.limiter);
 
         let timeout = spec.timeout;
-        let task_cancel = match &entry {
-            InvocationEntry::Lifecycle => None,
-            InvocationEntry::Capability { cancellation, .. } => Some(cancellation.clone()),
-        };
+        let task_cancel = control.task_cancel;
+        let abandoned = control.abandoned;
+        let epoch_abandoned = abandoned.clone();
         let epoch_task_cancel = task_cancel.clone();
         let cancel = spec.cancel.clone();
         store.epoch_deadline_callback(move |mut ctx| {
             if cancel
                 .as_ref()
                 .is_some_and(|flag| flag.load(Ordering::Relaxed))
+                || epoch_abandoned
+                    .as_ref()
+                    .is_some_and(|flag| flag.load(Ordering::Acquire))
                 || epoch_task_cancel
                     .as_ref()
                     .is_some_and(|token| token.is_requested())
@@ -937,6 +1007,9 @@ impl WorkflowExecutor {
                             .cancel
                             .as_ref()
                             .is_some_and(|flag| flag.load(Ordering::Relaxed))
+                            || abandoned
+                                .as_ref()
+                                .is_some_and(|flag| flag.load(Ordering::Acquire))
                             || task_cancel
                                 .as_ref()
                                 .is_some_and(|token| token.is_requested())
@@ -1018,6 +1091,9 @@ impl WorkflowExecutor {
                         if watchdog_cancel
                             .as_ref()
                             .is_some_and(|flag| flag.load(Ordering::Relaxed))
+                            || abandoned
+                                .as_ref()
+                                .is_some_and(|flag| flag.load(Ordering::Acquire))
                             || task_cancel
                                 .as_ref()
                                 .is_some_and(|token| token.is_requested())
@@ -1107,6 +1183,7 @@ impl WorkflowExecutor {
             },
             termination: None,
             runtime: None,
+            execution: None,
             connection_resolver: Err(
                 "connection resolution is unavailable for direct capability invocation".to_string(),
             ),
@@ -1361,3 +1438,6 @@ mod tests {
 #[cfg(test)]
 #[path = "workflow/isolated_capability_tests.rs"]
 mod isolated_capability_tests;
+
+#[path = "workflow/scoped_execution.rs"]
+mod scoped_execution;

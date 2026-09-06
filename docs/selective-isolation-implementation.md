@@ -165,8 +165,9 @@ The complete component-host suite with both integration/PoC features passed
 **96 tests**, with one manual benchmark ignored; focused all-target Clippy passed
 for both component-host and the WIT crate.
 
-This is the execution ABI and its host adapter. The production root Store still
-needs context wiring and a real scoped launcher/runtime adapter. The descendant
+This chunk established the execution ABI and its host adapter. The production
+root Store wiring is described below; a real scoped launcher/runtime adapter
+is still required. The descendant
 cleanup primitive described below is available for that wiring. Aggregate input/transport/guest
 memory accounting is also still required; the handle quota does not replace it.
 No DSL backend or production linker default has been enabled by this chunk.
@@ -201,11 +202,45 @@ The production launcher must still construct and register these child scopes;
 no generated workflow is using the new execution ABI yet. This primitive does
 not implement durable attempt fencing or native blocking-work interruption.
 
+### Production Store context and supervised root execution
+
+The production `WorkflowState` now implements the execution-resource view and
+`WorkflowExecutor` links the versioned task interface. Existing entry points
+retain an absent launcher. `execute_invoke_with_context` enables an externally
+owned context for one root run; `execute_isolated_workflow` and
+`execute_isolated_capability_with_context` accept separate child contexts and
+preserve both root and task cancellation guards.
+
+The context-enabled root runs under an owned supervisor. The supervisor joins
+the root worker, then awaits descendant shutdown, then returns the outcome and
+elapsed duration. A successful or suspended guest result cannot bypass cleanup.
+Worker panic or cleanup failure becomes a root host failure. Dropping the caller
+future requests interruption through an epoch flag and an asynchronous wake;
+the supervisor continues cleanup even when the root was waiting at its durable
+start-confirmation gate. Child entry points deliberately leave descendant cleanup
+with their owning task supervisor, outside the cancellable execution future.
+
+Nine new tests execute canonical parent WASM through the production linker and
+runner. They cover guest-driven cancellation and recovery, unreleased children
+on successful return/trap, cleanup barriers and failure, CPU timeout, root cancel
+while joining, caller abandonment, closed/panicked/abandoned start gates,
+pre-start cancellation, legacy unavailable context, and isolated lifecycle entry
+with both task and root cancellation. The launcher in these new tests uses
+controlled futures; existing real HTTP/utils component tests also passed in the
+full **111-test component-host suite**. Focused all-target Clippy passed.
+
+The server/environment launch path still needs to construct the real scoped
+launcher/runtime adapter and select this context-enabled entry point for isolated
+artifacts. Its admission permit and durable launch ownership must survive until
+tree teardown is confirmed, including caller abandonment; supervision inside
+component-host alone does not transfer ownership of those external resources.
+No compiler backend or runtime default is enabled by this change.
+
 ## Remaining required work
 
 - P0: add explicit legacy/isolated differential selection and coverage counters.
-- P1: production root/child context wiring, aggregate input/transport/guest
-  resource reservations and integration of scoped tree teardown.
+- P1: production scoped launcher and environment ownership integration, aggregate
+  input/transport/guest resource reservations and root fencing on cleanup failure.
 - P2: sequential/parallel Agent call backend and every AI auxiliary invocation,
   preserving package state eligibility and existing invocation semantics.
 - P3: recursive Embed extraction and scoped child runtime, suspension/wake sets,
