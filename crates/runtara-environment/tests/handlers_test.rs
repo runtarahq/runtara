@@ -2266,7 +2266,7 @@ async fn cancel_signal_terminalizes_a_parked_instance_without_a_guest() {
 async fn every_stored_status_reads_back_as_itself() {
     skip_if_no_db!();
     let pool = get_test_pool().await;
-    let state = create_test_state(pool.clone(), std::env::temp_dir());
+    let instances = InstanceRepository::new(pool.clone());
     let persistence = PostgresPersistence::new(pool.clone());
     let tenant_id = format!("status-tenant-{}", Uuid::new_v4());
 
@@ -2298,7 +2298,7 @@ async fn every_stored_status_reads_back_as_itself() {
     }
 
     for (instance_id, expected) in &created {
-        let one = InstanceRepository::new(pool.clone())
+        let one = instances
             .detail(instance_id)
             .await
             .expect("status read must succeed")
@@ -2309,7 +2309,7 @@ async fn every_stored_status_reads_back_as_itself() {
         );
     }
 
-    let page = InstanceRepository::new(pool.clone())
+    let page = instances
         .list(&db::ListInstancesOptions {
             tenant_id: Some(tenant_id.clone()),
             limit: 100,
