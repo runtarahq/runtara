@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tracing::{debug, error, info, instrument, warn};
 
-use runtara_core::persistence::{CompleteInstanceParams, Persistence};
+use runtara_core::persistence::{CompleteInstanceParams, PairedRecordStatus, Persistence};
 
 use crate::container_registry::ContainerRegistry;
 use crate::db;
@@ -1637,7 +1637,7 @@ pub struct InstanceStatusResponse {
     /// Instance id (echoed even when not found).
     pub instance_id: String,
     /// Lifecycle status.
-    pub status: Option<String>,
+    pub status: Option<CoreInstanceStatus>,
     /// Owning tenant.
     pub tenant_id: Option<String>,
     /// Image the instance was launched from.
@@ -1714,7 +1714,9 @@ pub async fn handle_get_instance_status(
 
     Ok(InstanceStatusResponse {
         found: true,
-        status: Some(inst.status),
+        status: Some(runtara_store_postgres::encoding::status_from_str(
+            &inst.status,
+        )?),
         tenant_id: Some(inst.tenant_id),
         instance_id: inst.instance_id,
         image_id: inst.image_id,
@@ -1748,7 +1750,7 @@ pub struct InstanceSummary {
     /// Human-readable name of the image the instance was launched from.
     pub image_name: Option<String>,
     /// Lifecycle status.
-    pub status: String,
+    pub status: CoreInstanceStatus,
     /// Creation time.
     pub created_at: DateTime<Utc>,
     /// First-run start time.
@@ -1804,18 +1806,20 @@ pub async fn handle_list_instances(
     Ok(ListInstancesResult {
         instances: instances
             .into_iter()
-            .map(|inst| InstanceSummary {
-                instance_id: inst.instance_id,
-                tenant_id: inst.tenant_id,
-                image_id: inst.image_id,
-                image_name: inst.image_name,
-                status: inst.status,
-                created_at: inst.created_at,
-                started_at: inst.started_at,
-                finished_at: inst.finished_at,
-                has_error: inst.error.is_some(),
+            .map(|inst| {
+                Ok(InstanceSummary {
+                    status: runtara_store_postgres::encoding::status_from_str(&inst.status)?,
+                    instance_id: inst.instance_id,
+                    tenant_id: inst.tenant_id,
+                    image_id: inst.image_id,
+                    image_name: inst.image_name,
+                    created_at: inst.created_at,
+                    started_at: inst.started_at,
+                    finished_at: inst.finished_at,
+                    has_error: inst.error.is_some(),
+                })
             })
-            .collect(),
+            .collect::<Result<Vec<_>>>()?,
         total_count,
     })
 }
@@ -2134,8 +2138,8 @@ pub struct StepSummary {
     pub step_name: Option<String>,
     /// Step type.
     pub step_type: String,
-    /// `running`, `completed` or `failed`.
-    pub status: String,
+    /// Whether the step is still open, closed cleanly, or closed failing.
+    pub status: PairedRecordStatus,
     /// Start time.
     pub started_at: DateTime<Utc>,
     /// Completion time.
@@ -2177,8 +2181,6 @@ pub async fn handle_list_step_summaries(
     limit: i64,
     offset: i64,
 ) -> Result<ListStepSummariesResult> {
-    use runtara_core::persistence::PairedRecordStatus;
-
     if instance_id.is_empty() {
         return Err(crate::error::Error::InvalidRequest(
             "instance_id is required".to_string(),
@@ -2204,12 +2206,7 @@ pub async fn handle_list_step_summaries(
         steps: steps
             .into_iter()
             .map(|step| StepSummary {
-                status: match step.status {
-                    PairedRecordStatus::Running => "running",
-                    PairedRecordStatus::Completed => "completed",
-                    PairedRecordStatus::Failed => "failed",
-                }
-                .to_string(),
+                status: step.status,
                 step_id: step.correlation_id,
                 step_name: step.label,
                 step_type: step.kind,

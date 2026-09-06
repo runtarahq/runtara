@@ -12,8 +12,9 @@ use runtara_environment::container_registry::{ContainerInfo, ContainerRegistry};
 use runtara_environment::db;
 use runtara_environment::handlers::{
     DrainController, EnvironmentHandlerState, MAX_METRIC_BUCKETS, ResumeInstanceRequest,
-    StartInstanceRequest, StartRejection, StopInstanceRequest, handle_get_tenant_metrics,
-    handle_resume_instance, handle_start_instance, handle_stop_instance, spawn_container_monitor,
+    StartInstanceRequest, StartRejection, StopInstanceRequest, handle_get_instance_status,
+    handle_get_tenant_metrics, handle_list_instances, handle_resume_instance,
+    handle_start_instance, handle_stop_instance, spawn_container_monitor,
 };
 use runtara_environment::launch_dispatcher::LaunchLifecycleObservers;
 use runtara_environment::launch_queue::{LaunchKind, LaunchRepository, LaunchState};
@@ -2252,4 +2253,91 @@ async fn cancel_signal_terminalizes_a_parked_instance_without_a_guest() {
             .unwrap()
             .is_none()
     );
+}
+
+/// Every status the column can hold survives both read paths as itself.
+///
+/// These crossed as `String` until the reader turned them back into an enum,
+/// and that reader carried two arms it could never take — a `"sleeping"` alias
+/// belonging to `termination_reason`, and an `_ => Unknown` catch-all. Walking
+/// the real enum against the real column is what says the six labels are the
+/// whole set, which is the fact those arms got wrong.
+#[tokio::test]
+async fn every_stored_status_reads_back_as_itself() {
+    skip_if_no_db!();
+    let pool = get_test_pool().await;
+    let state = create_test_state(pool.clone(), std::env::temp_dir());
+    let persistence = PostgresPersistence::new(pool.clone());
+    let tenant_id = format!("status-tenant-{}", Uuid::new_v4());
+
+    // Pending is the state `register_instance` establishes; the rest are
+    // reached by moving an instance into them.
+    let statuses = [
+        CoreInstanceStatus::Pending,
+        CoreInstanceStatus::Running,
+        CoreInstanceStatus::Suspended,
+        CoreInstanceStatus::Completed,
+        CoreInstanceStatus::Failed,
+        CoreInstanceStatus::Cancelled,
+    ];
+
+    let mut created = Vec::new();
+    for status in statuses {
+        let instance_id = format!("status-{status:?}-{}", Uuid::new_v4());
+        persistence
+            .register_instance(&instance_id, &tenant_id)
+            .await
+            .expect("register instance");
+        if status != CoreInstanceStatus::Pending {
+            persistence
+                .update_instance_status(&instance_id, status, None)
+                .await
+                .expect("move to status");
+        }
+        created.push((instance_id, status));
+    }
+
+    for (instance_id, expected) in &created {
+        let one = handle_get_instance_status(&state, instance_id)
+            .await
+            .expect("status read must succeed");
+        assert!(one.found, "{instance_id} must exist");
+        assert_eq!(
+            one.status,
+            Some(*expected),
+            "get_instance_status must report the stored status for {instance_id}"
+        );
+    }
+
+    let page = handle_list_instances(
+        &state,
+        &db::ListInstancesOptions {
+            tenant_id: Some(tenant_id.clone()),
+            limit: 100,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("list must succeed");
+
+    assert_eq!(
+        page.instances.len(),
+        statuses.len(),
+        "the tenant is isolated to this test, so every instance must come back"
+    );
+    for (instance_id, expected) in &created {
+        let listed = page
+            .instances
+            .iter()
+            .find(|i| &i.instance_id == instance_id)
+            .expect("every created instance must be listed");
+        assert_eq!(
+            listed.status, *expected,
+            "list_instances must report the stored status for {instance_id}"
+        );
+    }
+
+    for (instance_id, _) in &created {
+        cleanup(&pool, Some(instance_id), None).await;
+    }
 }

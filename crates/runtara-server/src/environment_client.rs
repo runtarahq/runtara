@@ -7,12 +7,12 @@
 //! [`runtara_environment::handlers`] as functions. There is no socket, no JSON
 //! round trip, and nothing to connect to or reconnect to.
 //!
-//! What remains is the shape conversion the old HTTP client did after
-//! deserializing: environment reports statuses as strings and bodies as the
-//! bytes it stored, and [`crate::runtime_types`] holds the richer forms the
-//! server's handlers want (enums, parsed JSON). Timestamps and bodies no longer
-//! round-trip through epoch milliseconds and base64 — environment hands over
-//! the `DateTime<Utc>` and the `Vec<u8>` it read.
+//! What remains is a vocabulary translation, not a shape conversion.
+//! Environment answers in `runtara-core`'s terms — `DateTime<Utc>`, the bytes
+//! it stored, core's own status enums — and [`crate::runtime_types`] holds the
+//! forms the server's handlers speak. Nothing round-trips through epoch
+//! milliseconds, base64 or status strings any more; the mappings left here are
+//! total, so no reading of a stored row can fall through one.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -110,7 +110,10 @@ impl EnvironmentClient {
             image_id: json.image_id.unwrap_or_default(),
             image_name: json.image_name.unwrap_or_default(),
             tenant_id: json.tenant_id.unwrap_or_default(),
-            status: instance_status_from_string(json.status.as_deref().unwrap_or("unknown")),
+            status: json
+                .status
+                .map(instance_status_from_core)
+                .unwrap_or(InstanceStatus::Unknown),
             checkpoint_id: json.checkpoint_id,
             // `created_at` is NOT NULL and the handler fills it whenever the
             // instance exists, which the `found` check above has already
@@ -167,7 +170,7 @@ impl EnvironmentClient {
                     tenant_id: inst.tenant_id,
                     image_id: inst.image_id.unwrap_or_default(),
                     image_name: inst.image_name.unwrap_or_default(),
-                    status: instance_status_from_string(&inst.status),
+                    status: instance_status_from_core(inst.status),
                     created_at: inst.created_at,
                     started_at: inst.started_at,
                     finished_at: inst.finished_at,
@@ -628,7 +631,7 @@ impl EnvironmentClient {
                     step_id: step.step_id,
                     step_name: step.step_name,
                     step_type: step.step_type,
-                    status: step_status_from_string(&step.status),
+                    status: step_status_from_core(step.status),
                     started_at: step.started_at,
                     completed_at: step.completed_at,
                     duration_ms: step.duration_ms,
@@ -754,15 +757,24 @@ fn image_summary(img: runtara_environment::handlers::ImageSummary) -> ImageSumma
     }
 }
 
-fn instance_status_from_string(s: &str) -> InstanceStatus {
-    match s {
-        "pending" => InstanceStatus::Pending,
-        "running" => InstanceStatus::Running,
-        "suspended" | "sleeping" => InstanceStatus::Suspended,
-        "completed" => InstanceStatus::Completed,
-        "failed" => InstanceStatus::Failed,
-        "cancelled" => InstanceStatus::Cancelled,
-        _ => InstanceStatus::Unknown,
+/// Core's lifecycle status in the server's vocabulary.
+///
+/// Total, so nothing falls through. The string version this replaces carried
+/// two arms that could never be taken: `instance_status` is a six-label
+/// Postgres enum declared in `001_initial_schema.sql` and never altered since,
+/// so the `"sleeping"` alias (a `termination_reason` label, a different column)
+/// and the `_ => Unknown` catch-all were both unreachable. `Unknown` stays in
+/// the server's own enum for callers that model "not observed yet"; no
+/// conversion produces it from a stored row.
+fn instance_status_from_core(status: runtara_core::domain::InstanceStatus) -> InstanceStatus {
+    use runtara_core::domain::InstanceStatus as Core;
+    match status {
+        Core::Pending => InstanceStatus::Pending,
+        Core::Running => InstanceStatus::Running,
+        Core::Suspended => InstanceStatus::Suspended,
+        Core::Completed => InstanceStatus::Completed,
+        Core::Failed => InstanceStatus::Failed,
+        Core::Cancelled => InstanceStatus::Cancelled,
     }
 }
 
@@ -792,11 +804,12 @@ fn list_instances_options(options: &ListInstancesOptions) -> db::ListInstancesOp
     }
 }
 
-fn step_status_from_string(s: &str) -> StepStatus {
-    match s {
-        "completed" => StepStatus::Completed,
-        "failed" => StepStatus::Failed,
-        _ => StepStatus::Running,
+fn step_status_from_core(status: runtara_core::persistence::PairedRecordStatus) -> StepStatus {
+    use runtara_core::persistence::PairedRecordStatus as Core;
+    match status {
+        Core::Running => StepStatus::Running,
+        Core::Completed => StepStatus::Completed,
+        Core::Failed => StepStatus::Failed,
     }
 }
 
