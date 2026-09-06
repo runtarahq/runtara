@@ -922,6 +922,7 @@ mod tests {
         crate::persistence::conformance::run_conformance_sequence(&backend).await;
         crate::persistence::conformance::run_lifecycle_command_sequence(&backend).await;
         crate::persistence::conformance::run_parked_cancellation_sequence(&backend).await;
+        crate::persistence::conformance::run_lifecycle_policy_matrix(&backend).await;
     }
 
     fn foreign_vocabulary() -> EventVocabulary {

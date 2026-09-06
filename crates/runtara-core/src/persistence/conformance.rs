@@ -1151,3 +1151,192 @@ pub async fn run_parked_cancellation_sequence<P: Persistence>(backend: &P) {
         "recovery discovers parked cancellation without a sleep deadline"
     );
 }
+
+/// Observable lifecycle matrix shared by every backend. Expected values are
+/// specified independently of the pure policy implementation.
+pub async fn run_lifecycle_policy_matrix<P: Persistence>(backend: &P) {
+    use crate::{
+        domain::{InstanceStatus as S, SignalType as K},
+        lifecycle::{Decision, ParkReason, ParkRequest},
+    };
+    let statuses = [
+        S::Pending,
+        S::Running,
+        S::Suspended,
+        S::Completed,
+        S::Failed,
+        S::Cancelled,
+    ];
+    let kinds = [K::Cancel, K::Pause, K::Resume, K::Shutdown];
+    for status in statuses {
+        for kind in kinds {
+            let id = Uuid::new_v4().to_string();
+            backend
+                .register_instance(&id, "policy-matrix")
+                .await
+                .unwrap();
+            backend
+                .complete_instance(
+                    CompleteInstanceParams::new(&id, status)
+                        .with_output(b"previous-output")
+                        .with_error("previous-error")
+                        .with_termination("crashed", Some(91))
+                        .with_checkpoint("previous-checkpoint"),
+                )
+                .await
+                .unwrap();
+            backend.insert_signal(&id, kind, b"payload").await.unwrap();
+            let command = backend.get_pending_signal(&id).await.unwrap().unwrap();
+            let before = backend.get_instance(&id).await.unwrap().unwrap();
+            let decision = backend
+                .apply_lifecycle_command(&id, &command.command_id, kind)
+                .await
+                .unwrap();
+            let rejects =
+                matches!(status, S::Completed | S::Failed | S::Cancelled) && kind != K::Cancel;
+            if rejects {
+                assert_eq!(decision, Decision::Rejected);
+            } else {
+                assert!(matches!(decision, Decision::Applied(_)));
+            }
+            let after = backend.get_instance(&id).await.unwrap().unwrap();
+            let expected_status = if rejects {
+                status
+            } else {
+                match kind {
+                    K::Cancel => S::Cancelled,
+                    K::Pause | K::Shutdown => S::Suspended,
+                    K::Resume => status,
+                }
+            };
+            assert_eq!(after.status, expected_status, "{status:?} + {kind:?}");
+            let reason = if rejects {
+                Some("crashed")
+            } else {
+                match kind {
+                    K::Pause => None,
+                    K::Shutdown => Some("shutdown_requested"),
+                    _ => Some("crashed"),
+                }
+            };
+            assert_eq!(after.termination_reason.as_deref(), reason);
+            assert_eq!(after.output, before.output);
+            assert_eq!(after.error, before.error);
+            assert_eq!(after.exit_code, before.exit_code);
+            assert_eq!(after.checkpoint_id, before.checkpoint_id);
+            assert_eq!(after.sleep_until.is_some(), !rejects && kind == K::Shutdown);
+            let event_count = backend
+                .count_events(&id, &ListEventsFilter::default())
+                .await
+                .unwrap();
+            assert_eq!(
+                event_count,
+                i64::from(!rejects && matches!(kind, K::Pause | K::Shutdown))
+            );
+            if !rejects {
+                assert!(backend.get_pending_signal(&id).await.unwrap().is_none());
+                assert_eq!(
+                    backend
+                        .apply_lifecycle_command(&id, &command.command_id, kind)
+                        .await
+                        .unwrap(),
+                    Decision::AlreadyApplied
+                );
+                let repeated = backend.get_instance(&id).await.unwrap().unwrap();
+                assert_eq!(repeated.finished_at, after.finished_at);
+                assert_eq!(repeated.sleep_until, after.sleep_until);
+                assert_eq!(
+                    backend
+                        .count_events(&id, &ListEventsFilter::default())
+                        .await
+                        .unwrap(),
+                    event_count
+                );
+            } else {
+                assert_eq!(
+                    backend
+                        .get_pending_signal(&id)
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .command_id,
+                    command.command_id
+                );
+            }
+            backend.delete_instances_batch(&[id]).await.unwrap();
+        }
+        for reason in [ParkReason::Timer, ParkReason::Signal] {
+            for with_deadline in [false, true] {
+                let id = Uuid::new_v4().to_string();
+                backend
+                    .register_instance(&id, "park-policy-matrix")
+                    .await
+                    .unwrap();
+                backend
+                    .complete_instance(
+                        CompleteInstanceParams::new(&id, status)
+                            .with_output(b"old-result")
+                            .with_error("old-error")
+                            .with_termination("crashed", Some(91))
+                            .with_checkpoint("saved"),
+                    )
+                    .await
+                    .unwrap();
+                backend.insert_signal(&id, K::Cancel, b"").await.unwrap();
+                let receipt = backend.get_pending_signal(&id).await.unwrap().unwrap();
+                let before = backend.get_instance(&id).await.unwrap().unwrap();
+                let deadline = with_deadline.then(|| Utc::now() + Duration::hours(1));
+                let result = backend
+                    .park_instance(&id, ParkRequest { reason, deadline })
+                    .await
+                    .unwrap();
+                let after = backend.get_instance(&id).await.unwrap().unwrap();
+                if status == S::Running {
+                    assert!(matches!(result, Decision::Applied(_)));
+                    assert_eq!(after.status, S::Suspended);
+                    assert_eq!(
+                        after.termination_reason.as_deref(),
+                        Some(if reason == ParkReason::Timer {
+                            "sleeping"
+                        } else {
+                            "waiting_signal"
+                        })
+                    );
+                    assert_eq!(
+                        after.sleep_until.map(|d| d.timestamp_millis()),
+                        deadline.map(|d| d.timestamp_millis())
+                    );
+                    assert!(after.finished_at.is_some());
+                    assert!(after.output.is_none() && after.error.is_none());
+                } else {
+                    assert_eq!(result, Decision::Rejected);
+                    assert_eq!(after.status, before.status);
+                    assert_eq!(after.finished_at, before.finished_at);
+                    assert_eq!(after.termination_reason, before.termination_reason);
+                    assert_eq!(after.sleep_until, before.sleep_until);
+                    assert_eq!(after.output, before.output);
+                    assert_eq!(after.error, before.error);
+                }
+                assert_eq!(after.checkpoint_id, before.checkpoint_id);
+                assert_eq!(after.exit_code, before.exit_code);
+                assert_eq!(
+                    backend
+                        .get_pending_signal(&id)
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .command_id,
+                    receipt.command_id
+                );
+                assert_eq!(
+                    backend
+                        .count_events(&id, &ListEventsFilter::default())
+                        .await
+                        .unwrap(),
+                    0
+                );
+                backend.delete_instances_batch(&[id]).await.unwrap();
+            }
+        }
+    }
+}
