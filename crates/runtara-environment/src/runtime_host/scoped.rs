@@ -9,6 +9,7 @@ use std::sync::Mutex;
 
 mod compiler_authority;
 mod invocation;
+mod invocation_admission;
 mod invocation_io;
 pub use compiler_authority::CompilerInvocationAuthority;
 pub use invocation_io::InvocationIo;

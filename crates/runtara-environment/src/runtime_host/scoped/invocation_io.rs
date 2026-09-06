@@ -7,8 +7,9 @@ use runtara_core::persistence::invocations::*;
 
 /// IO and supervised lifecycle for an already-admitted durable attempt. Install
 /// this same object as the child's `TaskLifecycle`; caught IO failures then fail
-/// settlement and revoke the root lease. Initial admission/uncertain replies and
-/// root launch/recovery ownership remain the embedding's responsibility.
+/// settlement and revoke the root lease. `ScopedInvocationFactory` can supervise
+/// initial admission and uncertain replies when supplied an owned root lease.
+/// Root launch/recovery ownership remains the embedding's responsibility.
 pub struct InvocationIo {
     pub(super) persistence: Arc<dyn Persistence>,
     fence: AttemptFence,

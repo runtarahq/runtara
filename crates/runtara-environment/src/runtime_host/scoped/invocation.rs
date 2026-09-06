@@ -1,10 +1,12 @@
 //! Bind a prepared child launch to root-owned persistence and host authority.
+use super::invocation_admission::InvocationAdmission;
 use super::*;
 use runtara_component_host::execution_host::{ExecutionContext, ExecutionError, StartRequest};
 use runtara_component_host::{
     ChildInvocationScope, ChildInvocationSpec, InvocationScopeFactory, InvokeExit, WorkflowLimits,
     WorkflowRunSpec,
 };
+use runtara_core::persistence::invocations::{InvocationLease, validate_identity};
 use std::collections::HashMap;
 
 /// Result of authorizing one child against its parent and verified package.
@@ -51,6 +53,7 @@ pub struct ScopedInvocationFactory {
     owner: Arc<ScopedRuntimeOwner>,
     authority: Arc<dyn InvocationAuthority>,
     settings: Arc<ScopedRunSettings>,
+    durable: Option<(InvocationLease, Duration)>,
 }
 
 impl ScopedInvocationFactory {
@@ -64,7 +67,37 @@ impl ScopedInvocationFactory {
             owner,
             authority,
             settings,
+            durable: None,
         }
+    }
+
+    /// Enable supervised initial admission only for compiler-proven durable
+    /// calls. The runner must already own this root lease and retain/revoke it
+    /// through cleanup and recovery. This method performs no persistence IO;
+    /// old inventories and non-durable calls retain ordinary execution.
+    pub fn with_invocation_lease(
+        mut self,
+        lease: InvocationLease,
+        control_timeout: Duration,
+    ) -> Result<Self, ExecutionError> {
+        if lease.instance_id != self.owner.root.instance_id
+            || lease.epoch <= 0
+            || [&lease.tenant_id, &lease.instance_id, &lease.owner]
+                .iter()
+                .any(|value| validate_identity(value).is_err())
+            || control_timeout.is_zero()
+            || self
+                .owner
+                .root
+                .state
+                .persistence
+                .invocation_fences()
+                .is_none()
+        {
+            return Err(ExecutionError::InvalidContext);
+        }
+        self.durable = Some((lease, control_timeout));
+        Ok(self)
     }
 
     /// Explicit durable path for an already-admitted, host-selected attempt.
@@ -78,6 +111,10 @@ impl ScopedInvocationFactory {
         if io.fence().path != request.context.path
             || io.fence().lease.instance_id != self.owner.root.instance_id
             || !Arc::ptr_eq(&io.persistence, &self.owner.root.state.persistence)
+            || self
+                .durable
+                .as_ref()
+                .is_some_and(|(lease, _)| *lease != io.fence().lease)
         {
             return Err(ExecutionError::InvalidContext);
         }
@@ -99,17 +136,41 @@ impl ScopedInvocationFactory {
         if io.is_some() && authorized.durable != Some(true) {
             return Err(ExecutionError::InvalidContext);
         }
+        let admission = if io.is_none() && authorized.durable == Some(true) {
+            self.durable.as_ref().map(|(lease, timeout)| {
+                Arc::new(InvocationAdmission::new(
+                    self.owner.root.state.persistence.clone(),
+                    lease.clone(),
+                    request.context.path.clone(),
+                    *timeout,
+                ))
+            })
+        } else {
+            None
+        };
         let owner = self.owner.clone();
         let settings = self.settings.clone();
         let input = request.input.clone();
         let path = request.context.path.clone();
         Ok(ChildInvocationScope {
-            lifecycle: io.as_ref().map(|io| {
-                io.clone() as Arc<dyn runtara_component_host::isolated_tasks::TaskLifecycle>
-            }),
+            lifecycle: io
+                .as_ref()
+                .map(|io| {
+                    io.clone() as Arc<dyn runtara_component_host::isolated_tasks::TaskLifecycle>
+                })
+                .or_else(|| {
+                    admission.as_ref().map(|admission| {
+                        admission.clone()
+                            as Arc<dyn runtara_component_host::isolated_tasks::TaskLifecycle>
+                    })
+                }),
             make_spec: Box::new(move |cancel| {
                 // Recheck the root admission fence inside the actual task,
                 // including a close between authorization and task start.
+                let io = match admission {
+                    Some(admission) => Some(admission.io()?),
+                    None => io,
+                };
                 let runtime = match io {
                     Some(io) => owner.child_fenced(input, authorized.checkpoints, cancel, io)?,
                     None => owner.child(input, path, authorized.checkpoints, cancel)?,

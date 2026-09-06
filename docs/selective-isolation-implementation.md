@@ -1349,6 +1349,47 @@ tests, 13 embedded-runner unit tests and seven scoped-runner integration tests
 components were reused because no guest implementation or WIT interface changed.
 No local-server E2E or new performance measurements ran for these changes.
 
+## Supervised initial admission and uncertain replies
+
+`ScopedInvocationFactory::with_invocation_lease` now connects compiler-owned
+durability to initial admission. The host must supply an already-owned root lease
+and a nonzero control timeout. Synchronous preparation creates only an in-memory,
+host-generated start ID. The supervised admission hook starts the database attempt
+before constructing a Store and provides the resulting fence to initializer IO,
+capability execution and final settlement. Historical unknown durability and
+explicitly non-durable calls install no hook and create no attempt records.
+
+The start ID survives cancellation of the query future. If a transaction commits
+but its reply is dropped, settlement resolves that same ID after child/descendant
+cleanup; it never starts a replacement child. A replayed cancelled path returns
+its original tombstone without borrowing its old lease for IO. Generic native
+cancellation closes an active attempt as settled, preserving the distinction from
+a durable user-cancel tombstone. Repeated successful calls get new start IDs and
+still execute; this is not a result cache.
+
+Admission errors, invalid returned authority and panics suppress execution and
+attempt bounded root-lease revocation. A timeout or failure while resolving an
+uncertain reply also fails shutdown. Failure to revoke remains failure, requiring
+the root owner to retain capacity and retry fencing before release/relaunch.
+
+Six new PostgreSQL-backed lifecycle tests cover normal IO, native cancellation,
+pre-poll cancellation with zero attempts, dropped/error/panicking replies,
+invalid returned ownership, durable cancellation during reply recovery, old-lease
+tombstones, and bounded admission/recovery failures under held root-row locks.
+Two new real-WASM tests cover automatic durability selection, fresh attempts for
+repeated calls, initializer suppression on cancelled replay and unchanged root
+status. The compiler-authority test also exercises automatic selection from
+verified v4/v5 inventories with forged runtime durability input. Verification
+passed all 69 runtime-host tests and seven scoped-runner integration tests.
+
+This persistence layer does not implement workflow orchestration or the physical
+cancel operation. Native start/cancel/join already works without a ledger; WASM
+continues to own graph traversal, retries, recovery and sibling continuation.
+Transactions are for durable write/replay arbitration, not for stopping a Store.
+The new factory mode is not enabled by the production runner. Runner lease
+ownership/recovery, parent/root write fencing, targeted command routing, final
+server E2E and current-format performance qualification remain required.
+
 ## Remaining required work
 
 - P0: extend explicit differential selection and invocation-count evidence to all

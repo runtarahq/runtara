@@ -274,6 +274,23 @@ behavior expansion with explicit error/side-effect tests, not a DSL modification
 
 ### Fencing without changing existing durability settings
 
+Live cancellation and durable cancellation are separate contracts. Stopping a
+child Store and its pending host futures requires no database transaction. WASM
+owns the graph, retry/recovery policy, sibling continuation and selection of the
+child handle to cancel; the host implements generic start/cancel/join primitives.
+An external Cancel request supplies a control event, not a host-selected graph
+successor. Self-contained orchestration does not mean WASM must implement its own
+engine interruption or database driver.
+
+The transitions below add a persistence guarantee across crashes/replay: a
+cancelled attempt cannot commit late writes or restart unnoticed. They are not
+the mechanism that interrupts execution. The native task can be stopped while
+durable settlement is still pending; persistence failure prevents publication of
+a trustworthy durable outcome and release of root ownership. Do not make this
+ledger a prerequisite for the generic cancellation primitive, non-durable calls,
+or artifact modes that do not request it. Do not move graph control into the host
+to implement persistence fencing.
+
 Keep logical checkpoint keys stable, including iteration addresses, embed call
 sites and AiAgent per-tool-call counters. Add attempt generation and launch lease
 to authorization/context and a separate attempt ledger; do not append generations
@@ -393,9 +410,12 @@ Missing, extra or duplicate durability entries are rejected. Runtime admission
 retains inventory v4 support with unknown durability; unknown and explicit false
 cannot authorize durable fencing. New compilation uses a distinct cache provenance
 tag, without changing the guest ABI or raw/native envelope versions. Ordinary
-execution still creates no invocation ledger entries. Production initial admission,
-root lease ownership, root/parent write fencing and targeted command routing remain
-required before durable cancellation can be enabled.
+execution still creates no invocation ledger entries. A factory supplied an owned
+root lease now admits compiler-proven durable calls under supervised lifecycle
+hooks and resolves interrupted admission replies using a retained host start ID.
+The runner does not supply that lease yet. Root lease ownership, root/parent write
+fencing and targeted command routing remain required before durable cancellation
+can be enabled in production.
 
 | Existing entry/runtime mode | Compatibility policy |
 |---|---|

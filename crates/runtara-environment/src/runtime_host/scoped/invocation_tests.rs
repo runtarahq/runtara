@@ -629,7 +629,7 @@ async fn compiler_durability_authorizes_only_explicit_durable_fencing() {
         assert_eq!(authority.authorize(&req).unwrap().durable, durable);
         let scopes = ScopedInvocationFactory::new(
             fx.owner.clone(),
-            authority,
+            authority.clone(),
             settings(
                 Instant::now() + Duration::from_secs(5),
                 Arc::new(AtomicBool::new(false)),
@@ -642,6 +642,20 @@ async fn compiler_durability_authorizes_only_explicit_durable_fencing() {
             .claim_invocation_lease(&root.tenant_id, &fx.id, "durability-test", None)
             .await
             .unwrap();
+        let automatic = ScopedInvocationFactory::new(
+            fx.owner.clone(),
+            authority,
+            settings(
+                Instant::now() + Duration::from_secs(5),
+                Arc::new(AtomicBool::new(false)),
+            ),
+        )
+        .with_invocation_lease(lease.clone(), Duration::from_secs(3))
+        .unwrap();
+        assert_eq!(
+            automatic.prepare_child(&req).unwrap().lifecycle.is_some(),
+            durable == Some(true)
+        );
         let attempt = fences
             .begin_invocation_attempt(&lease, &req.context.path, "one")
             .await
