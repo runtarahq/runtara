@@ -4957,6 +4957,7 @@ dependencies = [
  "runtara-report-dsl",
  "runtara-store-postgres",
  "runtara-text-parser",
+ "runtara-workflow-wit",
  "runtara-workflows",
  "rust-embed",
  "schemars 1.2.1",

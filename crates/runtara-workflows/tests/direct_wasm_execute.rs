@@ -1980,6 +1980,7 @@ fn direct_compile_entry_returns_native_result_shape_when_components_available() 
             progress_callback: None,
         },
         DirectWorkflowCompileOptions {
+            isolation_policy: None,
             output_dir: temp.path().to_path_buf(),
             extra_component_dirs: Vec::new(),
             components_dir,

@@ -131,7 +131,7 @@ fn image_cache_hits(
     image_source_checksum(image) == Some(source_checksum)
         && image_template_major(image) == Some(runtara_workflows::TEMPLATE_MAJOR_VERSION)
         && image_compiler_mode(image) == Some(compiler_mode.as_str())
-        && image_lowering_mode(image) == Some(runtara_workflows::direct_lowering_tag().as_str())
+        && image_lowering_mode(image) == Some(crate::config::workflow_lowering_tag().as_str())
         && image_track_events(image) == Some(track_events)
 }
 
@@ -158,7 +158,7 @@ fn workflow_compilation_fingerprint(
     compiler_mode: WorkflowCompilerMode,
     track_events: bool,
 ) -> String {
-    let lowering_mode = runtara_workflows::direct_lowering_tag();
+    let lowering_mode = crate::config::workflow_lowering_tag();
     let mut fingerprint = Sha256::new();
 
     for field in [
@@ -217,7 +217,7 @@ fn workflow_image_metadata(
         "templateMajor": runtara_workflows::TEMPLATE_MAJOR_VERSION,
         "compilerMode": compilation_result.compiler_mode.as_str(),
         // Part of cache identity: see `image_cache_hits`.
-        "loweringMode": runtara_workflows::direct_lowering_tag(),
+        "loweringMode": crate::config::workflow_lowering_tag(),
         // Part of cache identity: step-debug instrumentation changes the
         // generated workflow component.
         "trackEvents": track_events,
@@ -353,6 +353,8 @@ fn compile_workflow_direct_only(
         components_dir,
         extra_component_dirs,
         source_checksum: Some(source_checksum),
+        isolation_policy: crate::config::isolation_policy()
+            .and_then(|policy| policy.compiler_options()),
     };
 
     match compile_workflow_direct(input.clone(), options) {
@@ -1442,7 +1444,7 @@ mod tests {
                 "sourceChecksum": "source-sha256",
                 "templateMajor": runtara_workflows::TEMPLATE_MAJOR_VERSION,
                 "compilerMode": "direct-wasm",
-                "loweringMode": runtara_workflows::direct_lowering_tag(),
+                "loweringMode": crate::config::workflow_lowering_tag(),
                 "trackEvents": true
             }
         });
@@ -1571,7 +1573,7 @@ mod tests {
                 "source-sha256",
                 WorkflowCompilerMode::DirectWasm,
                 true,
-            ) || runtara_workflows::direct_lowering_tag()
+            ) || crate::config::workflow_lowering_tag()
                 == "store_freeing_sleep=false,omit_runtime=false",
             "an image built with other lowering must not be reused"
         );
@@ -1581,7 +1583,7 @@ mod tests {
                 "sourceChecksum": "source-sha256",
                 "templateMajor": runtara_workflows::TEMPLATE_MAJOR_VERSION,
                 "compilerMode": "direct-wasm",
-                "loweringMode": runtara_workflows::direct_lowering_tag(),
+                "loweringMode": crate::config::workflow_lowering_tag(),
                 "trackEvents": true
             }
         }));
@@ -1631,7 +1633,7 @@ mod tests {
             workflow_image_metadata(&result, "workflow-a", 7, "source-sha256", true, None);
         assert_eq!(
             metadata["workflow"]["loweringMode"],
-            serde_json::json!(runtara_workflows::direct_lowering_tag()),
+            serde_json::json!(crate::config::workflow_lowering_tag()),
             "provenance must record the lowering the artifact was built with"
         );
     }

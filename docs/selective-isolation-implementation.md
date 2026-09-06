@@ -1008,19 +1008,99 @@ and 48 runtime-host tests against isolated PostgreSQL, plus 103 component-host
 unit tests. Feature-enabled all-target Clippy passed with warnings denied. The CI YAML and feature wiring were parsed
 and checked locally; the remote CI job has not been run for this commit.
 
-Server startup policy, shared compiler/runner review configuration, compatibility
-fallback for unsupported root runtime contracts, and policy-aware compilation
-cache keys still need integration. Per-root task/result/handle bounds do not
+The following section covers server startup policy, shared compiler/runner review
+configuration, compatibility fallback and compilation cache identity. Per-root
+task/result/handle bounds do not
 establish aggregate input, guest memory, transport or descendant quotas; reported
 runner memory remains the root Store's metric. Durable attempt fences, targeted
 commands, recursive extracted children, fresh benchmarks, Linux/capacity gates,
 and final local-server testing remain required before rollout.
 
+## Shared server policy and artifact-compatible rollback
+
+The server can now opt in through `RUNTARA_EXPERIMENTAL_ISOLATION_POLICY`, a
+path to an operator-owned JSON file. It loads and validates the file once during
+configuration initialization and shares that snapshot between normal workflow
+compilation and the embedded runner. An absent policy preserves legacy behavior.
+This remains an experiment, not default enablement or approval of any package.
+
+Example schema (replace the placeholder with the SHA-256 of reviewed component
+bytes; do not approve a package merely because its digest matches):
+
+```json
+{
+  "version": 1,
+  "compileEnabled": true,
+  "reviews": {
+    "utils": {
+      "sha256": "<64 lowercase hexadecimal characters>",
+      "resetSafe": true,
+      "compilerCheckpointContract": true
+    }
+  },
+  "retainedReviews": {},
+  "maxChildTasks": 8,
+  "maxResultBytes": 8388608,
+  "maxHandles": 32
+}
+```
+
+Both approval flags require review, including for checkpoint-free native agents.
+Unknown fields, unsupported versions, invalid digests and invalid resource bounds
+fail startup. Quotas are per root and do not establish aggregate descendant,
+transport or guest-memory limits. The compiler's package byte limit matches the
+native precompiler admission limit; it is separate from retained result bytes.
+
+The normal `compile_workflow_direct` API accepts an optional policy and package
+limits. The server supplies them from the snapshot. Eligibility is resolved before
+emission; legacy remains the fallback for unreviewed or incompatible packages.
+For policy-driven compilation, a root without the lifecycle/native runtime shape
+(including composed runtime binding or omitted runtime), or a remaining shared or
+legacy dependency importing raw `wasi:http/`, prevents isolated selection. The
+report records `unsupported-root-runtime`. HTTP imports in a selected child alone
+do not exclude the root. Exact experimental selection APIs retain their existing
+behavior; the runner still validates the resulting artifact before admission.
+Shared component digests inspected during selection, as well as all Agent digests,
+are rechecked before composition replaces an existing output.
+
+Enabled compilation adds a deterministic fingerprint to the existing lowering
+mode provenance. It covers current package reviews, their approval flags, root
+runtime binding, invocation ABI and inventory version. Image reuse, immutable
+image names, successful artifact freshness, queue claims and recorded-failure
+freshness use that same tag. Runtime-only quotas and retained reviews do not
+change emitted bytes and do not invalidate compilation caches. No SQL migration
+is required. Policy changes take effect after server restart; the file is not
+reread during requests.
+
+To stop producing new isolated artifacts, set `compileEnabled` to `false` and
+restart. This restores the legacy compile path and cache tag while keeping exact
+runtime approvals active. When replacing a current review, put its previous full
+review object into `retainedReviews[agentId]`, an array, for as long as artifacts
+pinned to those bytes must run or resume. Retention approves only that Agent ID
+and digest. Removing the policy or withdrawing both current and retained approval
+makes such artifacts fail admission; rollback must retain their reviews. It does
+not rewrite a pinned package or turn it into a legacy artifact.
+
+The accompanying tests cover shared-policy validation/fingerprints, historical
+runner approvals with a real emitted workflow and PostgreSQL, root import
+classification, unsupported ABI byte parity, shared-component mutation rejection,
+and the public compile wrapper's selected and legacy output. Local verification
+passed 569 workflow unit tests, 24 emitted isolation tests, seven scoped-runner
+integration tests, four policy unit tests, 22 server compilation-service unit tests
+and 18 database-backed compilation provenance tests (644 total). Feature-enabled
+all-target Clippy for the server, workflows and environment passed with warnings
+denied. The server database suite initially could not run migrations on the
+runner's plain PostgreSQL image because `vector` was missing; the rerun passed
+against a separate `pgvector/pgvector:pg16` database matching server CI. No guest
+component code changed; the emitted tests used the previously built components.
+Targeted interruption, recursive children, aggregate quotas and final local-server
+qualification remain outstanding.
+
 ## Remaining required work
 
 - P0: extend explicit differential selection and invocation-count evidence to all
   required constructs and production artifact inspection.
-- P1: server integration of conflict-aware package eligibility and scoped-runner policy, aggregate
+- P1: qualify the shared server policy through local-server E2E; implement aggregate
   input/transport/guest resource reservations and root fencing on cleanup failure.
 - P2: qualify logical scopes across every AI auxiliary invocation and nested
   construct, qualify the runner scope factory for workflow-agents and certify package reset/state

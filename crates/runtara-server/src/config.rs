@@ -1,3 +1,4 @@
+pub mod isolation;
 mod runtime;
 
 pub use runtime::RuntimeOverrides;
@@ -80,6 +81,8 @@ pub struct Config {
     /// Directory containing prebuilt direct workflow stdlib/runtime components
     /// plus agent components. Defaults to `agent_components_dir`.
     pub direct_wasm_components_dir: Option<std::path::PathBuf>,
+    /// Immutable shared compiler/runner reviews; absent keeps legacy defaults.
+    pub isolation_policy: Option<std::sync::Arc<isolation::IsolationPolicy>>,
     /// Host or host:port authorities accepted by the MCP Streamable HTTP transport.
     pub mcp_allowed_hosts: Vec<String>,
     /// Backing store for MCP Streamable HTTP session recovery.
@@ -237,6 +240,7 @@ impl Config {
             agent_components_dir.as_deref(),
         );
 
+        let isolation_policy = isolation::IsolationPolicy::from_env()?;
         let mcp_allowed_hosts = mcp_allowed_hosts_from_raw(
             std::env::var(RUNTARA_MCP_ALLOWED_HOSTS_ENV).ok().as_deref(),
         );
@@ -305,6 +309,7 @@ impl Config {
             connection_service_url,
             agent_components_dir,
             direct_wasm_components_dir,
+            isolation_policy,
             mcp_allowed_hosts,
             mcp_session_store,
             mcp_session_ttl_seconds,
@@ -552,6 +557,17 @@ pub fn init(config: Config) {
 /// Get the global configuration.
 pub fn get() -> &'static Config {
     CONFIG.get().expect("Config must be initialized before use")
+}
+
+/// Snapshot shared by the compiler and embedded runner. Never rereads the file.
+pub fn isolation_policy() -> Option<std::sync::Arc<isolation::IsolationPolicy>> {
+    try_get().and_then(|config| config.isolation_policy.clone())
+}
+
+/// Durable cache identity includes the active isolation review and runtime shape.
+pub fn workflow_lowering_tag() -> String {
+    let base = runtara_workflows::direct_lowering_tag();
+    isolation_policy().map_or(base.clone(), |policy| policy.lowering_tag(&base))
 }
 
 /// Initialize the global configuration for a unit test, if nothing has yet.

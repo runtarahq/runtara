@@ -45,6 +45,8 @@ pub struct EmbeddedRuntaraConfig {
     /// Bounded active-execution timeout policy shared with the server runtime
     /// client and Environment lifecycle handlers.
     pub execution_timeout_policy: ExecutionTimeoutPolicy,
+    /// Same immutable review snapshot used by server compilation/cache identity.
+    pub isolation_policy: Option<Arc<crate::config::isolation::IsolationPolicy>>,
 }
 
 /// Handle to the running embedded Runtara servers.
@@ -97,10 +99,14 @@ impl EmbeddedRuntara {
         // bind address: it is the endpoint a guest is meant to reach.
         let core_http_url = format!("http://{}", config.core_client_addr);
         let runner: Arc<dyn runtara_environment::runner::Runner> =
-            runtara_environment::runner::build_runner_with_core_http_url(
+            runtara_environment::runner::build_runner_configured(
                 persistence.clone(),
                 event_observer,
                 Some(core_http_url),
+                config
+                    .isolation_policy
+                    .as_ref()
+                    .map(|policy| policy.runner_config()),
             )
             .map_err(|e| anyhow::anyhow!("build workflow runner: {e}"))?;
         info!(
@@ -322,6 +328,7 @@ pub async fn maybe_start_embedded(
         core_http_bind_addr: Some(SocketAddr::from(([127, 0, 0, 1], core_http_addr))),
         core_overrides,
         execution_timeout_policy,
+        isolation_policy: crate::config::isolation_policy(),
     };
 
     let runtara = EmbeddedRuntara::start(config, event_observer).await?;

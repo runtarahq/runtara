@@ -506,3 +506,61 @@ fn policy_rechecks_shared_bytes_before_replacing_a_composed_artifact() {
     );
     assert_eq!(fs::read(&compiled.wasm_path).unwrap(), original);
 }
+
+#[test]
+fn public_compile_wrapper_routes_policy_and_keeps_legacy_default() {
+    use runtara_workflows::compile::{
+        CompilationInput, DirectWorkflowCompileOptions, compile_workflow_direct,
+    };
+    let components = direct_e2e_components_dir();
+    let dir = tempfile::tempdir().unwrap();
+    let graph = super::super::wasm_performance_baseline::random_chain(1, false);
+    for isolated in [false, true] {
+        let direct_input = input(
+            graph.clone(),
+            &dir.path().join(format!("direct-{isolated}")),
+        );
+        let reference = if isolated {
+            compile_direct_workflow_composed_with_isolation_policy(
+                direct_input,
+                WorkflowAbi::InvokeHostImports,
+                false,
+                &components,
+                &[],
+                approved(&components),
+                limits(),
+            )
+            .unwrap()
+        } else {
+            let mut result = compile_direct_workflow(direct_input).unwrap();
+            compose_direct_workflow(&mut result, &components).unwrap();
+            result
+        };
+        let wrapped = compile_workflow_direct(
+            CompilationInput {
+                tenant_id: "test".into(),
+                workflow_id: "isolated-agent-test".into(),
+                version: 1,
+                execution_graph: serde_json::from_value(graph.clone()).unwrap(),
+                track_events: false,
+                child_workflows: vec![],
+                connection_service_url: None,
+                agent_catalog: None,
+                progress_callback: None,
+                agent_slug: None,
+            },
+            DirectWorkflowCompileOptions {
+                output_dir: dir.path().join(format!("wrapper-{isolated}")),
+                components_dir: components.clone(),
+                extra_component_dirs: vec![],
+                source_checksum: None,
+                isolation_policy: isolated.then(|| (approved(&components), limits())),
+            },
+        )
+        .unwrap();
+        let bytes = fs::read(&wrapped.binary_path).unwrap();
+        assert_eq!(bytes, fs::read(reference.wasm_path).unwrap());
+        assert_eq!(wrapped.binary_checksum, artifact_digest(&bytes));
+        assert_eq!(parse(&bytes, limits()).unwrap().is_some(), isolated);
+    }
+}

@@ -160,7 +160,7 @@ impl Drop for TaskCompletionGuard {
 /// In-process workflow runner backed by an embedded wasmtime engine.
 pub struct EmbeddedWasmRunner {
     config: WorkflowRunnerConfig,
-    scoped_agents: Option<ScopedAgentRunnerConfig>,
+    scoped_agents: Option<Arc<ScopedAgentRunnerConfig>>,
     /// Address legacy HTTP-composed artifacts use for runtara-core. Modern
     /// HostImport-composed artifacts receive the native runtime host instead.
     core_http_url: Option<String>,
@@ -814,7 +814,7 @@ impl EmbeddedWasmRunner {
     /// existing path. Package reviews must come from trusted operator policy.
     pub fn with_scoped_agents(mut self, config: ScopedAgentRunnerConfig) -> Result<Self> {
         config.validate()?;
-        self.scoped_agents = Some(config);
+        self.scoped_agents = Some(Arc::new(config));
         Ok(self)
     }
 
@@ -1005,7 +1005,7 @@ impl EmbeddedWasmRunner {
             ));
         }
 
-        scoped::admit(&workflow, &self.executor, self.scoped_agents.as_ref())?;
+        scoped::admit(&workflow, &self.executor, self.scoped_agents.as_deref())?;
 
         // This is a cancellable database operation, so it observes the same
         // absolute preparation lease deadline as the dispatcher. Missing or
@@ -1535,7 +1535,7 @@ impl Runner for EmbeddedWasmRunner {
         // A prepared token can outlive configuration construction or come from
         // another runner. Recheck policy before taking any active run capacity.
         let scoped_authority =
-            scoped::admit(&workflow, &self.executor, self.scoped_agents.as_ref())?;
+            scoped::admit(&workflow, &self.executor, self.scoped_agents.as_deref())?;
         let scoped_config = self.scoped_agents.clone();
 
         // The child compiler already read, hashed, compiled, and returned the

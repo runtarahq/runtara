@@ -29,6 +29,7 @@ fn bounds(agent: &str) -> ScopedAgentRunnerConfig {
     let bytes = std::fs::read(components().join(format!("runtara_agent_{agent}.wasm"))).unwrap();
     ScopedAgentRunnerConfig {
         reviewed_agents: [(agent.into(), artifact_digest(&bytes))].into(),
+        retained_agents: Default::default(),
         max_child_tasks: 8,
         max_result_bytes: 8 * 1024 * 1024,
         max_handles: 32,
@@ -230,6 +231,63 @@ async fn scoped_runner_admits_reviewed_packages_and_keeps_legacy_execution() {
         let output: Value = serde_json::from_slice(&instance.output.unwrap()).unwrap();
         assert!((0.0..1.0).contains(&output["value"].as_f64().unwrap()));
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn scoped_runner_retains_exact_historical_reviews_for_pinned_artifacts() {
+    let h = Harness::new().await;
+    let artifact = compile(
+        random_graph(),
+        &h.dir.path().join("retained"),
+        "utils",
+        "scoped",
+    );
+    let mut config = bounds("utils");
+    let historical = config
+        .reviewed_agents
+        .insert("utils".into(), "0".repeat(64))
+        .unwrap();
+    let options = h.options(&artifact.wasm_path).await;
+    let error = h
+        .runner(Some(config.clone()))
+        .try_launch_detached(&options)
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("no matching runtime review"),
+        "{error}"
+    );
+    // A historical approval belongs to the exact Agent ID as well as its digest.
+    config
+        .retained_agents
+        .insert("datetime".into(), [historical.clone()].into());
+    assert!(
+        h.runner(Some(config.clone()))
+            .try_launch_detached(&options)
+            .await
+            .is_err()
+    );
+    config
+        .retained_agents
+        .insert("utils".into(), [historical].into());
+    let runner = h.runner(Some(config));
+    let handle = runner.try_launch_detached(&options).await.unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        runner.wait_for_exit(&handle, Duration::from_millis(10)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(runner.occupancy().unwrap().held, 0);
+    let instance = h
+        .persistence
+        .get_instance(&options.instance_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(instance.status, InstanceStatus::Completed);
+    let output: Value = serde_json::from_slice(&instance.output.unwrap()).unwrap();
+    assert!((0.0..1.0).contains(&output["value"].as_f64().unwrap()));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

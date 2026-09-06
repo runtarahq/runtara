@@ -367,6 +367,7 @@ fn run() -> Result<(), String> {
             progress_callback,
         },
         DirectWorkflowCompileOptions {
+            isolation_policy: None,
             output_dir: build_output_dir(&args),
             extra_component_dirs: Vec::new(),
             components_dir,

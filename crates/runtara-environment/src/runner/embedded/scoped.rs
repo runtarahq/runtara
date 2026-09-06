@@ -9,7 +9,7 @@ use crate::runtime_host::{
 use runtara_component_host::execution_host::ExecutionContext;
 use runtara_component_host::isolated_tasks::IsolatedTasks;
 use runtara_component_host::{InvokeExit, InvokeRunResult, PreparedInvocationLauncher};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Operator-reviewed packages and per-root bounds for the opt-in scoped runner.
 /// Approval covers fresh-store semantics and the compiler checkpoint contract.
@@ -18,6 +18,8 @@ use std::collections::BTreeMap;
 pub struct ScopedAgentRunnerConfig {
     /// Canonical Agent IDs mapped to approved lowercase SHA-256 component digests.
     pub reviewed_agents: BTreeMap<String, String>,
+    /// Previously approved bytes retained for pinned artifacts and rollback.
+    pub retained_agents: BTreeMap<String, BTreeSet<String>>,
     /// Maximum simultaneously retained child tasks per root.
     pub max_child_tasks: usize,
     /// Maximum completed child-result bytes retained per root.
@@ -38,13 +40,22 @@ impl ScopedAgentRunnerConfig {
                 "invalid scoped Agent resource bounds".into(),
             ));
         }
-        if self.reviewed_agents.iter().any(|(id, digest)| {
-            id.is_empty()
-                || digest.len() != 64
-                || !digest
-                    .bytes()
-                    .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
-        }) {
+        if self
+            .reviewed_agents
+            .iter()
+            .chain(
+                self.retained_agents
+                    .iter()
+                    .flat_map(|(id, digests)| digests.iter().map(move |digest| (id, digest))),
+            )
+            .any(|(id, digest)| {
+                id.is_empty()
+                    || digest.len() != 64
+                    || !digest
+                        .bytes()
+                        .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+            })
+        {
             return Err(RunnerError::Other(
                 "invalid scoped Agent review identity".into(),
             ));
@@ -81,7 +92,12 @@ pub(super) fn admit(
         let (binding, _) = catalog
             .resolve(&call.binding)
             .expect("validated inventory binding");
-        if config.reviewed_agents.get(&call.agent_id) != Some(&binding.artifact) {
+        if config.reviewed_agents.get(&call.agent_id) != Some(&binding.artifact)
+            && !config
+                .retained_agents
+                .get(&call.agent_id)
+                .is_some_and(|digests| digests.contains(&binding.artifact))
+        {
             return Err(RunnerError::StartFailed(format!(
                 "scoped Agent `{}` has no matching runtime review",
                 call.agent_id
@@ -168,6 +184,7 @@ mod tests {
     fn scoped_runner_configuration_requires_finite_nonzero_capacity_and_exact_digests() {
         let base = ScopedAgentRunnerConfig {
             reviewed_agents: [("utils".into(), "a".repeat(64))].into(),
+            retained_agents: BTreeMap::new(),
             max_child_tasks: 4,
             max_result_bytes: 1024,
             max_handles: 8,

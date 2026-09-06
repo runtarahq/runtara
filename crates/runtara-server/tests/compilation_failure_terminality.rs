@@ -131,7 +131,7 @@ async fn record_failure_from_build(
     .bind("[E004] Workflow has no steps defined")
     .bind(checksum)
     .bind(runtara_workflows::TEMPLATE_MAJOR_VERSION)
-    .bind(runtara_workflows::direct_lowering_tag())
+    .bind(runtara_server::config::workflow_lowering_tag())
     .bind(build)
     .execute(pool)
     .await
@@ -170,7 +170,7 @@ async fn record_ready(
     .bind(checksum)
     .bind(artifact_track_events)
     .bind(runtara_workflows::TEMPLATE_MAJOR_VERSION)
-    .bind(runtara_workflows::direct_lowering_tag())
+    .bind(runtara_server::config::workflow_lowering_tag())
     .execute(pool)
     .await
     .expect("recording a ready compilation must succeed");
