@@ -45,11 +45,11 @@ pub fn max_auto_restarts() -> i32 {
 /// then fail terminally with the `environment_restart` reason instead of being
 /// relaunched. Defaults to on, matching the always-on graceful-drain recovery.
 ///
-/// Shares [`parse_enabled_env`](runtara_core::config::parse_enabled_env) with
+/// Shares [`parse_enabled`](crate::config::parse_enabled) with
 /// the `*_CLEANUP_ENABLED` opt-outs so every switch in the crate answers to the
 /// same spellings; a hand-rolled parser here used to ignore `off`.
 pub fn auto_recover_enabled() -> bool {
-    runtara_core::config::parse_enabled_env("RUNTARA_AUTO_RECOVER")
+    crate::config::parse_enabled(std::env::var("RUNTARA_AUTO_RECOVER").ok().as_deref())
 }
 
 /// Outcome of a recovery decision.

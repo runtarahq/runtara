@@ -37,7 +37,8 @@ That host depends on `runtara-core`, `runtara-store-postgres`, `sqlx`, and `anyh
 - `persistence` defines records, queries, conditional updates, wake claims, and retention obligations through `Persistence`.
 - `instance_handlers` implements registration, checkpoints, sleep, events, and signal delivery over that trait.
 - `error` provides storage-neutral errors and transport-independent classifications.
-- `config` provides runtime overrides that hosts apply when constructing their runtime.
+
+Hosts pass configuration explicitly, including handler concurrency limits through `InstanceHandlerState::with_limits`. Core never reads the process environment; the host owns deployment variable names, defaults, precedence, and transport shutdown settings.
 
 Event subtypes and payload keys are opaque producer-defined strings. `EventVocabulary` requires distinct opening and closing subtypes. Each backend validates any additional restrictions required by its query implementation.
 
@@ -48,6 +49,8 @@ The `test-support` feature exposes an in-memory backend, handler mocks, and a sh
 Persistence records, status filters, completion parameters, event filters, and lifecycle signal operations now use `domain` enums. Stored event types include `Started` and legacy `Progress`, in addition to incoming instance events. PostgreSQL encoding and checked decoding live in `runtara-store-postgres::encoding`; core's database string mappers have been removed.
 
 `CoreError::DatabaseError` is now `CoreError::PersistenceError`, with code `PERSISTENCE_ERROR`. The blanket conversion from JSON errors has been removed: callers must classify failures in context. The server's HTTP route error codes and existing database enum labels remain unchanged.
+
+The `config` module has been removed. `RuntimeOverrides` now lives in `runtara_server::config`, alongside the host's environment loading and `ConfigError`. Cleanup callers use the pure `runtara_environment::config::parse_enabled(Option<&str>)` parser instead of core's environment-reading helper.
 
 ## License
 
