@@ -1,8 +1,9 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! The shutdown-aware polling loop this crate's retention workers share.
+//! The shutdown-aware polling loop this crate's periodic workers share.
 //!
-//! Run-dir cleanup, database cleanup and image cleanup each had their own copy
+//! Run-dir cleanup, database cleanup, image cleanup and the heartbeat monitor
+//! each had their own copy
 //! of the same forty lines: an eager pass raced against the shutdown signal,
 //! then a `biased` select between that signal and a sleep. The three differed
 //! only in what they logged and which pass they called, so a fix to the loop —
@@ -15,7 +16,7 @@
 //! The rendered text is unchanged and still names the worker, and every log
 //! filter in this repo is crate-level (`runtara_environment=info`), so nothing
 //! in tree is affected — but the split is deliberate and worth knowing: a
-//! worker's `disabled` and `started` lines stay behind in its own module
+//! worker's `disabled` and `started` lines stay in its own module
 //! because they carry per-worker configuration fields, while the shutdown,
 //! stopped and pass-failure lines come from here. A module-scoped filter set
 //! on one worker will therefore see it start and not see it stop.
@@ -42,7 +43,9 @@ pub(crate) struct PeriodicLoop<'a> {
     /// Run a pass immediately instead of waiting out the first interval.
     ///
     /// Retention workers want this: a host that restarts more often than the
-    /// interval would otherwise never enforce retention at all.
+    /// interval would otherwise never enforce retention at all. The heartbeat
+    /// monitor does not: staleness is measured against a timeout, so a scan at
+    /// t=0 can say nothing a scan one interval later cannot.
     pub eager_first_pass: bool,
     /// Logged when a pass returns `Err`. The pass keeps running after one.
     pub pass_error: &'static str,

@@ -205,7 +205,7 @@ pub mod wake_scheduler;
 /// Pure configuration parsing shared by environment and server callers.
 pub mod config;
 
-/// The shutdown-aware polling loop the retention workers share.
+/// The shutdown-aware polling loop the periodic workers share.
 pub(crate) mod periodic;
 
 /// Background worker for cleaning up old run directories.
