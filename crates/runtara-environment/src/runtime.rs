@@ -398,11 +398,13 @@ impl EnvironmentRuntimeConfig {
                 .with_drain(drain.clone())
                 .with_launch_control(launch_notifier.clone(), lifecycle_observers.clone());
 
-        let wake_shutdown = wake_scheduler.shutdown_handle();
-
-        let wake_handle = tokio::spawn(async move {
-            wake_scheduler.run().await;
-        });
+        let wake = Worker::spawn(
+            "wake scheduler",
+            wake_scheduler.shutdown_handle(),
+            async move {
+                wake_scheduler.run().await;
+            },
+        );
 
         // Only this worker hands a generation to a runner. Sources commit a
         // queue row then notify it, and a periodic scan recovers notifications
@@ -416,10 +418,13 @@ impl EnvironmentRuntimeConfig {
         )
         .with_execution_timeout_policy(self.execution_timeout_policy)
         .with_drain(drain.clone());
-        let launch_dispatcher_shutdown = launch_dispatcher.shutdown_handle();
-        let launch_dispatcher_handle = tokio::spawn(async move {
-            launch_dispatcher.run().await;
-        });
+        let dispatcher = Worker::spawn(
+            "launch dispatcher",
+            launch_dispatcher.shutdown_handle(),
+            async move {
+                launch_dispatcher.run().await;
+            },
+        );
 
         // Create cleanup worker. Config loads from env (so operators can tune
         // RUNTARA_RUN_DIR_CLEANUP_* at runtime) but the builder-supplied
@@ -428,13 +433,16 @@ impl EnvironmentRuntimeConfig {
         cleanup_config.data_dir = self.data_dir.clone();
         cleanup_config.poll_interval = self.cleanup_poll_interval;
         cleanup_config.max_age = self.cleanup_max_age;
+        let cleanup_enabled = cleanup_config.enabled;
         let cleanup_worker = CleanupWorker::new(cleanup_config);
-        let cleanup_shutdown = cleanup_worker.shutdown_handle();
-
-        // Start cleanup worker task
-        let cleanup_handle = tokio::spawn(async move {
-            cleanup_worker.run().await;
-        });
+        let cleanup = Worker::spawn_configurable(
+            "run-dir cleanup",
+            cleanup_worker.shutdown_handle(),
+            cleanup_enabled,
+            async move {
+                cleanup_worker.run().await;
+            },
+        );
 
         // Create heartbeat monitor
         let heartbeat_config = HeartbeatMonitorConfig {
@@ -448,53 +456,112 @@ impl EnvironmentRuntimeConfig {
             heartbeat_config,
         )
         .with_drain(drain.clone());
-        let heartbeat_shutdown = heartbeat_monitor.shutdown_handle();
-
-        let heartbeat_handle = tokio::spawn(async move {
-            heartbeat_monitor.run().await;
-        });
+        let heartbeat = Worker::spawn(
+            "heartbeat monitor",
+            heartbeat_monitor.shutdown_handle(),
+            async move {
+                heartbeat_monitor.run().await;
+            },
+        );
 
         // Create database cleanup worker
+        let db_cleanup_enabled = self.db_cleanup_config.enabled;
         let db_cleanup_worker = DbCleanupWorker::new(
             self.pool.clone(),
             self.persistence.clone(),
             self.db_cleanup_config,
         );
-        let db_cleanup_shutdown = db_cleanup_worker.shutdown_handle();
-
-        let db_cleanup_handle = tokio::spawn(async move {
-            db_cleanup_worker.run().await;
-        });
+        let db_cleanup = Worker::spawn_configurable(
+            "database cleanup",
+            db_cleanup_worker.shutdown_handle(),
+            db_cleanup_enabled,
+            async move {
+                db_cleanup_worker.run().await;
+            },
+        );
 
         // Create image cleanup worker
         let mut image_cleanup_config = self.image_cleanup_config;
         image_cleanup_config.data_dir = self.data_dir.clone();
+        let image_cleanup_enabled = image_cleanup_config.enabled;
         let image_cleanup_worker = ImageCleanupWorker::new(self.pool.clone(), image_cleanup_config);
-        let image_cleanup_shutdown = image_cleanup_worker.shutdown_handle();
-
-        let image_cleanup_handle = tokio::spawn(async move {
-            image_cleanup_worker.run().await;
-        });
+        let image_cleanup = Worker::spawn_configurable(
+            "image cleanup",
+            image_cleanup_worker.shutdown_handle(),
+            image_cleanup_enabled,
+            async move {
+                image_cleanup_worker.run().await;
+            },
+        );
 
         info!("EnvironmentRuntime started");
 
         Ok(EnvironmentRuntime {
-            wake_handle,
-            launch_dispatcher_handle,
-            cleanup_handle,
-            heartbeat_handle,
-            db_cleanup_handle,
-            wake_shutdown,
-            launch_dispatcher_shutdown,
-            cleanup_shutdown,
-            heartbeat_shutdown,
-            db_cleanup_shutdown,
-            image_cleanup_handle,
-            image_cleanup_shutdown,
+            wake,
+            launch_dispatcher: dispatcher,
+            // This order is the shutdown join order, which the panic report
+            // reads back in the same sequence.
+            workers: vec![cleanup, heartbeat, db_cleanup, image_cleanup],
             state,
             drain,
             lifecycle_observers,
         })
+    }
+}
+
+/// One background task the runtime owns, with the signal that stops it.
+///
+/// These travelled as two loose fields per worker — six handles and six
+/// notifies, twelve in all, kept in step only by their names. Pairing them
+/// means a worker cannot be added, stopped or joined without its other half.
+struct Worker {
+    /// Reported when the task panics, so a failed shutdown names the worker.
+    name: &'static str,
+    shutdown: Arc<Notify>,
+    handle: JoinHandle<()>,
+    /// Whether this worker's configuration has it doing anything.
+    ///
+    /// A disabled retention worker returns from `run()` immediately, so its
+    /// handle is finished almost as soon as it is spawned. That is the
+    /// configured outcome, not a stopped worker.
+    enabled: bool,
+}
+
+impl Worker {
+    /// Spawn `task` for a worker the runtime expects to keep running.
+    fn spawn(
+        name: &'static str,
+        shutdown: Arc<Notify>,
+        task: impl std::future::Future<Output = ()> + Send + 'static,
+    ) -> Self {
+        Self::spawn_configurable(name, shutdown, true, task)
+    }
+
+    /// Spawn `task` for a worker its configuration may have turned off.
+    fn spawn_configurable(
+        name: &'static str,
+        shutdown: Arc<Notify>,
+        enabled: bool,
+        task: impl std::future::Future<Output = ()> + Send + 'static,
+    ) -> Self {
+        Self {
+            name,
+            shutdown,
+            handle: tokio::spawn(task),
+            enabled,
+        }
+    }
+
+    /// Ask the worker to stop. It finishes the pass it is on.
+    fn stop(&self) {
+        self.shutdown.notify_one();
+    }
+
+    /// Whether this worker is in the state its configuration calls for.
+    ///
+    /// A disabled worker is live precisely because it has finished.
+    fn is_live(&self) -> bool {
+        !self.enabled || !self.handle.is_finished()
     }
 }
 
@@ -510,18 +577,13 @@ impl EnvironmentRuntimeConfig {
 ///
 /// Call [`shutdown`](Self::shutdown) for graceful termination.
 pub struct EnvironmentRuntime {
-    wake_handle: JoinHandle<()>,
-    launch_dispatcher_handle: JoinHandle<()>,
-    cleanup_handle: JoinHandle<()>,
-    heartbeat_handle: JoinHandle<()>,
-    db_cleanup_handle: JoinHandle<()>,
-    wake_shutdown: Arc<Notify>,
-    launch_dispatcher_shutdown: Arc<Notify>,
-    cleanup_shutdown: Arc<Notify>,
-    heartbeat_shutdown: Arc<Notify>,
-    db_cleanup_shutdown: Arc<Notify>,
-    image_cleanup_handle: JoinHandle<()>,
-    image_cleanup_shutdown: Arc<Notify>,
+    /// Held by name because [`Self::drain`] stops it first and then waits for
+    /// it to quiesce before taking its snapshot.
+    wake: Worker,
+    /// Held by name for the same reason: dispatch stops before the snapshot.
+    launch_dispatcher: Worker,
+    /// The rest, which only ever start together and stop together.
+    workers: Vec<Worker>,
     state: Arc<EnvironmentHandlerState>,
     drain: DrainController,
     lifecycle_observers: LaunchLifecycleObservers,
@@ -578,7 +640,7 @@ impl EnvironmentRuntime {
 
         // Stop dispatch before taking the active-run snapshot. Queued rows
         // remain durable and will be reclaimed on the next runtime start.
-        self.launch_dispatcher_shutdown.notify_one();
+        self.launch_dispatcher.stop();
 
         // Stop the wake scheduler before the snapshot below, and give it a
         // moment to finish the batch it is on. The snapshot is what decides who
@@ -587,12 +649,12 @@ impl EnvironmentRuntime {
         // straggler list, and still running into teardown. The scheduler also
         // re-checks the drain flag per launch, which covers the batch already
         // in flight here; this just stops new ones being claimed at all.
-        self.wake_shutdown.notify_one();
+        self.wake.stop();
         let quiesce_deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while !self.wake_handle.is_finished() && std::time::Instant::now() < quiesce_deadline {
+        while !self.wake.handle.is_finished() && std::time::Instant::now() < quiesce_deadline {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        if !self.wake_handle.is_finished() {
+        if !self.wake.handle.is_finished() {
             warn!("Wake scheduler did not quiesce before the drain snapshot");
         }
 
@@ -794,36 +856,21 @@ impl EnvironmentRuntime {
     pub async fn shutdown(self) -> Result<()> {
         info!("EnvironmentRuntime shutting down...");
 
-        // Signal wake scheduler shutdown
-        self.wake_shutdown.notify_one();
-
-        // Signal durable launch dispatcher shutdown
-        self.launch_dispatcher_shutdown.notify_one();
-
-        // Signal cleanup worker shutdown
-        self.cleanup_shutdown.notify_one();
-
-        // Signal heartbeat monitor shutdown
-        self.heartbeat_shutdown.notify_one();
-
-        // Signal database cleanup worker shutdown
-        self.db_cleanup_shutdown.notify_one();
-
-        // Signal image cleanup worker shutdown
-        self.image_cleanup_shutdown.notify_one();
+        // Every worker is asked to stop before any is waited on, so a slow one
+        // cannot delay the signal reaching the rest.
+        let workers: Vec<Worker> = std::iter::once(self.wake)
+            .chain(std::iter::once(self.launch_dispatcher))
+            .chain(self.workers)
+            .collect();
+        for worker in &workers {
+            worker.stop();
+        }
 
         let mut panicked: Vec<&'static str> = Vec::new();
-        for (name, handle) in [
-            ("wake scheduler", self.wake_handle),
-            ("launch dispatcher", self.launch_dispatcher_handle),
-            ("run-dir cleanup", self.cleanup_handle),
-            ("heartbeat monitor", self.heartbeat_handle),
-            ("database cleanup", self.db_cleanup_handle),
-            ("image cleanup", self.image_cleanup_handle),
-        ] {
-            if let Err(e) = handle.await {
-                error!(worker = name, error = %e, "Worker task panicked");
-                panicked.push(name);
+        for worker in workers {
+            if let Err(e) = worker.handle.await {
+                error!(worker = worker.name, error = %e, "Worker task panicked");
+                panicked.push(worker.name);
             }
         }
 
@@ -838,14 +885,15 @@ impl EnvironmentRuntime {
         Ok(())
     }
 
-    /// Check if the runtime is still running.
+    /// Whether every worker is still running.
+    ///
+    /// One finished worker makes this false, which is the same answer the
+    /// six-way conjunction gave.
     pub fn is_running(&self) -> bool {
-        !self.wake_handle.is_finished()
-            && !self.launch_dispatcher_handle.is_finished()
-            && !self.cleanup_handle.is_finished()
-            && !self.heartbeat_handle.is_finished()
-            && !self.db_cleanup_handle.is_finished()
-            && !self.image_cleanup_handle.is_finished()
+        std::iter::once(&self.wake)
+            .chain(std::iter::once(&self.launch_dispatcher))
+            .chain(self.workers.iter())
+            .all(Worker::is_live)
     }
 }
 
@@ -1085,6 +1133,38 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A worker its configuration disabled has finished on purpose.
+    ///
+    /// `is_running()` ANDs every worker's liveness, so before this a single
+    /// disabled retention worker — `RUNTARA_RUN_DIR_CLEANUP_ENABLED=false`, say
+    /// — made the whole runtime report itself stopped for its entire life, and
+    /// `EmbeddedRuntara::is_running()` with it. Disabling a cleanup worker is a
+    /// supported configuration, not a fault.
+    #[tokio::test]
+    async fn a_disabled_worker_does_not_make_the_runtime_look_stopped() {
+        // A task that returns immediately: exactly what `run()` does when its
+        // config says the worker is off.
+        let finished =
+            || Worker::spawn_configurable("test", Arc::new(Notify::new()), false, async {});
+        let worker = finished();
+        // Let the task actually complete before asking.
+        tokio::task::yield_now().await;
+        assert!(worker.handle.is_finished(), "fixture must have finished");
+        assert!(
+            worker.is_live(),
+            "a disabled worker is live precisely because it finished"
+        );
+
+        // The same finished handle, but for a worker that was meant to run.
+        let enabled = Worker::spawn_configurable("test", Arc::new(Notify::new()), true, async {});
+        tokio::task::yield_now().await;
+        assert!(enabled.handle.is_finished());
+        assert!(
+            !enabled.is_live(),
+            "an enabled worker that finished early has stopped"
+        );
+    }
 
     /// A drain that cannot read the registry has no idea what to park, so every
     /// guest runs on into teardown and dies with the process. That used to be
