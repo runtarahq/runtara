@@ -277,3 +277,7 @@ mod real_messaging;
 #[cfg(feature = "component-integration-tests")]
 #[path = "cooperative_cancellation/real_mcp.rs"]
 mod real_mcp;
+
+#[cfg(feature = "component-integration-tests")]
+#[path = "cooperative_cancellation/real_storage.rs"]
+mod real_storage;

@@ -169,6 +169,9 @@ enum Scenario {
     AiMemorySave,
     ObjectQuery,
     ObjectExecute,
+    StorageDownload(&'static str, bool),
+    StoragePresign(&'static str),
+    Sftp,
     PartialBody,
     SignalReadFailure,
     ParallelSplit,
@@ -182,6 +185,12 @@ enum Scenario {
 }
 
 impl Scenario {
+    fn is_storage(self) -> bool {
+        matches!(
+            self,
+            Self::StorageDownload(..) | Self::StoragePresign(_) | Self::Sftp
+        )
+    }
     fn is_object(self) -> bool {
         matches!(self, Self::ObjectQuery | Self::ObjectExecute)
     }
@@ -202,6 +211,7 @@ impl Scenario {
         matches!(self, Self::SlackHeaders | Self::Mailgun | Self::TeamsChunks)
             || self.is_ai()
             || self.is_mcp()
+            || matches!(self, Self::StorageDownload(..))
     }
     fn drains_normally(self) -> bool {
         matches!(self, Self::PauseBranches | Self::ShutdownBranches)
@@ -249,7 +259,10 @@ async fn run(scenario: Scenario) -> anyhow::Result<()> {
     } else if parallel
         || matches!(
             scenario,
-            Scenario::AiSummary | Scenario::AiMemorySave | Scenario::TeamsChunks
+            Scenario::AiSummary
+                | Scenario::AiMemorySave
+                | Scenario::TeamsChunks
+                | Scenario::StorageDownload(_, true)
         )
     {
         2
@@ -317,6 +330,26 @@ async fn run(scenario: Scenario) -> anyhow::Result<()> {
             .map(|(key, value)| (key.clone(), immediate(value.clone())))
             .collect::<serde_json::Map<String, Value>>()
             .into();
+    }
+    if scenario.is_storage() {
+        let (agent, capability) = match scenario {
+            Scenario::StorageDownload(agent, _) => (agent, "storage-download-file"),
+            Scenario::StoragePresign(agent) => (agent, "storage-generate-presigned-url"),
+            Scenario::Sftp => ("sftp", "sftp-download-file"),
+            _ => unreachable!(),
+        };
+        let integration = match agent {
+            "s3-storage" => "s3_compatible",
+            "azure-blob-storage" => "azure_blob_storage",
+            _ => "sftp",
+        };
+        graph["steps"]["fetch"]["agentId"] = agent.into();
+        graph["steps"]["fetch"]["capabilityId"] = capability.into();
+        graph["steps"]["fetch"]["inputMapping"] = serde_json::json!({
+            "bucket":immediate("bucket".into()), "key":immediate("file.txt".into()),
+            "path":immediate("/file.txt".into()), "operation":immediate("download".into()),
+            "_connection":immediate(serde_json::json!({"connection_id":"fixture-connection","integration_id":integration,"parameters":{}}))
+        });
     }
     if scenario.is_object() {
         graph["steps"]["fetch"]["agentId"] = "object-model".into();
@@ -425,7 +458,7 @@ async fn run(scenario: Scenario) -> anyhow::Result<()> {
                         }
                         // Read the entire internal request before issuing a response or
                         // cancellation. Memory-save payloads can span multiple packets.
-                        if scenario.is_ai() || scenario.is_object() {
+                        if scenario.is_ai() || scenario.is_object() || scenario.is_storage() {
                             let end = request.windows(4).position(|bytes| bytes == b"\r\n\r\n").unwrap() + 4;
                             let headers = std::str::from_utf8(&request[..end])?;
                             let length = headers.lines().filter_map(|line| line.split_once(':'))
@@ -443,6 +476,19 @@ async fn run(scenario: Scenario) -> anyhow::Result<()> {
                                 let body: Value = serde_json::from_slice(&request[end..end + length])?;
                                 assert_eq!(body["connectionId"], "fixture-connection");
                                 assert_eq!(body["sql"], "SELECT 1");
+                            }
+                            if matches!(scenario, Scenario::StoragePresign(_) | Scenario::Sftp) {
+                                let body: Value = serde_json::from_slice(&request[end..end + length])?;
+                                if scenario == Scenario::Sftp {
+                                    assert!(request.starts_with(b"POST /agent/sftp/sftp-download-file "));
+                                    assert_eq!(body["_connection"]["connection_id"], "fixture-connection");
+                                    assert_eq!(body["path"], "/file.txt");
+                                } else {
+                                    assert!(request.starts_with(b"POST /presign "));
+                                    assert_eq!(body["connection_id"], "fixture-connection");
+                                    assert_eq!(body["method"], "GET");
+                                    assert_eq!(body["path"], "/bucket/file.txt");
+                                }
                             }
                         }
                         if scenario.is_ai() {
@@ -512,6 +558,10 @@ async fn run(scenario: Scenario) -> anyhow::Result<()> {
                             } else {
                                 assert_eq!(body["connection_id"], "fixture-connection");
                                 match scenario {
+                                    Scenario::StorageDownload(_, _) => {
+                                        assert_eq!(body["url"], "/bucket/file.txt");
+                                        assert_eq!(body["method"], if server_host.requests.load(Ordering::SeqCst) == 0 {"HEAD"} else {"GET"});
+                                    },
                                     Scenario::SlackHeaders => assert_eq!(body["url"], "https://slack.com/api/chat.postMessage"),
                                     Scenario::Mailgun => assert_eq!(body["url"], "/v3/example.invalid/messages"),
                                     Scenario::TeamsChunks => {
@@ -532,6 +582,14 @@ async fn run(scenario: Scenario) -> anyhow::Result<()> {
                             stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\nx").await?;
                         }
                         let started = server_host.requests.fetch_add(1, Ordering::SeqCst) + 1;
+                        if matches!(scenario, Scenario::StorageDownload(_, true)) && started == 1 {
+                            let bytes = serde_json::to_vec(&serde_json::json!({"status":200,"headers":{"content-type":"text/plain"},"body_raw":""}))?;
+                            stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", bytes.len()).as_bytes()).await?;
+                            stream.write_all(&bytes).await?;
+                            server_host.closed_count.fetch_add(1, Ordering::SeqCst);
+                            server_host.closed.notify_one();
+                            return anyhow::Ok(());
+                        }
                         if (scenario == Scenario::TeamsChunks && started == 1) || (scenario == Scenario::McpTool && started < 3) {
                             let body = if scenario == Scenario::TeamsChunks {serde_json::json!({"id":"first"})} else {serde_json::json!({"jsonrpc":"2.0","id":1,"result":{}})};
                             let bytes = serde_json::to_vec(&serde_json::json!({"status":if scenario.is_mcp() && started==2 {202} else {200},"headers":{"mcp-session-id":"fixture-session"},"body":body}))?;
@@ -586,8 +644,8 @@ async fn run(scenario: Scenario) -> anyhow::Result<()> {
             .execute_invoke(
                 &pre,
                 runtara_component_host::WorkflowRunSpec {
-                    env: if scenario.uses_proxy() || scenario.is_object() {
-                        HashMap::from([("RUNTARA_HTTP_PROXY_URL".into(), url.clone()), ("RUNTARA_TENANT_ID".into(), "fixture-tenant".into()), ("CONNECTION_SERVICE_URL".into(), url.clone()), ("RUNTARA_OBJECT_MODEL_URL".into(), if scenario.is_object() {url.clone()} else {format!("{url}/object-model")})])
+                    env: if scenario.uses_proxy() || scenario.is_object() || scenario.is_storage() {
+                        HashMap::from([("RUNTARA_HTTP_PROXY_URL".into(), url.clone()), ("RUNTARA_TENANT_ID".into(), "fixture-tenant".into()), ("CONNECTION_SERVICE_URL".into(), url.clone()), ("RUNTARA_AGENT_SERVICE_URL".into(), format!("{url}/agent")), ("RUNTARA_OBJECT_MODEL_URL".into(), if scenario.is_object() {url.clone()} else {format!("{url}/object-model")})])
                     } else { HashMap::new() },
                     stderr: None,
                     timeout: Duration::from_secs(10),
@@ -748,4 +806,28 @@ async fn emitted_mcp_cancel_interrupts_initialization_without_recovery() -> anyh
 async fn emitted_mcp_cancel_interrupts_tool_after_handshake_without_recovery() -> anyhow::Result<()>
 {
     run(Scenario::McpTool).await
+}
+
+#[tokio::test]
+async fn emitted_storage_download_cancel_stops_head_and_get_without_recovery() -> anyhow::Result<()>
+{
+    for agent in ["s3-storage", "azure-blob-storage"] {
+        for after_head in [false, true] {
+            run(Scenario::StorageDownload(agent, after_head)).await?;
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn emitted_storage_presign_cancel_bypasses_soft_failure_and_recovery() -> anyhow::Result<()> {
+    for agent in ["s3-storage", "azure-blob-storage"] {
+        run(Scenario::StoragePresign(agent)).await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn emitted_sftp_cancel_stops_native_service_wait_without_recovery() -> anyhow::Result<()> {
+    run(Scenario::Sftp).await
 }

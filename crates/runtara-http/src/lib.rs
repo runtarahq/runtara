@@ -416,7 +416,9 @@ pub struct PresignResult {
 /// using the appropriate scheme (AWS SigV4 query string, Azure SAS, …), and
 /// returns it. The signed URL is intended to be returned to the workflow
 /// caller and consumed outside of the proxy.
-pub fn presign(
+/// In WASM the request yields through standard component I/O and can be
+/// cancelled. The native backend retains its existing blocking transport.
+pub async fn presign(
     connection_id: &str,
     method: &str,
     path: &str,
@@ -454,10 +456,7 @@ pub fn presign(
             .push(("X-Org-Id".to_string(), tenant_id.clone()));
     }
 
-    #[cfg(feature = "native")]
-    let response = native::execute(request)?;
-    #[cfg(all(feature = "wasi", not(feature = "native")))]
-    let response = wasi_backend::execute(request)?;
+    let response = request.call_async().await?;
 
     if !(200..300).contains(&response.status) {
         let body = String::from_utf8_lossy(&response.body).to_string();

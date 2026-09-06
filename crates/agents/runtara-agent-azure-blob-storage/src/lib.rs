@@ -14,7 +14,7 @@
 //! `https://{account}.blob.core.windows.net`. The component never sees storage
 //! account keys and performs no signing.
 //!
-//! Presigned SAS URLs are obtained via `runtara_http::presign(...)` — same
+//! Presigned SAS URLs are obtained via `runtara_http::presign(...).await` — same
 //! mechanism as the s3_storage agent, fully server-side.
 //!
 //! The capability surface mirrors the s3_storage agent so workflows can be
@@ -39,9 +39,8 @@ mod bindings {
     wit_bindgen::generate!({
         path: ["../../runtara-agent-wit/wit", "wit"],
         world: "runtara:agent-azure-blob-storage/agent",
-        // Sync impls of the async-TYPED invoke (sync lift; see
-        // spikes/wit-bindgen-async-typed).
-        async: false,
+        // Callback bindings permit cancellation of awaited component I/O.
+        async: ["export:runtara:agent-azure-blob-storage/capabilities@0.4.0#invoke"],
         generate_all,
     });
 }
@@ -176,7 +175,7 @@ fn url_encode_blob_key(s: &str) -> String {
 }
 
 /// Fire an HTTP request via the runtara proxy (Azure Shared Key signing is done server-side).
-fn azure_request(
+async fn azure_request(
     method: &str,
     path: &str,
     connection_id: &str,
@@ -196,7 +195,7 @@ fn azure_request(
         req = req.body_bytes(data);
     }
 
-    req.call_agent().map_err(|e| {
+    req.call_agent_async().await.map_err(|e| {
         AgentError::transient(
             "AZURE_BLOB_NETWORK_ERROR",
             format!("Azure Blob request {method} {path} failed: {e}"),
@@ -352,10 +351,12 @@ pub struct CreateBucketOutput {
     module_secure = true,
     side_effects = true
 )]
-pub fn storage_create_bucket(input: CreateBucketInput) -> Result<CreateBucketOutput, AgentError> {
+pub async fn storage_create_bucket(
+    input: CreateBucketInput,
+) -> Result<CreateBucketOutput, AgentError> {
     let conn = require_connection(&input._connection)?;
     let path = container_path(&input.bucket);
-    let resp = azure_request("PUT", &path, &conn.connection_id, &[], None)?;
+    let resp = azure_request("PUT", &path, &conn.connection_id, &[], None).await?;
 
     Ok(match resp.status {
         // 409 (container already exists) is treated as success — matches the
@@ -414,10 +415,12 @@ pub struct ListBucketsOutput {
     module_supports_connections = true,
     module_integration_ids = "azure_blob_storage"
 )]
-pub fn storage_list_buckets(input: ListBucketsInput) -> Result<ListBucketsOutput, AgentError> {
+pub async fn storage_list_buckets(
+    input: ListBucketsInput,
+) -> Result<ListBucketsOutput, AgentError> {
     let conn = require_connection(&input._connection)?;
     // GET /?comp=list — lists all containers in the storage account.
-    let resp = azure_request("GET", "/?comp=list", &conn.connection_id, &[], None)?;
+    let resp = azure_request("GET", "/?comp=list", &conn.connection_id, &[], None).await?;
 
     Ok(if resp.status == 200 {
         let xml = String::from_utf8_lossy(&resp.body).to_string();
@@ -478,10 +481,12 @@ pub struct DeleteBucketOutput {
     module_integration_ids = "azure_blob_storage",
     side_effects = true
 )]
-pub fn storage_delete_bucket(input: DeleteBucketInput) -> Result<DeleteBucketOutput, AgentError> {
+pub async fn storage_delete_bucket(
+    input: DeleteBucketInput,
+) -> Result<DeleteBucketOutput, AgentError> {
     let conn = require_connection(&input._connection)?;
     let path = container_path(&input.bucket);
-    let resp = azure_request("DELETE", &path, &conn.connection_id, &[], None)?;
+    let resp = azure_request("DELETE", &path, &conn.connection_id, &[], None).await?;
 
     Ok(match resp.status {
         // 404 (already gone) is treated as success — matches legacy idempotent semantics.
@@ -582,7 +587,7 @@ pub struct UploadFileOutput {
     module_integration_ids = "azure_blob_storage",
     side_effects = true
 )]
-pub fn storage_upload_file(input: UploadFileInput) -> Result<UploadFileOutput, AgentError> {
+pub async fn storage_upload_file(input: UploadFileInput) -> Result<UploadFileOutput, AgentError> {
     let conn = require_connection(&input._connection)?;
 
     let is_base64 = input.is_base64.unwrap_or(true);
@@ -626,7 +631,8 @@ pub fn storage_upload_file(input: UploadFileInput) -> Result<UploadFileOutput, A
         &conn.connection_id,
         &[("Content-Type", ct), ("x-ms-blob-type", "BlockBlob")],
         Some(&data),
-    )?;
+    )
+    .await?;
 
     Ok(match resp.status {
         200 | 201 => UploadFileOutput {
@@ -715,13 +721,16 @@ pub struct DownloadFileOutput {
     module_supports_connections = true,
     module_integration_ids = "azure_blob_storage"
 )]
-pub fn storage_download_file(input: DownloadFileInput) -> Result<DownloadFileOutput, AgentError> {
+pub async fn storage_download_file(
+    input: DownloadFileInput,
+) -> Result<DownloadFileOutput, AgentError> {
     let conn = require_connection(&input._connection)?;
 
     // HEAD first to grab content-type without paying the body cost. Mirrors
     // legacy behaviour; a HEAD failure shouldn't block the GET.
     let head_path = blob_path(&input.bucket, &input.key);
     let content_type = azure_request("HEAD", &head_path, &conn.connection_id, &[], None)
+        .await
         .ok()
         .and_then(|r| {
             if r.status == 200 {
@@ -735,7 +744,7 @@ pub fn storage_download_file(input: DownloadFileInput) -> Result<DownloadFileOut
         });
 
     let get_path = blob_path(&input.bucket, &input.key);
-    let resp = azure_request("GET", &get_path, &conn.connection_id, &[], None)?;
+    let resp = azure_request("GET", &get_path, &conn.connection_id, &[], None).await?;
 
     Ok(if resp.status == 200 {
         let size = resp.body.len() as u64;
@@ -842,7 +851,7 @@ pub struct ListFilesOutput {
     module_supports_connections = true,
     module_integration_ids = "azure_blob_storage"
 )]
-pub fn storage_list_files(input: ListFilesInput) -> Result<ListFilesOutput, AgentError> {
+pub async fn storage_list_files(input: ListFilesInput) -> Result<ListFilesOutput, AgentError> {
     let conn = require_connection(&input._connection)?;
 
     let mut query_parts = vec!["restype=container".to_string(), "comp=list".to_string()];
@@ -857,7 +866,7 @@ pub fn storage_list_files(input: ListFilesInput) -> Result<ListFilesOutput, Agen
     }
 
     let path = format!("/{}?{}", input.bucket, query_parts.join("&"));
-    let resp = azure_request("GET", &path, &conn.connection_id, &[], None)?;
+    let resp = azure_request("GET", &path, &conn.connection_id, &[], None).await?;
 
     Ok(if resp.status == 200 {
         let xml = String::from_utf8_lossy(&resp.body).to_string();
@@ -935,10 +944,12 @@ pub struct GetFileInfoOutput {
     module_supports_connections = true,
     module_integration_ids = "azure_blob_storage"
 )]
-pub fn storage_get_file_info(input: GetFileInfoInput) -> Result<GetFileInfoOutput, AgentError> {
+pub async fn storage_get_file_info(
+    input: GetFileInfoInput,
+) -> Result<GetFileInfoOutput, AgentError> {
     let conn = require_connection(&input._connection)?;
     let path = blob_path(&input.bucket, &input.key);
-    let resp = azure_request("HEAD", &path, &conn.connection_id, &[], None)?;
+    let resp = azure_request("HEAD", &path, &conn.connection_id, &[], None).await?;
 
     Ok(if resp.status == 200 {
         let content_type = resp
@@ -1010,10 +1021,10 @@ pub struct DeleteFileOutput {
     module_integration_ids = "azure_blob_storage",
     side_effects = true
 )]
-pub fn storage_delete_file(input: DeleteFileInput) -> Result<DeleteFileOutput, AgentError> {
+pub async fn storage_delete_file(input: DeleteFileInput) -> Result<DeleteFileOutput, AgentError> {
     let conn = require_connection(&input._connection)?;
     let path = blob_path(&input.bucket, &input.key);
-    let resp = azure_request("DELETE", &path, &conn.connection_id, &[], None)?;
+    let resp = azure_request("DELETE", &path, &conn.connection_id, &[], None).await?;
 
     Ok(match resp.status {
         // 404 (already gone) is treated as success — matches legacy behaviour.
@@ -1075,7 +1086,7 @@ pub struct CopyFileOutput {
     module_integration_ids = "azure_blob_storage",
     side_effects = true
 )]
-pub fn storage_copy_file(input: CopyFileInput) -> Result<CopyFileOutput, AgentError> {
+pub async fn storage_copy_file(input: CopyFileInput) -> Result<CopyFileOutput, AgentError> {
     let conn = require_connection(&input._connection)?;
 
     // Azure Copy Blob: PUT on the destination with x-ms-copy-source pointing
@@ -1090,7 +1101,8 @@ pub fn storage_copy_file(input: CopyFileInput) -> Result<CopyFileOutput, AgentEr
         &conn.connection_id,
         &[("x-ms-copy-source", &copy_source)],
         None,
-    )?;
+    )
+    .await?;
 
     Ok(match resp.status {
         200..=202 => CopyFileOutput {
@@ -1178,7 +1190,7 @@ pub struct GeneratePresignedUrlOutput {
     module_supports_connections = true,
     module_integration_ids = "azure_blob_storage"
 )]
-pub fn storage_generate_presigned_url(
+pub async fn storage_generate_presigned_url(
     input: GeneratePresignedUrlInput,
 ) -> Result<GeneratePresignedUrlOutput, AgentError> {
     let conn = require_connection(&input._connection)?;
@@ -1212,7 +1224,9 @@ pub fn storage_generate_presigned_url(
             &path,
             expires,
             input.content_type.as_deref(),
-        ) {
+        )
+        .await
+        {
             Ok(result) => GeneratePresignedUrlOutput {
                 success: true,
                 url: Some(result.url),
@@ -1338,20 +1352,22 @@ struct Component;
 
 #[cfg(target_arch = "wasm32")]
 impl Guest for Component {
-    fn invoke(capability_id: String, input: Vec<u8>) -> Result<Vec<u8>, ErrorInfo> {
+    async fn invoke(capability_id: String, input: Vec<u8>) -> Result<Vec<u8>, ErrorInfo> {
         let value: serde_json::Value = serde_json::from_slice(&input).map_err(bad_json)?;
 
         let executor_result = match capability_id.as_str() {
-            "storage-create-bucket" => __executor_storage_create_bucket(value),
-            "storage-list-buckets" => __executor_storage_list_buckets(value),
-            "storage-delete-bucket" => __executor_storage_delete_bucket(value),
-            "storage-upload-file" => __executor_storage_upload_file(value),
-            "storage-download-file" => __executor_storage_download_file(value),
-            "storage-list-files" => __executor_storage_list_files(value),
-            "storage-get-file-info" => __executor_storage_get_file_info(value),
-            "storage-delete-file" => __executor_storage_delete_file(value),
-            "storage-copy-file" => __executor_storage_copy_file(value),
-            "storage-generate-presigned-url" => __executor_storage_generate_presigned_url(value),
+            "storage-create-bucket" => __executor_storage_create_bucket(value).await,
+            "storage-list-buckets" => __executor_storage_list_buckets(value).await,
+            "storage-delete-bucket" => __executor_storage_delete_bucket(value).await,
+            "storage-upload-file" => __executor_storage_upload_file(value).await,
+            "storage-download-file" => __executor_storage_download_file(value).await,
+            "storage-list-files" => __executor_storage_list_files(value).await,
+            "storage-get-file-info" => __executor_storage_get_file_info(value).await,
+            "storage-delete-file" => __executor_storage_delete_file(value).await,
+            "storage-copy-file" => __executor_storage_copy_file(value).await,
+            "storage-generate-presigned-url" => {
+                __executor_storage_generate_presigned_url(value).await
+            }
             other => {
                 return Err(ErrorInfo {
                     code: "UNKNOWN_CAPABILITY".into(),

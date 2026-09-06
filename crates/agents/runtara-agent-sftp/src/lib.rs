@@ -38,9 +38,8 @@ mod bindings {
     wit_bindgen::generate!({
         path: ["../../runtara-agent-wit/wit", "wit"],
         world: "runtara:agent-sftp/agent",
-        // Sync impls of the async-TYPED invoke (sync lift; see
-        // spikes/wit-bindgen-async-typed).
-        async: false,
+        // Callback bindings permit cancellation of awaited component I/O.
+        async: ["export:runtara:agent-sftp/capabilities@0.4.0#invoke"],
         generate_all,
     });
 }
@@ -144,7 +143,7 @@ pub struct RawConnection {
 // or `{ "success": false, "error": "..." }`. We unwrap the envelope so the
 // caller can `serde_json::from_value` straight into the typed output struct.
 
-fn forward_to_native(
+async fn forward_to_native(
     capability_id: &str,
     connection: &Option<RawConnection>,
     input: &Value,
@@ -176,7 +175,8 @@ fn forward_to_native(
         .header("Content-Type", "application/json")
         .header("X-Org-Id", &tenant_id)
         .body_bytes(&body)
-        .call()
+        .call_async()
+        .await
         .map_err(|e| {
             AgentError::transient(
                 "SFTP_NATIVE_AGENT_NETWORK_ERROR",
@@ -218,7 +218,7 @@ fn forward_to_native(
 }
 
 /// Run a capability stub: serialize input → forward → deserialize output.
-fn run_capability<I, O>(
+async fn run_capability<I, O>(
     capability_id: &str,
     connection: &Option<RawConnection>,
     input: &I,
@@ -228,7 +228,7 @@ where
     O: for<'de> Deserialize<'de>,
 {
     let input_value = serde_json::to_value(input)?;
-    let output_value = forward_to_native(capability_id, connection, &input_value)?;
+    let output_value = forward_to_native(capability_id, connection, &input_value).await?;
     serde_json::from_value(output_value).map_err(|e| {
         AgentError::permanent("SFTP_OUTPUT_DESERIALIZATION_ERROR", e.to_string())
             .with_attr("capability", capability_id)
@@ -315,8 +315,8 @@ pub struct SftpListFilesInput {
     module_integration_ids = "sftp",
     module_secure = true
 )]
-pub fn sftp_list_files(input: SftpListFilesInput) -> Result<Vec<FileInfo>, AgentError> {
-    run_capability("sftp-list-files", &input._connection, &input)
+pub async fn sftp_list_files(input: SftpListFilesInput) -> Result<Vec<FileInfo>, AgentError> {
+    run_capability("sftp-list-files", &input._connection, &input).await
 }
 
 // ============================================================================
@@ -356,8 +356,8 @@ fn default_response_format() -> String {
     display_name = "Download File",
     description = "Download a file from SFTP and return its content"
 )]
-pub fn sftp_download_file(input: SftpDownloadFileInput) -> Result<String, AgentError> {
-    run_capability("sftp-download-file", &input._connection, &input)
+pub async fn sftp_download_file(input: SftpDownloadFileInput) -> Result<String, AgentError> {
+    run_capability("sftp-download-file", &input._connection, &input).await
 }
 
 // ============================================================================
@@ -405,8 +405,8 @@ fn default_content_format() -> String {
     description = "Upload a file to SFTP",
     side_effects = true
 )]
-pub fn sftp_upload_file(input: SftpUploadFileInput) -> Result<usize, AgentError> {
-    run_capability("sftp-upload-file", &input._connection, &input)
+pub async fn sftp_upload_file(input: SftpUploadFileInput) -> Result<usize, AgentError> {
+    run_capability("sftp-upload-file", &input._connection, &input).await
 }
 
 // ============================================================================
@@ -455,8 +455,10 @@ pub struct DeleteFileResponse {
     description = "Delete a file from SFTP",
     side_effects = true
 )]
-pub fn sftp_delete_file(input: SftpDeleteFileInput) -> Result<DeleteFileResponse, AgentError> {
-    run_capability("sftp-delete-file", &input._connection, &input)
+pub async fn sftp_delete_file(
+    input: SftpDeleteFileInput,
+) -> Result<DeleteFileResponse, AgentError> {
+    run_capability("sftp-delete-file", &input._connection, &input).await
 }
 
 // ============================================================================
@@ -536,14 +538,14 @@ struct Component;
 
 #[cfg(target_arch = "wasm32")]
 impl Guest for Component {
-    fn invoke(capability_id: String, input: Vec<u8>) -> Result<Vec<u8>, ErrorInfo> {
+    async fn invoke(capability_id: String, input: Vec<u8>) -> Result<Vec<u8>, ErrorInfo> {
         let value: serde_json::Value = serde_json::from_slice(&input).map_err(bad_json)?;
 
         let executor_result = match capability_id.as_str() {
-            "sftp-list-files" => __executor_sftp_list_files(value),
-            "sftp-download-file" => __executor_sftp_download_file(value),
-            "sftp-upload-file" => __executor_sftp_upload_file(value),
-            "sftp-delete-file" => __executor_sftp_delete_file(value),
+            "sftp-list-files" => __executor_sftp_list_files(value).await,
+            "sftp-download-file" => __executor_sftp_download_file(value).await,
+            "sftp-upload-file" => __executor_sftp_upload_file(value).await,
+            "sftp-delete-file" => __executor_sftp_delete_file(value).await,
             other => {
                 return Err(ErrorInfo {
                     code: "UNKNOWN_CAPABILITY".into(),

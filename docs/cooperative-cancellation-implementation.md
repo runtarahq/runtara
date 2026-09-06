@@ -666,3 +666,59 @@ remain ignored. Affected-crate all-target Clippy with the existing integration
 test features, formatting and diff whitespace checks passed. No real service,
 database/server E2E, Linux qualification or new performance/capacity measurement
 was run in this stage.
+
+## S3, Azure Blob Storage and SFTP I/O
+
+The existing S3 and Azure Blob Storage components now use callback exports and
+await their normal proxy requests across all ten capabilities each. The shared
+`runtara_http::presign` helper is now async; both in-repository callers await it.
+Signing remains in the existing proxy service with unchanged request fields,
+tenant headers and endpoint derivation. The SFTP component's four capabilities
+await their existing native-service HTTP endpoint. There is no new feature flag,
+alternate build path, host invocation registry or workflow scheduler.
+
+Seven built-component test functions cover 36 blocked-request cases: uploads,
+copies, deletes, both stages of downloads, presigning through both supported
+proxy URL shapes, and all four SFTP capabilities. Every blocked case is exercised
+before response headers and during a partial response body. Standard cancellation
+must close local I/O, allow an independent sibling to finish and permit a fresh
+call in the same Agent instance. A cancelled download HEAD must not fall through
+to GET, and a cancelled presign must not become an ordinary soft failure.
+
+The same tests preserve non-cancellation behavior: provider-specific deletion
+status handling (including already-absent objects), successful GET after an
+ordinary HEAD failure, presign output and soft failures, and SFTP HTTP, envelope
+and output error classification. Fixture assertions cover encoded object paths,
+copy-source headers, upload bytes, Azure blob type, presign parameters and SFTP
+forwarding. All endpoints are local fixtures; no storage account or SSH server
+is contacted.
+
+Three new emitted-DSL test functions exercise seven workflows: both providers'
+download HEAD and GET waits, both providers' presign waits, and the SFTP service
+wait. The existing root lifecycle command requires cleanup before acknowledgement
+and prevents retries, `onError` recovery and normal workflow completion.
+
+These guarantees stop the guest's pending work. A storage write already accepted
+by a service may still finish; closing the SFTP wrapper's HTTP request does not
+prove termination of native SSH work. Neither cancellation nor its tests add
+rollback or transaction ownership. Native HTTP retains its blocking transport.
+
+Twelve of 27 built-in Agent bindings are migrated. The other 15 bindings and the
+nested-workflow, CPU-cooperation, timeout, emergency-abort, terminal-race, E2E and
+performance/capacity gates remain open.
+
+```sh
+scripts/build-agent-components.sh
+cargo test -p runtara-http --features native -p runtara-agent-s3-storage -p runtara-agent-azure-blob-storage -p runtara-agent-sftp
+cargo test -p runtara-component-host --features component-integration-tests --test cooperative_cancellation -- --test-threads=4
+cargo test -p runtara-workflows --features direct-wasm-integration-tests --test direct_wasm_execute -- --test-threads=4
+```
+
+The normal build regenerated all 27 Agent components and both shared workflow
+components with metadata. All 17 focused native tests and 44 component cancellation
+tests passed. The full emitted-workflow suite passed 277 tests with four test
+threads, including all 27 cooperative lifecycle tests; the two manual release
+benchmarks remain ignored. Affected-crate all-target Clippy with the existing
+integration test features, formatting and diff whitespace checks passed. No
+database/server E2E, Linux qualification or fresh performance/capacity measurement
+was run in this stage.

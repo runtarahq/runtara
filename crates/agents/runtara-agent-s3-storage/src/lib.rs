@@ -36,9 +36,8 @@ mod bindings {
     wit_bindgen::generate!({
         path: ["../../runtara-agent-wit/wit", "wit"],
         world: "runtara:agent-s3-storage/agent",
-        // Sync impls of the async-TYPED invoke (sync lift; see
-        // spikes/wit-bindgen-async-typed).
-        async: false,
+        // Callback bindings permit cancellation of awaited component I/O.
+        async: ["export:runtara:agent-s3-storage/capabilities@0.4.0#invoke"],
         generate_all,
     });
 }
@@ -169,7 +168,7 @@ fn url_encode_s3_key(s: &str) -> String {
 }
 
 /// Fire an HTTP request via the runtara proxy (SigV4 is done server-side).
-fn s3_request(
+async fn s3_request(
     method: &str,
     path: &str,
     connection_id: &str,
@@ -189,7 +188,7 @@ fn s3_request(
         req = req.body_bytes(data);
     }
 
-    req.call_agent().map_err(|e| {
+    req.call_agent_async().await.map_err(|e| {
         AgentError::transient(
             "S3_NETWORK_ERROR",
             format!("S3 request {method} {path} failed: {e}"),
@@ -320,10 +319,12 @@ pub struct CreateBucketOutput {
     module_integration_ids = "s3_compatible",
     module_secure = true
 )]
-pub fn storage_create_bucket(input: CreateBucketInput) -> Result<CreateBucketOutput, AgentError> {
+pub async fn storage_create_bucket(
+    input: CreateBucketInput,
+) -> Result<CreateBucketOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     let path = bucket_path(&input.bucket);
-    let resp = s3_request("PUT", &path, &connection.connection_id, &[], None)?;
+    let resp = s3_request("PUT", &path, &connection.connection_id, &[], None).await?;
 
     Ok(match resp.status {
         200 | 201 | 409 => CreateBucketOutput {
@@ -377,9 +378,11 @@ pub struct ListBucketsOutput {
     side_effects = false,
     idempotent = true
 )]
-pub fn storage_list_buckets(input: ListBucketsInput) -> Result<ListBucketsOutput, AgentError> {
+pub async fn storage_list_buckets(
+    input: ListBucketsInput,
+) -> Result<ListBucketsOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
-    let resp = s3_request("GET", "/", &connection.connection_id, &[], None)?;
+    let resp = s3_request("GET", "/", &connection.connection_id, &[], None).await?;
 
     Ok(if resp.status == 200 {
         let xml = String::from_utf8_lossy(&resp.body).to_string();
@@ -436,10 +439,12 @@ pub struct DeleteBucketOutput {
     side_effects = true,
     idempotent = true
 )]
-pub fn storage_delete_bucket(input: DeleteBucketInput) -> Result<DeleteBucketOutput, AgentError> {
+pub async fn storage_delete_bucket(
+    input: DeleteBucketInput,
+) -> Result<DeleteBucketOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     let path = bucket_path(&input.bucket);
-    let resp = s3_request("DELETE", &path, &connection.connection_id, &[], None)?;
+    let resp = s3_request("DELETE", &path, &connection.connection_id, &[], None).await?;
 
     Ok(match resp.status {
         200 | 204 | 404 => DeleteBucketOutput {
@@ -539,7 +544,7 @@ pub struct UploadFileOutput {
     side_effects = true,
     idempotent = false
 )]
-pub fn storage_upload_file(input: UploadFileInput) -> Result<UploadFileOutput, AgentError> {
+pub async fn storage_upload_file(input: UploadFileInput) -> Result<UploadFileOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
 
     let is_base64 = input.is_base64.unwrap_or(true);
@@ -579,7 +584,8 @@ pub fn storage_upload_file(input: UploadFileInput) -> Result<UploadFileOutput, A
         &connection.connection_id,
         &[("Content-Type", ct)],
         Some(&data),
-    )?;
+    )
+    .await?;
 
     Ok(match resp.status {
         200 | 201 => UploadFileOutput {
@@ -668,13 +674,16 @@ pub struct DownloadFileOutput {
     side_effects = false,
     idempotent = true
 )]
-pub fn storage_download_file(input: DownloadFileInput) -> Result<DownloadFileOutput, AgentError> {
+pub async fn storage_download_file(
+    input: DownloadFileInput,
+) -> Result<DownloadFileOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
 
     // HEAD first to pull content_type without re-streaming the body. Mirrors
     // the legacy behaviour; failure of HEAD doesn't abort the GET.
     let head_path = object_path(&input.bucket, &input.key);
     let content_type = s3_request("HEAD", &head_path, &connection.connection_id, &[], None)
+        .await
         .ok()
         .and_then(|r| {
             if r.status == 200 {
@@ -688,7 +697,7 @@ pub fn storage_download_file(input: DownloadFileInput) -> Result<DownloadFileOut
         });
 
     let get_path = object_path(&input.bucket, &input.key);
-    let resp = s3_request("GET", &get_path, &connection.connection_id, &[], None)?;
+    let resp = s3_request("GET", &get_path, &connection.connection_id, &[], None).await?;
 
     Ok(if resp.status == 200 {
         let size = resp.body.len() as u64;
@@ -795,7 +804,7 @@ pub struct ListFilesOutput {
     side_effects = false,
     idempotent = true
 )]
-pub fn storage_list_files(input: ListFilesInput) -> Result<ListFilesOutput, AgentError> {
+pub async fn storage_list_files(input: ListFilesInput) -> Result<ListFilesOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
 
     let mut query_parts = vec!["list-type=2".to_string()];
@@ -810,7 +819,7 @@ pub fn storage_list_files(input: ListFilesInput) -> Result<ListFilesOutput, Agen
     }
 
     let path = format!("/{}?{}", input.bucket, query_parts.join("&"));
-    let resp = s3_request("GET", &path, &connection.connection_id, &[], None)?;
+    let resp = s3_request("GET", &path, &connection.connection_id, &[], None).await?;
 
     Ok(if resp.status == 200 {
         let xml = String::from_utf8_lossy(&resp.body).to_string();
@@ -888,10 +897,12 @@ pub struct GetFileInfoOutput {
     side_effects = false,
     idempotent = true
 )]
-pub fn storage_get_file_info(input: GetFileInfoInput) -> Result<GetFileInfoOutput, AgentError> {
+pub async fn storage_get_file_info(
+    input: GetFileInfoInput,
+) -> Result<GetFileInfoOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     let path = object_path(&input.bucket, &input.key);
-    let resp = s3_request("HEAD", &path, &connection.connection_id, &[], None)?;
+    let resp = s3_request("HEAD", &path, &connection.connection_id, &[], None).await?;
 
     Ok(if resp.status == 200 {
         let content_type = resp
@@ -962,10 +973,10 @@ pub struct DeleteFileOutput {
     side_effects = true,
     idempotent = true
 )]
-pub fn storage_delete_file(input: DeleteFileInput) -> Result<DeleteFileOutput, AgentError> {
+pub async fn storage_delete_file(input: DeleteFileInput) -> Result<DeleteFileOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     let path = object_path(&input.bucket, &input.key);
-    let resp = s3_request("DELETE", &path, &connection.connection_id, &[], None)?;
+    let resp = s3_request("DELETE", &path, &connection.connection_id, &[], None).await?;
 
     Ok(match resp.status {
         200 | 204 | 404 => DeleteFileOutput {
@@ -1025,7 +1036,7 @@ pub struct CopyFileOutput {
     side_effects = true,
     idempotent = true
 )]
-pub fn storage_copy_file(input: CopyFileInput) -> Result<CopyFileOutput, AgentError> {
+pub async fn storage_copy_file(input: CopyFileInput) -> Result<CopyFileOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
 
     let dst_path = object_path(&input.destination_bucket, &input.destination_key);
@@ -1036,7 +1047,8 @@ pub fn storage_copy_file(input: CopyFileInput) -> Result<CopyFileOutput, AgentEr
         &connection.connection_id,
         &[("x-amz-copy-source", &copy_source)],
         None,
-    )?;
+    )
+    .await?;
 
     Ok(match resp.status {
         200 | 201 => CopyFileOutput {
@@ -1125,7 +1137,7 @@ pub struct GeneratePresignedUrlOutput {
     side_effects = false,
     idempotent = true
 )]
-pub fn storage_generate_presigned_url(
+pub async fn storage_generate_presigned_url(
     input: GeneratePresignedUrlInput,
 ) -> Result<GeneratePresignedUrlOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
@@ -1159,7 +1171,9 @@ pub fn storage_generate_presigned_url(
             &path,
             expires,
             input.content_type.as_deref(),
-        ) {
+        )
+        .await
+        {
             Ok(result) => GeneratePresignedUrlOutput {
                 success: true,
                 url: Some(result.url),
@@ -1330,20 +1344,22 @@ struct Component;
 
 #[cfg(target_arch = "wasm32")]
 impl Guest for Component {
-    fn invoke(capability_id: String, input: Vec<u8>) -> Result<Vec<u8>, ErrorInfo> {
+    async fn invoke(capability_id: String, input: Vec<u8>) -> Result<Vec<u8>, ErrorInfo> {
         let value: serde_json::Value = serde_json::from_slice(&input).map_err(bad_json)?;
 
         let executor_result = match capability_id.as_str() {
-            "storage-create-bucket" => __executor_storage_create_bucket(value),
-            "storage-list-buckets" => __executor_storage_list_buckets(value),
-            "storage-delete-bucket" => __executor_storage_delete_bucket(value),
-            "storage-upload-file" => __executor_storage_upload_file(value),
-            "storage-download-file" => __executor_storage_download_file(value),
-            "storage-list-files" => __executor_storage_list_files(value),
-            "storage-get-file-info" => __executor_storage_get_file_info(value),
-            "storage-delete-file" => __executor_storage_delete_file(value),
-            "storage-copy-file" => __executor_storage_copy_file(value),
-            "storage-generate-presigned-url" => __executor_storage_generate_presigned_url(value),
+            "storage-create-bucket" => __executor_storage_create_bucket(value).await,
+            "storage-list-buckets" => __executor_storage_list_buckets(value).await,
+            "storage-delete-bucket" => __executor_storage_delete_bucket(value).await,
+            "storage-upload-file" => __executor_storage_upload_file(value).await,
+            "storage-download-file" => __executor_storage_download_file(value).await,
+            "storage-list-files" => __executor_storage_list_files(value).await,
+            "storage-get-file-info" => __executor_storage_get_file_info(value).await,
+            "storage-delete-file" => __executor_storage_delete_file(value).await,
+            "storage-copy-file" => __executor_storage_copy_file(value).await,
+            "storage-generate-presigned-url" => {
+                __executor_storage_generate_presigned_url(value).await
+            }
             other => {
                 return Err(ErrorInfo {
                     code: "UNKNOWN_CAPABILITY".into(),
