@@ -36,6 +36,7 @@ runtara-store-postgres = { path = "../runtara-store-postgres" }
 
 # Embedded wasmtime workflow execution (EmbeddedWasmRunner)
 runtara-component-host = { path = "../runtara-component-host", version = "8.9" }
+runtara-workflow-wit = { path = "../runtara-workflow-wit", version = "8.9", features = ["isolation-package"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

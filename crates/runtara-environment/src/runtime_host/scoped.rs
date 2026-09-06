@@ -7,7 +7,9 @@ use runtara_component_host::isolated_tasks::TaskCancellation;
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
+mod compiler_authority;
 mod invocation;
+pub use compiler_authority::CompilerInvocationAuthority;
 mod root;
 mod signal_poll;
 pub use invocation::{

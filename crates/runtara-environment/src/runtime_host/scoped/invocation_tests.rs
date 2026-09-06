@@ -132,6 +132,13 @@ async fn launcher(
     fx: &Fixture,
     scopes: Arc<ScopedInvocationFactory>,
 ) -> PreparedInvocationLauncher {
+    PreparedInvocationLauncher::new(fx.executor.clone(), catalog(fx, None).await, scopes).unwrap()
+}
+
+async fn catalog(
+    fx: &Fixture,
+    invocations: Option<runtara_workflow_wit::isolation_package::InvocationManifest>,
+) -> Arc<runtara_component_host::PreparedChildCatalog> {
     use runtara_component_host::precompile::{
         CompiledWorkflowPackage, PrecompileRequest, PrecompileResponse,
         deserialize_trusted_precompiled_component, precompile_artifact_with_engine,
@@ -159,12 +166,17 @@ async fn launcher(
     }
     let child = compiled.pop().unwrap();
     let root = compiled.pop().unwrap();
+    let binding = if invocations.is_some() {
+        "agent:test"
+    } else {
+        "child"
+    };
     let package = CompiledWorkflowPackage {
-        invocations: None,
+        invocations,
         root,
         artifacts: BTreeMap::from([("fixture-child".into(), child)]),
         bindings: serde_json::from_value(
-            serde_json::json!([{"id":"child","artifact":"fixture-child","interface":INTERFACE}]),
+            serde_json::json!([{"id":binding,"artifact":"fixture-child","interface":INTERFACE}]),
         )
         .unwrap(),
     };
@@ -173,12 +185,7 @@ async fn launcher(
         .prepare_precompiled_package(package)
         .await
         .unwrap();
-    PreparedInvocationLauncher::new(
-        fx.executor.clone(),
-        prepared.child_catalog().unwrap().clone(),
-        scopes,
-    )
-    .unwrap()
+    prepared.child_catalog().unwrap().clone()
 }
 
 fn child_wat() -> String {
@@ -361,5 +368,200 @@ async fn scope_factory_root_cancel_deadline_and_task_cancel_prevent_initializers
             .any(|event| event.checkpoint_id.as_deref() == Some("parent/child"))
     );
     assert_eq!(fx.status().await, InstanceStatus::Running);
+    fx.close().await;
+}
+
+#[tokio::test]
+async fn compiler_checkpoint_contracts_bind_real_children_and_persistence() {
+    use runtara_workflow_wit::isolation_package::{
+        AgentCallSite, AgentInvocationPath, CheckpointContract, CheckpointNamespace,
+        InvocationCallSite, InvocationManifest,
+    };
+    use serde_json::json;
+    let fx = Fixture::new().await;
+    assert!(CompilerInvocationAuthority::new(catalog(&fx, None).await, vec![]).is_err());
+    for contract in [
+        CheckpointContract::None,
+        CheckpointContract::Child,
+        CheckpointContract::Tool {
+            ai_step_id: "brain".into(),
+            labels: vec!["approved".into()],
+        },
+    ] {
+        let tool = matches!(contract, CheckpointContract::Tool { .. });
+        let domain = if tool { 3 } else { 0 };
+        let inventory = InvocationManifest {
+            version: 4,
+            workflow_id: "root".into(),
+            agent_calls: vec![AgentCallSite {
+                binding: "agent:test".into(),
+                agent_id: "test".into(),
+                capability: "copy".into(),
+                step_id: "call".into(),
+                domains: vec![domain],
+            }],
+            call_sites: vec![InvocationCallSite {
+                token: 7,
+                identity: 0,
+                agent_reference: 0,
+                caller_reference: if tool { 1 } else { 0 },
+                domain,
+            }],
+            scope_paths: [(7, vec![Default::default()])].into(),
+            checkpoint_contracts: [(7, contract.clone())].into(),
+        };
+        if matches!(contract, CheckpointContract::Child) {
+            let mut collision = inventory.clone();
+            collision.call_sites.push(InvocationCallSite {
+                token: 8,
+                identity: 0,
+                agent_reference: 2,
+                caller_reference: 2,
+                domain: 0,
+            });
+            collision.scope_paths.insert(8, vec![Default::default()]);
+            collision
+                .checkpoint_contracts
+                .insert(8, CheckpointContract::Child);
+            assert!(
+                CompilerInvocationAuthority::new(catalog(&fx, Some(collision)).await, vec![])
+                    .is_err()
+            );
+        }
+        let catalog = catalog(&fx, Some(inventory)).await;
+        let authority =
+            Arc::new(CompilerInvocationAuthority::new(catalog.clone(), vec![]).unwrap());
+        let path = format!(
+            "runtara:v3:{}:aaaaaaah:{}",
+            json!(["agent", "root", [], [], ["test", "copy", "call"]]),
+            if tool { "aaaaaaad" } else { "aaaaaaaa" }
+        );
+        let invocation = AgentInvocationPath::decode(&path).unwrap();
+        let namespace = if tool {
+            CheckpointNamespace::tool(&invocation, "brain", "approved")
+        } else {
+            CheckpointNamespace::child(&invocation)
+        };
+        let input = serde_json::to_vec(&json!({"data":{"instance_id":"forged"},"variables":{"_cache_key_prefix":namespace.encoded_prefix()}})).unwrap();
+        let make_request = |input: Vec<u8>| StartRequest {
+            binding: "agent:test".into(),
+            entry: Entry::Capability("copy".into()),
+            input,
+            context: InvocationContext {
+                path: path.clone(),
+                attempt: 1,
+            },
+        };
+        if !matches!(contract, CheckpointContract::None) {
+            assert!(
+                authority
+                    .authorize(&make_request(
+                        br#"{"variables":{"_cache_key_prefix":"forged"}}"#.to_vec()
+                    ))
+                    .is_err()
+            );
+        }
+        let scopes = Arc::new(ScopedInvocationFactory::new(
+            fx.owner.clone(),
+            authority,
+            settings(
+                Instant::now() + Duration::from_secs(10),
+                Arc::new(AtomicBool::new(false)),
+            ),
+        ));
+        let (token_source, _) = fx.child().await;
+        let prepared_scope = scopes.prepare_child(&make_request(input.clone())).unwrap();
+        let spec = (prepared_scope.make_spec)(token_source.cancel.clone()).unwrap();
+        let runtime = spec.spec.runtime.unwrap();
+        let frames: serde_json::Value = serde_json::from_str(
+            namespace
+                .encoded_prefix()
+                .strip_prefix("runtara:scope:v2:")
+                .unwrap(),
+        )
+        .unwrap();
+        let own = format!(
+            "runtara:v2:{}",
+            json!(["wait", "child-workflow", frames, [], ["instance", "signal"]])
+        );
+        let foreign = format!(
+            "runtara:v2:{}",
+            json!(["wait", "child-workflow", [], [], ["instance", "signal"]])
+        );
+        {
+            let key = &foreign;
+            assert!(
+                runtime
+                    .checkpoint(key.clone(), b"forbidden".to_vec())
+                    .await
+                    .is_err()
+            );
+            assert!(runtime.get_checkpoint(key.clone()).await.is_err());
+            assert!(runtime.poll_custom_signal(key.clone()).await.is_err());
+            assert!(
+                runtime
+                    .record_retry_attempt(key.clone(), 1, None)
+                    .await
+                    .is_err()
+            );
+            assert!(
+                runtime
+                    .durable_sleep_checkpoint(key.clone(), b"forbidden".to_vec(), 0)
+                    .await
+                    .is_err()
+            );
+            assert!(
+                fx.persistence
+                    .load_checkpoint(&fx.id, key)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        if matches!(contract, CheckpointContract::None) {
+            assert!(runtime.checkpoint(own.clone(), vec![]).await.is_err());
+        } else {
+            runtime
+                .checkpoint(own.clone(), b"owned".to_vec())
+                .await
+                .unwrap();
+            assert_eq!(
+                runtime.get_checkpoint(own.clone()).await.unwrap(),
+                Some(b"owned".to_vec())
+            );
+            fx.persistence
+                .put_custom_signal(&fx.id, &own, b"owned signal")
+                .await
+                .unwrap();
+            assert_eq!(
+                runtime.poll_custom_signal(own.clone()).await.unwrap(),
+                Some(b"owned signal".to_vec())
+            );
+            runtime
+                .record_retry_attempt(own.clone(), 2, None)
+                .await
+                .unwrap();
+            let sleep = format!("{own}::retry_sleep::2");
+            runtime
+                .durable_sleep_checkpoint(sleep.clone(), b"wake".to_vec(), 0)
+                .await
+                .unwrap();
+            assert_eq!(
+                runtime.get_checkpoint(sleep).await.unwrap(),
+                Some(b"wake".to_vec())
+            );
+        }
+        let launcher =
+            PreparedInvocationLauncher::new(fx.executor.clone(), catalog, scopes).unwrap();
+        let launch = launcher.prepare(make_request(input.clone())).unwrap();
+        let id = fx.tasks.spawn(launch.run).unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(5), fx.tasks.join(id))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(result.outcome(),InvokeExit::Completed(bytes) if *bytes == input));
+        fx.tasks.release(id).await.unwrap();
+        assert_eq!(fx.status().await, InstanceStatus::Running);
+    }
     fx.close().await;
 }

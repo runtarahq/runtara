@@ -871,11 +871,46 @@ Native transport tests roundtrip all four inventory versions. All 27 Agent and
 two shared workflow components rebuilt successfully. Fresh size and latency
 measurements must include the additional contract metadata and grant validation.
 
+### Compiler-backed persistence authority
+
+`CompilerInvocationAuthority` now implements the environment's mandatory scope
+policy using the exact prepared catalog and an immutable host-supplied inherited
+namespace. It requires inventory version 4, rejects overlapping checkpoint grants
+before creating children, revalidates each invocation, and derives checkpoint
+permissions from its compiler contract. An input envelope can confirm the
+expected workflow-agent namespace but cannot choose a different grant. Native
+capabilities receive no checkpoint permission.
+
+The resulting authority plugs directly into `ScopedInvocationFactory`. Every
+checkpoint read/write, custom-signal poll, durable sleep and retry report passes
+through the structured grant on `ScopedRuntimeHost`. Parent/foreign namespace
+operations fail before persistence access. Child input, tenant/instance ownership,
+root deadlines, cancellation tokens and terminal-callback validation retain the
+existing scoped runtime behavior. The factory creates no descendant execution
+context for these Agent calls; recursive extracted child graphs remain P3 work.
+
+Verification: all **48 runtime-host tests** passed against isolated PostgreSQL.
+The new integration test exercises native, normal workflow-agent and AI-tool
+contracts through the actual scope factory, checks allowed checkpoint/signal/
+sleep/retry operations and denied foreign operations, verifies denied writes do
+not appear in persistence, and executes a real WASM child through the prepared
+launcher. Its completion leaves the root running. Old-inventory and overlapping-
+grant catalogs are rejected by this new authority; existing explicit legacy
+scope policies retain their original path. Feature-enabled all-target Clippy
+passed with warnings denied. The test PostgreSQL container was stopped afterward.
+
+This supplies a concrete persistence policy; it does not enable a production
+backend. The selector must still certify component reset behavior and structured-
+key support, retain legacy execution for unsupported or conflicting packages,
+and bind the factory/root coordinator to the production runner. Durable attempt
+fencing is still required for database requests already in flight at cancellation.
+Local-server qualification and fresh performance comparisons remain pending.
+
 ## Remaining required work
 
 - P0: extend explicit differential selection and invocation-count evidence to all
   required constructs and production artifact inspection.
-- P1: checkpoint grants and production environment ownership integration, aggregate
+- P1: conflict-aware package eligibility and production scope-factory wiring, aggregate
   input/transport/guest resource reservations and root fencing on cleanup failure.
 - P2: qualify logical scopes across every AI auxiliary invocation and nested
   construct, integrate the production scope factory and certify package reset/state

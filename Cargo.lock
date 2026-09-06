@@ -4812,6 +4812,7 @@ dependencies = [
  "runtara-component-host",
  "runtara-core",
  "runtara-store-postgres",
+ "runtara-workflow-wit",
  "serde",
  "serde_json",
  "sqlx",
