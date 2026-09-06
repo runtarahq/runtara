@@ -630,6 +630,43 @@ artifact/authority policy. Bounded shared signal polling, durable root/attempt
 fences, aggregate reservations, extracted child graphs and final local-server
 qualification remain required; the production default is unchanged.
 
+### Compiler invocation inventory through prepared execution
+
+Logical Agent compilation now produces an immutable inventory from the same
+normalized manifest used to emit WASM, including nested graph and preloaded child
+Agent references. Identities are sorted and deduplicated with their allowed
+step/AI domains. Composition rejects logical lowering without its inventory and
+continues requiring the exact reviewed package selection. The sidecar reports
+package version 2; ordinary compilation and the v1 experimental bridge retain
+their prior package formats.
+
+Raw package v2 carries the inventory alongside digested component members. The
+trusted worker preserves it in native envelope `RTRNP002`; prepared catalogs,
+queued ownership and the optional prepared cache retain the same data. Raw and
+native decoding reject missing or mismatched versions, invalid bindings/domains
+and duplicate identities. Existing byte/count limits also bound this metadata.
+Old package/native forms remain accepted without invented authority.
+
+Verification: all **18 workflow-WIT/package tests** and **four native codec tests**
+passed. The full component-host suite passed **132 tests**, with one manual
+benchmark ignored. After extending the cache test to v2, it passed with cache on
+and off and executed a retained actual utils child after source/cache removal.
+All **11 emitted Agent isolation tests** passed with inventory checked across raw,
+native and prepared representations and against actual observed call identities.
+These cover chains, retries, replay, parallel items/branches, protected input
+variables and legacy package selection; AI auxiliary inventory is checked at
+composition. The comparison smoke also passed both backends across all 11
+workloads. Provider execution qualification remains pending. No database tests
+were rerun for this transport-only change; the existing scoped-runtime test
+fixture only gained an absent-inventory field. Feature-enabled all-target
+Clippy for all four affected crates passed with `-D warnings`.
+
+The inventory transports static call sites; the production policy still needs
+namespace/loop validation, checkpoint authority and durable attempt fencing.
+No production runner or backend default has changed. Current v2 package size,
+validation cost and execution timings require fresh paired measurements; the
+existing v1 performance report is historical evidence for that backend only.
+
 ## Remaining required work
 
 - P0: extend explicit differential selection and invocation-count evidence to all

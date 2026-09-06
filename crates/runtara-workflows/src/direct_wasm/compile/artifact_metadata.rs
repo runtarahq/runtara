@@ -76,11 +76,15 @@ pub struct DirectArtifactMetadata {
     pub child_workflows: Vec<DirectChildWorkflowDependencyMetadata>,
 }
 
-/// Composition-stage isolated Agent inventory. Contexts identify live adapter
-/// calls, not replay-stable logical step/attempt cancellation addresses.
+/// Composition-stage isolated Agent inventory. The context contract distinguishes
+/// live v1 adapter calls from replay-stable v2 logical step/attempt identities.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct DirectIsolationMetadata {
+    /// Raw package version required by the selected runtime. V2 retains the
+    /// compiler invocation manifest; older inventory sidecars default to v1.
+    #[serde(default = "legacy_package_version")]
+    pub package_version: u32,
     /// Guest bridge contract version.
     pub adapter_version: u32,
     /// Identity semantics supplied to the scoped launcher.
@@ -89,6 +93,10 @@ pub struct DirectIsolationMetadata {
     pub bindings: Vec<runtara_workflow_wit::isolation_package::Binding>,
     /// Packages left with their original component lifetime.
     pub legacy_agents: Vec<String>,
+}
+
+fn legacy_package_version() -> u32 {
+    1
 }
 
 /// File identity captured in direct artifact metadata.

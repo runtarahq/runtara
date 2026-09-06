@@ -362,6 +362,19 @@ dependencies. Package parsing must bound total expanded size, nesting and counts
 verify hashes and ABI compatibility, and reject invalid compiled artifacts before
 registration. This is artifact validation, not a new restriction on valid DSL.
 
+Logical Agent lowering now packages a deterministic call-site inventory from the
+same normalized compiler manifest as the emitted code. Raw package version 2 and
+native envelope `RTRNP002` carry it through worker verification, preparation and
+cache/queue ownership. Both decoders reject missing or inconsistent versioned
+metadata. Existing raw/native formats remain readable; legacy compilation still
+uses its original format. The sidecar reports `packageVersion` for inspection,
+but execution must use the inventory bound to the verified package.
+
+This inventory identifies workflow, binding, Agent, capability, step and allowed
+AI invocation domains. It is an input to the future production authority policy;
+it does not yet validate namespace/loop ancestry or fence durable attempts. Do
+not enable the scoped production runner based only on its presence.
+
 | Existing entry/runtime mode | Compatibility policy |
 |---|---|
 | InvokeHostImports + HostImport (production) | Primary isolated backend and complete parity gate. |
@@ -752,6 +765,12 @@ dependency changes are reported separately for attribution. It is a comparison
 tool, not a performance acceptance gate.
 
 ### Required candidate comparison
+
+Version 2 adds call-site metadata to both the raw and native package, so its size
+cost grows with distinct call identities even when Agent component bytes are
+deduplicated. Rerun the paired raw/gzip/native size and timing measurements with
+this metadata included. The v1 report below does not measure v2 serialization,
+validation, prepared-catalog memory or the persistence-backed scope factory.
 
 The first Agent-only comparison now runs the real composed adapter backend.
 The opt-in logical-context adapter v2 now has compiler wiring; the recorded

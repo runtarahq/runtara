@@ -240,6 +240,7 @@ async fn run_graph_faults(
     assert_eq!(compiled.wasm_size, bytes.len());
     if isolate {
         let package = parse(&bytes, limits()).unwrap().unwrap();
+        assert_eq!(package.invocations(), compiled.invocation_manifest.as_ref());
         assert_eq!(package.bindings().len(), 1);
         assert_eq!(
             package.artifacts().len(),
@@ -275,15 +276,23 @@ async fn run_graph_faults(
     })
     .unwrap();
     let executor = Arc::new(WorkflowExecutor::new(engine.clone()).unwrap());
+    let expected_invocations = compiled.invocation_manifest.clone();
     let request = PrecompileRequest::for_artifact([17; 32], &compiled.wasm_path).unwrap();
     let response = PrecompileResponse::Success(precompile_artifact(&request).unwrap());
     // SAFETY: the unchanged response above came from our own compiler.
     let compiled =
         unsafe { deserialize_trusted_precompiled_package(&engine, &request, &response) }.unwrap();
+    assert_eq!(compiled.invocations, expected_invocations);
     let prepared = executor
         .prepare_precompiled_package(compiled)
         .await
         .unwrap();
+    assert_eq!(
+        prepared
+            .child_catalog()
+            .and_then(|catalog| catalog.invocations()),
+        expected_invocations.as_ref()
+    );
     let starts = Arc::new(AtomicUsize::new(0));
     let contexts = Arc::new(Mutex::new(Vec::new()));
     let tasks = Arc::new(IsolatedTasks::new(engine.clone(), 4, 8 * 1024 * 1024).unwrap());
@@ -376,6 +385,28 @@ async fn run_graph_faults(
     tasks.shutdown().await.unwrap();
     assert_eq!(tasks.retained_result_bytes(), 0);
     let recorded = contexts.lock().unwrap().clone();
+    if let Some(invocations) = expected_invocations {
+        for (path, attempt) in &recorded {
+            assert!(*attempt > 0);
+            let (base, activation) = path.rsplit_once(':').unwrap();
+            let (base, domain) = base.rsplit_once(':').unwrap();
+            assert_eq!(activation.len(), 8);
+            assert_eq!(domain.len(), 8);
+            let domain = domain
+                .bytes()
+                .fold(0u32, |value, digit| (value << 4) | u32::from(digit - b'a'));
+            let key: Value =
+                serde_json::from_str(base.strip_prefix("runtara:v2:").unwrap()).unwrap();
+            assert_eq!(key[0], "agent");
+            assert_eq!(key[1], invocations.workflow_id);
+            assert!(
+                invocations.agent_calls.iter().any(|site| key[4]
+                    == serde_json::json!([site.agent_id, site.capability, site.step_id])
+                    && site.domains.contains(&domain)),
+                "emitted invocation missing from prepared authority: {path}"
+            );
+        }
+    }
     (result.exit, starts.load(Ordering::SeqCst), recorded)
 }
 
@@ -497,6 +528,20 @@ fn scoped_agent_composition_requires_matching_reviewed_selection() {
         );
     }
     assert!(compose_direct_workflow(&mut compiled, &components).is_err());
+    compiled.invocation_manifest = None;
+    let error = compose_direct_workflow_with_isolated_agents(
+        &mut compiled,
+        &components,
+        &[],
+        &selected(&components),
+        limits(),
+    )
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("invocation authority must be selected together")
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -613,12 +658,15 @@ fn scoped_agent_ai_auxiliary_call_sites_validate_and_compose() {
     let mut summarize: Value = serde_json::from_str(&super::ai_agent_memory_graph_json()).unwrap();
     summarize["steps"]["ai"]["config"]["memory"]["compaction"]["strategy"] =
         serde_json::json!("summarize");
-    for graph in [
+    for (case, graph) in [
         serde_json::from_str(&super::single_shot_ai_agent_graph_json("")).unwrap(),
         serde_json::from_str(&super::ai_agent_tool_loop_graph_json()).unwrap(),
         serde_json::from_str(&super::ai_agent_memory_graph_json()).unwrap(),
         summarize,
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
         let dir = tempfile::tempdir().unwrap();
         let legacy = compile(graph.clone(), dir.path());
         let agents: std::collections::BTreeSet<String> = legacy
@@ -666,8 +714,33 @@ fn scoped_agent_ai_auxiliary_call_sites_validate_and_compose() {
         .unwrap();
         let metadata = compiled.artifact_metadata.isolation.unwrap();
         assert_eq!(metadata.adapter_version, 2);
+        assert_eq!(metadata.package_version, 2);
         assert_eq!(metadata.bindings.len(), agents.len());
         assert!(metadata.legacy_agents.is_empty());
+        let invocations = compiled.invocation_manifest.unwrap();
+        assert_eq!(invocations.workflow_id, "scoped-ai-compile");
+        if case >= 2 {
+            assert!(
+                invocations
+                    .agent_calls
+                    .iter()
+                    .any(|site| site.capability == "load-memory" && site.domains == [1])
+            );
+            assert!(
+                invocations
+                    .agent_calls
+                    .iter()
+                    .any(|site| site.capability == "save-memory" && site.domains == [5])
+            );
+        }
+        if case == 3 {
+            assert!(
+                invocations
+                    .agent_calls
+                    .iter()
+                    .any(|site| site.capability == "summarize-memory" && site.domains == [4])
+            );
+        }
     }
 }
 

@@ -40,6 +40,7 @@ mod edge_route;
 mod embed_retry;
 mod embed_workflow;
 mod error_step;
+mod invocation_manifest;
 mod isolation_adapter;
 #[cfg(test)]
 mod isolation_adapter_tests;
@@ -548,6 +549,9 @@ pub struct DirectCompilationInput {
 /// Result of opt-in direct workflow compilation.
 #[derive(Debug, Clone)]
 pub struct DirectCompilationResult {
+    /// Call-site inventory generated from the same normalized manifest as code.
+    /// Included in package v2 when logical Agent isolation is selected.
+    pub invocation_manifest: Option<runtara_workflow_wit::isolation_package::InvocationManifest>,
     /// Agent dependencies emitted with the private logical-context interface.
     /// Composition must bind every selected dependency to a reviewed adapter.
     pub scoped_agents: std::collections::BTreeSet<String>,
@@ -666,6 +670,11 @@ fn compose_direct_workflow_selected(
     extra_component_dirs: &[PathBuf],
     selection: Option<IsolationSelection<'_>>,
 ) -> Result<PathBuf, DirectCompileError> {
+    if result.scoped_agents.is_empty() == result.invocation_manifest.is_some() {
+        return Err(component_error(
+            "logical Agent lowering and invocation authority must be selected together",
+        ));
+    }
     if !result.scoped_agents.is_empty()
         && selection.as_ref().map(|s| {
             s.0.keys()
@@ -765,6 +774,11 @@ fn compose_direct_workflow_selected(
         None
     } else {
         Some(DirectIsolationMetadata {
+            package_version: if result.invocation_manifest.is_some() {
+                2
+            } else {
+                1
+            },
             adapter_version: if result.scoped_agents.is_empty() {
                 1
             } else {
@@ -787,8 +801,19 @@ fn compose_direct_workflow_selected(
     };
     let composed_wasm = if let Some((_, limits)) = selection.filter(|_| !bindings.is_empty()) {
         let refs: Vec<&[u8]> = children.iter().map(Vec::as_slice).collect();
-        runtara_workflow_wit::isolation_package::append(&composed_wasm, &refs, bindings, limits)
+        if let Some(invocations) = result.invocation_manifest.clone() {
+            runtara_workflow_wit::isolation_package::append_with_invocations(
+                &composed_wasm,
+                &refs,
+                bindings,
+                invocations,
+                limits,
+            )
             .map_err(component_error)?
+        } else {
+            runtara_workflow_wit::isolation_package::append(&composed_wasm, &refs, bindings, limits)
+                .map_err(component_error)?
+        }
     } else {
         composed_wasm
     };
@@ -1344,6 +1369,15 @@ fn compile_direct_workflow_inner(
     fs::write(&wac_path, &component_artifacts.wac_source)?;
 
     Ok(DirectCompilationResult {
+        invocation_manifest: if scoped_agents.is_empty() {
+            None
+        } else {
+            Some(invocation_manifest::build(
+                &manifest,
+                &input.workflow_id,
+                &scoped_agents,
+            )?)
+        },
         scoped_agents,
         wasm_path,
         workflow_logic_wasm_path: build_dir.join("workflow-logic.wasm"),
