@@ -223,15 +223,35 @@ only to exercise its `Debug`/`Clone` derives, and two byte-identical copies of
 those in `wake_scheduler_test.rs`. Nothing else was deleted — the behavioural
 tests that looked like duplicates were retargeted, not dropped.
 
-### Still open
+### The pool, closed afterwards
 
-`EnvironmentHandlerState.pool` is `pub PgPool`, and `EnvironmentClient` builds
-both repositories out of it. So the boundary is narrowed, not enforced:
-everything reachable from that pool is still de facto public API, and
-`pipeline_sampler.rs` still runs its own `SELECT COUNT(*) FROM instances`
-against this crate's table rather than calling `InstanceRepository`. Closing
-that means handing the server repositories instead of a pool, which is a change
-to how the crate is embedded and wants its own review.
+This section used to read "still open", because two PRs in a row had to
+describe the boundary as narrowed rather than enforced: `pool` was `pub PgPool`,
+so everything reachable from the runtime database was de facto public API, and
+`pipeline_sampler.rs` ran its own `SELECT COUNT(*) FROM instances` against a
+table it does not own.
+
+Both are gone. The field is `pub(crate)`; callers outside the crate take
+`instances()`, `images()` or `launches()`; and the parked count is
+`InstanceRepository::count_parked`, which spells `suspended` inside the crate
+that owns the vocabulary rather than in the crate that merely displays it.
+
+`runner` stays `pub` on purpose. It is an `Arc<dyn Runner>`, and a trait object
+exposes only what its trait exposes; a `PgPool` exposes the database. Closing
+both for symmetry would be a worse boundary, not a tighter one.
+
+What is genuinely still open is narrower than it was. `create_runtara_pool()`
+in `runtara-server` remains public and builds a runtime pool from
+`RUNTARA_DATABASE_URL`, so the server can still reach that database — but by
+constructing a connection from a URL it already owns, which is a visible act at
+startup rather than a field quietly handed out by a shared state struct. And
+`count_parked` has no index to sit on: `idx_instances_status` is status-only,
+and `suspended` is the value that dominates the table. Migration
+`019_index_instances_pending_tenant_created.sql` is the precedent for fixing
+that — a partial composite index for exactly this shape of per-tenant status
+count — and a `suspended` sibling would be the forward migration to add. The
+cost is pre-existing, not introduced here; it is now documented rather than
+implied.
 
 ### Fixed along the way
 
