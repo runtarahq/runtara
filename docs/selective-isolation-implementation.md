@@ -1,6 +1,13 @@
 # Selective isolation implementation record
 
-Objective: implement [the full plan](selective-isolation-plan.md), preserving the
+> **Architecture superseded on 2026-09-06.** This is a historical implementation
+> record of the separate-Store experiment. The active
+> [cooperative cancellation plan](selective-isolation-plan.md) replaces its custom
+> task API, child packaging and invocation-ledger direction. Tests below establish
+> the recorded experimental behavior only; they do not qualify the new design.
+> No experimental code was removed or enabled by this documentation update.
+
+Original objective: implement [the former plan](selective-isolation-plan-superseded.md), preserving the
 DSL and existing support, with small tested commits and final local-server E2E.
 This record tracks implementation; the earlier research is not a completion claim.
 
