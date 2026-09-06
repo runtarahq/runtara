@@ -157,6 +157,9 @@
 /// Execution domain types independent of storage and transport.
 pub mod domain;
 
+/// Pure lifecycle policy shared by storage backends and execution hosts.
+pub mod lifecycle;
+
 /// Persistence layer for instances, checkpoints, events, and signals.
 pub mod persistence;
 
