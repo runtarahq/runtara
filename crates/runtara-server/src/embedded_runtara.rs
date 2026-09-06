@@ -18,7 +18,7 @@ use std::sync::Arc;
 use crate::config::RuntimeOverrides;
 use runtara_core::persistence::Persistence;
 use runtara_environment::execution_timeout::ExecutionTimeoutPolicy;
-use runtara_environment::runtime::EnvironmentRuntime;
+use runtara_environment::runtime::{DrainReport, EnvironmentRuntime};
 use runtara_store_postgres::PostgresPersistence;
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
@@ -172,13 +172,12 @@ impl EmbeddedRuntara {
     pub async fn drain(
         &self,
         grace: std::time::Duration,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<DrainReport, Box<dyn std::error::Error + Send + Sync>> {
         self.core.set_draining();
         self.environment
             .drain(grace)
             .await
-            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })?;
-        Ok(())
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })
     }
 
     /// Gracefully shut down both servers.

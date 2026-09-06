@@ -566,7 +566,13 @@ impl EnvironmentRuntime {
     ///
     /// Returns when all tracked instances are terminal or the grace period
     /// expires, whichever comes first. Safe to call multiple times.
-    pub async fn drain(&self, grace: Duration) -> Result<()> {
+    ///
+    /// The [`DrainReport`] says what actually happened, because "nothing was
+    /// active" and "everything was force-stopped and half the writes failed"
+    /// are both successful drains and a caller has to be able to tell them
+    /// apart. `Err` is reserved for the one case where the drain cannot even
+    /// establish what needed parking — see the snapshot below.
+    pub async fn drain(&self, grace: Duration) -> Result<DrainReport> {
         self.drain.set();
         info!(grace_secs = grace.as_secs(), "EnvironmentRuntime draining");
 
@@ -591,17 +597,27 @@ impl EnvironmentRuntime {
         }
 
         let container_registry = ContainerRegistry::new(self.state.pool.clone());
-        let active = match container_registry.list_all_registered().await {
-            Ok(list) => list,
-            Err(e) => {
-                warn!(error = %e, "Failed to list active containers; aborting drain");
-                return Ok(());
-            }
+        // The one failure that is not best-effort. Without the snapshot the
+        // drain has no idea what to park, so every guest runs on into teardown
+        // and dies abruptly — the path `recovery` then has to rescue under a
+        // crash-loop cap. Reporting that as a successful drain is how a host
+        // comes to believe its instances were parked when none of them were.
+        let active = container_registry
+            .list_all_registered()
+            .await
+            .map_err(|e| {
+                error!(error = %e, "Could not list active instances; drain cannot proceed");
+                e
+            })?;
+
+        let mut report = DrainReport {
+            active: active.len(),
+            ..DrainReport::default()
         };
 
         if active.is_empty() {
             info!("No active instances to drain");
-            return Ok(());
+            return Ok(report);
         }
 
         info!(active_count = active.len(), "Signalling active instances");
@@ -618,6 +634,7 @@ impl EnvironmentRuntime {
                 )
                 .await
             {
+                report.failures += 1;
                 warn!(
                     instance_id = %info.instance_id,
                     error = %e,
@@ -641,10 +658,13 @@ impl EnvironmentRuntime {
         }
 
         if remaining.is_empty() {
+            report.settled = report.active;
             info!("All instances drained gracefully");
-            return Ok(());
+            return Ok(report);
         }
 
+        report.force_stopped = remaining.len();
+        report.settled = report.active.saturating_sub(remaining.len());
         warn!(
             stragglers = remaining.len(),
             "Grace period expired; force-stopping remaining instances"
@@ -660,6 +680,7 @@ impl EnvironmentRuntime {
                 metrics: None,
             };
             if let Err(e) = self.state.runner.stop(&handle).await {
+                report.failures += 1;
                 warn!(
                     instance_id = %info.instance_id,
                     error = %e,
@@ -694,6 +715,7 @@ impl EnvironmentRuntime {
                             )
                             .await
                         {
+                            report.failures += 1;
                             warn!(
                                 instance_id = %info.instance_id,
                                 error = %e,
@@ -703,6 +725,7 @@ impl EnvironmentRuntime {
                     }
                 }
                 Err(e) => {
+                    report.failures += 1;
                     warn!(
                         instance_id = %info.instance_id,
                         error = %e,
@@ -712,7 +735,7 @@ impl EnvironmentRuntime {
             }
         }
 
-        Ok(())
+        Ok(report)
     }
 
     async fn filter_non_terminal(
@@ -763,6 +786,11 @@ impl EnvironmentRuntime {
     ///
     /// The management HTTP listener is not among them: it belongs to whichever
     /// host serves it, and that host stops it around this call.
+    ///
+    /// Every worker is awaited even when an earlier one panicked, so a single
+    /// bad task cannot strand the rest. A panic is still reported afterwards:
+    /// it means that worker stopped doing its job at some unknown earlier
+    /// point, which is not something a host should learn only from a log line.
     pub async fn shutdown(self) -> Result<()> {
         info!("EnvironmentRuntime shutting down...");
 
@@ -784,33 +812,26 @@ impl EnvironmentRuntime {
         // Signal image cleanup worker shutdown
         self.image_cleanup_shutdown.notify_one();
 
-        // Wait for wake scheduler
-        if let Err(e) = self.wake_handle.await {
-            error!("Wake scheduler task panicked: {}", e);
+        let mut panicked: Vec<&'static str> = Vec::new();
+        for (name, handle) in [
+            ("wake scheduler", self.wake_handle),
+            ("launch dispatcher", self.launch_dispatcher_handle),
+            ("run-dir cleanup", self.cleanup_handle),
+            ("heartbeat monitor", self.heartbeat_handle),
+            ("database cleanup", self.db_cleanup_handle),
+            ("image cleanup", self.image_cleanup_handle),
+        ] {
+            if let Err(e) = handle.await {
+                error!(worker = name, error = %e, "Worker task panicked");
+                panicked.push(name);
+            }
         }
 
-        if let Err(e) = self.launch_dispatcher_handle.await {
-            error!("Launch dispatcher task panicked: {}", e);
-        }
-
-        // Wait for cleanup worker
-        if let Err(e) = self.cleanup_handle.await {
-            error!("Cleanup worker task panicked: {}", e);
-        }
-
-        // Wait for heartbeat monitor
-        if let Err(e) = self.heartbeat_handle.await {
-            error!("Heartbeat monitor task panicked: {}", e);
-        }
-
-        // Wait for database cleanup worker
-        if let Err(e) = self.db_cleanup_handle.await {
-            error!("Database cleanup worker task panicked: {}", e);
-        }
-
-        // Wait for image cleanup worker
-        if let Err(e) = self.image_cleanup_handle.await {
-            error!("Image cleanup worker task panicked: {}", e);
+        if !panicked.is_empty() {
+            return Err(anyhow::anyhow!(
+                "workers panicked before shutdown: {}",
+                panicked.join(", ")
+            ));
         }
 
         info!("EnvironmentRuntime shutdown complete");
@@ -825,6 +846,37 @@ impl EnvironmentRuntime {
             && !self.heartbeat_handle.is_finished()
             && !self.db_cleanup_handle.is_finished()
             && !self.image_cleanup_handle.is_finished()
+    }
+}
+
+/// What a drain actually accomplished.
+///
+/// A drain is best-effort per instance: one guest failing to park is not a
+/// reason to abandon the rest. But "nothing needed draining" and "several
+/// instances were force-stopped, and two of those writes failed" both used to
+/// arrive as `Ok(())`, which left a host unable to say whether its guests were
+/// parked. The counts distinguish them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DrainReport {
+    /// Instances registered as active when the snapshot was taken.
+    pub active: usize,
+    /// Instances that reached a terminal status within the grace period.
+    pub settled: usize,
+    /// Stragglers force-stopped after the grace period expired.
+    pub force_stopped: usize,
+    /// Per-instance operations that failed: a shutdown signal that could not be
+    /// written, a runner that would not stop, a suspend or wake that did not
+    /// persist. Each one is an instance whose parking is not guaranteed.
+    pub failures: usize,
+}
+
+impl DrainReport {
+    /// Every active instance parked on its own, with nothing forced and
+    /// nothing failing.
+    ///
+    /// A drain with no active instances is clean: there was nothing to park.
+    pub fn is_clean(&self) -> bool {
+        self.force_stopped == 0 && self.failures == 0 && self.settled == self.active
     }
 }
 
@@ -1029,6 +1081,94 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A drain that cannot read the registry has no idea what to park, so every
+    /// guest runs on into teardown and dies with the process. That used to be
+    /// reported as `Ok(())` — indistinguishable from "nothing needed draining"
+    /// — which let a host believe its instances had parked when none had.
+    #[tokio::test]
+    async fn a_drain_that_cannot_enumerate_instances_reports_failure() {
+        // Lazy, so construction succeeds and every query fails: the closest
+        // stand-in for the database trouble this guards against.
+        let unreachable = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(Duration::from_millis(250))
+            .connect_lazy("postgresql://127.0.0.1:1/unreachable")
+            .expect("a lazy pool never connects up front");
+
+        let runtime = EnvironmentRuntime::builder()
+            .pool(unreachable.clone())
+            .core_persistence(Arc::new(runtara_store_postgres::PostgresPersistence::new(
+                unreachable,
+            )))
+            .runner(Arc::new(crate::runner::MockRunner::new()))
+            .data_dir(std::env::temp_dir())
+            .build()
+            .expect("builder has everything it needs")
+            .start()
+            .await
+            .expect("start tolerates an unhealthy pool; its workers report later");
+
+        let outcome = runtime.drain(Duration::from_millis(50)).await;
+
+        assert!(
+            outcome.is_err(),
+            "an unreadable registry must not report a successful drain: {:?}",
+            outcome.map(|report| report.is_clean())
+        );
+
+        let _ = runtime.shutdown().await;
+    }
+
+    /// A drain with nothing to park is clean, and a drain that parked
+    /// everything on its own is clean. Those are the only two shapes a caller
+    /// may treat as an orderly shutdown.
+    #[test]
+    fn a_drain_report_is_clean_only_when_nothing_was_forced_or_failed() {
+        assert!(
+            DrainReport::default().is_clean(),
+            "nothing to drain is clean"
+        );
+        assert!(
+            DrainReport {
+                active: 3,
+                settled: 3,
+                force_stopped: 0,
+                failures: 0,
+            }
+            .is_clean()
+        );
+
+        assert!(
+            !DrainReport {
+                active: 3,
+                settled: 2,
+                force_stopped: 1,
+                failures: 0,
+            }
+            .is_clean(),
+            "a force-stopped straggler is not a clean park"
+        );
+        assert!(
+            !DrainReport {
+                active: 3,
+                settled: 3,
+                force_stopped: 0,
+                failures: 1,
+            }
+            .is_clean(),
+            "a failed write leaves an instance whose parking is not guaranteed"
+        );
+        assert!(
+            !DrainReport {
+                active: 3,
+                settled: 2,
+                force_stopped: 0,
+                failures: 0,
+            }
+            .is_clean(),
+            "an instance that neither settled nor was force-stopped is unaccounted for"
+        );
+    }
 
     #[test]
     fn test_builder_default_values() {
