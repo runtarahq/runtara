@@ -563,3 +563,53 @@ whitespace checks passed. No external provider calls, database/server E2E, Linux
 qualification, release size/timing comparison or capacity run was performed.
 The six standard proofs also passed in the default test build, without staged
 Agent integration tests enabled.
+
+## Object-model I/O and memory load/save
+
+The normal object-model Agent now uses callback bindings and async dispatch for
+all 14 capabilities. Its GET, POST and PUT helpers await the existing internal
+HTTP transport. Connection IDs remain in the query string and JSON body, tenant
+context remains in `X-Org-Id`, and requests still target `RUNTARA_OBJECT_MODEL_URL`
+directly. The server API, SQL execution rules and storage implementation are
+unchanged; no host-side workflow management was added.
+
+Built-component tests cover 26 pending-request cases, each with no headers and
+with a partial response body: SQL query/execute; memory schema lookup; optional
+schema creation; loading conversation messages; save-time lookup; and memory
+create/update. After cancellation, the next request must belong to a fresh SQL
+query in the same Agent instance. This rules out advancing to a later memory
+stage from the cancelled invocation, while the independent sibling completes.
+Additional tests preserve the distinct read/write retry contracts for HTTP 429,
+503 and 413. Every endpoint is a local fixture, not a database.
+
+Four emitted-DSL cases extend the lifecycle proof to SQL query, SQL execute,
+AiAgent memory load and AiAgent memory save. Root cancellation bypasses retries
+and `onError`, requires local I/O cleanup before acknowledgement and does not
+publish workflow completion. Cancelling memory load prevents the model call;
+cancelling the save prevents subsequent workflow execution. The fixture reads
+complete request bodies before responding or signalling, including bodies split
+across TCP packets.
+
+These tests qualify local workflow cancellation, not rollback of a schema change,
+a SQL statement or a memory write already accepted by the server. They do not
+add database transaction ownership to cancellation. Native HTTP continues to use
+its existing blocking backend; the cancellation guarantees here are tested in
+WASM. Six of 27 built-in Agent bindings are now migrated. The other 21 bindings
+and the nested-workflow, CPU, timeout, emergency-abort, terminal-race, E2E and
+performance/capacity gates remain open.
+
+```sh
+scripts/build-agent-components.sh
+cargo test -p runtara-agent-object-model
+cargo test -p runtara-component-host --features component-integration-tests --test cooperative_cancellation -- --test-threads=4
+cargo test -p runtara-workflows --features direct-wasm-integration-tests --test direct_wasm_execute -- --test-threads=4
+```
+
+Results: the normal build regenerated all 27 Agent components and both shared
+workflow components with metadata. All 11 object-model native tests, all 29
+component cancellation tests and all 270 emitted-workflow tests passed (four test
+threads; the two existing manual benchmarks remain ignored). The emitted suite
+includes all 20 cooperative lifecycle cases. Affected-crate all-target Clippy with
+the existing integration test features, formatting and diff whitespace checks
+passed. No database/server E2E, Linux run or fresh performance/capacity measurement
+was performed in this stage.

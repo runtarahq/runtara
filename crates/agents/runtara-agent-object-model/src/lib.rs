@@ -3,8 +3,8 @@
 //! This agent is special: it does not talk to an external service. Requests
 //! target the **internal** runtara-server object-model HTTP API
 //! (`RUNTARA_OBJECT_MODEL_URL`). Because the traffic is internal we call
-//! `.call()` directly — bypassing `RUNTARA_HTTP_PROXY_URL` — exactly matching
-//! the legacy host-side implementation. The connection is identified by the
+//! `.call_async().await` directly, preserving the existing internal API routing
+//! independently of `RUNTARA_HTTP_PROXY_URL`. The connection is identified by the
 //! `connectionId` query parameter and JSON body field; the tenant id is
 //! supplied via the `X-Org-Id` header sourced from `RUNTARA_TENANT_ID`.
 //!
@@ -31,9 +31,8 @@ mod bindings {
     wit_bindgen::generate!({
         path: ["../../runtara-agent-wit/wit", "wit"],
         world: "runtara:agent-object-model/agent",
-        // Sync impls of the async-TYPED invoke (sync lift; see
-        // spikes/wit-bindgen-async-typed).
-        async: false,
+        // Callback bindings release outstanding I/O on standard cancellation.
+        async: ["export:runtara:agent-object-model/capabilities@0.4.0#invoke"],
         generate_all,
     });
 }
@@ -155,7 +154,7 @@ fn with_connection_in_body(mut body: Value, connection_id: &str) -> Value {
 }
 
 // ============================================================================
-// HTTP helpers (use .call() directly — internal API, no proxy)
+// HTTP helpers (use .call_async().await directly — internal API, no proxy)
 // ============================================================================
 
 /// Truncate a string to at most `max` bytes on a UTF-8 char boundary, appending
@@ -221,7 +220,7 @@ fn check_status(
         .with_attr("body", body_sample))
 }
 
-fn http_post(path: &str, body: Value, connection_id: &str) -> Result<Value, AgentError> {
+async fn http_post(path: &str, body: Value, connection_id: &str) -> Result<Value, AgentError> {
     let path = path_with_connection(path, connection_id);
     let body = with_connection_in_body(body, connection_id);
     let url = format!("{}{}", object_model_base_url(), path);
@@ -233,7 +232,8 @@ fn http_post(path: &str, body: Value, connection_id: &str) -> Result<Value, Agen
         .header("X-Org-Id", &tid)
         .header("Content-Type", "application/json")
         .body_json(&body)
-        .call()
+        .call_async()
+        .await
         .map_err(|e| {
             AgentError::permanent(
                 "OBJECT_MODEL_HTTP_ERROR",
@@ -254,7 +254,7 @@ fn http_post(path: &str, body: Value, connection_id: &str) -> Result<Value, Agen
     })
 }
 
-fn http_put(path: &str, body: Value, connection_id: &str) -> Result<Value, AgentError> {
+async fn http_put(path: &str, body: Value, connection_id: &str) -> Result<Value, AgentError> {
     let path = path_with_connection(path, connection_id);
     let body = with_connection_in_body(body, connection_id);
     let url = format!("{}{}", object_model_base_url(), path);
@@ -266,7 +266,8 @@ fn http_put(path: &str, body: Value, connection_id: &str) -> Result<Value, Agent
         .header("X-Org-Id", &tid)
         .header("Content-Type", "application/json")
         .body_json(&body)
-        .call()
+        .call_async()
+        .await
         .map_err(|e| {
             AgentError::permanent(
                 "OBJECT_MODEL_HTTP_ERROR",
@@ -287,7 +288,7 @@ fn http_put(path: &str, body: Value, connection_id: &str) -> Result<Value, Agent
     })
 }
 
-fn http_get(path: &str, connection_id: &str) -> Result<Value, AgentError> {
+async fn http_get(path: &str, connection_id: &str) -> Result<Value, AgentError> {
     let path = path_with_connection(path, connection_id);
     let url = format!("{}{}", object_model_base_url(), path);
     let tid = tenant_id();
@@ -295,7 +296,8 @@ fn http_get(path: &str, connection_id: &str) -> Result<Value, AgentError> {
     let resp = runtara_http::HttpClient::new()
         .request("GET", &url)
         .header("X-Org-Id", &tid)
-        .call()
+        .call_async()
+        .await
         .map_err(|e| {
             AgentError::permanent(
                 "OBJECT_MODEL_HTTP_ERROR",
@@ -471,7 +473,9 @@ pub struct CreateInstanceOutput {
     module_secure = true,
     side_effects = true
 )]
-pub fn create_instance(input: CreateInstanceInput) -> Result<CreateInstanceOutput, AgentError> {
+pub async fn create_instance(
+    input: CreateInstanceInput,
+) -> Result<CreateInstanceOutput, AgentError> {
     let connection_id = require_connection_id(input._connection.as_ref())?.to_string();
     let resp = http_post(
         "/instances",
@@ -480,7 +484,8 @@ pub fn create_instance(input: CreateInstanceInput) -> Result<CreateInstanceOutpu
             "properties": input.data,
         }),
         &connection_id,
-    )?;
+    )
+    .await?;
 
     Ok(CreateInstanceOutput {
         success: resp["success"].as_bool().unwrap_or(false),
@@ -610,7 +615,9 @@ pub struct QueryInstancesOutput {
     description = "Query instances from an object model schema with optional filters",
     side_effects = false
 )]
-pub fn query_instances(input: QueryInstancesInput) -> Result<QueryInstancesOutput, AgentError> {
+pub async fn query_instances(
+    input: QueryInstancesInput,
+) -> Result<QueryInstancesOutput, AgentError> {
     let connection_id = require_connection_id(input._connection.as_ref())?.to_string();
     let condition_json = parse_condition(input.condition.as_ref());
 
@@ -626,7 +633,8 @@ pub fn query_instances(input: QueryInstancesInput) -> Result<QueryInstancesOutpu
             "offset": input.offset,
         }),
         &connection_id,
-    )?;
+    )
+    .await?;
 
     let instances = resp["instances"].as_array().cloned().unwrap_or_default();
 
@@ -696,7 +704,7 @@ pub struct CheckInstanceExistsOutput {
     description = "Check if an instance matching the given filters exists",
     side_effects = false
 )]
-pub fn check_instance_exists(
+pub async fn check_instance_exists(
     input: CheckInstanceExistsInput,
 ) -> Result<CheckInstanceExistsOutput, AgentError> {
     let connection_id = require_connection_id(input._connection.as_ref())?.to_string();
@@ -707,7 +715,8 @@ pub fn check_instance_exists(
             "filters": input.filters,
         }),
         &connection_id,
-    )?;
+    )
+    .await?;
 
     Ok(CheckInstanceExistsOutput {
         exists: resp["exists"].as_bool().unwrap_or(false),
@@ -795,7 +804,7 @@ pub struct CreateIfNotExistsOutput {
     description = "Create an instance only if no matching instance exists (idempotent insert)",
     side_effects = true
 )]
-pub fn create_if_not_exists(
+pub async fn create_if_not_exists(
     input: CreateIfNotExistsInput,
 ) -> Result<CreateIfNotExistsOutput, AgentError> {
     let connection_id = require_connection_id(input._connection.as_ref())?.to_string();
@@ -807,7 +816,8 @@ pub fn create_if_not_exists(
             "data": input.data,
         }),
         &connection_id,
-    )?;
+    )
+    .await?;
 
     Ok(CreateIfNotExistsOutput {
         success: resp["success"].as_bool().unwrap_or(false),
@@ -883,7 +893,9 @@ pub struct UpdateInstanceOutput {
     description = "Update an existing instance in an object model schema",
     side_effects = true
 )]
-pub fn update_instance(input: UpdateInstanceInput) -> Result<UpdateInstanceOutput, AgentError> {
+pub async fn update_instance(
+    input: UpdateInstanceInput,
+) -> Result<UpdateInstanceOutput, AgentError> {
     let connection_id = require_connection_id(input._connection.as_ref())?.to_string();
     let properties = Value::Object(input.data.into_iter().collect());
 
@@ -895,7 +907,8 @@ pub fn update_instance(input: UpdateInstanceInput) -> Result<UpdateInstanceOutpu
         ),
         json!({ "data": properties }),
         &connection_id,
-    )?;
+    )
+    .await?;
 
     Ok(UpdateInstanceOutput {
         success: resp["success"].as_bool().unwrap_or(false),
@@ -955,7 +968,9 @@ pub struct DeleteInstanceOutput {
     description = "Delete a single instance from an object model schema",
     side_effects = true
 )]
-pub fn delete_instance(input: DeleteInstanceInput) -> Result<DeleteInstanceOutput, AgentError> {
+pub async fn delete_instance(
+    input: DeleteInstanceInput,
+) -> Result<DeleteInstanceOutput, AgentError> {
     let connection_id = require_connection_id(input._connection.as_ref())?.to_string();
     let resp = http_post(
         "/instances/delete",
@@ -964,7 +979,8 @@ pub fn delete_instance(input: DeleteInstanceInput) -> Result<DeleteInstanceOutpu
             "instance_id": input.instance_id,
         }),
         &connection_id,
-    )?;
+    )
+    .await?;
 
     Ok(DeleteInstanceOutput {
         success: resp["success"].as_bool().unwrap_or(false),
@@ -1108,7 +1124,7 @@ pub struct BulkCreateInstancesOutput {
     description = "Insert many instances in a single transaction",
     side_effects = true
 )]
-pub fn bulk_create_instances(
+pub async fn bulk_create_instances(
     input: BulkCreateInstancesInput,
 ) -> Result<BulkCreateInstancesOutput, AgentError> {
     let connection_id = require_connection_id(input._connection.as_ref())?.to_string();
@@ -1143,7 +1159,7 @@ pub fn bulk_create_instances(
         body["conflict_columns"] = json!(cols);
     }
 
-    let resp = http_post("/instances/bulk-create", body, &connection_id)?;
+    let resp = http_post("/instances/bulk-create", body, &connection_id).await?;
 
     let errors: Vec<AgentBulkRowError> = resp
         .get("errors")
@@ -1245,7 +1261,7 @@ pub struct BulkUpdateInstancesOutput {
     description = "Update many instances in one transaction, by condition or by per-row values",
     side_effects = true
 )]
-pub fn bulk_update_instances(
+pub async fn bulk_update_instances(
     input: BulkUpdateInstancesInput,
 ) -> Result<BulkUpdateInstancesOutput, AgentError> {
     let connection_id = require_connection_id(input._connection.as_ref())?.to_string();
@@ -1289,7 +1305,7 @@ pub fn bulk_update_instances(
         });
     };
 
-    let resp = http_post("/instances/bulk-update", body, &connection_id)?;
+    let resp = http_post("/instances/bulk-update", body, &connection_id).await?;
 
     Ok(BulkUpdateInstancesOutput {
         success: resp["success"].as_bool().unwrap_or(false),
@@ -1359,7 +1375,7 @@ pub struct BulkDeleteInstancesOutput {
     description = "Delete many instances in one transaction, by IDs or by condition",
     side_effects = true
 )]
-pub fn bulk_delete_instances(
+pub async fn bulk_delete_instances(
     input: BulkDeleteInstancesInput,
 ) -> Result<BulkDeleteInstancesOutput, AgentError> {
     let connection_id = require_connection_id(input._connection.as_ref())?.to_string();
@@ -1391,7 +1407,7 @@ pub fn bulk_delete_instances(
         }
     };
 
-    let resp = http_post("/instances/bulk-delete", body, &connection_id)?;
+    let resp = http_post("/instances/bulk-delete", body, &connection_id).await?;
 
     Ok(BulkDeleteInstancesOutput {
         success: resp["success"].as_bool().unwrap_or(false),
@@ -1515,7 +1531,9 @@ pub struct QueryAggregateOutput {
                    result.",
     side_effects = false
 )]
-pub fn query_aggregate(input: QueryAggregateInput) -> Result<QueryAggregateOutput, AgentError> {
+pub async fn query_aggregate(
+    input: QueryAggregateInput,
+) -> Result<QueryAggregateOutput, AgentError> {
     let connection_id = require_connection_id(input._connection.as_ref())?.to_string();
     let condition_json = parse_condition(input.condition.as_ref());
 
@@ -1531,7 +1549,8 @@ pub fn query_aggregate(input: QueryAggregateInput) -> Result<QueryAggregateOutpu
             "offset": input.offset,
         }),
         &connection_id,
-    )?;
+    )
+    .await?;
 
     let columns = resp
         .get("columns")
@@ -1563,7 +1582,7 @@ pub fn query_aggregate(input: QueryAggregateInput) -> Result<QueryAggregateOutpu
 }
 
 // ============================================================================
-// Capability: query_sql / execute_sql (raw SQL)
+// Capability: query_sql / execute_sql (raw SQL).await
 // ============================================================================
 
 /// Retry reclassification for `query-sql`: transport failures
@@ -1692,7 +1711,7 @@ pub struct QuerySqlOutput {
         )
     )
 )]
-pub fn query_sql(input: QuerySqlInput) -> Result<QuerySqlOutput, AgentError> {
+pub async fn query_sql(input: QuerySqlInput) -> Result<QuerySqlOutput, AgentError> {
     let connection_id = require_connection_id(input._connection.as_ref())?.to_string();
 
     let mut body = json!({
@@ -1703,7 +1722,9 @@ pub fn query_sql(input: QuerySqlInput) -> Result<QuerySqlOutput, AgentError> {
         body["resultSchema"] = json!(schema);
     }
 
-    let resp = http_post("/sql/query", body, &connection_id).map_err(query_sql_reclassify)?;
+    let resp = http_post("/sql/query", body, &connection_id)
+        .await
+        .map_err(query_sql_reclassify)?;
 
     let rows = resp
         .get("rows")
@@ -1814,7 +1835,7 @@ pub struct ExecuteSqlOutput {
         )
     )
 )]
-pub fn execute_sql(input: ExecuteSqlInput) -> Result<ExecuteSqlOutput, AgentError> {
+pub async fn execute_sql(input: ExecuteSqlInput) -> Result<ExecuteSqlOutput, AgentError> {
     let connection_id = require_connection_id(input._connection.as_ref())?.to_string();
 
     let resp = http_post(
@@ -1825,6 +1846,7 @@ pub fn execute_sql(input: ExecuteSqlInput) -> Result<ExecuteSqlOutput, AgentErro
         }),
         &connection_id,
     )
+    .await
     .map_err(execute_sql_reclassify)?;
 
     Ok(ExecuteSqlOutput {
@@ -1846,8 +1868,8 @@ const MEMORY_TABLE_NAME: &str = "ai_conversation_memory";
 
 /// Ensure the conversation memory schema exists (mirrors legacy
 /// `ensure_memory_schema`). GET the schema first; create it on 404 / missing.
-fn ensure_memory_schema(connection_id: &str) -> Result<(), AgentError> {
-    let resp = http_get(&format!("/schemas/{}", MEMORY_SCHEMA_NAME), connection_id)?;
+async fn ensure_memory_schema(connection_id: &str) -> Result<(), AgentError> {
+    let resp = http_get(&format!("/schemas/{}", MEMORY_SCHEMA_NAME), connection_id).await?;
 
     if resp["success"].as_bool().unwrap_or(false)
         && resp.get("schema").is_some()
@@ -1871,7 +1893,8 @@ fn ensure_memory_schema(connection_id: &str) -> Result<(), AgentError> {
             ]
         }),
         connection_id,
-    )?;
+    )
+    .await?;
 
     // A failed creation otherwise surfaces later as a confusing
     // "Schema not found" on the next query — fail here with the real reason.
@@ -1942,9 +1965,9 @@ pub struct LoadMemoryOutput {
     side_effects = false,
     tags = "memory:read"
 )]
-pub fn load_memory(input: LoadMemoryInput) -> Result<LoadMemoryOutput, AgentError> {
+pub async fn load_memory(input: LoadMemoryInput) -> Result<LoadMemoryOutput, AgentError> {
     let connection_id = require_connection_id(input._connection.as_ref())?.to_string();
-    ensure_memory_schema(&connection_id)?;
+    ensure_memory_schema(&connection_id).await?;
 
     let mut filters = HashMap::new();
     filters.insert(
@@ -1961,7 +1984,8 @@ pub fn load_memory(input: LoadMemoryInput) -> Result<LoadMemoryOutput, AgentErro
             "offset": 0,
         }),
         &connection_id,
-    )?;
+    )
+    .await?;
 
     if resp["success"].as_bool().unwrap_or(false) {
         if let Some(instance) = resp["instances"].as_array().and_then(|a| a.first()) {
@@ -2049,9 +2073,9 @@ pub struct SaveMemoryOutput {
     side_effects = true,
     tags = "memory:write"
 )]
-pub fn save_memory(input: SaveMemoryInput) -> Result<SaveMemoryOutput, AgentError> {
+pub async fn save_memory(input: SaveMemoryInput) -> Result<SaveMemoryOutput, AgentError> {
     let connection_id = require_connection_id(input._connection.as_ref())?.to_string();
-    ensure_memory_schema(&connection_id)?;
+    ensure_memory_schema(&connection_id).await?;
 
     let message_count = input.messages.len() as i64;
     let messages_json = Value::Array(input.messages);
@@ -2071,7 +2095,8 @@ pub fn save_memory(input: SaveMemoryInput) -> Result<SaveMemoryOutput, AgentErro
             "offset": 0,
         }),
         &connection_id,
-    )?;
+    )
+    .await?;
 
     if !query_resp["success"].as_bool().unwrap_or(false) {
         return Err(AgentError::permanent(
@@ -2100,7 +2125,8 @@ pub fn save_memory(input: SaveMemoryInput) -> Result<SaveMemoryOutput, AgentErro
                 }
             }),
             &connection_id,
-        )?;
+        )
+        .await?;
 
         if !update_resp["success"].as_bool().unwrap_or(false) {
             return Err(AgentError::permanent(
@@ -2125,7 +2151,8 @@ pub fn save_memory(input: SaveMemoryInput) -> Result<SaveMemoryOutput, AgentErro
                 }
             }),
             &connection_id,
-        )?;
+        )
+        .await?;
 
         if !create_resp["success"].as_bool().unwrap_or(false) {
             return Err(AgentError::permanent(
@@ -2286,24 +2313,24 @@ struct Component;
 
 #[cfg(target_arch = "wasm32")]
 impl Guest for Component {
-    fn invoke(capability_id: String, input: Vec<u8>) -> Result<Vec<u8>, ErrorInfo> {
+    async fn invoke(capability_id: String, input: Vec<u8>) -> Result<Vec<u8>, ErrorInfo> {
         let value: serde_json::Value = serde_json::from_slice(&input).map_err(bad_json)?;
 
         let executor_result = match capability_id.as_str() {
-            "create-instance" => __executor_create_instance(value),
-            "query-instances" => __executor_query_instances(value),
-            "check-instance-exists" => __executor_check_instance_exists(value),
-            "create-if-not-exists" => __executor_create_if_not_exists(value),
-            "update-instance" => __executor_update_instance(value),
-            "delete-instance" => __executor_delete_instance(value),
-            "bulk-create-instances" => __executor_bulk_create_instances(value),
-            "bulk-update-instances" => __executor_bulk_update_instances(value),
-            "bulk-delete-instances" => __executor_bulk_delete_instances(value),
-            "query-aggregate" => __executor_query_aggregate(value),
-            "query-sql" => __executor_query_sql(value),
-            "execute-sql" => __executor_execute_sql(value),
-            "load-memory" => __executor_load_memory(value),
-            "save-memory" => __executor_save_memory(value),
+            "create-instance" => __executor_create_instance(value).await,
+            "query-instances" => __executor_query_instances(value).await,
+            "check-instance-exists" => __executor_check_instance_exists(value).await,
+            "create-if-not-exists" => __executor_create_if_not_exists(value).await,
+            "update-instance" => __executor_update_instance(value).await,
+            "delete-instance" => __executor_delete_instance(value).await,
+            "bulk-create-instances" => __executor_bulk_create_instances(value).await,
+            "bulk-update-instances" => __executor_bulk_update_instances(value).await,
+            "bulk-delete-instances" => __executor_bulk_delete_instances(value).await,
+            "query-aggregate" => __executor_query_aggregate(value).await,
+            "query-sql" => __executor_query_sql(value).await,
+            "execute-sql" => __executor_execute_sql(value).await,
+            "load-memory" => __executor_load_memory(value).await,
+            "save-memory" => __executor_save_memory(value).await,
             other => {
                 return Err(ErrorInfo {
                     code: "UNKNOWN_CAPABILITY".into(),

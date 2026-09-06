@@ -265,3 +265,7 @@ mod real_slack;
 #[cfg(feature = "component-integration-tests")]
 #[path = "cooperative_cancellation/real_ai.rs"]
 mod real_ai;
+
+#[cfg(feature = "component-integration-tests")]
+#[path = "cooperative_cancellation/real_object_model.rs"]
+mod real_object_model;

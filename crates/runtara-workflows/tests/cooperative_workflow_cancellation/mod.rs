@@ -161,6 +161,10 @@ enum Scenario {
     AiSingle,
     AiTurn,
     AiSummary,
+    AiMemoryLoad,
+    AiMemorySave,
+    ObjectQuery,
+    ObjectExecute,
     PartialBody,
     SignalReadFailure,
     ParallelSplit,
@@ -174,8 +178,18 @@ enum Scenario {
 }
 
 impl Scenario {
+    fn is_object(self) -> bool {
+        matches!(self, Self::ObjectQuery | Self::ObjectExecute)
+    }
     fn is_ai(self) -> bool {
-        matches!(self, Self::AiSingle | Self::AiTurn | Self::AiSummary)
+        matches!(
+            self,
+            Self::AiSingle
+                | Self::AiTurn
+                | Self::AiSummary
+                | Self::AiMemoryLoad
+                | Self::AiMemorySave
+        )
     }
     fn uses_proxy(self) -> bool {
         self == Self::SlackHeaders || self.is_ai()
@@ -221,7 +235,7 @@ async fn run(scenario: Scenario) -> anyhow::Result<()> {
     );
     let expected_requests = if pre_cancel {
         0
-    } else if parallel || scenario == Scenario::AiSummary {
+    } else if parallel || matches!(scenario, Scenario::AiSummary | Scenario::AiMemorySave) {
         2
     } else {
         1
@@ -259,11 +273,26 @@ async fn run(scenario: Scenario) -> anyhow::Result<()> {
             "_connection":immediate(serde_json::json!({"connection_id":"fixture-connection","integration_id":"slack_bot","parameters":{}}))
         });
     }
+    if scenario.is_object() {
+        graph["steps"]["fetch"]["agentId"] = "object-model".into();
+        graph["steps"]["fetch"]["capabilityId"] = if scenario == Scenario::ObjectQuery {
+            "query-sql"
+        } else {
+            "execute-sql"
+        }
+        .into();
+        graph["steps"]["fetch"]["inputMapping"] = serde_json::json!({
+            "sql":immediate("SELECT 1".into()), "params":immediate(serde_json::json!([])),
+            "_connection":immediate(serde_json::json!({"connection_id":"fixture-connection","integration_id":"object_model","parameters":{}}))
+        });
+    }
     if scenario.is_ai() {
         graph = serde_json::from_str(&match scenario {
             Scenario::AiSingle => single_shot_ai_agent_graph_json(""),
             Scenario::AiTurn => ai_agent_tool_loop_durable_graph_json(false),
-            Scenario::AiSummary => ai_agent_memory_graph_json(),
+            Scenario::AiSummary | Scenario::AiMemoryLoad | Scenario::AiMemorySave => {
+                ai_agent_memory_graph_json()
+            }
             _ => unreachable!(),
         })?;
         graph["durable"] = false.into();
@@ -349,6 +378,28 @@ async fn run(scenario: Scenario) -> anyhow::Result<()> {
                             anyhow::ensure!(n != 0, "request closed before headers");
                             request.extend_from_slice(&buffer[..n]);
                         }
+                        // Read the entire internal request before issuing a response or
+                        // cancellation. Memory-save payloads can span multiple packets.
+                        if scenario.is_ai() || scenario.is_object() {
+                            let end = request.windows(4).position(|bytes| bytes == b"\r\n\r\n").unwrap() + 4;
+                            let headers = std::str::from_utf8(&request[..end])?;
+                            let length = headers.lines().filter_map(|line| line.split_once(':'))
+                                .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                                .map(|(_, length)| length.trim().parse::<usize>()).transpose()?.unwrap_or(0);
+                            anyhow::ensure!(length < 16_384, "unexpected internal request size");
+                            while request.len() < end + length {
+                                let n = stream.read(&mut buffer).await?;
+                                anyhow::ensure!(n > 0, "internal request body closed early");
+                                request.extend_from_slice(&buffer[..n]);
+                            }
+                            if scenario.is_object() {
+                                let path = if scenario == Scenario::ObjectQuery {"query"} else {"execute"};
+                                assert!(request.starts_with(format!("POST /sql/{path}?connectionId=fixture-connection ").as_bytes()));
+                                let body: Value = serde_json::from_slice(&request[end..end + length])?;
+                                assert_eq!(body["connectionId"], "fixture-connection");
+                                assert_eq!(body["sql"], "SELECT 1");
+                            }
+                        }
                         if scenario.is_ai() {
                             let end = request.windows(4).position(|bytes| bytes == b"\r\n\r\n").unwrap() + 4;
                             let headers = std::str::from_utf8(&request[..end])?;
@@ -360,9 +411,27 @@ async fn run(scenario: Scenario) -> anyhow::Result<()> {
                                 return anyhow::Ok(());
                             }
                             if line.contains(" /object-model/") {
-                                // Only loading memory is allowed before the summary. A
-                                // cancelled summary must never fall through to save-memory.
-                                assert!(scenario == Scenario::AiSummary);
+                                // The summary fixture permits only memory loading. The
+                                // load/save fixtures cancel at their selected request.
+                                assert!(matches!(scenario, Scenario::AiSummary | Scenario::AiMemoryLoad | Scenario::AiMemorySave));
+                                let cancel_load = scenario == Scenario::AiMemoryLoad && line.starts_with("POST /object-model/instances/query?");
+                                let cancel_save = scenario == Scenario::AiMemorySave && line.starts_with("POST /object-model/instances?connectionId=");
+                                if cancel_load || cancel_save {
+                                    let started = server_host.requests.fetch_add(1, Ordering::SeqCst) + 1;
+                                    assert_eq!(started, expected_requests);
+                                    server_host.requested.store(true, Ordering::SeqCst);
+                                    loop {
+                                        match stream.read(&mut buffer).await {
+                                            Ok(0) => break,
+                                            Ok(_) => {},
+                                            Err(e) if matches!(e.kind(), std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::BrokenPipe) => break,
+                                            Err(e) => return Err(e.into()),
+                                        }
+                                    }
+                                    server_host.closed_count.fetch_add(1, Ordering::SeqCst);
+                                    server_host.closed.notify_one();
+                                    return anyhow::Ok(());
+                                }
                                 let reply = if line.starts_with("GET /object-model/schemas/ai_conversation_memory?connectionId=conn-1 ") {
                                     serde_json::json!({"success":true,"schema":{}})
                                 } else {
@@ -404,7 +473,7 @@ async fn run(scenario: Scenario) -> anyhow::Result<()> {
                             stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\nx").await?;
                         }
                         let started = server_host.requests.fetch_add(1, Ordering::SeqCst) + 1;
-                        if scenario == Scenario::AiSummary && started == 1 {
+                        if matches!(scenario, Scenario::AiSummary | Scenario::AiMemorySave) && started == 1 {
                             let bytes = serde_json::to_vec(&llm_ok("completed first turn"))?;
                             stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", bytes.len()).as_bytes()).await?;
                             stream.write_all(&bytes).await?;
@@ -449,8 +518,8 @@ async fn run(scenario: Scenario) -> anyhow::Result<()> {
             .execute_invoke(
                 &pre,
                 runtara_component_host::WorkflowRunSpec {
-                    env: if scenario.uses_proxy() {
-                        HashMap::from([("RUNTARA_HTTP_PROXY_URL".into(), url.clone()), ("RUNTARA_TENANT_ID".into(), "fixture-tenant".into()), ("CONNECTION_SERVICE_URL".into(), url.clone()), ("RUNTARA_OBJECT_MODEL_URL".into(), format!("{url}/object-model"))])
+                    env: if scenario.uses_proxy() || scenario.is_object() {
+                        HashMap::from([("RUNTARA_HTTP_PROXY_URL".into(), url.clone()), ("RUNTARA_TENANT_ID".into(), "fixture-tenant".into()), ("CONNECTION_SERVICE_URL".into(), url.clone()), ("RUNTARA_OBJECT_MODEL_URL".into(), if scenario.is_object() {url.clone()} else {format!("{url}/object-model")})])
                     } else { HashMap::new() },
                     stderr: None,
                     timeout: Duration::from_secs(10),
@@ -576,4 +645,21 @@ async fn emitted_ai_turn_cancels_without_dispatching_tools_or_recovery() -> anyh
 #[tokio::test]
 async fn emitted_ai_summary_cancels_without_saving_fallback_memory() -> anyhow::Result<()> {
     run(Scenario::AiSummary).await
+}
+
+#[tokio::test]
+async fn emitted_ai_memory_load_cancels_before_calling_the_model() -> anyhow::Result<()> {
+    run(Scenario::AiMemoryLoad).await
+}
+#[tokio::test]
+async fn emitted_ai_memory_save_cancels_without_completing_workflow() -> anyhow::Result<()> {
+    run(Scenario::AiMemorySave).await
+}
+#[tokio::test]
+async fn emitted_sql_query_cancel_bypasses_retries_and_recovery() -> anyhow::Result<()> {
+    run(Scenario::ObjectQuery).await
+}
+#[tokio::test]
+async fn emitted_sql_execute_cancel_bypasses_retries_and_recovery() -> anyhow::Result<()> {
+    run(Scenario::ObjectExecute).await
 }
