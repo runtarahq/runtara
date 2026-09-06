@@ -363,6 +363,7 @@ impl RuntaraSdk {
 
         if let Some(custom) = custom {
             let sdk_signal = Signal {
+                command_id: String::new(),
                 signal_type: SignalType::Resume, // custom signals are scoped; type unused here
                 payload: custom.payload,
                 checkpoint_id: Some(custom.checkpoint_id),
@@ -388,10 +389,8 @@ impl RuntaraSdk {
 
     /// Acknowledge a received signal.
     #[cfg_attr(feature = "tracing", tracing::instrument(skip(self), fields(instance_id = %self.backend.instance_id())))]
-    pub fn acknowledge_signal(&self, signal_type: SignalType) -> Result<()> {
-        self.backend.acknowledge_signal(signal_type)?;
-        debug!("Signal acknowledged");
-        Ok(())
+    pub fn acknowledge_signal(&self, command_id: &str, signal_type: SignalType) -> Result<bool> {
+        self.backend.acknowledge_signal(command_id, signal_type)
     }
 
     /// Check for cancellation and return error if cancelled.

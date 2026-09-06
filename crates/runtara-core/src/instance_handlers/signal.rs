@@ -2,18 +2,18 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Signal handlers: polling and acknowledgement.
 
+#[cfg(test)]
 use crate::domain::InstanceStatus as CoreInstanceStatus;
 #[cfg(test)]
 use crate::domain::SignalType as CoreSignalType;
 
 use anyhow::Result;
-use tracing::{debug, info, instrument, warn};
+use tracing::{debug, instrument};
 
 use super::state::InstanceHandlerState;
 use super::types::{
     CustomSignal, PollSignalsRequest, PollSignalsResponse, Signal, SignalAck, SignalType,
 };
-use crate::persistence::CompleteInstanceParams;
 
 /// Handle signal polling request.
 ///
@@ -49,6 +49,7 @@ pub async fn handle_poll_signals(
         let signal_type = SignalType::from(sig.signal_type);
 
         Signal {
+            command_id: sig.command_id,
             instance_id: request.instance_id.clone(),
             signal_type: signal_type.into(),
             payload: sig.payload.unwrap_or_default(),
@@ -74,94 +75,24 @@ pub async fn handle_poll_signals(
     })
 }
 
-/// Handle signal acknowledgement (fire-and-forget).
-///
-/// Applies the signal's status transition — a cancel ack also moves the
-/// instance to `cancelled` — and only then marks the signal acknowledged, so a
-/// transition that fails leaves the signal pending to be retried rather than
-/// consumed.
-#[instrument(skip(state, ack), fields(
-    instance_id = %ack.instance_id,
-    signal_type = ?ack.signal_type(),
-))]
-pub async fn handle_signal_ack(state: &InstanceHandlerState, ack: SignalAck) -> Result<()> {
-    debug!(
-        signal_type = ?ack.signal_type,
-        acknowledged = ack.acknowledged,
-        "Received signal acknowledgement"
-    );
-
-    if ack.acknowledged {
-        // Handle signal-specific side effects
-        match ack.signal_type() {
-            SignalType::SignalCancel => {
-                // Update instance status to cancelled with finished_at
-                state
-                    .persistence
-                    .complete_instance(CompleteInstanceParams::new(
-                        &ack.instance_id,
-                        CoreInstanceStatus::Cancelled,
-                    ))
-                    .await?;
-                info!("Instance cancelled");
-            }
-            SignalType::SignalPause => {
-                // Update instance status to suspended
-                state
-                    .persistence
-                    .update_instance_status(&ack.instance_id, CoreInstanceStatus::Suspended, None)
-                    .await?;
-                info!("Instance paused/suspended");
-            }
-            SignalType::SignalResume => {
-                // Instance should resume execution
-                debug!("Resume signal acknowledged");
-            }
-            SignalType::SignalShutdown => {
-                // Suspend with termination_reason so the instance can be resumed
-                // after restart. Retain "suspended" status so heartbeat-monitor
-                // recovery treats it as a normal suspension.
-                state
-                    .persistence
-                    .complete_instance(
-                        CompleteInstanceParams::new(
-                            &ack.instance_id,
-                            CoreInstanceStatus::Suspended,
-                        )
-                        .with_termination("shutdown_requested", None),
-                    )
-                    .await?;
-                // Mark the instance as immediately due for wake so the wake
-                // scheduler relaunches it after the server restarts. Drain
-                // pauses the scheduler, so this cannot fire mid-shutdown.
-                if let Err(e) = state
-                    .persistence
-                    .set_instance_sleep(&ack.instance_id, chrono::Utc::now())
-                    .await
-                {
-                    warn!(error = %e, "Failed to schedule post-restart wake for shutdown suspend");
-                }
-                info!("Instance suspended for shutdown");
-            }
-        }
-
-        // Acknowledge last, once the status transition above has landed.
-        // Acknowledging first consumes the signal whether or not the
-        // transition succeeded, and callers log-and-continue on the error, so
-        // a transient persistence failure would leave an instance that was told
-        // to cancel recorded as a clean success: the guest's next poll would
-        // no longer see the signal, and the end-of-run cancel backstop would
-        // find nothing to enforce. Acking here instead leaves an unhandled
-        // signal pending, which is what both of those retry paths key on.
-        state
-            .persistence
-            .acknowledge_signal(&ack.instance_id)
-            .await?;
-    } else {
-        warn!("Signal was not acknowledged by instance");
+/// Acknowledge the delivered command and its lifecycle transition atomically.
+/// False means the receipt is stale or the requested transition is no longer valid.
+#[instrument(skip(state, ack), fields(instance_id = %ack.instance_id, command_id = %ack.command_id))]
+pub async fn handle_signal_ack(state: &InstanceHandlerState, ack: SignalAck) -> Result<bool> {
+    if !ack.acknowledged {
+        return Ok(false);
     }
-
-    Ok(())
+    let signal_type = match ack.signal_type {
+        0 => crate::domain::SignalType::Cancel,
+        1 => crate::domain::SignalType::Pause,
+        2 => crate::domain::SignalType::Resume,
+        3 => crate::domain::SignalType::Shutdown,
+        _ => anyhow::bail!("Unknown lifecycle signal type: {}", ack.signal_type),
+    };
+    Ok(state
+        .persistence
+        .acknowledge_signal(&ack.instance_id, &ack.command_id, signal_type)
+        .await?)
 }
 
 #[cfg(test)]
@@ -310,6 +241,12 @@ mod tests {
         let state = InstanceHandlerState::new(persistence.clone());
 
         let request = SignalAck {
+            command_id: persistence
+                .get_pending_signal("inst-1")
+                .await
+                .unwrap()
+                .unwrap()
+                .command_id,
             instance_id: "inst-1".to_string(),
             signal_type: SignalType::SignalCancel as i32,
             acknowledged: true,
@@ -342,6 +279,12 @@ mod tests {
         let state = InstanceHandlerState::new(persistence.clone());
 
         let ack = SignalAck {
+            command_id: persistence
+                .get_pending_signal("inst-1")
+                .await
+                .unwrap()
+                .unwrap()
+                .command_id,
             instance_id: "inst-1".to_string(),
             signal_type: SignalType::SignalCancel as i32,
             acknowledged: true,
@@ -375,6 +318,12 @@ mod tests {
         let state = InstanceHandlerState::new(persistence.clone());
 
         let ack = SignalAck {
+            command_id: persistence
+                .get_pending_signal("inst-1")
+                .await
+                .unwrap()
+                .unwrap()
+                .command_id,
             instance_id: "inst-1".to_string(),
             signal_type: SignalType::SignalShutdown as i32,
             acknowledged: true,

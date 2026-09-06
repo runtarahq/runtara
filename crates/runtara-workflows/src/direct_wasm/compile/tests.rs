@@ -773,7 +773,7 @@ fn assert_direct_breakpoint_before_import(core: &[u8], module: &str, name: &str)
         &run_calls,
         direct_core_import(
             &imports,
-            "cm32p2|runtara:workflow-runtime/runtime@0.1",
+            "cm32p2|runtara:workflow-runtime/runtime@0.2",
             "debug-mode-enabled",
         ),
     );
@@ -789,7 +789,7 @@ fn assert_direct_breakpoint_before_import(core: &[u8], module: &str, name: &str)
         &run_calls,
         direct_core_import(
             &imports,
-            "cm32p2|runtara:workflow-runtime/runtime@0.1",
+            "cm32p2|runtara:workflow-runtime/runtime@0.2",
             "checkpoint",
         ),
         breakpoint_key_position,
@@ -807,7 +807,7 @@ fn assert_direct_breakpoint_before_import(core: &[u8], module: &str, name: &str)
         &run_calls,
         direct_core_import(
             &imports,
-            "cm32p2|runtara:workflow-runtime/runtime@0.1",
+            "cm32p2|runtara:workflow-runtime/runtime@0.2",
             "custom-event",
         ),
         breakpoint_event_position,
@@ -816,7 +816,7 @@ fn assert_direct_breakpoint_before_import(core: &[u8], module: &str, name: &str)
         &run_calls,
         direct_core_import(
             &imports,
-            "cm32p2|runtara:workflow-runtime/runtime@0.1",
+            "cm32p2|runtara:workflow-runtime/runtime@0.2",
             "breakpoint-pause",
         ),
         custom_event_position,
@@ -1218,7 +1218,7 @@ fn direct_compile_exports_wasi_cli_run_and_imports_components() {
                     saw_runtime_import |= import
                         .name
                         .0
-                        .contains("runtara:workflow-runtime/runtime@0.1.0");
+                        .contains("runtara:workflow-runtime/runtime@0.2.0");
                 }
             }
             Payload::ComponentExportSection(reader) => {
@@ -1449,22 +1449,22 @@ fn direct_core_run_lowers_embed_workflow_breakpoint_after_child_input_mapping() 
                                 stdlib_build_source_index = Some(next_function_index)
                             }
                             (
-                                "cm32p2|runtara:workflow-runtime/runtime@0.1",
+                                "cm32p2|runtara:workflow-runtime/runtime@0.2",
                                 "debug-mode-enabled",
                             ) => runtime_debug_mode_enabled_index = Some(next_function_index),
                             ("cm32p2|runtara:workflow-stdlib/json@0.1", "breakpoint-key") => {
                                 stdlib_breakpoint_key_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.1", "checkpoint") => {
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.2", "checkpoint") => {
                                 runtime_checkpoint_index = Some(next_function_index)
                             }
                             ("cm32p2|runtara:workflow-stdlib/json@0.1", "breakpoint-event") => {
                                 stdlib_breakpoint_event_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.1", "custom-event") => {
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.2", "custom-event") => {
                                 runtime_custom_event_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.1", "breakpoint-pause") => {
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.2", "breakpoint-pause") => {
                                 runtime_breakpoint_pause_index = Some(next_function_index)
                             }
                             (
@@ -4468,7 +4468,7 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
         (
             "runtime.load-input",
             "runtara:workflow-runtime/runtime",
-            "cm32p2|runtara:workflow-runtime/runtime@0.1",
+            "cm32p2|runtara:workflow-runtime/runtime@0.2",
             "load-input",
             vec![WasmType::Pointer],
         ),
@@ -4663,21 +4663,21 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
         (
             "runtime.complete",
             "runtara:workflow-runtime/runtime",
-            "cm32p2|runtara:workflow-runtime/runtime@0.1",
+            "cm32p2|runtara:workflow-runtime/runtime@0.2",
             "complete",
             vec![WasmType::Pointer, WasmType::Length, WasmType::Pointer],
         ),
         (
             "runtime.fail",
             "runtara:workflow-runtime/runtime",
-            "cm32p2|runtara:workflow-runtime/runtime@0.1",
+            "cm32p2|runtara:workflow-runtime/runtime@0.2",
             "fail",
             vec![WasmType::Pointer, WasmType::Length, WasmType::Pointer],
         ),
         (
             "runtime.custom-event",
             "runtara:workflow-runtime/runtime",
-            "cm32p2|runtara:workflow-runtime/runtime@0.1",
+            "cm32p2|runtara:workflow-runtime/runtime@0.2",
             "custom-event",
             vec![
                 WasmType::Pointer,
@@ -4770,7 +4770,7 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
                             ("cm32p2|runtara:workflow-stdlib/json@0.1", "init-manifest") => {
                                 init_manifest_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.1", "load-input") => {
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.2", "load-input") => {
                                 load_input_index = Some(next_function_index)
                             }
                             ("cm32p2|runtara:workflow-stdlib/json@0.1", "build-source") => {
@@ -4797,13 +4797,13 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
                             ("cm32p2|runtara:workflow-stdlib/json@0.1", "error") => {
                                 error_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.1", "complete") => {
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.2", "complete") => {
                                 complete_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.1", "fail") => {
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.2", "fail") => {
                                 fail_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.1", "custom-event") => {
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.2", "custom-event") => {
                                 custom_event_index = Some(next_function_index)
                             }
                             _ => {}
@@ -4961,25 +4961,25 @@ fn direct_core_run_lowers_finish_breakpoint_after_output_mapping() {
                                 stdlib_apply_mapping_index = Some(next_function_index)
                             }
                             (
-                                "cm32p2|runtara:workflow-runtime/runtime@0.1",
+                                "cm32p2|runtara:workflow-runtime/runtime@0.2",
                                 "debug-mode-enabled",
                             ) => runtime_debug_mode_enabled_index = Some(next_function_index),
                             ("cm32p2|runtara:workflow-stdlib/json@0.1", "breakpoint-key") => {
                                 stdlib_breakpoint_key_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.1", "checkpoint") => {
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.2", "checkpoint") => {
                                 runtime_checkpoint_index = Some(next_function_index)
                             }
                             ("cm32p2|runtara:workflow-stdlib/json@0.1", "breakpoint-event") => {
                                 stdlib_breakpoint_event_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.1", "custom-event") => {
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.2", "custom-event") => {
                                 runtime_custom_event_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.1", "breakpoint-pause") => {
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.2", "breakpoint-pause") => {
                                 runtime_breakpoint_pause_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.1", "complete") => {
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.2", "complete") => {
                                 runtime_complete_index = Some(next_function_index)
                             }
                             _ => {}
@@ -5187,7 +5187,7 @@ fn direct_core_run_lowers_agent_breakpoint_after_input_mapping_before_validation
         &run_calls,
         direct_core_import(
             &imports,
-            "cm32p2|runtara:workflow-runtime/runtime@0.1",
+            "cm32p2|runtara:workflow-runtime/runtime@0.2",
             "debug-mode-enabled",
         ),
     );
@@ -5203,7 +5203,7 @@ fn direct_core_run_lowers_agent_breakpoint_after_input_mapping_before_validation
         &run_calls,
         direct_core_import(
             &imports,
-            "cm32p2|runtara:workflow-runtime/runtime@0.1",
+            "cm32p2|runtara:workflow-runtime/runtime@0.2",
             "checkpoint",
         ),
     );
@@ -5223,7 +5223,7 @@ fn direct_core_run_lowers_agent_breakpoint_after_input_mapping_before_validation
     // static occurrence.
     let custom_event_index = direct_core_import(
         &imports,
-        "cm32p2|runtara:workflow-runtime/runtime@0.1",
+        "cm32p2|runtara:workflow-runtime/runtime@0.2",
         "custom-event",
     );
     let custom_event_position =
@@ -5232,7 +5232,7 @@ fn direct_core_run_lowers_agent_breakpoint_after_input_mapping_before_validation
         &run_calls,
         direct_core_import(
             &imports,
-            "cm32p2|runtara:workflow-runtime/runtime@0.1",
+            "cm32p2|runtara:workflow-runtime/runtime@0.2",
             "breakpoint-pause",
         ),
     );
@@ -7085,7 +7085,7 @@ fn direct_core_run_emits_step_debug_events_when_tracking_enabled() {
                             ("cm32p2|runtara:workflow-stdlib/json@0.1", "init-manifest") => {
                                 init_manifest_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.1", "load-input") => {
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.2", "load-input") => {
                                 load_input_index = Some(next_function_index)
                             }
                             ("cm32p2|runtara:workflow-stdlib/json@0.1", "build-source") => {
@@ -7094,13 +7094,13 @@ fn direct_core_run_emits_step_debug_events_when_tracking_enabled() {
                             ("cm32p2|runtara:workflow-stdlib/json@0.1", "apply-mapping") => {
                                 apply_mapping_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.1", "complete") => {
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.2", "complete") => {
                                 complete_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.1", "custom-event") => {
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.2", "custom-event") => {
                                 custom_event_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.1", "fail") => {
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.2", "fail") => {
                                 fail_index = Some(next_function_index)
                             }
                             ("cm32p2|runtara:workflow-stdlib/json@0.1", "step-debug-start") => {
@@ -7781,17 +7781,17 @@ fn direct_core_run_lowers_split_retry_helpers() {
     );
     let blocking_sleep_index = direct_core_import(
         &imports,
-        "cm32p2|runtara:workflow-runtime/runtime@0.1",
+        "cm32p2|runtara:workflow-runtime/runtime@0.2",
         "blocking-sleep",
     );
     let durable_sleep_checkpoint_index = direct_core_import(
         &imports,
-        "cm32p2|runtara:workflow-runtime/runtime@0.1",
+        "cm32p2|runtara:workflow-runtime/runtime@0.2",
         "durable-sleep-checkpoint",
     );
     let record_retry_index = direct_core_import(
         &imports,
-        "cm32p2|runtara:workflow-runtime/runtime@0.1",
+        "cm32p2|runtara:workflow-runtime/runtime@0.2",
         "record-retry-attempt",
     );
 
@@ -8548,7 +8548,7 @@ fn direct_core_run_lowers_durable_delay_finish_through_stdlib_and_runtime() {
                                 delay_duration_index = Some(next_function_index)
                             }
                             (
-                                "cm32p2|runtara:workflow-runtime/runtime@0.1",
+                                "cm32p2|runtara:workflow-runtime/runtime@0.2",
                                 "durable-sleep-checkpoint",
                             ) => durable_sleep_checkpoint_index = Some(next_function_index),
                             ("cm32p2|runtara:workflow-stdlib/json@0.1", "delay") => {
@@ -8689,29 +8689,29 @@ fn direct_core_run_lowers_delay_breakpoint_pause_before_sleep() {
                                 stdlib_build_source_index = Some(next_function_index)
                             }
                             (
-                                "cm32p2|runtara:workflow-runtime/runtime@0.1",
+                                "cm32p2|runtara:workflow-runtime/runtime@0.2",
                                 "debug-mode-enabled",
                             ) => runtime_debug_mode_enabled_index = Some(next_function_index),
                             ("cm32p2|runtara:workflow-stdlib/json@0.1", "breakpoint-key") => {
                                 stdlib_breakpoint_key_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.1", "checkpoint") => {
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.2", "checkpoint") => {
                                 runtime_checkpoint_index = Some(next_function_index)
                             }
                             ("cm32p2|runtara:workflow-stdlib/json@0.1", "breakpoint-event") => {
                                 stdlib_breakpoint_event_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.1", "custom-event") => {
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.2", "custom-event") => {
                                 runtime_custom_event_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.1", "breakpoint-pause") => {
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.2", "breakpoint-pause") => {
                                 runtime_breakpoint_pause_index = Some(next_function_index)
                             }
                             ("cm32p2|runtara:workflow-stdlib/json@0.1", "delay-duration-ms") => {
                                 stdlib_delay_duration_index = Some(next_function_index)
                             }
                             (
-                                "cm32p2|runtara:workflow-runtime/runtime@0.1",
+                                "cm32p2|runtara:workflow-runtime/runtime@0.2",
                                 "durable-sleep-checkpoint",
                             ) => runtime_durable_sleep_checkpoint_index = Some(next_function_index),
                             _ => {}
@@ -8832,10 +8832,10 @@ fn direct_core_run_lowers_non_durable_delay_finish_through_blocking_sleep() {
                                 delay_duration_index = Some(next_function_index)
                             }
                             (
-                                "cm32p2|runtara:workflow-runtime/runtime@0.1",
+                                "cm32p2|runtara:workflow-runtime/runtime@0.2",
                                 "durable-sleep-checkpoint",
                             ) => durable_sleep_checkpoint_index = Some(next_function_index),
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.1", "blocking-sleep") => {
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.2", "blocking-sleep") => {
                                 blocking_sleep_index = Some(next_function_index)
                             }
                             ("cm32p2|runtara:workflow-stdlib/json@0.1", "delay") => {
@@ -9004,29 +9004,29 @@ fn direct_core_run_lowers_wait_for_signal_finish_through_runtime_polling() {
                             ("cm32p2|runtara:workflow-stdlib/json@0.1", "apply-mapping") => {
                                 apply_mapping_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.1", "instance-id") => {
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.2", "instance-id") => {
                                 runtime_instance_id_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.1", "now-ms") => {
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.2", "now-ms") => {
                                 runtime_now_ms_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.1", "fail") => {
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.2", "fail") => {
                                 runtime_fail_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.1", "custom-event") => {
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.2", "custom-event") => {
                                 runtime_custom_event_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.1", "check-signals") => {
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.2", "check-signals") => {
                                 runtime_check_signals_index = Some(next_function_index)
                             }
                             (
-                                "cm32p2|runtara:workflow-runtime/runtime@0.1",
+                                "cm32p2|runtara:workflow-runtime/runtime@0.2",
                                 "poll-custom-signal",
                             ) => runtime_poll_custom_signal_index = Some(next_function_index),
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.1", "heartbeat") => {
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.2", "heartbeat") => {
                                 runtime_heartbeat_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.1", "blocking-sleep") => {
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.2", "blocking-sleep") => {
                                 runtime_blocking_sleep_index = Some(next_function_index)
                             }
                             _ => {}
@@ -9153,7 +9153,7 @@ fn direct_core_run_lowers_wait_for_signal_debug_events_with_tracking() {
                             ("cm32p2|runtara:workflow-stdlib/json@0.1", "apply-mapping") => {
                                 apply_mapping_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.1", "custom-event") => {
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.2", "custom-event") => {
                                 runtime_custom_event_index = Some(next_function_index)
                             }
                             _ => {}
@@ -9270,25 +9270,25 @@ fn direct_core_run_lowers_wait_for_signal_breakpoint_pause() {
                     if matches!(import.ty, TypeRef::Func(_)) {
                         match (import.module, import.name) {
                             (
-                                "cm32p2|runtara:workflow-runtime/runtime@0.1",
+                                "cm32p2|runtara:workflow-runtime/runtime@0.2",
                                 "debug-mode-enabled",
                             ) => runtime_debug_mode_enabled_index = Some(next_function_index),
                             ("cm32p2|runtara:workflow-stdlib/json@0.1", "breakpoint-key") => {
                                 stdlib_breakpoint_key_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.1", "checkpoint") => {
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.2", "checkpoint") => {
                                 runtime_checkpoint_index = Some(next_function_index)
                             }
                             ("cm32p2|runtara:workflow-stdlib/json@0.1", "breakpoint-event") => {
                                 stdlib_breakpoint_event_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.1", "custom-event") => {
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.2", "custom-event") => {
                                 runtime_custom_event_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.1", "breakpoint-pause") => {
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.2", "breakpoint-pause") => {
                                 runtime_breakpoint_pause_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.1", "instance-id") => {
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.2", "instance-id") => {
                                 runtime_instance_id_index = Some(next_function_index)
                             }
                             _ => {}
@@ -9527,7 +9527,7 @@ fn direct_core_run_wraps_wait_on_wait_error_before_runtime_fail() {
                             ("cm32p2|runtara:workflow-stdlib/json@0.1", "wait-on-wait-error") => {
                                 wait_on_wait_error_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.1", "fail") => {
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.2", "fail") => {
                                 runtime_fail_index = Some(next_function_index)
                             }
                             _ => {}
@@ -10023,7 +10023,7 @@ fn direct_core_run_lowers_log_finish_through_stdlib_and_runtime() {
                             ("cm32p2|runtara:workflow-stdlib/json@0.1", "log") => {
                                 log_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.1", "custom-event") => {
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.2", "custom-event") => {
                                 custom_event_index = Some(next_function_index)
                             }
                             ("cm32p2|runtara:workflow-stdlib/json@0.1", "apply-mapping") => {
@@ -10172,13 +10172,13 @@ fn direct_core_run_lowers_error_through_stdlib_and_runtime() {
                             ("cm32p2|runtara:workflow-stdlib/json@0.1", "error") => {
                                 error_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.1", "custom-event") => {
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.2", "custom-event") => {
                                 custom_event_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.1", "fail") => {
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.2", "fail") => {
                                 fail_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.1", "complete") => {
+                            ("cm32p2|runtara:workflow-runtime/runtime@0.2", "complete") => {
                                 complete_index = Some(next_function_index)
                             }
                             _ => {}
@@ -10446,7 +10446,7 @@ fn direct_compile_writes_component_scaffold_sidecars() {
     assert_eq!(world_wit, result.component_artifacts.world_wit);
     assert_eq!(wac, result.component_artifacts.wac_source);
     assert!(world_wit.contains("import runtara:workflow-stdlib/json@0.1.0;"));
-    assert!(world_wit.contains("import runtara:workflow-runtime/runtime@0.1.0;"));
+    assert!(world_wit.contains("import runtara:workflow-runtime/runtime@0.2.0;"));
     assert!(world_wit.contains("export runtara:workflow-lifecycle/lifecycle@0.2.0;"));
     assert!(wac.contains("new runtara:workflow-stdlib"));
     // HostImport default: the runtime component is neither instantiated nor

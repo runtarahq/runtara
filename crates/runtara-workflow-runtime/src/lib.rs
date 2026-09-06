@@ -58,6 +58,7 @@ fn with_sdk_mut<T>(op: impl FnOnce(&mut RuntaraSdk) -> Result<T, String>) -> Res
     op(&mut guard)
 }
 
+#[cfg(test)]
 fn signal_is_cancel(signal: Option<Signal>) -> bool {
     signal.is_some_and(|signal| signal.signal_type == SignalType::Cancel)
 }
@@ -72,6 +73,7 @@ enum CheckpointSignalAction {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeSignalInfo {
     pub signal_type: String,
+    pub command_id: String,
     pub payload: Vec<u8>,
     pub checkpoint_id: Option<String>,
 }
@@ -111,6 +113,7 @@ fn checkpoint_signal_action(signal_type: &str) -> Option<CheckpointSignalAction>
 fn runtime_signal(signal: Signal) -> RuntimeSignalInfo {
     RuntimeSignalInfo {
         signal_type: signal_type_name(signal.signal_type).to_string(),
+        command_id: signal.command_id,
         payload: signal.payload,
         checkpoint_id: signal.checkpoint_id,
     }
@@ -162,7 +165,6 @@ pub fn debug_mode_enabled() -> Result<bool, String> {
 }
 
 pub fn breakpoint_pause() -> Result<(), String> {
-    runtara_sdk::acknowledge_pause();
     let _ = with_sdk(|sdk| sdk.suspended().map_err(sdk_error));
     Ok(())
 }
@@ -175,38 +177,22 @@ pub fn is_cancelled() -> Result<bool, String> {
     if runtara_sdk::is_cancelled() {
         return Ok(true);
     }
-
-    let cancelled = with_sdk_mut(|sdk| sdk.poll_signal().map(signal_is_cancel).map_err(sdk_error))?;
-
-    if cancelled {
-        runtara_sdk::acknowledge_cancellation();
+    let signal = with_sdk_mut(|sdk| sdk.poll_signal().map_err(sdk_error))?;
+    match signal {
+        Some(signal) if signal.signal_type == SignalType::Cancel => {
+            runtara_sdk::acknowledge_cancellation(&signal.command_id).map_err(sdk_error)
+        }
+        _ => Ok(false),
     }
-
-    Ok(cancelled)
 }
 
 pub fn check_signals() -> Result<bool, String> {
     let signal = with_sdk_mut(|sdk| sdk.poll_signal().map_err(sdk_error))?;
-    let Some(signal) = signal else {
-        return Ok(false);
-    };
-
-    match signal.signal_type {
-        SignalType::Cancel => {
-            runtara_sdk::acknowledge_cancellation();
-            Ok(true)
+    match signal {
+        Some(signal) => {
+            handle_checkpoint_signal(signal_type_name(signal.signal_type), &signal.command_id)
         }
-        SignalType::Pause => {
-            runtara_sdk::acknowledge_pause();
-            with_sdk(|sdk| sdk.suspended().map_err(sdk_error))?;
-            Ok(true)
-        }
-        SignalType::Shutdown => {
-            runtara_sdk::acknowledge_shutdown();
-            with_sdk(|sdk| sdk.suspended().map_err(sdk_error))?;
-            Ok(true)
-        }
-        SignalType::Resume => Ok(false),
+        None => Ok(false),
     }
 }
 
@@ -243,24 +229,15 @@ pub fn checkpoint(checkpoint_id: &str, state: &[u8]) -> Result<RuntimeCheckpoint
     })
 }
 
-pub fn handle_checkpoint_signal(signal_type: &str) -> Result<bool, String> {
-    match checkpoint_signal_action(signal_type) {
-        Some(CheckpointSignalAction::Cancel) => {
-            runtara_sdk::acknowledge_cancellation();
-            Ok(true)
-        }
-        Some(CheckpointSignalAction::Pause) => {
-            runtara_sdk::acknowledge_pause();
-            with_sdk(|sdk| sdk.suspended().map_err(sdk_error))?;
-            Ok(true)
-        }
-        Some(CheckpointSignalAction::Shutdown) => {
-            runtara_sdk::acknowledge_shutdown();
-            with_sdk(|sdk| sdk.suspended().map_err(sdk_error))?;
-            Ok(true)
-        }
-        None => Ok(false),
+pub fn handle_checkpoint_signal(signal_type: &str, command_id: &str) -> Result<bool, String> {
+    let accepted = match checkpoint_signal_action(signal_type) {
+        Some(CheckpointSignalAction::Cancel) => runtara_sdk::acknowledge_cancellation(command_id),
+        Some(CheckpointSignalAction::Pause) => runtara_sdk::acknowledge_pause(command_id),
+        Some(CheckpointSignalAction::Shutdown) => runtara_sdk::acknowledge_shutdown(command_id),
+        None => return Ok(false),
     }
+    .map_err(sdk_error)?;
+    Ok(accepted)
 }
 
 pub fn record_retry_attempt(
@@ -292,6 +269,7 @@ mod component {
     fn signal_info(signal: super::RuntimeSignalInfo) -> SignalInfo {
         SignalInfo {
             signal_type: signal.signal_type,
+            command_id: signal.command_id,
             payload: signal.payload,
             checkpoint_id: signal.checkpoint_id,
         }
@@ -378,8 +356,11 @@ mod component {
             super::checkpoint(&checkpoint_id, &state).map(checkpoint_result)
         }
 
-        fn handle_checkpoint_signal(signal_type: String) -> Result<bool, String> {
-            super::handle_checkpoint_signal(&signal_type)
+        fn handle_checkpoint_signal(
+            signal_type: String,
+            command_id: String,
+        ) -> Result<bool, String> {
+            super::handle_checkpoint_signal(&signal_type, &command_id)
         }
 
         fn record_retry_attempt(
@@ -471,11 +452,13 @@ mod tests {
     #[test]
     fn only_cancel_signals_are_terminal_cancellation() {
         let pause = Signal {
+            command_id: "test-command".into(),
             signal_type: SignalType::Pause,
             payload: Vec::new(),
             checkpoint_id: None,
         };
         let cancel = Signal {
+            command_id: "test-command".into(),
             signal_type: SignalType::Cancel,
             payload: Vec::new(),
             checkpoint_id: None,
@@ -518,6 +501,7 @@ mod tests {
             found: true,
             state: br#"{"ok":true}"#.to_vec(),
             pending_signal: Some(Signal {
+                command_id: "test-command".into(),
                 signal_type: SignalType::Pause,
                 payload: b"pause-now".to_vec(),
                 checkpoint_id: Some("step-a".to_string()),

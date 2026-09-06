@@ -12,9 +12,6 @@
 //! statement (`claim_sleeping_instances_due`), which is what makes overlapping
 //! polls safe.
 
-use runtara_core::instance_handlers::{
-    InstanceHandlerState, SignalAck, SignalType, handle_signal_ack,
-};
 use runtara_core::persistence::{CompleteInstanceParams, Persistence};
 use sqlx::PgPool;
 use std::sync::Arc;
@@ -238,7 +235,7 @@ impl WakeScheduler {
 
     /// Claim a batch of due instances and wake them concurrently.
     ///
-    /// Returns how many were claimed, which [`WakeScheduler::run`] uses to
+    /// Returns how many were cancelled or claimed, which [`WakeScheduler::run`] uses to
     /// decide whether more work is waiting.
     async fn process_pending_wakes(self: Arc<Self>) -> crate::error::Result<usize> {
         // While draining, suspended instances are being stamped with
@@ -247,6 +244,19 @@ impl WakeScheduler {
         if self.drain.is_draining() {
             debug!("Draining; skipping wake processing");
             return Ok(0);
+        }
+
+        let cancelled = self
+            .persistence
+            .cancel_suspended_instances(None, self.config.batch_size)
+            .await?;
+        let cancelled_count = cancelled.len();
+        for instance in cancelled {
+            self.lifecycle_observers.notify_instance_released(
+                instance.tenant_id,
+                instance.instance_id,
+                "cancelled",
+            );
         }
 
         // Claims as it selects: back-to-back polls would otherwise keep
@@ -265,10 +275,10 @@ impl WakeScheduler {
 
         if sleeping_instances.is_empty() {
             debug!("No sleeping instances due for wake");
-            return Ok(0);
+            return Ok(cancelled_count);
         }
 
-        let claimed = sleeping_instances.len();
+        let claimed = sleeping_instances.len() + cancelled_count;
         info!(count = claimed, "Processing sleeping instances");
 
         // Relaunching is mostly CPU-bound, so a batch is worth spreading over
@@ -334,51 +344,14 @@ impl WakeScheduler {
         Ok(claimed)
     }
 
-    /// Whether a `cancel` signal is waiting for this instance.
-    ///
-    /// A read failure is reported as "no cancel": relaunching an instance that
-    /// turns out to be cancelled is recoverable (the guest observes the signal
-    /// at its next poll), whereas refusing to wake on a transient database
-    /// error would strand a healthy sleeper.
-    async fn cancel_pending(&self, instance_id: &str) -> bool {
-        match self.persistence.get_pending_signal(instance_id).await {
-            // `acknowledged_at` is re-checked even though `get_pending_signal`
-            // already filters on `acknowledged_at IS NULL`: defence in depth.
-            // Waking is destructive enough that a regression in that predicate
-            // must not silently re-cancel a handled run. The check is free.
-            Ok(Some(signal)) => {
-                signal.signal_type == runtara_core::domain::SignalType::Cancel
-                    && signal.acknowledged_at.is_none()
-            }
-            Ok(None) => false,
-            Err(e) => {
-                warn!(
-                    instance_id = %instance_id,
-                    error = %e,
-                    "Failed to read pending signals before wake; relaunching anyway"
-                );
-                false
-            }
-        }
-    }
-
-    /// Acknowledge the pending cancel and drive the instance to `cancelled`.
-    ///
-    /// Reuses core's ack path rather than writing the status directly, so a
-    /// cancel resolved here is indistinguishable from one a running guest
-    /// acknowledged: same signal acknowledgement, same terminal status.
-    async fn cancel_without_launch(&self, instance_id: &str) -> crate::error::Result<()> {
-        let state = InstanceHandlerState::new(self.persistence.clone());
-        handle_signal_ack(
-            &state,
-            SignalAck {
-                instance_id: instance_id.to_string(),
-                signal_type: SignalType::SignalCancel as i32,
-                acknowledged: true,
-            },
-        )
-        .await
-        .map_err(|e| crate::error::Error::Other(format!("Failed to cancel woken instance: {e}")))
+    /// Apply cancellation only while the instance is still parked. A concurrent
+    /// launch that wins the running transition must observe its pending command.
+    async fn cancel_without_launch(&self, instance_id: &str) -> crate::error::Result<bool> {
+        Ok(!self
+            .persistence
+            .cancel_suspended_instances(Some(instance_id), 1)
+            .await?
+            .is_empty())
     }
 
     /// Wake an already-claimed instance, releasing the claim if it fails.
@@ -456,12 +429,7 @@ impl WakeScheduler {
         // HIT that skips the poll sites entirely. Drive it to terminal here
         // instead of starting a process only to cancel it — the claim above
         // already took this row out of the wake candidate set.
-        if self.cancel_pending(&instance.instance_id).await {
-            info!(
-                instance_id = %instance.instance_id,
-                "Cancel signal pending at wake time; cancelling instead of relaunching"
-            );
-            self.cancel_without_launch(&instance.instance_id).await?;
+        if self.cancel_without_launch(&instance.instance_id).await? {
             self.lifecycle_observers.notify_instance_released(
                 instance.tenant_id.clone(),
                 instance.instance_id.clone(),

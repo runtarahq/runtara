@@ -2211,3 +2211,47 @@ async fn scope_ancestry_uses_custom_event_subtypes() {
         .await
         .unwrap();
 }
+
+#[tokio::test]
+async fn cancel_signal_terminalizes_a_parked_instance_without_a_guest() {
+    use runtara_core::domain::InstanceStatus;
+    use runtara_environment::handlers::{SendSignalOutcome, handle_send_signal};
+    let pool = get_test_pool().await;
+    let temp = tempfile::TempDir::new().unwrap();
+    let state = create_test_state(pool, temp.path().to_owned());
+    let id = Uuid::new_v4().to_string();
+    state
+        .persistence
+        .register_instance(&id, "parked-handler")
+        .await
+        .unwrap();
+    state
+        .persistence
+        .update_instance_status(&id, InstanceStatus::Suspended, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        handle_send_signal(&state, &id, "cancel", None)
+            .await
+            .unwrap(),
+        SendSignalOutcome::Delivered
+    );
+    assert_eq!(
+        state
+            .persistence
+            .get_instance(&id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        InstanceStatus::Cancelled
+    );
+    assert!(
+        state
+            .persistence
+            .get_pending_signal(&id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}

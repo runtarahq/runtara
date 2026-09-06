@@ -223,12 +223,36 @@ impl PersistenceRuntimeHost {
             "Guest resumed from an interrupted sleep without polling signals; \
              cancelling host-side (workflow artifact predates the Delay poll site)"
         );
-        self.cancelled.store(true, Ordering::SeqCst);
         // The ack is what writes terminal status `cancelled`, exactly as it
         // would had the guest observed the signal itself. It runs BEFORE the
         // guest is stopped, so the terminal status is durable even if the trap
         // lands immediately.
-        self.ack_signal(SignalType::SignalCancel).await;
+        let accepted = async {
+            let Some(signal) = self
+                .state
+                .persistence
+                .get_pending_signal(&self.instance_id)
+                .await
+                .map_err(Self::err)?
+            else {
+                return Ok(false);
+            };
+            if signal.signal_type != runtara_core::domain::SignalType::Cancel {
+                return Ok(false);
+            }
+            self.ack_signal(SignalType::SignalCancel, &signal.command_id)
+                .await
+        }
+        .await;
+        match accepted {
+            Ok(true) => self.cancelled.store(true, Ordering::SeqCst),
+            Ok(false) => return,
+            Err(error) => {
+                self.sleep_interrupted.store(true, Ordering::SeqCst);
+                tracing::warn!(%error, "Failed to acknowledge interrupted sleep cancellation; will retry");
+                return;
+            }
+        }
         if let Some(cancel) = &self.cancel_token {
             cancel.store(true, Ordering::SeqCst);
         }
@@ -254,32 +278,19 @@ impl PersistenceRuntimeHost {
         self.sleep_interrupted.store(false, Ordering::SeqCst);
     }
 
-    /// Server-side signal acknowledgement — the status-transition half of the
-    /// SDK's `acknowledge_*` free functions (`handle_signal_ack` marks the
-    /// signal consumed and applies cancel/pause/shutdown side effects).
-    ///
-    /// Ack failures are logged and swallowed, NOT propagated — exact parity
-    /// with the SDK free functions (`registry.rs`), which `warn!` and continue
-    /// so a failed acknowledgement never turns a clean suspend/cancel into a
-    /// guest-visible runtime error.
-    async fn ack_signal(&self, signal_type: SignalType) {
-        if let Err(error) = handle_signal_ack(
+    /// Apply only the command the guest actually observed.
+    async fn ack_signal(&self, signal_type: SignalType, command_id: &str) -> Result<bool, String> {
+        handle_signal_ack(
             &self.state,
             SignalAck {
+                command_id: command_id.to_owned(),
                 instance_id: self.instance_id.clone(),
                 signal_type: signal_type as i32,
                 acknowledged: true,
             },
         )
         .await
-        {
-            tracing::warn!(
-                instance_id = %self.instance_id,
-                ?signal_type,
-                %error,
-                "failed to acknowledge signal (continuing, guest-parity)"
-            );
-        }
+        .map_err(Self::err)
     }
 
     /// The `sdk.suspended()` equivalent: record a suspended instance event
@@ -341,6 +352,7 @@ impl PersistenceRuntimeHost {
     fn runtime_signal(signal: Signal) -> RuntimeSignalInfo {
         RuntimeSignalInfo {
             signal_type: Self::signal_type_name(signal.signal_type).to_string(),
+            command_id: signal.command_id,
             payload: signal.payload,
             // The guest-protocol handlers never scope lifecycle signals to a
             // checkpoint; the composed runtime forwarded `None` here too.
@@ -395,8 +407,6 @@ impl RuntimeHost for PersistenceRuntimeHost {
 
     async fn breakpoint_pause(&self) -> Result<(), String> {
         self.escalate_if_cancel_ignored().await;
-        // Guest: acknowledge_pause() then sdk.suspended().
-        self.ack_signal(SignalType::SignalPause).await;
         self.suspended_event().await
     }
 
@@ -417,12 +427,14 @@ impl RuntimeHost for PersistenceRuntimeHost {
             return Ok(false);
         };
         if Self::signal_type_of(signal.signal_type) == Some(SignalType::SignalCancel) {
-            self.cancelled.store(true, Ordering::SeqCst);
-            self.ack_signal(SignalType::SignalCancel).await;
-            return Ok(true);
+            let accepted = self
+                .ack_signal(SignalType::SignalCancel, &signal.command_id)
+                .await?;
+            if accepted {
+                self.cancelled.store(true, Ordering::SeqCst);
+            }
+            return Ok(accepted);
         }
-        // Non-cancel signals are left pending (polling is non-destructive),
-        // exactly like the guest path that inspects only the cancel case.
         Ok(false)
     }
 
@@ -431,25 +443,11 @@ impl RuntimeHost for PersistenceRuntimeHost {
         let Some(signal) = self.poll_lifecycle_signal().await? else {
             return Ok(false);
         };
-        match Self::signal_type_of(signal.signal_type) {
-            Some(SignalType::SignalCancel) => {
-                self.cancelled.store(true, Ordering::SeqCst);
-                self.ack_signal(SignalType::SignalCancel).await;
-                Ok(true)
-            }
-            Some(SignalType::SignalPause) => {
-                self.ack_signal(SignalType::SignalPause).await;
-                self.suspended_event().await?;
-                Ok(true)
-            }
-            Some(SignalType::SignalShutdown) => {
-                self.cancelled.store(true, Ordering::SeqCst);
-                self.ack_signal(SignalType::SignalShutdown).await;
-                self.suspended_event().await?;
-                Ok(true)
-            }
-            Some(SignalType::SignalResume) | None => Ok(false),
-        }
+        self.handle_checkpoint_signal(
+            Self::signal_type_name(signal.signal_type).into(),
+            signal.command_id,
+        )
+        .await
     }
 
     async fn poll_custom_signal(&self, checkpoint_id: String) -> Result<Option<Vec<u8>>, String> {
@@ -509,28 +507,25 @@ impl RuntimeHost for PersistenceRuntimeHost {
         })
     }
 
-    async fn handle_checkpoint_signal(&self, signal_type: String) -> Result<bool, String> {
+    async fn handle_checkpoint_signal(
+        &self,
+        signal_type: String,
+        command_id: String,
+    ) -> Result<bool, String> {
         self.escalate_if_cancel_ignored().await;
-        // Mirrors the guest runtime's checkpoint_signal_action dispatch.
-        match signal_type.as_str() {
-            "cancel" => {
-                self.cancelled.store(true, Ordering::SeqCst);
-                self.ack_signal(SignalType::SignalCancel).await;
-                Ok(true)
-            }
-            "pause" => {
-                self.ack_signal(SignalType::SignalPause).await;
-                self.suspended_event().await?;
-                Ok(true)
-            }
-            "shutdown" => {
-                self.cancelled.store(true, Ordering::SeqCst);
-                self.ack_signal(SignalType::SignalShutdown).await;
-                self.suspended_event().await?;
-                Ok(true)
-            }
-            _ => Ok(false),
+        let kind = match signal_type.as_str() {
+            "cancel" => SignalType::SignalCancel,
+            "pause" => SignalType::SignalPause,
+            "shutdown" => SignalType::SignalShutdown,
+            _ => return Ok(false),
+        };
+        if !self.ack_signal(kind, &command_id).await? {
+            return Ok(false);
         }
+        if matches!(kind, SignalType::SignalCancel | SignalType::SignalShutdown) {
+            self.cancelled.store(true, Ordering::SeqCst);
+        }
+        Ok(true)
     }
 
     async fn record_retry_attempt(
@@ -836,7 +831,7 @@ mod tests {
         assert_eq!(pending.signal_type, "pause");
 
         assert!(
-            host.handle_checkpoint_signal(pending.signal_type)
+            host.handle_checkpoint_signal(pending.signal_type, pending.command_id)
                 .await
                 .unwrap()
         );
@@ -846,11 +841,82 @@ mod tests {
         // Unknown types are ignored (guest parity).
         assert!(
             !host
-                .handle_checkpoint_signal("resume".into())
+                .handle_checkpoint_signal("resume".into(), "unused".into())
                 .await
                 .unwrap()
         );
-        assert!(!host.handle_checkpoint_signal("bogus".into()).await.unwrap());
+        assert!(
+            !host
+                .handle_checkpoint_signal("bogus".into(), "unused".into())
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn retried_checkpoint_ack_after_resume_does_not_suspend_again() {
+        let (p, host, id) = setup().await;
+        p.insert_signal(&id, CoreSignalType::Pause, b"")
+            .await
+            .unwrap();
+        let signal = p.get_pending_signal(&id).await.unwrap().unwrap();
+        assert!(
+            host.handle_checkpoint_signal("pause".into(), signal.command_id.clone())
+                .await
+                .unwrap()
+        );
+        p.update_instance_status(&id, CoreInstanceStatus::Running, None)
+            .await
+            .unwrap();
+        assert!(
+            host.handle_checkpoint_signal("pause".into(), signal.command_id)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            p.get_instance(&id).await.unwrap().unwrap().status,
+            CoreInstanceStatus::Running
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_checkpoint_receipt_does_not_suspend_or_consume_cancel() {
+        let (p, host, id) = setup().await;
+        p.insert_signal(&id, CoreSignalType::Pause, b"")
+            .await
+            .unwrap();
+        let old = host
+            .checkpoint("receipt".into(), b"state".to_vec())
+            .await
+            .unwrap()
+            .pending_signal
+            .unwrap();
+        p.insert_signal(&id, CoreSignalType::Cancel, b"")
+            .await
+            .unwrap();
+        assert!(
+            !host
+                .handle_checkpoint_signal(old.signal_type, old.command_id)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            p.get_instance(&id).await.unwrap().unwrap().status,
+            CoreInstanceStatus::Running
+        );
+        assert_eq!(
+            p.get_pending_signal(&id)
+                .await
+                .unwrap()
+                .unwrap()
+                .signal_type,
+            CoreSignalType::Cancel
+        );
+        assert!(host.check_signals().await.unwrap());
+        assert_eq!(
+            p.get_instance(&id).await.unwrap().unwrap().status,
+            CoreInstanceStatus::Cancelled
+        );
     }
 
     #[tokio::test]

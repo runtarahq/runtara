@@ -4,11 +4,12 @@
 // loading persisted input, completing/failing instances, event emission,
 // cancellation, heartbeat, and durable sleep.
 
-package runtara:workflow-runtime@0.1.0;
+package runtara:workflow-runtime@0.2.0;
 
 interface runtime {
     record signal-info {
         signal-type: string,
+        command-id: string,
         payload: list<u8>,
         checkpoint-id: option<string>,
     }
@@ -69,6 +70,7 @@ interface runtime {
 
     handle-checkpoint-signal: func(
         signal-type: string,
+        command-id: string,
     ) -> result<bool, string>;
 
     record-retry-attempt: func(

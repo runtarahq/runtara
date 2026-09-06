@@ -1627,7 +1627,11 @@ impl runtara_component_host::runtime_host::RuntimeHost for CapturingRuntimeHost 
             },
         )
     }
-    async fn handle_checkpoint_signal(&self, _signal_type: String) -> Result<bool, String> {
+    async fn handle_checkpoint_signal(
+        &self,
+        _signal_type: String,
+        _command_id: String,
+    ) -> Result<bool, String> {
         Ok(false)
     }
     async fn record_retry_attempt(
@@ -2117,7 +2121,7 @@ fn direct_compose_host_import_binding_surfaces_runtime_as_component_import() {
     assert!(
         host_imports
             .iter()
-            .any(|name| name == "runtara:workflow-runtime/runtime@0.1.0"),
+            .any(|name| name == "runtara:workflow-runtime/runtime@0.2.0"),
         "host-import binding must surface the runtime interface; imports: {host_imports:?}"
     );
     assert!(
@@ -2131,6 +2135,8 @@ fn direct_compose_host_import_binding_surfaces_runtime_as_component_import() {
 /// the return channel — no HTTP anywhere.
 struct RecordingRuntimeHost {
     input: Vec<u8>,
+    pending_signal: Option<runtara_component_host::runtime_host::RuntimeSignalInfo>,
+    acknowledged_commands: Mutex<Vec<(String, String)>>,
     completed: Mutex<Option<Vec<u8>>>,
     failed: Mutex<Option<Vec<u8>>>,
     /// Total `runtime.complete` calls — a composed workflow-agent child must
@@ -2143,6 +2149,8 @@ impl RecordingRuntimeHost {
     fn new(input: &[u8]) -> Self {
         Self {
             input: input.to_vec(),
+            pending_signal: None,
+            acknowledged_commands: Mutex::new(Vec::new()),
             completed: Mutex::new(None),
             failed: Mutex::new(None),
             complete_calls: std::sync::atomic::AtomicU32::new(0),
@@ -2201,13 +2209,21 @@ impl runtara_component_host::runtime_host::RuntimeHost for RecordingRuntimeHost 
             runtara_component_host::runtime_host::RuntimeCheckpointResult {
                 found: false,
                 state: Vec::new(),
-                pending_signal: None,
+                pending_signal: self.pending_signal.clone(),
                 custom_signal: None,
             },
         )
     }
-    async fn handle_checkpoint_signal(&self, _signal_type: String) -> Result<bool, String> {
-        Ok(false)
+    async fn handle_checkpoint_signal(
+        &self,
+        signal_type: String,
+        command_id: String,
+    ) -> Result<bool, String> {
+        self.acknowledged_commands
+            .lock()
+            .unwrap()
+            .push((signal_type, command_id));
+        Ok(true)
     }
     async fn record_retry_attempt(
         &self,
@@ -2367,7 +2383,11 @@ impl runtara_component_host::runtime_host::RuntimeHost for PersistingRuntimeHost
             },
         )
     }
-    async fn handle_checkpoint_signal(&self, _signal_type: String) -> Result<bool, String> {
+    async fn handle_checkpoint_signal(
+        &self,
+        _signal_type: String,
+        _command_id: String,
+    ) -> Result<bool, String> {
         Ok(false)
     }
     async fn record_retry_attempt(
@@ -2473,6 +2493,66 @@ fn direct_wasm_execute_host_import_runtime_runs_without_http() {
     let output_json: Value = serde_json::from_slice(&output).expect("output is JSON");
     assert_eq!(output_json, serde_json::json!({ "result": "host-import" }));
     assert!(host.failed.lock().unwrap().is_none(), "no failure expected");
+}
+
+#[test]
+fn direct_wasm_checkpoint_ack_preserves_command_identity() {
+    let components_dir = direct_e2e_components_dir();
+    let result =
+        compile_invoke_abi_artifact(&components_dir, "command-identity-abi", AGENT_CACHED_REPLAY);
+
+    let mut host = RecordingRuntimeHost::new(br#"{"value":"command-identity"}"#);
+    host.pending_signal = Some(runtara_component_host::runtime_host::RuntimeSignalInfo {
+        signal_type: "pause".into(),
+        command_id: "receipt-39e0a768".into(),
+        payload: b"payload".to_vec(),
+        checkpoint_id: None,
+    });
+    let host = Arc::new(host);
+    let executor = embedded_executor();
+
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let run = runtime.block_on(async {
+        let pre = executor
+            .load_instance_pre(&result.wasm_path)
+            .await
+            .expect("load host-import artifact");
+        executor
+            .execute_invoke(
+                &pre,
+                runtara_component_host::WorkflowRunSpec {
+                    env: HashMap::new(),
+                    stderr: None,
+                    timeout: Duration::from_secs(60),
+                    cancel: None,
+                    limits: runtara_component_host::WorkflowLimits::default(),
+                    runtime: Some(host.clone()),
+                },
+                br#"{"value":"command-identity"}"#.to_vec(),
+            )
+            .await
+    });
+
+    assert!(
+        matches!(run.exit, runtara_component_host::InvokeExit::Suspended(_)),
+        "unexpected exit: {:?} (failed: {:?})",
+        run.exit,
+        host.failed
+            .lock()
+            .unwrap()
+            .as_deref()
+            .map(String::from_utf8_lossy),
+    );
+    assert_eq!(
+        *host.acknowledged_commands.lock().unwrap(),
+        vec![("pause".into(), "receipt-39e0a768".into())]
+    );
+    assert_eq!(
+        host.complete_calls
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "accepted pause exits before workflow completion"
+    );
 }
 
 #[test]
@@ -6584,7 +6664,7 @@ fn direct_wasm_execute_agent_capabilities_keeps_runtime_for_durable_workflow() {
         compiled
             .component_artifacts
             .world_wit
-            .contains("import runtara:workflow-runtime/runtime@0.1.0;"),
+            .contains("import runtara:workflow-runtime/runtime@0.2.0;"),
         "durable agent must keep the runtime import:\n{}",
         compiled.component_artifacts.world_wit
     );
@@ -7421,7 +7501,11 @@ impl runtara_component_host::runtime_host::RuntimeHost for CheckpointingRuntimeH
             },
         )
     }
-    async fn handle_checkpoint_signal(&self, _signal_type: String) -> Result<bool, String> {
+    async fn handle_checkpoint_signal(
+        &self,
+        _signal_type: String,
+        _command_id: String,
+    ) -> Result<bool, String> {
         Ok(false)
     }
     fn now_ms(&self) -> Result<u64, String> {
@@ -12467,7 +12551,11 @@ impl runtara_component_host::runtime_host::RuntimeHost for CancelDuringDelayHost
             },
         )
     }
-    async fn handle_checkpoint_signal(&self, _signal_type: String) -> Result<bool, String> {
+    async fn handle_checkpoint_signal(
+        &self,
+        _signal_type: String,
+        _command_id: String,
+    ) -> Result<bool, String> {
         Ok(true)
     }
     async fn record_retry_attempt(

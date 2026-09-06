@@ -160,6 +160,7 @@ async fn get_pending_signal(
         .get_pending_signal(instance_id)
         .await?
         .map(|signal| Signal {
+            command_id: signal.command_id,
             instance_id: instance_id.to_string(),
             signal_type: SignalType::from(signal.signal_type).into(),
             payload: signal.payload.unwrap_or_default(),

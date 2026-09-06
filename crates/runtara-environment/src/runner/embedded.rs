@@ -1354,6 +1354,7 @@ async fn enforce_unacked_cancel(persistence: &Arc<dyn Persistence>, instance_id:
             if let Err(e) = handle_signal_ack(
                 &state,
                 SignalAck {
+                    command_id: signal.command_id,
                     instance_id: instance_id.to_string(),
                     signal_type: SignalType::SignalCancel as i32,
                     acknowledged: true,
@@ -1701,9 +1702,17 @@ impl Runner for EmbeddedWasmRunner {
                         warn!(instance_id = %instance_id, "Embedded workflow run cancelled");
                     }
                 }
-                // A park is not an ending — the wake scheduler owns it from
-                // here (and resolves a pending cancel itself).
-                if !matches!(&run.exit, InvokeExit::Suspended(_)) {
+                if matches!(&run.exit, InvokeExit::Suspended(_)) {
+                    // A cancel may arrive after the guest's last poll but before
+                    // it parks. Resolve it now; the scheduler recovers this if
+                    // the process stops before reaching this point.
+                    if let Err(error) = persistence
+                        .cancel_suspended_instances(Some(&instance_id), 1)
+                        .await
+                    {
+                        warn!(instance_id, %error, "Parked cancellation deferred to scheduler recovery");
+                    }
+                } else {
                     enforce_unacked_cancel(&persistence, &instance_id).await;
                 }
             } else if let Some(pre) = workflow.command() {
@@ -2479,7 +2488,16 @@ mod tests {
             .await
             .unwrap();
         persistence
-            .acknowledge_signal(instance_id.as_str())
+            .acknowledge_signal(
+                instance_id.as_str(),
+                &persistence
+                    .get_pending_signal(instance_id.as_str())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .command_id,
+                runtara_core::domain::SignalType::Cancel,
+            )
             .await
             .unwrap();
         persistence

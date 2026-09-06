@@ -299,6 +299,7 @@ struct CheckpointResp {
 
 #[derive(Deserialize)]
 struct SignalResp {
+    command_id: String,
     signal_type: String,
     #[serde(default)]
     payload: Option<String>, // base64
@@ -339,6 +340,7 @@ struct SleepBody {
 
 #[derive(Serialize)]
 struct SignalAckBody {
+    command_id: String,
     signal_type: String,
 }
 
@@ -445,6 +447,7 @@ fn encode_b64(data: &[u8]) -> String {
 
 fn parse_signal(resp: &SignalResp) -> Signal {
     Signal {
+        command_id: resp.command_id.clone(),
         signal_type: parse_signal_type(&resp.signal_type),
         payload: resp.payload.as_deref().map(decode_b64).unwrap_or_default(),
         checkpoint_id: None,
@@ -714,13 +717,14 @@ impl SdkBackend for HttpBackend {
         Ok((signal, custom))
     }
 
-    fn acknowledge_signal(&self, signal_type: SignalType) -> Result<()> {
+    fn acknowledge_signal(&self, command_id: &str, signal_type: SignalType) -> Result<bool> {
         let body = SignalAckBody {
+            command_id: command_id.to_owned(),
             signal_type: signal_type_str(&signal_type).to_string(),
         };
 
-        let _: SuccessResp = self.post(&self.url("signals/ack"), &body)?;
-        Ok(())
+        let response: SuccessResp = self.post(&self.url("signals/ack"), &body)?;
+        Ok(response.success)
     }
 
     fn get_instance_status(&self, instance_id: &str) -> Result<StatusResponse> {

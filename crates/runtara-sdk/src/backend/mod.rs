@@ -96,7 +96,7 @@ pub trait SdkBackend: Send + Sync {
     ) -> Result<(Option<Signal>, Option<CustomSignal>)>;
 
     /// Acknowledge a received signal.
-    fn acknowledge_signal(&self, signal_type: SignalType) -> Result<()>;
+    fn acknowledge_signal(&self, command_id: &str, signal_type: SignalType) -> Result<bool>;
 
     /// Get the status of another instance by ID.
     fn get_instance_status(&self, instance_id: &str) -> Result<StatusResponse>;

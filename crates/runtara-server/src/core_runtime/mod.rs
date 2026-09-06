@@ -537,8 +537,24 @@ mod tests {
             Ok(None)
         }
 
-        async fn acknowledge_signal(&self, _instance_id: &str) -> Result<(), CoreError> {
-            Ok(())
+        async fn acknowledge_signal(
+            &self,
+            _instance_id: &str,
+            _command_id: &str,
+            _signal_type: runtara_core::domain::SignalType,
+        ) -> Result<bool, CoreError> {
+            Ok(false)
+        }
+
+        async fn cancel_suspended_instances(
+            &self,
+            _instance_id: Option<&str>,
+            _limit: i64,
+        ) -> std::result::Result<
+            Vec<runtara_core::persistence::CancelledInstance>,
+            runtara_core::error::CoreError,
+        > {
+            Ok(Vec::new())
         }
 
         async fn insert_custom_signal(

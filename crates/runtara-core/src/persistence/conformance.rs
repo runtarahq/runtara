@@ -488,7 +488,7 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
         .expect("signal should be pending after insert");
     assert_eq!(pending.signal_type, CoreSignalType::Cancel);
     backend
-        .acknowledge_signal(&instance_id)
+        .acknowledge_signal(&instance_id, &pending.command_id, pending.signal_type)
         .await
         .expect("acknowledge_signal failed");
     // The ack consumes the signal: a second read must come back empty.
@@ -574,6 +574,12 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
     );
     // Bind the variant so the match remains type-checked when we add status-filtered cases.
     let _ = PairedRecordStatus::Running;
+
+    // Restore running for the independent sleep contract after cancellation.
+    backend
+        .update_instance_status(&instance_id, CoreInstanceStatus::Running, None)
+        .await
+        .unwrap();
 
     // --- sleep cycle --------------------------------------------------------
     // Verifies both the "not due yet" (running) and "due now" (suspended +
@@ -890,4 +896,258 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
 
     // --- health -------------------------------------------------------------
     assert!(backend.health_check().await.expect("health_check failed"));
+}
+
+/// Receipt identity, cancellation precedence, and idempotent lifecycle transitions.
+/// Run unchanged against each persistence implementation.
+pub async fn run_lifecycle_command_sequence<P: Persistence>(backend: &P) {
+    use crate::domain::{InstanceStatus as Status, SignalType as Kind};
+    let id = Uuid::new_v4().to_string();
+    backend
+        .register_instance(&id, "command-contract")
+        .await
+        .unwrap();
+    backend
+        .update_instance_status(&id, Status::Running, None)
+        .await
+        .unwrap();
+    backend
+        .insert_signal(&id, Kind::Pause, b"first")
+        .await
+        .unwrap();
+    let first = backend.get_pending_signal(&id).await.unwrap().unwrap();
+    backend
+        .insert_signal(&id, Kind::Pause, b"replacement")
+        .await
+        .unwrap();
+    let second = backend.get_pending_signal(&id).await.unwrap().unwrap();
+    assert_ne!(
+        first.command_id, second.command_id,
+        "same-kind commands need distinct receipts"
+    );
+    assert!(
+        !backend
+            .acknowledge_signal(&id, &first.command_id, Kind::Pause)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !backend
+            .acknowledge_signal(&id, &second.command_id, Kind::Cancel)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        backend.get_instance(&id).await.unwrap().unwrap().status,
+        Status::Running
+    );
+    assert_eq!(
+        backend
+            .get_pending_signal(&id)
+            .await
+            .unwrap()
+            .unwrap()
+            .command_id,
+        second.command_id
+    );
+    assert!(
+        backend
+            .acknowledge_signal(&id, &second.command_id, Kind::Pause)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        backend.get_instance(&id).await.unwrap().unwrap().status,
+        Status::Suspended
+    );
+    assert!(backend.get_pending_signal(&id).await.unwrap().is_none());
+    // A retry after resume must not apply the old pause again.
+    backend
+        .update_instance_status(&id, Status::Running, None)
+        .await
+        .unwrap();
+    assert!(
+        backend
+            .acknowledge_signal(&id, &second.command_id, Kind::Pause)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        backend.get_instance(&id).await.unwrap().unwrap().status,
+        Status::Running
+    );
+    let events = backend
+        .list_events(&id, &ListEventsFilter::default(), 100, 0)
+        .await
+        .unwrap();
+    assert_eq!(
+        events.len(),
+        1,
+        "pause and its retry record exactly one suspension event"
+    );
+    assert_eq!(events[0].event_type, crate::domain::EventType::Suspended);
+    backend
+        .insert_signal(&id, Kind::Shutdown, b"")
+        .await
+        .unwrap();
+    let shutdown = backend.get_pending_signal(&id).await.unwrap().unwrap();
+    assert!(
+        backend
+            .acknowledge_signal(&id, &shutdown.command_id, Kind::Shutdown)
+            .await
+            .unwrap()
+    );
+    let suspended = backend.get_instance(&id).await.unwrap().unwrap();
+    assert_eq!(suspended.status, Status::Suspended);
+    assert_eq!(
+        suspended.termination_reason.as_deref(),
+        Some("shutdown_requested")
+    );
+    assert!(suspended.sleep_until.is_some());
+    backend
+        .insert_signal(&id, Kind::Cancel, b"cancel")
+        .await
+        .unwrap();
+    let cancel = backend.get_pending_signal(&id).await.unwrap().unwrap();
+    for kind in [Kind::Pause, Kind::Shutdown, Kind::Resume, Kind::Cancel] {
+        backend.insert_signal(&id, kind, b"later").await.unwrap();
+        assert_eq!(
+            backend
+                .get_pending_signal(&id)
+                .await
+                .unwrap()
+                .unwrap()
+                .command_id,
+            cancel.command_id
+        );
+    }
+    assert!(
+        !backend
+            .acknowledge_signal(&id, &shutdown.command_id, Kind::Shutdown)
+            .await
+            .unwrap()
+    );
+    assert!(
+        backend
+            .acknowledge_signal(&id, &cancel.command_id, Kind::Cancel)
+            .await
+            .unwrap()
+    );
+    let cancelled = backend.get_instance(&id).await.unwrap().unwrap();
+    assert_eq!(cancelled.status, Status::Cancelled);
+    assert!(cancelled.finished_at.is_some());
+    assert!(cancelled.sleep_until.is_none());
+    assert!(backend.get_pending_signal(&id).await.unwrap().is_none());
+    backend.insert_signal(&id, Kind::Pause, b"").await.unwrap();
+    let late = backend.get_pending_signal(&id).await.unwrap().unwrap();
+    assert!(
+        !backend
+            .acknowledge_signal(&id, &late.command_id, Kind::Pause)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        backend.get_instance(&id).await.unwrap().unwrap().status,
+        Status::Cancelled
+    );
+}
+
+/// Parked cancellation is atomic, repeatable, and recoverable without a deadline.
+pub async fn run_parked_cancellation_sequence<P: Persistence>(backend: &P) {
+    use crate::domain::{InstanceStatus as Status, SignalType as Kind};
+    for deadline in [None, Some(Utc::now() + Duration::hours(24))] {
+        let id = Uuid::new_v4().to_string();
+        backend
+            .register_instance(&id, "park-contract")
+            .await
+            .unwrap();
+        backend
+            .update_instance_status(&id, Status::Running, None)
+            .await
+            .unwrap();
+        backend.insert_signal(&id, Kind::Cancel, b"").await.unwrap();
+        assert!(
+            backend
+                .cancel_suspended_instances(Some(&id), 1)
+                .await
+                .unwrap()
+                .is_empty(),
+            "a running guest retains its command"
+        );
+        assert!(backend.get_pending_signal(&id).await.unwrap().is_some());
+        // Model a cancel arriving just before the guest parks.
+        backend
+            .update_instance_status(&id, Status::Suspended, None)
+            .await
+            .unwrap();
+        if let Some(deadline) = deadline {
+            backend.set_instance_sleep(&id, deadline).await.unwrap();
+        }
+        let cancelled = backend
+            .cancel_suspended_instances(Some(&id), 1)
+            .await
+            .unwrap();
+        assert_eq!(cancelled.len(), 1);
+        assert_eq!(cancelled[0].instance_id, id);
+        assert_eq!(cancelled[0].tenant_id, "park-contract");
+        let instance = backend.get_instance(&id).await.unwrap().unwrap();
+        assert_eq!(instance.status, Status::Cancelled);
+        assert!(instance.finished_at.is_some());
+        assert!(instance.sleep_until.is_none());
+        assert!(backend.get_pending_signal(&id).await.unwrap().is_none());
+        assert!(
+            backend
+                .cancel_suspended_instances(Some(&id), 1)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        // A park or wake retry that lost the race cannot put its deadline back.
+        backend
+            .set_instance_sleep(&id, Utc::now() + Duration::hours(1))
+            .await
+            .unwrap();
+        assert!(
+            backend
+                .get_instance(&id)
+                .await
+                .unwrap()
+                .unwrap()
+                .sleep_until
+                .is_none()
+        );
+    }
+    let id = Uuid::new_v4().to_string();
+    backend
+        .register_instance(&id, "park-recovery")
+        .await
+        .unwrap();
+    backend
+        .update_instance_status(&id, Status::Suspended, None)
+        .await
+        .unwrap();
+    backend.insert_signal(&id, Kind::Pause, b"").await.unwrap();
+    assert!(
+        backend
+            .cancel_suspended_instances(Some(&id), 1)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    backend.insert_signal(&id, Kind::Cancel, b"").await.unwrap();
+    assert!(
+        backend
+            .cancel_suspended_instances(None, 0)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let recovered = backend
+        .cancel_suspended_instances(None, 1000)
+        .await
+        .unwrap();
+    assert!(
+        recovered.iter().any(|instance| instance.instance_id == id),
+        "recovery discovers parked cancellation without a sleep deadline"
+    );
 }
