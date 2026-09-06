@@ -465,3 +465,24 @@ async fn cancelling_a_parent_reaps_non_cooperative_wasm_grandchildren() {
     assert_wasm_is_stopped(false, true).await;
     assert_wasm_is_stopped(true, true).await;
 }
+
+#[tokio::test]
+async fn repeated_and_concurrent_shutdown_cannot_forget_failed_cleanup() {
+    let tasks = registry(2, 1024);
+    let id = tasks
+        .spawn_scoped(
+            |_| async { InvokeExit::Completed(vec![1]) },
+            Box::pin(async { Err(TaskError::WorkerLost) }),
+        )
+        .unwrap();
+    assert!(matches!(tasks.join(id).await, Err(TaskError::WorkerLost)));
+    let (first, concurrent) = tokio::join!(tasks.shutdown(), tasks.shutdown());
+    assert_eq!(first, Err(TaskError::WorkerLost));
+    assert_eq!(concurrent, Err(TaskError::WorkerLost));
+    assert_eq!(tasks.shutdown().await, Err(TaskError::WorkerLost));
+    assert_eq!(
+        tasks.spawn(|_| async { InvokeExit::Completed(vec![]) }),
+        Err(TaskError::Closed)
+    );
+    assert_eq!(tasks.retained_result_bytes(), 0);
+}

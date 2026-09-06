@@ -227,7 +227,10 @@ while joining, caller abandonment, closed/panicked/abandoned start gates,
 pre-start cancellation, legacy unavailable context, and isolated lifecycle entry
 with both task and root cancellation. The launcher in these new tests uses
 controlled futures; existing real HTTP/utils component tests also passed in the
-full **111-test component-host suite**. Focused all-target Clippy passed.
+full **111-test component-host suite**. Focused all-target Clippy passed. The
+workflow regression suite also passed **840 tests**, including all 221 emitted
+WASM executions; the manual performance benchmark and existing doctest were
+ignored as expected.
 
 The server/environment launch path still needs to construct the real scoped
 launcher/runtime adapter and select this context-enabled entry point for isolated
@@ -235,6 +238,20 @@ artifacts. Its admission permit and durable launch ownership must survive until
 tree teardown is confirmed, including caller abandonment; supervision inside
 component-host alone does not transfer ownership of those external resources.
 No compiler backend or runtime default is enabled by this change.
+
+### Cleanup failure remains visible after repeated shutdown
+
+A new regression test reproduced a registry bug: after the first failed shutdown
+cleared its task map, a concurrent or later shutdown returned success. The registry
+now retains the cleanup-failure state after releasing task metadata. Every later
+shutdown reports `WorkerLost`, so a root supervisor cannot mistake a previous
+unconfirmed teardown for success. Admission remains closed and retained result
+buffers are released.
+
+The test failed before the fix and passed after it. All **19 task-registry tests**
+passed, followed by the full **112-test component-host suite** and focused
+all-target Clippy with both integration/PoC features. This is a live ownership
+fix; durable root fencing remains a separate required integration.
 
 ## Remaining required work
 

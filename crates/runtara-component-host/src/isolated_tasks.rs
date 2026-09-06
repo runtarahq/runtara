@@ -189,6 +189,7 @@ impl Task {
 
 struct RegistryState {
     closed: bool,
+    shutdown_failed: bool,
     next_id: u64,
     tasks: BTreeMap<u64, Arc<Task>>,
 }
@@ -223,6 +224,7 @@ impl IsolatedTasks {
             engine,
             state: Mutex::new(RegistryState {
                 closed: false,
+                shutdown_failed: false,
                 next_id: 1,
                 tasks: BTreeMap::new(),
             }),
@@ -400,8 +402,13 @@ impl IsolatedTasks {
         for task in &tasks {
             failed |= task.reap().await.is_err();
         }
-        self.state.lock().unwrap().tasks.clear();
-        if failed {
+        let mut state = self.state.lock().unwrap();
+        state.tasks.clear();
+        // Clearing retained tasks must not clear evidence that teardown was
+        // unconfirmed. Every later/concurrent owner must observe the same host
+        // failure rather than publish a successful root result after a retry.
+        state.shutdown_failed |= failed;
+        if state.shutdown_failed {
             Err(TaskError::WorkerLost)
         } else {
             Ok(())
