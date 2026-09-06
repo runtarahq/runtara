@@ -1060,6 +1060,412 @@ async fn release_launch_after_monitor(
     }
 }
 
+/// Run one bounded cleanup step for a start-gate handoff that never opened.
+///
+/// Both failure modes are logged and neither aborts the caller: whatever is
+/// left behind is reclaimed by durable expiry or restart recovery, which stay
+/// authoritative precisely so this path can be best-effort. The two callers
+/// carried the same twenty-five line `timeout` / three-way `match` between
+/// them, differing only in these two messages.
+async fn best_effort_start_gate_cleanup<T, E: std::fmt::Display>(
+    instance_id: &str,
+    launch_id: &str,
+    failed: &'static str,
+    timed_out: &'static str,
+    step: impl std::future::Future<Output = std::result::Result<T, E>>,
+) {
+    match tokio::time::timeout(START_GATE_MONITOR_CLEANUP_TIMEOUT, step).await {
+        Ok(Ok(_)) => {}
+        Ok(Err(error)) => warn!(
+            instance_id = %instance_id,
+            launch_id = %launch_id,
+            error = %error,
+            "{}", failed
+        ),
+        Err(_) => warn!(
+            instance_id = %instance_id,
+            launch_id = %launch_id,
+            "{}", timed_out
+        ),
+    }
+}
+
+/// Kill and settle a guest that outlived its execution timeout.
+///
+/// Unlike the exit path there is nothing to collect: the process is still
+/// running and is about to be stopped, so this writes the terminal status
+/// itself rather than reading one the guest reported.
+async fn settle_execution_timeout(
+    pool: &PgPool,
+    runner: &Arc<dyn Runner>,
+    handle: &RunnerHandle,
+    persistence: &Arc<dyn Persistence>,
+    lifecycle_observers: &LaunchLifecycleObservers,
+    instance_id: &str,
+    timeout: Duration,
+) {
+    let container_registry = ContainerRegistry::new(pool.clone());
+    warn!(
+        instance_id = %instance_id,
+        timeout_secs = %timeout.as_secs(),
+        "Execution timed out, killing container"
+    );
+    let _ = runner.stop(handle).await;
+
+    // Update instance status to failed with termination_reason = "timeout"
+    if let Err(e) = persistence
+        .complete_instance(
+            CompleteInstanceParams::new(instance_id, CoreInstanceStatus::Failed)
+                .if_running()
+                .with_termination("timeout", None)
+                .with_error("Execution timed out"),
+        )
+        .await
+    {
+        warn!(
+            instance_id = %instance_id,
+            error = %e,
+            "Failed to update instance status after timeout"
+        );
+    }
+
+    // Clean up container registry, but only the row this monitor
+    // registered: a resume may have replaced it with a live run.
+    let _ = container_registry
+        .cleanup_handle(instance_id, &handle.launch_id, &handle.handle_id)
+        .await;
+
+    release_launch_after_monitor(
+        pool,
+        persistence.as_ref(),
+        &handle.launch_id,
+        instance_id,
+        lifecycle_observers,
+    )
+    .await;
+}
+
+/// Persist what the finished process left behind, and read back the status the
+/// guest reported.
+///
+/// Ordering matters and is the reason this runs before the staleness check: a
+/// monitor that has been superseded still holds the only copy of its own run's
+/// diagnostics, so it writes them before discovering it is stale.
+async fn record_exit_diagnostics(
+    pool: &PgPool,
+    persistence: &Arc<dyn Persistence>,
+    runner: &Arc<dyn Runner>,
+    handle: &RunnerHandle,
+    instance_id: &str,
+) -> (
+    std::result::Result<
+        Option<(CoreInstanceStatus, Option<String>)>,
+        runtara_core::error::CoreError,
+    >,
+    Option<String>,
+) {
+    let (_output, stderr, metrics) = runner.collect_result(handle).await;
+
+    let observed_status = match crate::metrics::record_resources_returning_status(
+        pool,
+        instance_id,
+        metrics.memory_peak_bytes,
+        metrics.cpu_usage_usec,
+    )
+    .await
+    {
+        Ok(observed) => {
+            debug!(
+                instance_id = %instance_id,
+                memory_peak_bytes = ?metrics.memory_peak_bytes,
+                cpu_usage_usec = ?metrics.cpu_usage_usec,
+                "Stored container metrics"
+            );
+            Ok(observed)
+        }
+        Err(e) => {
+            warn!(
+                instance_id = %instance_id,
+                error = %e,
+                "Failed to store container metrics"
+            );
+            // The status this carries decides crash vs normal exit
+            // below, so a failed metrics write must not be read as a
+            // crash. Fall back to a plain status read, as before.
+            persistence
+                .get_instance_meta(instance_id)
+                .await
+                .map(|found| found.map(|i| (i.status, i.termination_reason)))
+        }
+    };
+
+    // Store stderr via Persistence trait for debugging (even if instance succeeds via Core)
+    if let Some(ref stderr_content) = stderr {
+        if let Err(e) =
+            crate::metrics::record_instance_stderr(pool, instance_id, stderr_content).await
+        {
+            warn!(
+                instance_id = %instance_id,
+                error = %e,
+                "Failed to store container stderr"
+            );
+        } else {
+            debug!(
+                instance_id = %instance_id,
+                stderr_len = stderr_content.len(),
+                "Stored container stderr"
+            );
+        }
+    }
+
+    (observed_status, stderr)
+}
+
+/// Settle a guest that exited without reporting a terminal status.
+///
+/// Two very different situations reach here and the drain flag is what tells
+/// them apart: during a drain this is the expected force-kill, and the instance
+/// is parked for the wake scheduler to relaunch; otherwise the process died on
+/// its own and the run is a crash.
+async fn settle_unreported_exit(
+    persistence: &Arc<dyn Persistence>,
+    drain: &DrainController,
+    instance_id: &str,
+    stderr: Option<&str>,
+) {
+    // Process died without a terminal SDK event. If the environment
+    // is draining, this is the expected force-kill path — mark the
+    // instance as `suspended + shutdown_requested` so restart-time
+    // heartbeat-monitor recovery treats it as a normal suspension
+    // rather than a crash.
+    let draining = drain.is_draining();
+    let (status, termination_reason, default_error) = if draining {
+        (
+            CoreInstanceStatus::Suspended,
+            "shutdown_requested",
+            "Process terminated during graceful shutdown",
+        )
+    } else {
+        (
+            CoreInstanceStatus::Failed,
+            "crashed",
+            "Process terminated without SDK event",
+        )
+    };
+
+    // A crash with no terminal SDK event (e.g. a guest trap such as
+    // the per-instance memory limit being exceeded) leaves its only
+    // diagnostic in the per-run stderr, where the host writes
+    // "workflow failed: <reason>". Fold that reason into the instance
+    // `error` so the failure is visible in the API rather than the
+    // generic "terminated without SDK event" — otherwise the step that
+    // was in flight surfaces as running with a null error.
+    let crash_error: String = match stderr.map(str::trim) {
+        Some(reason) if !draining && !reason.is_empty() => {
+            format!("{default_error}: {}", tail_chars(reason, 2000))
+        }
+        _ => default_error.to_string(),
+    };
+
+    let mut params = CompleteInstanceParams::new(instance_id, status)
+        .if_running()
+        .with_termination(termination_reason, None)
+        .with_error(&crash_error);
+    if let Some(s) = stderr {
+        params = params.with_stderr(s);
+    }
+    match persistence.complete_instance(params).await {
+        Ok(applied) => {
+            if applied {
+                if drain.is_draining() {
+                    // Schedule an immediate wake so the wake
+                    // scheduler relaunches the instance after
+                    // restart — without this a force-stopped
+                    // instance with no checkpoint stays
+                    // suspended forever.
+                    if let Err(e) = persistence
+                        .schedule_wake(
+                            instance_id,
+                            chrono::Utc::now(),
+                            runtara_core::domain::WakeReason::Recovery,
+                        )
+                        .await
+                    {
+                        warn!(
+                            instance_id = %instance_id,
+                            error = %e,
+                            "Failed to schedule post-restart wake"
+                        );
+                    }
+                    info!(
+                        instance_id = %instance_id,
+                        "Process terminated during drain - suspended for shutdown"
+                    );
+                } else {
+                    warn!(
+                        instance_id = %instance_id,
+                        "Process terminated without SDK event - marked as crashed"
+                    );
+                }
+            } else {
+                info!(
+                    instance_id = %instance_id,
+                    "Instance SDK event arrived just in time"
+                );
+            }
+        }
+        Err(e) => {
+            error!(
+                instance_id = %instance_id,
+                error = %e,
+                "Failed to mark instance terminal state"
+            );
+        }
+    }
+}
+
+/// What the monitor should do once a start gate has failed to open.
+enum AfterFailedGate {
+    /// The runner's confirmation won the marker race after all, so there is a
+    /// live guest to watch.
+    Watch,
+    /// The handoff is settled, or has been left to durable recovery. Either
+    /// way this monitor has nothing further to do.
+    Done,
+}
+
+/// Terminalize a handoff whose runner never durably crossed the start gate.
+///
+/// Every failure here ends in `Done` rather than an error: the durable expiry
+/// scan and restart recovery own anything this cannot finish, and a monitor
+/// that pressed on regardless would be acting on a generation it no longer
+/// owns. The one path back to `Watch` is the race where the confirmation
+/// committed just as its response was lost — the marker is already cleared, so
+/// there is a running guest and no terminal row to write.
+async fn settle_failed_start_gate(
+    pool: &PgPool,
+    runner: &Arc<dyn Runner>,
+    handle: &RunnerHandle,
+    lifecycle_observers: &LaunchLifecycleObservers,
+    instance_id: &str,
+    attempt_count: i32,
+) -> AfterFailedGate {
+    warn!(
+        instance_id = %instance_id,
+        launch_id = %handle.launch_id,
+        attempt_count,
+        "Start gate did not permit guest execution; terminalizing exact handoff"
+    );
+
+    let repository = LaunchRepository::new(pool.clone());
+    let terminal = match tokio::time::timeout(
+        START_GATE_MONITOR_CLEANUP_TIMEOUT,
+        repository.fail_unconfirmed_running(
+            &handle.launch_id,
+            attempt_count,
+            "runner did not durably cross start gate",
+        ),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => {
+            warn!(
+                instance_id = %instance_id,
+                launch_id = %handle.launch_id,
+                attempt_count,
+                "Timed out terminalizing failed start-gate handoff; durable expiry will recover it"
+            );
+            return AfterFailedGate::Done;
+        }
+    };
+
+    match terminal {
+        // This monitor owns the generation: stop the runner and drop the
+        // registry row before releasing admission.
+        Ok(Some(failed)) => {
+            best_effort_start_gate_cleanup(
+                instance_id,
+                &handle.launch_id,
+                "Failed to stop runner after failed start-gate confirmation",
+                "Timed out stopping failed start-gate runner; closed gate/lease recovery remains authoritative",
+                runner.stop(handle),
+            )
+            .await;
+            best_effort_start_gate_cleanup(
+                instance_id,
+                &handle.launch_id,
+                "Could not remove failed start-gate runner registry row",
+                "Timed out removing failed start-gate registry row; restart recovery will reconcile it",
+                ContainerRegistry::new(pool.clone()).cleanup_handle(
+                    instance_id,
+                    &handle.launch_id,
+                    &handle.handle_id,
+                ),
+            )
+            .await;
+            lifecycle_observers.notify_released(&failed, "start_gate_failed");
+            AfterFailedGate::Done
+        }
+        // Nothing to terminalize. Either the confirmation beat us to the
+        // marker — a live guest — or someone else already settled this.
+        Ok(None) => match tokio::time::timeout(
+            START_GATE_MONITOR_CLEANUP_TIMEOUT,
+            repository.is_gate_confirmed(&handle.launch_id, attempt_count),
+        )
+        .await
+        {
+            Ok(Ok(true)) => {
+                warn!(
+                    instance_id = %instance_id,
+                    launch_id = %handle.launch_id,
+                    attempt_count,
+                    "Start gate was confirmed while monitor observed its deadline"
+                );
+                AfterFailedGate::Watch
+            }
+            Ok(Ok(false)) => {
+                debug!(
+                    instance_id = %instance_id,
+                    launch_id = %handle.launch_id,
+                    attempt_count,
+                    "Failed start-gate handoff was already recovered or terminalized"
+                );
+                AfterFailedGate::Done
+            }
+            Ok(Err(error)) => {
+                warn!(
+                    instance_id = %instance_id,
+                    launch_id = %handle.launch_id,
+                    attempt_count,
+                    error = %error,
+                    "Could not read failed start-gate handoff; retaining registry for recovery"
+                );
+                AfterFailedGate::Done
+            }
+            Err(_) => {
+                warn!(
+                    instance_id = %instance_id,
+                    launch_id = %handle.launch_id,
+                    attempt_count,
+                    "Timed out reading failed start-gate handoff; retaining registry for durable recovery"
+                );
+                AfterFailedGate::Done
+            }
+        },
+        Err(error) => {
+            warn!(
+                instance_id = %instance_id,
+                launch_id = %handle.launch_id,
+                attempt_count,
+                error = %error,
+                "Could not terminalize failed start-gate handoff; retaining registry for recovery"
+            );
+            AfterFailedGate::Done
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 /// Spawn the generation-owned monitor for a runner handoff.
 ///
@@ -1084,165 +1490,28 @@ pub fn spawn_container_monitor(
 
     tokio::spawn(async move {
         if let Some((gate, attempt_count)) = start_gate {
-            // The runner, not this monitor, performs the durable confirmation
-            // immediately before guest preparation. Waiting for that result
-            // prevents monitor ownership from clearing a recoverable marker.
-            match gate.wait_for_runner_confirmation().await {
-                StartGateOutcome::Opened => {}
-                StartGateOutcome::Cancelled
-                | StartGateOutcome::TimedOut
-                | StartGateOutcome::ConfirmationFailed => {
-                    warn!(
-                        instance_id = %instance_id,
-                        launch_id = %handle.launch_id,
+            let opened = matches!(
+                gate.wait_for_runner_confirmation().await,
+                StartGateOutcome::Opened
+            );
+            if !opened
+                && matches!(
+                    settle_failed_start_gate(
+                        &pool,
+                        &runner,
+                        &handle,
+                        &lifecycle_observers,
+                        &instance_id,
                         attempt_count,
-                        "Start gate did not permit guest execution; terminalizing exact handoff"
-                    );
-                    let repository = LaunchRepository::new(pool.clone());
-                    let terminal = match tokio::time::timeout(
-                        START_GATE_MONITOR_CLEANUP_TIMEOUT,
-                        repository.fail_unconfirmed_running(
-                            &handle.launch_id,
-                            attempt_count,
-                            "runner did not durably cross start gate",
-                        ),
                     )
-                    .await
-                    {
-                        Ok(result) => result,
-                        Err(_) => {
-                            warn!(
-                                instance_id = %instance_id,
-                                launch_id = %handle.launch_id,
-                                attempt_count,
-                                "Timed out terminalizing failed start-gate handoff; durable expiry will recover it"
-                            );
-                            return;
-                        }
-                    };
-                    match terminal {
-                        Ok(Some(failed)) => {
-                            // The conditional queue/Core transaction won
-                            // before we touch the runner registry. A
-                            // confirmation that committed just as its
-                            // response was lost clears the marker, making
-                            // this update return `None` instead of killing a
-                            // live guest.
-                            match tokio::time::timeout(
-                                START_GATE_MONITOR_CLEANUP_TIMEOUT,
-                                runner.stop(&handle),
-                            )
-                            .await
-                            {
-                                Ok(Err(error)) => {
-                                    warn!(
-                                        instance_id = %instance_id,
-                                        launch_id = %handle.launch_id,
-                                        error = %error,
-                                        "Failed to stop runner after failed start-gate confirmation"
-                                    );
-                                }
-                                Err(_) => {
-                                    warn!(
-                                        instance_id = %instance_id,
-                                        launch_id = %handle.launch_id,
-                                        "Timed out stopping failed start-gate runner; closed gate/lease recovery remains authoritative"
-                                    );
-                                }
-                                Ok(Ok(())) => {}
-                            }
-                            let registry = ContainerRegistry::new(pool.clone());
-                            match tokio::time::timeout(
-                                START_GATE_MONITOR_CLEANUP_TIMEOUT,
-                                registry.cleanup_handle(
-                                    &instance_id,
-                                    &handle.launch_id,
-                                    &handle.handle_id,
-                                ),
-                            )
-                            .await
-                            {
-                                Ok(Err(error)) => {
-                                    warn!(
-                                        instance_id = %instance_id,
-                                        launch_id = %handle.launch_id,
-                                        error = %error,
-                                        "Could not remove failed start-gate runner registry row"
-                                    );
-                                }
-                                Err(_) => {
-                                    warn!(
-                                        instance_id = %instance_id,
-                                        launch_id = %handle.launch_id,
-                                        "Timed out removing failed start-gate registry row; restart recovery will reconcile it"
-                                    );
-                                }
-                                Ok(Ok(_)) => {}
-                            }
-                            lifecycle_observers.notify_released(&failed, "start_gate_failed");
-                            return;
-                        }
-                        Ok(None) => {
-                            match tokio::time::timeout(
-                                START_GATE_MONITOR_CLEANUP_TIMEOUT,
-                                repository.is_gate_confirmed(&handle.launch_id, attempt_count),
-                            )
-                            .await
-                            {
-                                Err(_) => {
-                                    warn!(
-                                        instance_id = %instance_id,
-                                        launch_id = %handle.launch_id,
-                                        attempt_count,
-                                        "Timed out reading failed start-gate handoff; retaining registry for durable recovery"
-                                    );
-                                    return;
-                                }
-                                Ok(Ok(true)) => {
-                                    // Confirmation won the exact marker race.
-                                    // Continue into the normal monitor path.
-                                    warn!(
-                                        instance_id = %instance_id,
-                                        launch_id = %handle.launch_id,
-                                        attempt_count,
-                                        "Start gate was confirmed while monitor observed its deadline"
-                                    );
-                                }
-                                Ok(Ok(false)) => {
-                                    debug!(
-                                        instance_id = %instance_id,
-                                        launch_id = %handle.launch_id,
-                                        attempt_count,
-                                        "Failed start-gate handoff was already recovered or terminalized"
-                                    );
-                                    return;
-                                }
-                                Ok(Err(error)) => {
-                                    warn!(
-                                        instance_id = %instance_id,
-                                        launch_id = %handle.launch_id,
-                                        attempt_count,
-                                        error = %error,
-                                        "Could not read failed start-gate handoff; retaining registry for recovery"
-                                    );
-                                    return;
-                                }
-                            }
-                        }
-                        Err(error) => {
-                            warn!(
-                                instance_id = %instance_id,
-                                launch_id = %handle.launch_id,
-                                attempt_count,
-                                error = %error,
-                                "Could not terminalize failed start-gate handoff; retaining registry for recovery"
-                            );
-                            return;
-                        }
-                    }
-                }
+                    .await,
+                    AfterFailedGate::Done
+                )
+            {
+                return;
             }
         }
+
         // Brief initial delay to let the process start before we begin watching it.
         tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -1260,65 +1529,14 @@ pub fn spawn_container_monitor(
                     "Process terminated, checking Core status"
                 );
 
-                // Collect metrics and stderr from cgroup before container cleanup
-                let (_output, stderr, metrics) = runner.collect_result(&handle).await;
-
-                // Store metrics and pick up the status the SDK reported in the
-                // same statement: this monitor needs both, and they are the
-                // same row. Kept even when there are no metrics to write, so
-                // the crash check below always has a status to look at.
-                let observed_status = match crate::metrics::record_resources_returning_status(
+                let (observed_status, stderr) = record_exit_diagnostics(
                     &pool,
+                    &persistence,
+                    &runner,
+                    &handle,
                     &instance_id,
-                    metrics.memory_peak_bytes,
-                    metrics.cpu_usage_usec,
                 )
-                .await
-                {
-                    Ok(observed) => {
-                        debug!(
-                            instance_id = %instance_id,
-                            memory_peak_bytes = ?metrics.memory_peak_bytes,
-                            cpu_usage_usec = ?metrics.cpu_usage_usec,
-                            "Stored container metrics"
-                        );
-                        Ok(observed)
-                    }
-                    Err(e) => {
-                        warn!(
-                            instance_id = %instance_id,
-                            error = %e,
-                            "Failed to store container metrics"
-                        );
-                        // The status this carries decides crash vs normal exit
-                        // below, so a failed metrics write must not be read as a
-                        // crash. Fall back to a plain status read, as before.
-                        persistence
-                            .get_instance_meta(&instance_id)
-                            .await
-                            .map(|found| found.map(|i| (i.status, i.termination_reason)))
-                    }
-                };
-
-                // Store stderr via Persistence trait for debugging (even if instance succeeds via Core)
-                if let Some(ref stderr_content) = stderr {
-                    if let Err(e) =
-                        crate::metrics::record_instance_stderr(&pool, &instance_id, stderr_content)
-                            .await
-                    {
-                        warn!(
-                            instance_id = %instance_id,
-                            error = %e,
-                            "Failed to store container stderr"
-                        );
-                    } else {
-                        debug!(
-                            instance_id = %instance_id,
-                            stderr_len = stderr_content.len(),
-                            "Stored container stderr"
-                        );
-                    }
-                }
+                .await;
 
                 // Guard: check that this monitor is still the active one for this instance.
                 // When an instance is resumed, a NEW monitor is spawned for the new process.
@@ -1373,91 +1591,13 @@ pub fn spawn_container_monitor(
                             );
                         }
                         _ => {
-                            // Process died without a terminal SDK event. If the environment
-                            // is draining, this is the expected force-kill path — mark the
-                            // instance as `suspended + shutdown_requested` so restart-time
-                            // heartbeat-monitor recovery treats it as a normal suspension
-                            // rather than a crash.
-                            let draining = drain.is_draining();
-                            let (status, termination_reason, default_error) = if draining {
-                                (
-                                    CoreInstanceStatus::Suspended,
-                                    "shutdown_requested",
-                                    "Process terminated during graceful shutdown",
-                                )
-                            } else {
-                                (CoreInstanceStatus::Failed, "crashed", "Process terminated without SDK event")
-                            };
-
-                            // A crash with no terminal SDK event (e.g. a guest trap such as
-                            // the per-instance memory limit being exceeded) leaves its only
-                            // diagnostic in the per-run stderr, where the host writes
-                            // "workflow failed: <reason>". Fold that reason into the instance
-                            // `error` so the failure is visible in the API rather than the
-                            // generic "terminated without SDK event" — otherwise the step that
-                            // was in flight surfaces as running with a null error.
-                            let crash_error: String = match stderr.as_deref().map(str::trim) {
-                                Some(reason) if !draining && !reason.is_empty() => {
-                                    format!("{default_error}: {}", tail_chars(reason, 2000))
-                                }
-                                _ => default_error.to_string(),
-                            };
-
-                            let mut params = CompleteInstanceParams::new(&instance_id, status)
-                                .if_running()
-                                .with_termination(termination_reason, None)
-                                .with_error(&crash_error);
-                            if let Some(s) = stderr.as_deref() {
-                                params = params.with_stderr(s);
-                            }
-                            match persistence.complete_instance(params).await {
-                                Ok(applied) => {
-                                    if applied {
-                                        if drain.is_draining() {
-                                            // Schedule an immediate wake so the wake
-                                            // scheduler relaunches the instance after
-                                            // restart — without this a force-stopped
-                                            // instance with no checkpoint stays
-                                            // suspended forever.
-                                            if let Err(e) = persistence
-                                                .schedule_wake(
-                                                    &instance_id,
-                                                    chrono::Utc::now(),
-                                                    runtara_core::domain::WakeReason::Recovery,
-                                                )
-                                                .await
-                                            {
-                                                warn!(
-                                                    instance_id = %instance_id,
-                                                    error = %e,
-                                                    "Failed to schedule post-restart wake"
-                                                );
-                                            }
-                                            info!(
-                                                instance_id = %instance_id,
-                                                "Process terminated during drain - suspended for shutdown"
-                                            );
-                                        } else {
-                                            warn!(
-                                                instance_id = %instance_id,
-                                                "Process terminated without SDK event - marked as crashed"
-                                            );
-                                        }
-                                    } else {
-                                        info!(
-                                            instance_id = %instance_id,
-                                            "Instance SDK event arrived just in time"
-                                        );
-                                    }
-                                }
-                                Err(e) => {
-                                    error!(
-                                        instance_id = %instance_id,
-                                        error = %e,
-                                        "Failed to mark instance terminal state"
-                                    );
-                                }
-                            }
+                            settle_unreported_exit(
+                                &persistence,
+                                &drain,
+                                &instance_id,
+                                stderr.as_deref(),
+                            )
+                            .await;
                         }
                     }
 
@@ -1478,42 +1618,14 @@ pub fn spawn_container_monitor(
 
             }
             _ = tokio::time::sleep_until(sleep_until) => {
-                warn!(
-                    instance_id = %instance_id,
-                    timeout_secs = %timeout.as_secs(),
-                    "Execution timed out, killing container"
-                );
-                let _ = runner.stop(&handle).await;
-
-                // Update instance status to failed with termination_reason = "timeout"
-                if let Err(e) = persistence
-                    .complete_instance(
-                        CompleteInstanceParams::new(&instance_id, CoreInstanceStatus::Failed)
-                            .if_running()
-                            .with_termination("timeout", None)
-                            .with_error("Execution timed out"),
-                    )
-                    .await
-                {
-                    warn!(
-                        instance_id = %instance_id,
-                        error = %e,
-                        "Failed to update instance status after timeout"
-                    );
-                }
-
-                // Clean up container registry, but only the row this monitor
-                // registered: a resume may have replaced it with a live run.
-                let _ = container_registry
-                    .cleanup_handle(&instance_id, &handle.launch_id, &handle.handle_id)
-                    .await;
-
-                release_launch_after_monitor(
+                settle_execution_timeout(
                     &pool,
-                    persistence.as_ref(),
-                    &handle.launch_id,
-                    &instance_id,
+                    &runner,
+                    &handle,
+                    &persistence,
                     &lifecycle_observers,
+                    &instance_id,
+                    timeout,
                 )
                 .await;
             }
