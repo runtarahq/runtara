@@ -1862,14 +1862,18 @@ pub enum SendSignalOutcome {
         /// The status that refused it.
         status: String,
     },
-    /// The signal type is not one of `cancel`, `pause`.
+    /// The signal type is not one of `cancel`, `pause`, `shutdown`.
     UnknownSignalType {
         /// What the caller asked for.
         signal_type: String,
     },
 }
 
-/// Send a lifecycle signal (`cancel`, `pause`) to an instance.
+/// Send a lifecycle signal (`cancel`, `pause`, `shutdown`) to an instance.
+///
+/// `shutdown` is how a draining host asks a guest to checkpoint and exit so it
+/// can be resumed after the restart; [`crate::runtime::EnvironmentRuntime::drain`]
+/// writes the same signal straight through `Persistence`.
 pub async fn handle_send_signal(
     state: &EnvironmentHandlerState,
     instance_id: &str,
@@ -1889,14 +1893,15 @@ pub async fn handle_send_signal(
         });
     }
 
-    let signal_type = match signal_type {
-        "cancel" => runtara_core::domain::SignalType::Cancel,
-        "pause" => runtara_core::domain::SignalType::Pause,
-        _ => {
-            return Ok(SendSignalOutcome::UnknownSignalType {
-                signal_type: signal_type.to_string(),
-            });
-        }
+    // Decoded with the storage layer's own parser rather than a match here, so
+    // the set this accepts is by construction the set the column can hold. The
+    // local match had drifted from it: it never admitted `shutdown`, so every
+    // graceful-drain signal write was refused as an unknown type.
+    let Ok(signal_type) = runtara_store_postgres::encoding::signal_type_from_str(signal_type)
+    else {
+        return Ok(SendSignalOutcome::UnknownSignalType {
+            signal_type: signal_type.to_string(),
+        });
     };
 
     let payload = payload.map(|p| p.as_bytes().to_vec()).unwrap_or_default();
@@ -2721,6 +2726,98 @@ mod tests {
     use crate::image_registry::Image;
     use chrono::Utc;
     use serde_json::json;
+
+    /// Handler state whose reads and writes all land in memory.
+    ///
+    /// `handle_send_signal` only ever touches `persistence`, so the pool is
+    /// built lazily and never connected — the signal path needs no database.
+    fn in_memory_state() -> (
+        EnvironmentHandlerState,
+        Arc<runtara_core::persistence::memory::InMemoryPersistence>,
+    ) {
+        let persistence = Arc::new(runtara_core::persistence::memory::InMemoryPersistence::new());
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgresql://localhost:1/unused")
+            .expect("a lazy pool never connects");
+        let state = EnvironmentHandlerState::new(
+            pool,
+            persistence.clone(),
+            Arc::new(crate::runner::MockRunner::new()),
+            std::env::temp_dir(),
+        );
+        (state, persistence)
+    }
+
+    /// Every signal the storage layer can encode must also be one this handler
+    /// accepts.
+    ///
+    /// `shutdown` is the one that regressed: the handler used to match only
+    /// `cancel` and `pause`, so the graceful-drain path
+    /// (`ShutdownCoordinator::drain_executions` via
+    /// `RuntimeClient::signal_shutdown`) had its signal refused as an unknown
+    /// type on every call, logged the refusal as a warning, and then waited out
+    /// the whole grace period having asked no guest to checkpoint.
+    #[tokio::test]
+    async fn every_storable_signal_type_is_accepted() {
+        use runtara_core::domain::SignalType;
+
+        for signal_type in [SignalType::Cancel, SignalType::Pause, SignalType::Shutdown] {
+            let name = runtara_store_postgres::encoding::signal_type_to_str(signal_type);
+            let (state, persistence) = in_memory_state();
+            let instance_id = format!("signal-{name}");
+            persistence
+                .register_instance(&instance_id, "tenant-1")
+                .await
+                .expect("register");
+            persistence
+                .update_instance_status(&instance_id, CoreInstanceStatus::Running, None)
+                .await
+                .expect("mark running");
+
+            let outcome = handle_send_signal(&state, &instance_id, name, None)
+                .await
+                .expect("signal send must not error");
+
+            assert_eq!(
+                outcome,
+                SendSignalOutcome::Delivered,
+                "`{name}` is a signal the column can hold, so the handler must take it"
+            );
+
+            let stored = persistence
+                .get_pending_signal(&instance_id)
+                .await
+                .expect("read back the signal")
+                .expect("a delivered signal is pending");
+            assert_eq!(stored.signal_type, signal_type, "stored as sent: {name}");
+        }
+    }
+
+    /// A name the column cannot hold is still refused, rather than everything
+    /// being waved through now that the parse is shared.
+    #[tokio::test]
+    async fn an_unstorable_signal_type_is_still_refused() {
+        let (state, persistence) = in_memory_state();
+        persistence
+            .register_instance("signal-bogus", "tenant-1")
+            .await
+            .expect("register");
+        persistence
+            .update_instance_status("signal-bogus", CoreInstanceStatus::Running, None)
+            .await
+            .expect("mark running");
+
+        let outcome = handle_send_signal(&state, "signal-bogus", "detonate", None)
+            .await
+            .expect("an unknown name is an outcome, not an error");
+
+        assert_eq!(
+            outcome,
+            SendSignalOutcome::UnknownSignalType {
+                signal_type: "detonate".to_string(),
+            }
+        );
+    }
 
     fn make_image(metadata: Option<serde_json::Value>) -> Image {
         Image {
