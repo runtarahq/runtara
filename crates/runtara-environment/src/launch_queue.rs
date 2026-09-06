@@ -448,6 +448,37 @@ pub enum LaunchQueueError {
     },
 }
 
+/// One stage of the durable-launch summary, as stored.
+///
+/// `stage` is a [`LaunchState`] name except for `expired`, which is the queue's
+/// own terminal outcome — `failed` carrying [`LAUNCH_QUEUE_TIMEOUT`] — and is
+/// deliberately distinct from an arbitrary workflow failure.
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub struct LaunchStageCount {
+    /// Stage name: a launch state, or `expired`.
+    pub stage: String,
+    /// Generations in this stage.
+    pub count: i64,
+    /// Age of the oldest generation in the stage, in milliseconds.
+    pub oldest_age_ms: Option<i64>,
+    /// Generations returned to the queue because the runner or the preparation
+    /// pool was full. An actionable current condition, not a process counter.
+    pub capacity_rejections: i64,
+}
+
+/// One workflow's share of a stage.
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub struct LaunchWorkflowCount {
+    /// Stage name, as in [`LaunchStageCount::stage`].
+    pub stage: String,
+    /// Workflow the generation's image belongs to, or `unknown`.
+    pub workflow_id: String,
+    /// Generations for this workflow in this stage.
+    pub count: i64,
+    /// Age of the oldest of them, in milliseconds.
+    pub oldest_age_ms: Option<i64>,
+}
+
 /// PostgreSQL repository for [`Launch`] rows.
 ///
 /// This type does not call a runner.  A future dispatcher owns that side
@@ -462,6 +493,155 @@ impl LaunchRepository {
     /// Create a repository backed by the Environment/Core shared database.
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
+    }
+
+    /// Aggregate the actionable launch stages for a tenant.
+    ///
+    /// Lives here rather than in the server's sampler because every other
+    /// `instance_launches` query does, and the sampler's copy had re-typed the
+    /// state names and three `last_error` constants that this module already
+    /// exports — a second, hand-maintained spelling of a wire contract in
+    /// another crate. The aggregation stays in SQL: these are counts over a
+    /// backlog that can run to thousands of rows, and the whole point of the
+    /// telemetry is to observe exactly that condition.
+    ///
+    /// `expired` is the queue's own terminal outcome — `failed` carrying
+    /// [`LAUNCH_QUEUE_TIMEOUT`] — reported apart from arbitrary failures.
+    pub async fn stage_telemetry(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<LaunchStageCount>, LaunchQueueError> {
+        let active_states = LaunchState::sql_list(LaunchState::ACTIVE);
+        let reported_states =
+            LaunchState::sql_list(&[LaunchState::ACTIVE, &[LaunchState::Cancelled][..]].concat());
+        let query = format!(
+            r#"
+            WITH relevant AS (
+                SELECT
+                    CASE
+                        WHEN state = 'failed' AND last_error = '{LAUNCH_QUEUE_TIMEOUT}'
+                            THEN 'expired'
+                        ELSE state
+                    END AS stage,
+                    CASE
+                        WHEN state IN ({active_states}) THEN created_at
+                        ELSE updated_at
+                    END AS age_from,
+                    last_error
+                FROM instance_launches
+                WHERE tenant_id = $1
+                  AND (
+                        state IN ({reported_states})
+                        OR (state = 'failed' AND last_error = '{LAUNCH_QUEUE_TIMEOUT}')
+                  )
+            )
+            SELECT
+                stage,
+                COUNT(*)::BIGINT AS count,
+                CASE
+                    WHEN MIN(age_from) IS NULL THEN NULL
+                    ELSE GREATEST(
+                        0::BIGINT,
+                        (EXTRACT(EPOCH FROM CURRENT_TIMESTAMP - MIN(age_from)) * 1000)::BIGINT
+                    )
+                END AS oldest_age_ms,
+                COUNT(*) FILTER (
+                    WHERE stage = 'queued'
+                      AND last_error IN (
+                          '{RUNNER_CAPACITY_UNAVAILABLE}',
+                          '{PREPARATION_CAPACITY_UNAVAILABLE}'
+                      )
+                )::BIGINT AS capacity_rejections
+            FROM relevant
+            GROUP BY stage
+            "#
+        );
+        Ok(sqlx::query_as::<_, LaunchStageCount>(&query)
+            .bind(tenant_id)
+            .fetch_all(&self.pool)
+            .await?)
+    }
+
+    /// Attribute each stage to the workflows contributing most to it.
+    ///
+    /// Joins `images` for the workflow identity, which is another
+    /// Environment-owned table, so the join stays inside Environment rather
+    /// than being reassembled by a reader in the server. `per_stage` bounds the
+    /// drill-down: attribution is a clue, not a metric label, and a tenant with
+    /// many published workflows must not widen every sample without limit.
+    pub async fn workflow_telemetry(
+        &self,
+        tenant_id: &str,
+        per_stage: i64,
+    ) -> Result<Vec<LaunchWorkflowCount>, LaunchQueueError> {
+        let active_states = LaunchState::sql_list(LaunchState::ACTIVE);
+        let reported_states =
+            LaunchState::sql_list(&[LaunchState::ACTIVE, &[LaunchState::Cancelled][..]].concat());
+        let query = format!(
+            r#"
+            WITH relevant AS (
+                SELECT
+                    launch.image_id,
+                    CASE
+                        WHEN launch.state = 'failed'
+                            AND launch.last_error = '{LAUNCH_QUEUE_TIMEOUT}' THEN 'expired'
+                        ELSE launch.state
+                    END AS stage,
+                    CASE
+                        WHEN launch.state IN ({active_states}) THEN launch.created_at
+                        ELSE launch.updated_at
+                    END AS age_from
+                FROM instance_launches AS launch
+                WHERE launch.tenant_id = $1
+                  AND (
+                        launch.state IN ({reported_states})
+                        OR (
+                            launch.state = 'failed'
+                            AND launch.last_error = '{LAUNCH_QUEUE_TIMEOUT}'
+                        )
+                  )
+            ), grouped AS (
+                SELECT
+                    relevant.stage,
+                    COALESCE(
+                        NULLIF(images.metadata #>> '{{workflow,workflowId}}', ''),
+                        NULLIF(SPLIT_PART(images.name, ':', 1), ''),
+                        'unknown'
+                    ) AS workflow_id,
+                    COUNT(*)::BIGINT AS count,
+                    CASE
+                        WHEN MIN(relevant.age_from) IS NULL THEN NULL
+                        ELSE GREATEST(
+                            0::BIGINT,
+                            (EXTRACT(EPOCH FROM CURRENT_TIMESTAMP - MIN(relevant.age_from)) * 1000)::BIGINT
+                        )
+                    END AS oldest_age_ms
+                FROM relevant
+                JOIN images ON images.image_id = relevant.image_id
+                GROUP BY relevant.stage, workflow_id
+            ), ranked AS (
+                SELECT
+                    stage,
+                    workflow_id,
+                    count,
+                    oldest_age_ms,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY stage
+                        ORDER BY count DESC, oldest_age_ms DESC NULLS LAST, workflow_id ASC
+                    ) AS rank
+                FROM grouped
+            )
+            SELECT stage, workflow_id, count, oldest_age_ms
+            FROM ranked
+            WHERE rank <= $2
+            ORDER BY stage, count DESC, oldest_age_ms DESC NULLS LAST, workflow_id ASC
+            "#
+        );
+        Ok(sqlx::query_as::<_, LaunchWorkflowCount>(&query)
+            .bind(tenant_id)
+            .bind(per_stage)
+            .fetch_all(&self.pool)
+            .await?)
     }
 
     /// Read one durable generation by its idempotency key.

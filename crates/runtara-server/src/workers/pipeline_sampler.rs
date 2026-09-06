@@ -301,7 +301,7 @@ fn build_snapshot_with_stuck_after(
         launch_stage(
             "launchExpired",
             "Queue expired",
-            Some("launch_queue_timeout"),
+            Some(runtara_environment::launch_queue::LAUNCH_QUEUE_TIMEOUT),
             None,
             launches.map(|value| &value.expired),
             None,
@@ -656,53 +656,13 @@ async fn count_launch_telemetry(
     tenant_id: &str,
 ) -> Option<LaunchTelemetryReading> {
     let started = Instant::now();
-    let summary = sqlx::query_as::<_, (String, i64, Option<i64>, i64)>(
-        r#"
-        WITH relevant AS (
-            SELECT
-                CASE
-                    WHEN state = 'failed' AND last_error = 'launch_queue_timeout'
-                        THEN 'expired'
-                    ELSE state
-                END AS stage,
-                CASE
-                    WHEN state IN ('queued', 'preparing', 'leased', 'starting', 'running') THEN created_at
-                    ELSE updated_at
-                END AS age_from,
-                last_error
-            FROM instance_launches
-            WHERE tenant_id = $1
-              AND (
-                    state IN ('queued', 'preparing', 'leased', 'starting', 'running', 'cancelled')
-                    OR (state = 'failed' AND last_error = 'launch_queue_timeout')
-              )
-        )
-        SELECT
-            stage,
-            COUNT(*)::BIGINT,
-            CASE
-                WHEN MIN(age_from) IS NULL THEN NULL
-                ELSE GREATEST(
-                    0::BIGINT,
-                    (EXTRACT(EPOCH FROM CURRENT_TIMESTAMP - MIN(age_from)) * 1000)::BIGINT
-                )
-            END AS oldest_age_ms,
-            COUNT(*) FILTER (
-                WHERE stage = 'queued'
-                  AND last_error IN (
-                      'runner_capacity_unavailable',
-                      'preparation_capacity_unavailable'
-                  )
-            )::BIGINT AS capacity_rejections
-        FROM relevant
-        GROUP BY stage
-        "#,
-    )
-    .bind(tenant_id)
-    .fetch_all(pool)
-    .await;
+    let launches = runtara_environment::launch_queue::LaunchRepository::new(pool.clone());
 
-    let summary = match summary {
+    // The SQL lives with the table it reads. This used to be two queries here,
+    // carrying their own copies of the launch state names and of three
+    // `last_error` constants the environment crate already exports — a second
+    // spelling of a wire contract, in a crate that does not own it.
+    let summary = match launches.stage_telemetry(tenant_id).await {
         Ok(rows) => rows,
         Err(error) => {
             tracing::warn!(error = %error, "pipeline sampler could not count durable launches");
@@ -710,71 +670,9 @@ async fn count_launch_telemetry(
         }
     };
 
-    let attribution = sqlx::query_as::<_, (String, String, i64, Option<i64>)>(
-        r#"
-        WITH relevant AS (
-            SELECT
-                launch.image_id,
-                CASE
-                    WHEN launch.state = 'failed'
-                        AND launch.last_error = 'launch_queue_timeout' THEN 'expired'
-                    ELSE launch.state
-                END AS stage,
-                CASE
-                WHEN launch.state IN ('queued', 'preparing', 'leased', 'starting', 'running')
-                        THEN launch.created_at
-                    ELSE launch.updated_at
-                END AS age_from
-            FROM instance_launches AS launch
-            WHERE launch.tenant_id = $1
-              AND (
-                    launch.state IN ('queued', 'preparing', 'leased', 'starting', 'running', 'cancelled')
-                    OR (
-                        launch.state = 'failed'
-                        AND launch.last_error = 'launch_queue_timeout'
-                    )
-              )
-        ), grouped AS (
-            SELECT
-                relevant.stage,
-                COALESCE(
-                    NULLIF(images.metadata #>> '{workflow,workflowId}', ''),
-                    NULLIF(SPLIT_PART(images.name, ':', 1), ''),
-                    'unknown'
-                ) AS workflow_id,
-                COUNT(*)::BIGINT AS count,
-                CASE
-                    WHEN MIN(relevant.age_from) IS NULL THEN NULL
-                    ELSE GREATEST(
-                        0::BIGINT,
-                        (EXTRACT(EPOCH FROM CURRENT_TIMESTAMP - MIN(relevant.age_from)) * 1000)::BIGINT
-                    )
-                END AS oldest_age_ms
-            FROM relevant
-            JOIN images ON images.image_id = relevant.image_id
-            GROUP BY relevant.stage, workflow_id
-        ), ranked AS (
-            SELECT
-                stage,
-                workflow_id,
-                count,
-                oldest_age_ms,
-                ROW_NUMBER() OVER (
-                    PARTITION BY stage
-                    ORDER BY count DESC, oldest_age_ms DESC NULLS LAST, workflow_id ASC
-                ) AS rank
-            FROM grouped
-        )
-        SELECT stage, workflow_id, count, oldest_age_ms
-        FROM ranked
-        WHERE rank <= $2
-        ORDER BY stage, count DESC, oldest_age_ms DESC NULLS LAST, workflow_id ASC
-        "#,
-    )
-    .bind(tenant_id)
-    .bind(TOP_LAUNCH_WORKFLOWS)
-    .fetch_all(pool)
-    .await;
+    let attribution = launches
+        .workflow_telemetry(tenant_id, TOP_LAUNCH_WORKFLOWS)
+        .await;
 
     let attribution = match attribution {
         Ok(rows) => rows,
@@ -789,28 +687,28 @@ async fn count_launch_telemetry(
     };
 
     let mut telemetry = LaunchTelemetryReading::default();
-    for (stage, count, oldest_age_ms, capacity_rejections) in summary {
-        let Some(target) = launch_stage_reading_mut(&mut telemetry, &stage) else {
+    for row in summary {
+        let Some(target) = launch_stage_reading_mut(&mut telemetry, &row.stage) else {
             tracing::warn!(
-                stage,
+                stage = row.stage,
                 "pipeline sampler ignored unknown durable launch state"
             );
             continue;
         };
-        target.count = u64::try_from(count).unwrap_or(0);
-        target.oldest_age_ms = oldest_age_ms.map(|age| u64::try_from(age).unwrap_or(0));
-        if stage == "queued" {
-            telemetry.capacity_rejections = u64::try_from(capacity_rejections).unwrap_or(0);
+        target.count = u64::try_from(row.count).unwrap_or(0);
+        target.oldest_age_ms = row.oldest_age_ms.map(|age| u64::try_from(age).unwrap_or(0));
+        if row.stage == "queued" {
+            telemetry.capacity_rejections = u64::try_from(row.capacity_rejections).unwrap_or(0);
         }
     }
-    for (stage, workflow_id, count, oldest_age_ms) in attribution {
-        let Some(target) = launch_stage_reading_mut(&mut telemetry, &stage) else {
+    for row in attribution {
+        let Some(target) = launch_stage_reading_mut(&mut telemetry, &row.stage) else {
             continue;
         };
         target.top_workflows.push(LaunchWorkflowReading {
-            workflow_id,
-            count: u64::try_from(count).unwrap_or(0),
-            oldest_age_ms: oldest_age_ms.map(|age| u64::try_from(age).unwrap_or(0)),
+            workflow_id: row.workflow_id,
+            count: u64::try_from(row.count).unwrap_or(0),
+            oldest_age_ms: row.oldest_age_ms.map(|age| u64::try_from(age).unwrap_or(0)),
         });
     }
 
