@@ -514,6 +514,45 @@ Clippy with both integration/PoC features passed with `-D warnings`. These are
 host/WASM boundary tests; database fencing and the final local server gate are
 not yet satisfied.
 
+### Child runtime authority and deferred root commands
+
+`runtara-environment::runtime_host::scoped` supplies a child runtime adapter bound
+to one immutable root host, child input, logical path and the admitted task's
+actual cancellation token. It implements every `RuntimeHost` method. Child
+success/failure callbacks are captured locally; identical duplicates are
+idempotent and conflicts remain errors. Events retain their payload/subtype and
+carry the child path. Every checkpoint, retry, custom-signal and sleep address
+requires an explicit host-supplied `CheckpointAuthority`; keys are preserved
+without adding another namespace. There is no permissive default authority.
+
+Sibling signal polls observe the same root command without acknowledging it.
+The root owner retains exact command receipts, deduplicates observations, and
+requires closure after descendant teardown before applying them through core's
+atomic acknowledgement handler. A stale receipt cannot consume a replacement
+command. Breakpoints are likewise deferred and coalesced; cancelling their child
+discards them, and an accepted root command supersedes them. Child cancellation
+does not write a root command or cancel a sibling. Closure rejects new child
+runtime calls. This is a process-local admission fence, not a persistent fence
+for database writes already in flight.
+
+Verification: **31 runtime tests passed against an isolated PostgreSQL instance**,
+including eight new scoped tests and the existing legacy runtime checks. The new
+tests cover terminal capture, conflicting callbacks, sibling checkpoint authority,
+unchanged keys/payloads, non-destructive custom signals, pause/cancel/shutdown
+receipts, stale commands, targeted cancellation, breakpoint coalescing and command
+precedence. One test executes a real WASM component through the prepared component
+and runtime linker against PostgreSQL: child completion and pause observation
+leave root status unchanged until explicit owner finalization. Environment
+all-target Clippy with `db-integration-tests` and `-D warnings` passed.
+
+The adapter is not yet connected to the production invocation-scope factory or
+root runner. Its test authority uses explicit sibling prefixes; production must
+validate the compiler's actual namespace contract. Root polling/finalization
+integration, bounded shared polling, child outcome reconciliation, durable
+attempt fencing, and the complete parking/wake protocol remain required. Linker
+sleep aliases also need qualification with that production scope. These tests
+do not satisfy the final local-server or all-construct compatibility gates.
+
 ## Remaining required work
 
 - P0: extend explicit differential selection and invocation-count evidence to all
@@ -523,7 +562,7 @@ not yet satisfied.
 - P2: qualify logical scopes across every AI auxiliary invocation and nested
   construct, integrate the production scope factory and certify package reset/state
   eligibility. Basic emitted Agent paths and attempts are wired above.
-- P3: recursive Embed extraction and scoped child runtime, suspension/wake sets,
+- P3: recursive Embed extraction and production scoped-runtime integration, suspension/wake sets,
   scopes, deadlines, checkpoint keys and existing reference ABI modes.
 - P4: durable attempt transitions, root and targeted command routing, crash/lease
   fencing, resource/tenant ownership and parked invocation handling.

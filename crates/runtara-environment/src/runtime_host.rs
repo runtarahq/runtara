@@ -30,6 +30,8 @@
 //!   `is_cancelled` short-circuits after a consumed cancel/shutdown, exactly
 //!   like `runtara_sdk::is_cancelled()`.
 
+pub mod scoped;
+
 #[cfg(all(test, feature = "db-integration-tests"))]
 use runtara_core::domain::InstanceStatus as CoreInstanceStatus;
 #[cfg(all(test, feature = "db-integration-tests"))]

@@ -117,6 +117,11 @@ pub struct RuntimeCheckpointResult {
 ///   model arrives in a later phase).
 /// - Errors are returned as guest-visible `Err(String)` (the WIT `result`'s
 ///   err arm), not traps; a trap is reserved for host misconfiguration.
+///
+/// Scoped child hosts capture terminal callbacks locally and report lifecycle
+/// receipts to a root-owned coordinator instead of applying root transitions.
+/// The embedding finalizes those effects after invocation teardown; it must
+/// supply explicit checkpoint authority and persistent attempt fencing.
 #[async_trait::async_trait]
 pub trait RuntimeHost: Send + Sync {
     /// Persisted input for this instance; `None` when the record has no input
