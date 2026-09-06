@@ -367,7 +367,10 @@ impl DbCleanupWorker {
             return Ok(());
         }
 
-        // Use a transaction to ensure consistency
+        // One transaction across three tables, which is why these DELETEs stay
+        // here rather than moving to the registries that own each table:
+        // splitting them would let a failure part-way leave an instance whose
+        // rows disagree about whether it still exists.
         let mut tx = self.pool.begin().await?;
 
         // container_registry

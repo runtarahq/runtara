@@ -412,8 +412,8 @@ impl HeartbeatMonitor {
 
         // Get all instance IDs we're tracking locally
         let tracked_ids: std::collections::HashSet<String> =
-            sqlx::query_scalar::<_, String>("SELECT instance_id FROM container_registry")
-                .fetch_all(&self.pool)
+            ContainerRegistry::new(self.pool.clone())
+                .tracked_instance_ids()
                 .await?
                 .into_iter()
                 .collect();

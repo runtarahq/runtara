@@ -10,14 +10,14 @@
 //! observations about a process, and Core never reads any of them back to
 //! decide anything.
 
-use chrono::{DateTime, Utc};
 use opentelemetry::metrics::{Counter, Histogram, Meter};
 use opentelemetry::{KeyValue, global};
 use runtara_core::persistence::{InstanceCompletionMetrics, InstanceMetricsSink};
 use sqlx::PgPool;
 use std::sync::OnceLock;
 
-use crate::error::{Error, Result};
+use crate::error::Result;
+use crate::instance_repository::InstanceRepository;
 
 static WORKFLOW_METRICS: OnceLock<WorkflowMetrics> = OnceLock::new();
 
@@ -111,101 +111,38 @@ impl InstanceMetricsSink for OtlpMetricsSink {
     }
 }
 
-/// Write resource usage and read back the status the guest reported, in one
-/// statement.
+/// Record what the process used, report it, and hand back the status the guest
+/// reported.
 ///
-/// The container monitor needs both, and they are the same row: `RETURNING`
-/// makes it one round trip instead of two. `None` means no such instance.
-/// Called even when there are no metrics to write, so the caller's crash check
-/// always has a status to look at.
+/// The persistence half belongs to
+/// [`InstanceRepository`](crate::instance_repository::InstanceRepository); what
+/// stays here is the OTLP vocabulary, which is this module's whole job.
 pub async fn record_resources_returning_status(
     pool: &PgPool,
     instance_id: &str,
     memory_peak_bytes: Option<u64>,
     cpu_usage_usec: Option<u64>,
 ) -> Result<Option<(runtara_core::domain::InstanceStatus, Option<String>)>> {
-    let row: Option<(String, Option<String>)> = sqlx::query_as(
-        "UPDATE instances \
-         SET memory_peak_bytes = COALESCE(memory_peak_bytes, $2), \
-             cpu_usage_usec = COALESCE(cpu_usage_usec, $3) \
-         WHERE instance_id = $1 \
-         RETURNING status::TEXT, termination_reason::TEXT",
-    )
-    .bind(instance_id)
-    .bind(memory_peak_bytes.map(|v| v as i64))
-    .bind(cpu_usage_usec.map(|v| v as i64))
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| Error::Other(format!("record_resources_returning_status: {e}")))?;
+    let instances = InstanceRepository::new(pool.clone());
+    let observed = instances
+        .record_resources_returning_status(instance_id, memory_peak_bytes, cpu_usage_usec)
+        .await?;
 
-    if row.is_some()
+    if observed.is_some()
         && (memory_peak_bytes.is_some() || cpu_usage_usec.is_some())
-        && let Some(metric) = fetch_completion_metrics(pool, instance_id).await?
+        && let Some(metric) = instances.completion_metrics(instance_id).await?
     {
         let metrics = workflow_metrics();
         let attributes = metric_attributes(&metric);
         record_resources(metrics, &metric, &attributes);
     }
 
-    row.map(|(status, reason)| {
-        Ok((
-            runtara_store_postgres::encoding::status_from_str(&status)?,
-            reason,
-        ))
-    })
-    .transpose()
+    Ok(observed)
 }
 
 /// Store raw stderr captured from the runner, for debugging.
-///
-/// First writer wins, so a later re-report cannot clobber the output that
-/// actually explained the failure.
 pub async fn record_instance_stderr(pool: &PgPool, instance_id: &str, stderr: &str) -> Result<()> {
-    sqlx::query("UPDATE instances SET stderr = COALESCE(stderr, $2) WHERE instance_id = $1")
-        .bind(instance_id)
-        .bind(stderr)
-        .execute(pool)
+    InstanceRepository::new(pool.clone())
+        .record_stderr(instance_id, stderr)
         .await
-        .map_err(|e| Error::Other(format!("record_instance_stderr: {e}")))?;
-    Ok(())
-}
-
-#[derive(Debug, sqlx::FromRow)]
-struct MetricRow {
-    tenant_id: String,
-    status: String,
-    termination_reason: Option<String>,
-    started_at: Option<DateTime<Utc>>,
-    finished_at: Option<DateTime<Utc>>,
-    memory_peak_bytes: Option<i64>,
-    cpu_usage_usec: Option<i64>,
-}
-
-async fn fetch_completion_metrics(
-    pool: &PgPool,
-    instance_id: &str,
-) -> Result<Option<InstanceCompletionMetrics>> {
-    let row: Option<MetricRow> = sqlx::query_as(
-        "SELECT tenant_id, status::text AS status, \
-                termination_reason::text AS termination_reason, \
-                started_at, finished_at, memory_peak_bytes, cpu_usage_usec \
-         FROM instances WHERE instance_id = $1",
-    )
-    .bind(instance_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| Error::Other(format!("fetch_completion_metrics: {e}")))?;
-
-    row.map(|row| {
-        Ok(InstanceCompletionMetrics {
-            tenant_id: row.tenant_id,
-            status: runtara_store_postgres::encoding::status_from_str(&row.status)?,
-            termination_reason: row.termination_reason,
-            started_at: row.started_at,
-            finished_at: row.finished_at,
-            memory_peak_bytes: row.memory_peak_bytes.and_then(|v| u64::try_from(v).ok()),
-            cpu_usage_usec: row.cpu_usage_usec.and_then(|v| u64::try_from(v).ok()),
-        })
-    })
-    .transpose()
 }

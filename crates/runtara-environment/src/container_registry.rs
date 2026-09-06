@@ -92,6 +92,19 @@ impl ContainerRegistry {
     }
 
     /// Get a specific container's info
+    /// Just the instance ids this process is tracking.
+    ///
+    /// The heartbeat monitor wants a membership set, not the rows, and used to
+    /// read the table itself for it.
+    pub async fn tracked_instance_ids(&self) -> Result<Vec<String>> {
+        Ok(
+            sqlx::query_scalar::<_, String>("SELECT instance_id FROM container_registry")
+                .fetch_all(&self.pool)
+                .await?,
+        )
+    }
+
+    /// Get a specific container's info
     pub async fn get(&self, instance_id: &str) -> Result<Option<ContainerInfo>> {
         let container = sqlx::query_as::<_, ContainerInfo>(
             "SELECT * FROM container_registry WHERE instance_id = $1",

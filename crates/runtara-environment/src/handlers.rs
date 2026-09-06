@@ -101,7 +101,15 @@ pub struct EnvironmentHandlerState {
     /// PostgreSQL connection pool (for Environment-specific tables: images, containers, etc.).
     pub pool: PgPool,
     /// Core persistence layer (for instance lifecycle, checkpoints, signals).
-    /// All instance write operations are delegated to this shared persistence layer.
+    ///
+    /// Everything core reasons about — status, termination, sleep — changes
+    /// through here and nowhere else. Two deliberate exceptions write the
+    /// `instances` row directly, both for columns core never reads: the
+    /// forensic ones a run leaves behind and the crash-loop counters, which
+    /// [`crate::instance_repository::InstanceRepository`] owns; and the
+    /// pending-instance insert inside
+    /// [`crate::launch_queue::LaunchRepository::claim_initial`], which shares a
+    /// transaction with the launch row on purpose.
     pub persistence: Arc<dyn Persistence>,
     /// When the server started (for uptime calculation).
     pub start_time: std::time::Instant,

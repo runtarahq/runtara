@@ -2924,8 +2924,21 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             shutdown_coordinator.drain_executions().await;
             if let Some(runtara) = embedded_runtara.as_ref() {
                 println!("Draining embedded Runtara environment...");
-                if let Err(e) = runtara.drain(shutdown_coordinator.grace()).await {
-                    eprintln!("Error draining embedded Runtara: {}", e);
+                match runtara.drain(shutdown_coordinator.grace()).await {
+                    // A drain that could not enumerate what to park leaves every
+                    // guest to die with the process, so say so rather than let
+                    // shutdown read as orderly.
+                    Err(e) => eprintln!("Error draining embedded Runtara: {e}"),
+                    Ok(report) if report.is_clean() => {
+                        println!("Drained {} instance(s) cleanly", report.settled);
+                    }
+                    Ok(report) => {
+                        eprintln!(
+                            "Drain finished with {} of {} instance(s) parked on their own, \
+                             {} force-stopped, {} operation(s) failed",
+                            report.settled, report.active, report.force_stopped, report.failures
+                        );
+                    }
                 }
             }
         }
