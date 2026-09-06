@@ -1169,6 +1169,55 @@ These primitives alone do not enable user cancellation of one step, remove E128,
 or establish crash-safe production execution. Local-server E2E and fresh
 performance comparisons remain required.
 
+## Supervisor-owned asynchronous admission and settlement
+
+The native task registry now accepts an optional `TaskLifecycle`. Admission runs
+before the execution factory, Store instantiation or guest initializer. It can
+return a retained control outcome without constructing a Store. Settlement runs
+under the supervisor after the execution future is destroyed and descendant
+cleanup finishes. `PreparedInvocation` and `ChildInvocationScope` carry this
+ownership through the normal execution imports and prepared launcher.
+
+Settlement is retained even when cancellation drops admission after a database
+commit but before the reply is recorded. It also runs for pre-start cancellation,
+admission errors, execution panics and failed descendant cleanup. The embedding
+must retain an idempotent admission identity outside the cancellable future and
+bound its persistence/cleanup work. Task result publication, join/release and
+capacity release wait for settlement. A settlement failure or panic closes the
+result channel and makes shutdown report a persistent host failure; a hook cannot
+turn failed admission/cleanup into successful execution. An admission panic is a
+host failure because its external effects may be uncertain.
+
+For tasks with a lifecycle hook, its arbitration result is authoritative. A local
+cancellation arriving during settlement remains a request; it cannot overwrite a
+durable completion winner afterward. The hook must resolve that race through its
+persistence/control authority. Tasks without a hook retain the existing local
+cancellation-wins-before-publication semantics. A managed result exceeding its
+retention budget reports host failure, rather than replacing a potentially
+committed outcome with a recoverable guest trap. The caller must still fence the
+root when settlement or resource cleanup cannot be confirmed.
+
+Six native tests cover admission bypass, cancelled admission, cleanup/settlement
+ordering, retained capacity, late cancellation, errors/panics and result-budget
+failure. Three PostgreSQL-backed tests execute a real prepared WASM child through
+the new bridge. They prove that normal execution is bracketed by durable
+admission/settlement, cancellation can recover an uncertain admission reply
+without starting the child, and a persisted cancellation can beat a computed
+result and prevent the child's initializer on replay. Generic native cancellation
+settles the attempt without creating a permanent user-cancel tombstone, preserving
+the distinction needed for pause/replay. Child completion never terminalizes the
+root in these tests.
+
+Verification passed 109 component-host unit tests, 28 scoped-runtime tests against
+PostgreSQL, 24 emitted-workflow isolation tests and seven scoped-runner integration
+tests (168 total). Feature-enabled Clippy and the workspace commit-hook lint
+passed. The existing guest components were reused because no guest/WIT
+implementation changed. The production scope factory installs no lifecycle hook
+yet: the database adapter in these tests validates the bridge, not full production
+fencing. Required work remains to guard every child write family, bind/revoke root
+leases in the runner, preserve non-durable call behavior, and route targeted
+commands. This change does not enable Agent/Embed timeouts or a Cancel-step API.
+
 ## Remaining required work
 
 - P0: extend explicit differential selection and invocation-count evidence to all

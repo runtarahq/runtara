@@ -574,3 +574,6 @@ async fn compiler_checkpoint_contracts_bind_real_children_and_persistence() {
     }
     fx.close().await;
 }
+
+#[path = "durable_lifecycle_tests.rs"]
+mod durable_lifecycle_tests;
