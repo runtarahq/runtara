@@ -341,15 +341,112 @@ pub struct StartInstanceRequest {
 
 /// Response from starting an instance.
 pub struct StartInstanceResponse {
-    /// Whether the instance was started.
-    pub success: bool,
-    /// Instance ID (assigned or generated).
+    /// Instance ID (assigned or generated). Empty on a rejection.
     pub instance_id: String,
     /// Whether an earlier request had already reserved this exact instance.
     /// A deduplicated response never launches another process.
     pub deduplicated: bool,
-    /// Error message if failed.
-    pub error: Option<String>,
+    /// Why the start was refused, or `None` when it was accepted.
+    pub rejection: Option<StartRejection>,
+}
+
+impl StartInstanceResponse {
+    /// The start was accepted and a launch generation exists.
+    pub fn accepted(instance_id: impl Into<String>, deduplicated: bool) -> Self {
+        Self {
+            instance_id: instance_id.into(),
+            deduplicated,
+            rejection: None,
+        }
+    }
+
+    /// The start was refused. No instance id is reported: the caller asked for
+    /// work that will not happen, and returning an id invites treating the
+    /// refusal as a launch.
+    pub fn rejected(rejection: StartRejection) -> Self {
+        Self {
+            instance_id: String::new(),
+            deduplicated: false,
+            rejection: Some(rejection),
+        }
+    }
+
+    /// Whether a launch was accepted.
+    pub fn is_accepted(&self) -> bool {
+        self.rejection.is_none()
+    }
+}
+
+/// Why Environment refused to start an instance.
+///
+/// These used to be a `success: bool` beside a free-text `error`, which left
+/// the caller recovering the category by searching the message for "not found".
+/// Two unrelated refusals then collapsed into one: a genuinely missing image,
+/// and a database failure whose text happened to contain the phrase. The
+/// server reacts to a missing image by deleting the workflow's compilation
+/// record and forcing a rebuild, so a transient database error was able to
+/// discard a perfectly good compilation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StartRejection {
+    /// The request itself was malformed; retrying it unchanged cannot work.
+    InvalidRequest(String),
+
+    /// No image with this id is visible to this tenant.
+    ///
+    /// Deliberately covers "no such image" and "the image belongs to another
+    /// tenant" alike. Telling those apart would confirm the existence of an
+    /// image the caller is not entitled to see, so the refusal is identical.
+    ImageNotFound {
+        /// The image the caller asked for.
+        image_id: String,
+    },
+
+    /// The image row exists but cannot be launched: its artifact is missing
+    /// from disk, or it does not export the current lifecycle entrypoint.
+    ///
+    /// Grouped with [`Self::ImageNotFound`] by callers on purpose — both are
+    /// repaired by registering the image again, and neither is retryable as-is.
+    ImageNotRunnable {
+        /// The image the caller asked for.
+        image_id: String,
+        /// What was wrong with it.
+        detail: String,
+    },
+
+    /// A guarded trigger lost the durable workflow-wide launch race. Not a
+    /// failure: the workflow is already doing the work that was asked for.
+    SingleInstanceActive,
+
+    /// The instance id is taken by a row this request does not own, or by one
+    /// with no active launch generation.
+    InstanceAlreadyExists {
+        /// The contested instance id.
+        instance_id: String,
+    },
+
+    /// Environment could not carry the start through — a database, queue or
+    /// persistence failure. Unlike every refusal above, the same request may
+    /// succeed on a retry, so a caller must not treat it as a bad image.
+    Internal(String),
+}
+
+impl std::fmt::Display for StartRejection {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidRequest(detail) => write!(formatter, "{detail}"),
+            Self::ImageNotFound { image_id } => {
+                write!(formatter, "Image '{image_id}' not found")
+            }
+            Self::ImageNotRunnable { image_id, detail } => {
+                write!(formatter, "Image '{image_id}' is not runnable: {detail}")
+            }
+            Self::SingleInstanceActive => write!(formatter, "{SINGLE_INSTANCE_ACTIVE}"),
+            Self::InstanceAlreadyExists { instance_id } => {
+                write!(formatter, "Instance '{instance_id}' already exists")
+            }
+            Self::Internal(detail) => write!(formatter, "Failed to create instance: {detail}"),
+        }
+    }
 }
 
 async fn existing_start_response(
@@ -369,12 +466,11 @@ async fn existing_start_response(
             existing_tenant_id = %existing.tenant_id,
             "Rejecting reuse of an instance ID owned by another tenant"
         );
-        return Ok(Some(StartInstanceResponse {
-            success: false,
-            instance_id: String::new(),
-            deduplicated: false,
-            error: Some(format!("Instance '{}' already exists", instance_id)),
-        }));
+        return Ok(Some(StartInstanceResponse::rejected(
+            StartRejection::InstanceAlreadyExists {
+                instance_id: instance_id.to_string(),
+            },
+        )));
     }
 
     match db::get_instance_image_id(&state.pool, instance_id).await? {
@@ -386,12 +482,11 @@ async fn existing_start_response(
                 existing_image_id,
                 "Rejecting reuse of an instance ID for a different image"
             );
-            return Ok(Some(StartInstanceResponse {
-                success: false,
-                instance_id: String::new(),
-                deduplicated: false,
-                error: Some(format!("Instance '{}' already exists", instance_id)),
-            }));
+            return Ok(Some(StartInstanceResponse::rejected(
+                StartRejection::InstanceAlreadyExists {
+                    instance_id: instance_id.to_string(),
+                },
+            )));
         }
         None => {
             // An instance row without an image association is an incomplete or
@@ -402,12 +497,11 @@ async fn existing_start_response(
                 requested_image_id = image_id,
                 "Rejecting reuse of an instance ID without an image association"
             );
-            return Ok(Some(StartInstanceResponse {
-                success: false,
-                instance_id: String::new(),
-                deduplicated: false,
-                error: Some(format!("Instance '{}' already exists", instance_id)),
-            }));
+            return Ok(Some(StartInstanceResponse::rejected(
+                StartRejection::InstanceAlreadyExists {
+                    instance_id: instance_id.to_string(),
+                },
+            )));
         }
     }
 
@@ -418,12 +512,7 @@ async fn existing_start_response(
         status = ?existing.status,
         "Instance start already accepted; returning deduplicated response"
     );
-    Ok(Some(StartInstanceResponse {
-        success: true,
-        instance_id: instance_id.to_string(),
-        deduplicated: true,
-        error: None,
-    }))
+    Ok(Some(StartInstanceResponse::accepted(instance_id, true)))
 }
 
 /// Enrich instance input for storage (display/audit purposes):
@@ -481,12 +570,9 @@ pub async fn handle_start_instance(
 
     // Validate image_id
     if request.image_id.is_empty() {
-        return Ok(StartInstanceResponse {
-            success: false,
-            instance_id: String::new(),
-            deduplicated: false,
-            error: Some("image_id is required".to_string()),
-        });
+        return Ok(StartInstanceResponse::rejected(
+            StartRejection::InvalidRequest("image_id is required".to_string()),
+        ));
     }
 
     // Look up image
@@ -494,21 +580,20 @@ pub async fn handle_start_instance(
     let image = match image_registry.get(&request.image_id).await {
         Ok(Some(img)) => img,
         Ok(None) => {
-            return Ok(StartInstanceResponse {
-                success: false,
-                instance_id: String::new(),
-                deduplicated: false,
-                error: Some(format!("Image '{}' not found", request.image_id)),
-            });
+            return Ok(StartInstanceResponse::rejected(
+                StartRejection::ImageNotFound {
+                    image_id: request.image_id.clone(),
+                },
+            ));
         }
         Err(e) => {
             error!(error = %e, "Failed to look up image");
-            return Ok(StartInstanceResponse {
-                success: false,
-                instance_id: String::new(),
-                deduplicated: false,
-                error: Some(format!("Database error: {}", e)),
-            });
+            // Deliberately NOT an image refusal. The caller repairs a missing
+            // image by rebuilding it; doing that because the database blinked
+            // would throw away a compilation that was never at fault.
+            return Ok(StartInstanceResponse::rejected(StartRejection::Internal(
+                format!("failed to look up image: {e}"),
+            )));
         }
     };
 
@@ -520,12 +605,11 @@ pub async fn handle_start_instance(
             request_tenant = %request.tenant_id,
             "Tenant mismatch: tenant does not own this image"
         );
-        return Ok(StartInstanceResponse {
-            success: false,
-            instance_id: String::new(),
-            deduplicated: false,
-            error: Some(format!("Image '{}' not found", request.image_id)),
-        });
+        return Ok(StartInstanceResponse::rejected(
+            StartRejection::ImageNotFound {
+                image_id: request.image_id.clone(),
+            },
+        ));
     }
 
     let wasm_path = PathBuf::from(&image.binary_path);
@@ -565,12 +649,12 @@ pub async fn handle_start_instance(
             binary_path = %wasm_path.display(),
             "Registered image artifact is missing"
         );
-        return Ok(StartInstanceResponse {
-            success: false,
-            instance_id: String::new(),
-            deduplicated: false,
-            error: Some(format!("Image '{}' artifact not found", request.image_id)),
-        });
+        return Ok(StartInstanceResponse::rejected(
+            StartRejection::ImageNotRunnable {
+                image_id: request.image_id.clone(),
+                detail: "registered artifact is missing from disk".to_string(),
+            },
+        ));
     }
 
     // A compiled workflow must prove its current lifecycle ABI before we
@@ -582,12 +666,12 @@ pub async fn handle_start_instance(
             error = %error,
             "Refusing workflow image without lifecycle.invoke"
         );
-        return Ok(StartInstanceResponse {
-            success: false,
-            instance_id: String::new(),
-            deduplicated: false,
-            error: Some(error.to_string()),
-        });
+        return Ok(StartInstanceResponse::rejected(
+            StartRejection::ImageNotRunnable {
+                image_id: request.image_id.clone(),
+                detail: error.to_string(),
+            },
+        ));
     }
 
     // Prepare the durable input envelope before the atomic initial claim. The
@@ -656,23 +740,15 @@ pub async fn handle_start_instance(
                 launch_id = %launch.launch_id,
                 "Instance start durably queued"
             );
-            Ok(StartInstanceResponse {
-                success: true,
-                instance_id,
-                deduplicated: false,
-                error: None,
-            })
+            Ok(StartInstanceResponse::accepted(instance_id, false))
         }
         Ok(InitialLaunchOutcome::SingleInstanceActive) => {
             // This is a deliberate trigger skip, not a failed Environment
             // start. The embedded client maps the stable code back to the
             // trigger worker, which ACKs it without creating an instance.
-            Ok(StartInstanceResponse {
-                success: false,
-                instance_id: String::new(),
-                deduplicated: false,
-                error: Some(SINGLE_INSTANCE_ACTIVE.to_string()),
-            })
+            Ok(StartInstanceResponse::rejected(
+                StartRejection::SingleInstanceActive,
+            ))
         }
         Ok(InitialLaunchOutcome::ExistingLaunch(_)) => {
             // The existing active generation is the idempotency winner. Keep
@@ -683,12 +759,11 @@ pub async fn handle_start_instance(
             {
                 Ok(response)
             } else {
-                Ok(StartInstanceResponse {
-                    success: false,
-                    instance_id: String::new(),
-                    deduplicated: false,
-                    error: Some(format!("Instance '{}' already exists", instance_id)),
-                })
+                Ok(StartInstanceResponse::rejected(
+                    StartRejection::InstanceAlreadyExists {
+                        instance_id: instance_id.clone(),
+                    },
+                ))
             }
         }
         Ok(InitialLaunchOutcome::ExistingInstance) => {
@@ -696,24 +771,15 @@ pub async fn handle_start_instance(
             // call it a successful replay: doing so would hide exactly the
             // stranded state the queue is supposed to surface and recover.
             warn!(instance_id = %instance_id, "Existing instance has no active launch generation");
-            Ok(StartInstanceResponse {
-                success: false,
-                instance_id: String::new(),
-                deduplicated: false,
-                error: Some(format!(
-                    "Instance '{}' exists without an active launch generation",
-                    instance_id
-                )),
-            })
+            Ok(StartInstanceResponse::rejected(StartRejection::Internal(
+                format!("instance '{instance_id}' exists without an active launch generation"),
+            )))
         }
         Err(error) => {
             error!(error = %error, "Failed to atomically queue instance start");
-            Ok(StartInstanceResponse {
-                success: false,
-                instance_id: String::new(),
-                deduplicated: false,
-                error: Some(format!("Failed to create instance: {error}")),
-            })
+            Ok(StartInstanceResponse::rejected(StartRejection::Internal(
+                error.to_string(),
+            )))
         }
     }
 }

@@ -21,9 +21,8 @@ use chrono::{TimeZone, Utc};
 use runtara_environment::db;
 use runtara_environment::handlers::{
     self, EnvironmentHandlerState, ResumeInstanceRequest, SendCustomSignalOutcome,
-    SendSignalOutcome, StartInstanceRequest, StopInstanceRequest,
+    SendSignalOutcome, StartInstanceRequest, StartRejection, StopInstanceRequest,
 };
-use runtara_environment::launch_queue::SINGLE_INSTANCE_ACTIVE;
 use thiserror::Error;
 use tracing::{debug, info, instrument};
 
@@ -200,25 +199,34 @@ impl EnvironmentClient {
         )
         .await?;
 
-        if !resp.success && resp.error.as_deref() == Some(SINGLE_INSTANCE_ACTIVE) {
-            return Err(EnvironmentError::SingleInstanceActive);
+        // Environment reports a typed refusal, so the category is read from
+        // the variant rather than recovered by searching the message. Matching
+        // on the text used to fold a database failure that happened to say
+        // "not found" into ImageNotFound, whose handler deletes the workflow's
+        // compilation record and forces a rebuild.
+        match resp.rejection {
+            None => Ok(StartInstanceResult {
+                success: true,
+                instance_id: resp.instance_id,
+                deduplicated: resp.deduplicated,
+                error: None,
+            }),
+            Some(StartRejection::SingleInstanceActive) => {
+                Err(EnvironmentError::SingleInstanceActive)
+            }
+            // Both are repaired by registering the image again, which is what
+            // the caller's ImageNotFound handler does.
+            Some(rejection @ StartRejection::ImageNotFound { .. })
+            | Some(rejection @ StartRejection::ImageNotRunnable { .. }) => {
+                Err(EnvironmentError::ImageNotFound(rejection.to_string()))
+            }
+            Some(rejection) => Ok(StartInstanceResult {
+                success: false,
+                instance_id: resp.instance_id,
+                deduplicated: resp.deduplicated,
+                error: Some(rejection.to_string()),
+            }),
         }
-
-        // A refusal naming a missing image is reported as such rather than as a
-        // generic failure: callers retry the former by re-registering the image.
-        if !resp.success
-            && let Some(ref error) = resp.error
-            && error.contains("not found")
-        {
-            return Err(EnvironmentError::ImageNotFound(error.clone()));
-        }
-
-        Ok(StartInstanceResult {
-            success: resp.success,
-            instance_id: resp.instance_id,
-            deduplicated: resp.deduplicated,
-            error: resp.error,
-        })
     }
 
     /// Stop a running instance.
