@@ -20,6 +20,7 @@ pub mod bindings;
 pub mod connection_resolver_host;
 pub mod dispatcher;
 pub mod engine;
+pub mod execution_host;
 pub(crate) mod host_io;
 pub mod host_state;
 pub mod isolated_tasks;

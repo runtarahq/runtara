@@ -17,7 +17,13 @@ pub use runtara_workflow_wit::LIFECYCLE_INTERFACE_NAME;
 
 /// WIT mirror of `lifecycle.error-info` (field-for-field the agent error).
 #[derive(
-    Debug, Clone, PartialEq, Eq, wasmtime::component::ComponentType, wasmtime::component::Lift,
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    wasmtime::component::ComponentType,
+    wasmtime::component::Lift,
+    wasmtime::component::Lower,
 )]
 #[component(record)]
 pub struct WorkflowErrorInfo {
@@ -33,7 +39,13 @@ pub struct WorkflowErrorInfo {
 
 /// WIT mirror of `lifecycle.signal-wait`.
 #[derive(
-    Debug, Clone, PartialEq, Eq, wasmtime::component::ComponentType, wasmtime::component::Lift,
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    wasmtime::component::ComponentType,
+    wasmtime::component::Lift,
+    wasmtime::component::Lower,
 )]
 #[component(record)]
 pub struct SignalWait {
@@ -45,7 +57,13 @@ pub struct SignalWait {
 
 /// WIT mirror of `lifecycle.wake`.
 #[derive(
-    Debug, Clone, PartialEq, Eq, wasmtime::component::ComponentType, wasmtime::component::Lift,
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    wasmtime::component::ComponentType,
+    wasmtime::component::Lift,
+    wasmtime::component::Lower,
 )]
 #[component(variant)]
 pub enum WorkflowWake {
@@ -64,7 +82,13 @@ pub enum WorkflowWake {
 /// carries a wake-SET (re-invoke on ANY; sequential lowering emits
 /// singletons).
 #[derive(
-    Debug, Clone, PartialEq, Eq, wasmtime::component::ComponentType, wasmtime::component::Lift,
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    wasmtime::component::ComponentType,
+    wasmtime::component::Lift,
+    wasmtime::component::Lower,
 )]
 #[component(variant)]
 pub enum WorkflowOutcome {

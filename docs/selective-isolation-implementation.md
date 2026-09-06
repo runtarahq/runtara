@@ -134,10 +134,47 @@ remain part of the final local-server gate.
 This connects preparation and ownership, not the generated execution imports or
 root-to-child invocation context. No production backend default has changed.
 
+### Guest execution resource ABI and host imports
+
+The canonical `runtara:workflow-execution/tasks@0.1.0` interface now defines
+owned task resources, start/cancel, asynchronous join/release, relative invocation
+context and typed completion/error/suspension/cancellation/timeout/trap outcomes.
+The WIT parser validates its resource and async shapes; all **16 WIT tests passed**.
+
+`execution_host` provides the generic linker adapter over `IsolatedTasks`. An
+embedding-owned launcher resolves prepared bindings and validates relative context;
+guests cannot install that launcher. Task handles belong to the parent execution
+context and are checked again at the host table boundary. Joining preserves error
+retry metadata and full wake sets. Explicit release cancels/reaps work while the
+resource remains owned; resource-drop cancels/reaps and returns its handle quota.
+Store destruction requests cancellation for handles the guest failed to drop;
+the embedding must still await context shutdown before releasing the parent.
+
+A separate handle quota closes a gap between task release and resource-drop:
+released-but-undropped resources cannot grow the host table indefinitely. Tests
+confirm capacity is returned only when the handle itself is destroyed.
+
+Nine focused tests passed, including parent-WASM control flow that starts a pending
+child, joins a sibling, cancels/joins the pending child and executes its own recovery.
+A real-component variant runs the actual HTTP and random-double agents and keeps
+the HTTP endpoint hanging until parent WASM cancels it. Other cases cover resource
+destruction, parent traps, wrong-parent handles, unavailable/closed/full contexts,
+invalid binding/context errors, owned bytes, retry metadata and multi-entry wake sets.
+The tests also establish the required canonical borrow cleanup for forwarding shims.
+The complete component-host suite with both integration/PoC features passed
+**96 tests**, with one manual benchmark ignored; focused all-target Clippy passed
+for both component-host and the WIT crate.
+
+This is the execution ABI and its host adapter. The production root Store still
+needs context wiring, a real scoped launcher/runtime adapter, and descendant
+cleanup before a parent task publishes its result. Aggregate input/transport/guest
+memory accounting is also still required; the handle quota does not replace it.
+No DSL backend or production linker default has been enabled by this chunk.
+
 ## Remaining required work
 
 - P0: add explicit legacy/isolated differential selection and coverage counters.
-- P1: versioned execution imports, root/child context wiring, aggregate guest
+- P1: production root/child context wiring, aggregate input/transport/guest
   resource reservations and tree teardown.
 - P2: sequential/parallel Agent call backend and every AI auxiliary invocation,
   preserving package state eligibility and existing invocation semantics.

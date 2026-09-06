@@ -127,18 +127,24 @@ the child invocation, never the root workflow.
 
 ## Generic execution interface and ownership
 
-Proposed private, versioned execution imports:
+Private, versioned execution imports:
 
 ```text
 start(package-local artifact, entry, input, invocation context) → task resource
-request-cancel(task, command identity) → accepted | already-terminal
+request-cancel(task) → requested | already-requested | already-terminal
 join(task) → completed(bytes) | failed(error-info) | suspended(wakes)
-             | cancelled(reason) | trapped(detail)
+             | cancelled | timed-out | trapped(detail)
 release(task)
 ```
 
-The exact WIT must be validated against the pinned component async implementation
-before freezing it. `join` must be awaitable from existing async-typed exports.
+The initial [execution WIT](../crates/runtara-workflow-wit/wit/execution/runtara-workflow-execution.wit)
+and host imports have been validated against the pinned component async implementation
+using real parent-WASM control flow and built HTTP/utils agents. `join` and `release`
+are awaitable from async-typed exports. Durable command identity and deduplication
+belong to the execution-control coordinator below; the live task import itself
+operates on an already resolved, owned resource. This ABI proof is not production
+compiler/context wiring or persistent command handling.
+
 Use resource ownership and invocation generations, not guest-chosen integer IDs
 that can address another tenant's tasks. Invalid, stale and released handles have
 defined errors; cancellation and release are idempotent at the command layer.
