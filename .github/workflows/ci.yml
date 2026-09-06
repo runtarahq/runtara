@@ -630,7 +630,7 @@ jobs:
           test "$meta_count" -eq "$expected"
 
       - name: Run dispatcher integration tests (incl. full-bundle drift detector)
-        run: cargo test -p runtara-component-host --features component-integration-tests --tests
+        run: cargo test -p runtara-component-host --features component-integration-tests,isolated-step-poc --tests
 
       # Direct WASM smoke: use the staged stdlib/runtime/agent component
       # bundle, then compile direct workflow fixtures, compose them in-process

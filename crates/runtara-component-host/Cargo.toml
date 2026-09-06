@@ -11,6 +11,8 @@ categories = ["wasm"]
 
 [features]
 component-integration-tests = []
+# Test-only experiment: guest-owned orchestration across disposable Stores.
+isolated-step-poc = []
 
 [[test]]
 name = "capability_fixtures"

@@ -28,6 +28,9 @@ pub mod registry;
 pub mod runtime_host;
 pub mod workflow;
 
+#[cfg(all(test, feature = "isolated-step-poc"))]
+mod isolated_step_poc;
+
 pub use bindings::exports::runtara::agent::capabilities::ErrorInfo;
 pub use connection_resolver_host::{CONNECTION_RESOLVER_INTERFACE_NAME, ConnectionResolverHost};
 pub use dispatcher::{
