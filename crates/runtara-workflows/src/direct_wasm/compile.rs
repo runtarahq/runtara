@@ -31,6 +31,7 @@ mod ai_agent_loop;
 mod artifact_metadata;
 mod branch_parallel;
 mod checkpoint;
+mod cooperative_wait;
 mod core_imports;
 mod core_module;
 mod debug;
@@ -147,9 +148,9 @@ world command {
 }
 "#;
 const AGENT_TYPES_WIT: &str = include_str!("../../../runtara-agent-wit/wit/runtara-agent.wit");
-/// Host-satisfied concurrent timer for in-window retry backoff
-///. Imported by the workflow world only
-/// when a parallel Split window exists; the wac trailing `...` bubbles it to
+/// Host-satisfied concurrent timer for retry backoff and lifecycle polling.
+/// Imported for parallel windows and runtime-backed Agent waits;
+/// the wac trailing `...` bubbles it to
 /// the composed component where the executor binds it func_wrap_concurrent.
 const HOST_IO_TIMERS_WIT: &str = "\
 package runtara:host-io@0.1.0;
@@ -1690,7 +1691,7 @@ fn build_direct_component_resolve_scoped(
                 .map_err(component_error)?;
         }
     }
-    if !parallel_pools.is_empty() {
+    if !parallel_pools.is_empty() || (!omit_runtime && !agents.is_empty()) {
         resolve
             .push_str("runtara-host-io-timers.wit", HOST_IO_TIMERS_WIT)
             .map_err(component_error)?;
@@ -1738,7 +1739,7 @@ fn build_direct_component_resolve_scoped(
     if has_connections {
         workflow_wit.push_str("    import runtara:connection-resolver/resolver@0.1.0;\n");
     }
-    if !parallel_pools.is_empty() {
+    if !parallel_pools.is_empty() || (!omit_runtime && !agents.is_empty()) {
         workflow_wit.push_str("    import runtara:host-io/timers@0.1.0;\n");
     }
     for agent in agents {

@@ -5054,6 +5054,7 @@ dependencies = [
 name = "runtara-workflows"
 version = "8.9.9"
 dependencies = [
+ "anyhow",
  "async-trait",
  "base64 0.22.1",
  "minijinja",

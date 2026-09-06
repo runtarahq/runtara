@@ -353,7 +353,7 @@ fn emit_world_wit(
     if has_connections {
         out.push_str("    import runtara:connection-resolver/resolver@0.1.0;\n");
     }
-    if !parallel_pools.is_empty() {
+    if !parallel_pools.is_empty() || (!omit_runtime && !agents.is_empty()) {
         out.push_str("    import runtara:host-io/timers@0.1.0;\n");
     }
     for agent in agents {
@@ -546,6 +546,7 @@ package runtara:workflow@0.1.0;
 world workflow {
     import runtara:workflow-stdlib/json@0.1.0;
     import runtara:workflow-runtime/runtime@0.4.0;
+    import runtara:host-io/timers@0.1.0;
     import runtara:agent-crypto/capabilities@0.4.0;
     import runtara:agent-object-model/capabilities@0.4.0;
     export runtara:workflow-lifecycle/lifecycle@0.2.0;

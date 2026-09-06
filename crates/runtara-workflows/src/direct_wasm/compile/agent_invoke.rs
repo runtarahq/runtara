@@ -9,8 +9,8 @@
 //! inside `input` under `_connection`: `emit_agent_connection_input` resolves it
 //! (a `connection_ref` wins over the literal, id-only) and rewrites the input in
 //! place before the call, uniformly for every agent kind (primary, memory,
-//! MCP-tool). Capability-id and input `(ptr, len)` are pushed directly; the ≤16
-//! flat params never spill to the indirect args form.
+//! MCP-tool). The base call's four flat input parameters fit async lowering;
+//! retained scoped invocations use the existing indirect-argument shim.
 
 use wasm_encoder::{Function as WasmFunction, Instruction};
 
@@ -41,6 +41,14 @@ pub(super) fn emit_agent_invoke(
     source_len_local: u32,
     site: AgentInvocationSite,
 ) {
+    super::cooperative_wait::emit_poll_before_call(body, indices);
+    let async_invoke = indices
+        .agent_invokes
+        .iter()
+        .find(|(_, candidate)| candidate.function_index == invoke.function_index)
+        .and_then(|(agent, _)| indices.agent_invokes_async.get(agent))
+        .expect("every Agent has a standard async lowering");
+
     // Inject the connection into the input under `_connection` — the single
     // connection channel. A connectionless agent is a no-op.
     emit_agent_connection_input(
@@ -80,7 +88,8 @@ pub(super) fn emit_agent_invoke(
         }
     }
     push_retptr_arg(body);
-    body.instruction(&Instruction::Call(invoke.function_index));
+    body.instruction(&Instruction::Call(async_invoke.function_index));
+    super::cooperative_wait::emit_await_call(body, indices);
 
     // A workflow-agent child shares this instance's runtime host, so a
     // lifecycle suspend (pause/shutdown ack) can fire INSIDE the child; the

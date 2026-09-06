@@ -179,16 +179,13 @@ pub(super) fn emit_direct_core_module(
         }
     }
 
-    // Parallel-Split extra CORE imports (Phase 3):
-    // the CM-async waitable builtins from the legacy `$root` module, plus an
-    // `[async-lower]invoke` per agent referenced by an eligible parallel
-    // window. Emitted only when such a window exists, so sequential-only
-    // workflows keep a byte-identical import section. wit-component's legacy
-    // name mangling turns these into `canon lower ... async` / the waitable
-    // canon builtins at encode time.
-    let parallel_pools =
-        super::split_parallel::parallel_agent_pools(&config.static_data, &config.run_plan);
-    if !parallel_pools.is_empty() {
+    // Standard async calls for every Agent, including sequential calls. Pools
+    // continue to determine component instance count, not cancellation support.
+    let has_agents = world
+        .imports
+        .keys()
+        .any(|name| agent_id_for_import(resolve, Some(name)).is_some());
+    if has_agents {
         let builtin = |field: &str,
                        params: &[ValType],
                        results: &[ValType],
@@ -250,6 +247,15 @@ pub(super) fn emit_direct_core_module(
             &mut imports,
             &mut imported_function_count,
         ));
+        import_indices.subtask_cancel = Some(builtin(
+            "[subtask-cancel]",
+            &[ValType::I32],
+            &[ValType::I32],
+            &mut types,
+            &mut type_count,
+            &mut imports,
+            &mut imported_function_count,
+        ));
         import_indices.subtask_drop = Some(builtin(
             "[subtask-drop]",
             &[ValType::I32],
@@ -260,9 +266,13 @@ pub(super) fn emit_direct_core_module(
             &mut imported_function_count,
         ));
 
-        // Concurrent backoff timer (§3.4): async-lowered `sleep` from the
+        // Concurrent polling/backoff timer: async-lowered `sleep` from the
         // host-io timers interface. Params ≤4 flats, empty result → no retptr;
         // returns the packed subtask status.
+        if world
+            .imports
+            .keys()
+            .any(|name| resolve.name_world_key(name) == "runtara:host-io/timers@0.1.0")
         {
             let type_index = {
                 let index = type_count;
@@ -279,18 +289,6 @@ pub(super) fn emit_direct_core_module(
             imported_function_count += 1;
         }
 
-        let is_pool_member = |agent_id: &str| -> bool {
-            if parallel_pools.contains_key(agent_id) {
-                return true;
-            }
-            // "<base>-par<n>" phantom member of a pooled base?
-            agent_id.rfind("-par").is_some_and(|split_at| {
-                let (base, suffix) = agent_id.split_at(split_at);
-                suffix[4..].parse::<u32>().ok().is_some_and(|member| {
-                    parallel_pools.get(base).is_some_and(|pool| member < *pool)
-                })
-            })
-        };
         for (name, import) in &world.imports {
             let WorldItem::Interface { id, .. } = import else {
                 continue;
@@ -298,9 +296,6 @@ pub(super) fn emit_direct_core_module(
             let Some(agent_id) = agent_id_for_import(resolve, Some(name)) else {
                 continue;
             };
-            if !is_pool_member(&agent_id) {
-                continue;
-            }
             for function in resolve.interfaces[*id].functions.values() {
                 if function.name != "invoke" {
                     continue;
@@ -738,6 +733,8 @@ pub(super) const CANONICAL_LOCAL_GROUPS: &[(u32, ValType)] = &[
     (2, ValType::I64),
     (2, ValType::I32),
     (2, ValType::I64),
+    // 142-145: sequential cooperative wait handle, set, timer, packed status.
+    (4, ValType::I32),
 ];
 
 /// Drop `n` leading local slots from `groups`, splitting (never merging) the

@@ -5418,7 +5418,7 @@ fn direct_core_lowers_non_durable_agent_call() {
         .expect("Agent core module validates");
 
     let (actual_module, actual_name) = resolve.wasm_import_name(
-        ManglingAndAbi::Standard32,
+        ManglingAndAbi::Legacy(wit_parser::LiftLowerAbi::AsyncCallback),
         WasmImport::Func {
             interface: Some(interface_key),
             func: function,
@@ -5672,7 +5672,7 @@ fn direct_core_lowers_non_durable_agent_retry_loop() {
                             {
                                 record_retry_attempt_index = Some(next_function_index);
                             }
-                            (module, "invoke")
+                            (module, "[async-lower]invoke")
                                 if module.contains("runtara:agent-utils/capabilities") =>
                             {
                                 agent_invoke_index = Some(next_function_index);
@@ -5945,7 +5945,7 @@ fn direct_core_lowers_durable_agent_no_retry_checkpoint_path() {
                                 saw_handle_checkpoint_signal_import = true;
                                 handle_checkpoint_signal_index = Some(next_function_index);
                             }
-                            (module, "invoke")
+                            (module, "[async-lower]invoke")
                                 if module.contains("runtara:agent-utils/capabilities") =>
                             {
                                 agent_invoke_index = Some(next_function_index);
@@ -6100,6 +6100,7 @@ fn direct_core_checkpoint_replay_skips_agent_invoke_and_checkpoint_save() {
         CallAgentInvoke,
         CallCheckpoint,
         If,
+        Block,
         Else,
         End,
         LoadCachedPtr,
@@ -6117,7 +6118,7 @@ fn direct_core_checkpoint_replay_skips_agent_invoke_and_checkpoint_save() {
             let mut else_index = None;
             for (index, op) in ops.iter().enumerate().skip(if_index + 1) {
                 match op {
-                    ReplayOp::If => depth += 1,
+                    ReplayOp::If | ReplayOp::Block => depth += 1,
                     ReplayOp::Else if depth == 1 => else_index = Some(index),
                     ReplayOp::End => {
                         depth -= 1;
@@ -6171,7 +6172,7 @@ fn direct_core_checkpoint_replay_skips_agent_invoke_and_checkpoint_save() {
                             {
                                 checkpoint_index = Some(next_function_index);
                             }
-                            (module, "invoke")
+                            (module, "[async-lower]invoke")
                                 if module.contains("runtara:agent-utils/capabilities") =>
                             {
                                 agent_invoke_index = Some(next_function_index);
@@ -6202,6 +6203,9 @@ fn direct_core_checkpoint_replay_skips_agent_invoke_and_checkpoint_save() {
                                 ops.push(ReplayOp::CallCheckpoint);
                             }
                             Operator::If { .. } => ops.push(ReplayOp::If),
+                            Operator::Block { .. } | Operator::Loop { .. } => {
+                                ops.push(ReplayOp::Block)
+                            }
                             Operator::Else => ops.push(ReplayOp::Else),
                             Operator::End => ops.push(ReplayOp::End),
                             Operator::I32Load { memarg }
@@ -6405,7 +6409,7 @@ fn direct_core_lowers_durable_agent_retry_loop() {
                                 saw_record_retry_attempt_import = true;
                                 record_retry_attempt_index = Some(next_function_index);
                             }
-                            (module, "invoke")
+                            (module, "[async-lower]invoke")
                                 if module.contains("runtara:agent-utils/capabilities") =>
                             {
                                 agent_invoke_index = Some(next_function_index);
@@ -6841,7 +6845,7 @@ fn direct_core_lowers_non_durable_agent_connection_call() {
         "invoke",
     );
     let (actual_module, actual_name) = resolve.wasm_import_name(
-        ManglingAndAbi::Standard32,
+        ManglingAndAbi::Legacy(wit_parser::LiftLowerAbi::AsyncCallback),
         WasmImport::Func {
             interface: Some(interface_key),
             func: function,
@@ -10962,10 +10966,10 @@ fn direct_compile_parallel_split_emits_async_lowered_invoke() {
     assert!(has("[async-lower]invoke"), "async-lowered invoke missing");
 }
 
-/// The SAME graph without `parallelism` stays on the sequential lowering:
-/// no CM-async imports appear (byte-preservation of the sequential path).
+/// Sequential scheduling also uses standard async calls so an individual
+/// operation can cooperate with cancellation.
 #[test]
-fn direct_compile_sequential_split_has_no_async_imports() {
+fn direct_compile_sequential_split_uses_standard_cancellable_calls() {
     let temp = tempfile::tempdir().expect("tempdir");
     let mut graph = fixture("split_parallel");
     let Some(runtara_dsl::Step::Split(split)) = graph.steps.get_mut("split") else {
@@ -10990,13 +10994,10 @@ fn direct_compile_sequential_split_has_no_async_imports() {
         wasm.windows(needle.len())
             .any(|window| window == needle.as_bytes())
     };
+    assert!(has("[waitable-set-new]"), "sequential waitable set missing");
     assert!(
-        !has("[waitable-set-new]"),
-        "sequential compile grew async imports"
-    );
-    assert!(
-        !has("[async-lower]invoke"),
-        "sequential compile grew async lowers"
+        has("[async-lower]invoke"),
+        "sequential async invoke missing"
     );
 }
 

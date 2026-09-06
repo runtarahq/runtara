@@ -1,10 +1,10 @@
 # Cooperative cancellation implementation record
 
-Status: HTTP Agent cancellation and read-only lifecycle observation, 2026-09-06. Governing contract:
+Status: sequential emitted cancellation, 2026-09-06. Governing contract:
 [cooperative cancellation plan](selective-isolation-plan.md). Update the existing
 implementation directly; no new product feature flags or alternate backend.
-Emitted workflow signal/timeout integration and the remaining plan gates are
-still incomplete.
+Parallel/nested cancellation, timeouts and the remaining plan gates are still
+incomplete.
 
 ## P0: initial ABI inventory
 
@@ -226,3 +226,75 @@ and terminal publication races remain unqualified. In particular, the existing
 core acknowledgement policy can still apply Cancel to an already-terminal
 instance; the plan's accepted-completion rule needs explicit implementation and
 compatibility tests. No claim of completed G4/G7 is made by read-only observation.
+
+## Sequential generated waits
+
+The direct emitter now lowers sequential Agent calls asynchronously, including
+auxiliary AiAgent calls that use the same invocation helper. It emits standard
+waitable sets, `subtask.cancel` and `subtask.drop` into the normal composed
+artifact. The existing instance pools still determine component multiplicity.
+No new selector, task resource, per-call Store or isolated package is involved.
+Pure workflow-agent artifacts that omit the runtime keep that mode; they can
+await component completion without importing a lifecycle polling timer.
+
+For runtime-backed sequential calls, WASM polls before launch and includes the
+existing concurrent clock import in its wait. Polls/heartbeats recur on a
+one-second timer while a call remains pending. Agent results at address 0 and
+signal/error results at 128 have separate scratch regions, so async completion
+cannot corrupt signal observation. Canonical discriminants are read as bytes,
+without assuming their padding is zero. The pending wait handles use guest
+locals; strings returned by runtime calls still use canonical ABI allocation.
+
+A completion event accepted by the wait exits without another signal poll. Once
+WASM observes root Cancel, it detaches the Agent handle, requests standard
+cancellation, waits for resolution, drops the handle/set and acknowledges the
+exact command. The callee may resolve as returned or cancelled; either resolution
+releases the subtask, while the selected root intent stops ordinary execution.
+The generated early return bypasses automatic retries and step `onError` paths.
+A rejected acknowledgement traps rather than reporting completed cancellation.
+Signal/heartbeat errors also clean up the pending call before returning failure.
+Synchronous cancellation may wait indefinitely for an uncooperative callee;
+whole-run emergency supervision is still required.
+
+Added [`cooperative_workflow_cancellation`](../crates/runtara-workflows/tests/cooperative_workflow_cancellation/mod.rs)
+to the existing emitted-workflow integration suite:
+
+| Test | Evidence |
+|---|---|
+| `emitted_cancel_before_agent_launch_does_not_send_http` | A pre-existing root intent is acknowledged without sending an HTTP request. |
+| `emitted_cancel_interrupts_pending_headers_without_retry_or_recovery` | The endpoint never supplies headers; generated WASM stops HTTP and the endpoint observes closure before acknowledgement publication. |
+| `emitted_cancel_interrupts_partial_body_without_retry_or_recovery` | The endpoint sends headers and an incomplete body, then requests cancellation; closure precedes acknowledgement. This does not independently observe the exact host body-read phase. |
+| `emitted_signal_poll_failure_cleans_up_http_before_failing` | A signal transport error after HTTP starts closes the pending connection, preserves the error and does not acknowledge a command or enter recovery. |
+
+The fixtures use the normally built HTTP Agent with a five-minute capability
+timeout and a ten-second whole-run test watchdog. The endpoint cannot complete
+the blocked response. Retries and `onError` are enabled to catch unintended
+continuation. Artifact checks require no scoped Agent adapters, invocation
+inventory or superseded tasks import. The signal source is a controlled
+`RuntimeHost`; this is emitted DSL plus real host I/O, not API/server E2E.
+
+Verification: 573 compiler unit tests passed. The full emitted suite passed
+253 tests with two pre-existing manual benchmarks ignored; a subsequent focused
+run passed all four new cases, including the added transport-error case (254
+distinct integration tests across the two runs). Affected-crate all-target
+Clippy with `direct-wasm-integration-tests` and `-D warnings` passed. Compiler
+inspection assertions now follow the async invoke, and the replay control-flow
+inspection counts nested blocks/loops so it still proves cache hits skip calls
+and fresh results checkpoint after invocation. Guest sources/WIT were unchanged
+in this stage; tests used the normal release components built in the preceding
+stage. Commands:
+
+```sh
+cargo test -p runtara-workflows --lib
+cargo test -p runtara-workflows --features direct-wasm-integration-tests --test direct_wasm_execute
+cargo test -p runtara-workflows --features direct-wasm-integration-tests --test direct_wasm_execute cooperative_workflow_cancellation
+cargo clippy -p runtara-workflows --all-targets --features direct-wasm-integration-tests -- -D warnings
+```
+
+Remaining: replace the parallel drains/scheduler's consuming signal checks and
+cancel every active peer before root acknowledgement; qualify sequential waits
+inside those schedulers, pause/shutdown observation and superseding commands;
+migrate the other Agent/export bindings and compiled workflow-agent cancellation
+delivery; implement deadline selection, independent emergency grace and terminal
+race rules; then complete persistence/server E2E, size/timing and capacity gates.
+Sequential helpers do not establish cancellation of parallel or nested scopes.

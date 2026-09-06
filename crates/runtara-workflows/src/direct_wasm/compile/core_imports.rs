@@ -30,6 +30,7 @@ pub(super) struct DirectCoreImportIndices {
     runtime_breakpoint_pause: Option<u32>,
     runtime_heartbeat: Option<u32>,
     runtime_instance_id: Option<u32>,
+    runtime_poll_signal: Option<u32>,
     runtime_is_cancelled: Option<u32>,
     runtime_check_signals: Option<u32>,
     runtime_poll_custom_signal: Option<u32>,
@@ -155,6 +156,7 @@ pub(super) struct DirectCoreImportIndices {
     pub(super) waitable_set_wait: Option<u32>,
     pub(super) waitable_set_drop: Option<u32>,
     pub(super) waitable_join: Option<u32>,
+    pub(super) subtask_cancel: Option<u32>,
     pub(super) subtask_drop: Option<u32>,
     pub(super) timer_sleep_async: Option<u32>,
     pub(super) agent_invokes_async: BTreeMap<String, DirectAgentInvokeImport>,
@@ -210,6 +212,11 @@ impl DirectCoreImportIndices {
             runtime_instance_id: require_runtime(
                 self.runtime_instance_id,
                 "runtime.instance-id",
+                omit_runtime,
+            )?,
+            runtime_poll_signal: require_runtime(
+                self.runtime_poll_signal,
+                "runtime.poll-signal",
                 omit_runtime,
             )?,
             runtime_is_cancelled: require_runtime(
@@ -630,6 +637,7 @@ impl DirectCoreImportIndices {
             waitable_set_wait: self.waitable_set_wait,
             waitable_set_drop: self.waitable_set_drop,
             waitable_join: self.waitable_join,
+            subtask_cancel: self.subtask_cancel,
             subtask_drop: self.subtask_drop,
             timer_sleep_async: self.timer_sleep_async,
             agent_invokes_async: self.agent_invokes_async,
@@ -659,6 +667,7 @@ pub(super) struct DirectCoreFunctionIndices {
     pub(super) runtime_breakpoint_pause: u32,
     pub(super) runtime_heartbeat: u32,
     pub(super) runtime_instance_id: u32,
+    pub(super) runtime_poll_signal: u32,
     pub(super) runtime_is_cancelled: u32,
     pub(super) runtime_check_signals: u32,
     pub(super) runtime_poll_custom_signal: u32,
@@ -775,13 +784,12 @@ pub(super) struct DirectCoreFunctionIndices {
     pub(super) stdlib_step_debug_end: u32,
     pub(super) stdlib_step_debug_error: u32,
     pub(super) agent_invokes: BTreeMap<String, DirectAgentInvokeImport>,
-    /// CM-async builtins — present only when the plan contains an eligible
-    /// parallel Split (kept `Option` so sequential-only workflows emit
-    /// byte-identical import sections).
+    /// Standard async builtins, present when the workflow invokes Agents.
     pub(super) waitable_set_new: Option<u32>,
     pub(super) waitable_set_wait: Option<u32>,
     pub(super) waitable_set_drop: Option<u32>,
     pub(super) waitable_join: Option<u32>,
+    pub(super) subtask_cancel: Option<u32>,
     pub(super) subtask_drop: Option<u32>,
     pub(super) timer_sleep_async: Option<u32>,
     pub(super) agent_invokes_async: BTreeMap<String, DirectAgentInvokeImport>,
@@ -985,6 +993,8 @@ pub(super) fn import_core_function(
         import_indices.runtime_heartbeat = Some(function_index);
     } else if is_runtime_import(resolve, interface, function, "instance-id") {
         import_indices.runtime_instance_id = Some(function_index);
+    } else if is_runtime_import(resolve, interface, function, "poll-signal") {
+        import_indices.runtime_poll_signal = Some(function_index);
     } else if is_runtime_import(resolve, interface, function, "is-cancelled") {
         import_indices.runtime_is_cancelled = Some(function_index);
     } else if is_runtime_import(resolve, interface, function, "check-signals") {
