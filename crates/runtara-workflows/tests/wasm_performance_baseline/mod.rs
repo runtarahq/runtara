@@ -1,5 +1,6 @@
 //! Manual release baseline for real emitted workflow artifacts, not timing gates.
 use super::*;
+mod comparison;
 use runtara_component_host::{EngineConfig, InvokeExit, WorkflowExecutor, WorkflowRunSpec};
 use runtara_workflows::ChildWorkflowInput;
 use serde_json::json;

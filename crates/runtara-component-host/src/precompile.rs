@@ -488,7 +488,29 @@ pub fn precompile_artifact(request: &PrecompileRequest) -> Result<PrecompiledCom
     let source_digest = digest(&component);
     let engine =
         build_engine(&EngineConfig::default()).context("build precompile worker engine")?;
-    let serialized_component = compiled_package::precompile(&engine, &component)?;
+    precompile_source(request, &engine, &component, source_digest)
+}
+
+/// Read, hash and precompile with an explicitly configured engine. This uses
+/// the same bounded artifact/package encoding and integrity fields as the worker,
+/// while allowing controlled cache settings and a reused engine in measurements.
+/// It is synchronous; callers needing cancellation must still use a worker process.
+pub fn precompile_artifact_with_engine(
+    request: &PrecompileRequest,
+    engine: &Engine,
+) -> Result<PrecompiledComponent> {
+    let component = read_bounded_artifact(request.artifact_path())?;
+    let source_digest = digest(&component);
+    precompile_source(request, engine, &component, source_digest)
+}
+
+fn precompile_source(
+    request: &PrecompileRequest,
+    engine: &Engine,
+    component: &[u8],
+    source_digest: [u8; PRECOMPILE_NONCE_BYTES],
+) -> Result<PrecompiledComponent> {
+    let serialized_component = compiled_package::precompile(engine, component)?;
     ensure!(
         !serialized_component.is_empty(),
         "wasmtime returned an empty serialized component"
@@ -502,7 +524,7 @@ pub fn precompile_artifact(request: &PrecompileRequest) -> Result<PrecompiledCom
     Ok(PrecompiledComponent {
         nonce: request.nonce(),
         source_digest,
-        engine_fingerprint: precompile_engine_fingerprint(&engine),
+        engine_fingerprint: precompile_engine_fingerprint(engine),
         serialized_digest: digest(&serialized_component),
         serialized_component,
     })
@@ -939,6 +961,36 @@ mod tests {
         // `run_precompile_worker` through in-memory private buffers.
         unsafe { deserialize_trusted_precompiled_component(&engine, &request, &response) }
             .expect("deserialize trusted precompile output");
+    }
+
+    #[test]
+    fn explicit_precompile_engine_controls_configuration_and_keeps_integrity_checks() {
+        let (_dir, path, source) = component_file();
+        let request = PrecompileRequest::for_artifact(test_nonce(), &path).unwrap();
+        let engine = build_engine(&EngineConfig {
+            cache_dir: None,
+            enable_epoch_interruption: false,
+        })
+        .unwrap();
+        let compiled = precompile_artifact_with_engine(&request, &engine).unwrap();
+        assert_eq!(compiled.source_digest(), digest(&source));
+        assert_eq!(
+            compiled.engine_fingerprint(),
+            precompile_engine_fingerprint(&engine)
+        );
+        let response = PrecompileResponse::Success(compiled);
+        // SAFETY: this response was produced in this process by the function above.
+        unsafe { deserialize_trusted_precompiled_package(&engine, &request, &response) }.unwrap();
+        let other = build_engine(&EngineConfig {
+            cache_dir: None,
+            enable_epoch_interruption: true,
+        })
+        .unwrap();
+        // SAFETY: same trusted response; incompatible engine must be rejected.
+        assert!(
+            unsafe { deserialize_trusted_precompiled_package(&other, &request, &response) }
+                .is_err()
+        );
     }
 
     #[test]

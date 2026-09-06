@@ -359,6 +359,46 @@ a missing worktree build-output link caused one initial fixture-location failure
 and was restored before that successful run. Focused all-target workflow Clippy
 passed with the integration feature and `-D warnings`.
 
+### Paired measurement harness
+
+A separate ignored `workflow_performance_comparison` test uses the same 11 workload
+fixtures as the historical baseline. It selects the actual composed Agent adapter,
+uses the production bounded worker package codec with an explicitly cache-disabled
+engine, and retains complete raw/gzip/native package sizes, preparation phases,
+fresh full executions, instrumented counter checks and checkpoint replay samples.
+Embed remains inline in this candidate; Finish-only graphs are explicit controls.
+
+The explicit-engine precompiler shares the default worker's bounded reading,
+package encoding, integrity fields and trusted deserialization contract. The
+worker entry still creates its default engine. A configuration-mismatch regression
+test proves the new entry honors its supplied engine. It does not make synchronous
+compilation cancellable; the process worker remains necessary for that boundary.
+
+Run the release harness serially with alternating first backends, for example:
+
+```sh
+RUSTC_WRAPPER= RUNTARA_BENCH_FIRST=legacy cargo test --release -p runtara-workflows \
+  --features direct-wasm-integration-tests --test direct_wasm_execute \
+  workflow_performance_comparison -- --ignored --nocapture > /tmp/isolation-comparison-1.log 2>&1
+RUSTC_WRAPPER= RUNTARA_BENCH_FIRST=isolated-agent cargo test --release -p runtara-workflows \
+  --features direct-wasm-integration-tests --test direct_wasm_execute \
+  workflow_performance_comparison -- --ignored --nocapture > /tmp/isolation-comparison-2.log 2>&1
+```
+
+Use `scripts/research/workflow_comparison_report.py` with `--logs`, `--output`,
+`--markdown`, `--date`, `--source-revision` and `--machine` to validate and render
+paired results. Commit implementation before measured runs; revision, executable
+hash, dependency hashes, configuration, workloads, sample summaries and isolation
+counts are checked before reports can be combined. Preserve the historical
+baseline separately because it used a different preparation timer boundary.
+
+The debug smoke test executes both backends for all 11 workloads; it is correctness
+evidence only. Release runs use 100 samples for small cases and 30 for large cases,
+with separate instrumentation runs and three compilation samples. These remain
+exploratory; they do not provide the required production tail evidence. Direct
+Agent/parent-step spans, aggregate memory, server persistence and cancellation
+measurements remain pending.
+
 ## Remaining required work
 
 - P0: extend explicit differential selection and invocation-count evidence to all
