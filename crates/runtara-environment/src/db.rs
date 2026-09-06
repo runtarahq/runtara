@@ -8,6 +8,8 @@
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 
+use crate::instance_repository::ListInstancesOptions;
+
 /// Instance record from the database (matches Core's schema).
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct Instance {
@@ -160,35 +162,6 @@ pub async fn get_instance_full(
 // are delegated to the Core Persistence trait. The atomic start claim below is
 // the narrow exception: it must write Core's instance row and Environment's
 // image binding as one database transaction. Join reads remain here too.
-
-/// Options for listing instances.
-#[derive(Debug, Clone, Default)]
-pub struct ListInstancesOptions {
-    /// Filter by tenant ID.
-    pub tenant_id: Option<String>,
-    /// Filter by status — a row matches if it holds any one of these. `None`
-    /// (or an empty list) leaves the status unfiltered.
-    pub statuses: Option<Vec<String>>,
-    /// Filter by image ID (exact match).
-    pub image_id: Option<String>,
-    /// Filter by image name prefix (e.g., `"workflow_id:"` matches every
-    /// version and artifact of that workflow).
-    pub image_name_prefix: Option<String>,
-    /// Filter by created_at >= value.
-    pub created_after: Option<DateTime<Utc>>,
-    /// Filter by created_at < value.
-    pub created_before: Option<DateTime<Utc>>,
-    /// Filter by finished_at >= value.
-    pub finished_after: Option<DateTime<Utc>>,
-    /// Filter by finished_at < value.
-    pub finished_before: Option<DateTime<Utc>>,
-    /// Order by field and direction.
-    pub order_by: Option<String>,
-    /// Maximum results to return.
-    pub limit: i64,
-    /// Pagination offset.
-    pub offset: i64,
-}
 
 /// Status filter as a bindable array. An empty list means "no status filter"
 /// rather than "match nothing", so callers can pass a filtered/deduped vector
@@ -407,23 +380,6 @@ pub async fn get_instance_image_with_env(
 // Tenant Metrics
 // ============================================================================
 
-/// Options for tenant metrics aggregation.
-#[derive(Debug, Clone)]
-pub struct TenantMetricsOptions {
-    /// Tenant ID.
-    pub tenant_id: String,
-    /// Start of time range.
-    pub start_time: DateTime<Utc>,
-    /// End of time range.
-    pub end_time: DateTime<Utc>,
-    /// Bucket width in seconds.
-    ///
-    /// A plain number rather than an enum: the aggregation query only ever needs
-    /// the width, and the named granularities callers speak in (`hourly`,
-    /// `daily`) belong at the API boundary that has to parse them.
-    pub bucket_seconds: u32,
-}
-
 /// Aggregated metrics bucket from database.
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct MetricsBucketRow {
@@ -452,7 +408,7 @@ pub struct MetricsBucketRow {
 /// Get aggregated tenant metrics.
 ///
 /// Aggregates instance execution metrics into time buckets of
-/// `options.bucket_seconds`, using aggregate functions for statistics.
+/// `bucket_seconds`, using aggregate functions for statistics.
 ///
 /// Buckets are aligned by flooring the Unix epoch to a multiple of the width
 /// rather than by `date_trunc`. That admits widths `date_trunc` has no unit for -
@@ -464,12 +420,15 @@ pub struct MetricsBucketRow {
 /// Returns all buckets in the time range, including empty ones (with zero counts).
 pub async fn get_tenant_metrics(
     pool: &PgPool,
-    options: &TenantMetricsOptions,
+    tenant_id: &str,
+    start_time: DateTime<Utc>,
+    end_time: DateTime<Utc>,
+    bucket_seconds: u32,
 ) -> Result<Vec<MetricsBucketRow>, sqlx::Error> {
     // A zero width divides by zero inside the query. Callers are validated at
     // both the HTTP boundary and in `handle_get_tenant_metrics`, so reaching
     // here with one is a bug rather than bad input; clamp instead of panicking.
-    let bucket_seconds = f64::from(options.bucket_seconds.max(1));
+    let bucket_seconds = f64::from(bucket_seconds.max(1));
 
     // The spine and the aggregate derive their bucket key with the same
     // expression, so the join keys align by construction. Getting that wrong is
@@ -525,9 +484,9 @@ pub async fn get_tenant_metrics(
     "#;
 
     sqlx::query_as::<_, MetricsBucketRow>(query)
-        .bind(&options.tenant_id)
-        .bind(options.start_time)
-        .bind(options.end_time)
+        .bind(tenant_id)
+        .bind(start_time)
+        .bind(end_time)
         .bind(bucket_seconds)
         .fetch_all(pool)
         .await

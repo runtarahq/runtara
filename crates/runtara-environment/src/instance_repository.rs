@@ -103,6 +103,35 @@ pub struct InstanceListItem {
     pub has_error: bool,
 }
 
+/// Options for listing instances.
+#[derive(Debug, Clone, Default)]
+pub struct ListInstancesOptions {
+    /// Filter by tenant ID.
+    pub tenant_id: Option<String>,
+    /// Filter by status — a row matches if it holds any one of these. `None`
+    /// (or an empty list) leaves the status unfiltered.
+    pub statuses: Option<Vec<String>>,
+    /// Filter by image ID (exact match).
+    pub image_id: Option<String>,
+    /// Filter by image name prefix (e.g., `"workflow_id:"` matches every
+    /// version and artifact of that workflow).
+    pub image_name_prefix: Option<String>,
+    /// Filter by created_at >= value.
+    pub created_after: Option<DateTime<Utc>>,
+    /// Filter by created_at < value.
+    pub created_before: Option<DateTime<Utc>>,
+    /// Filter by finished_at >= value.
+    pub finished_after: Option<DateTime<Utc>>,
+    /// Filter by finished_at < value.
+    pub finished_before: Option<DateTime<Utc>>,
+    /// Order by field and direction.
+    pub order_by: Option<String>,
+    /// Maximum results to return.
+    pub limit: i64,
+    /// Pagination offset.
+    pub offset: i64,
+}
+
 /// A page of instances plus the unpaged total.
 #[derive(Debug)]
 pub struct InstancePage {
@@ -159,7 +188,7 @@ impl InstanceRepository {
     /// A failing count degrades to `0` rather than failing the call: the page is
     /// the answer the caller asked for, and losing it because a second query
     /// stumbled would be the worse outcome.
-    pub async fn list(&self, options: &crate::db::ListInstancesOptions) -> Result<InstancePage> {
+    pub async fn list(&self, options: &ListInstancesOptions) -> Result<InstancePage> {
         let instances = crate::db::list_instances(&self.pool, options).await?;
 
         let total_count = match crate::db::count_instances(&self.pool, options).await {

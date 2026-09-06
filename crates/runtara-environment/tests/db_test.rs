@@ -8,6 +8,7 @@ mod common;
 
 use runtara_core::persistence::{CompleteInstanceParams, Persistence};
 use runtara_environment::db;
+use runtara_environment::instance_repository::ListInstancesOptions;
 use runtara_store_postgres::PostgresPersistence;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -415,7 +416,7 @@ async fn test_list_instances() {
     update_test_instance_status(&pool, &ids[0], "completed", None).await;
 
     // List all
-    let options = db::ListInstancesOptions {
+    let options = ListInstancesOptions {
         tenant_id: Some(tenant_id.to_string()),
         limit: 100,
         ..Default::default()
@@ -427,7 +428,7 @@ async fn test_list_instances() {
     assert_eq!(instances.len(), 3);
 
     // List by status
-    let options = db::ListInstancesOptions {
+    let options = ListInstancesOptions {
         tenant_id: Some(tenant_id.to_string()),
         statuses: Some(vec!["completed".to_string()]),
         limit: 100,
@@ -480,7 +481,7 @@ async fn test_list_instances_by_multiple_statuses() {
     update_test_instance_status(&pool, &ids[1], "cancelled", None).await;
     update_test_instance_status(&pool, &ids[2], "completed", None).await;
 
-    let options = db::ListInstancesOptions {
+    let options = ListInstancesOptions {
         tenant_id: Some(tenant_id.to_string()),
         statuses: Some(vec!["failed".to_string(), "cancelled".to_string()]),
         limit: 100,
@@ -504,7 +505,7 @@ async fn test_list_instances_by_multiple_statuses() {
     assert_eq!(count, 2);
 
     // An empty list means "no status filter", not "match nothing".
-    let unfiltered = db::ListInstancesOptions {
+    let unfiltered = ListInstancesOptions {
         tenant_id: Some(tenant_id.to_string()),
         statuses: Some(Vec::new()),
         limit: 100,
@@ -822,17 +823,9 @@ async fn test_tenant_metrics_one_minute_buckets_over_an_hour() {
     )
     .await;
 
-    let buckets = db::get_tenant_metrics(
-        &pool,
-        &db::TenantMetricsOptions {
-            tenant_id: tenant_id.clone(),
-            start_time: start,
-            end_time: end,
-            bucket_seconds: 60,
-        },
-    )
-    .await
-    .expect("aggregation should succeed");
+    let buckets = db::get_tenant_metrics(&pool, &tenant_id, start, end, 60)
+        .await
+        .expect("aggregation should succeed");
 
     // 60 whole minutes, and the spine is inclusive of both edges.
     assert_eq!(buckets.len(), 61, "expected a full minute-resolution spine");
@@ -877,17 +870,9 @@ async fn test_tenant_metrics_empty_buckets_carry_null_aggregates_not_zero() {
     )
     .await;
 
-    let buckets = db::get_tenant_metrics(
-        &pool,
-        &db::TenantMetricsOptions {
-            tenant_id: tenant_id.clone(),
-            start_time: epoch(0),
-            end_time: epoch(600),
-            bucket_seconds: 60,
-        },
-    )
-    .await
-    .expect("aggregation should succeed");
+    let buckets = db::get_tenant_metrics(&pool, &tenant_id, epoch(0), epoch(600), 60)
+        .await
+        .expect("aggregation should succeed");
 
     // "No runs" and "runs that took no time" are different claims. A zero here
     // would be averaged into the dashboard's duration and memory figures.
@@ -929,17 +914,9 @@ async fn test_tenant_metrics_hourly_width_aligns_to_hour_boundaries() {
     )
     .await;
 
-    let buckets = db::get_tenant_metrics(
-        &pool,
-        &db::TenantMetricsOptions {
-            tenant_id: tenant_id.clone(),
-            start_time: epoch(0),
-            end_time: epoch(10_800),
-            bucket_seconds: 3_600,
-        },
-    )
-    .await
-    .expect("aggregation should succeed");
+    let buckets = db::get_tenant_metrics(&pool, &tenant_id, epoch(0), epoch(10_800), 3_600)
+        .await
+        .expect("aggregation should succeed");
 
     // Flooring the epoch by 3600 must reproduce what date_trunc('hour') gave,
     // since hours divide the epoch evenly. This is the compatibility pin.
@@ -1020,17 +997,9 @@ async fn test_tenant_metrics_daily_buckets_stay_utc_under_a_shifted_session_time
     )
     .await;
 
-    let buckets = db::get_tenant_metrics(
-        &pool,
-        &db::TenantMetricsOptions {
-            tenant_id: tenant_id.clone(),
-            start_time: epoch(0),
-            end_time: epoch(3 * day),
-            bucket_seconds: 86_400,
-        },
-    )
-    .await
-    .expect("aggregation should succeed");
+    let buckets = db::get_tenant_metrics(&pool, &tenant_id, epoch(0), epoch(3 * day), 86_400)
+        .await
+        .expect("aggregation should succeed");
 
     for bucket in &buckets {
         assert_eq!(
@@ -1058,17 +1027,9 @@ async fn test_tenant_metrics_counts_a_boundary_crossing_run_once() {
     // finished_at, so it belongs to the later bucket and to only that bucket.
     seed_terminal_instance(&pool, &tenant_id, "completed", epoch(30), epoch(150), None).await;
 
-    let buckets = db::get_tenant_metrics(
-        &pool,
-        &db::TenantMetricsOptions {
-            tenant_id: tenant_id.clone(),
-            start_time: epoch(0),
-            end_time: epoch(600),
-            bucket_seconds: 60,
-        },
-    )
-    .await
-    .expect("aggregation should succeed");
+    let buckets = db::get_tenant_metrics(&pool, &tenant_id, epoch(0), epoch(600), 60)
+        .await
+        .expect("aggregation should succeed");
 
     let total: i64 = buckets.iter().map(|b| b.invocation_count).sum();
     assert_eq!(total, 1, "a run spanning a boundary was counted twice");
@@ -1112,17 +1073,9 @@ async fn test_tenant_metrics_totals_do_not_change_with_bucket_width() {
     // must total the same at every width. If the two sides of the LEFT JOIN
     // ever key differently, runs silently vanish into unmatched buckets.
     for width in [60u32, 360, 1_440, 3_600, 7_200, 21_600, 86_400] {
-        let buckets = db::get_tenant_metrics(
-            &pool,
-            &db::TenantMetricsOptions {
-                tenant_id: tenant_id.clone(),
-                start_time: epoch(0),
-                end_time: epoch(86_400),
-                bucket_seconds: width,
-            },
-        )
-        .await
-        .expect("aggregation should succeed");
+        let buckets = db::get_tenant_metrics(&pool, &tenant_id, epoch(0), epoch(86_400), width)
+            .await
+            .expect("aggregation should succeed");
 
         let total: i64 = buckets.iter().map(|b| b.invocation_count).sum();
         assert_eq!(
@@ -1155,17 +1108,9 @@ async fn test_tenant_metrics_excludes_other_tenants_and_non_terminal_runs() {
     // Running: no finished_at, so it is invisible to the aggregation by design.
     seed_terminal_instance(&pool, &tenant_id, "running", epoch(0), epoch(30), None).await;
 
-    let buckets = db::get_tenant_metrics(
-        &pool,
-        &db::TenantMetricsOptions {
-            tenant_id: tenant_id.clone(),
-            start_time: epoch(0),
-            end_time: epoch(600),
-            bucket_seconds: 60,
-        },
-    )
-    .await
-    .expect("aggregation should succeed");
+    let buckets = db::get_tenant_metrics(&pool, &tenant_id, epoch(0), epoch(600), 60)
+        .await
+        .expect("aggregation should succeed");
 
     let total: i64 = buckets.iter().map(|b| b.invocation_count).sum();
     assert_eq!(

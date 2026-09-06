@@ -2055,6 +2055,23 @@ pub async fn handle_get_scope_ancestors(
     Ok(ancestors)
 }
 
+/// Options for tenant metrics aggregation.
+#[derive(Debug, Clone)]
+pub struct TenantMetricsOptions {
+    /// Tenant ID.
+    pub tenant_id: String,
+    /// Start of time range.
+    pub start_time: DateTime<Utc>,
+    /// End of time range.
+    pub end_time: DateTime<Utc>,
+    /// Bucket width in seconds.
+    ///
+    /// A plain number rather than an enum: the aggregation query only ever needs
+    /// the width, and the named granularities callers speak in (`hourly`,
+    /// `daily`) belong at the API boundary that has to parse them.
+    pub bucket_seconds: u32,
+}
+
 /// Widest bucket count the aggregation query may be asked to build.
 ///
 /// Mirrors `runtara_server`'s limit of the same name. Kept as its own constant
@@ -2112,7 +2129,7 @@ pub struct MetricsBucket {
 /// terminal yet reports `None` rather than 0%.
 pub async fn handle_get_tenant_metrics(
     state: &EnvironmentHandlerState,
-    options: &db::TenantMetricsOptions,
+    options: &TenantMetricsOptions,
 ) -> Result<Vec<MetricsBucket>> {
     if options.tenant_id.is_empty() {
         return Err(crate::error::Error::InvalidRequest(
@@ -2137,7 +2154,14 @@ pub async fn handle_get_tenant_metrics(
         )));
     }
 
-    let bucket_rows = db::get_tenant_metrics(&state.pool, options).await?;
+    let bucket_rows = db::get_tenant_metrics(
+        &state.pool,
+        &options.tenant_id,
+        options.start_time,
+        options.end_time,
+        options.bucket_seconds,
+    )
+    .await?;
 
     Ok(bucket_rows
         .into_iter()

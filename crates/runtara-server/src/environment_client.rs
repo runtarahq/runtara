@@ -18,13 +18,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use chrono::Utc;
-use runtara_environment::db;
 use runtara_environment::handlers::{
     self, EnvironmentHandlerState, ResumeInstanceRequest, SendCustomSignalOutcome,
     SendSignalOutcome, StartInstanceRequest, StartRejection, StopInstanceRequest,
 };
 use runtara_environment::image_registry::{Image, ImageFilter, ImageRegistry};
-use runtara_environment::instance_repository::InstanceRepository;
+use runtara_environment::instance_repository::{self, InstanceRepository};
 use thiserror::Error;
 use tracing::{debug, info, instrument, warn};
 
@@ -709,7 +708,7 @@ impl EnvironmentClient {
 
         let buckets = handlers::handle_get_tenant_metrics(
             &self.state,
-            &db::TenantMetricsOptions {
+            &handlers::TenantMetricsOptions {
                 tenant_id: options.tenant_id.clone(),
                 start_time,
                 end_time,
@@ -793,8 +792,10 @@ fn instance_status_from_core(status: runtara_core::domain::InstanceStatus) -> In
 ///
 /// An empty status list means "no filter", not "match nothing" — the same
 /// normalization the query-string form used to do on the way in.
-fn list_instances_options(options: &ListInstancesOptions) -> db::ListInstancesOptions {
-    db::ListInstancesOptions {
+fn list_instances_options(
+    options: &ListInstancesOptions,
+) -> instance_repository::ListInstancesOptions {
+    instance_repository::ListInstancesOptions {
         tenant_id: options.tenant_id.clone(),
         statuses: (!options.statuses.is_empty()).then(|| {
             options

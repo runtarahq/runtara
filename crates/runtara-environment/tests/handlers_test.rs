@@ -12,10 +12,11 @@ use runtara_environment::container_registry::{ContainerInfo, ContainerRegistry};
 use runtara_environment::db;
 use runtara_environment::handlers::{
     DrainController, EnvironmentHandlerState, MAX_METRIC_BUCKETS, ResumeInstanceRequest,
-    StartInstanceRequest, StartRejection, StopInstanceRequest, handle_get_tenant_metrics,
-    handle_resume_instance, handle_start_instance, handle_stop_instance, spawn_container_monitor,
+    StartInstanceRequest, StartRejection, StopInstanceRequest, TenantMetricsOptions,
+    handle_get_tenant_metrics, handle_resume_instance, handle_start_instance, handle_stop_instance,
+    spawn_container_monitor,
 };
-use runtara_environment::instance_repository::InstanceRepository;
+use runtara_environment::instance_repository::{InstanceRepository, ListInstancesOptions};
 use runtara_environment::launch_dispatcher::LaunchLifecycleObservers;
 use runtara_environment::launch_queue::{LaunchKind, LaunchRepository, LaunchState};
 use runtara_environment::runner::MockRunner;
@@ -2093,9 +2094,9 @@ fn metrics_options(
     tenant_id: &str,
     bucket_seconds: u32,
     span_seconds: i64,
-) -> db::TenantMetricsOptions {
+) -> TenantMetricsOptions {
     let start_time = chrono::DateTime::from_timestamp(0, 0).expect("epoch");
-    db::TenantMetricsOptions {
+    TenantMetricsOptions {
         tenant_id: tenant_id.to_string(),
         start_time,
         end_time: start_time + chrono::Duration::seconds(span_seconds),
@@ -2310,7 +2311,7 @@ async fn every_stored_status_reads_back_as_itself() {
     }
 
     let page = instances
-        .list(&db::ListInstancesOptions {
+        .list(&ListInstancesOptions {
             tenant_id: Some(tenant_id.clone()),
             limit: 100,
             ..Default::default()

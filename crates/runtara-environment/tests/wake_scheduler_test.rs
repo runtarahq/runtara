@@ -10,6 +10,7 @@ use chrono::Utc;
 use runtara_core::persistence::{CompleteInstanceParams, Persistence};
 use runtara_environment::db::{self, Instance};
 use runtara_environment::handlers::DrainController;
+use runtara_environment::instance_repository::ListInstancesOptions;
 use runtara_environment::launch_queue::{LaunchKind, LaunchRepository, LaunchState};
 use runtara_environment::runner::{MockRunner, Runner};
 use runtara_environment::wake_scheduler::{WakeScheduler, WakeSchedulerConfig};
@@ -408,7 +409,7 @@ async fn test_list_instances() {
     update_test_instance_status(&pool, &instance2, "completed", None).await;
 
     // List all for tenant-a
-    let options = db::ListInstancesOptions {
+    let options = ListInstancesOptions {
         tenant_id: Some("list-test-tenant-a".to_string()),
         limit: 100,
         ..Default::default()
@@ -417,7 +418,7 @@ async fn test_list_instances() {
     assert_eq!(instances.len(), 2);
 
     // List running for tenant-a
-    let options = db::ListInstancesOptions {
+    let options = ListInstancesOptions {
         tenant_id: Some("list-test-tenant-a".to_string()),
         statuses: Some(vec!["running".to_string()]),
         limit: 100,
@@ -427,7 +428,7 @@ async fn test_list_instances() {
     assert_eq!(instances.len(), 1);
 
     // List all with limit
-    let options = db::ListInstancesOptions {
+    let options = ListInstancesOptions {
         limit: 2,
         ..Default::default()
     };
@@ -437,13 +438,13 @@ async fn test_list_instances() {
     // List with offset. Scoped to this test's own tenant: unscoped, both pages
     // saturate at `limit` as soon as the shared database holds more than 100
     // instances, and the assertion silently compares 100 against 100 - 1.
-    let all_options = db::ListInstancesOptions {
+    let all_options = ListInstancesOptions {
         tenant_id: Some("list-test-tenant-a".to_string()),
         limit: 100,
         ..Default::default()
     };
     let all = db::list_instances(&pool, &all_options).await.unwrap();
-    let offset_options = db::ListInstancesOptions {
+    let offset_options = ListInstancesOptions {
         tenant_id: Some("list-test-tenant-a".to_string()),
         limit: 100,
         offset: 1,
