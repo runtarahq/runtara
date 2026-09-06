@@ -406,6 +406,15 @@ impl Persistence for MockPersistence {
         Ok(true)
     }
 
+    async fn cancel_suspended_instances(
+        &self,
+        _instance_id: Option<&str>,
+        _limit: i64,
+    ) -> std::result::Result<Vec<crate::persistence::CancelledInstance>, crate::error::CoreError>
+    {
+        Ok(Vec::new())
+    }
+
     async fn insert_custom_signal(
         &self,
         _instance_id: &str,

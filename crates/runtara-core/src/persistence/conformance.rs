@@ -1051,3 +1051,103 @@ pub async fn run_lifecycle_command_sequence<P: Persistence>(backend: &P) {
         Status::Cancelled
     );
 }
+
+/// Parked cancellation is atomic, repeatable, and recoverable without a deadline.
+pub async fn run_parked_cancellation_sequence<P: Persistence>(backend: &P) {
+    use crate::domain::{InstanceStatus as Status, SignalType as Kind};
+    for deadline in [None, Some(Utc::now() + Duration::hours(24))] {
+        let id = Uuid::new_v4().to_string();
+        backend
+            .register_instance(&id, "park-contract")
+            .await
+            .unwrap();
+        backend
+            .update_instance_status(&id, Status::Running, None)
+            .await
+            .unwrap();
+        backend.insert_signal(&id, Kind::Cancel, b"").await.unwrap();
+        assert!(
+            backend
+                .cancel_suspended_instances(Some(&id), 1)
+                .await
+                .unwrap()
+                .is_empty(),
+            "a running guest retains its command"
+        );
+        assert!(backend.get_pending_signal(&id).await.unwrap().is_some());
+        // Model a cancel arriving just before the guest parks.
+        backend
+            .update_instance_status(&id, Status::Suspended, None)
+            .await
+            .unwrap();
+        if let Some(deadline) = deadline {
+            backend.set_instance_sleep(&id, deadline).await.unwrap();
+        }
+        let cancelled = backend
+            .cancel_suspended_instances(Some(&id), 1)
+            .await
+            .unwrap();
+        assert_eq!(cancelled.len(), 1);
+        assert_eq!(cancelled[0].instance_id, id);
+        assert_eq!(cancelled[0].tenant_id, "park-contract");
+        let instance = backend.get_instance(&id).await.unwrap().unwrap();
+        assert_eq!(instance.status, Status::Cancelled);
+        assert!(instance.finished_at.is_some());
+        assert!(instance.sleep_until.is_none());
+        assert!(backend.get_pending_signal(&id).await.unwrap().is_none());
+        assert!(
+            backend
+                .cancel_suspended_instances(Some(&id), 1)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        // A park or wake retry that lost the race cannot put its deadline back.
+        backend
+            .set_instance_sleep(&id, Utc::now() + Duration::hours(1))
+            .await
+            .unwrap();
+        assert!(
+            backend
+                .get_instance(&id)
+                .await
+                .unwrap()
+                .unwrap()
+                .sleep_until
+                .is_none()
+        );
+    }
+    let id = Uuid::new_v4().to_string();
+    backend
+        .register_instance(&id, "park-recovery")
+        .await
+        .unwrap();
+    backend
+        .update_instance_status(&id, Status::Suspended, None)
+        .await
+        .unwrap();
+    backend.insert_signal(&id, Kind::Pause, b"").await.unwrap();
+    assert!(
+        backend
+            .cancel_suspended_instances(Some(&id), 1)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    backend.insert_signal(&id, Kind::Cancel, b"").await.unwrap();
+    assert!(
+        backend
+            .cancel_suspended_instances(None, 0)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let recovered = backend
+        .cancel_suspended_instances(None, 1000)
+        .await
+        .unwrap();
+    assert!(
+        recovered.iter().any(|instance| instance.instance_id == id),
+        "recovery discovers parked cancellation without a sleep deadline"
+    );
+}

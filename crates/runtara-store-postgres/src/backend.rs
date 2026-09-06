@@ -658,6 +658,57 @@ impl Persistence for PostgresPersistence {
         Ok(true)
     }
 
+    async fn cancel_suspended_instances(
+        &self,
+        instance_id: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<runtara_core::persistence::CancelledInstance>, CoreError> {
+        // Lock instances first, as in explicit acknowledgment. The command ID
+        // joins both writes so a replaced/handled receipt cannot cancel a run.
+        // One statement commits status, deadline clearing and receipt together.
+        let rows: Vec<(String, String)> = sqlx::query_as(
+            r#"
+            WITH candidates AS MATERIALIZED (
+                SELECT i.instance_id, s.command_id
+                FROM instances i JOIN pending_signals s USING (instance_id)
+                WHERE i.status = 'suspended'
+                  AND s.signal_type = 'cancel' AND s.acknowledged_at IS NULL
+                  AND ($1::text IS NULL OR i.instance_id = $1)
+                ORDER BY i.instance_id
+                LIMIT $2
+                FOR UPDATE OF i SKIP LOCKED
+            ), acknowledged AS (
+                UPDATE pending_signals s SET acknowledged_at = NOW()
+                FROM candidates c
+                WHERE s.instance_id = c.instance_id AND s.command_id = c.command_id
+                  AND s.signal_type = 'cancel' AND s.acknowledged_at IS NULL
+                RETURNING s.instance_id
+            )
+            UPDATE instances i
+            SET status = 'cancelled', finished_at = NOW(), sleep_until = NULL
+            FROM acknowledged a
+            WHERE i.instance_id = a.instance_id
+            RETURNING i.instance_id, i.tenant_id
+        "#,
+        )
+        .bind(instance_id)
+        .bind(limit.max(0))
+        .fetch_all(&self.pool)
+        .await
+        .db()?;
+        let mut cancelled = Vec::new();
+        for (instance_id, tenant_id) in rows {
+            if let Some(sink) = &self.metrics_sink {
+                report_completion(sink.as_ref(), &self.pool, &instance_id).await;
+            }
+            cancelled.push(runtara_core::persistence::CancelledInstance {
+                instance_id,
+                tenant_id,
+            });
+        }
+        Ok(cancelled)
+    }
+
     async fn insert_custom_signal(
         &self,
         instance_id: &str,

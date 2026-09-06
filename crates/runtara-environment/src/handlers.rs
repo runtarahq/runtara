@@ -1986,6 +1986,19 @@ pub async fn handle_send_signal(
         .insert_signal(instance_id, signal_type, &payload)
         .await?;
 
+    if signal_type == runtara_core::domain::SignalType::Cancel {
+        for cancelled in state
+            .persistence
+            .cancel_suspended_instances(Some(instance_id), 1)
+            .await?
+        {
+            state.lifecycle_observers.notify_instance_released(
+                cancelled.tenant_id,
+                cancelled.instance_id,
+                "cancelled",
+            );
+        }
+    }
     Ok(SendSignalOutcome::Delivered)
 }
 

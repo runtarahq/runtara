@@ -116,6 +116,15 @@ pub struct SignalRecord {
     pub acknowledged_at: Option<DateTime<Utc>>,
 }
 
+/// Instance whose pending cancellation was applied without a running guest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CancelledInstance {
+    /// Cancelled instance identity.
+    pub instance_id: String,
+    /// Tenant to notify when releasing execution admission.
+    pub tenant_id: String,
+}
+
 /// Pending custom signal scoped to a specific checkpoint.
 #[derive(Debug, Clone)]
 pub struct CustomSignalRecord {
@@ -597,6 +606,17 @@ pub trait Persistence: Send + Sync {
         signal_type: SignalType,
     ) -> Result<bool, CoreError>;
 
+    /// Atomically cancel suspended instances with pending cancel commands, clear
+    /// their wake deadlines, and acknowledge those exact commands. Returns only
+    /// newly cancelled instances. Active runs and terminal instances are untouched.
+    /// `Some(id)` targets an API request; `None` recovers interrupted delivery in
+    /// bounded batches. Locked instances may be skipped for the next recovery pass.
+    async fn cancel_suspended_instances(
+        &self,
+        instance_id: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<CancelledInstance>, CoreError>;
+
     async fn insert_custom_signal(
         &self,
         instance_id: &str,
@@ -695,6 +715,8 @@ pub trait Persistence: Send + Sync {
     }
 
     /// Set the sleep_until timestamp for an instance.
+    /// Terminal instances retain no wake deadline, including when this write
+    /// races with cancellation or completion.
     async fn set_instance_sleep(
         &self,
         instance_id: &str,

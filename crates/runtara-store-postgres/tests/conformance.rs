@@ -33,6 +33,7 @@ async fn postgres_backend_passes_conformance_sequence() {
     let backend = PostgresPersistence::new(pool);
     run_conformance_sequence(&backend).await;
     runtara_core::persistence::conformance::run_lifecycle_command_sequence(&backend).await;
+    runtara_core::persistence::conformance::run_parked_cancellation_sequence(&backend).await;
 }
 
 /// Obtain a Postgres pool. Prefers `TEST_RUNTARA_DATABASE_URL` (for CI and
@@ -238,5 +239,62 @@ async fn command_ack_rolls_back_transition_when_receipt_write_fails() {
             .acknowledge_signal(&id, &signal.command_id, SignalType::Shutdown)
             .await
             .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn parked_cancellation_rolls_back_ack_when_transition_fails() {
+    use runtara_core::{
+        domain::{InstanceStatus, SignalType},
+        persistence::Persistence,
+    };
+    let (pool, _container) = postgres_test_pool().await;
+    let backend = PostgresPersistence::new(pool.clone());
+    let id = uuid::Uuid::new_v4().to_string();
+    backend.register_instance(&id, "park-atomic").await.unwrap();
+    backend
+        .update_instance_status(&id, InstanceStatus::Suspended, None)
+        .await
+        .unwrap();
+    let deadline = chrono::Utc::now() + chrono::Duration::hours(24);
+    backend.set_instance_sleep(&id, deadline).await.unwrap();
+    backend
+        .insert_signal(&id, SignalType::Cancel, b"")
+        .await
+        .unwrap();
+    let receipt = backend.get_pending_signal(&id).await.unwrap().unwrap();
+    let constraint = format!("park_ack_failure_{}", uuid::Uuid::new_v4().simple());
+    sqlx::query(&format!("ALTER TABLE instances ADD CONSTRAINT {constraint} CHECK (instance_id <> '{id}' OR status <> 'cancelled')"))
+        .execute(&pool).await.unwrap();
+    let result = backend.cancel_suspended_instances(Some(&id), 1).await;
+    sqlx::query(&format!(
+        "ALTER TABLE instances DROP CONSTRAINT {constraint}"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert!(result.is_err());
+    let instance = backend.get_instance(&id).await.unwrap().unwrap();
+    assert_eq!(instance.status, InstanceStatus::Suspended);
+    assert_eq!(
+        instance.sleep_until.unwrap().timestamp_millis(),
+        deadline.timestamp_millis()
+    );
+    assert_eq!(
+        backend
+            .get_pending_signal(&id)
+            .await
+            .unwrap()
+            .unwrap()
+            .command_id,
+        receipt.command_id
+    );
+    assert_eq!(
+        backend
+            .cancel_suspended_instances(Some(&id), 1)
+            .await
+            .unwrap()
+            .len(),
+        1
     );
 }

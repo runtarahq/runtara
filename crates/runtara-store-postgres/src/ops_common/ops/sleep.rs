@@ -28,7 +28,7 @@ macro_rules! impl_sleep_ops {
                 let p1 = <$Dialect>::placeholder(1);
                 let p2 = <$Dialect>::placeholder(2);
                 let sql = format!(
-                    "UPDATE instances SET sleep_until = {p2} WHERE instance_id = {p1}"
+                    "UPDATE instances SET sleep_until = CASE WHEN status IN ('completed', 'failed', 'cancelled') THEN NULL ELSE {p2} END WHERE instance_id = {p1}"
                 );
                 let result = ::sqlx::query(&sql)
                     .bind(instance_id)

@@ -385,6 +385,17 @@ impl Persistence for MockPersistence {
         Ok(false)
     }
 
+    async fn cancel_suspended_instances(
+        &self,
+        _instance_id: Option<&str>,
+        _limit: i64,
+    ) -> std::result::Result<
+        Vec<runtara_core::persistence::CancelledInstance>,
+        runtara_core::error::CoreError,
+    > {
+        Ok(Vec::new())
+    }
+
     async fn insert_custom_signal(
         &self,
         _instance_id: &str,

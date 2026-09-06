@@ -385,6 +385,46 @@ impl Persistence for InMemoryPersistence {
         Ok(true)
     }
 
+    async fn cancel_suspended_instances(
+        &self,
+        instance_id: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<crate::persistence::CancelledInstance>, CoreError> {
+        let mut store = self.store.lock().unwrap();
+        let mut candidates: Vec<_> = store
+            .instances
+            .values()
+            .filter(|instance| {
+                instance.status == CoreInstanceStatus::Suspended
+                    && instance_id.is_none_or(|id| id == instance.instance_id)
+                    && store
+                        .signals
+                        .get(&instance.instance_id)
+                        .is_some_and(|signal| {
+                            signal.signal_type == crate::domain::SignalType::Cancel
+                                && signal.acknowledged_at.is_none()
+                        })
+            })
+            .map(|instance| instance.instance_id.clone())
+            .collect();
+        candidates.sort();
+        candidates.truncate(limit.max(0) as usize);
+        let now = Utc::now();
+        let mut cancelled = Vec::new();
+        for id in candidates {
+            let instance = store.instances.get_mut(&id).unwrap();
+            instance.status = CoreInstanceStatus::Cancelled;
+            instance.finished_at = Some(now);
+            instance.sleep_until = None;
+            cancelled.push(crate::persistence::CancelledInstance {
+                instance_id: id.clone(),
+                tenant_id: instance.tenant_id.clone(),
+            });
+            store.signals.get_mut(&id).unwrap().acknowledged_at = Some(now);
+        }
+        Ok(cancelled)
+    }
+
     async fn insert_custom_signal(
         &self,
         instance_id: &str,
@@ -480,7 +520,8 @@ impl Persistence for InMemoryPersistence {
         sleep_until: DateTime<Utc>,
     ) -> Result<(), CoreError> {
         let mut store = self.store.lock().unwrap();
-        store.instance_mut(instance_id)?.sleep_until = Some(sleep_until);
+        let instance = store.instance_mut(instance_id)?;
+        instance.sleep_until = (!instance.status.is_terminal()).then_some(sleep_until);
         Ok(())
     }
 
@@ -837,6 +878,7 @@ mod tests {
         let backend = InMemoryPersistence::new();
         crate::persistence::conformance::run_conformance_sequence(&backend).await;
         crate::persistence::conformance::run_lifecycle_command_sequence(&backend).await;
+        crate::persistence::conformance::run_parked_cancellation_sequence(&backend).await;
     }
 
     fn foreign_vocabulary() -> EventVocabulary {

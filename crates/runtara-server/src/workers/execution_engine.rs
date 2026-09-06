@@ -2084,18 +2084,6 @@ impl ExecutionEngine {
             ExecutionError::DatabaseError(format!("Failed to cancel instance: {}", e))
         })?;
 
-        if matches!(
-            runtara_status,
-            crate::runtime_client::InstanceStatus::Suspended
-        ) && let Err(e) = client.resume_instance(instance_id).await
-        {
-            warn!(
-                instance_id = %instance_id,
-                error = %e,
-                "Failed to resume suspended instance for cancellation"
-            );
-        }
-
         info!(
             instance_id = %instance_id,
             previous_status = %status_str,
