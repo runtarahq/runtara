@@ -213,14 +213,15 @@ async fn scoped_adapter_preserves_context_bits_payload_and_repeated_call_identit
         .get_export_index(
             &mut store,
             None,
-            "runtara:agent-utils/scoped-capabilities@0.4.0",
+            "runtara:agent-utils/scoped-capabilities-v3@0.4.0",
         )
         .unwrap();
     let index = instance
         .get_export_index(&mut store, Some(&interface), "invoke")
         .unwrap();
     let invoke = instance.get_typed_func::<(String, Vec<u8>, String, u32, u32, u64), (Result<Vec<u8>, WorkflowErrorInfo>,)>(&mut store, index).unwrap();
-    let path = "workflow/🦀/step:with:delimiters";
+    let path = r#"runtara:v2:["agent","workflow",[],[],["utils","echo","🦀:step"]]"#;
+    let expected_path = path.replacen("runtara:v2:", "runtara:v3:", 1);
     let input = vec![255; 1024 * 1024];
     for (domain, activation, attempt) in [
         (0, 0, 1),
@@ -250,13 +251,58 @@ async fn scoped_adapter_preserves_context_bits_payload_and_repeated_call_identit
     assert_eq!(
         *calls.lock().unwrap(),
         vec![
-            (format!("{path}:aaaaaaaa:aaaaaaaa"), 1),
-            (format!("{path}:aaaaaaaa:aaaaaaab"), u64::MAX),
-            (format!("{path}:pppppppp:pppppppp"), 9),
-            (format!("{path}:aaaaaaaa:aaaaaaaa"), 1),
+            (format!("{expected_path}:aaaaaaaa:aaaaaaaa"), 1),
+            (format!("{expected_path}:aaaaaaaa:aaaaaaab"), u64::MAX),
+            (format!("{expected_path}:pppppppp:pppppppp"), 9),
+            (format!("{expected_path}:aaaaaaaa:aaaaaaaa"), 1),
         ]
     );
     drop(store);
+    for malformed in [
+        "",
+        "runtara:v2",
+        "runtara:v1:[]",
+        "runtara:v3:[]",
+        "Runtara:v2:[]",
+    ] {
+        let mut store = wasmtime::Store::new(
+            &engine,
+            State {
+                table: ResourceTable::new(),
+                context: context.clone(),
+            },
+        );
+        store.set_epoch_deadline(1 << 40);
+        let instance = linker
+            .instantiate_async(&mut store, &component)
+            .await
+            .unwrap();
+        let interface = instance
+            .get_export_index(
+                &mut store,
+                None,
+                "runtara:agent-utils/scoped-capabilities-v3@0.4.0",
+            )
+            .unwrap();
+        let index = instance
+            .get_export_index(&mut store, Some(&interface), "invoke")
+            .unwrap();
+        let invoke = instance.get_typed_func::<(String, Vec<u8>, String, u32, u32, u64), (Result<Vec<u8>, WorkflowErrorInfo>,)>(&mut store, index).unwrap();
+        assert!(
+            invoke
+                .call_async(
+                    &mut store,
+                    ("echo".into(), vec![], malformed.into(), 0, 0, 1)
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            calls.lock().unwrap().len(),
+            4,
+            "malformed prefix reached launcher"
+        );
+    }
     context.shutdown().await.unwrap();
     assert_eq!(tasks.retained_result_bytes(), 0);
 }

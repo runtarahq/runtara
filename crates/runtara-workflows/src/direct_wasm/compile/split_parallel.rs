@@ -619,6 +619,7 @@ fn emit_pool_reinvoke(
     body: &mut WasmFunction,
     invoke_pool: &[&super::DirectAgentInvokeImport],
     capability_id: &super::DirectDataSegment,
+    call_site: u32,
     cursor_local: u32,
     chunk_start_local: u32,
     input_ptr_local: u32,
@@ -638,7 +639,7 @@ fn emit_pool_reinvoke(
                 body.instruction(&Instruction::LocalGet(slot_ptr_local));
                 body.instruction(&Instruction::I32Load(slot_mem(offset)));
             }
-            body.instruction(&Instruction::I32Const(0)); // Step domain
+            body.instruction(&Instruction::I32Const(call_site as i32));
             body.instruction(&Instruction::I32Const(0)); // activation carried by key
             body.instruction(&Instruction::LocalGet(slot_ptr_local));
             body.instruction(&Instruction::I32Load(slot_mem(
@@ -1042,6 +1043,7 @@ pub(super) fn emit_parallel_split_items(
             body,
             &invoke_pool,
             capability_id,
+            static_data.invocation_site(parallel.agent_id, parallel.agent_id, 0),
             DIRECT_PSPLIT_LAUNCH_LOCAL,
             DIRECT_PSPLIT_CHUNK_START_LOCAL,
             output_ptr_local,
@@ -1056,6 +1058,7 @@ pub(super) fn emit_parallel_split_items(
             body,
             &invoke_pool,
             capability_id,
+            static_data.invocation_site(parallel.agent_id, parallel.agent_id, 0),
             DIRECT_PSPLIT_LAUNCH_LOCAL,
             DIRECT_PSPLIT_CHUNK_START_LOCAL,
             output_ptr_local,
@@ -1381,6 +1384,7 @@ pub(super) fn emit_parallel_split_items(
                     body,
                     &invoke_pool,
                     capability_id,
+                    static_data.invocation_site(parallel.agent_id, parallel.agent_id, 0),
                     DIRECT_PSPLIT_ROUND_CURSOR_LOCAL,
                     DIRECT_PSPLIT_CHUNK_START_LOCAL,
                     output_ptr_local,
@@ -1395,6 +1399,7 @@ pub(super) fn emit_parallel_split_items(
                     body,
                     &invoke_pool,
                     capability_id,
+                    static_data.invocation_site(parallel.agent_id, parallel.agent_id, 0),
                     DIRECT_PSPLIT_ROUND_CURSOR_LOCAL,
                     DIRECT_PSPLIT_CHUNK_START_LOCAL,
                     output_ptr_local,

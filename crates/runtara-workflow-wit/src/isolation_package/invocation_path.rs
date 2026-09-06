@@ -1,4 +1,4 @@
-//! Decode logical-agent-call:2 identities before granting runtime authority.
+//! Decode versioned logical Agent identities before granting runtime authority.
 use super::InvocationManifest;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -40,8 +40,14 @@ pub struct AgentInvocationPath {
     pub agent_id: String,
     pub capability: String,
     pub step_id: String,
-    pub domain: u32,
+    pub selector: InvocationSelector,
     pub activation: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InvocationSelector {
+    Domain(u32),
+    CallSite(u32),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -74,10 +80,17 @@ impl AgentInvocationPath {
         let (path, domain) = path.rsplit_once(':').ok_or(invalid)?;
         let activation = counter(activation)?;
         let domain = counter(domain)?;
-        if domain > 5 || (!matches!(domain, 2 | 3) && activation != 0) {
-            return Err(invalid);
-        }
-        let json = path.strip_prefix("runtara:v2:").ok_or(invalid)?;
+        let (json, selector) = if let Some(json) = path.strip_prefix("runtara:v3:") {
+            (json, InvocationSelector::CallSite(domain))
+        } else {
+            if domain > 5 || (!matches!(domain, 2 | 3) && activation != 0) {
+                return Err(invalid);
+            }
+            (
+                path.strip_prefix("runtara:v2:").ok_or(invalid)?,
+                InvocationSelector::Domain(domain),
+            )
+        };
         let key: Key = serde_json::from_str(json).map_err(|_| invalid)?;
         if key.0 != "agent" || serde_json::to_string(&key).map_err(|_| invalid)? != json {
             return Err(invalid);
@@ -91,7 +104,7 @@ impl AgentInvocationPath {
             agent_id,
             capability,
             step_id,
-            domain,
+            selector,
             activation,
         })
     }
@@ -151,10 +164,22 @@ impl InvocationManifest {
         attempt: u64,
     ) -> Result<AgentInvocationPath, InvocationPathError> {
         let path = AgentInvocationPath::decode(path)?;
-        if attempt == 0 || (path.domain != 0 && attempt != 1) {
+        let (domain, required_identity) = match (self.version, path.selector) {
+            (1, InvocationSelector::Domain(domain)) => (domain, None),
+            (2, InvocationSelector::CallSite(token)) => {
+                let index = self
+                    .call_sites
+                    .binary_search_by_key(&token, |site| site.token)
+                    .map_err(|_| InvocationPathError::UnknownCall)?;
+                let site = &self.call_sites[index];
+                (site.domain, Some(site.identity as usize))
+            }
+            _ => return Err(InvocationPathError::UnknownCall),
+        };
+        if attempt == 0 || (domain != 0 && attempt != 1) {
             return Err(InvocationPathError::InvalidAttempt);
         }
-        if self.version != 1
+        if (!matches!(domain, 2 | 3) && path.activation != 0)
             || self.workflow_id != path.workflow_id
             || capability != path.capability
         {
@@ -177,7 +202,9 @@ impl InvocationManifest {
                     ))
             })
             .map_err(|_| InvocationPathError::UnknownCall)?;
-        if !self.agent_calls[index].domains.contains(&path.domain) {
+        if required_identity.is_some_and(|required| required != index)
+            || !self.agent_calls[index].domains.contains(&domain)
+        {
             return Err(InvocationPathError::UnknownCall);
         }
         Ok(path)

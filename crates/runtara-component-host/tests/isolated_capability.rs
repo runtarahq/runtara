@@ -202,6 +202,7 @@ async fn prepared_catalog_survives_queue_and_enabled_cache() {
     .unwrap();
     let child = std::fs::read(component_path("utils")).unwrap();
     let invocations = InvocationManifest {
+        call_sites: Vec::new(),
         version: 1,
         workflow_id: "cache-test".into(),
         agent_calls: vec![AgentCallSite {

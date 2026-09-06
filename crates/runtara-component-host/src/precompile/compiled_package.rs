@@ -244,67 +244,91 @@ mod tests {
 
     #[test]
     fn invocation_authority_survives_native_transport_and_cannot_be_silently_dropped() {
-        use runtara_workflow_wit::isolation_package::{AgentCallSite, append_with_invocations};
+        use runtara_workflow_wit::isolation_package::{
+            AgentCallSite, InvocationCallSite, append_with_invocations,
+        };
         let engine = build_engine(&EngineConfig {
             cache_dir: None,
             ..Default::default()
         })
         .unwrap();
         let child = root();
-        let expected = InvocationManifest {
-            version: 1,
-            workflow_id: "root".into(),
-            agent_calls: vec![AgentCallSite {
-                binding: "agent:test".into(),
-                agent_id: "test".into(),
-                capability: "copy".into(),
-                step_id: "s".into(),
-                domains: vec![0, 3],
-            }],
-        };
-        let package = append_with_invocations(
-            &root(),
-            &[&child],
-            vec![Binding {
-                id: "agent:test".into(),
-                artifact: artifact_digest(&child),
-                interface: "test".into(),
-            }],
-            expected.clone(),
-            PackageLimits {
-                total_bytes: 65536,
-                manifest_bytes: 32768,
-                artifacts: 1,
-                bindings: 1,
-            },
-        )
-        .unwrap();
-        let native = precompile(&engine, &package).unwrap();
-        assert!(native.starts_with(MAGIC_V2));
-        // SAFETY: our own engine just produced this entire native response.
-        let loaded = unsafe { deserialize(&engine, &native) }.unwrap();
-        assert_eq!(loaded.invocations, Some(expected));
-        for mode in ["missing", "binding", "version"] {
-            let end = 12 + u32::from_le_bytes(native[8..12].try_into().unwrap()) as usize;
-            let mut index: Index = serde_json::from_slice(&native[12..end]).unwrap();
-            match mode {
-                "missing" => index.invocations = None,
-                "binding" => {
-                    index.invocations.as_mut().unwrap().agent_calls[0].binding =
-                        "agent:other".into()
+        for version in [1, 2] {
+            let expected = InvocationManifest {
+                call_sites: if version == 1 {
+                    Vec::new()
+                } else {
+                    vec![
+                        InvocationCallSite {
+                            token: 7,
+                            identity: 0,
+                            agent_reference: 2,
+                            caller_reference: 2,
+                            domain: 0,
+                        },
+                        InvocationCallSite {
+                            token: 8,
+                            identity: 0,
+                            agent_reference: 2,
+                            caller_reference: 10,
+                            domain: 3,
+                        },
+                    ]
+                },
+                version,
+                workflow_id: "root".into(),
+                agent_calls: vec![AgentCallSite {
+                    binding: "agent:test".into(),
+                    agent_id: "test".into(),
+                    capability: "copy".into(),
+                    step_id: "s".into(),
+                    domains: vec![0, 3],
+                }],
+            };
+            let package = append_with_invocations(
+                &root(),
+                &[&child],
+                vec![Binding {
+                    id: "agent:test".into(),
+                    artifact: artifact_digest(&child),
+                    interface: "test".into(),
+                }],
+                expected.clone(),
+                PackageLimits {
+                    total_bytes: 65536,
+                    manifest_bytes: 32768,
+                    artifacts: 1,
+                    bindings: 1,
+                },
+            )
+            .unwrap();
+            let native = precompile(&engine, &package).unwrap();
+            assert!(native.starts_with(MAGIC_V2));
+            // SAFETY: our own engine just produced this entire native response.
+            let loaded = unsafe { deserialize(&engine, &native) }.unwrap();
+            assert_eq!(loaded.invocations, Some(expected));
+            for mode in ["missing", "binding", "version"] {
+                let end = 12 + u32::from_le_bytes(native[8..12].try_into().unwrap()) as usize;
+                let mut index: Index = serde_json::from_slice(&native[12..end]).unwrap();
+                match mode {
+                    "missing" => index.invocations = None,
+                    "binding" => {
+                        index.invocations.as_mut().unwrap().agent_calls[0].binding =
+                            "agent:other".into()
+                    }
+                    _ => index.invocations.as_mut().unwrap().version = 3,
                 }
-                _ => index.invocations.as_mut().unwrap().version = 2,
+                let json = serde_json::to_vec(&index).unwrap();
+                let mut changed = MAGIC_V2.to_vec();
+                changed.extend_from_slice(&(json.len() as u32).to_le_bytes());
+                changed.extend_from_slice(&json);
+                changed.extend_from_slice(&native[end..]);
+                assert!(decode(&changed).is_err(), "accepted {mode}");
             }
-            let json = serde_json::to_vec(&index).unwrap();
-            let mut changed = MAGIC_V2.to_vec();
-            changed.extend_from_slice(&(json.len() as u32).to_le_bytes());
-            changed.extend_from_slice(&json);
-            changed.extend_from_slice(&native[end..]);
-            assert!(decode(&changed).is_err(), "accepted {mode}");
+            let mut old_header = native;
+            old_header[..8].copy_from_slice(MAGIC);
+            assert!(decode(&old_header).is_err());
         }
-        let mut old_header = native;
-        old_header[..8].copy_from_slice(MAGIC);
-        assert!(decode(&old_header).is_err());
     }
 
     #[test]

@@ -254,7 +254,7 @@ async fn run_graph_faults(
                 .as_ref()
                 .unwrap()
                 .context_contract,
-            "logical-agent-call:2"
+            "logical-agent-call:3"
         );
     }
     let sidecar: DirectArtifactMetadata =
@@ -388,23 +388,15 @@ async fn run_graph_faults(
     if let Some(invocations) = expected_invocations {
         for (path, attempt) in &recorded {
             assert!(*attempt > 0);
-            let (base, activation) = path.rsplit_once(':').unwrap();
-            let (base, domain) = base.rsplit_once(':').unwrap();
-            assert_eq!(activation.len(), 8);
-            assert_eq!(domain.len(), 8);
-            let domain = domain
-                .bytes()
-                .fold(0u32, |value, digit| (value << 4) | u32::from(digit - b'a'));
-            let key: Value =
-                serde_json::from_str(base.strip_prefix("runtara:v2:").unwrap()).unwrap();
-            assert_eq!(key[0], "agent");
-            assert_eq!(key[1], invocations.workflow_id);
-            assert!(
-                invocations.agent_calls.iter().any(|site| key[4]
-                    == serde_json::json!([site.agent_id, site.capability, site.step_id])
-                    && site.domains.contains(&domain)),
-                "emitted invocation missing from prepared authority: {path}"
-            );
+            let decoded =
+                runtara_workflow_wit::isolation_package::AgentInvocationPath::decode(path).unwrap();
+            assert!(matches!(
+                decoded.selector,
+                runtara_workflow_wit::isolation_package::InvocationSelector::CallSite(_)
+            ));
+            invocations
+                .resolve_agent_invocation("agent:utils", &decoded.capability, path, *attempt)
+                .unwrap();
         }
     }
     (result.exit, starts.load(Ordering::SeqCst), recorded)
@@ -713,7 +705,7 @@ fn scoped_agent_ai_auxiliary_call_sites_validate_and_compose() {
         )
         .unwrap();
         let metadata = compiled.artifact_metadata.isolation.unwrap();
-        assert_eq!(metadata.adapter_version, 2);
+        assert_eq!(metadata.adapter_version, 3);
         assert_eq!(metadata.package_version, 2);
         assert_eq!(metadata.bindings.len(), agents.len());
         assert!(metadata.legacy_agents.is_empty());
@@ -758,4 +750,85 @@ async fn scoped_agent_context_cannot_be_replaced_by_workflow_input_variables() {
     let (exit, _, actual) = run_graph_contexts(graph, serde_json::json!({"data":{"path":"forged","attempt":999},"variables":{"_workflow_id":"forged","_durable_key_version":1,"_loop_path":["forged"],"_loop_indices":[999],"_manifest_graph_path":"forged","attempt":999}}), true, false).await;
     completed(exit);
     assert_eq!(expected, actual);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn scoped_agent_contexts_distinguish_on_wait_body_from_parent_with_same_step_id() {
+    use serde_json::json;
+    let mut graph = super::wasm_performance_baseline::random_chain(1, true);
+    graph["steps"]["r0"]["durable"] = false.into();
+    graph["steps"]["wait"] = json!({"id":"wait", "stepType":"WaitForSignal", "pollIntervalMs":0,
+        "onWait":super::wasm_performance_baseline::random_chain(1, false)});
+    graph["executionPlan"] = json!([
+        {"fromStep":"r0","toStep":"wait"}, {"fromStep":"wait","toStep":"finish"}
+    ]);
+    let (exit, starts, contexts) =
+        run_graph_contexts(graph, json!({"data":{},"variables":{}}), true, false).await;
+    assert!(matches!(exit, InvokeExit::Suspended(_)), "{exit:?}");
+    assert_eq!(starts, 2);
+    assert_eq!(contexts.len(), 2);
+    assert_ne!(
+        contexts[0].0, contexts[1].0,
+        "parent and onWait calls need distinct cancellation addresses"
+    );
+}
+
+#[test]
+fn scoped_shared_ai_tool_has_distinct_caller_tokens_stable_across_selection() {
+    use serde_json::json;
+    let mut graph: Value = serde_json::from_str(&super::ai_agent_tool_loop_graph_json()).unwrap();
+    graph["steps"]["ai2"] = graph["steps"]["ai"].clone();
+    graph["steps"]["ai2"]["id"] = "ai2".into();
+    graph["executionPlan"] = json!([
+        {"fromStep":"ai","toStep":"ai2","label":"next"},
+        {"fromStep":"ai2","toStep":"finish","label":"next"},
+        {"fromStep":"ai","toStep":"echo_tool","label":"echo"},
+        {"fromStep":"ai2","toStep":"echo_tool","label":"echo"}
+    ]);
+    let dir = tempfile::tempdir().unwrap();
+    let legacy = compile(graph.clone(), dir.path());
+    let all = legacy
+        .component_artifacts
+        .agent_components
+        .iter()
+        .map(|a| a.agent_id.clone())
+        .collect();
+    let mut inventories = Vec::new();
+    for agents in [all, ["utils".into()].into()] {
+        let compiled = runtara_workflows::direct_wasm::compile_direct_workflow_with_scoped_agents(
+            DirectCompilationInput {
+                workflow_id: "shared-tool".into(),
+                version: 1,
+                source_checksum: None,
+                execution_graph: serde_json::from_value(graph.clone()).unwrap(),
+                child_workflows: vec![],
+                output_dir: dir.path().to_owned(),
+                track_events: false,
+                agent_catalog: None,
+                agent_slug: None,
+            },
+            runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
+            false,
+            agents,
+        )
+        .unwrap();
+        inventories.push(compiled.invocation_manifest.unwrap());
+    }
+    let tool_sites = |inventory: &runtara_workflow_wit::isolation_package::InvocationManifest| {
+        inventory
+            .call_sites
+            .iter()
+            .filter(|site| {
+                site.domain == 3
+                    && inventory.agent_calls[site.identity as usize].step_id == "echo_tool"
+            })
+            .map(|site| (site.token, site.agent_reference, site.caller_reference))
+            .collect::<Vec<_>>()
+    };
+    let full = tool_sites(&inventories[0]);
+    assert_eq!(full.len(), 2);
+    assert_ne!(full[0].0, full[1].0);
+    assert_eq!(full[0].1, full[1].1);
+    assert_ne!(full[0].2, full[1].2);
+    assert_eq!(full, tool_sites(&inventories[1]));
 }

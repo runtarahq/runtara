@@ -1664,6 +1664,7 @@ fn emit_branch_launch(
         super::agent_invoke::emit_agent_context(
             body,
             indices,
+            static_data,
             branch.agent_id,
             source_ptr_local,
             source_len_local,

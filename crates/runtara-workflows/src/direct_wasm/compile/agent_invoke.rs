@@ -64,6 +64,7 @@ pub(super) fn emit_agent_invoke(
         emit_agent_context(
             body,
             indices,
+            static_data,
             agent_id,
             source_ptr_local,
             source_len_local,
@@ -100,7 +101,7 @@ pub(super) enum AgentInvocationSite {
     Step(Option<u32>),
     MemoryLoad,
     AiTurn,
-    AiTool,
+    AiTool(u32),
     Summarize,
     MemorySave,
 }
@@ -109,6 +110,7 @@ pub(super) enum AgentInvocationSite {
 pub(super) fn emit_agent_context(
     body: &mut WasmFunction,
     indices: &DirectCoreFunctionIndices,
+    static_data: &DirectCoreStaticData,
     agent_id: u32,
     source_ptr_local: u32,
     source_len_local: u32,
@@ -126,11 +128,17 @@ pub(super) fn emit_agent_context(
         AgentInvocationSite::Step(_) => (0, None),
         AgentInvocationSite::MemoryLoad => (1, None),
         AgentInvocationSite::AiTurn => (2, Some(super::DIRECT_AI_ITER_LOCAL)),
-        AgentInvocationSite::AiTool => (3, Some(super::DIRECT_AI_TOOL_CALL_COUNTER_LOCAL)),
+        AgentInvocationSite::AiTool(_) => (3, Some(super::DIRECT_AI_TOOL_CALL_COUNTER_LOCAL)),
         AgentInvocationSite::Summarize => (4, None),
         AgentInvocationSite::MemorySave => (5, None),
     };
-    body.instruction(&Instruction::I32Const(domain));
+    let caller = match site {
+        AgentInvocationSite::AiTool(caller) => caller,
+        _ => agent_id,
+    };
+    body.instruction(&Instruction::I32Const(
+        static_data.invocation_site(agent_id, caller, domain) as i32,
+    ));
     body.instruction(&activation.map_or(Instruction::I32Const(0), Instruction::LocalGet));
     if let AgentInvocationSite::Step(Some(attempt)) = site {
         body.instruction(&Instruction::LocalGet(attempt));

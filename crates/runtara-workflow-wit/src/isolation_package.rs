@@ -13,9 +13,10 @@ use sha2::{Digest, Sha256};
 
 mod invocation_manifest;
 mod invocation_path;
-pub use invocation_manifest::{AgentCallSite, InvocationManifest};
+pub use invocation_manifest::{AgentCallSite, InvocationCallSite, InvocationManifest};
 pub use invocation_path::{
-    AgentInvocationPath, InvocationPathError, LoopFrame, LoopKind, NamespaceFrame,
+    AgentInvocationPath, InvocationPathError, InvocationSelector, LoopFrame, LoopKind,
+    NamespaceFrame,
 };
 
 pub const SECTION_NAME: &str = "runtara:isolated-package@1";

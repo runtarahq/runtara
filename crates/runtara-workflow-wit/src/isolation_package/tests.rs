@@ -63,6 +63,7 @@ fn rewritten_from(original: Vec<u8>, mutate: impl FnOnce(&mut Manifest)) -> Vec<
 
 fn invocations() -> InvocationManifest {
     InvocationManifest {
+        call_sites: Vec::new(),
         version: 1,
         workflow_id: "workflow::雪".into(),
         agent_calls: vec![AgentCallSite {
@@ -123,7 +124,7 @@ fn invocation_authority_versions_references_domains_and_duplicate_identities_are
             _ => {
                 let inv = m.invocations.as_mut().unwrap();
                 match mode {
-                    "version" => inv.version = 2,
+                    "version" => inv.version = 3,
                     "binding" => inv.agent_calls[0].binding = "agent:missing".into(),
                     "agent" => inv.agent_calls[0].agent_id = "missing".into(),
                     "duplicate" => inv.agent_calls.push(inv.agent_calls[0].clone()),
@@ -340,5 +341,104 @@ fn native_or_core_module_headers_cannot_be_packaged_as_components() {
             ),
             Err(PackageError::NotComponent)
         );
+    }
+}
+
+fn qualified_invocations() -> InvocationManifest {
+    let mut inventory = invocations();
+    inventory.version = 2;
+    inventory.call_sites = vec![
+        InvocationCallSite {
+            token: 7,
+            identity: 0,
+            agent_reference: 2,
+            caller_reference: 2,
+            domain: 0,
+        },
+        InvocationCallSite {
+            token: 9,
+            identity: 0,
+            agent_reference: 2,
+            caller_reference: 10,
+            domain: 3,
+        },
+        InvocationCallSite {
+            token: 13,
+            identity: 0,
+            agent_reference: 2,
+            caller_reference: 11,
+            domain: 3,
+        },
+        InvocationCallSite {
+            token: 19,
+            identity: 0,
+            agent_reference: 20,
+            caller_reference: 20,
+            domain: 0,
+        },
+    ];
+    inventory
+}
+
+#[test]
+fn qualified_inventory_roundtrips_distinct_definitions_and_callers_with_token_gaps() {
+    let child = component("utils");
+    let inventory = qualified_invocations();
+    let bytes = append_with_invocations(
+        COMPONENT_HEADER,
+        &[&child],
+        vec![binding("agent:utils", &child)],
+        inventory.clone(),
+        limits(),
+    )
+    .unwrap();
+    assert_eq!(
+        parse(&bytes, limits()).unwrap().unwrap().invocations(),
+        Some(&inventory)
+    );
+    let old_json = serde_json::to_value(invocations()).unwrap();
+    assert!(old_json.get("call_sites").is_none());
+    assert_eq!(
+        serde_json::from_value::<InvocationManifest>(old_json).unwrap(),
+        invocations()
+    );
+}
+
+#[test]
+fn qualified_inventory_rejects_ambiguous_or_uncovered_authority_at_admission() {
+    for mode in [
+        "old-version",
+        "duplicate-token",
+        "token-order",
+        "missing-identity",
+        "wrong-domain",
+        "duplicate-origin",
+        "foreign-self",
+        "uncovered",
+        "conflicting-definition",
+    ] {
+        let bytes = rewritten_from(package_v2(), |m| {
+            let mut inv = qualified_invocations();
+            match mode {
+                "old-version" => inv.version = 1,
+                "duplicate-token" => inv.call_sites[1].token = 7,
+                "token-order" => inv.call_sites.swap(0, 1),
+                "missing-identity" => inv.call_sites[0].identity = u32::MAX,
+                "wrong-domain" => inv.call_sites[0].domain = 5,
+                "duplicate-origin" => inv.call_sites[2].caller_reference = 10,
+                "foreign-self" => inv.call_sites[0].caller_reference = 3,
+                "uncovered" => inv.call_sites.retain(|site| site.domain == 0),
+                "conflicting-definition" => {
+                    let mut other = inv.agent_calls[0].clone();
+                    other.step_id = "z".into();
+                    other.domains = vec![3];
+                    inv.agent_calls.push(other);
+                    inv.call_sites[2].identity = 1;
+                }
+                _ => unreachable!(),
+            }
+            m.invocations = Some(inv);
+        });
+        assert!(parse(&bytes, limits()).is_err(), "accepted {mode}");
     }
 }

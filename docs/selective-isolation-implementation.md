@@ -742,6 +742,57 @@ The decoder is a host/compiler helper and adds no guest interface or DSL field.
 Fresh v2 performance measurements must include its per-invocation parsing and
 lookup costs; the historical v1 benchmark does not exercise this check.
 
+### Qualified Agent definition and caller identities
+
+A new emitted regression reproduced an address collision: a root `r0` Agent and
+an `r0` Agent inside `WaitForSignal.onWait`, both calling the same capability,
+produced the same v2 logical invocation path. Authored step IDs and loop ancestry
+alone do not identify every nested graph definition. A shared tool Agent can
+similarly be called by two different AiAgent controllers whose counters both
+start at zero.
+
+The compiler now assigns a token to each normalized Agent definition, caller and
+semantic role. The emitter and package inventory use the same token assignment;
+assignment includes unselected definitions so selecting an additional package
+does not renumber existing tokens. AI tool calls include the actual AI caller,
+while ordinary Agent, provider and memory calls use their own definition. The
+inventory can represent multiple definitions with the same authored identity.
+
+Scoped compilation now emits `logical-agent-call:3`, the private
+`scoped-capabilities-v3` interface, and inner invocation inventory version 2. The
+outer raw package and native transport remain version 2. The copied invocation
+path changes to `runtara:v3:` and its first fixed-width suffix identifies the
+call-site token; the second remains the activation counter. Retry attempt remains
+a separate u64. The canonical parameter layout and durable checkpoint key bytes
+are unchanged. Existing v2 paths require inventory version 1; v3 paths require
+inventory version 2. Cross-version reinterpretation is rejected. Previously
+compiled packages keep their existing code and interpretation.
+
+Admission checks sorted unique tokens, valid identity and role references,
+consistent definition-to-identity mapping, unique definition/caller/role tuples,
+and complete role coverage. The prepared launcher's resolver applies the original
+role-specific activation and attempt rules after token lookup, and checks that
+the token belongs to the requested Agent identity. These static checks still do
+not grant checkpoint namespace access or implement durable attempt fencing.
+Compiler-backed namespace membership and production selection remain required.
+
+Verification: **24 workflow-WIT/package tests**, **132 component-host tests**,
+and **858 workflow tests** passed. The workflow suite includes 235 emitted
+integration cases, all 13 Agent-isolation checks, and the paired comparison smoke
+across 11 workloads. The new onWait collision regression failed before the fix
+and passes afterward. A compiler test checks distinct callers for a shared AI
+tool and stable tokens across package selection; this is composition evidence,
+not a live isolated LLM conversation test. Native transport tests cover both
+inventory versions. Bridge tests exercise Unicode, maximum counters, repeated
+calls and malformed version prefixes rejected before launch. All 27 Agent and
+two shared workflow components rebuilt successfully. Feature-enabled all-target
+Clippy passed with `-D warnings`. Manual release benchmarks and the existing
+ignored doctest were not run; no database code changed or database suite reran.
+
+Fresh paired measurements must include the v3 bridge, larger per-call-site
+inventory, and launch-time decoding. The historical v1 comparison does not
+measure these costs; no new performance claim follows from this identity fix.
+
 ## Remaining required work
 
 - P0: extend explicit differential selection and invocation-count evidence to all

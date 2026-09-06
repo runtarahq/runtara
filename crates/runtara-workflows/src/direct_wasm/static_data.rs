@@ -164,6 +164,7 @@ pub(super) struct DirectCoreStaticData {
     pub(super) split_timeout_error: DirectDataSegment,
     step_ids: BTreeMap<String, DirectDataSegment>,
     agent_capability_ids: BTreeMap<u32, DirectDataSegment>,
+    invocation_sites: BTreeMap<(u32, u32, u32), u32>,
     /// Agents with a literal `connection_id`. Not baked — the stdlib injects the
     /// connection from the manifest (`agent-connection-input`); this only gates
     /// the pre-invoke injection call.
@@ -328,6 +329,10 @@ impl DirectCoreStaticData {
 
         let memory_min_pages = wasm_pages_for_bytes(offset)?;
         Ok(Self {
+            invocation_sites: super::compile::invocation_manifest::call_sites(
+                graph,
+                child_workflows,
+            )?,
             parallel_enabled: false,
             manifest,
             variables,
@@ -361,6 +366,10 @@ impl DirectCoreStaticData {
         self.step_ids.get(step_id).ok_or_else(|| {
             DirectCompileError::Component(format!("missing direct static step id '{step_id}'"))
         })
+    }
+
+    pub(super) fn invocation_site(&self, target: u32, caller: u32, domain: u32) -> u32 {
+        self.invocation_sites[&(target, caller, domain)]
     }
 
     pub(super) fn agent_capability_id(

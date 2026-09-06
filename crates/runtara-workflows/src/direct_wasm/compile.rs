@@ -40,7 +40,7 @@ mod edge_route;
 mod embed_retry;
 mod embed_workflow;
 mod error_step;
-mod invocation_manifest;
+pub(super) mod invocation_manifest;
 mod isolation_adapter;
 #[cfg(test)]
 mod isolation_adapter_tests;
@@ -782,12 +782,12 @@ fn compose_direct_workflow_selected(
             adapter_version: if result.scoped_agents.is_empty() {
                 1
             } else {
-                2
+                3
             },
             context_contract: if result.scoped_agents.is_empty() {
                 "live-adapter-call:1"
             } else {
-                "logical-agent-call:2"
+                "logical-agent-call:3"
             }
             .into(),
             bindings: bindings.clone(),
@@ -1685,7 +1685,7 @@ fn build_direct_component_resolve_scoped(
     }
     for agent in agents {
         let interface = if scoped_agents.contains(agent) {
-            "scoped-capabilities"
+            "scoped-capabilities-v3"
         } else {
             "capabilities"
         };
@@ -1732,12 +1732,12 @@ fn agent_wit_package(agent: &str) -> String {
 
 fn agent_wit_package_configured(agent: &str, scoped: bool) -> String {
     let interface = if scoped {
-        "scoped-capabilities"
+        "scoped-capabilities-v3"
     } else {
         "capabilities"
     };
     let context = if scoped {
-        "path: string, domain: u32, activation: u32, attempt: u64,"
+        "path: string, call-site: u32, activation: u32, attempt: u64,"
     } else {
         ""
     };

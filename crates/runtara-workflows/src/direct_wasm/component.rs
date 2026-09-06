@@ -358,7 +358,7 @@ fn emit_world_wit(
     }
     for agent in agents {
         let interface = if scoped_agents.contains(agent) {
-            "scoped-capabilities"
+            "scoped-capabilities-v3"
         } else {
             "capabilities"
         };
@@ -434,7 +434,7 @@ fn emit_wac(
     }
     for agent in agents {
         let interface = if scoped_agents.contains(agent) {
-            "scoped-capabilities"
+            "scoped-capabilities-v3"
         } else {
             "capabilities"
         };

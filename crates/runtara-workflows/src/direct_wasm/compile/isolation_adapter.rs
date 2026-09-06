@@ -1,6 +1,6 @@
 //! Guest bridge from the Agent ABI to owned execution resources. Graph control
-//! stays in the parent. V1 identifies live calls; V2 accepts compiler-generated
-//! logical call-site and attempt identity through a private interface.
+//! stays in the parent. V1 identifies live calls; V3 accepts compiler-qualified
+//! call-site and attempt identity through a private interface.
 use super::*;
 use std::collections::BTreeMap;
 use wasm_encoder::{
@@ -70,7 +70,7 @@ pub(super) fn emit_adapter_configured(
         .push_str("agent.wit", &agent_wit_package_configured(agent, scoped))
         .map_err(component_error)?;
     let interface = if scoped {
-        "scoped-capabilities"
+        "scoped-capabilities-v3"
     } else {
         "capabilities"
     };
@@ -577,10 +577,35 @@ fn realloc() -> WasmFunction {
     body
 }
 
-/// The compiler supplies the durable Agent key plus a call-site domain and
-/// activation index. Fixed-width base-16 (a–p) keeps the suffix injective without JSON
+/// The compiler supplies the durable Agent key plus a qualified call-site token
+/// and activation index. Fixed-width base-16 (a–p) keeps the suffix injective without JSON
 /// parsing or host policy. The attempt stays a separate u64 in the task context.
 fn emit_context_path(body: &mut WasmFunction, path: u32, realloc: u32) {
+    emit(
+        body,
+        [
+            Instruction::LocalGet(5),
+            Instruction::I32Const(11),
+            Instruction::I32LtU,
+            Instruction::If(BlockType::Empty),
+            Instruction::Unreachable,
+            Instruction::End,
+        ],
+    );
+    for (offset, byte) in b"runtara:v2:".iter().enumerate() {
+        emit(
+            body,
+            [
+                Instruction::LocalGet(4),
+                Instruction::I32Load8U(mem(offset as u64)),
+                Instruction::I32Const(i32::from(*byte)),
+                Instruction::I32Ne,
+                Instruction::If(BlockType::Empty),
+                Instruction::Unreachable,
+                Instruction::End,
+            ],
+        );
+    }
     emit(
         body,
         [
@@ -605,6 +630,16 @@ fn emit_context_path(body: &mut WasmFunction, path: u32, realloc: u32) {
                 src_mem: 0,
                 dst_mem: 0,
             },
+        ],
+    );
+    // Only the copied invocation address changes version. The parent's durable
+    // checkpoint key and input buffer remain byte-for-byte unchanged.
+    emit(
+        body,
+        [
+            Instruction::LocalGet(path),
+            Instruction::I32Const(i32::from(b'3')),
+            Instruction::I32Store8(mem(9)),
         ],
     );
     for (field, offset) in [(6, 0), (7, 9)] {

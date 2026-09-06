@@ -4,6 +4,7 @@ use serde_json::json;
 
 fn manifest() -> InvocationManifest {
     InvocationManifest {
+        call_sites: Vec::new(),
         version: 1,
         workflow_id: "root::雪".into(),
         agent_calls: vec![AgentCallSite {
@@ -51,7 +52,7 @@ fn canonical_unicode_namespaces_loops_and_max_counters_decode_without_delimiter_
             1,
         )
         .unwrap();
-    assert_eq!(decoded.domain, 3);
+    assert_eq!(decoded.selector, InvocationSelector::Domain(3));
     assert_eq!(decoded.activation, u32::MAX);
     assert_eq!(
         decoded.loops,
@@ -176,6 +177,82 @@ fn compiler_inventory_checks_entry_identity_domain_and_attempt_before_authority(
             &path(&key(), "aaaaaaac", "aaaaaaaa"),
             1
         ),
+        Err(InvocationPathError::UnknownCall)
+    );
+}
+
+#[test]
+fn qualified_tokens_resolve_semantic_rules_without_reinterpreting_legacy_domains() {
+    use crate::isolation_package::InvocationCallSite;
+    let mut inventory = manifest();
+    inventory.version = 2;
+    inventory.agent_calls[0].domains = vec![0, 3];
+    inventory.call_sites = vec![
+        InvocationCallSite {
+            token: 15,
+            identity: 0,
+            agent_reference: 0,
+            caller_reference: 0,
+            domain: 0,
+        },
+        InvocationCallSite {
+            token: u32::MAX,
+            identity: 0,
+            agent_reference: 0,
+            caller_reference: 1,
+            domain: 3,
+        },
+    ];
+    let qualified = |token: &str, activation: &str| {
+        path(&key(), token, activation).replacen("runtara:v2:", "runtara:v3:", 1)
+    };
+    let step = qualified("aaaaaaap", "aaaaaaaa");
+    let tool = qualified("pppppppp", "pppppppp");
+    assert_eq!(
+        inventory
+            .resolve_agent_invocation("agent:utils", "copy", &step, u64::MAX)
+            .unwrap()
+            .selector,
+        InvocationSelector::CallSite(15)
+    );
+    assert_eq!(
+        inventory
+            .resolve_agent_invocation("agent:utils", "copy", &tool, 1)
+            .unwrap()
+            .activation,
+        u32::MAX
+    );
+    for (path, attempt, expected) in [
+        (step.clone(), 0, InvocationPathError::InvalidAttempt),
+        (tool.clone(), 2, InvocationPathError::InvalidAttempt),
+        (
+            qualified("aaaaaaap", "aaaaaaab"),
+            1,
+            InvocationPathError::UnknownCall,
+        ),
+        (
+            qualified("aaaaaaaa", "aaaaaaaa"),
+            1,
+            InvocationPathError::UnknownCall,
+        ),
+        (standard(&key()), 1, InvocationPathError::UnknownCall),
+    ] {
+        assert_eq!(
+            inventory.resolve_agent_invocation("agent:utils", "copy", &path, attempt),
+            Err(expected)
+        );
+    }
+    assert_eq!(
+        manifest().resolve_agent_invocation("agent:utils", "copy", &step, 1),
+        Err(InvocationPathError::UnknownCall)
+    );
+    // An otherwise valid token may not name another flat identity.
+    let mut other = inventory.agent_calls[0].clone();
+    other.step_id = "z".into();
+    inventory.agent_calls.push(other);
+    inventory.call_sites[0].identity = 1;
+    assert_eq!(
+        inventory.resolve_agent_invocation("agent:utils", "copy", &step, 1),
         Err(InvocationPathError::UnknownCall)
     );
 }
