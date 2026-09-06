@@ -69,7 +69,7 @@ impl InvocationScopeFactory for Scopes {
                 if let Some(starts) = starts {
                     starts.fetch_add(1, Ordering::Relaxed);
                 }
-                spec()
+                Ok(spec().into())
             }),
             execution: None,
         })

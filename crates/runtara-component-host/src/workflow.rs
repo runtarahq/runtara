@@ -45,7 +45,7 @@ pub use prepared_catalog::PreparedChildCatalog;
 #[path = "workflow/prepared_launcher.rs"]
 mod prepared_launcher;
 pub use prepared_launcher::{
-    ChildInvocationScope, InvocationScopeFactory, PreparedInvocationLauncher,
+    ChildInvocationScope, ChildInvocationSpec, InvocationScopeFactory, PreparedInvocationLauncher,
 };
 
 use crate::engine::EPOCH_TICK;
@@ -166,6 +166,7 @@ enum InvocationEntry<'a> {
 
 #[derive(Default)]
 struct InvocationControl {
+    deadline: Option<Instant>,
     task_cancel: Option<crate::isolated_tasks::TaskCancellation>,
     abandoned: Option<Arc<AtomicBool>>,
     execution: Option<Arc<ExecutionContext>>,
@@ -937,7 +938,10 @@ impl WorkflowExecutor {
             None => None,
         };
 
+        let inherited_deadline = control.deadline.map(tokio::time::Instant::from_std);
         let initial_deadline = tokio::time::Instant::now() + spec.timeout;
+        let initial_deadline =
+            inherited_deadline.map_or(initial_deadline, |deadline| deadline.min(initial_deadline));
         let state = WorkflowState {
             wasi: builder.build(),
             http: WasiHttpCtx::new(),
@@ -1005,7 +1009,12 @@ impl WorkflowExecutor {
                 Ok(Err(error))
             } else {
                 store.data_mut().begin_active_execution(timeout);
-                let active_started = Instant::now();
+                if let Some(inherited) = inherited_deadline {
+                    let state = store.data_mut();
+                    state.active_deadline = state.active_deadline.min(inherited);
+                    state.http_deadline = state.active_deadline;
+                }
+                let active_deadline = store.data().active_deadline;
                 let run = async {
                     // Check before entering any guest initializer, including
                     // short initializers that would not hit an epoch check.
@@ -1022,6 +1031,10 @@ impl WorkflowExecutor {
                     {
                         store.data_mut().termination = Some(Termination::Cancelled);
                         anyhow::bail!("execution cancelled before instantiation");
+                    }
+                    if tokio::time::Instant::now() >= active_deadline {
+                        store.data_mut().termination = Some(Termination::Timeout);
+                        anyhow::bail!("execution deadline elapsed before instantiation");
                     }
                     let instance = pre.instantiate_async(&mut store).await?;
                     if let InvocationEntry::Capability {
@@ -1107,7 +1120,7 @@ impl WorkflowExecutor {
                         {
                             return Termination::Cancelled;
                         }
-                        if active_started.elapsed() >= timeout {
+                        if tokio::time::Instant::now() >= active_deadline {
                             return Termination::Timeout;
                         }
                     }

@@ -19,7 +19,7 @@ impl InvocationScopeFactory for CachedChildScope {
             return Err(ExecutionError::InvalidContext);
         }
         Ok(ChildInvocationScope {
-            make_spec: Box::new(|_| spec()),
+            make_spec: Box::new(|_| Ok(spec().into())),
             execution: None,
         })
     }

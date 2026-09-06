@@ -27,6 +27,9 @@ impl Drop for Dropped {
 }
 #[derive(Default)]
 struct Signals {
+    deadline: Mutex<Option<Instant>>,
+    reject_setup: AtomicBool,
+    reject_outcome: AtomicBool,
     pending_started: Notify,
     pending_dropped: Arc<AtomicBool>,
     initialized: AtomicUsize,
@@ -61,11 +64,25 @@ impl InvocationScopeFactory for Scopes {
         };
         Ok(ChildInvocationScope {
             make_spec: Box::new(move |token| {
+                if signals.reject_setup.load(Ordering::Acquire) {
+                    return Err("scope closed during admission".into());
+                }
                 signals.tokens.lock().unwrap().push(token);
                 signals.specs.fetch_add(1, Ordering::AcqRel);
                 let mut config = spec();
                 config.cancel = Some(cancel);
-                config
+                let deadline = *signals.deadline.lock().unwrap();
+                Ok(ChildInvocationSpec {
+                    spec: config,
+                    deadline,
+                    outcome_check: Some(Box::new(move |_| {
+                        if signals.reject_outcome.load(Ordering::Acquire) {
+                            Err("conflicting callbacks".into())
+                        } else {
+                            Ok(())
+                        }
+                    })),
+                })
             }),
             execution,
         })
@@ -213,6 +230,59 @@ fn capability() -> String {
       (instance $api (export "error-info" (type $error)) (export "invoke" (func $invoke)))
       (export "{CAPABILITY}" (instance $api)))"#
     )
+}
+
+#[tokio::test]
+async fn prepared_launcher_inherited_deadline_cannot_reset_at_child_start() {
+    let fx = Fixture::new(true);
+    *fx.signals.deadline.lock().unwrap() = Some(Instant::now());
+    let launcher = fx.launcher(fx.catalog(&capability(), &[("child", CAPABILITY)]));
+    // The child spec still allows 30 seconds. Its inherited root deadline has
+    // already elapsed, so even a short initializer must not run.
+    let id = fx.spawn(
+        launcher.as_ref(),
+        request("child", Entry::Capability("copy".into()), b"42".to_vec()),
+    );
+    let result = bounded(fx.tasks.join(id)).await.unwrap();
+    assert!(matches!(result.outcome(), InvokeExit::Timeout));
+    assert_eq!(fx.signals.initialized.load(Ordering::Acquire), 0);
+    let descendants = fx.signals.child_tasks.lock().unwrap()[0].clone();
+    assert!(matches!(
+        descendants.spawn(|_| async { InvokeExit::Completed(vec![]) }),
+        Err(TaskError::Closed)
+    ));
+    fx.tasks.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn prepared_launcher_scope_failures_still_reap_descendant_ownership() {
+    for reject_setup in [true, false] {
+        let fx = Fixture::new(true);
+        fx.signals
+            .reject_setup
+            .store(reject_setup, Ordering::Release);
+        fx.signals
+            .reject_outcome
+            .store(!reject_setup, Ordering::Release);
+        let launcher = fx.launcher(fx.catalog(&capability(), &[("child", CAPABILITY)]));
+        let id = fx.spawn(
+            launcher.as_ref(),
+            request("child", Entry::Capability("copy".into()), b"42".to_vec()),
+        );
+        let result = bounded(fx.tasks.join(id)).await.unwrap();
+        assert!(matches!(result.outcome(), InvokeExit::Trapped { reason }
+            if reason.contains(if reject_setup { "scope setup failed" } else { "outcome validation failed" })));
+        assert_eq!(
+            fx.signals.initialized.load(Ordering::Acquire),
+            usize::from(!reject_setup)
+        );
+        let descendants = fx.signals.child_tasks.lock().unwrap()[0].clone();
+        assert!(matches!(
+            descendants.spawn(|_| async { InvokeExit::Completed(vec![]) }),
+            Err(TaskError::Closed)
+        ));
+        fx.tasks.shutdown().await.unwrap();
+    }
 }
 
 #[tokio::test]

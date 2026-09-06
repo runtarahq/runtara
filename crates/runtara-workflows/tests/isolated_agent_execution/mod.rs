@@ -61,7 +61,7 @@ impl InvocationScopeFactory for Scopes {
         Ok(ChildInvocationScope {
             make_spec: Box::new(move |_| {
                 starts.fetch_add(1, Ordering::SeqCst);
-                spec()
+                Ok(spec().into())
             }),
             execution: None,
         })

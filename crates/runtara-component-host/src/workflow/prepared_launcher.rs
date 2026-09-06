@@ -14,8 +14,34 @@ use crate::isolated_tasks::TaskCancellation;
 /// The launcher transfers its cleanup to the supervisor, outside the execution
 /// future. Scope construction must not start any descendant work.
 pub struct ChildInvocationScope {
-    pub make_spec: Box<dyn FnOnce(TaskCancellation) -> WorkflowRunSpec + Send + 'static>,
+    pub make_spec:
+        Box<dyn FnOnce(TaskCancellation) -> Result<ChildInvocationSpec, String> + Send + 'static>,
     pub execution: Option<Arc<ExecutionContext>>,
+}
+
+/// A successfully admitted child and optional local outcome validation. The
+/// check runs after its Store is gone and may reject inconsistent captured
+/// callbacks. It must not perform IO, publish root state or schedule graph work.
+/// Descendant teardown still belongs to the task supervisor, even if this check
+/// fails or panics. Cancellation of execution discards the check with the future.
+pub struct ChildInvocationSpec {
+    pub spec: WorkflowRunSpec,
+    /// An inherited absolute deadline also covers Store setup. Unlike a root's
+    /// active timeout, crossing a child start gate cannot reset this deadline.
+    pub deadline: Option<Instant>,
+    pub outcome_check: Option<ChildOutcomeCheck>,
+}
+
+pub type ChildOutcomeCheck = Box<dyn FnOnce(&InvokeExit) -> Result<(), String> + Send + 'static>;
+
+impl From<WorkflowRunSpec> for ChildInvocationSpec {
+    fn from(spec: WorkflowRunSpec) -> Self {
+        Self {
+            spec,
+            deadline: None,
+            outcome_check: None,
+        }
+    }
 }
 
 /// Bound to immutable parent/root/tenant authority by the embedding. Validate
@@ -81,7 +107,14 @@ impl InvocationLauncher for PreparedInvocationLauncher {
         Ok(PreparedInvocation {
             run: Box::new(move |token| {
                 Box::pin(async move {
-                    let spec = (scope.make_spec)(token.clone());
+                    let child = match (scope.make_spec)(token.clone()) {
+                        Ok(child) => child,
+                        Err(reason) => {
+                            return InvokeExit::Trapped {
+                                reason: format!("child scope setup failed: {reason}"),
+                            };
+                        }
+                    };
                     let entry = match &request.entry {
                         Entry::Capability(capability) => InvocationEntry::Capability {
                             interface: &interface,
@@ -91,21 +124,30 @@ impl InvocationLauncher for PreparedInvocationLauncher {
                             interface: Some(&interface),
                         },
                     };
-                    executor
+                    let exit = executor
                         .execute_entry(
                             &pre,
-                            spec,
+                            child.spec,
                             request.input,
                             None,
                             entry,
                             InvocationControl {
                                 task_cancel: Some(token),
                                 execution: scope.execution,
+                                deadline: child.deadline,
                                 ..Default::default()
                             },
                         )
                         .await
-                        .exit
+                        .exit;
+                    if let Some(check) = child.outcome_check
+                        && let Err(reason) = check(&exit)
+                    {
+                        return InvokeExit::Trapped {
+                            reason: format!("child outcome validation failed: {reason}"),
+                        };
+                    }
+                    exit
                 })
             }),
             cleanup,
