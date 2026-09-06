@@ -125,6 +125,19 @@ fn invalidate_image_cache() {
     }
 }
 
+/// Which images [`ImageRegistry::list_filtered`] should return.
+#[derive(Debug, Default)]
+pub struct ImageFilter {
+    /// Restrict to one tenant.
+    pub tenant_id: Option<String>,
+    /// Exact name match; only meaningful together with `tenant_id`.
+    pub name: Option<String>,
+    /// Page size.
+    pub limit: i64,
+    /// Page offset.
+    pub offset: i64,
+}
+
 /// Image registry - manages available images in the database.
 pub struct ImageRegistry {
     pool: PgPool,
@@ -280,6 +293,55 @@ impl ImageRegistry {
             cache_image(image_id, image);
         }
         Ok(image)
+    }
+
+    /// Get an image by ID, refusing one that belongs to another tenant.
+    ///
+    /// A hit owned by a different tenant reads as `None`, not as a rejection:
+    /// telling a caller "this exists but is not yours" would leak the existence
+    /// of another tenant's image. `None` for `tenant_id` skips the check, for
+    /// callers that are not acting on behalf of a tenant.
+    pub async fn get_scoped(
+        &self,
+        image_id: &str,
+        tenant_id: Option<&str>,
+    ) -> Result<Option<Image>> {
+        if image_id.is_empty() {
+            return Err(crate::error::Error::InvalidRequest(
+                "image_id is required".to_string(),
+            ));
+        }
+
+        let Some(image) = self.get(image_id).await? else {
+            return Ok(None);
+        };
+        if let Some(tenant_id) = tenant_id
+            && image.tenant_id != tenant_id
+        {
+            return Ok(None);
+        }
+        Ok(Some(image))
+    }
+
+    /// List images, narrowing as far as the caller's filters allow.
+    ///
+    /// An exact name is only meaningful within a tenant, so it selects the
+    /// single-row lookup; a tenant alone pages that tenant's images; neither
+    /// pages every image. Naming the three cases here keeps the choice with the
+    /// table rather than with whoever is asking.
+    pub async fn list_filtered(&self, filter: &ImageFilter) -> Result<Vec<Image>> {
+        Ok(match (&filter.tenant_id, &filter.name) {
+            (Some(tenant_id), Some(name)) => self
+                .get_by_name(tenant_id, name)
+                .await?
+                .into_iter()
+                .collect(),
+            (Some(tenant_id), None) => {
+                self.list_by_tenant(tenant_id, filter.limit, filter.offset)
+                    .await?
+            }
+            (None, _) => self.list_all(filter.limit, filter.offset).await?,
+        })
     }
 
     /// Get an image by name for a tenant

@@ -23,6 +23,7 @@ use runtara_environment::handlers::{
     self, EnvironmentHandlerState, ResumeInstanceRequest, SendCustomSignalOutcome,
     SendSignalOutcome, StartInstanceRequest, StartRejection, StopInstanceRequest,
 };
+use runtara_environment::image_registry::{Image, ImageFilter, ImageRegistry};
 use thiserror::Error;
 use tracing::{debug, info, instrument, warn};
 
@@ -88,6 +89,16 @@ impl EnvironmentClient {
     /// Wrap the running environment's shared handler state.
     pub fn new(state: Arc<EnvironmentHandlerState>) -> Self {
         Self { state }
+    }
+
+    /// The registry that owns the `images` table.
+    ///
+    /// Image reads go straight to it. They used to pass through a pair of
+    /// handlers that only re-shaped the row, which is a layer worth having when
+    /// something has to cross a socket and not when the caller is linked
+    /// against the same crate.
+    fn image_registry(&self) -> ImageRegistry {
+        ImageRegistry::new(self.state.pool.clone())
     }
 
     // =========================================================================
@@ -330,16 +341,15 @@ impl EnvironmentClient {
     pub async fn list_images(&self, options: ListImagesOptions) -> Result<ListImagesResult> {
         debug!("Listing images");
 
-        let images = handlers::handle_list_images(
-            &self.state,
-            &handlers::ListImagesParams {
+        let images = self
+            .image_registry()
+            .list_filtered(&ImageFilter {
                 tenant_id: options.tenant_id,
                 name: None,
                 limit: i64::from(options.limit),
                 offset: i64::from(options.offset),
-            },
-        )
-        .await?;
+            })
+            .await?;
 
         let total_count = images.len() as u32;
         Ok(ListImagesResult {
@@ -362,19 +372,18 @@ impl EnvironmentClient {
     ) -> Result<Option<ImageSummary>> {
         debug!("Finding image by name");
 
-        Ok(handlers::handle_list_images(
-            &self.state,
-            &handlers::ListImagesParams {
+        Ok(self
+            .image_registry()
+            .list_filtered(&ImageFilter {
                 tenant_id: Some(tenant_id.to_string()),
                 name: Some(name.to_string()),
                 limit: 1,
                 offset: 0,
-            },
-        )
-        .await?
-        .into_iter()
-        .next()
-        .map(image_summary))
+            })
+            .await?
+            .into_iter()
+            .next()
+            .map(image_summary))
     }
 
     /// Get one image, scoped to a tenant.
@@ -382,11 +391,11 @@ impl EnvironmentClient {
     pub async fn get_image(&self, image_id: &str, tenant_id: &str) -> Result<Option<ImageSummary>> {
         debug!("Getting image");
 
-        Ok(
-            handlers::handle_get_image(&self.state, image_id, Some(tenant_id))
-                .await?
-                .map(image_summary),
-        )
+        Ok(self
+            .image_registry()
+            .get_scoped(image_id, Some(tenant_id))
+            .await?
+            .map(image_summary))
     }
 
     /// Store an uploaded image artifact and register (or replace) its row.
@@ -746,7 +755,9 @@ fn failed_unless(success: bool, code: &str, error: Option<String>) -> Result<()>
     })
 }
 
-fn image_summary(img: runtara_environment::handlers::ImageSummary) -> ImageSummary {
+/// The image fields the server reports, dropping the ones only environment
+/// uses (where the artifact sits on disk, when its row was last rewritten).
+fn image_summary(img: Image) -> ImageSummary {
     ImageSummary {
         image_id: img.image_id,
         tenant_id: img.tenant_id,
