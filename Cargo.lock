@@ -4433,6 +4433,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "runtara-dsl",
+ "serde",
  "serde_json",
  "syn 2.0.117",
 ]
@@ -4559,6 +4560,7 @@ dependencies = [
  "runtara-http",
  "serde",
  "serde_json",
+ "tokio",
  "wit-bindgen 0.58.0",
 ]
 

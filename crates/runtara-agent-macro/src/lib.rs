@@ -261,7 +261,12 @@ struct OutputContainerArgs {
     description: Option<String>,
 }
 
-/// Attribute macro for marking agent capability functions
+/// Attribute macro for marking agent capability functions.
+///
+/// An authored `async fn` generates an async dispatcher with the same coercion
+/// and error contract as a synchronous capability. Its descriptor stores a
+/// standard Rust future; the macro does not spawn work or own an executor.
+/// Guest bindings can await the dispatcher directly without boxing it.
 ///
 /// # Example
 /// ```ignore
@@ -389,10 +394,13 @@ pub fn capability(attr: TokenStream, item: TokenStream) -> TokenStream {
     // This follows the naming convention: __INPUT_META_{StructName}
     let input_meta_ident = format_ident!("__INPUT_META_{}", input_type);
 
-    // Generate synchronous executor wrapper
+    // Preserve the authored function's asyncness. Both wrappers share exactly
+    // the same coercion and error envelope; guest dispatch awaits directly.
+    let asyncness = input_fn.sig.asyncness;
+    let await_result = asyncness.map(|_| quote! { .await });
     let executor_wrapper = quote! {
         #[doc(hidden)]
-        fn #executor_fn_ident(input: serde_json::Value) -> Result<serde_json::Value, String> {
+        #asyncness fn #executor_fn_ident(input: serde_json::Value) -> Result<serde_json::Value, String> {
             // Helper to create JSON-structured errors matching AgentError format.
             // All capability errors must be parseable JSON so the #[resilient] macro
             // can check error category for retry decisions.
@@ -410,7 +418,7 @@ pub fn capability(attr: TokenStream, item: TokenStream) -> TokenStream {
             let typed_input: #input_type_ident = serde_json::from_value(coerced_input)
                 .map_err(|e| __to_json_error("INPUT_DESERIALIZATION_ERROR",
                     format!("Invalid input for {}: {}", #capability_id, e)))?;
-            let result = #fn_name(typed_input).map_err(|e| {
+            let result = #fn_name(typed_input)#await_result.map_err(|e| {
                 let s: String = e.into();
                 // Pass through existing JSON errors (from AgentError), wrap plain strings
                 if s.starts_with('{') { s } else {
@@ -477,6 +485,28 @@ pub fn capability(attr: TokenStream, item: TokenStream) -> TokenStream {
         quote! { &[] }
     };
 
+    let executor_registration = if asyncness.is_some() {
+        quote! {
+            #[allow(non_upper_case_globals)]
+            #[doc(hidden)]
+            pub static #executor_ident: runtara_dsl::agent_meta::AsyncCapabilityExecutor = runtara_dsl::agent_meta::AsyncCapabilityExecutor {
+                module: #module_str,
+                capability_id: #capability_id,
+                execute: |input| Box::pin(#executor_fn_ident(input)),
+            };
+        }
+    } else {
+        quote! {
+            #[allow(non_upper_case_globals)]
+            #[doc(hidden)]
+            pub static #executor_ident: runtara_dsl::agent_meta::CapabilityExecutor = runtara_dsl::agent_meta::CapabilityExecutor {
+                module: #module_str,
+                capability_id: #capability_id,
+                execute: #executor_fn_ident,
+            };
+        }
+    };
+
     let expanded = quote! {
         #input_fn
 
@@ -501,13 +531,7 @@ pub fn capability(attr: TokenStream, item: TokenStream) -> TokenStream {
 
         #executor_wrapper
 
-        #[allow(non_upper_case_globals)]
-        #[doc(hidden)]
-        pub static #executor_ident: runtara_dsl::agent_meta::CapabilityExecutor = runtara_dsl::agent_meta::CapabilityExecutor {
-            module: #module_str,
-            capability_id: #capability_id,
-            execute: #executor_fn_ident,
-        };
+        #executor_registration
 
         #module_registration
     };

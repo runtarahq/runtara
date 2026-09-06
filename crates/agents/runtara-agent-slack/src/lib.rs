@@ -34,9 +34,7 @@ mod bindings {
     wit_bindgen::generate!({
         path: ["../../runtara-agent-wit/wit", "wit"],
         world: "runtara:agent-slack/agent",
-        // Sync impls of the async-TYPED invoke (sync lift; see
-        // spikes/wit-bindgen-async-typed).
-        async: false,
+        async: ["export:runtara:agent-slack/capabilities@0.4.0#invoke"],
         generate_all,
     });
 }
@@ -149,7 +147,7 @@ const UPLOAD_TIMEOUT_MS: u64 = 120_000;
 /// proxy (which injects the Bot token for the connection). Handles Slack's
 /// "200 OK with ok:false" error pattern and maps well-known error codes to
 /// structured `AgentError` values.
-fn slack_api_call(
+async fn slack_api_call(
     slack_method: &str,
     connection: &RawConnection,
     body: &Value,
@@ -169,7 +167,8 @@ fn slack_api_call(
         .header("Content-Type", "application/json; charset=utf-8")
         .header("X-Runtara-Connection-Id", &connection.connection_id)
         .body_bytes(&body_bytes)
-        .call_agent()
+        .call_agent_async()
+        .await
         .map_err(|e| {
             AgentError::transient(
                 "SLACK_NETWORK_ERROR",
@@ -373,7 +372,7 @@ pub struct SendMessageOutput {
     module_integration_ids = "slack_bot",
     module_secure = true
 )]
-pub fn send_message(input: SendMessageInput) -> Result<SendMessageOutput, AgentError> {
+pub async fn send_message(input: SendMessageInput) -> Result<SendMessageOutput, AgentError> {
     let connection = input._connection.as_ref().ok_or_else(|| {
         AgentError::permanent(
             "SLACK_MISSING_CONNECTION",
@@ -400,7 +399,7 @@ pub fn send_message(input: SendMessageInput) -> Result<SendMessageOutput, AgentE
         body["unfurl_media"] = json!(unfurl_media);
     }
 
-    let resp = slack_api_call("chat.postMessage", connection, &body)?;
+    let resp = slack_api_call("chat.postMessage", connection, &body).await?;
 
     Ok(SendMessageOutput {
         ok: true,
@@ -483,7 +482,7 @@ pub struct AddReactionOutput {
     module_integration_ids = "slack_bot",
     module_secure = true
 )]
-pub fn add_reaction(input: AddReactionInput) -> Result<AddReactionOutput, AgentError> {
+pub async fn add_reaction(input: AddReactionInput) -> Result<AddReactionOutput, AgentError> {
     let connection = input._connection.as_ref().ok_or_else(|| {
         AgentError::permanent(
             "SLACK_MISSING_CONNECTION",
@@ -500,7 +499,8 @@ pub fn add_reaction(input: AddReactionInput) -> Result<AddReactionOutput, AgentE
             "timestamp": input.timestamp,
             "name": input.name,
         }),
-    )?;
+    )
+    .await?;
 
     Ok(AddReactionOutput {
         ok: true,
@@ -602,7 +602,7 @@ pub struct UploadFileOutput {
     module_integration_ids = "slack_bot",
     module_secure = true
 )]
-pub fn upload_file(input: UploadFileInput) -> Result<UploadFileOutput, AgentError> {
+pub async fn upload_file(input: UploadFileInput) -> Result<UploadFileOutput, AgentError> {
     use base64::Engine as _;
 
     let connection = input._connection.as_ref().ok_or_else(|| {
@@ -635,7 +635,7 @@ pub fn upload_file(input: UploadFileInput) -> Result<UploadFileOutput, AgentErro
         get_url_body["snippet_type"] = json!(snippet_type);
     }
 
-    let url_resp = slack_api_call("files.getUploadURLExternal", connection, &get_url_body)?;
+    let url_resp = slack_api_call("files.getUploadURLExternal", connection, &get_url_body).await?;
 
     let upload_url = url_resp["upload_url"].as_str().ok_or_else(|| {
         AgentError::permanent(
@@ -665,7 +665,8 @@ pub fn upload_file(input: UploadFileInput) -> Result<UploadFileOutput, AgentErro
         .request("POST", upload_url)
         .header("Content-Type", content_type)
         .body_bytes(&file_bytes)
-        .call_agent()
+        .call_agent_async()
+        .await
         .map_err(|e| {
             AgentError::transient(
                 "SLACK_UPLOAD_NETWORK_ERROR",
@@ -732,7 +733,8 @@ pub fn upload_file(input: UploadFileInput) -> Result<UploadFileOutput, AgentErro
         complete_body["thread_ts"] = json!(thread_ts);
     }
 
-    let complete_resp = slack_api_call("files.completeUploadExternal", connection, &complete_body)?;
+    let complete_resp =
+        slack_api_call("files.completeUploadExternal", connection, &complete_body).await?;
 
     // Extract file info from the completed upload response
     let files = complete_resp["files"].as_array();
@@ -845,13 +847,13 @@ struct Component;
 
 #[cfg(target_arch = "wasm32")]
 impl Guest for Component {
-    fn invoke(capability_id: String, input: Vec<u8>) -> Result<Vec<u8>, ErrorInfo> {
+    async fn invoke(capability_id: String, input: Vec<u8>) -> Result<Vec<u8>, ErrorInfo> {
         let value: serde_json::Value = serde_json::from_slice(&input).map_err(bad_json)?;
 
         let executor_result = match capability_id.as_str() {
-            "send-message" => __executor_send_message(value),
-            "add-reaction" => __executor_add_reaction(value),
-            "upload-file" => __executor_upload_file(value),
+            "send-message" => __executor_send_message(value).await,
+            "add-reaction" => __executor_add_reaction(value).await,
+            "upload-file" => __executor_upload_file(value).await,
             other => {
                 return Err(ErrorInfo {
                     code: "UNKNOWN_CAPABILITY".into(),
@@ -960,14 +962,15 @@ mod tests {
         assert!(capability.has_side_effects);
     }
 
-    #[test]
-    fn add_reaction_requires_connection() {
+    #[tokio::test]
+    async fn add_reaction_requires_connection() {
         let error = add_reaction(AddReactionInput {
             _connection: None,
             channel: "C123".into(),
             timestamp: "1712345678.000100".into(),
             name: "thumbsup".into(),
         })
+        .await
         .expect_err("connection is required");
 
         assert_eq!(error.code, "SLACK_MISSING_CONNECTION");

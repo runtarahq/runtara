@@ -1,5 +1,5 @@
 (component
-  (import "runtara:agent-http/capabilities@0.4.0" (instance $http
+  (import "runtara:agent-{{AGENT}}/capabilities@0.4.0" (instance $http
     (type $error-def (record (field "code" string) (field "message" string)
       (field "category" string) (field "severity" string) (field "retryable" bool)
       (field "retry-after-ms" (option u64)) (field "attributes" (option string))))
@@ -37,7 +37,8 @@
     (import "h" "join" (func $join (param i32 i32)))
     (import "h" "wait" (func $wait (param i32 i32) (result i32)))
     (import "h" "drop-set" (func $drop-set (param i32)))
-    (data (i32.const 1024) "http-request")
+    (data (i32.const 1024) "{{CAPABILITY}}")
+    (data (i32.const 1536) "{{SECOND_CAPABILITY}}")
     (data (i32.const 2048) "{{INPUT}}")
     (data (i32.const 8192) "{{SECOND_INPUT}}")
     (func $resolve (param $status i32) (local $handle i32) (local $set i32)
@@ -50,7 +51,7 @@
       (call $drop (local.get $handle))
       (call $drop-set (local.get $set)))
     (func (export "run") (result i32) (local $target i32) (local $sibling i32)
-      (local.set $target (call $invoke (i32.const 1024) (i32.const 12) (i32.const 2048) (i32.const {{INPUT_LEN}}) (i32.const 0)))
+      (local.set $target (call $invoke (i32.const 1024) (i32.const {{CAPABILITY_LEN}}) (i32.const 2048) (i32.const {{INPUT_LEN}}) (i32.const 0)))
       (if (i32.ne (i32.and (local.get $target) (i32.const 15)) (i32.const 1)) (then unreachable))
       (local.set $sibling (call $sibling (i32.const 128)))
       (call $signal)
@@ -59,8 +60,8 @@
       (call $drop (local.get $target))
       (call $resolve (local.get $sibling))
       (if (i32.ne (i32.load (i32.const 128)) (i32.const 7)) (then unreachable))
-      ;; A second HTTP call in the same real Agent instance must still work.
-      (call $resolve (call $invoke (i32.const 1024) (i32.const 12) (i32.const 8192) (i32.const {{SECOND_INPUT_LEN}}) (i32.const 64)))
+      ;; A second capability call in the same real Agent instance must still work.
+      (call $resolve (call $invoke (i32.const 1536) (i32.const {{SECOND_CAPABILITY_LEN}}) (i32.const 8192) (i32.const {{SECOND_INPUT_LEN}}) (i32.const 64)))
       ;; Return the actual JSON success bytes to the native assertions.
       (if (i32.ne (i32.load8_u (i32.const 64)) (i32.const 0)) (then unreachable))
       (i32.store (i32.const 96) (i32.load (i32.const 72)))

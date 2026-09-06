@@ -5,13 +5,13 @@ use runtara_component_host::{CallContext, HostState};
 use std::path::PathBuf;
 use wac_graph::{CompositionGraph, EncodeOptions, types::Package};
 
-fn agent_path() -> anyhow::Result<PathBuf> {
+fn agent_path(agent_id: &str) -> anyhow::Result<PathBuf> {
     let directory = std::env::var_os("RUNTARA_AGENT_COMPONENTS_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/wasm32-wasip2/release")
         });
-    let agent = directory.join("runtara_agent_http.wasm");
+    let agent = directory.join(format!("runtara_agent_{agent_id}.wasm"));
     anyhow::ensure!(
         agent.exists(),
         "run scripts/build-agent-components.sh first"
@@ -20,7 +20,17 @@ fn agent_path() -> anyhow::Result<PathBuf> {
 }
 
 fn compose(input: &[u8], second: &[u8]) -> anyhow::Result<Vec<u8>> {
-    let agent = agent_path()?;
+    compose_agent("http", "http-request", input, "http-request", second)
+}
+
+pub(super) fn compose_agent(
+    agent_id: &str,
+    capability: &str,
+    input: &[u8],
+    second_capability: &str,
+    second: &[u8],
+) -> anyhow::Result<Vec<u8>> {
+    let agent = agent_path(agent_id)?;
     let escape = |bytes: &[u8]| {
         bytes
             .iter()
@@ -28,6 +38,17 @@ fn compose(input: &[u8], second: &[u8]) -> anyhow::Result<Vec<u8>> {
             .collect::<String>()
     };
     let parent = include_str!("http-parent.wat")
+        .replace("{{AGENT}}", agent_id)
+        .replace("{{CAPABILITY}}", &escape(capability.as_bytes()))
+        .replace("{{CAPABILITY_LEN}}", &capability.len().to_string())
+        .replace(
+            "{{SECOND_CAPABILITY}}",
+            &escape(second_capability.as_bytes()),
+        )
+        .replace(
+            "{{SECOND_CAPABILITY_LEN}}",
+            &second_capability.len().to_string(),
+        )
         .replace("{{INPUT}}", &escape(input))
         .replace("{{INPUT_LEN}}", &input.len().to_string())
         .replace("{{SECOND_INPUT}}", &escape(second))
@@ -46,7 +67,7 @@ fn compose(input: &[u8], second: &[u8]) -> anyhow::Result<Vec<u8>> {
     Ok(graph.encode(EncodeOptions::default())?)
 }
 
-async fn request_headers(socket: &mut tokio::net::TcpStream) -> anyhow::Result<Vec<u8>> {
+pub(super) async fn request_headers(socket: &mut tokio::net::TcpStream) -> anyhow::Result<Vec<u8>> {
     let mut bytes = Vec::new();
     while !bytes.ends_with(b"\r\n\r\n") {
         bytes.push(socket.read_u8().await?);
@@ -67,7 +88,6 @@ async fn cancel_real_http(body_wait: bool) -> anyhow::Result<()> {
     let bytes = compose(&input, &second)?;
     let started = Arc::new(Notify::new());
     let cleaned = Arc::new(Notify::new());
-    let sibling_started = Arc::new(Notify::new());
     let server = tokio::spawn({
         let started = started.clone();
         let cleaned = cleaned.clone();
@@ -100,41 +120,13 @@ async fn cancel_real_http(body_wait: bool) -> anyhow::Result<()> {
         }
     });
     let run = async {
-        let engine = runtara_component_host::build_engine(&runtara_component_host::EngineConfig {
-            cache_dir: None,
-            enable_epoch_interruption: false,
-        })?;
-        let component = Component::new(&engine, bytes)?;
-        let mut linker = runtara_component_host::build_linker(&engine)?;
-        linker.root().func_wrap_concurrent("sibling", {
-            let sibling_started = sibling_started.clone();
-            move |_, (): ()| {
-                let sibling_started = sibling_started.clone();
-                let cleaned = cleaned.clone();
-                Box::pin(async move {
-                    sibling_started.notify_one();
-                    cleaned.notified().await;
-                    Ok((7u32,))
-                })
-            }
-        })?;
-        linker
-            .root()
-            .func_wrap_concurrent("signal", move |_, (): ()| {
-                let started = started.clone();
-                let sibling_started = sibling_started.clone();
-                Box::pin(async move {
-                    started.notified().await;
-                    sibling_started.notified().await;
-                    Ok(())
-                })
-            })?;
-        let state = HostState::new(Arc::new(CallContext::placeholder_for_metadata()));
-        let mut store = Store::new(&engine, state);
-        let instance = linker.instantiate_async(&mut store, &component).await?;
-        let run = instance.get_typed_func::<(), (Vec<u8>,)>(&mut store, "run")?;
-        let (output,) = run.call_async(&mut store, ()).await?;
-        let output: serde_json::Value = serde_json::from_slice(&output)?;
+        let output = cancel_and_reuse(
+            bytes,
+            CallContext::placeholder_for_metadata(),
+            started,
+            cleaned,
+        )
+        .await?;
         assert_eq!(output["status_code"], 200);
         assert_eq!(output["body"], "ok");
         assert_eq!(output["success"], true);
@@ -158,6 +150,51 @@ async fn cancel_real_http(body_wait: bool) -> anyhow::Result<()> {
     }
 }
 
+pub(super) async fn cancel_and_reuse(
+    bytes: Vec<u8>,
+    context: CallContext,
+    started: Arc<Notify>,
+    cleaned: Arc<Notify>,
+) -> anyhow::Result<serde_json::Value> {
+    let sibling_started = Arc::new(Notify::new());
+    let engine = runtara_component_host::build_engine(&runtara_component_host::EngineConfig {
+        cache_dir: None,
+        enable_epoch_interruption: false,
+    })?;
+    let component = Component::new(&engine, bytes)?;
+    let mut linker = runtara_component_host::build_linker(&engine)?;
+    linker.root().func_wrap_concurrent("sibling", {
+        let sibling_started = sibling_started.clone();
+        move |_, (): ()| {
+            let sibling_started = sibling_started.clone();
+            let cleaned = cleaned.clone();
+            Box::pin(async move {
+                sibling_started.notify_one();
+                cleaned.notified().await;
+                Ok((7u32,))
+            })
+        }
+    })?;
+    linker
+        .root()
+        .func_wrap_concurrent("signal", move |_, (): ()| {
+            let started = started.clone();
+            let sibling_started = sibling_started.clone();
+            Box::pin(async move {
+                started.notified().await;
+                sibling_started.notified().await;
+                Ok(())
+            })
+        })?;
+    let state = HostState::new(Arc::new(context));
+    let mut store = Store::new(&engine, state);
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let run = instance.get_typed_func::<(), (Vec<u8>,)>(&mut store, "run")?;
+    let (output,) = run.call_async(&mut store, ()).await?;
+    let output: serde_json::Value = serde_json::from_slice(&output)?;
+    Ok(output)
+}
+
 #[tokio::test]
 async fn built_http_agent_cancels_pending_headers_and_can_be_reused() -> anyhow::Result<()> {
     cancel_real_http(false).await
@@ -173,16 +210,29 @@ async fn invoke_agent(
     capability: &str,
     input: Vec<u8>,
 ) -> anyhow::Result<Result<Vec<u8>, runtara_component_host::ErrorInfo>> {
+    invoke_named_agent("http", context, capability, input).await
+}
+
+pub(super) async fn invoke_named_agent(
+    agent_id: &str,
+    context: CallContext,
+    capability: &str,
+    input: Vec<u8>,
+) -> anyhow::Result<Result<Vec<u8>, runtara_component_host::ErrorInfo>> {
     let engine = runtara_component_host::build_engine(&runtara_component_host::EngineConfig {
         cache_dir: None,
         enable_epoch_interruption: false,
     })?;
-    let component = Component::from_file(&engine, agent_path()?)?;
+    let component = Component::from_file(&engine, agent_path(agent_id)?)?;
     let linker = runtara_component_host::build_linker(&engine)?;
     let mut store = Store::new(&engine, HostState::new(Arc::new(context)));
     let instance = linker.instantiate_async(&mut store, &component).await?;
     let interface = instance
-        .get_export_index(&mut store, None, "runtara:agent-http/capabilities@0.4.0")
+        .get_export_index(
+            &mut store,
+            None,
+            &format!("runtara:agent-{agent_id}/capabilities@0.4.0"),
+        )
         .unwrap();
     let export = instance
         .get_export_index(&mut store, Some(&interface), "invoke")

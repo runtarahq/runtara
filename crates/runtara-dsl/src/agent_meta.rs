@@ -29,6 +29,19 @@ pub struct CapabilityExecutor {
     pub execute: CapabilityExecutorFn,
 }
 
+/// A capability invocation driven by the caller's normal Rust async runtime.
+/// WASM dispatch calls its generated async function directly; this boxed form
+/// supports metadata consumers that need a homogeneous function pointer.
+pub type AsyncCapabilityFuture =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<serde_json::Value, String>>>>;
+
+/// Async counterpart of the synchronous native capability descriptor.
+pub struct AsyncCapabilityExecutor {
+    pub module: &'static str,
+    pub capability_id: &'static str,
+    pub execute: fn(serde_json::Value) -> AsyncCapabilityFuture,
+}
+
 /// Execute a capability by module and capability_id.
 ///
 /// Agent execution is provided by `runtara-agents::registry`. This fallback

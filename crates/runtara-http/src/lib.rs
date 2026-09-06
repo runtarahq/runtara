@@ -190,19 +190,22 @@ impl RequestBuilder {
         Self::decode_proxy_response(proxy_response)
     }
 
-    /// Await a host HTTP operation using the standard Component Model async ABI.
-    #[cfg(all(feature = "wasi", not(feature = "native")))]
+    /// Await host I/O through the standard Component Model async ABI in WASM.
+    /// Native metadata/test builds retain the existing blocking ureq backend:
+    /// polling this future on native can block, and is not cancellable I/O.
     pub async fn call_async(self) -> Result<HttpResponse, HttpError> {
-        host_io::execute_async(self).await
+        #[cfg(feature = "native")]
+        return native::execute(self);
+        #[cfg(all(feature = "wasi", not(feature = "native")))]
+        return host_io::execute_async(self).await;
     }
 
     /// Preserve the existing proxy/connection policy while allowing cancellation.
-    #[cfg(all(feature = "wasi", not(feature = "native")))]
     pub async fn call_agent_async(self) -> Result<HttpResponse, HttpError> {
         static PROXY_URL: OnceLock<Option<String>> = OnceLock::new();
         let proxy_url = PROXY_URL.get_or_init(|| std::env::var("RUNTARA_HTTP_PROXY_URL").ok());
         if let Some(proxy) = proxy_url {
-            let response = host_io::execute_async(self.prepare_proxy_request(proxy)).await?;
+            let response = self.prepare_proxy_request(proxy).call_async().await?;
             Self::decode_proxy_response(response)
         } else {
             self.call_async().await

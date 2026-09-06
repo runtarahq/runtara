@@ -36,3 +36,6 @@ runtara-http = { path = "../../runtara-http", default-features = false, features
 
 [target.'cfg(target_family = "wasm")'.dependencies]
 runtara-http = { path = "../../runtara-http", default-features = false, features = ["wasi"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }

@@ -1,6 +1,6 @@
 # Cooperative cancellation implementation record
 
-Status: sequential and parallel emitted root cancellation, 2026-09-06. Governing contract:
+Status: sequential/parallel root cancellation and Agent binding migration, 2026-09-06. Governing contract:
 [cooperative cancellation plan](selective-isolation-plan.md). Update the existing
 implementation directly; no new product feature flags or alternate backend.
 Nested workflow-agent cancellation, timeouts and the remaining plan gates are
@@ -397,3 +397,95 @@ cargo clippy -p runtara-workflows -p runtara-component-host --all-targets --feat
 Guest sources and WIT were unchanged; these checks used the existing normal
 release bundle. No database/server E2E, release performance measurements or
 Linux qualification was run in this stage.
+
+
+## Shared async capability dispatch and Slack bindings
+
+`#[capability]` now accepts authored Rust `async fn` capabilities. The generated
+async dispatcher uses the same input coercion, deserialization, structured/plain
+error handling and output serialization as the synchronous dispatcher. Existing
+synchronous descriptors and native SFTP registry calls retain their signatures.
+An async descriptor holds a function returning a standard boxed Rust future for
+metadata consumers. Guest `invoke` awaits the generated function directly and
+does not use that boxed adapter. There is no new executor, host task service,
+workflow scheduler, product flag or backend selector.
+
+HTTP now uses this shared macro dispatcher; its temporary handwritten async
+coercion/error wrapper was removed. Slack's normal export uses the cancellation-
+capable wit-bindgen callback ABI. `send-message`, `add-reaction`, and `upload-file`
+await the existing host-I/O transport. Each stage of upload (obtain URL, upload
+bytes, finalize) is independently awaiting I/O, so cancellation drops the future
+at the current stage and prevents the following stage from starting. A fresh
+invocation can reuse the same Agent instance after cancellation.
+
+The Rust capability functions for HTTP and Slack are now async on both targets.
+The existing native HTTP backend remains blocking ureq: polling the native async
+facade can block and does not provide cancellable native I/O. This preserves the
+native test/metadata build's transport behavior; WASM cancellation is provided
+by the standard async host import. This is not a claim of new native async I/O.
+All workflow tests use the built WASM components for that guarantee.
+
+New macro tests exercise:
+
+- async/sync metadata and input coercion parity;
+- input errors, plain errors, structured errors and retry metadata;
+- output serialization errors;
+- destruction of a pending capability when its dispatch future is dropped.
+
+New built-Slack tests use a local proxy stub throughout; they do not contact Slack
+or send real messages. They check cancellation with missing headers and partial
+proxy bodies, each of the three upload stages, cleanup before a sibling resumes,
+and a successful later call in the same component instance. The next request
+after upload cancellation must be the parent's new `send-message`, proving that
+the cancelled upload cannot advance to another stage. The fixtures also check
+connection/tenant forwarding, absence of connection injection on presigned upload
+bytes, input coercion, dispatch/connection errors, HTTP 429 retry metadata and
+Slack's HTTP-200 error response contract.
+
+The emitted DSL suite adds
+`emitted_cancel_interrupts_slack_without_retry_or_recovery`: a normal compiled
+Slack step, with retries and `onError` present, waits on the local proxy while an
+existing lifecycle Cancel reaches WASM. The test requires closure before root
+acknowledgement and forbids retry/recovery/ordinary completion. Artifact checks
+still require a normal composed binary with no isolation inventory or tasks import.
+
+HTTP and Slack are now migrated; the other 25 Agent bindings, compiled workflow-
+agent cancellation, CPU cooperation points, deadline handling, emergency grace,
+terminal races, server E2E and performance/capacity gates remain open. The full
+plan has not been completed by these component tests.
+
+
+Verification for the shared dispatcher/Slack stage:
+
+- The normal build script rebuilt all 27 Agent components and both shared
+  workflow components, including their generated metadata.
+- Macro tests passed: 54 unit tests, the four new async contract tests and the
+  existing connection-condition test. HTTP's 16 native tests, Slack's two native
+  tests, the HTTP client's 12 tests and four native registry tests passed.
+- DSL/compiler unit tests passed (221 + 573).
+- All 17 standard/real-Agent cancellation proofs passed, including seven Slack
+  cases. The production-bundle fixture harness and six dispatcher tests passed.
+- The full emitted-workflow regression passed 262 tests with four test threads,
+  with two existing manual benchmarks ignored. The later focused run passed all
+  13 cancellation cases, including the new Slack DSL case (263 distinct emitted
+  integration tests across these runs).
+- Affected-crate all-target Clippy passed with the existing component/workflow
+  integration features. Formatting and diff whitespace checks passed.
+
+```sh
+scripts/build-agent-components.sh
+cargo test -p runtara-agent-macro --tests
+cargo test -p runtara-agent-http -p runtara-agent-slack --lib
+cargo test -p runtara-http --features native --lib
+cargo test -p runtara-agents --test custom_module_registration_test
+cargo test -p runtara-dsl -p runtara-workflows --lib
+cargo test -p runtara-component-host --features component-integration-tests --test cooperative_cancellation --test dispatcher --test capability_fixtures
+cargo test -p runtara-workflows --features direct-wasm-integration-tests --test direct_wasm_execute -- --test-threads=4
+cargo test -p runtara-workflows --features direct-wasm-integration-tests --test direct_wasm_execute cooperative_workflow_cancellation
+```
+
+All I/O fixtures use local endpoints. No database/server E2E, Linux qualification,
+release size/timing comparison or capacity measurement was run in this stage.
+Cancelling a later upload stage does not undo a URL/file allocation or bytes
+already accepted by the remote service; these tests establish local workflow
+interruption and resource cleanup, not external rollback.

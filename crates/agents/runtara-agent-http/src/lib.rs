@@ -424,9 +424,9 @@ pub enum HttpResponseBody {
     module_supports_connections = true,
     module_secure = true
 )]
-pub fn http_request(input: HttpRequestInput) -> Result<HttpResponse, AgentError> {
+pub async fn http_request(input: HttpRequestInput) -> Result<HttpResponse, AgentError> {
     let request = prepare_http_request(&input);
-    finish_http_request(&input, request.call_agent())
+    finish_http_request(&input, request.call_agent_async().await)
 }
 
 fn prepare_http_request(input: &HttpRequestInput) -> runtara_http::RequestBuilder {
@@ -695,7 +695,7 @@ impl Guest for Component {
         let value: serde_json::Value = serde_json::from_slice(&input).map_err(bad_json)?;
 
         let executor_result = match capability_id.as_str() {
-            "http-request" => execute_http_request_async(value).await,
+            "http-request" => __executor_http_request(value).await,
             other => {
                 return Err(ErrorInfo {
                     code: "UNKNOWN_CAPABILITY".into(),
@@ -712,41 +712,6 @@ impl Guest for Component {
             .map_err(error_string_to_error_info)
             .and_then(|out_value| serde_json::to_vec(&out_value).map_err(bad_json))
     }
-}
-
-// Preserve the macro executor's coercion and JSON error envelope. The native
-// executor remains synchronous; this guest path awaits the same request shaping
-// and response handling through the standard async transport.
-#[cfg(target_arch = "wasm32")]
-async fn execute_http_request_async(value: Value) -> Result<Value, String> {
-    let error = |code: &str, message: String| {
-        serde_json::json!({
-            "code": code, "message": message, "category": "permanent", "severity": "error"
-        })
-        .to_string()
-    };
-    let value = runtara_dsl::coercion::coerce_input(value, &__INPUT_META_HttpRequestInput);
-    let input: HttpRequestInput = serde_json::from_value(value).map_err(|e| {
-        error(
-            "INPUT_DESERIALIZATION_ERROR",
-            format!("Invalid input for http-request: {e}"),
-        )
-    })?;
-    let result = prepare_http_request(&input).call_agent_async().await;
-    let output = finish_http_request(&input, result).map_err(|e| {
-        let text: String = e.into();
-        if text.starts_with('{') {
-            text
-        } else {
-            error("CAPABILITY_ERROR", text)
-        }
-    })?;
-    serde_json::to_value(output).map_err(|e| {
-        error(
-            "OUTPUT_SERIALIZATION_ERROR",
-            format!("Failed to serialize result for http-request: {e}"),
-        )
-    })
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -840,7 +805,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = http_request(input);
+        let result = http_request(input).await;
         assert!(result.is_ok());
 
         let response = result.unwrap();
@@ -877,7 +842,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = http_request(input);
+        let result = http_request(input).await;
         assert!(result.is_ok());
 
         let response = result.unwrap();
@@ -911,7 +876,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = http_request(input);
+        let result = http_request(input).await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap().status_code, 200);
     }
@@ -940,7 +905,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = http_request(input);
+        let result = http_request(input).await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap().status_code, 200);
     }
@@ -962,7 +927,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = http_request(input);
+        let result = http_request(input).await;
         assert!(result.is_ok());
 
         let response = result.unwrap();
@@ -992,7 +957,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = http_request(input);
+        let result = http_request(input).await;
         assert!(result.is_ok());
 
         let response = result.unwrap();
@@ -1025,7 +990,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = http_request(input);
+        let result = http_request(input).await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap().status_code, 200);
     }
@@ -1046,7 +1011,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = http_request(input);
+        let result = http_request(input).await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap().status_code, 204);
     }
@@ -1070,7 +1035,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = http_request(input);
+        let result = http_request(input).await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap().status_code, 200);
     }
@@ -1094,7 +1059,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = http_request(input);
+        let result = http_request(input).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().message.contains("404"));
     }
@@ -1118,7 +1083,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = http_request(input);
+        let result = http_request(input).await;
         assert!(result.is_ok());
 
         let response = result.unwrap();
@@ -1146,7 +1111,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = http_request(input);
+        let result = http_request(input).await;
         assert!(result.is_ok());
 
         let response = result.unwrap();
@@ -1175,7 +1140,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = http_request(input);
+        let result = http_request(input).await;
         assert!(result.is_ok());
 
         let response = result.unwrap();
@@ -1205,7 +1170,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = http_request(input);
+        let result = http_request(input).await;
         assert!(result.is_ok());
 
         let response = result.unwrap();
@@ -1230,7 +1195,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = http_request(input);
+        let result = http_request(input).await;
         assert!(result.is_ok());
 
         let response = result.unwrap();
@@ -1256,7 +1221,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = http_request(input);
+        let result = http_request(input).await;
         assert!(result.is_ok());
 
         let response = result.unwrap();

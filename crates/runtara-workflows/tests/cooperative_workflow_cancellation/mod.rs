@@ -157,6 +157,7 @@ impl RuntimeHost for Host {
 enum Scenario {
     BeforeLaunch,
     Headers,
+    SlackHeaders,
     PartialBody,
     SignalReadFailure,
     ParallelSplit,
@@ -240,6 +241,15 @@ async fn run(scenario: Scenario) -> anyhow::Result<()> {
             "handled":{"id":"handled","stepType":"Finish","inputMapping":{"recovered":immediate(true.into())}}
         }, "executionPlan":[{"fromStep":"fetch","toStep":"finish"},{"fromStep":"fetch","toStep":"handled","label":"onError"}]
     });
+    if scenario == Scenario::SlackHeaders {
+        graph["steps"]["fetch"]["agentId"] = "slack".into();
+        graph["steps"]["fetch"]["capabilityId"] = "send-message".into();
+        graph["steps"]["fetch"]["inputMapping"] = serde_json::json!({
+            "channel":immediate("C-fixture".into()),
+            "text":immediate("local cancellation fixture".into()),
+            "_connection":immediate(serde_json::json!({"connection_id":"fixture-connection","integration_id":"slack_bot","parameters":{}}))
+        });
+    }
     if parallel {
         graph = if matches!(
             scenario,
@@ -313,6 +323,22 @@ async fn run(scenario: Scenario) -> anyhow::Result<()> {
                             anyhow::ensure!(n != 0, "request closed before headers");
                             request.extend_from_slice(&buffer[..n]);
                         }
+                        if scenario == Scenario::SlackHeaders {
+                            let end = request.windows(4).position(|bytes| bytes == b"\r\n\r\n").unwrap() + 4;
+                            let headers = std::str::from_utf8(&request[..end])?;
+                            anyhow::ensure!(headers.starts_with("POST / "), "Slack request bypassed local proxy");
+                            let length: usize = headers.lines().filter_map(|line| line.split_once(':'))
+                                .find(|(name, _)| name.eq_ignore_ascii_case("content-length")).unwrap().1.trim().parse()?;
+                            anyhow::ensure!(length < 16_384, "unexpected proxy request size");
+                            while request.len() < end + length {
+                                let n = stream.read(&mut buffer).await?;
+                                anyhow::ensure!(n > 0, "proxy body closed early");
+                                request.extend_from_slice(&buffer[..n]);
+                            }
+                            let body: Value = serde_json::from_slice(&request[end..end + length])?;
+                            assert_eq!(body["url"], "https://slack.com/api/chat.postMessage");
+                            assert_eq!(body["connection_id"], "fixture-connection");
+                        }
                         if partial_body {
                             stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\nx").await?;
                         }
@@ -354,7 +380,9 @@ async fn run(scenario: Scenario) -> anyhow::Result<()> {
             .execute_invoke(
                 &pre,
                 runtara_component_host::WorkflowRunSpec {
-                    env: HashMap::new(),
+                    env: if scenario == Scenario::SlackHeaders {
+                        HashMap::from([("RUNTARA_HTTP_PROXY_URL".into(), url.clone()), ("RUNTARA_TENANT_ID".into(), "fixture-tenant".into())])
+                    } else { HashMap::new() },
                     stderr: None,
                     timeout: Duration::from_secs(10),
                     cancel: None,
@@ -461,4 +489,9 @@ async fn emitted_cancel_supersedes_pause_while_parallel_calls_hang() -> anyhow::
 #[tokio::test]
 async fn emitted_checkpoint_cancel_cleans_pending_sibling_before_ack() -> anyhow::Result<()> {
     run(Scenario::CheckpointCancelBranches).await
+}
+
+#[tokio::test]
+async fn emitted_cancel_interrupts_slack_without_retry_or_recovery() -> anyhow::Result<()> {
+    run(Scenario::SlackHeaders).await
 }

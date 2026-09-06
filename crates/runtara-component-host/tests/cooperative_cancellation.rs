@@ -257,3 +257,7 @@ async fn cancelling_a_queued_call_resolves_before_entry_and_can_be_dropped() -> 
             (call $drop (local.get $queued))"#);
     run_proof(&source, None, Arc::new(Notify::new())).await
 }
+
+#[cfg(feature = "component-integration-tests")]
+#[path = "cooperative_cancellation/real_slack.rs"]
+mod real_slack;
