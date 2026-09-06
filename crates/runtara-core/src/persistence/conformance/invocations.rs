@@ -502,3 +502,7 @@ pub async fn concurrent_admission(p: &dyn Persistence) {
         pair => panic!("lease claims must have exactly one winner: {pair:?}"),
     }
 }
+
+#[path = "invocation_writes.rs"]
+mod writes;
+pub use writes::{child_write_boundaries, child_write_rejections, child_write_semantics};

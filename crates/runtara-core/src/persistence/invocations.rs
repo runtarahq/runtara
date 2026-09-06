@@ -1,12 +1,60 @@
 //! Optional atomic persistence for isolated invocation ownership.
 //!
-//! This contract stores control state, never invocation results. Callers keep
-//! compiler checkpoint keys unchanged and authorize those keys before entry.
+//! The invocation ledger stores control state, never a result cache. Fenced IO
+//! writes use the existing checkpoint/event storage. Callers keep compiler
+//! checkpoint keys unchanged and authorize those keys before entry.
 //! It is not used by ordinary non-durable calls: those arbitrate in memory until
 //! a durable control command requires a tombstone. A backend must provide every
 //! operation atomically; checking a token and later issuing an unfenced write
 //! does not implement this contract.
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
+
+/// Child telemetry cannot encode root completion, failure or suspension.
+#[derive(Clone, Debug)]
+pub enum InvocationEventKind {
+    /// Proof of life, including while an invocation sleeps in process.
+    Heartbeat,
+    /// Guest telemetry with its existing subtype.
+    Custom(String),
+}
+
+/// Timeline append addressed by the trusted attempt, never a caller-supplied root.
+#[derive(Clone, Debug)]
+pub struct InvocationEvent {
+    /// Restricted child event kind.
+    pub kind: InvocationEventKind,
+    /// Empty bytes are stored as no payload, as in ordinary runtime events.
+    pub payload: Vec<u8>,
+    /// Emitter timestamp, retained verbatim.
+    pub created_at: DateTime<Utc>,
+}
+
+/// Retry audit record, separate from both result checkpoints and attempt fencing.
+#[derive(Clone, Debug)]
+pub struct InvocationRetry {
+    /// Already-authorized compiler checkpoint key.
+    pub checkpoint_id: String,
+    /// One-based retry counter, representable by existing retry storage.
+    pub attempt_number: u32,
+    /// Optional audit detail; never interpreted as control state.
+    pub error_message: Option<String>,
+}
+
+impl InvocationRetry {
+    /// Validate before writing; do not narrow an overflowing guest counter.
+    pub fn storage_key(&self) -> FenceResult<String> {
+        validate_identity(&self.checkpoint_id)?;
+        if self.attempt_number == 0 || self.attempt_number > i32::MAX as u32 {
+            return Err(InvocationFenceError::Rejected(
+                FenceRejection::InvalidIdentity,
+            ));
+        }
+        let key = format!("{}::retry::{}", self.checkpoint_id, self.attempt_number);
+        validate_identity(&key)?;
+        Ok(key)
+    }
+}
 
 /// Current host owner of an isolated root execution.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -91,7 +139,7 @@ pub struct InvocationSettlement {
     pub checkpoint: Option<InvocationCheckpointResult>,
 }
 
-/// A rejected mutation never changes lease, attempt or checkpoint state.
+/// A rejected mutation never changes lease, attempt, checkpoint or event state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FenceRejection {
     /// Invalid or unrepresentable identity/counter.
@@ -195,4 +243,29 @@ pub trait InvocationFences: Send + Sync {
         fence: &AttemptFence,
         checkpoint: &InvocationCheckpoint,
     ) -> FenceResult<InvocationCheckpointResult>;
+    /// Save the in-process sleep checkpoint and root checkpoint pointer under
+    /// one active fence. This preserves the existing sleep upsert, including
+    /// empty bytes; it is not a result-checkpoint probe or first-write cache.
+    /// Does not park the root, schedule a wake or wait out the duration.
+    async fn invocation_sleep_checkpoint(
+        &self,
+        fence: &AttemptFence,
+        checkpoint: &InvocationCheckpoint,
+    ) -> FenceResult<()>;
+    /// Upsert the existing retry audit key without moving the root checkpoint
+    /// pointer. Retrying the same number updates its audit metadata. Counter
+    /// overflow and a derived key longer than the identity limit are rejected.
+    async fn invocation_retry(
+        &self,
+        fence: &AttemptFence,
+        retry: &InvocationRetry,
+    ) -> FenceResult<()>;
+    /// Append child telemetry at the attempt's root/path while the attempt is
+    /// active. Repeated calls append repeated events; this is not deduplication.
+    /// Notify any external observer only after a successful commit.
+    async fn invocation_event(
+        &self,
+        fence: &AttemptFence,
+        event: &InvocationEvent,
+    ) -> FenceResult<()>;
 }

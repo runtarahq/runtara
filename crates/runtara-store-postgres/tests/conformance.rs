@@ -713,7 +713,11 @@ async fn invocation_write_waiting_on_a_database_lock_observes_committed_fence() 
         .fetch_one(&writer_pool)
         .await
         .unwrap();
-    for revoke_lease in [false, true] {
+    for (revoke_lease, family) in [false, true].into_iter().flat_map(|revoke| {
+        ["checkpoint", "sleep", "retry", "event"]
+            .into_iter()
+            .map(move |family| (revoke, family))
+    }) {
         let id = uuid::Uuid::new_v4().to_string();
         backend
             .register_instance(&id, "blocked-write")
@@ -739,15 +743,46 @@ async fn invocation_write_waiting_on_a_database_lock_observes_committed_fence() 
             .unwrap();
         let writer = PostgresPersistence::new(writer_pool.clone());
         let pending = tokio::spawn(async move {
-            writer
-                .invocation_checkpoint(
-                    &attempt.fence,
-                    &InvocationCheckpoint {
-                        checkpoint_id: "child::late".into(),
-                        state: b"late".to_vec(),
-                    },
-                )
-                .await
+            let write = InvocationCheckpoint {
+                checkpoint_id: "child::late".into(),
+                state: b"late".to_vec(),
+            };
+            match family {
+                "checkpoint" => writer
+                    .invocation_checkpoint(&attempt.fence, &write)
+                    .await
+                    .map(|_| ()),
+                "sleep" => {
+                    writer
+                        .invocation_sleep_checkpoint(&attempt.fence, &write)
+                        .await
+                }
+                "retry" => {
+                    writer
+                        .invocation_retry(
+                            &attempt.fence,
+                            &InvocationRetry {
+                                checkpoint_id: "child::late".into(),
+                                attempt_number: 1,
+                                error_message: None,
+                            },
+                        )
+                        .await
+                }
+                "event" => {
+                    writer
+                        .invocation_event(
+                            &attempt.fence,
+                            &InvocationEvent {
+                                kind: InvocationEventKind::Heartbeat,
+                                payload: vec![],
+                                created_at: chrono::Utc::now(),
+                            },
+                        )
+                        .await
+                }
+                _ => unreachable!(),
+            }
         });
         let blocked = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
@@ -766,7 +801,7 @@ async fn invocation_write_waiting_on_a_database_lock_observes_committed_fence() 
         .await;
         if blocked.is_err() {
             pending.abort();
-            panic!("the checkpoint writer never reached the controlled row lock");
+            panic!("the {family} writer never reached the controlled row lock");
         }
         // Commit the same state mutation as cancellation/revocation while
         // holding the shared root lock. The waiting writer must revalidate it.
@@ -795,14 +830,23 @@ async fn invocation_write_waiting_on_a_database_lock_observes_committed_fence() 
         };
         assert!(
             matches!(result,Err(InvocationFenceError::Rejected(reason)) if reason == expected),
-            "{result:?}"
+            "{family}: {result:?}"
         );
-        assert!(
+        assert_eq!(
             backend
-                .load_checkpoint(&id, "child::late")
+                .count_checkpoints(&id, None, None, None)
                 .await
-                .unwrap()
-                .is_none()
+                .unwrap(),
+            0,
+            "{family}"
+        );
+        assert_eq!(
+            backend
+                .count_events(&id, &Default::default())
+                .await
+                .unwrap(),
+            0,
+            "{family}"
         );
         assert_eq!(
             backend
@@ -815,4 +859,206 @@ async fn invocation_write_waiting_on_a_database_lock_observes_committed_fence() 
         );
     }
     writer_pool.close().await;
+}
+
+#[tokio::test]
+async fn invocation_fences_child_write_semantics() {
+    let (pool, _container) = postgres_test_pool().await;
+    runtara_core::persistence::conformance::invocations::child_write_semantics(
+        &PostgresPersistence::new(pool),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn invocation_fences_child_write_rejections() {
+    let (pool, _container) = postgres_test_pool().await;
+    runtara_core::persistence::conformance::invocations::child_write_rejections(
+        &PostgresPersistence::new(pool),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn invocation_fences_child_write_boundaries() {
+    let (pool, _container) = postgres_test_pool().await;
+    runtara_core::persistence::conformance::invocations::child_write_boundaries(
+        &PostgresPersistence::new(pool),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn invocation_sleep_write_preserves_upsert_and_rolls_back_failed_pointer() {
+    use runtara_core::{
+        domain::InstanceStatus,
+        persistence::{Persistence, invocations::*},
+    };
+    let (pool, _container) = postgres_test_pool().await;
+    let backend = PostgresPersistence::new(pool.clone());
+    let id = uuid::Uuid::new_v4().to_string();
+    backend
+        .register_instance(&id, "sleep-rollback")
+        .await
+        .unwrap();
+    backend
+        .update_instance_status(&id, InstanceStatus::Running, None)
+        .await
+        .unwrap();
+    let lease = backend
+        .claim_invocation_lease("sleep-rollback", &id, "owner", None)
+        .await
+        .unwrap();
+    let token = backend
+        .begin_invocation_attempt(&lease, "child", "one")
+        .await
+        .unwrap()
+        .fence;
+    let constraint = format!("sleep_failure_{}", uuid::Uuid::new_v4().simple());
+    sqlx::query(&format!("ALTER TABLE instances ADD CONSTRAINT {constraint} CHECK (instance_id <> '{id}' OR checkpoint_id IS DISTINCT FROM 'sleep')")).execute(&pool).await.unwrap();
+    let result = backend
+        .invocation_sleep_checkpoint(
+            &token,
+            &InvocationCheckpoint {
+                checkpoint_id: "sleep".into(),
+                state: b"before-sleep".to_vec(),
+            },
+        )
+        .await;
+    sqlx::query(&format!(
+        "ALTER TABLE instances DROP CONSTRAINT {constraint}"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert!(matches!(result, Err(InvocationFenceError::Storage(_))));
+    assert!(
+        backend
+            .load_checkpoint(&id, "sleep")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        backend
+            .get_instance(&id)
+            .await
+            .unwrap()
+            .unwrap()
+            .checkpoint_id
+            .is_none()
+    );
+    assert_eq!(
+        backend
+            .begin_invocation_attempt(&lease, "child", "one")
+            .await
+            .unwrap()
+            .state,
+        AttemptState::Active
+    );
+    // The successful path uses ordinary sleep upsert semantics, including
+    // refreshing the checkpoint timestamp and retaining literal empty bytes.
+    backend
+        .invocation_sleep_checkpoint(
+            &token,
+            &InvocationCheckpoint {
+                checkpoint_id: "sleep".into(),
+                state: b"initial".to_vec(),
+            },
+        )
+        .await
+        .unwrap();
+    sqlx::query("UPDATE checkpoints SET created_at='2000-01-01' WHERE instance_id=$1")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    backend
+        .invocation_sleep_checkpoint(
+            &token,
+            &InvocationCheckpoint {
+                checkpoint_id: "sleep".into(),
+                state: vec![],
+            },
+        )
+        .await
+        .unwrap();
+    let saved = backend
+        .load_checkpoint(&id, "sleep")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(saved.state.is_empty());
+    assert!(saved.created_at > chrono::DateTime::from_timestamp_millis(1_000_000_000_000).unwrap());
+    assert_eq!(
+        backend
+            .get_instance(&id)
+            .await
+            .unwrap()
+            .unwrap()
+            .checkpoint_id
+            .as_deref(),
+        Some("sleep")
+    );
+}
+
+#[tokio::test]
+async fn invocation_retry_preserves_audit_metadata_and_rejects_late_overwrite() {
+    use runtara_core::{
+        domain::InstanceStatus,
+        persistence::{Persistence, invocations::*},
+    };
+    let (pool, _container) = postgres_test_pool().await;
+    let backend = PostgresPersistence::new(pool.clone());
+    let id = uuid::Uuid::new_v4().to_string();
+    backend
+        .register_instance(&id, "retry-metadata")
+        .await
+        .unwrap();
+    backend
+        .update_instance_status(&id, InstanceStatus::Running, None)
+        .await
+        .unwrap();
+    let lease = backend
+        .claim_invocation_lease("retry-metadata", &id, "owner", None)
+        .await
+        .unwrap();
+    let token = backend
+        .begin_invocation_attempt(&lease, "child", "one")
+        .await
+        .unwrap()
+        .fence;
+    let mut retry = InvocationRetry {
+        checkpoint_id: "child::work".into(),
+        attempt_number: 2,
+        error_message: Some("first".into()),
+    };
+    backend.invocation_retry(&token, &retry).await.unwrap();
+    retry.error_message = Some("updated".into());
+    backend.invocation_retry(&token, &retry).await.unwrap();
+    backend.cancel_invocation_attempt(&token).await.unwrap();
+    retry.error_message = Some("late".into());
+    assert!(matches!(
+        backend.invocation_retry(&token, &retry).await,
+        Err(InvocationFenceError::Rejected(FenceRejection::Cancelled))
+    ));
+    let record: (bool, i32, Option<String>, Vec<u8>) = sqlx::query_as("SELECT is_retry_attempt,attempt_number,error_message,state FROM checkpoints WHERE instance_id=$1 AND checkpoint_id=$2")
+        .bind(&id).bind(retry.storage_key().unwrap()).fetch_one(&pool).await.unwrap();
+    assert_eq!(record, (true, 2, Some("updated".into()), vec![]));
+    assert_eq!(
+        backend
+            .count_checkpoints(&id, None, None, None)
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(
+        backend
+            .get_instance(&id)
+            .await
+            .unwrap()
+            .unwrap()
+            .checkpoint_id
+            .is_none()
+    );
 }

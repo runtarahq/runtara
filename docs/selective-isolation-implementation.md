@@ -1218,6 +1218,47 @@ fencing. Required work remains to guard every child write family, bind/revoke ro
 leases in the runner, preserve non-durable call behavior, and route targeted
 commands. This change does not enable Agent/Embed timeouts or a Cancel-step API.
 
+## Fenced child checkpoint, retry and event writes
+
+The optional persistence contract now covers the remaining in-process child write
+families. Memory uses the same store lock for validation and mutation; PostgreSQL
+holds the tenant-owned root row lock through the write and commit. All four write
+families reject cancelled/settled attempts, revoked or superseded leases, stale
+attempt generations, inactive roots and forged tenant/path/start identities.
+
+`invocation_sleep_checkpoint` preserves the existing sleep upsert, including literal
+empty state and the PostgreSQL timestamp refresh, and updates the root checkpoint
+pointer in the same transaction. It does not park the root, wait, or schedule a
+wake. `invocation_retry` preserves the synthetic retry key and PostgreSQL retry
+metadata, without moving the root pointer. It rejects zero/overflowing retry
+counters and oversized derived keys before writing. `invocation_event` appends
+telemetry at the trusted attempt's root/path; its type can only represent Custom
+or Heartbeat events. It cannot terminalize or suspend a root. Observer notification
+belongs after successful persistence in the future runtime integration.
+
+Three shared conformance cases exercise successful semantics, ten categories of
+lost/forged authority, and input boundaries against both backends. PostgreSQL tests
+also verify retry metadata and rejected late overwrites, rollback of a sleep
+checkpoint when its pointer update fails, and the successful sleep upsert's empty
+state/timestamp behavior. The observed database-lock test now covers checkpoint,
+sleep, retry and event writers against both cancellation and lease revocation.
+Each writer is confirmed blocked at the database before the fence commits; no
+late checkpoint, retry record, event or pointer may appear.
+
+Verification passed 79 core unit tests and the full PostgreSQL suite (72 backend
+unit tests and 23 conformance/integration tests), 174 total, plus feature-enabled
+Clippy. An initial parallel full-suite run exposed interference in an existing
+global active-instance-count assertion. The rerun used CI's `--test-threads=1`
+setting; concurrency inside the race tests remains enabled. The existing migration
+Rustdoc example is still ignored. No local-server E2E has run for this change.
+
+These are additional persistence primitives, not production activation. Scoped
+runtime calls and in-process sleep heartbeats still need to use these methods;
+root/parent writes and launch/recovery ownership still require lease integration.
+No new migration, guest component or default-path database call is introduced.
+The performance plan now explicitly requires transaction counts/timing, root-lock
+contention, ledger growth/retention, and a separate non-durable zero-ledger-IO check.
+
 ## Remaining required work
 
 - P0: extend explicit differential selection and invocation-count evidence to all

@@ -1,6 +1,7 @@
 //! Atomic invocation transitions. Lock the tenant-owned root row first in every
 //! transaction, including cancellation; root lifecycle UPDATEs share that lock.
 use crate::PostgresPersistence;
+use crate::dialect::{Dialect, PostgresDialect};
 use runtara_core::persistence::invocations::*;
 use sqlx::{PgConnection, Postgres, Transaction};
 
@@ -75,6 +76,21 @@ impl PostgresPersistence {
         let status = status.ok_or_else(|| denied(FenceRejection::UnknownRoot))?;
         if running && status != "running" {
             return Err(denied(FenceRejection::InactiveRoot));
+        }
+        Ok(tx)
+    }
+    async fn invocation_write_transaction(
+        &self,
+        token: &AttemptFence,
+    ) -> FenceResult<Transaction<'static, Postgres>> {
+        let mut tx = self
+            .invocation_transaction(&token.lease.tenant_id, &token.lease.instance_id, true)
+            .await?;
+        check_lease(&mut tx, &token.lease, true).await?;
+        match check_attempt(&mut tx, token).await? {
+            AttemptState::Cancelled => return Err(denied(FenceRejection::Cancelled)),
+            AttemptState::Settled => return Err(denied(FenceRejection::Settled)),
+            AttemptState::Active => {}
         }
         Ok(tx)
     }
@@ -333,17 +349,58 @@ impl InvocationFences for PostgresPersistence {
         write: &InvocationCheckpoint,
     ) -> FenceResult<InvocationCheckpointResult> {
         validate_identity(&write.checkpoint_id)?;
-        let mut tx = self
-            .invocation_transaction(&token.lease.tenant_id, &token.lease.instance_id, true)
-            .await?;
-        check_lease(&mut tx, &token.lease, true).await?;
-        match check_attempt(&mut tx, token).await? {
-            AttemptState::Cancelled => return Err(denied(FenceRejection::Cancelled)),
-            AttemptState::Settled => return Err(denied(FenceRejection::Settled)),
-            AttemptState::Active => {}
-        }
+        let mut tx = self.invocation_write_transaction(token).await?;
         let result = checkpoint(&mut tx, token, write).await?;
         tx.commit().await.map_err(storage)?;
         Ok(result)
+    }
+    async fn invocation_sleep_checkpoint(
+        &self,
+        token: &AttemptFence,
+        write: &InvocationCheckpoint,
+    ) -> FenceResult<()> {
+        validate_identity(&write.checkpoint_id)?;
+        let mut tx = self.invocation_write_transaction(token).await?;
+        sqlx::query(PostgresDialect::sql_save_checkpoint())
+            .bind(&token.lease.instance_id)
+            .bind(&write.checkpoint_id)
+            .bind(&write.state)
+            .execute(&mut *tx)
+            .await
+            .map_err(storage)?;
+        sqlx::query("UPDATE instances SET checkpoint_id=$2 WHERE instance_id=$1")
+            .bind(&token.lease.instance_id)
+            .bind(&write.checkpoint_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(storage)?;
+        tx.commit().await.map_err(storage)
+    }
+    async fn invocation_retry(
+        &self,
+        token: &AttemptFence,
+        retry: &InvocationRetry,
+    ) -> FenceResult<()> {
+        let key = retry.storage_key()?;
+        let mut tx = self.invocation_write_transaction(token).await?;
+        sqlx::query("INSERT INTO checkpoints (instance_id,checkpoint_id,state,is_retry_attempt,attempt_number,error_message,created_at) VALUES ($1,$2,'',true,$3,$4,NOW()) ON CONFLICT (instance_id,checkpoint_id) DO UPDATE SET attempt_number=EXCLUDED.attempt_number,error_message=EXCLUDED.error_message,created_at=NOW()")
+            .bind(&token.lease.instance_id).bind(key).bind(retry.attempt_number as i32).bind(&retry.error_message).execute(&mut *tx).await.map_err(storage)?;
+        tx.commit().await.map_err(storage)
+    }
+    async fn invocation_event(
+        &self,
+        token: &AttemptFence,
+        event: &InvocationEvent,
+    ) -> FenceResult<()> {
+        let mut tx = self.invocation_write_transaction(token).await?;
+        let (kind, subtype) = match &event.kind {
+            InvocationEventKind::Heartbeat => (runtara_core::domain::EventType::Heartbeat, None),
+            InvocationEventKind::Custom(kind) => {
+                (runtara_core::domain::EventType::Custom, Some(kind))
+            }
+        };
+        sqlx::query("INSERT INTO instance_events (instance_id,event_type,checkpoint_id,payload,created_at,subtype) VALUES ($1,$2::instance_event_type,$3,$4,$5,$6)")
+            .bind(&token.lease.instance_id).bind(crate::encoding::event_type_to_str(kind)).bind(&token.path).bind((!event.payload.is_empty()).then_some(&event.payload)).bind(event.created_at).bind(subtype).execute(&mut *tx).await.map_err(storage)?;
+        tx.commit().await.map_err(storage)
     }
 }

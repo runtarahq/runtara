@@ -634,6 +634,13 @@ latency from a full run and call the difference an exact Agent measurement.
 - Measure durable first execution and checkpoint replay separately. For server runs,
   use isolated persistence and deterministic local services; record database and
   service configuration and distinguish service waiting from active CPU time.
+- For invocation fencing, record database round trips, admission/settlement time,
+  root-row lock wait and transaction duration separately from Store execution.
+  Compare checkpoint, retry, event-heavy and sleep workloads, with parallel children
+  under one root versus the same concurrency spread across independent roots.
+  Report attempt-ledger rows/bytes per run and after retention. Verify ordinary
+  non-durable calls introduce zero invocation-ledger IO; do not average that fast
+  path together with durable arbitration when reporting single-step overhead.
 - Run release builds with identical dependency hashes, engine settings, memory
   limits, event/durability options and inputs. Record OS/architecture, CPU/RAM,
   toolchain, revisions, artifact hashes, concurrency and warmup/sample counts.

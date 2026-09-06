@@ -38,6 +38,32 @@ fn attempt(store: &Store, token: &AttemptFence) -> FenceResult<usize> {
     }
     Ok(found)
 }
+fn active_attempt(store: &Store, token: &AttemptFence) -> FenceResult<()> {
+    lease(store, &token.lease, true)?;
+    let index = attempt(store, token)?;
+    match store.invocation_attempts[index].state {
+        AttemptState::Cancelled => Err(denied(FenceRejection::Cancelled)),
+        AttemptState::Settled => Err(denied(FenceRejection::Settled)),
+        AttemptState::Active => Ok(()),
+    }
+}
+
+fn upsert_checkpoint(store: &mut Store, instance: &str, key: &str, state: &[u8]) {
+    if let Some(existing) = store
+        .checkpoints
+        .iter_mut()
+        .find(|c| c.instance_id == instance && c.checkpoint_id == key)
+    {
+        existing.state = state.to_vec();
+    } else {
+        store.checkpoints.push(CheckpointRecord {
+            instance_id: instance.into(),
+            checkpoint_id: key.into(),
+            state: state.to_vec(),
+            created_at: Utc::now(),
+        });
+    }
+}
 fn checkpoint(
     store: &mut Store,
     token: &AttemptFence,
@@ -231,19 +257,94 @@ impl InvocationFences for InMemoryPersistence {
     ) -> FenceResult<InvocationCheckpointResult> {
         validate_identity(&write.checkpoint_id)?;
         let mut store = self.store.lock().unwrap();
-        lease(&store, &token.lease, true)?;
-        let index = attempt(&store, token)?;
-        match store.invocation_attempts[index].state {
-            AttemptState::Cancelled => Err(denied(FenceRejection::Cancelled)),
-            AttemptState::Settled => Err(denied(FenceRejection::Settled)),
-            AttemptState::Active => Ok(checkpoint(&mut store, token, write)),
-        }
+        active_attempt(&store, token)?;
+        Ok(checkpoint(&mut store, token, write))
+    }
+    async fn invocation_sleep_checkpoint(
+        &self,
+        token: &AttemptFence,
+        write: &InvocationCheckpoint,
+    ) -> FenceResult<()> {
+        validate_identity(&write.checkpoint_id)?;
+        let mut store = self.store.lock().unwrap();
+        active_attempt(&store, token)?;
+        upsert_checkpoint(
+            &mut store,
+            &token.lease.instance_id,
+            &write.checkpoint_id,
+            &write.state,
+        );
+        store
+            .instances
+            .get_mut(&token.lease.instance_id)
+            .unwrap()
+            .checkpoint_id = Some(write.checkpoint_id.clone());
+        Ok(())
+    }
+    async fn invocation_retry(
+        &self,
+        token: &AttemptFence,
+        retry: &InvocationRetry,
+    ) -> FenceResult<()> {
+        let key = retry.storage_key()?;
+        let mut store = self.store.lock().unwrap();
+        active_attempt(&store, token)?;
+        // Memory's existing retry projection exposes the synthetic checkpoint;
+        // detailed retry metadata is stored by the PostgreSQL backend.
+        upsert_checkpoint(&mut store, &token.lease.instance_id, &key, b"");
+        Ok(())
+    }
+    async fn invocation_event(
+        &self,
+        token: &AttemptFence,
+        event: &InvocationEvent,
+    ) -> FenceResult<()> {
+        let mut store = self.store.lock().unwrap();
+        active_attempt(&store, token)?;
+        let (event_type, subtype) = match &event.kind {
+            InvocationEventKind::Heartbeat => (crate::domain::EventType::Heartbeat, None),
+            InvocationEventKind::Custom(kind) => {
+                (crate::domain::EventType::Custom, Some(kind.clone()))
+            }
+        };
+        let id = store.next_id();
+        store.events.push(EventRecord {
+            id: Some(id),
+            instance_id: token.lease.instance_id.clone(),
+            event_type,
+            checkpoint_id: Some(token.path.clone()),
+            payload: (!event.payload.is_empty()).then(|| event.payload.clone()),
+            created_at: event.created_at,
+            subtype,
+        });
+        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn child_write_semantics() {
+        crate::persistence::conformance::invocations::child_write_semantics(
+            &InMemoryPersistence::default(),
+        )
+        .await;
+    }
+    #[tokio::test]
+    async fn child_write_rejections() {
+        crate::persistence::conformance::invocations::child_write_rejections(
+            &InMemoryPersistence::default(),
+        )
+        .await;
+    }
+    #[tokio::test]
+    async fn child_write_boundaries() {
+        crate::persistence::conformance::invocations::child_write_boundaries(
+            &InMemoryPersistence::default(),
+        )
+        .await;
+    }
     #[tokio::test]
     async fn concurrent_admission() {
         crate::persistence::conformance::invocations::concurrent_admission(
