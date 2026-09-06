@@ -58,9 +58,29 @@ the package with Wasmtime and executes both its root and resolved child. Focused
 all-target Clippy passed. The guest-only WIT dependency stays light: package codec
 dependencies are behind the host/compiler feature.
 
-This is packaging and validation, not yet the prepared-worker catalog transport
-or a compiler/backend switch. Native child preparation must remain in the killable
-worker; it must not be added as synchronous compilation inside `start`.
+This establishes packaging and validation; it does not yet select a compiler
+backend or expose the catalog to running workflows.
+
+### Native package preparation
+
+The precompile worker now validates the raw package and precompiles the root and
+every unique child into one bounded native response. The existing private-worker
+nonce, full source digest, engine fingerprint and serialized digest protect the
+whole response. The new trusted package decoder validates member framing and
+bindings before loading the prepared components; native bytes still require the
+same trusted provenance as legacy responses. Legacy components keep their existing
+native encoding. The root-only decoder explicitly rejects packages so a caller
+cannot silently discard isolated dependencies.
+
+Verification: three new native codec tests cover legacy compatibility, deduplicated
+roundtrip with 100 bindings, truncation/trailing bytes and corrupted child rejection.
+The real package integration test now runs both root and child after worker
+precompilation, rejects a wrong nonce and checks the root-only decoder rejection.
+The complete component-host suite with integration/PoC features passed **76 tests**,
+with one manual benchmark ignored; focused all-target Clippy passed.
+
+The environment's package-aware prepared cache and child execution imports remain
+to be connected. Native compilation stays in the worker, never in `start`.
 
 ## Remaining required work
 

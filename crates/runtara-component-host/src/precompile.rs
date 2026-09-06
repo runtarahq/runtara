@@ -21,6 +21,9 @@ use wasmtime::{Engine, component::Component};
 
 use crate::{EngineConfig, build_engine};
 
+mod compiled_package;
+pub use compiled_package::CompiledWorkflowPackage;
+
 /// Exact byte length of a request nonce and source digest.
 pub const PRECOMPILE_NONCE_BYTES: usize = 32;
 
@@ -485,9 +488,7 @@ pub fn precompile_artifact(request: &PrecompileRequest) -> Result<PrecompiledCom
     let source_digest = digest(&component);
     let engine =
         build_engine(&EngineConfig::default()).context("build precompile worker engine")?;
-    let serialized_component = engine
-        .precompile_component(&component)
-        .map_err(|error| anyhow::anyhow!("precompile workflow component: {error:#}"))?;
+    let serialized_component = compiled_package::precompile(&engine, &component)?;
     ensure!(
         !serialized_component.is_empty(),
         "wasmtime returned an empty serialized component"
@@ -592,12 +593,36 @@ pub unsafe fn deserialize_trusted_precompiled_component(
 ) -> Result<Component> {
     let success = validate_precompile_response(request, response)?;
     ensure_precompile_engine_compatible(engine, success)?;
+    ensure!(
+        !compiled_package::is_bundle(success.serialized_component()),
+        "isolated package requires package-aware preparation"
+    );
     // SAFETY: upheld by this function's caller contract. The child side only
     // returns `Engine::precompile_component` output and the parent must keep
     // the stdout pipe private from untrusted writers.
     unsafe { Component::deserialize(engine, success.serialized_component()) }.map_err(|error| {
         anyhow::anyhow!("deserialize trusted precompiled workflow component: {error:#}")
     })
+}
+
+/// Deserialize the root and all isolated dependencies from one verified worker
+/// response. Legacy responses produce a root with an empty child catalog.
+///
+/// # Safety
+///
+/// The same process-private provenance requirement as
+/// [`deserialize_trusted_precompiled_component`] applies to the entire response.
+/// Hashes and framing do not make arbitrary native machine code safe to load.
+pub unsafe fn deserialize_trusted_precompiled_package(
+    engine: &Engine,
+    request: &PrecompileRequest,
+    response: &PrecompileResponse,
+) -> Result<CompiledWorkflowPackage> {
+    let success = validate_precompile_response(request, response)?;
+    ensure_precompile_engine_compatible(engine, success)?;
+    // SAFETY: this function requires the exact trusted worker response; every
+    // native member was emitted by Wasmtime under that worker's engine.
+    unsafe { compiled_package::deserialize(engine, success.serialized_component()) }
 }
 
 fn read_bounded_artifact(path: &Path) -> Result<Vec<u8>> {
