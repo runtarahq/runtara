@@ -417,6 +417,13 @@ impl RuntimeHost for PersistenceRuntimeHost {
             .await
     }
 
+    async fn poll_signal(&self) -> Result<Option<RuntimeSignalInfo>, String> {
+        self.note_guest_polled_signals();
+        self.poll_lifecycle_signal()
+            .await
+            .map(|signal| signal.map(Self::runtime_signal))
+    }
+
     async fn is_cancelled(&self) -> Result<bool, String> {
         self.note_guest_polled_signals();
         // Mirrors guest is_cancelled: local flag short-circuit, then a
@@ -737,6 +744,130 @@ mod tests {
             .find(|e| e.event_type == runtara_core::domain::EventType::Custom)
             .unwrap();
         assert_eq!(custom.subtype.as_deref(), Some("step-debug-start"));
+    }
+
+    #[tokio::test]
+    async fn poll_signal_retains_commands_and_status_until_explicit_acknowledgement() {
+        for kind in [
+            CoreSignalType::Cancel,
+            CoreSignalType::Pause,
+            CoreSignalType::Shutdown,
+        ] {
+            let (p, host, id) = setup().await;
+            assert_eq!(host.poll_signal().await.unwrap(), None);
+            p.put_custom_signal(&id, "business", b"application payload")
+                .await
+                .unwrap();
+            p.insert_signal(&id, kind, b"lifecycle payload")
+                .await
+                .unwrap();
+            let signal = host.poll_signal().await.unwrap().unwrap();
+            assert_eq!(host.poll_signal().await.unwrap(), Some(signal.clone()));
+            assert_eq!(signal.payload, b"lifecycle payload");
+            assert_eq!(signal.checkpoint_id, None);
+            assert_eq!(
+                p.get_instance(&id).await.unwrap().unwrap().status,
+                CoreInstanceStatus::Running
+            );
+            assert!(!host.cancelled.load(Ordering::SeqCst));
+            assert_eq!(
+                p.get_pending_signal(&id).await.unwrap().unwrap().command_id,
+                signal.command_id
+            );
+            assert_eq!(
+                host.poll_custom_signal("business".into()).await.unwrap(),
+                Some(b"application payload".to_vec())
+            );
+
+            assert!(
+                host.handle_checkpoint_signal(
+                    signal.signal_type.clone(),
+                    signal.command_id.clone()
+                )
+                .await
+                .unwrap()
+            );
+            let expected = if kind == CoreSignalType::Cancel {
+                CoreInstanceStatus::Cancelled
+            } else {
+                CoreInstanceStatus::Suspended
+            };
+            assert_eq!(p.get_instance(&id).await.unwrap().unwrap().status, expected);
+            assert_eq!(host.poll_signal().await.unwrap(), None);
+            // A duplicate receipt preserves the same terminal/suspended result.
+            assert!(
+                host.handle_checkpoint_signal(signal.signal_type, signal.command_id)
+                    .await
+                    .unwrap()
+            );
+            assert_eq!(p.get_instance(&id).await.unwrap().unwrap().status, expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn poll_signal_observation_does_not_consume_a_superseding_cancel() {
+        let (p, host, id) = setup().await;
+        p.insert_signal(&id, CoreSignalType::Pause, b"")
+            .await
+            .unwrap();
+        let pause = host.poll_signal().await.unwrap().unwrap();
+        p.insert_signal(&id, CoreSignalType::Cancel, b"")
+            .await
+            .unwrap();
+        assert!(
+            !host
+                .handle_checkpoint_signal(pause.signal_type, pause.command_id)
+                .await
+                .unwrap()
+        );
+        let cancel = host.poll_signal().await.unwrap().unwrap();
+        assert_eq!(cancel.signal_type, "cancel");
+        assert_eq!(
+            p.get_instance(&id).await.unwrap().unwrap().status,
+            CoreInstanceStatus::Running
+        );
+        assert!(
+            host.handle_checkpoint_signal(cancel.signal_type, cancel.command_id)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            p.get_instance(&id).await.unwrap().unwrap().status,
+            CoreInstanceStatus::Cancelled
+        );
+    }
+
+    #[tokio::test]
+    async fn poll_signal_after_interrupted_sleep_observes_without_publishing_cancellation() {
+        let (p, _, id) = setup().await;
+        let host = PersistenceRuntimeHost::from_persistence(p.clone(), id.clone(), false)
+            .with_signal_poll_interval(Duration::from_secs(60));
+        assert_eq!(host.poll_signal().await.unwrap(), None);
+        p.insert_signal(&id, CoreSignalType::Cancel, b"")
+            .await
+            .unwrap();
+        host.durable_sleep_checkpoint("sleep".into(), vec![], 60_000)
+            .await
+            .unwrap();
+        let signal = host.poll_signal().await.unwrap().unwrap();
+        assert_eq!(signal.signal_type, "cancel");
+        // Observation must clear legacy ignored-sleep escalation, without
+        // acknowledging the command before the guest has cleaned up.
+        host.heartbeat().await.unwrap();
+        assert_eq!(
+            p.get_instance(&id).await.unwrap().unwrap().status,
+            CoreInstanceStatus::Running
+        );
+        assert!(p.get_pending_signal(&id).await.unwrap().is_some());
+        assert!(
+            host.handle_checkpoint_signal(signal.signal_type, signal.command_id)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            p.get_instance(&id).await.unwrap().unwrap().status,
+            CoreInstanceStatus::Cancelled
+        );
     }
 
     #[tokio::test]

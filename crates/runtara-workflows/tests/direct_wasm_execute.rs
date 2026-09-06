@@ -1587,6 +1587,11 @@ impl runtara_component_host::runtime_host::RuntimeHost for CapturingRuntimeHost 
         // Mirror: heartbeat events are filtered out by capture_event.
         Ok(())
     }
+    async fn poll_signal(
+        &self,
+    ) -> Result<Option<runtara_component_host::runtime_host::RuntimeSignalInfo>, String> {
+        Ok(None)
+    }
     async fn is_cancelled(&self) -> Result<bool, String> {
         Ok(false)
     }
@@ -2162,7 +2167,7 @@ fn direct_compose_host_import_binding_surfaces_runtime_as_component_import() {
     assert!(
         host_imports
             .iter()
-            .any(|name| name == "runtara:workflow-runtime/runtime@0.3.0"),
+            .any(|name| name == "runtara:workflow-runtime/runtime@0.4.0"),
         "host-import binding must surface the runtime interface; imports: {host_imports:?}"
     );
     assert!(
@@ -2228,6 +2233,11 @@ impl runtara_component_host::runtime_host::RuntimeHost for RecordingRuntimeHost 
     }
     async fn heartbeat(&self) -> Result<(), String> {
         Ok(())
+    }
+    async fn poll_signal(
+        &self,
+    ) -> Result<Option<runtara_component_host::runtime_host::RuntimeSignalInfo>, String> {
+        Ok(None)
     }
     async fn is_cancelled(&self) -> Result<bool, String> {
         Ok(false)
@@ -2365,6 +2375,11 @@ impl runtara_component_host::runtime_host::RuntimeHost for PersistingRuntimeHost
     }
     async fn heartbeat(&self) -> Result<(), String> {
         Ok(())
+    }
+    async fn poll_signal(
+        &self,
+    ) -> Result<Option<runtara_component_host::runtime_host::RuntimeSignalInfo>, String> {
+        Ok(None)
     }
     async fn is_cancelled(&self) -> Result<bool, String> {
         Ok(false)
@@ -6746,7 +6761,7 @@ fn direct_wasm_execute_agent_capabilities_keeps_runtime_for_durable_workflow() {
         compiled
             .component_artifacts
             .world_wit
-            .contains("import runtara:workflow-runtime/runtime@0.3.0;"),
+            .contains("import runtara:workflow-runtime/runtime@0.4.0;"),
         "durable agent must keep the runtime import:\n{}",
         compiled.component_artifacts.world_wit
     );
@@ -7543,6 +7558,11 @@ impl runtara_component_host::runtime_host::RuntimeHost for CheckpointingRuntimeH
     }
     async fn heartbeat(&self) -> Result<(), String> {
         Ok(())
+    }
+    async fn poll_signal(
+        &self,
+    ) -> Result<Option<runtara_component_host::runtime_host::RuntimeSignalInfo>, String> {
+        Ok(None)
     }
     async fn is_cancelled(&self) -> Result<bool, String> {
         Ok(false)
@@ -12707,6 +12727,11 @@ impl runtara_component_host::runtime_host::RuntimeHost for CancelDuringDelayHost
     }
     async fn heartbeat(&self) -> Result<(), String> {
         Ok(())
+    }
+    async fn poll_signal(
+        &self,
+    ) -> Result<Option<runtara_component_host::runtime_host::RuntimeSignalInfo>, String> {
+        Ok(None)
     }
     async fn is_cancelled(&self) -> Result<bool, String> {
         Ok(self

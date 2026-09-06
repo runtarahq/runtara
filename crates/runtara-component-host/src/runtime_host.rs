@@ -33,7 +33,7 @@ use crate::workflow::WorkflowState;
 
 /// Fully-qualified component import name of the runtime interface.
 ///
-/// Must match `runtara:workflow-runtime@0.3.0`'s `runtime` interface as
+/// Must match `runtara:workflow-runtime@0.4.0`'s `runtime` interface as
 /// emitted into the workflow world by `runtara-workflows::direct_wasm`
 /// (`emit_world_wit`) — the Spike-B integration test asserts a HostImport
 /// composition surfaces exactly this name.
@@ -141,6 +141,10 @@ pub trait RuntimeHost: Send + Sync {
     async fn breakpoint_pause(&self) -> Result<(), String>;
     /// Liveness heartbeat.
     async fn heartbeat(&self) -> Result<(), String>;
+    /// Read a lifecycle command without acknowledging it or publishing status.
+    /// May be rate-limited. The guest retains observed intent until cleanup and
+    /// uses `handle_checkpoint_signal` to acknowledge the exact command later.
+    async fn poll_signal(&self) -> Result<Option<RuntimeSignalInfo>, String>;
     /// True when a cancel signal is pending or was already consumed.
     async fn is_cancelled(&self) -> Result<bool, String>;
     /// Poll lifecycle signals; true when a stop-like signal was handled and
@@ -225,7 +229,24 @@ fn require_host(
 /// coexists with minimal components). Old composed artifacts therefore run
 /// unchanged through a linker that carries these bindings.
 pub fn add_runtime_to_linker(linker: &mut Linker<WorkflowState>) -> anyhow::Result<()> {
-    let mut inst = linker.instance(RUNTIME_INTERFACE_NAME)?;
+    add_runtime_version_to_linker(linker, runtara_workflow_wit::LEGACY_RUNTIME_INTERFACE_NAME)?;
+    add_runtime_version_to_linker(linker, RUNTIME_INTERFACE_NAME)
+}
+
+fn add_runtime_version_to_linker(
+    linker: &mut Linker<WorkflowState>,
+    interface: &str,
+) -> anyhow::Result<()> {
+    let mut inst = linker.instance(interface)?;
+    if interface == RUNTIME_INTERFACE_NAME {
+        inst.func_wrap_async(
+            "poll-signal",
+            |mut store: StoreContextMut<'_, WorkflowState>, (): ()| {
+                let host = require_host(&mut store);
+                Box::new(async move { Ok((host?.poll_signal().await,)) })
+            },
+        )?;
+    }
 
     inst.func_wrap_async(
         "load-input",
@@ -426,6 +447,60 @@ pub fn add_runtime_to_linker(linker: &mut Linker<WorkflowState>) -> anyhow::Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runtime_versions_link_with_distinct_signal_observation_contracts() {
+        let engine = crate::build_engine(&crate::EngineConfig {
+            cache_dir: None,
+            enable_epoch_interruption: false,
+        })
+        .unwrap();
+        let mut linker = Linker::<WorkflowState>::new(&engine);
+        add_runtime_to_linker(&mut linker).unwrap();
+        let observation = r#"
+            (type $signal (record
+                (field "signal-type" string)
+                (field "command-id" string)
+                (field "payload" (list u8))
+                (field "checkpoint-id" (option string))))
+            (export "signal-info" (type $exported-signal (eq $signal)))
+            (export "poll-signal" (func (result (result (option $exported-signal) (error string)))))
+        "#;
+        for (version, poll, expected) in [
+            (
+                runtara_workflow_wit::LEGACY_RUNTIME_INTERFACE_NAME,
+                "",
+                true,
+            ),
+            (RUNTIME_INTERFACE_NAME, observation, true),
+            (
+                runtara_workflow_wit::LEGACY_RUNTIME_INTERFACE_NAME,
+                observation,
+                false,
+            ),
+        ] {
+            let component = wasmtime::component::Component::new(
+                &engine,
+                format!(
+                    r#"
+                (component (import "{version}" (instance
+                    {poll}
+                    (export "is-cancelled" (func (result (result bool (error string)))))
+                    (export "handle-checkpoint-signal" (func
+                        (param "signal-type" string) (param "command-id" string)
+                        (result (result bool (error string)))))
+                )))
+            "#
+                ),
+            )
+            .unwrap();
+            assert_eq!(
+                linker.instantiate_pre(&component).is_ok(),
+                expected,
+                "{version}"
+            );
+        }
+    }
 
     #[test]
     fn now_ms_is_epoch_scaled() {

@@ -175,6 +175,12 @@ pub fn heartbeat() -> Result<(), String> {
     with_sdk(|sdk| sdk.heartbeat().map_err(sdk_error))
 }
 
+/// Read-only lifecycle observation; acknowledgement remains explicit.
+pub fn poll_signal() -> Result<Option<RuntimeSignalInfo>, String> {
+    with_sdk_mut(|sdk| sdk.poll_signal().map_err(sdk_error))
+        .map(|signal| signal.map(runtime_signal))
+}
+
 pub fn is_cancelled() -> Result<bool, String> {
     if runtara_sdk::is_cancelled() {
         return Ok(true);
@@ -325,6 +331,10 @@ mod component {
 
         fn heartbeat() -> Result<(), String> {
             super::heartbeat()
+        }
+
+        fn poll_signal() -> Result<Option<SignalInfo>, String> {
+            super::poll_signal().map(|signal| signal.map(signal_info))
         }
 
         fn is_cancelled() -> Result<bool, String> {

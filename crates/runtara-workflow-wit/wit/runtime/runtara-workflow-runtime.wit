@@ -4,7 +4,7 @@
 // loading persisted input, completing/failing instances, event emission,
 // cancellation, heartbeat, and durable sleep.
 
-package runtara:workflow-runtime@0.3.0;
+package runtara:workflow-runtime@0.4.0;
 
 interface runtime {
     record signal-info {
@@ -46,6 +46,14 @@ interface runtime {
 
     heartbeat: func() -> result<_, string>;
 
+    /// Read the pending lifecycle command without acknowledging it or publishing
+    /// terminal/suspended status. Rate limiting may return none between polls.
+    /// The guest retains an observed command while cleaning up active subtasks,
+    /// then calls handle-checkpoint-signal with its type and command-id.
+    /// Custom WaitForSignal payloads are not consumed by this operation.
+    poll-signal: func() -> result<option<signal-info>, string>;
+
+    /// Legacy consuming helper; do not use while subtasks still need cleanup.
     is-cancelled: func() -> result<bool, string>;
 
     check-signals: func() -> result<bool, string>;

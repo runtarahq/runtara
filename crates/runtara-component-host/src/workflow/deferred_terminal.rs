@@ -114,6 +114,9 @@ impl RuntimeHost for DeferredTerminal {
     async fn heartbeat(&self) -> Result<(), String> {
         self.inner.heartbeat().await
     }
+    async fn poll_signal(&self) -> Result<Option<crate::runtime_host::RuntimeSignalInfo>, String> {
+        self.inner.poll_signal().await
+    }
     async fn is_cancelled(&self) -> Result<bool, String> {
         self.inner.is_cancelled().await
     }

@@ -385,7 +385,12 @@ impl PreparedWorkflow {
         let ty = self.instance_pre.component().component_type();
         let imports: Vec<_> = ty.imports(engine).map(|(name, _)| name).collect();
         self.is_lifecycle_invoke(engine)
-            && imports.contains(&runtara_workflow_wit::RUNTIME_INTERFACE_NAME)
+            && [
+                runtara_workflow_wit::RUNTIME_INTERFACE_NAME,
+                runtara_workflow_wit::LEGACY_RUNTIME_INTERFACE_NAME,
+            ]
+            .iter()
+            .any(|name| imports.contains(name))
             && !imports.iter().any(|name| name.starts_with("wasi:http/"))
     }
 

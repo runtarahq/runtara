@@ -481,7 +481,7 @@ mod tests {
         assert!(
             artifacts
                 .world_wit
-                .contains("import runtara:workflow-runtime/runtime@0.3.0;")
+                .contains("import runtara:workflow-runtime/runtime@0.4.0;")
         );
         // The Phase-5 default exports the invoke lifecycle; the legacy run
         // export remains reachable via the explicit CliRunHttp ABI.
@@ -545,7 +545,7 @@ package runtara:workflow@0.1.0;
 
 world workflow {
     import runtara:workflow-stdlib/json@0.1.0;
-    import runtara:workflow-runtime/runtime@0.3.0;
+    import runtara:workflow-runtime/runtime@0.4.0;
     import runtara:agent-crypto/capabilities@0.4.0;
     import runtara:agent-object-model/capabilities@0.4.0;
     export runtara:workflow-lifecycle/lifecycle@0.2.0;
@@ -694,7 +694,7 @@ world workflow {
         assert!(
             artifacts
                 .world_wit
-                .contains("import runtara:workflow-runtime/runtime@0.3.0;")
+                .contains("import runtara:workflow-runtime/runtime@0.4.0;")
         );
     }
 
@@ -736,7 +736,7 @@ world workflow {
                 },
                 DirectSharedComponentRequirement {
                     package: "runtara:workflow-runtime",
-                    package_with_version: "runtara:workflow-runtime@0.3.0",
+                    package_with_version: "runtara:workflow-runtime@0.4.0",
                     bundle_wasm_filename: "runtara_workflow_runtime.wasm",
                     bundle_meta_filename: "runtara_workflow_runtime.meta.json",
                     cas_wasm_filename: "runtara-workflow-runtime.wasm",

@@ -107,6 +107,12 @@ impl RuntimeHost for ScopedRootRuntime {
         self.owner.ensure_open()?;
         self.owner.root.heartbeat().await
     }
+    async fn poll_signal(
+        &self,
+    ) -> Result<Option<runtara_component_host::runtime_host::RuntimeSignalInfo>, String> {
+        self.owner.ensure_open()?;
+        self.owner.root.poll_signal().await
+    }
     async fn is_cancelled(&self) -> Result<bool, String> {
         self.owner.observe(None, true).await
     }

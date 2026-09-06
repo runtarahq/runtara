@@ -1,6 +1,6 @@
 # Cooperative cancellation implementation record
 
-Status: standard HTTP Agent cancellation, 2026-09-06. Governing contract:
+Status: HTTP Agent cancellation and read-only lifecycle observation, 2026-09-06. Governing contract:
 [cooperative cancellation plan](selective-isolation-plan.md). Update the existing
 implementation directly; no new product feature flags or alternate backend.
 Emitted workflow signal/timeout integration and the remaining plan gates are
@@ -158,3 +158,71 @@ Verified so far for this update:
 No emitted cancellation selection, lifecycle acknowledgement changes, cooperative deadline
 handling, emergency grace integration, production rollout qualification or fresh
 size/latency comparison is established by these Agent-level tests.
+
+## Lifecycle signal observation before cleanup
+
+Runtime 0.4.0 adds `poll-signal`, a read-only view of the existing lifecycle
+command, with its type, command ID and payload. Both the native persistence
+runtime and the guest SDK runtime implement it. It does not acknowledge the
+command, set the local cancelled latch, change instance status, consume a custom
+signal, or create a checkpoint. Existing decorators forward the read without
+introducing execution bookkeeping.
+
+The guest must retain an observed command while cleaning up active subtasks;
+rate limiting can make a subsequent poll return none. Once cleanup succeeds it
+can use the existing `handle-checkpoint-signal` receipt, which identifies the
+exact command. A superseded receipt must not consume its replacement. After a
+durable sleep interrupted by cancellation, the new poll also clears the legacy
+ignored-signal escalation marker, allowing cleanup calls without prematurely
+publishing cancellation.
+
+Normal new compilations and the shared runtime build use 0.4.0. The host keeps
+the 0.3.0 interface registered for already-built artifacts, with its existing
+consuming helpers. This is artifact compatibility, not an opt-in backend. A
+linker test verifies both interface shapes and rejects the new poll on 0.3.0.
+Existing 0.3.0 WAT execution fixtures remain unchanged.
+
+New persistence tests verify repeated observation before acknowledgement for
+Cancel/Pause/Shutdown, unchanged running status and custom payloads, duplicate
+receipts, Pause superseded by Cancel, and observation after interrupted sleep.
+The full native runtime-host database module passed: 26 tests against the
+isolated Postgres fixture. The normal component build also passed for all 27
+agents and both shared components.
+
+The 573 compiler unit tests and 148 component-host tests passed; the latter
+include the nine standard/real-HTTP cancellation cases and retained 0.3.0
+execution fixtures. One existing manual host benchmark was ignored. The
+standalone runtime and WIT suites passed with 9 and 31 tests respectively.
+Commands used the existing integration test features; no new gate was added.
+The 46 existing scoped-runtime database tests also passed, including old runtime
+imports and signal receipt behavior. The isolated database container was stopped
+after verification.
+
+Full emitted-workflow regression passed again: 250 tests, with the two existing
+manual performance benchmarks ignored. All-target Clippy for the five affected
+crates passed with their component, database and emitted-workflow integration
+features enabled, as did formatting and diff whitespace checks. The main commands
+were:
+
+```sh
+cargo test -p runtara-workflow-wit -p runtara-workflow-runtime -p runtara-component-host --lib
+cargo test -p runtara-workflows --lib
+cargo test -p runtara-component-host --features component-integration-tests,isolated-step-poc --tests
+cargo test -p runtara-environment --features db-integration-tests --lib runtime_host::tests
+cargo test -p runtara-environment --features db-integration-tests --lib runtime_host::scoped::
+cargo test -p runtara-workflows --features direct-wasm-integration-tests --test direct_wasm_execute
+cargo clippy -p runtara-component-host -p runtara-environment -p runtara-workflows -p runtara-workflow-runtime -p runtara-workflow-wit --all-targets --features runtara-component-host/component-integration-tests,runtara-environment/db-integration-tests,runtara-workflows/direct-wasm-integration-tests -- -D warnings
+```
+
+The database helper supplied only the isolated fixture's URL. Native checks used
+`SQLX_OFFLINE=true`, an empty `RUSTC_WRAPPER`, and the existing isolated native
+target directory; integration tests used the normal release component bundle.
+
+This establishes the signal transport needed by emitted cancellable waits. The
+emitter does not call `poll-signal` yet. Its waits still need timer readiness,
+standard cancellation of every active subtask in the selected scope, retained
+command handling and acknowledgement after cleanup. Whole-run emergency grace
+and terminal publication races remain unqualified. In particular, the existing
+core acknowledgement policy can still apply Cancel to an already-terminal
+instance; the plan's accepted-completion rule needs explicit implementation and
+compatibility tests. No claim of completed G4/G7 is made by read-only observation.

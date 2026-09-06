@@ -46,6 +46,9 @@ impl RuntimeHost for Publication {
     async fn heartbeat(&self) -> Result<(), String> {
         panic!("unexpected heartbeat call")
     }
+    async fn poll_signal(&self) -> Result<Option<crate::runtime_host::RuntimeSignalInfo>, String> {
+        Ok(None)
+    }
     async fn is_cancelled(&self) -> Result<bool, String> {
         panic!("unexpected is_cancelled call")
     }

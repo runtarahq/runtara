@@ -420,6 +420,17 @@ impl RuntimeHost for ScopedRuntimeHost {
         self.event(InstanceEventType::EventHeartbeat, Vec::new(), None)
             .await
     }
+    async fn poll_signal(
+        &self,
+    ) -> Result<Option<runtara_component_host::runtime_host::RuntimeSignalInfo>, String> {
+        self.live()?;
+        let result = self.owner.root.poll_signal().await;
+        if let Some(io) = &self.io {
+            io.read_result(result)
+        } else {
+            result
+        }
+    }
     async fn is_cancelled(&self) -> Result<bool, String> {
         if self.cancel.is_requested() {
             return Ok(true);

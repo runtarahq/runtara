@@ -7,12 +7,22 @@ This crate intentionally separates workflow semantics from runtime lifecycle:
 - `runtara:workflow-stdlib/json@0.1.0` owns reusable JSON semantics such as
   manifest initialization, source construction, mappings, conditions, switch
   routing, filtering, logging payloads, structured error payloads, and grouping.
-- `runtara:workflow-runtime/runtime@0.3.0` owns SDK/runtime lifecycle calls such
+- `runtara:workflow-runtime/runtime@0.4.0` owns SDK/runtime lifecycle calls such
   as input loading, completion, failure, events, cancellation, and durable
   sleep.
 
 Both are composed statically with workflow-logic and agent components into one
 final `workflow.wasm`.
+
+Runtime 0.4.0 adds read-only `poll-signal` for cooperative cancellation. It
+returns an existing lifecycle command without acknowledging it or changing
+instance status. Guest code retains the command while cancelling and cleaning
+up active operations, then acknowledges its exact type and command ID through
+`handle-checkpoint-signal`. Polling can be rate-limited; a later empty poll does
+not withdraw an already observed command. Application signals remain separate.
+The host also binds runtime 0.3.0 for already-built workflows, preserving its
+consuming `is-cancelled`/`check-signals` behavior. New compilations and normal
+runtime component builds use 0.4.0; there is no feature selector.
 
 Runtime 0.3.0 adds `signal-id` to `custom-signal-info`, separate from its
 `checkpoint-id` address. Reads are retained and writes replace the value with
