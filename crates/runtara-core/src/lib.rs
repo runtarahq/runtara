@@ -70,7 +70,7 @@
 //! | `Sleep` | Durable sleep - persists a wake deadline |
 //! | `InstanceEvent` | Fire-and-forget events (heartbeat, completed, failed, suspended) |
 //! | `GetInstanceStatus` | Query instance status |
-//! | `PollSignals` | Poll for pending cancel/pause/resume signals |
+//! | `PollSignals` | Poll for pending cancel/pause/shutdown signals |
 //! | `SignalAck` | Acknowledge receipt of a signal |
 //!
 //! ## Checkpoint Semantics

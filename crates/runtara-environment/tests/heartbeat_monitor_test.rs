@@ -255,6 +255,7 @@ impl MockPersistence {
             output: None,
             error: None,
             sleep_until: None,
+            wake_reason: None,
             termination_reason: None,
             exit_code: None,
             recovery_attempts: 0,
@@ -405,16 +406,16 @@ impl Persistence for MockPersistence {
         Ok(Vec::new())
     }
 
-    async fn insert_custom_signal(
+    async fn put_custom_signal(
         &self,
         _instance_id: &str,
         _checkpoint_id: &str,
         _payload: &[u8],
-    ) -> Result<(), CoreError> {
-        Ok(())
+    ) -> Result<String, CoreError> {
+        Ok("mock-custom-signal".into())
     }
 
-    async fn take_pending_custom_signal(
+    async fn get_custom_signal(
         &self,
         _instance_id: &str,
         _checkpoint_id: &str,
@@ -456,10 +457,11 @@ impl Persistence for MockPersistence {
         Ok(self.instances.lock().unwrap().len() as i64)
     }
 
-    async fn set_instance_sleep(
+    async fn schedule_wake(
         &self,
         _instance_id: &str,
         _sleep_until: DateTime<Utc>,
+        _reason: runtara_core::domain::WakeReason,
     ) -> Result<(), CoreError> {
         Ok(())
     }
@@ -1067,6 +1069,7 @@ async fn test_completed_instance_in_core_not_flagged() {
             output: None,
             error: None,
             sleep_until: None,
+            wake_reason: None,
             termination_reason: Some("completed".to_string()),
             exit_code: None,
             recovery_attempts: 0,

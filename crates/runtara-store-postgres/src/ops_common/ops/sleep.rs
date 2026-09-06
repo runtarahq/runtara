@@ -5,7 +5,7 @@
 //! The `impl_sleep_ops!` macro expands to concrete `impl $Backend { ... }`
 //! blocks with `op_set_instance_sleep`, `op_clear_instance_sleep`, and
 //! `op_get_sleeping_instances_due`. Fields modified are `sleep_until`
-//! on the `instances` table — no other state.
+//! and `wake_reason` on the `instances` table.
 //!
 //! The due-instance scan compares `sleep_until` against `Dialect::NOW`
 //! (`CURRENT_TIMESTAMP`) with both sides passed through
@@ -22,17 +22,20 @@ macro_rules! impl_sleep_ops {
                 pool: &$Pool,
                 instance_id: &str,
                 sleep_until: ::chrono::DateTime<::chrono::Utc>,
+                reason: ::runtara_core::domain::WakeReason,
             ) -> ::core::result::Result<(), ::runtara_core::error::CoreError> {
                 use crate::ops_common::error::not_found_if_empty;
                 use crate::dialect::Dialect;
                 let p1 = <$Dialect>::placeholder(1);
                 let p2 = <$Dialect>::placeholder(2);
+                let p3 = <$Dialect>::placeholder(3);
                 let sql = format!(
-                    "UPDATE instances SET sleep_until = CASE WHEN status IN ('completed', 'failed', 'cancelled') THEN NULL ELSE {p2} END WHERE instance_id = {p1}"
+                    "UPDATE instances SET sleep_until = CASE WHEN status IN ('completed', 'failed', 'cancelled') THEN NULL ELSE {p2} END, wake_reason = CASE WHEN status IN ('completed', 'failed', 'cancelled') THEN NULL ELSE {p3} END WHERE instance_id = {p1}"
                 );
                 let result = ::sqlx::query(&sql)
                     .bind(instance_id)
                     .bind(sleep_until)
+                    .bind(crate::encoding::wake_reason_to_str(reason))
                     .execute(pool)
                     .await
                     .map_err(|e| ::runtara_core::error::CoreError::PersistenceError {
@@ -125,7 +128,7 @@ macro_rules! impl_sleep_ops {
                 let sql = format!(
                     "SELECT instance_id, tenant_id, definition_version, \
                             {status_col}, {termination_col}, checkpoint_id, attempt, max_attempts, \
-                            created_at, started_at, finished_at, output, error, sleep_until \
+                            created_at, started_at, finished_at, output, error, sleep_until, wake_reason \
                      FROM instances \
                      WHERE sleep_until IS NOT NULL \
                        AND {lhs} <= {rhs} \
@@ -193,7 +196,7 @@ macro_rules! impl_sleep_ops {
                      ) \
                      RETURNING instance_id, tenant_id, definition_version, \
                                {status_col}, {termination_col}, checkpoint_id, attempt, max_attempts, \
-                               created_at, started_at, finished_at, output, error, sleep_until"
+                               created_at, started_at, finished_at, output, error, sleep_until, wake_reason"
                 );
                 let records = ::sqlx::query_as::<_, crate::rows::InstanceRow>(&sql)
                     .bind(limit)

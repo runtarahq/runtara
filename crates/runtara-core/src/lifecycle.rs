@@ -3,7 +3,7 @@
 //! Pure lifecycle decisions. Backends evaluate these against locked state and
 //! persist the resulting effects atomically; hosts perform execution actions.
 
-use crate::domain::{EventType, InstanceStatus, SignalType};
+use crate::domain::{EventType, InstanceStatus, SignalType, WakeReason};
 
 /// An explicit field update. Keeping a value is different from clearing it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,6 +69,8 @@ pub struct Transition {
     pub reason: Change<SuspensionReason>,
     /// Wake deadline update.
     pub wake: Change<WakeDeadline>,
+    /// Host scheduling cause, separate from the command being acknowledged.
+    pub wake_reason: Change<WakeReason>,
     /// Timeline event to append in the same operation.
     pub event: Option<EventType>,
     /// Acknowledge the locked command in the same operation.
@@ -127,6 +129,7 @@ pub fn acknowledge(
         clear_result: false,
         reason: Change::Keep,
         wake: Change::Keep,
+        wake_reason: Change::Keep,
         event: None,
         acknowledge: true,
         report_completion: false,
@@ -136,6 +139,7 @@ pub fn acknowledge(
             effects.status = Some(InstanceStatus::Cancelled);
             effects.finish_now = true;
             effects.wake = Change::Clear;
+            effects.wake_reason = Change::Clear;
             effects.report_completion = !status.is_terminal();
         }
         SignalType::Pause | SignalType::Shutdown => {
@@ -145,12 +149,13 @@ pub fn acknowledge(
             if command.kind == SignalType::Shutdown {
                 effects.reason = Change::Set(SuspensionReason::Shutdown);
                 effects.wake = Change::Set(WakeDeadline::Now);
+                effects.wake_reason = Change::Set(WakeReason::Recovery);
             } else {
                 effects.reason = Change::Clear;
                 effects.wake = Change::Clear;
+                effects.wake_reason = Change::Clear;
             }
         }
-        SignalType::Resume => {}
     }
     Decision::Applied(effects)
 }
@@ -213,6 +218,11 @@ pub fn park(status: InstanceStatus, request: ParkRequest) -> Decision {
         wake: request.deadline.map_or(Change::Keep, |deadline| {
             Change::Set(WakeDeadline::At(deadline))
         }),
+        wake_reason: if request.deadline.is_some() {
+            Change::Set(WakeReason::Timer)
+        } else {
+            Change::Keep
+        },
         event: None,
         acknowledge: false,
         report_completion: false,
@@ -222,8 +232,6 @@ pub fn park(status: InstanceStatus, request: ParkRequest) -> Decision {
 /// Action performed locally after a successful command acknowledgment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExecutionAction {
-    /// No local execution change (legacy resume command).
-    Continue,
     /// Yield execution until explicitly resumed.
     Pause,
     /// End the current execution, including restartable shutdown.
@@ -236,7 +244,6 @@ pub fn execution_action(kind: SignalType) -> ExecutionAction {
     match kind {
         SignalType::Cancel | SignalType::Shutdown => ExecutionAction::Stop,
         SignalType::Pause => ExecutionAction::Pause,
-        SignalType::Resume => ExecutionAction::Continue,
     }
 }
 
@@ -256,12 +263,7 @@ mod tests {
         InstanceStatus::Failed,
         InstanceStatus::Cancelled,
     ];
-    const KINDS: [SignalType; 4] = [
-        SignalType::Cancel,
-        SignalType::Pause,
-        SignalType::Resume,
-        SignalType::Shutdown,
-    ];
+    const KINDS: [SignalType; 3] = [SignalType::Cancel, SignalType::Pause, SignalType::Shutdown];
     fn command(kind: SignalType, acknowledged: bool) -> Command<'static> {
         Command {
             id: "current",
@@ -317,7 +319,6 @@ mod tests {
                         Some(EventType::Suspended),
                         false,
                     ),
-                    SignalType::Resume => (None, false, Change::Keep, Change::Keep, None, false),
                 };
                 assert_eq!(
                     (
@@ -443,7 +444,6 @@ mod tests {
             (SignalType::Cancel, ExecutionAction::Stop, true),
             (SignalType::Shutdown, ExecutionAction::Stop, true),
             (SignalType::Pause, ExecutionAction::Pause, false),
-            (SignalType::Resume, ExecutionAction::Continue, false),
         ] {
             assert_eq!(execution_action(kind), action);
             assert_eq!(interrupts_sleep(kind), interrupts);

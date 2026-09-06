@@ -40,6 +40,11 @@ impl<'r> FromRow<'r, PgRow> for InstanceRow {
             output: row.try_get("output")?,
             error: row.try_get("error")?,
             sleep_until: row.try_get("sleep_until")?,
+            wake_reason: row
+                .try_get::<Option<String>, _>("wake_reason")?
+                .as_deref()
+                .map(crate::encoding::wake_reason_from_str)
+                .transpose()?,
             termination_reason: row.try_get("termination_reason").unwrap_or_default(),
             exit_code: row.try_get("exit_code").unwrap_or_default(),
             recovery_attempts: row.try_get("recovery_attempts").unwrap_or_default(),
@@ -105,6 +110,7 @@ pub struct CustomSignalRow(pub CustomSignalRecord);
 impl<'r> FromRow<'r, PgRow> for CustomSignalRow {
     fn from_row(row: &'r PgRow) -> Result<Self, sqlx::Error> {
         Ok(Self(CustomSignalRecord {
+            signal_id: row.try_get("signal_id")?,
             instance_id: row.try_get("instance_id")?,
             checkpoint_id: row.try_get("checkpoint_id")?,
             payload: row.try_get("payload")?,

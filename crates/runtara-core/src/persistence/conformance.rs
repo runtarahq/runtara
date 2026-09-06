@@ -519,26 +519,57 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
 
     // --- custom checkpoint signals -----------------------------------------
     let custom_payload = br#"{"wait-key":"payment"}"#.to_vec();
-    backend
-        .insert_custom_signal(&instance_id, checkpoint_id, &custom_payload)
+    let first_signal_id = backend
+        .put_custom_signal(&instance_id, checkpoint_id, &custom_payload)
         .await
-        .expect("insert_custom_signal failed");
+        .expect("put_custom_signal failed");
     let taken = backend
-        .take_pending_custom_signal(&instance_id, checkpoint_id)
+        .get_custom_signal(&instance_id, checkpoint_id)
         .await
-        .expect("take_pending_custom_signal failed")
+        .expect("get_custom_signal failed")
         .expect("custom signal should be readable");
     assert_eq!(taken.checkpoint_id, checkpoint_id);
     // Reads are non-destructive: a replayed WaitForSignal re-reads the same
     // signal after a drain/resume, so a second read returns the row again
     // rather than None. Instance deletion reclaims the signal.
     let taken_again = backend
-        .take_pending_custom_signal(&instance_id, checkpoint_id)
+        .get_custom_signal(&instance_id, checkpoint_id)
         .await
-        .expect("take_pending_custom_signal second call failed")
+        .expect("get_custom_signal second call failed")
         .expect("custom signal must remain re-readable (non-destructive)");
     assert_eq!(taken_again.checkpoint_id, checkpoint_id);
     assert_eq!(taken_again.payload, taken.payload);
+    assert_eq!(taken.signal_id, first_signal_id);
+    assert_eq!(taken_again.signal_id, first_signal_id);
+    assert_ne!(first_signal_id, checkpoint_id);
+    // Identical retries create a new value identity: no implicit deduplication.
+    let retry_id = backend
+        .put_custom_signal(&instance_id, checkpoint_id, &custom_payload)
+        .await
+        .unwrap();
+    assert_ne!(retry_id, first_signal_id);
+    let replacement = b"replacement";
+    let replacement_id = backend
+        .put_custom_signal(&instance_id, checkpoint_id, replacement)
+        .await
+        .unwrap();
+    assert_ne!(replacement_id, retry_id);
+    for _ in 0..2 {
+        let value = backend
+            .get_custom_signal(&instance_id, checkpoint_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(value.signal_id, replacement_id);
+        assert_eq!(value.payload.as_deref(), Some(replacement.as_slice()));
+    }
+    assert!(
+        backend
+            .get_custom_signal(&instance_id, "different-address")
+            .await
+            .unwrap()
+            .is_none()
+    );
 
     // --- paired records -----------------------------------------------------
     // This harness emits none of this vocabulary's start events, so the paired
@@ -1009,7 +1040,7 @@ pub async fn run_lifecycle_command_sequence<P: Persistence>(backend: &P) {
         .await
         .unwrap();
     let cancel = backend.get_pending_signal(&id).await.unwrap().unwrap();
-    for kind in [Kind::Pause, Kind::Shutdown, Kind::Resume, Kind::Cancel] {
+    for kind in [Kind::Pause, Kind::Shutdown, Kind::Cancel] {
         backend.insert_signal(&id, kind, b"later").await.unwrap();
         assert_eq!(
             backend
@@ -1167,7 +1198,7 @@ pub async fn run_lifecycle_policy_matrix<P: Persistence>(backend: &P) {
         S::Failed,
         S::Cancelled,
     ];
-    let kinds = [K::Cancel, K::Pause, K::Resume, K::Shutdown];
+    let kinds = [K::Cancel, K::Pause, K::Shutdown];
     for status in statuses {
         for kind in kinds {
             let id = Uuid::new_v4().to_string();
@@ -1206,7 +1237,6 @@ pub async fn run_lifecycle_policy_matrix<P: Persistence>(backend: &P) {
                 match kind {
                     K::Cancel => S::Cancelled,
                     K::Pause | K::Shutdown => S::Suspended,
-                    K::Resume => status,
                 }
             };
             assert_eq!(after.status, expected_status, "{status:?} + {kind:?}");
@@ -1225,6 +1255,14 @@ pub async fn run_lifecycle_policy_matrix<P: Persistence>(backend: &P) {
             assert_eq!(after.exit_code, before.exit_code);
             assert_eq!(after.checkpoint_id, before.checkpoint_id);
             assert_eq!(after.sleep_until.is_some(), !rejects && kind == K::Shutdown);
+            assert_eq!(
+                after.wake_reason,
+                if !rejects && kind == K::Shutdown {
+                    Some(crate::domain::WakeReason::Recovery)
+                } else {
+                    before.wake_reason
+                }
+            );
             let event_count = backend
                 .count_events(&id, &ListEventsFilter::default())
                 .await
@@ -1338,5 +1376,58 @@ pub async fn run_lifecycle_policy_matrix<P: Persistence>(backend: &P) {
                 backend.delete_instances_batch(&[id]).await.unwrap();
             }
         }
+    }
+}
+
+/// Wake causes survive claiming and re-launching, and never become guest commands.
+pub async fn run_wake_reason_sequence<P: Persistence>(backend: &P) {
+    use crate::domain::{InstanceStatus, WakeReason};
+    for reason in [
+        WakeReason::Timer,
+        WakeReason::CustomSignal,
+        WakeReason::ManualResume,
+        WakeReason::Recovery,
+    ] {
+        let id = uuid::Uuid::new_v4().to_string();
+        backend
+            .register_instance(&id, "wake-contract")
+            .await
+            .unwrap();
+        backend
+            .update_instance_status(&id, InstanceStatus::Suspended, None)
+            .await
+            .unwrap();
+        backend
+            .schedule_wake(&id, Utc::now() - Duration::seconds(1), reason)
+            .await
+            .unwrap();
+        let due = backend.get_sleeping_instances_due(1000).await.unwrap();
+        assert_eq!(
+            due.iter()
+                .find(|row| row.instance_id == id)
+                .unwrap()
+                .wake_reason,
+            Some(reason)
+        );
+        assert!(backend.claim_sleeping_instance(&id).await.unwrap());
+        backend
+            .mark_instance_running(&id, Utc::now())
+            .await
+            .unwrap();
+        let running = backend.get_instance(&id).await.unwrap().unwrap();
+        assert_eq!(running.wake_reason, Some(reason));
+        assert!(backend.get_pending_signal(&id).await.unwrap().is_none());
+        backend
+            .update_instance_status(&id, InstanceStatus::Completed, None)
+            .await
+            .unwrap();
+        backend
+            .schedule_wake(&id, Utc::now(), reason)
+            .await
+            .unwrap();
+        let ended = backend.get_instance(&id).await.unwrap().unwrap();
+        assert!(ended.sleep_until.is_none());
+        assert!(ended.wake_reason.is_none());
+        backend.delete_instances_batch(&[id]).await.unwrap();
     }
 }

@@ -500,6 +500,24 @@ async fn test_resume_instance_does_not_prepersist_placeholder_input() {
         active_launch(&pool, &instance_id).await.kind,
         LaunchKind::Resume
     );
+    let reason: Option<String> =
+        sqlx::query_scalar("SELECT wake_reason FROM instances WHERE instance_id = $1")
+            .bind(&instance_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(reason.as_deref(), Some("manual_resume"));
+    let pending: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pending_signals WHERE instance_id = $1 AND acknowledged_at IS NULL",
+    )
+    .bind(&instance_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        pending, 0,
+        "explicit resume must not enqueue a guest command"
+    );
 
     cleanup(&pool, Some(&instance_id), Some(&image_id)).await;
 }
@@ -1134,6 +1152,14 @@ async fn test_resume_instance_success() {
     create_test_instance(&pool, &instance_id, "test-tenant", &image_id).await;
     update_test_instance_status(&pool, &instance_id, "suspended", Some("checkpoint-123")).await;
 
+    // Core parked before the previous runner retired its launch row. Resume
+    // must not accept that running generation as its idempotent winner.
+    let old_launch = Uuid::new_v4().to_string();
+    sqlx::query("INSERT INTO instance_launches (launch_id, instance_id, tenant_id, image_id, kind, state, deadline_at) VALUES ($1, $2, 'test-tenant', $3, 'start', 'running', NOW() + INTERVAL '1 minute')")
+        .bind(&old_launch).bind(&instance_id).bind(&image_id).execute(&pool).await.unwrap();
+    sqlx::query("UPDATE instances SET sleep_until = NOW() + INTERVAL '1 hour', wake_reason = 'timer' WHERE instance_id = $1")
+        .bind(&instance_id).execute(&pool).await.unwrap();
+
     let request = ResumeInstanceRequest {
         instance_id: instance_id.clone(),
     };
@@ -1152,6 +1178,39 @@ async fn test_resume_instance_success() {
         active_launch(&pool, &instance_id).await.kind,
         LaunchKind::Resume
     );
+    let reason: Option<String> =
+        sqlx::query_scalar("SELECT wake_reason FROM instances WHERE instance_id = $1")
+            .bind(&instance_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(reason.as_deref(), Some("manual_resume"));
+    let pending: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pending_signals WHERE instance_id = $1 AND acknowledged_at IS NULL",
+    )
+    .bind(&instance_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        pending, 0,
+        "explicit resume must not enqueue a guest command"
+    );
+
+    let old_state: String =
+        sqlx::query_scalar("SELECT state FROM instance_launches WHERE launch_id = $1")
+            .bind(&old_launch)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(old_state, "suspended");
+    let timer_cleared: bool =
+        sqlx::query_scalar("SELECT sleep_until IS NULL FROM instances WHERE instance_id = $1")
+            .bind(&instance_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(timer_cleared);
 
     cleanup(&pool, Some(&instance_id), Some(&image_id)).await;
 }

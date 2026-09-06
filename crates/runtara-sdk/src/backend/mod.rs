@@ -87,7 +87,7 @@ pub trait SdkBackend: Send + Sync {
     /// Poll for pending signals (instance-wide and/or custom).
     ///
     /// If `checkpoint_id` is `Some`, polls for a custom signal scoped to that checkpoint.
-    /// If `None`, polls for instance-wide signals (cancel/pause/resume).
+    /// If `None`, polls for instance-wide signals (cancel/pause/shutdown).
     ///
     /// Returns `(instance_signal, custom_signal)`.
     fn poll_signals(

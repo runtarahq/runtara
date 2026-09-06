@@ -415,7 +415,7 @@ pub async fn get_scope_ancestors(
 #[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct PendingInputResponse {
-    /// Signal ID to deliver the response to
+    /// Legacy field name: checkpoint address to deliver the response to, not a value ID
     pub signal_id: String,
     /// Tool name that requested the input
     pub tool_name: Option<String>,
@@ -752,8 +752,10 @@ pub async fn submit_workflow_action(
 #[derive(Debug, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SubmitSignalRequest {
-    /// The signal ID from the pending input request or `external_input_requested` event.
-    pub signal_id: String,
+    /// Checkpoint/wait address from the pending input request or external-input event.
+    /// Legacy `signalId` and `signal_id` request fields are accepted as aliases.
+    #[serde(alias = "signalId", alias = "signal_id")]
+    pub checkpoint_id: String,
     /// The response payload to deliver to the waiting step.
     /// Should conform to the response_schema from the pending input request.
     pub payload: Value,
@@ -807,7 +809,7 @@ fn workflow_runtime_error_response(error: WorkflowRuntimeError) -> (StatusCode, 
 /// Submit a human response to a waiting AI Agent step.
 ///
 /// Delivers a custom signal to the workflow instance, resuming the AI Agent's
-/// WaitForSignal tool call. The signal_id must match the one from
+/// WaitForSignal tool call. The checkpoint address must match the wait key from
 /// the `pending-input` endpoint or the `external_input_requested` event.
 #[utoipa::path(
     post,
@@ -842,13 +844,13 @@ pub async fn submit_signal(
         );
     }
 
-    // Validate signal_id is not empty
-    if body.signal_id.is_empty() {
+    // Validate checkpoint_id is not empty
+    if body.checkpoint_id.is_empty() {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({
                 "success": false,
-                "message": "signal_id is required",
+                "message": "checkpointId is required",
                 "data": Value::Null
             })),
         );
@@ -886,17 +888,18 @@ pub async fn submit_signal(
 
     // Send custom signal
     match client
-        .send_custom_signal(&instance_id, &body.signal_id, Some(&payload_bytes))
+        .send_custom_signal(&instance_id, &body.checkpoint_id, Some(&payload_bytes))
         .await
     {
-        Ok(()) => (
+        Ok(signal_id) => (
             StatusCode::OK,
             Json(json!({
                 "success": true,
                 "message": "Signal delivered successfully",
                 "data": {
                     "instanceId": instance_id,
-                    "signalId": body.signal_id
+                    "signalId": signal_id,
+                    "checkpointId": body.checkpoint_id
                 }
             })),
         ),

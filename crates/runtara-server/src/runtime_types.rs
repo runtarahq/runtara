@@ -85,8 +85,6 @@ pub enum SignalType {
     Cancel,
     /// Pause execution (checkpoint and wait).
     Pause,
-    /// Resume paused execution.
-    Resume,
     /// Server draining: suspend at next checkpoint so the instance can be
     /// resumed after restart.
     Shutdown,
@@ -97,7 +95,6 @@ impl From<SignalType> for i32 {
         match signal {
             SignalType::Cancel => 0,
             SignalType::Pause => 1,
-            SignalType::Resume => 2,
             SignalType::Shutdown => 3,
         }
     }
@@ -1466,7 +1463,6 @@ mod tests {
     fn test_signal_type_to_i32() {
         assert_eq!(i32::from(SignalType::Cancel), 0);
         assert_eq!(i32::from(SignalType::Pause), 1);
-        assert_eq!(i32::from(SignalType::Resume), 2);
     }
 
     #[test]

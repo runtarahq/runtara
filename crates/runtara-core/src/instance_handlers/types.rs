@@ -13,8 +13,6 @@ pub enum SignalType {
     SignalCancel = 0,
     /// Pause execution (checkpoint and wait).
     SignalPause = 1,
-    /// Resume paused execution.
-    SignalResume = 2,
     /// Server draining: suspend at next checkpoint so the instance can be
     /// resumed after restart. Behaves like a cancel from the SDK's perspective
     /// but transitions the instance to `suspended + termination_reason="shutdown_requested"`
@@ -28,7 +26,6 @@ impl SignalType {
         match value {
             0 => Some(Self::SignalCancel),
             1 => Some(Self::SignalPause),
-            2 => Some(Self::SignalResume),
             3 => Some(Self::SignalShutdown),
             _ => None,
         }
@@ -40,7 +37,6 @@ impl From<SignalType> for CoreSignalType {
         match value {
             SignalType::SignalCancel => Self::Cancel,
             SignalType::SignalPause => Self::Pause,
-            SignalType::SignalResume => Self::Resume,
             SignalType::SignalShutdown => Self::Shutdown,
         }
     }
@@ -158,6 +154,8 @@ pub struct Signal {
 /// Custom signal targeted at a specific checkpoint_id.
 #[derive(Debug, Clone)]
 pub struct CustomSignal {
+    /// Identity of this retained value, distinct from its checkpoint address.
+    pub signal_id: String,
     /// Checkpoint ID this signal targets.
     pub checkpoint_id: String,
     /// Signal payload bytes.
@@ -170,7 +168,7 @@ pub struct CheckpointResponse {
     pub found: bool,
     /// Existing checkpoint state if found, empty if new.
     pub state: Vec<u8>,
-    /// Pending instance-wide signal (cancel/pause/resume).
+    /// Pending instance-wide signal (cancel/pause/shutdown).
     pub pending_signal: Option<Signal>,
     /// Pending checkpoint-scoped custom signal.
     pub custom_signal: Option<CustomSignal>,
@@ -303,15 +301,9 @@ pub struct SignalAck {
 }
 
 impl SignalAck {
-    /// Get the signal type as an enum.
-    pub fn signal_type(&self) -> SignalType {
-        match self.signal_type {
-            0 => SignalType::SignalCancel,
-            1 => SignalType::SignalPause,
-            2 => SignalType::SignalResume,
-            3 => SignalType::SignalShutdown,
-            _ => SignalType::SignalCancel,
-        }
+    /// Decode a supported lifecycle command; numeric value 2 is retired.
+    pub fn signal_type(&self) -> Option<SignalType> {
+        SignalType::try_from_i32(self.signal_type)
     }
 }
 
@@ -393,7 +385,6 @@ impl From<CoreSignalType> for SignalType {
         match value {
             CoreSignalType::Cancel => Self::SignalCancel,
             CoreSignalType::Pause => Self::SignalPause,
-            CoreSignalType::Resume => Self::SignalResume,
             CoreSignalType::Shutdown => Self::SignalShutdown,
         }
     }

@@ -33,7 +33,7 @@ use crate::workflow::WorkflowState;
 
 /// Fully-qualified component import name of the runtime interface.
 ///
-/// Must match `runtara:workflow-runtime@0.2.0`'s `runtime` interface as
+/// Must match `runtara:workflow-runtime@0.3.0`'s `runtime` interface as
 /// emitted into the workflow world by `runtara-workflows::direct_wasm`
 /// (`emit_world_wit`) — the Spike-B integration test asserts a HostImport
 /// composition surfaces exactly this name.
@@ -73,7 +73,10 @@ pub struct RuntimeSignalInfo {
 )]
 #[component(record)]
 pub struct RuntimeCustomSignalInfo {
-    /// The signal id (checkpoint id) the payload targets.
+    /// Identity of this retained value, distinct from its checkpoint address.
+    #[component(name = "signal-id")]
+    pub signal_id: String,
+    /// Checkpoint/wait address the retained value targets.
     #[component(name = "checkpoint-id")]
     pub checkpoint_id: String,
     /// Signal payload bytes.

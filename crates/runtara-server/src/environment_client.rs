@@ -277,16 +277,10 @@ impl EnvironmentClient {
     ) -> Result<()> {
         info!("Sending signal to instance");
 
-        // Resume is handled via resume_instance()
-        if signal_type == SignalType::Resume {
-            return self.resume_instance(instance_id).await;
-        }
-
         let signal_str = match signal_type {
             SignalType::Cancel => "cancel",
             SignalType::Pause => "pause",
             SignalType::Shutdown => "shutdown",
-            SignalType::Resume => unreachable!(),
         };
 
         let payload_str = payload.map(|p| String::from_utf8_lossy(p).to_string());
@@ -314,13 +308,13 @@ impl EnvironmentClient {
     }
 
     /// Send a custom (workflow-defined) signal addressed to one checkpoint.
-    #[instrument(skip(self, payload), fields(instance_id = %instance_id, signal_id = %signal_id))]
+    #[instrument(skip(self, payload), fields(instance_id = %instance_id, checkpoint_id = %checkpoint_id))]
     pub async fn send_custom_signal(
         &self,
         instance_id: &str,
-        signal_id: &str,
+        checkpoint_id: &str,
         payload: Option<&[u8]>,
-    ) -> Result<()> {
+    ) -> Result<String> {
         info!("Sending custom signal to instance");
 
         let payload_str = payload.map(|p| String::from_utf8_lossy(p).to_string());
@@ -328,12 +322,12 @@ impl EnvironmentClient {
         match handlers::handle_send_custom_signal(
             &self.state,
             instance_id,
-            signal_id,
+            checkpoint_id,
             payload_str.as_deref(),
         )
         .await?
         {
-            SendCustomSignalOutcome::Delivered => Ok(()),
+            SendCustomSignalOutcome::Delivered { signal_id } => Ok(signal_id),
             SendCustomSignalOutcome::InstanceNotFound => {
                 Err(EnvironmentError::InstanceNotFound(instance_id.to_string()))
             }

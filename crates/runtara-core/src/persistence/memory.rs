@@ -88,6 +88,11 @@ impl Store {
             Change::Set(WakeDeadline::Now) => instance.sleep_until = Some(now),
             Change::Set(WakeDeadline::At(deadline)) => instance.sleep_until = Some(deadline),
         }
+        match effects.wake_reason {
+            Change::Keep => {}
+            Change::Clear => instance.wake_reason = None,
+            Change::Set(reason) => instance.wake_reason = Some(reason),
+        }
         if let Some(event_type) = effects.event {
             let id = self.next_id();
             self.events.push(EventRecord {
@@ -168,6 +173,7 @@ impl Persistence for InMemoryPersistence {
                 output: None,
                 error: None,
                 sleep_until: None,
+                wake_reason: None,
                 termination_reason: None,
                 exit_code: None,
                 recovery_attempts: 0,
@@ -468,26 +474,29 @@ impl Persistence for InMemoryPersistence {
         Ok(cancelled)
     }
 
-    async fn insert_custom_signal(
+    async fn put_custom_signal(
         &self,
         instance_id: &str,
         checkpoint_id: &str,
         payload: &[u8],
-    ) -> Result<(), CoreError> {
+    ) -> Result<String, CoreError> {
         let mut store = self.store.lock().unwrap();
+        store.instance_mut(instance_id)?;
+        let signal_id = uuid::Uuid::new_v4().to_string();
         store.custom_signals.insert(
             (instance_id.to_string(), checkpoint_id.to_string()),
             CustomSignalRecord {
+                signal_id: signal_id.clone(),
                 instance_id: instance_id.to_string(),
                 checkpoint_id: checkpoint_id.to_string(),
                 payload: (!payload.is_empty()).then(|| payload.to_vec()),
                 created_at: Utc::now(),
             },
         );
-        Ok(())
+        Ok(signal_id)
     }
 
-    async fn take_pending_custom_signal(
+    async fn get_custom_signal(
         &self,
         instance_id: &str,
         checkpoint_id: &str,
@@ -557,14 +566,16 @@ impl Persistence for InMemoryPersistence {
             .count() as i64)
     }
 
-    async fn set_instance_sleep(
+    async fn schedule_wake(
         &self,
         instance_id: &str,
         sleep_until: DateTime<Utc>,
+        reason: crate::domain::WakeReason,
     ) -> Result<(), CoreError> {
         let mut store = self.store.lock().unwrap();
         let instance = store.instance_mut(instance_id)?;
         instance.sleep_until = (!instance.status.is_terminal()).then_some(sleep_until);
+        instance.wake_reason = (!instance.status.is_terminal()).then_some(reason);
         Ok(())
     }
 
@@ -923,6 +934,7 @@ mod tests {
         crate::persistence::conformance::run_lifecycle_command_sequence(&backend).await;
         crate::persistence::conformance::run_parked_cancellation_sequence(&backend).await;
         crate::persistence::conformance::run_lifecycle_policy_matrix(&backend).await;
+        crate::persistence::conformance::run_wake_reason_sequence(&backend).await;
     }
 
     fn foreign_vocabulary() -> EventVocabulary {

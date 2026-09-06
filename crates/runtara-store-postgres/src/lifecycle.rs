@@ -48,7 +48,7 @@ pub(crate) async fn lock_commands(
     if ids.is_empty() {
         return Ok(Vec::new());
     }
-    let rows: Vec<(String, String, String, bool)> = sqlx::query_as("SELECT instance_id, command_id::text, signal_type::text, acknowledged_at IS NOT NULL FROM pending_signals WHERE instance_id = ANY($1) ORDER BY instance_id FOR UPDATE")
+    let rows: Vec<(String, String, String, bool)> = sqlx::query_as("SELECT instance_id, command_id::text, signal_type::text, acknowledged_at IS NOT NULL FROM pending_signals WHERE instance_id = ANY($1) AND signal_type <> 'resume' ORDER BY instance_id FOR UPDATE")
         .bind(ids).fetch_all(&mut **tx).await.db()?;
     rows.into_iter()
         .map(|(instance_id, id, kind, acknowledged)| {
@@ -88,6 +88,10 @@ pub(crate) async fn apply_transition(
         Change::Set(WakeDeadline::At(deadline)) => Some(deadline),
         _ => None,
     };
+    let wake_reason = match effects.wake_reason {
+        Change::Set(reason) => Some(crate::encoding::wake_reason_to_str(reason)),
+        _ => None,
+    };
     let wake_now = matches!(effects.wake, Change::Set(WakeDeadline::Now));
     sqlx::query(r#"
         UPDATE instances SET
@@ -96,11 +100,12 @@ pub(crate) async fn apply_transition(
             termination_reason = CASE WHEN $4 THEN termination_reason ELSE $5::termination_reason END,
             sleep_until = CASE WHEN $6 THEN sleep_until WHEN $7 THEN NOW() ELSE $8 END,
             output = CASE WHEN $9 THEN NULL ELSE output END,
-            error = CASE WHEN $9 THEN NULL ELSE error END
+            error = CASE WHEN $9 THEN NULL ELSE error END,
+            wake_reason = CASE WHEN $10 THEN wake_reason ELSE $11 END
         WHERE instance_id = ANY($1)
     "#).bind(ids).bind(effects.status.map(crate::encoding::status_to_str)).bind(effects.finish_now)
         .bind(matches!(effects.reason, Change::Keep)).bind(reason)
-        .bind(matches!(effects.wake, Change::Keep)).bind(wake_now).bind(wake_at).bind(effects.clear_result)
+        .bind(matches!(effects.wake, Change::Keep)).bind(wake_now).bind(wake_at).bind(effects.clear_result).bind(matches!(effects.wake_reason, Change::Keep)).bind(wake_reason)
         .execute(&mut **tx).await.db()?;
     if let Some(event) = effects.event {
         sqlx::query("INSERT INTO instance_events (instance_id, event_type, created_at) SELECT unnest($1::text[]), $2::instance_event_type, NOW()")

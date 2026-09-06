@@ -71,16 +71,46 @@ guards. Parking only applies to running instances and commits its deadline with
 suspension metadata; a signal arriving before parking is checked by environment
 immediately afterward, while later arrivals can observe the suspended state.
 
-Custom-signal replay, explicit host resume, and guest component interfaces keep
-their existing contracts. Core's host dependencies are not added to WASM guests.
+## Commands, wake causes, and custom values
+
+Guests receive lifecycle commands `cancel`, `pause`, and `shutdown`. Resume is
+an explicit host operation that queues a launch; it is never delivered through
+signal polling or checkpoints. `WakeReason` records timer, custom-signal,
+manual-resume, or recovery causes in host scheduling state. Claims and retries
+preserve the cause, and cancellation clears obsolete wake intent. Enqueuing a
+new wake/resume generation clears its old deadline in the queue transaction;
+reconciliation releases a parked predecessor before the handoff.
+
+Custom signals are retained slots keyed by `(instance_id, checkpoint_id)`.
+`put_custom_signal` replaces the value and returns a fresh `signal_id` for every
+successful write, including identical retries. `get_custom_signal` is
+non-destructive: repeated reads return the current ID and payload until another
+write replaces them. There is no queue, history, or implicit deduplication.
+Completed workflow checkpoints provide replay caching independently of this slot.
+The checkpoint ID addresses the slot; the signal ID identifies a particular write.
+
+The submission API accepts `checkpointId` and returns both `checkpointId` and
+`signalId`. Legacy request fields `signalId` and `signal_id` remain address
+aliases. Existing DSL/debug and pending-input `signalId` fields also remain
+checkpoint addresses; they are not value identities.
 
 ## Adapter migration
 
-Backend implementers must supply `apply_lifecycle_command` and `park_instance`,
-returning the core policy's typed `Decision`. The existing `acknowledge_signal`
-method is a boolean compatibility wrapper: applied and already-applied receipts
-both return true. HTTP acknowledgment responses and WIT runtime `0.2.0` are
-unchanged by this refactor; no new schema migration is required.
+Backend implementers must supply `apply_lifecycle_command`, `park_instance`, and
+`schedule_wake`. Lifecycle operations return core's typed `Decision`;
+`acknowledge_signal` remains a boolean wrapper accepting applied and repeated
+receipts. `set_instance_sleep` is a timer convenience for `schedule_wake`.
+Custom-value methods are now `put_custom_signal` and `get_custom_signal`.
+
+Apply PostgreSQL migrations 022–024 before starting upgraded hosts. They retire
+pending guest resume commands without changing instance state, add custom-value
+identities, and add wake causes. The historical PostgreSQL `resume` enum label
+remains for migration compatibility; current readers ignore it. Wire numeric
+command value `2` is retired; `0`, `1`, and `3` retain their meanings.
+
+WIT runtime `0.3.0` adds `signal-id` to custom-signal-info. Rebuild shared components
+and recompile workflow artifacts. HTTP/SDK custom-signal records require the new
+identity field, so upgrade server and clients together.
 
 Persistence records, status filters, completion parameters, event filters, and lifecycle signal operations now use `domain` enums. Stored event types include `Started` and legacy `Progress`, in addition to incoming instance events. PostgreSQL encoding and checked decoding live in `runtara-store-postgres::encoding`; core's database string mappers have been removed.
 

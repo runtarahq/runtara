@@ -381,41 +381,42 @@ async fn insert_signal(
 }
 
 /// Insert or update a pending custom signal scoped to a checkpoint.
-async fn insert_custom_signal(
+async fn put_custom_signal(
     pool: &PgPool,
     instance_id: &str,
     checkpoint_id: &str,
     payload: &[u8],
-) -> Result<(), CoreError> {
+) -> Result<String, CoreError> {
     let payload_opt = if payload.is_empty() {
         None
     } else {
         Some(payload)
     };
 
-    sqlx::query(
+    let signal_id = sqlx::query_scalar(
         r#"
         INSERT INTO pending_checkpoint_signals (instance_id, checkpoint_id, payload, created_at)
         VALUES ($1, $2, $3, NOW())
         ON CONFLICT (instance_id, checkpoint_id) DO UPDATE
         SET payload = EXCLUDED.payload,
-            created_at = NOW()
+            created_at = NOW(), signal_id = gen_random_uuid()
+        RETURNING signal_id::text
         "#,
     )
     .bind(instance_id)
     .bind(checkpoint_id)
     .bind(payload_opt)
-    .execute(pool)
+    .fetch_one(pool)
     .await
     .db()?;
 
-    Ok(())
+    Ok(signal_id)
 }
 
-// `get_pending_signal`, `take_pending_custom_signal`
+// `get_pending_signal`, `get_custom_signal`
 // are migrated to the shared layer:
 // see PostgresPersistence::op_get_pending_signal /
-// op_take_pending_custom_signal (crate::ops_common::ops::signals).
+// op_get_custom_signal (crate::ops_common::ops::signals).
 
 // Health, sleep, and active-count operations are migrated to the shared layer:
 // see PostgresPersistence::op_health_check, op_count_active_instances,
@@ -691,21 +692,21 @@ impl Persistence for PostgresPersistence {
         Ok(cancelled)
     }
 
-    async fn insert_custom_signal(
+    async fn put_custom_signal(
         &self,
         instance_id: &str,
         checkpoint_id: &str,
         payload: &[u8],
-    ) -> Result<(), CoreError> {
-        insert_custom_signal(&self.pool, instance_id, checkpoint_id, payload).await
+    ) -> Result<String, CoreError> {
+        put_custom_signal(&self.pool, instance_id, checkpoint_id, payload).await
     }
 
-    async fn take_pending_custom_signal(
+    async fn get_custom_signal(
         &self,
         instance_id: &str,
         checkpoint_id: &str,
     ) -> Result<Option<CustomSignalRecord>, CoreError> {
-        Self::op_take_pending_custom_signal(&self.pool, instance_id, checkpoint_id).await
+        Self::op_get_custom_signal(&self.pool, instance_id, checkpoint_id).await
     }
 
     async fn save_retry_attempt(
@@ -743,12 +744,13 @@ impl Persistence for PostgresPersistence {
         Self::op_count_active_instances(&self.pool).await
     }
 
-    async fn set_instance_sleep(
+    async fn schedule_wake(
         &self,
         instance_id: &str,
-        sleep_until: DateTime<Utc>,
+        deadline: DateTime<Utc>,
+        reason: runtara_core::domain::WakeReason,
     ) -> Result<(), CoreError> {
-        Self::op_set_instance_sleep(&self.pool, instance_id, sleep_until).await
+        Self::op_set_instance_sleep(&self.pool, instance_id, deadline, reason).await
     }
 
     async fn mark_instance_running(
@@ -1578,34 +1580,28 @@ mod tests {
         let instance_id = Uuid::new_v4();
         create_test_instance(&pool, instance_id, "test-tenant").await;
 
-        insert_custom_signal(&pool, &instance_id.to_string(), "wait-1", b"custom-payload")
+        put_custom_signal(&pool, &instance_id.to_string(), "wait-1", b"custom-payload")
             .await
             .unwrap();
 
         // First read retrieves the signal.
-        let signal = PostgresPersistence::op_take_pending_custom_signal(
-            &pool,
-            &instance_id.to_string(),
-            "wait-1",
-        )
-        .await
-        .unwrap()
-        .expect("custom signal should exist");
+        let signal =
+            PostgresPersistence::op_get_custom_signal(&pool, &instance_id.to_string(), "wait-1")
+                .await
+                .unwrap()
+                .expect("custom signal should exist");
         assert_eq!(signal.checkpoint_id, "wait-1");
         assert_eq!(signal.payload.unwrap(), b"custom-payload".to_vec());
 
         // Reads are non-destructive: a second read (as happens on
         // replay-from-start) returns the same signal, not None — this is what
-        // lets a drained/resumed WaitForSignal re-read its consumed signal
+        // lets a drained/resumed WaitForSignal re-read its retained signal
         // instead of dead-hanging.
-        let signal = PostgresPersistence::op_take_pending_custom_signal(
-            &pool,
-            &instance_id.to_string(),
-            "wait-1",
-        )
-        .await
-        .unwrap()
-        .expect("custom signal should still exist (non-destructive read)");
+        let signal =
+            PostgresPersistence::op_get_custom_signal(&pool, &instance_id.to_string(), "wait-1")
+                .await
+                .unwrap()
+                .expect("custom signal should still exist (non-destructive read)");
         assert_eq!(signal.checkpoint_id, "wait-1");
         assert_eq!(signal.payload.unwrap(), b"custom-payload".to_vec());
 
@@ -2078,7 +2074,7 @@ mod tests {
     // ========================================================================
     //
     // These tests drive the `Persistence` trait rather than the `op_*` statics:
-    // `insert_signal`, `insert_custom_signal`, `update_instance_metrics` and
+    // `insert_signal`, `put_custom_signal`, `update_instance_metrics` and
     // `update_instance_stderr` were never migrated to `common/ops` and survive
     // as free functions in this module, so the trait is the only uniform entry
     // point across the whole family.
@@ -2288,15 +2284,15 @@ mod tests {
             .await
             .unwrap();
 
-        p.insert_custom_signal(&instance_id, "wait-1", b"payload-1")
+        p.put_custom_signal(&instance_id, "wait-1", b"payload-1")
             .await
             .unwrap();
-        p.insert_custom_signal(&instance_id, "wait-1", b"payload-2")
+        p.put_custom_signal(&instance_id, "wait-1", b"payload-2")
             .await
             .unwrap();
 
         let signal = p
-            .take_pending_custom_signal(&instance_id, "wait-1")
+            .get_custom_signal(&instance_id, "wait-1")
             .await
             .unwrap()
             .expect("custom signal should exist");

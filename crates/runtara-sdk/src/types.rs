@@ -28,8 +28,6 @@ pub enum SignalType {
     Cancel,
     /// Pause execution (checkpoint and wait)
     Pause,
-    /// Resume paused execution
-    Resume,
     /// Server shutdown in progress. Instance should checkpoint and exit
     /// cleanly (status=suspended), to be resumed after restart.
     Shutdown,
@@ -60,7 +58,7 @@ pub struct CheckpointResult {
     pub found: bool,
     /// Checkpoint state (existing state if found, empty if saved).
     pub state: Vec<u8>,
-    /// Pending instance-wide signal if any (cancel, pause, resume).
+    /// Pending instance-wide signal if any (cancel, pause, shutdown).
     /// Instance should handle this signal after processing the checkpoint.
     pub pending_signal: Option<Signal>,
     /// Pending checkpoint-scoped custom signal (if waiting on a specific checkpoint_id).
@@ -70,6 +68,8 @@ pub struct CheckpointResult {
 /// Custom signal targeted to a specific checkpoint/wait key.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CustomSignal {
+    /// Identity of this retained value, distinct from its checkpoint address.
+    pub signal_id: String,
     /// Target checkpoint/wait key
     pub checkpoint_id: String,
     /// Signal payload
@@ -270,7 +270,7 @@ mod tests {
     fn test_signal_clone() {
         let signal = Signal {
             command_id: "test-command".into(),
-            signal_type: SignalType::Resume,
+            signal_type: SignalType::Pause,
             payload: vec![42],
             checkpoint_id: Some("cp".to_string()),
         };
@@ -360,25 +360,6 @@ mod tests {
     }
 
     #[test]
-    fn test_checkpoint_result_should_not_exit_on_resume() {
-        let result = CheckpointResult {
-            found: false,
-            state: vec![],
-            pending_signal: Some(Signal {
-                command_id: "test-command".into(),
-                signal_type: SignalType::Resume,
-                payload: vec![],
-                checkpoint_id: None,
-            }),
-            custom_signal: None,
-        };
-
-        assert!(!result.should_pause());
-        assert!(!result.should_cancel());
-        assert!(!result.should_exit()); // Resume doesn't mean exit
-    }
-
-    #[test]
     fn test_checkpoint_result_no_signal() {
         let result = CheckpointResult {
             found: true,
@@ -399,6 +380,7 @@ mod tests {
             state: vec![],
             pending_signal: None,
             custom_signal: Some(CustomSignal {
+                signal_id: "test-signal-value".into(),
                 checkpoint_id: "wait-key".to_string(),
                 payload: vec![10, 20, 30],
             }),
@@ -427,6 +409,7 @@ mod tests {
                 checkpoint_id: Some("cp".to_string()),
             }),
             custom_signal: Some(CustomSignal {
+                signal_id: "test-signal-value".into(),
                 checkpoint_id: "key".to_string(),
                 payload: vec![5],
             }),
@@ -456,6 +439,7 @@ mod tests {
     #[test]
     fn test_custom_signal_creation() {
         let signal = CustomSignal {
+            signal_id: "test-signal-value".into(),
             checkpoint_id: "my-wait-key".to_string(),
             payload: vec![1, 2, 3, 4],
         };
@@ -467,6 +451,7 @@ mod tests {
     #[test]
     fn test_custom_signal_empty_payload() {
         let signal = CustomSignal {
+            signal_id: "test-signal-value".into(),
             checkpoint_id: "empty-payload".to_string(),
             payload: vec![],
         };
@@ -477,6 +462,7 @@ mod tests {
     #[test]
     fn test_custom_signal_clone_eq() {
         let signal = CustomSignal {
+            signal_id: "test-signal-value".into(),
             checkpoint_id: "test".to_string(),
             payload: vec![42],
         };

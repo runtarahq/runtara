@@ -149,6 +149,7 @@ pub fn make_instance(
         output: None,
         error: None,
         sleep_until: None,
+        wake_reason: None,
         termination_reason: None,
         exit_code: None,
         recovery_attempts: 0,
@@ -408,7 +409,6 @@ impl Persistence for MockPersistence {
                 instance.termination_reason =
                     (signal_type == SignalType::Shutdown).then(|| "shutdown_requested".into());
             }
-            SignalType::Resume => {}
         }
         signals.remove(instance_id);
         Ok(decision)
@@ -431,16 +431,16 @@ impl Persistence for MockPersistence {
         Ok(Vec::new())
     }
 
-    async fn insert_custom_signal(
+    async fn put_custom_signal(
         &self,
         _instance_id: &str,
         _checkpoint_id: &str,
         _payload: &[u8],
-    ) -> std::result::Result<(), CoreError> {
-        Ok(())
+    ) -> std::result::Result<String, CoreError> {
+        Ok("mock-custom-signal".into())
     }
 
-    async fn take_pending_custom_signal(
+    async fn get_custom_signal(
         &self,
         instance_id: &str,
         checkpoint_id: &str,
@@ -483,10 +483,11 @@ impl Persistence for MockPersistence {
         Ok(self.active_instance_count.lock().unwrap().unwrap_or(0))
     }
 
-    async fn set_instance_sleep(
+    async fn schedule_wake(
         &self,
         instance_id: &str,
         sleep_until: DateTime<Utc>,
+        _reason: crate::domain::WakeReason,
     ) -> std::result::Result<(), CoreError> {
         if let Some(inst) = self.instances.lock().unwrap().get_mut(instance_id) {
             inst.sleep_until = Some(sleep_until);

@@ -35,6 +35,7 @@ async fn postgres_backend_passes_conformance_sequence() {
     runtara_core::persistence::conformance::run_lifecycle_command_sequence(&backend).await;
     runtara_core::persistence::conformance::run_parked_cancellation_sequence(&backend).await;
     runtara_core::persistence::conformance::run_lifecycle_policy_matrix(&backend).await;
+    runtara_core::persistence::conformance::run_wake_reason_sequence(&backend).await;
 }
 
 /// Obtain a Postgres pool. Prefers `TEST_RUNTARA_DATABASE_URL` (for CI and
@@ -123,12 +124,7 @@ async fn domain_values_match_the_existing_postgres_schema() {
             .unwrap();
         assert!(selected.iter().any(|instance| instance.instance_id == id));
     }
-    for signal_type in [
-        SignalType::Cancel,
-        SignalType::Pause,
-        SignalType::Resume,
-        SignalType::Shutdown,
-    ] {
+    for signal_type in [SignalType::Cancel, SignalType::Pause, SignalType::Shutdown] {
         backend
             .update_instance_status(&id, InstanceStatus::Running, None)
             .await
@@ -487,4 +483,63 @@ async fn parking_and_terminal_transition_cannot_revive_cancelled_execution() {
         assert!(backend.get_pending_signal(&id).await.unwrap().is_none());
         backend.delete_instances_batch(&[id]).await.unwrap();
     }
+}
+
+#[tokio::test]
+async fn legacy_resume_is_retired_and_not_delivered_by_old_writers() {
+    use runtara_core::{
+        domain::{InstanceStatus, SignalType},
+        persistence::Persistence,
+    };
+    let (pool, _container) = postgres_test_pool().await;
+    let backend = PostgresPersistence::new(pool.clone());
+    let id = uuid::Uuid::new_v4().to_string();
+    backend
+        .register_instance(&id, "retired-resume")
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO pending_signals (instance_id, signal_type) VALUES ($1, 'resume')")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../migrations/postgresql/022_retire_guest_resume.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let acknowledged: bool = sqlx::query_scalar(
+        "SELECT acknowledged_at IS NOT NULL FROM pending_signals WHERE instance_id = $1",
+    )
+    .bind(&id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(acknowledged);
+    assert_eq!(
+        backend.get_instance(&id).await.unwrap().unwrap().status,
+        InstanceStatus::Pending
+    );
+    // An older producer must not resurrect the retired guest command.
+    sqlx::query("UPDATE pending_signals SET acknowledged_at = NULL WHERE instance_id = $1")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(backend.get_pending_signal(&id).await.unwrap().is_none());
+    backend
+        .insert_signal(&id, SignalType::Pause, b"")
+        .await
+        .unwrap();
+    assert_eq!(
+        backend
+            .get_pending_signal(&id)
+            .await
+            .unwrap()
+            .unwrap()
+            .signal_type,
+        SignalType::Pause
+    );
+    backend.delete_instances_batch(&[id]).await.unwrap();
 }

@@ -330,7 +330,6 @@ impl PersistenceRuntimeHost {
         match value {
             0 => Some(SignalType::SignalCancel),
             1 => Some(SignalType::SignalPause),
-            2 => Some(SignalType::SignalResume),
             3 => Some(SignalType::SignalShutdown),
             _ => None,
         }
@@ -342,7 +341,6 @@ impl PersistenceRuntimeHost {
         match Self::signal_type_of(signal_type) {
             Some(SignalType::SignalCancel) => "cancel",
             Some(SignalType::SignalPause) => "pause",
-            Some(SignalType::SignalResume) => "resume",
             Some(SignalType::SignalShutdown) => "shutdown",
             // Unknown types degrade to cancel, matching handle_poll_signals'
             // own unknown-type fallback.
@@ -502,6 +500,7 @@ impl RuntimeHost for PersistenceRuntimeHost {
             custom_signal: response
                 .custom_signal
                 .map(|signal| RuntimeCustomSignalInfo {
+                    signal_id: signal.signal_id,
                     checkpoint_id: signal.checkpoint_id,
                     payload: signal.payload,
                 }),
@@ -677,7 +676,7 @@ mod tests {
     async fn custom_signal_poll_is_idempotent_rereads() {
         let (p, host, inst_id) = setup().await;
         assert_eq!(host.poll_custom_signal("sig-1".into()).await.unwrap(), None);
-        p.insert_custom_signal(inst_id.as_str(), "sig-1", b"payload-1")
+        p.put_custom_signal(inst_id.as_str(), "sig-1", b"payload-1")
             .await
             .unwrap();
         // Non-destructive read (wait-replay fix): both polls see the payload.

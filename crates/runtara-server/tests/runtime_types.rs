@@ -51,7 +51,6 @@ fn test_instance_status_is_terminal() {
 fn test_signal_type_to_i32() {
     assert_eq!(i32::from(SignalType::Cancel), 0);
     assert_eq!(i32::from(SignalType::Pause), 1);
-    assert_eq!(i32::from(SignalType::Resume), 2);
 }
 
 #[test]

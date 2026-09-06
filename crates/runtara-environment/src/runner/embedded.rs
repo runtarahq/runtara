@@ -1261,7 +1261,7 @@ fn on_signal_checkpoint_ids(
 /// Re-reading here, after the row is visible to the waker, closes it: if the
 /// signal is already present we self-wake by stamping `sleep_until = now`, which
 /// is exactly what the waker would have done. The read is non-destructive
-/// (`take_pending_custom_signal` retains the row, despite its name), so the
+/// (`get_custom_signal` retains the row), so the
 /// replayed guest still observes the signal.
 ///
 /// Returns true when it woke the instance.
@@ -1272,12 +1272,16 @@ async fn wake_if_signal_already_arrived(
 ) -> bool {
     for checkpoint_id in on_signal_checkpoint_ids(wakes) {
         match persistence
-            .take_pending_custom_signal(instance_id, checkpoint_id)
+            .get_custom_signal(instance_id, checkpoint_id)
             .await
         {
             Ok(Some(_)) => {
                 if let Err(e) = persistence
-                    .set_instance_sleep(instance_id, chrono::Utc::now())
+                    .schedule_wake(
+                        instance_id,
+                        chrono::Utc::now(),
+                        runtara_core::domain::WakeReason::CustomSignal,
+                    )
                     .await
                 {
                     warn!(instance_id, error = %e, "Failed to self-wake after a signal raced the park");
@@ -2190,6 +2194,10 @@ mod tests {
             .expect("instance exists");
         assert_eq!(inst.status, CoreInstanceStatus::Suspended);
         assert_eq!(
+            inst.wake_reason,
+            Some(runtara_core::domain::WakeReason::Timer)
+        );
+        assert_eq!(
             inst.sleep_until.map(|dt| dt.timestamp_millis() as u64),
             Some(deadline_ms),
             "sleep_until must be the wake deadline so the wake scan selects it"
@@ -2278,7 +2286,7 @@ mod tests {
         // forever with its signal already in the table.
         let (persistence, instance_id) = running_instance().await;
         persistence
-            .insert_custom_signal(&instance_id, "raced-sig", b"{}")
+            .put_custom_signal(&instance_id, "raced-sig", b"{}")
             .await
             .expect("insert signal");
 
@@ -2298,6 +2306,10 @@ mod tests {
             .expect("get")
             .expect("instance exists");
         assert_eq!(inst.status, CoreInstanceStatus::Suspended);
+        assert_eq!(
+            inst.wake_reason,
+            Some(runtara_core::domain::WakeReason::CustomSignal)
+        );
         assert!(
             inst.sleep_until.is_some(),
             "a signal already present at park time must self-wake the instance, \
@@ -2306,7 +2318,7 @@ mod tests {
         // Non-destructive: the replayed guest still observes the signal.
         assert!(
             persistence
-                .take_pending_custom_signal(&instance_id, "raced-sig")
+                .get_custom_signal(&instance_id, "raced-sig")
                 .await
                 .expect("read signal")
                 .is_some(),

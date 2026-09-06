@@ -8,7 +8,7 @@ High-level client library for building durable workflow instances that talk to `
 
 ## What it is
 
-`runtara-sdk` is the ergonomic surface a workflow/instance uses to register itself, checkpoint state, send lifecycle events (heartbeat, completed, failed, suspended), and poll for cancel/pause/resume signals. The central type is `RuntaraSdk`, built from env via `RuntaraSdk::from_env()` or programmatically via `HttpSdkConfig`; `checkpoint()` returns a `CheckpointResult` that distinguishes fresh execution from resume and carries any pending `Signal`. The `#[resilient]` proc-macro (re-exported from `runtara-sdk-macros`) wires instance code into a global SDK registry so long-running operations can be cancelled cooperatively.
+`runtara-sdk` is the ergonomic surface a workflow/instance uses to register itself, checkpoint state, send lifecycle events (heartbeat, completed, failed, suspended), and poll for cancel/pause/shutdown signals. The central type is `RuntaraSdk`, built from env via `RuntaraSdk::from_env()` or programmatically via `HttpSdkConfig`; `checkpoint()` returns a `CheckpointResult` that distinguishes fresh execution from resume and carries any pending `Signal`. The `#[resilient]` proc-macro (re-exported from `runtara-sdk-macros`) wires instance code into a global SDK registry so long-running operations can be cancelled cooperatively.
 
 ## Using it standalone
 
