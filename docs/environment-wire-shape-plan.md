@@ -192,11 +192,46 @@ flag and the `not_found()` constructor that filled twenty fields with `None`.
 Absence was modelled that way so HTTP could answer it with a 200; in-process it
 is an `Option`, and the only caller was already turning it back into an error.
 
+### Closed afterwards
+
+`db` is now `pub(crate)`. It took four steps, in this order, because each one
+removes the reason the next was blocked:
+
+1. `ListInstancesOptions` and `TenantMetricsOptions` moved to the modules whose
+   public signatures take them, and `get_tenant_metrics` took its four scalars
+   instead of a struct, so the SQL layer names nothing above it. That alone
+   ended the server's `use runtara_environment::db`.
+2. `InstanceRepository::image_binding` replaced the three `instance_images`
+   readers. They queried a table keyed by `instance_id`, so each could only
+   return part of one row, and the dispatcher was issuing two of them to
+   assemble what one returns.
+3. The tenant-metrics tests moved to `src/db/integration_tests.rs`, beside the
+   query. They exercise it below the `MAX_METRIC_BUCKETS` cap the handler
+   enforces — the finest-width case asks for 1441 buckets — so they cannot be
+   routed through the public API without rewriting the assertions to fit the
+   refactor. The remaining tests retargeted onto `InstanceRepository`.
+4. `pub mod db` became `pub(crate) mod db`.
+
+Making it private is what let dead-code analysis reach it, which is the part
+worth knowing: the `Instance` row struct had no reader left, and five columns of
+the list projection — including every instance's `output` blob — were being
+fetched for every row of every page and dropped on the floor. Neither was
+visible while the module was public, because a `pub` item is always "used".
+
+Five tests went with the dead code: three in `db.rs` that constructed `Instance`
+only to exercise its `Debug`/`Clone` derives, and two byte-identical copies of
+those in `wake_scheduler_test.rs`. Nothing else was deleted — the behavioural
+tests that looked like duplicates were retargeted, not dropped.
+
 ### Still open
 
-`EnvironmentClient` constructs `db::ListInstancesOptions` directly, so
-`handlers` is not the crate's front door and `db` is not private. Settling that
-changes the crate's public surface and wants its own review.
+`EnvironmentHandlerState.pool` is `pub PgPool`, and `EnvironmentClient` builds
+both repositories out of it. So the boundary is narrowed, not enforced:
+everything reachable from that pool is still de facto public API, and
+`pipeline_sampler.rs` still runs its own `SELECT COUNT(*) FROM instances`
+against this crate's table rather than calling `InstanceRepository`. Closing
+that means handing the server repositories instead of a pool, which is a change
+to how the crate is embedded and wants its own review.
 
 ### Fixed along the way
 
