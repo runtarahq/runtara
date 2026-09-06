@@ -3,6 +3,8 @@ use runtara_component_host::isolated_tasks::{IsolatedTasks, TaskId};
 use runtara_core::domain::{InstanceStatus, SignalType as CoreSignal};
 use runtara_core::persistence::ListEventsFilter;
 
+#[path = "invocation_io_tests.rs"]
+mod invocation_io_tests;
 #[path = "invocation_tests.rs"]
 mod invocation_tests;
 #[path = "root_tests.rs"]

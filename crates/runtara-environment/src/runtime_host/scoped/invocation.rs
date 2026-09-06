@@ -63,12 +63,28 @@ impl ScopedInvocationFactory {
             settings,
         }
     }
-}
 
-impl InvocationScopeFactory for ScopedInvocationFactory {
-    fn prepare_child(
+    /// Explicit durable path for an already-admitted, host-selected attempt.
+    /// Carries the same IO authority into both the runtime and task lifecycle;
+    /// callers cannot accidentally attach fenced IO without supervised settlement.
+    pub fn prepare_fenced_child(
         &self,
         request: &StartRequest,
+        io: Arc<InvocationIo>,
+    ) -> Result<ChildInvocationScope, ExecutionError> {
+        if io.fence().path != request.context.path
+            || io.fence().lease.instance_id != self.owner.root.instance_id
+            || !Arc::ptr_eq(&io.persistence, &self.owner.root.state.persistence)
+        {
+            return Err(ExecutionError::InvalidContext);
+        }
+        self.prepare(request, Some(io))
+    }
+
+    fn prepare(
+        &self,
+        request: &StartRequest,
+        io: Option<Arc<InvocationIo>>,
     ) -> Result<ChildInvocationScope, ExecutionError> {
         self.owner
             .ensure_open()
@@ -82,11 +98,16 @@ impl InvocationScopeFactory for ScopedInvocationFactory {
         let input = request.input.clone();
         let path = request.context.path.clone();
         Ok(ChildInvocationScope {
-            lifecycle: None,
+            lifecycle: io.as_ref().map(|io| {
+                io.clone() as Arc<dyn runtara_component_host::isolated_tasks::TaskLifecycle>
+            }),
             make_spec: Box::new(move |cancel| {
                 // Recheck the root admission fence inside the actual task,
                 // including a close between authorization and task start.
-                let runtime = owner.child(input, path, authorized.checkpoints, cancel)?;
+                let runtime = match io {
+                    Some(io) => owner.child_fenced(input, authorized.checkpoints, cancel, io)?,
+                    None => owner.child(input, path, authorized.checkpoints, cancel)?,
+                };
                 Ok(ChildInvocationSpec {
                     deadline: Some(settings.deadline),
                     spec: WorkflowRunSpec {
@@ -102,6 +123,15 @@ impl InvocationScopeFactory for ScopedInvocationFactory {
             }),
             execution: authorized.execution,
         })
+    }
+}
+
+impl InvocationScopeFactory for ScopedInvocationFactory {
+    fn prepare_child(
+        &self,
+        request: &StartRequest,
+    ) -> Result<ChildInvocationScope, ExecutionError> {
+        self.prepare(request, None)
     }
 }
 

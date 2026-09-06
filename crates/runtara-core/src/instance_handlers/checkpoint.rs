@@ -220,7 +220,7 @@ pub async fn handle_get_checkpoint(
 /// Mirrors the runtime host's signal-poll interval: one persistence read per
 /// second is what a Wait poll loop already costs, and a delay shorter than one
 /// tick still performs exactly one uninterrupted sleep.
-const SLEEP_POLL_INTERVAL: Duration = Duration::from_millis(1000);
+pub const SLEEP_POLL_INTERVAL: Duration = Duration::from_millis(1000);
 
 /// Handle durable sleep request.
 ///

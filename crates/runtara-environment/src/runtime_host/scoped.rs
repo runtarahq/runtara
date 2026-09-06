@@ -9,7 +9,9 @@ use std::sync::Mutex;
 
 mod compiler_authority;
 mod invocation;
+mod invocation_io;
 pub use compiler_authority::CompilerInvocationAuthority;
+pub use invocation_io::InvocationIo;
 mod root;
 mod signal_poll;
 pub use invocation::{
@@ -77,6 +79,40 @@ impl ScopedRuntimeOwner {
         checkpoints: Arc<dyn CheckpointAuthority>,
         cancel: TaskCancellation,
     ) -> Result<Arc<ScopedRuntimeHost>, String> {
+        self.child_inner(input, path, checkpoints, cancel, None)
+    }
+
+    /// Bind an already-admitted durable attempt. Install the same `io` as the
+    /// prepared task's lifecycle so caught failures cannot publish success.
+    pub fn child_fenced(
+        self: &Arc<Self>,
+        input: Vec<u8>,
+        checkpoints: Arc<dyn CheckpointAuthority>,
+        cancel: TaskCancellation,
+        io: Arc<InvocationIo>,
+    ) -> Result<Arc<ScopedRuntimeHost>, String> {
+        if io.fence().lease.instance_id != self.root.instance_id
+            || !Arc::ptr_eq(&io.persistence, &self.root.state.persistence)
+        {
+            return Err("invocation IO belongs to another runtime owner".into());
+        }
+        self.child_inner(
+            input,
+            io.fence().path.clone(),
+            checkpoints,
+            cancel,
+            Some(io),
+        )
+    }
+
+    fn child_inner(
+        self: &Arc<Self>,
+        input: Vec<u8>,
+        path: String,
+        checkpoints: Arc<dyn CheckpointAuthority>,
+        cancel: TaskCancellation,
+        io: Option<Arc<InvocationIo>>,
+    ) -> Result<Arc<ScopedRuntimeHost>, String> {
         self.ensure_open()?;
         if path.is_empty() {
             return Err("empty child invocation path".into());
@@ -87,6 +123,7 @@ impl ScopedRuntimeOwner {
             path,
             checkpoints,
             cancel,
+            io,
             terminal: Mutex::new(ChildTerminalState::default()),
             breakpoint_recorded: AtomicBool::new(false),
         }))
@@ -270,12 +307,16 @@ pub struct ScopedRuntimeHost {
     path: String,
     checkpoints: Arc<dyn CheckpointAuthority>,
     cancel: TaskCancellation,
+    io: Option<Arc<InvocationIo>>,
     terminal: Mutex<ChildTerminalState>,
     breakpoint_recorded: AtomicBool,
 }
 impl ScopedRuntimeHost {
     fn live(&self) -> Result<(), String> {
         self.owner.ensure_open()?;
+        if let Some(io) = &self.io {
+            io.ensure_live()?;
+        }
         if self.cancel.is_requested() {
             Err("child invocation cancelled".into())
         } else {
@@ -324,10 +365,14 @@ impl ScopedRuntimeHost {
         subtype: Option<String>,
     ) -> Result<(), String> {
         self.live()?;
-        self.owner
-            .root
-            .event(kind, Some(self.path.clone()), payload, subtype)
-            .await
+        if let Some(io) = &self.io {
+            self.fenced_event(io, kind, payload, subtype).await
+        } else {
+            self.owner
+                .root
+                .event(kind, Some(self.path.clone()), payload, subtype)
+                .await
+        }
     }
 }
 
@@ -379,17 +424,30 @@ impl RuntimeHost for ScopedRuntimeHost {
             return Ok(true);
         }
         self.live()?;
-        self.owner.observe(None, true).await
+        let result = self.owner.observe(None, true).await;
+        if let Some(io) = &self.io {
+            io.read_result(result)
+        } else {
+            result
+        }
     }
     async fn check_signals(&self) -> Result<bool, String> {
         if self.cancel.is_requested() {
             return Ok(true);
         }
         self.live()?;
-        self.owner.observe(None, false).await
+        let result = self.owner.observe(None, false).await;
+        if let Some(io) = &self.io {
+            io.read_result(result)
+        } else {
+            result
+        }
     }
     async fn poll_custom_signal(&self, checkpoint_id: String) -> Result<Option<Vec<u8>>, String> {
         self.key(&checkpoint_id)?;
+        if let Some(io) = &self.io {
+            io.checkpoint(checkpoint_id.clone(), vec![]).await?;
+        }
         let result = handle_poll_signals(
             &self.owner.root.state,
             PollSignalsRequest {
@@ -397,12 +455,20 @@ impl RuntimeHost for ScopedRuntimeHost {
                 checkpoint_id: Some(checkpoint_id),
             },
         )
-        .await
-        .map_err(PersistenceRuntimeHost::err)?;
+        .await;
+        let result = if let Some(io) = &self.io {
+            io.read_result(result)?
+        } else {
+            result.map_err(PersistenceRuntimeHost::err)?
+        };
         Ok(result.custom_signal.map(|signal| signal.payload))
     }
     async fn get_checkpoint(&self, checkpoint_id: String) -> Result<Option<Vec<u8>>, String> {
         self.key(&checkpoint_id)?;
+        if let Some(io) = &self.io {
+            let result = io.checkpoint(checkpoint_id, vec![]).await?;
+            return Ok(result.found.then_some(result.state));
+        }
         let result = handle_get_checkpoint(
             &self.owner.root.state,
             GetCheckpointRequest {
@@ -420,6 +486,9 @@ impl RuntimeHost for ScopedRuntimeHost {
         state: Vec<u8>,
     ) -> Result<RuntimeCheckpointResult, String> {
         self.key(&checkpoint_id)?;
+        if let Some(io) = &self.io {
+            return self.fenced_checkpoint(io, checkpoint_id, state).await;
+        }
         let result = handle_checkpoint(
             &self.owner.root.state,
             CheckpointRequest {
@@ -463,6 +532,9 @@ impl RuntimeHost for ScopedRuntimeHost {
         error_message: Option<String>,
     ) -> Result<(), String> {
         self.key(&checkpoint_id)?;
+        if let Some(io) = &self.io {
+            return io.retry(checkpoint_id, attempt_number, error_message).await;
+        }
         handle_retry_attempt(
             &self.owner.root.state,
             RetryAttemptEvent {
@@ -484,6 +556,9 @@ impl RuntimeHost for ScopedRuntimeHost {
         ms: u64,
     ) -> Result<(), String> {
         self.key(&checkpoint_id)?;
+        if let Some(io) = &self.io {
+            return self.fenced_sleep(io, checkpoint_id, state, ms).await;
+        }
         let response = handle_sleep(
             &self.owner.root.state,
             SleepRequest {
