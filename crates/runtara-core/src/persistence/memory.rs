@@ -297,9 +297,17 @@ impl Persistence for InMemoryPersistence {
         payload: &[u8],
     ) -> Result<(), CoreError> {
         let mut store = self.store.lock().unwrap();
+        store.instance_mut(instance_id)?;
+        if store.signals.get(instance_id).is_some_and(|signal| {
+            signal.acknowledged_at.is_none()
+                && signal.signal_type == crate::domain::SignalType::Cancel
+        }) {
+            return Ok(());
+        }
         store.signals.insert(
             instance_id.to_string(),
             SignalRecord {
+                command_id: uuid::Uuid::new_v4().to_string(),
                 instance_id: instance_id.to_string(),
                 signal_type,
                 payload: (!payload.is_empty()).then(|| payload.to_vec()),
@@ -324,12 +332,57 @@ impl Persistence for InMemoryPersistence {
             .cloned())
     }
 
-    async fn acknowledge_signal(&self, instance_id: &str) -> Result<(), CoreError> {
+    async fn acknowledge_signal(
+        &self,
+        instance_id: &str,
+        command_id: &str,
+        signal_type: crate::domain::SignalType,
+    ) -> Result<bool, CoreError> {
+        use crate::domain::SignalType;
         let mut store = self.store.lock().unwrap();
-        if let Some(signal) = store.signals.get_mut(instance_id) {
-            signal.acknowledged_at = Some(Utc::now());
+        let Some(signal) = store.signals.get(instance_id) else {
+            return Ok(false);
+        };
+        if signal.command_id != command_id || signal.signal_type != signal_type {
+            return Ok(false);
         }
-        Ok(())
+        if signal.acknowledged_at.is_some() {
+            return Ok(true);
+        }
+        let instance = store.instance_mut(instance_id)?;
+        if instance.status.is_terminal() && signal_type != SignalType::Cancel {
+            return Ok(false);
+        }
+        let now = Utc::now();
+        match signal_type {
+            SignalType::Cancel => {
+                instance.status = CoreInstanceStatus::Cancelled;
+                instance.finished_at = Some(now);
+                instance.sleep_until = None;
+            }
+            SignalType::Pause | SignalType::Shutdown => {
+                instance.status = CoreInstanceStatus::Suspended;
+                instance.finished_at = Some(now);
+                instance.sleep_until = (signal_type == SignalType::Shutdown).then_some(now);
+                instance.termination_reason =
+                    (signal_type == SignalType::Shutdown).then(|| "shutdown_requested".into());
+            }
+            SignalType::Resume => {}
+        }
+        if matches!(signal_type, SignalType::Pause | SignalType::Shutdown) {
+            let event_id = store.next_id();
+            store.events.push(EventRecord {
+                id: Some(event_id),
+                instance_id: instance_id.to_owned(),
+                event_type: crate::domain::EventType::Suspended,
+                checkpoint_id: None,
+                payload: None,
+                created_at: now,
+                subtype: None,
+            });
+        }
+        store.signals.get_mut(instance_id).unwrap().acknowledged_at = Some(now);
+        Ok(true)
     }
 
     async fn insert_custom_signal(
@@ -783,6 +836,7 @@ mod tests {
     async fn in_memory_backend_satisfies_the_conformance_sequence() {
         let backend = InMemoryPersistence::new();
         crate::persistence::conformance::run_conformance_sequence(&backend).await;
+        crate::persistence::conformance::run_lifecycle_command_sequence(&backend).await;
     }
 
     fn foreign_vocabulary() -> EventVocabulary {

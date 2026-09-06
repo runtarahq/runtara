@@ -537,8 +537,13 @@ mod tests {
             Ok(None)
         }
 
-        async fn acknowledge_signal(&self, _instance_id: &str) -> Result<(), CoreError> {
-            Ok(())
+        async fn acknowledge_signal(
+            &self,
+            _instance_id: &str,
+            _command_id: &str,
+            _signal_type: runtara_core::domain::SignalType,
+        ) -> Result<bool, CoreError> {
+            Ok(false)
         }
 
         async fn insert_custom_signal(

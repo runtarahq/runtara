@@ -102,6 +102,8 @@ pub struct EventRecord {
 /// Signal record from the persistence layer.
 #[derive(Debug, Clone)]
 pub struct SignalRecord {
+    /// Opaque identity of this command; replacements receive a fresh identity.
+    pub command_id: String,
     /// Instance this signal is for.
     pub instance_id: String,
     /// Type of signal (cancel, pause, resume).
@@ -568,6 +570,8 @@ pub trait Persistence: Send + Sync {
     /// duration into the interval between two writes.
     async fn insert_event(&self, event: &EventRecord) -> Result<(), CoreError>;
 
+    /// Store a fresh lifecycle command, replacing the previous slot. An unacknowledged
+    /// cancellation dominates subsequent commands and retains its identity and payload.
     async fn insert_signal(
         &self,
         instance_id: &str,
@@ -580,7 +584,18 @@ pub trait Persistence: Send + Sync {
         instance_id: &str,
     ) -> Result<Option<SignalRecord>, CoreError>;
 
-    async fn acknowledge_signal(&self, instance_id: &str) -> Result<(), CoreError>;
+    /// Atomically acknowledge exactly the delivered command and apply its lifecycle
+    /// transition and suspension event. Shutdown also schedules immediate wake.
+    /// Returns false for a replaced/missing command, a type mismatch, or a transition
+    /// that would revive a terminal instance. Repeating an accepted acknowledgment
+    /// returns true without applying its transition again. Cancel may override a
+    /// completed/failed run when the runner discovers an unhandled cancellation.
+    async fn acknowledge_signal(
+        &self,
+        instance_id: &str,
+        command_id: &str,
+        signal_type: SignalType,
+    ) -> Result<bool, CoreError>;
 
     async fn insert_custom_signal(
         &self,

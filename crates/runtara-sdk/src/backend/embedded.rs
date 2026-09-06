@@ -63,14 +63,7 @@ impl EmbeddedBackend {
         }
     }
 
-    /// Fetch the instance-wide pending lifecycle signal (cancel/pause/shutdown)
-    /// from core persistence and acknowledge it.
-    ///
-    /// This is what lets an embedded guest suspend *cleanly* at a checkpoint
-    /// boundary on a drain/pause/cancel, instead of being force-stopped at the
-    /// shutdown grace deadline. The signal is acknowledged on read so it is not
-    /// redelivered after the instance relaunches (otherwise a recovered
-    /// instance would immediately re-suspend on the same stale signal).
+    /// Read the current lifecycle command without consuming its receipt.
     fn take_pending_lifecycle_signal(&self) -> Result<Option<Signal>> {
         let Some(record) = self
             .rt
@@ -85,12 +78,8 @@ impl EmbeddedBackend {
             CoreSignalType::Resume => SignalType::Resume,
             CoreSignalType::Shutdown => SignalType::Shutdown,
         };
-        // Acknowledge (idempotent: only clears an unacknowledged signal) so the
-        // signal is consumed once.
-        let _ = self
-            .rt
-            .block_on(self.persistence.acknowledge_signal(&self.instance_id));
         Ok(Some(Signal {
+            command_id: record.command_id,
             signal_type,
             payload: record.payload.unwrap_or_default(),
             checkpoint_id: None,
@@ -116,7 +105,7 @@ impl SdkBackend for EmbeddedBackend {
     }
 
     #[cfg_attr(feature = "tracing", tracing::instrument(skip(self), fields(instance_id = %self.instance_id)))]
-    fn register(&self, _checkpoint_id: Option<&str>) -> Result<()> {
+    fn register(&self, checkpoint_id: Option<&str>) -> Result<()> {
         self.rt
             .block_on(
                 self.persistence
@@ -431,15 +420,40 @@ impl SdkBackend for EmbeddedBackend {
 
     fn poll_signals(
         &self,
-        _checkpoint_id: Option<&str>,
+        checkpoint_id: Option<&str>,
     ) -> Result<(Option<Signal>, Option<CustomSignal>)> {
-        // Signals not supported in embedded mode
-        Ok((None, None))
+        let signal = self.take_pending_lifecycle_signal()?;
+        let custom = match checkpoint_id {
+            Some(id) => self
+                .rt
+                .block_on(
+                    self.persistence
+                        .take_pending_custom_signal(&self.instance_id, id),
+                )
+                .map_err(|e| SdkError::Internal(e.to_string()))?
+                .map(|signal| CustomSignal {
+                    checkpoint_id: signal.checkpoint_id,
+                    payload: signal.payload.unwrap_or_default(),
+                }),
+            None => None,
+        };
+        Ok((signal, custom))
     }
 
-    fn acknowledge_signal(&self, _signal_type: SignalType) -> Result<()> {
-        // No-op in embedded mode
-        Ok(())
+    fn acknowledge_signal(&self, command_id: &str, signal_type: SignalType) -> Result<bool> {
+        let signal_type = match signal_type {
+            SignalType::Cancel => CoreSignalType::Cancel,
+            SignalType::Pause => CoreSignalType::Pause,
+            SignalType::Resume => CoreSignalType::Resume,
+            SignalType::Shutdown => CoreSignalType::Shutdown,
+        };
+        self.rt
+            .block_on(self.persistence.acknowledge_signal(
+                &self.instance_id,
+                command_id,
+                signal_type,
+            ))
+            .map_err(|e| SdkError::Internal(e.to_string()))
     }
 
     fn get_instance_status(&self, instance_id: &str) -> Result<StatusResponse> {
@@ -792,8 +806,13 @@ mod tests {
             Ok(None)
         }
 
-        async fn acknowledge_signal(&self, _instance_id: &str) -> CoreResult<()> {
-            Ok(())
+        async fn acknowledge_signal(
+            &self,
+            _instance_id: &str,
+            _command_id: &str,
+            _signal_type: runtara_core::domain::SignalType,
+        ) -> CoreResult<bool> {
+            Ok(false)
         }
 
         async fn insert_custom_signal(

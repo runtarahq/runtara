@@ -87,6 +87,7 @@ pub struct SignalRow(pub SignalRecord);
 impl<'r> FromRow<'r, PgRow> for SignalRow {
     fn from_row(row: &'r PgRow) -> Result<Self, sqlx::Error> {
         Ok(Self(SignalRecord {
+            command_id: row.try_get("command_id")?,
             instance_id: row.try_get("instance_id")?,
             signal_type: crate::encoding::signal_type_from_str(
                 &row.try_get::<String, _>("signal_type")?,

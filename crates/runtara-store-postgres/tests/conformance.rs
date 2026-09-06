@@ -32,6 +32,7 @@ async fn postgres_backend_passes_conformance_sequence() {
     let (pool, _container) = postgres_test_pool().await;
     let backend = PostgresPersistence::new(pool);
     run_conformance_sequence(&backend).await;
+    runtara_core::persistence::conformance::run_lifecycle_command_sequence(&backend).await;
 }
 
 /// Obtain a Postgres pool. Prefers `TEST_RUNTARA_DATABASE_URL` (for CI and
@@ -127,14 +128,30 @@ async fn domain_values_match_the_existing_postgres_schema() {
         SignalType::Shutdown,
     ] {
         backend
+            .update_instance_status(&id, InstanceStatus::Running, None)
+            .await
+            .unwrap();
+        backend
             .insert_signal(&id, signal_type, b"payload")
             .await
             .unwrap();
         let signal = backend.get_pending_signal(&id).await.unwrap().unwrap();
         assert_eq!(signal.signal_type, signal_type);
         assert_eq!(signal.payload.as_deref(), Some(b"payload".as_slice()));
-        backend.acknowledge_signal(&id).await.unwrap();
+        let receipt = backend.get_pending_signal(&id).await.unwrap().unwrap();
+        backend
+            .acknowledge_signal(&id, &receipt.command_id, receipt.signal_type)
+            .await
+            .unwrap();
     }
+    backend
+        .delete_instances_batch(std::slice::from_ref(&id))
+        .await
+        .unwrap();
+    backend
+        .register_instance(&id, "typed-contract")
+        .await
+        .unwrap();
     for event_type in [
         EventType::Started,
         EventType::Progress,
@@ -166,4 +183,60 @@ async fn domain_values_match_the_existing_postgres_schema() {
         assert_eq!(backend.count_events(&id, &filter).await.unwrap(), 1);
     }
     backend.delete_instances_batch(&[id]).await.unwrap();
+}
+
+#[tokio::test]
+async fn command_ack_rolls_back_transition_when_receipt_write_fails() {
+    use runtara_core::{
+        domain::{InstanceStatus, SignalType},
+        persistence::Persistence,
+    };
+    let (pool, _container) = postgres_test_pool().await;
+    let backend = PostgresPersistence::new(pool.clone());
+    let id = uuid::Uuid::new_v4().to_string();
+    backend.register_instance(&id, "atomic-ack").await.unwrap();
+    backend
+        .update_instance_status(&id, InstanceStatus::Running, None)
+        .await
+        .unwrap();
+    backend
+        .insert_signal(&id, SignalType::Shutdown, b"")
+        .await
+        .unwrap();
+    let signal = backend.get_pending_signal(&id).await.unwrap().unwrap();
+    // Fail the second write after the status and wake deadline have been updated.
+    // The constraint is scoped to this test's UUID and removed before asserting.
+    let constraint = format!("ack_failure_{}", uuid::Uuid::new_v4().simple());
+    sqlx::query(&format!("ALTER TABLE pending_signals ADD CONSTRAINT {constraint} CHECK (instance_id <> '{id}' OR acknowledged_at IS NULL)"))
+        .execute(&pool).await.unwrap();
+    let result = backend
+        .acknowledge_signal(&id, &signal.command_id, SignalType::Shutdown)
+        .await;
+    sqlx::query(&format!(
+        "ALTER TABLE pending_signals DROP CONSTRAINT {constraint}"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert!(result.is_err());
+    let instance = backend.get_instance(&id).await.unwrap().unwrap();
+    assert_eq!(instance.status, InstanceStatus::Running);
+    assert!(instance.finished_at.is_none());
+    assert!(instance.sleep_until.is_none());
+    assert!(instance.termination_reason.is_none());
+    assert_eq!(
+        backend
+            .get_pending_signal(&id)
+            .await
+            .unwrap()
+            .unwrap()
+            .command_id,
+        signal.command_id
+    );
+    assert!(
+        backend
+            .acknowledge_signal(&id, &signal.command_id, SignalType::Shutdown)
+            .await
+            .unwrap()
+    );
 }

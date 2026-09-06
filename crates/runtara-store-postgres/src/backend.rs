@@ -348,7 +348,7 @@ async fn insert_event(pool: &PgPool, event: &EventRecord) -> Result<(), CoreErro
 // ============================================================================
 
 /// Insert or update a pending signal.
-/// Uses ON CONFLICT to replace existing signal for the same instance.
+/// Replaces the previous command unless an unacknowledged cancellation dominates.
 async fn insert_signal(
     pool: &PgPool,
     instance_id: &str,
@@ -369,7 +369,10 @@ async fn insert_signal(
         SET signal_type = EXCLUDED.signal_type,
             payload = EXCLUDED.payload,
             created_at = NOW(),
-            acknowledged_at = NULL
+            acknowledged_at = NULL,
+            command_id = gen_random_uuid()
+        WHERE pending_signals.acknowledged_at IS NOT NULL
+           OR pending_signals.signal_type <> 'cancel'
         "#,
     )
     .bind(instance_id)
@@ -414,9 +417,9 @@ async fn insert_custom_signal(
     Ok(())
 }
 
-// `get_pending_signal`, `acknowledge_signal`, `take_pending_custom_signal`
+// `get_pending_signal`, `take_pending_custom_signal`
 // are migrated to the shared layer:
-// see PostgresPersistence::op_get_pending_signal / op_acknowledge_signal /
+// see PostgresPersistence::op_get_pending_signal /
 // op_take_pending_custom_signal (crate::ops_common::ops::signals).
 
 // Health, sleep, and active-count operations are migrated to the shared layer:
@@ -583,8 +586,76 @@ impl Persistence for PostgresPersistence {
         Self::op_get_pending_signal(&self.pool, instance_id).await
     }
 
-    async fn acknowledge_signal(&self, instance_id: &str) -> Result<(), CoreError> {
-        Self::op_acknowledge_signal(&self.pool, instance_id).await
+    async fn acknowledge_signal(
+        &self,
+        instance_id: &str,
+        command_id: &str,
+        signal_type: CoreSignalType,
+    ) -> Result<bool, CoreError> {
+        // Lock the instance before its command. Lifecycle transitions and future
+        // parked cancellation use this ordering too.
+        let mut tx = self.pool.begin().await.db()?;
+        let status: Option<String> = sqlx::query_scalar(
+            "SELECT status::text FROM instances WHERE instance_id = $1 FOR UPDATE",
+        )
+        .bind(instance_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .db()?;
+        let Some(status) = status else {
+            return Err(CoreError::InstanceNotFound {
+                instance_id: instance_id.into(),
+            });
+        };
+        let command: Option<(String, String, Option<DateTime<Utc>>)> = sqlx::query_as(
+            "SELECT command_id::text, signal_type::text, acknowledged_at FROM pending_signals WHERE instance_id = $1 FOR UPDATE"
+        ).bind(instance_id).fetch_optional(&mut *tx).await.db()?;
+        let Some((stored_id, stored_type, acknowledged_at)) = command else {
+            return Ok(false);
+        };
+        if stored_id != command_id
+            || stored_type != crate::encoding::signal_type_to_str(signal_type)
+        {
+            return Ok(false);
+        }
+        if acknowledged_at.is_some() {
+            return Ok(true);
+        }
+        if is_reportable_terminal_status(&status) && signal_type != CoreSignalType::Cancel {
+            return Ok(false);
+        }
+        match signal_type {
+            CoreSignalType::Cancel => {
+                sqlx::query("UPDATE instances SET status = 'cancelled', finished_at = NOW(), sleep_until = NULL WHERE instance_id = $1")
+                    .bind(instance_id).execute(&mut *tx).await.db()?;
+            }
+            CoreSignalType::Pause | CoreSignalType::Shutdown => {
+                let shutdown = signal_type == CoreSignalType::Shutdown;
+                sqlx::query("UPDATE instances SET status = 'suspended', finished_at = NOW(), termination_reason = CASE WHEN $2 THEN 'shutdown_requested'::termination_reason ELSE NULL END, sleep_until = CASE WHEN $2 THEN NOW() ELSE NULL END WHERE instance_id = $1")
+                    .bind(instance_id).bind(shutdown).execute(&mut *tx).await.db()?;
+            }
+            CoreSignalType::Resume => {}
+        }
+        if matches!(
+            signal_type,
+            CoreSignalType::Pause | CoreSignalType::Shutdown
+        ) {
+            sqlx::query("INSERT INTO instance_events (instance_id, event_type, created_at) VALUES ($1, 'suspended', NOW())")
+                .bind(instance_id).execute(&mut *tx).await.db()?;
+        }
+        sqlx::query("UPDATE pending_signals SET acknowledged_at = NOW() WHERE instance_id = $1")
+            .bind(instance_id)
+            .execute(&mut *tx)
+            .await
+            .db()?;
+        tx.commit().await.db()?;
+        if signal_type == CoreSignalType::Cancel
+            && !is_reportable_terminal_status(&status)
+            && let Some(sink) = &self.metrics_sink
+        {
+            report_completion(sink.as_ref(), &self.pool, instance_id).await;
+        }
+        Ok(true)
     }
 
     async fn insert_custom_signal(
@@ -1441,9 +1512,22 @@ mod tests {
         insert_signal(&pool, &instance_id.to_string(), CoreSignalType::Cancel, b"")
             .await
             .unwrap();
-        PostgresPersistence::op_acknowledge_signal(&pool, &instance_id.to_string())
+        let backend = PostgresPersistence::new(pool.clone());
+        let signal = backend
+            .get_pending_signal(&instance_id.to_string())
             .await
+            .unwrap()
             .unwrap();
+        assert!(
+            backend
+                .acknowledge_signal(
+                    &instance_id.to_string(),
+                    &signal.command_id,
+                    signal.signal_type
+                )
+                .await
+                .unwrap()
+        );
 
         // Should no longer return as pending
         let signal = PostgresPersistence::op_get_pending_signal(&pool, &instance_id.to_string())

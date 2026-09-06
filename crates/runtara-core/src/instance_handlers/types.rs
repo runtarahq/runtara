@@ -121,6 +121,8 @@ pub struct CheckpointRequest {
 /// Signal forwarded from core to instance.
 #[derive(Debug, Clone)]
 pub struct Signal {
+    /// Identity of the delivered lifecycle command.
+    pub command_id: String,
     /// Instance identifier.
     pub instance_id: String,
     /// Signal type as integer (see `SignalType` enum values).
@@ -266,6 +268,8 @@ pub struct PollSignalsResponse {
 
 /// Signal acknowledgement.
 pub struct SignalAck {
+    /// Identity of the delivered lifecycle command.
+    pub command_id: String,
     /// Instance identifier.
     pub instance_id: String,
     /// Signal type as integer (see `SignalType` enum values).

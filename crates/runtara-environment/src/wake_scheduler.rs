@@ -334,45 +334,17 @@ impl WakeScheduler {
         Ok(claimed)
     }
 
-    /// Whether a `cancel` signal is waiting for this instance.
-    ///
-    /// A read failure is reported as "no cancel": relaunching an instance that
-    /// turns out to be cancelled is recoverable (the guest observes the signal
-    /// at its next poll), whereas refusing to wake on a transient database
-    /// error would strand a healthy sleeper.
-    async fn cancel_pending(&self, instance_id: &str) -> bool {
-        match self.persistence.get_pending_signal(instance_id).await {
-            // `acknowledged_at` is re-checked even though `get_pending_signal`
-            // already filters on `acknowledged_at IS NULL`: defence in depth.
-            // Waking is destructive enough that a regression in that predicate
-            // must not silently re-cancel a handled run. The check is free.
-            Ok(Some(signal)) => {
-                signal.signal_type == runtara_core::domain::SignalType::Cancel
-                    && signal.acknowledged_at.is_none()
-            }
-            Ok(None) => false,
-            Err(e) => {
-                warn!(
-                    instance_id = %instance_id,
-                    error = %e,
-                    "Failed to read pending signals before wake; relaunching anyway"
-                );
-                false
-            }
-        }
-    }
-
-    /// Acknowledge the pending cancel and drive the instance to `cancelled`.
-    ///
-    /// Reuses core's ack path rather than writing the status directly, so a
-    /// cancel resolved here is indistinguishable from one a running guest
-    /// acknowledged: same signal acknowledgement, same terminal status.
-    async fn cancel_without_launch(&self, instance_id: &str) -> crate::error::Result<()> {
+    /// Apply the cancellation observed at wake without launching a guest.
+    async fn cancel_without_launch(
+        &self,
+        signal: runtara_core::persistence::SignalRecord,
+    ) -> crate::error::Result<bool> {
         let state = InstanceHandlerState::new(self.persistence.clone());
         handle_signal_ack(
             &state,
             SignalAck {
-                instance_id: instance_id.to_string(),
+                command_id: signal.command_id,
+                instance_id: signal.instance_id,
                 signal_type: SignalType::SignalCancel as i32,
                 acknowledged: true,
             },
@@ -456,12 +428,13 @@ impl WakeScheduler {
         // HIT that skips the poll sites entirely. Drive it to terminal here
         // instead of starting a process only to cancel it — the claim above
         // already took this row out of the wake candidate set.
-        if self.cancel_pending(&instance.instance_id).await {
-            info!(
-                instance_id = %instance.instance_id,
-                "Cancel signal pending at wake time; cancelling instead of relaunching"
-            );
-            self.cancel_without_launch(&instance.instance_id).await?;
+        if let Some(signal) = self
+            .persistence
+            .get_pending_signal(&instance.instance_id)
+            .await?
+            && signal.signal_type == runtara_core::domain::SignalType::Cancel
+            && self.cancel_without_launch(signal).await?
+        {
             self.lifecycle_observers.notify_instance_released(
                 instance.tenant_id.clone(),
                 instance.instance_id.clone(),

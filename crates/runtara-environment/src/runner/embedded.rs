@@ -1354,6 +1354,7 @@ async fn enforce_unacked_cancel(persistence: &Arc<dyn Persistence>, instance_id:
             if let Err(e) = handle_signal_ack(
                 &state,
                 SignalAck {
+                    command_id: signal.command_id,
                     instance_id: instance_id.to_string(),
                     signal_type: SignalType::SignalCancel as i32,
                     acknowledged: true,
@@ -2479,7 +2480,16 @@ mod tests {
             .await
             .unwrap();
         persistence
-            .acknowledge_signal(instance_id.as_str())
+            .acknowledge_signal(
+                instance_id.as_str(),
+                &persistence
+                    .get_pending_signal(instance_id.as_str())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .command_id,
+                runtara_core::domain::SignalType::Cancel,
+            )
             .await
             .unwrap();
         persistence

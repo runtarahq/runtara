@@ -20,7 +20,7 @@
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::tracing_compat::{info, warn};
+use crate::tracing_compat::info;
 use once_cell::sync::OnceCell;
 
 use crate::RuntaraSdk;
@@ -176,111 +176,40 @@ pub fn reset_cancellation() {
     INSTANCE_CANCELLED.store(false, Ordering::SeqCst);
 }
 
-/// Acknowledge cancellation to runtara-core.
-///
-/// This should be called when the instance detects a cancel signal and is about
-/// to exit. It sends a SignalAck to the core, which will update the instance
-/// status to "cancelled" (rather than "failed").
-///
-/// This function is used by the `#[resilient]` macro when cancellation is detected.
-/// It triggers the local cancellation flag and sends the acknowledgment.
-///
-/// # Example
-///
-/// ```ignore
-/// // Detected cancel signal in checkpoint response
-/// if checkpoint_result.should_cancel() {
-///     acknowledge_cancellation();
-///     return Err("Instance cancelled".into());
-/// }
-/// ```
-#[cfg_attr(not(feature = "tracing"), allow(unused_variables))]
-pub fn acknowledge_cancellation() {
-    use crate::types::SignalType;
-
-    // Trigger local cancellation flag first
-    trigger_cancellation();
-
-    // Send acknowledgment to core
-    if let Some(sdk_mutex) = SDK_INSTANCE.get() {
-        match sdk_mutex.lock() {
-            Ok(sdk_guard) => match sdk_guard.acknowledge_signal(SignalType::Cancel) {
-                Ok(()) => info!("Cancellation acknowledged to core"),
-                Err(e) => warn!(error = %e, "Failed to acknowledge cancellation signal"),
-            },
-            Err(e) => warn!(error = %e, "Failed to lock SDK for cancellation acknowledgment"),
-        }
+/// Acknowledge the exact cancellation returned by polling or checkpointing.
+pub fn acknowledge_cancellation(command_id: &str) -> crate::Result<bool> {
+    let accepted = acknowledge_command(command_id, crate::types::SignalType::Cancel)?;
+    if accepted {
+        trigger_cancellation();
     }
+    Ok(accepted)
 }
 
-/// Acknowledge a pause signal to runtara-core.
-///
-/// This must be called when the workflow suspends due to a pause signal.
-/// Without acknowledgment, the pause signal remains pending and will be
-/// detected again on resume, causing the workflow to suspend immediately
-/// in an infinite loop.
-///
-/// # Example
-///
-/// ```ignore
-/// // Detected pause signal in checkpoint response
-/// if checkpoint_result.should_pause() {
-///     acknowledge_pause();
-///     sdk.suspended()?;
-///     return Ok(());
-/// }
-/// ```
-#[cfg_attr(not(feature = "tracing"), allow(unused_variables))]
-pub fn acknowledge_pause() {
-    use crate::types::SignalType;
-
-    // Send acknowledgment to core
-    if let Some(sdk_mutex) = SDK_INSTANCE.get() {
-        match sdk_mutex.lock() {
-            Ok(sdk_guard) => match sdk_guard.acknowledge_signal(SignalType::Pause) {
-                Ok(()) => info!("Pause acknowledged to core"),
-                Err(e) => warn!(error = %e, "Failed to acknowledge pause signal"),
-            },
-            Err(e) => warn!(error = %e, "Failed to lock SDK for pause acknowledgment"),
-        }
-    }
+/// Acknowledge the exact pause returned by polling or checkpointing.
+pub fn acknowledge_pause(command_id: &str) -> crate::Result<bool> {
+    acknowledge_command(command_id, crate::types::SignalType::Pause)
 }
 
-/// Acknowledge a shutdown signal to runtara-core.
-///
-/// The server has asked this instance to suspend at the next checkpoint
-/// boundary so it can be resumed after restart. This function:
-///
-/// 1. Flips the local cancellation flag so `is_cancelled()` / `with_cancellation()`
-///    short-circuit any in-flight cooperative work.
-/// 2. Sends a `Shutdown` signal ack to core, which transitions the instance
-///    to `suspended` with `termination_reason = "shutdown_requested"`.
-///
-/// # Example
-///
-/// ```ignore
-/// if checkpoint_result.should_suspend_on_shutdown() {
-///     acknowledge_shutdown();
-///     sdk.suspended()?;
-///     return Ok(());
-/// }
-/// ```
-#[cfg_attr(not(feature = "tracing"), allow(unused_variables))]
-pub fn acknowledge_shutdown() {
-    use crate::types::SignalType;
-
-    // Flip the local flag so any remaining cooperative work exits.
-    trigger_cancellation();
-
-    if let Some(sdk_mutex) = SDK_INSTANCE.get() {
-        match sdk_mutex.lock() {
-            Ok(sdk_guard) => match sdk_guard.acknowledge_signal(SignalType::Shutdown) {
-                Ok(()) => info!("Shutdown acknowledged to core"),
-                Err(e) => warn!(error = %e, "Failed to acknowledge shutdown signal"),
-            },
-            Err(e) => warn!(error = %e, "Failed to lock SDK for shutdown acknowledgment"),
-        }
+/// Acknowledge the exact shutdown returned by polling or checkpointing.
+pub fn acknowledge_shutdown(command_id: &str) -> crate::Result<bool> {
+    let accepted = acknowledge_command(command_id, crate::types::SignalType::Shutdown)?;
+    if accepted {
+        trigger_cancellation();
     }
+    Ok(accepted)
+}
+
+fn acknowledge_command(
+    command_id: &str,
+    signal_type: crate::types::SignalType,
+) -> crate::Result<bool> {
+    let Some(sdk_mutex) = SDK_INSTANCE.get() else {
+        return Ok(true);
+    };
+    let sdk = sdk_mutex
+        .lock()
+        .map_err(|e| crate::SdkError::Internal(e.to_string()))?;
+    sdk.acknowledge_signal(command_id, signal_type)
 }
 
 #[cfg(test)]

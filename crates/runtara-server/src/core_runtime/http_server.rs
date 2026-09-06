@@ -90,6 +90,7 @@ pub struct CheckpointResponse {
 /// Signal information
 #[derive(Debug, Serialize)]
 pub struct SignalInfo {
+    pub command_id: String,
     pub signal_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub payload: Option<String>,
@@ -138,6 +139,7 @@ pub struct SleepRequest {
 /// Signal acknowledgement request
 #[derive(Debug, Deserialize)]
 pub struct SignalAckRequest {
+    pub command_id: String,
     pub signal_type: String,
 }
 
@@ -343,6 +345,7 @@ async fn checkpoint_handler(
     match instance_handlers::handle_checkpoint(&state, request).await {
         Ok(resp) => {
             let signal = resp.pending_signal.map(|s| SignalInfo {
+                command_id: s.command_id,
                 signal_type: signal_type_to_string(s.signal_type),
                 payload: if s.payload.is_empty() {
                     None
@@ -389,6 +392,7 @@ async fn poll_signals_handler(
     match instance_handlers::handle_poll_signals(&state, request).await {
         Ok(resp) => {
             let signal = resp.signal.map(|s| SignalInfo {
+                command_id: s.command_id,
                 signal_type: signal_type_to_string(s.signal_type),
                 payload: if s.payload.is_empty() {
                     None
@@ -648,13 +652,14 @@ async fn signal_ack_handler(
     };
 
     let ack = HandlerSignalAck {
+        command_id: body.command_id,
         instance_id,
         signal_type,
         acknowledged: true,
     };
 
     match instance_handlers::handle_signal_ack(&state, ack).await {
-        Ok(()) => Json(SuccessResponse { success: true }).into_response(),
+        Ok(success) => Json(SuccessResponse { success }).into_response(),
         Err(e) => core_error_response("SIGNAL_ACK_ERROR", "Signal ack error", e),
     }
 }
