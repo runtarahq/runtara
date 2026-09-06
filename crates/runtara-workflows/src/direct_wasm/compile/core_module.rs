@@ -611,7 +611,7 @@ fn export_initialize(
 /// the ~100 hand-assigned `DIRECT_*_LOCAL` indices are ABSOLUTE, dropping params
 /// off the front keeps each surviving declared local at its original absolute
 /// index with its original type — the invariant the lowerers depend on.
-const CANONICAL_LOCAL_GROUPS: &[(u32, ValType)] = &[
+pub(super) const CANONICAL_LOCAL_GROUPS: &[(u32, ValType)] = &[
     (16, ValType::I32),
     (2, ValType::I64),
     (10, ValType::I32),

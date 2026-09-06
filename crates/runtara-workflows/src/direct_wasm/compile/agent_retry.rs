@@ -73,6 +73,12 @@ pub(super) fn emit_agent_retry_condition(
     body.instruction(&Instruction::Else);
     body.instruction(&Instruction::I32Const(0));
     body.instruction(&Instruction::End);
+    // Rate-limited retries use a separate wait budget and can outlive maxRetries.
+    // Never increment the one-based attempt counter past its unsigned ceiling.
+    body.instruction(&Instruction::LocalGet(DIRECT_AGENT_RETRY_ATTEMPT_LOCAL));
+    body.instruction(&Instruction::I32Const(-1));
+    body.instruction(&Instruction::I32LtU);
+    body.instruction(&Instruction::I32And);
 }
 
 pub(super) fn emit_agent_advance_retry_attempt(body: &mut WasmFunction) {
@@ -100,7 +106,11 @@ pub(super) fn emit_agent_retry_delay(
     rate_limit_budget_ms: u64,
 ) {
     body.instruction(&Instruction::LocalGet(DIRECT_AGENT_RETRY_ATTEMPT_LOCAL));
-    body.instruction(&Instruction::I32Const((max_retries + 1) as i32));
+    body.instruction(&Instruction::I32Const(
+        max_retries
+            .checked_add(1)
+            .expect("retry budget validated before lowering") as i32,
+    ));
     body.instruction(&Instruction::I64Const(retry_delay_ms as i64));
     body.instruction(&Instruction::I64Const(rate_limit_budget_ms as i64));
     body.instruction(&Instruction::LocalGet(DIRECT_AGENT_RETRY_SLEEP_TAG_LOCAL));

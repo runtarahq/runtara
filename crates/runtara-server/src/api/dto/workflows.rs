@@ -238,6 +238,12 @@ impl ValidationErrorDto {
                 None,
                 None,
             ),
+            ValidationError::RetryCountOverflow { step_id, .. } => (
+                error.to_string(),
+                Some(step_id.clone()),
+                Some("maxRetries".to_string()),
+                None,
+            ),
             ValidationError::UnsupportedStepTimeout { step_id, step_type } => (
                 format!(
                     "Step '{}': 'timeout' is unsupported for {} steps because a running invocation cannot be interrupted",
@@ -1423,6 +1429,19 @@ mod tests {
     use super::*;
     use runtara_workflows::validation::ValidationError;
     use serde_json::json;
+
+    #[test]
+    fn retry_count_overflow_maps_to_a_stable_save_error() {
+        let dto = ValidationErrorDto::from_runtara_error(&ValidationError::RetryCountOverflow {
+            step_id: "call".into(),
+            max_retries: u32::MAX,
+        });
+        assert_eq!(dto.code, "E129");
+        assert_eq!(dto.step_id.as_deref(), Some("call"));
+        assert_eq!(dto.field_name.as_deref(), Some("maxRetries"));
+        assert!(dto.message.contains("4294967294"));
+        assert!(dto.message.contains("4294967295"));
+    }
 
     #[test]
     fn unsupported_step_timeout_maps_to_a_stable_save_error() {

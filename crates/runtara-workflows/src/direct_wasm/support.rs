@@ -1665,6 +1665,16 @@ fn collect_step_support(
     direct_control: bool,
     unsupported: &mut Vec<UnsupportedWorkflowFeature>,
 ) {
+    if let Some(max_retries) = crate::retry_budget::step_max_retries(step)
+        && max_retries > crate::retry_budget::MAX_RETRIES
+    {
+        unsupported_step(
+            step,
+            "retry-count-overflow",
+            &crate::retry_budget::retry_count_message(u64::from(max_retries)),
+            unsupported,
+        );
+    }
     match step {
         Step::Finish(_) => {}
         Step::Agent(step) if supports_agent_step_baseline(graph, step) => {}

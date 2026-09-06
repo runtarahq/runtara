@@ -383,9 +383,56 @@ impl DirectFailureTarget {
     }
 }
 
+// Check the manifest too: planning can be called without the DSL support gate,
+// and Split/Embed retry counts are stored as untyped JSON in this representation.
+fn validate_retry_budgets(graph: &DirectGraphManifest) -> Result<(), DirectCompileError> {
+    let check = |step_id: &str, retries: u64| {
+        if retries > u64::from(crate::retry_budget::MAX_RETRIES) {
+            Err(DirectCompileError::InvalidRetryBudget {
+                step_id: step_id.to_owned(),
+                max_retries: retries,
+            })
+        } else {
+            Ok(())
+        }
+    };
+    for agent in &graph.agents {
+        if let Some(retries) = agent.max_retries {
+            check(&agent.step_id, u64::from(retries))?;
+        }
+    }
+    for split in &graph.splits {
+        if let Some(retries) = split
+            .value
+            .get("maxRetries")
+            .and_then(serde_json::Value::as_u64)
+        {
+            check(&split.step_id, retries)?;
+        }
+    }
+    for step in &graph.steps {
+        if step.step_type == "EmbedWorkflow"
+            && let Some(retries) = step
+                .body
+                .get("maxRetries")
+                .and_then(serde_json::Value::as_u64)
+        {
+            check(&step.id, retries)?;
+        }
+        for nested in &step.nested_graphs {
+            validate_retry_budgets(&nested.graph)?;
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn direct_run_plan(
     manifest: &DirectWorkflowManifest,
 ) -> Result<DirectRunPlan, DirectCompileError> {
+    validate_retry_budgets(&manifest.graph)?;
+    for child in &manifest.child_workflows {
+        validate_retry_budgets(&child.graph)?;
+    }
     let entry = manifest
         .graph
         .steps
@@ -2923,6 +2970,81 @@ fn canonicalize_direct_agent_id(agent_id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn audit_06_planner_rejects_retry_overflow_without_support_gate() {
+        use super::super::manifest::build_direct_workflow_manifest;
+        for (fixture, owner) in [
+            (
+                include_str!("../../tests/fixtures/ai_agent_single_shot.json"),
+                "ai",
+            ),
+            (
+                include_str!("../../tests/fixtures/ai_agent_tool_loop.json"),
+                "ai",
+            ),
+            (
+                include_str!("../../tests/fixtures/split_workflow.json"),
+                "split",
+            ),
+        ] {
+            let graph = serde_json::from_str(fixture).unwrap();
+            let mut manifest = build_direct_workflow_manifest(&graph).unwrap();
+            if owner == "split" {
+                manifest.graph.splits[0].value["maxRetries"] = serde_json::json!(u64::MAX);
+            } else {
+                manifest
+                    .graph
+                    .agents
+                    .iter_mut()
+                    .find(|agent| agent.step_id == owner)
+                    .unwrap()
+                    .max_retries = Some(u32::MAX);
+            }
+            assert!(
+                matches!(direct_run_plan(&manifest), Err(DirectCompileError::InvalidRetryBudget { step_id, .. }) if step_id == owner)
+            );
+        }
+    }
+
+    #[test]
+    fn audit_06_planner_checks_unreachable_nested_and_child_retry_budgets() {
+        use super::super::manifest::{
+            DirectChildWorkflowGraphManifest, DirectNestedGraphManifest,
+            build_direct_workflow_manifest,
+        };
+        let graph = serde_json::from_value(serde_json::json!({"entryPoint":"finish", "steps":{"finish":{"id":"finish", "stepType":"Finish"}}})).unwrap();
+        let base = build_direct_workflow_manifest(&graph).unwrap();
+        for child in [false, true] {
+            let mut manifest = base.clone();
+            let mut invalid = base.graph.clone();
+            let mut embed = direct_embed_step_manifest(None, None);
+            embed.body["maxRetries"] = serde_json::json!(u64::MAX);
+            invalid.steps.push(embed);
+            if child {
+                manifest
+                    .child_workflows
+                    .push(DirectChildWorkflowGraphManifest {
+                        step_id: "outer".into(),
+                        workflow_id: "child".into(),
+                        version_requested: "latest".into(),
+                        version_resolved: 1,
+                        graph: invalid,
+                        feature_summary: base.feature_summary.clone(),
+                    });
+            } else {
+                manifest.graph.steps[0]
+                    .nested_graphs
+                    .push(DirectNestedGraphManifest {
+                        role: "waitForSignal.onWait".into(),
+                        graph: Box::new(invalid),
+                    });
+            }
+            assert!(
+                matches!(direct_run_plan(&manifest), Err(DirectCompileError::InvalidRetryBudget { step_id, max_retries: u64::MAX }) if step_id == "call_child")
+            );
+        }
+    }
 
     // Walks a plan and records every emitted step id (and structural markers)
     // in emission order, so tests can assert linearization properties.

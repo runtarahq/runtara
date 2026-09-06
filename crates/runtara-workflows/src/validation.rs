@@ -58,6 +58,7 @@
 //! | E059 | ReferenceNonObjectTraversal | Reference tries to traverse through a scalar or invalid container |
 //! | E060 | StepNotYetExecuted | Reference to step that hasn't executed |
 //! | E128 | UnsupportedStepTimeout | A per-step timeout has no enforcement path |
+//! | E129 | RetryCountOverflow | Retries plus the initial attempt exceed u32 |
 //! | E126 | UnknownReferenceRoot | Reference root is not one of the runtime's supported roots |
 //! | E127 | ReferenceRootOutOfScope | `iteration`/`loop`/`item` root used where the runtime never populates it |
 //! | E070 | UnknownVariable | Variable doesn't exist |
@@ -376,6 +377,9 @@ pub enum ValidationError {
     /// receive this precise, structured error instead of a generic serde error.
     UnsupportedStepTimeout { step_id: String, step_type: String },
 
+    /// Retries plus the initial attempt cannot fit in the runtime u32 counter.
+    RetryCountOverflow { step_id: String, max_retries: u32 },
+
     // === Naming Errors ===
     /// Multiple steps have the same name.
     DuplicateStepName { name: String, step_ids: Vec<String> },
@@ -500,6 +504,7 @@ impl ValidationError {
             Self::InvalidConditionShape { .. } => "E025",
             Self::QueryOnlyConditionOperator { .. } => "E027",
             Self::UnsupportedStepTimeout { .. } => "E128",
+            Self::RetryCountOverflow { .. } => "E129",
             Self::DuplicateStepName { .. } => "E060",
             Self::DuplicateEdgePriority { .. } => "E070",
             Self::MultipleDefaultEdges { .. } => "E071",
@@ -991,6 +996,16 @@ impl std::fmt::Display for ValidationError {
                     "[E027] Step '{}': operator '{}' in {} is only valid inside object-model \
                      query conditions; the workflow runtime cannot evaluate it",
                     step_id, operator, location
+                )
+            }
+            ValidationError::RetryCountOverflow {
+                step_id,
+                max_retries,
+            } => {
+                write!(
+                    f,
+                    "[E129] Step '{step_id}': {}",
+                    crate::retry_budget::retry_count_message(u64::from(*max_retries))
                 )
             }
             ValidationError::UnsupportedStepTimeout { step_id, step_type } => {
@@ -3684,6 +3699,14 @@ const MAX_TIMEOUT_MS: u64 = 3_600_000; // 1 hour
 
 fn validate_configuration(graph: &ExecutionGraph, result: &mut ValidationResult) {
     for (step_id, step) in &graph.steps {
+        if let Some(max_retries) = crate::retry_budget::step_max_retries(step)
+            && max_retries > crate::retry_budget::MAX_RETRIES
+        {
+            result.errors.push(ValidationError::RetryCountOverflow {
+                step_id: step_id.clone(),
+                max_retries,
+            });
+        }
         match step {
             Step::AiAgent(ai_step) => {
                 // Retry hygiene applies to LLM calls too (each retry re-bills).
@@ -3833,6 +3856,11 @@ fn validate_configuration(graph: &ExecutionGraph, result: &mut ValidationResult)
                 }
             }
 
+            Step::WaitForSignal(wait) => {
+                if let Some(on_wait) = &wait.on_wait {
+                    validate_configuration(on_wait, result);
+                }
+            }
             _ => {}
         }
     }

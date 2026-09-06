@@ -5,22 +5,23 @@ Scope: DSL validation, direct-WASM manifest/planning/lowering, JSON stdlib,
 and durable suspend/resume through the production invoke ABI.
 
 **Update 2026-09-06:** AUDIT-01 is committed as `2b6bf542` and AUDIT-02 as
-`d787556e`, AUDIT-03 as `a0629d99`, and AUDIT-04 as `70a21db8`. AUDIT-05 is
-fixed in the audit worktree. AUDIT-06 and AUDIT-07 remain open. See the verification record for checks and limitations.
+`d787556e`, AUDIT-03 as `a0629d99`, AUDIT-04 as `70a21db8`, and AUDIT-05 as
+`2c0a3df9`. AUDIT-06 is fixed in the audit worktree. AUDIT-07 remains open. See the verification record for checks and limitations.
 
 [Open the interactive pattern guide](wasm-emitter-patterns.html) to compare tested
 controls, recorded failures, and proposed fixes with step-through diagrams and
 exportable example DSL. The guide is a standalone, offline HTML/CSS/JS page;
 its traces illustrate the audit evidence and do not run WASM.
 
-Seven findings are documented below. The accompanying **59 audit tests** now
-include **54 passing tests** and **5 known-defect regressions**. There are also
-**31 passing unit tests**: 8 graph-analysis tests for AUDIT-01, 6 arena tests for
+Seven findings are documented below. The accompanying **67 audit tests** now
+include **64 passing tests** and **3 known-defect regressions**. There are also
+**39 passing unit tests**: 8 graph-analysis tests for AUDIT-01, 6 arena tests for
 AUDIT-02, 7 identity tests and 1 compiler-version test for AUDIT-03, and 6 scoped
 configuration tests and 1 compiler-version test for AUDIT-04, plus 2 timer identity
-tests for AUDIT-05. All five remaining regressions exercise validation or compilation
-natively. The original AUDIT-01 through AUDIT-05 regressions now run normally;
-their ignores were removed after the fixes.
+tests for AUDIT-05; AUDIT-06 adds 5 compiler tests, 2 stdlib backoff tests and
+1 server save-error mapping test. All three remaining regressions exercise
+validation natively. The original AUDIT-01 through AUDIT-06 regressions now run
+normally; their ignores were removed after the fixes.
 
 The known-defect tests assert the **desired correct behavior** and currently fail.
 They carry explicit `#[ignore = "AUDIT-XX: ..."]` reasons so normal CI stays green
@@ -481,25 +482,84 @@ RUSTC_WRAPPER= cargo test -p runtara-workflows --features direct-wasm-integratio
 
 ## AUDIT-06 · P2 — maximum retry count overflows in the compiler
 
-An Agent with maxRetries 4294967295 parses and passes the support gate. Compiling
-it in the debug/test profile panics at `max_retries + 1`. The EmbedWorkflow
-reproduction also panics at its corresponding expression. Both compilers accept
-0, 1 and u32::MAX - 1 in the boundary controls. Release behavior was not executed;
-this boundary lacks a checked arithmetic/validation contract.
+**Fixed on 2026-09-06.** `maxRetries` now accepts **0 through 4,294,967,294**
+(`u32::MAX - 1`). The initial invocation counts as attempt 1, so at most
+4,294,967,295 total attempts fit in the runtime's unsigned counter. Omitted retry
+settings retain their existing defaults; this bound is a representation limit,
+not a recommended operational budget.
 
-Source: [Agent retry arithmetic](../crates/runtara-workflows/src/direct_wasm/compile/agent_retry.rs) (`emit_agent_retry_delay`), [Embed retry arithmetic](../crates/runtara-workflows/src/direct_wasm/compile/embed_retry.rs) (`emit_embed_retry_delay`), [configuration validation](../crates/runtara-workflows/src/validation.rs).
+The original Agent and EmbedWorkflow graphs with `maxRetries:4294967295` parsed
+and passed the support gate, then panicked at `max_retries + 1` in debug builds.
+The baseline rerun reproduced both failures. Split had the same unchecked
+expression, and both AI Agent modes share Agent retry lowering. Original release
+behavior was not executed; the fix is tested in both debug and release profiles.
 
-Fix direction: bound accepted retries and use checked arithmetic that returns a
-structured compile error. Cover u32::MAX and nearby limits.
+The fix covers four step types and both AI modes:
 
-Tests:
+- Agent and EmbedWorkflow use the top-level `maxRetries` field; Split and AI Agent
+  use `config.maxRetries`. Save validation returns **E129 / RetryCountOverflow**,
+  with the owning step and the `maxRetries` field in the server error DTO.
+- The compiler support gate returns **retry-count-overflow**, even if callers skip
+  save validation. Validation descends through Split/While subgraphs and
+  WaitForSignal.onWait. Closure validation and compiler support also check
+  preloaded children. No executable artifact is written for a rejected graph.
+- A defensive manifest check precedes planning and returns **InvalidRetryBudget**.
+  It covers agent records, Split config JSON, EmbedWorkflow body JSON, nested
+  graphs and child graphs, including unsigned JSON counts wider than u32.
+  Private lowering uses checked addition after this invariant is established.
+- Backoff now uses saturating exponentiation before its existing saturating
+  multiplication and delay cap. Previously `2u64.pow(attempt - 2)` could panic
+  in debug or wrap to zero in release starting at attempt 66, even though the
+  retry count itself was representable. Zero delay and retry-after overrides
+  retain their existing behavior.
+- Rate-limited retries retain their separate wait budget, so they may exceed
+  `maxRetries`. All three emitted retry predicates now also require
+  `attempt < u32::MAX`; even repeated zero-delay rate limits cannot wrap the
+  attempt identity back to zero. Normal retry comparisons remain unsigned across
+  the i32 sign boundary.
 
-| Test | Status on audited code |
+Source: [shared retry bound](../crates/runtara-workflows/src/retry_budget.rs),
+[validation](../crates/runtara-workflows/src/validation.rs),
+[support gate](../crates/runtara-workflows/src/direct_wasm/support.rs),
+[manifest planning](../crates/runtara-workflows/src/direct_wasm/plan.rs),
+[Agent retry lowering](../crates/runtara-workflows/src/direct_wasm/compile/agent_retry.rs),
+[Embed retry lowering](../crates/runtara-workflows/src/direct_wasm/compile/embed_retry.rs),
+[Split retry lowering](../crates/runtara-workflows/src/direct_wasm/compile/split_retry.rs),
+[save-error mapping](../crates/runtara-server/src/api/dto/workflows.rs),
+[shared retry backoff](../crates/runtara-workflow-stdlib/src/direct_json.rs) (`retry_delay_ms`).
+
+Tests (all enabled):
+
+| Test set | Confirmed behavior |
 | --- | --- |
-| [`audit_06_agent_retry_boundaries_below_overflow_compile`](../crates/runtara-workflows/tests/wasm_emitter_audit.rs) | Passing control |
-| [`audit_06_embed_retry_boundaries_below_overflow_compile`](../crates/runtara-workflows/tests/wasm_emitter_audit.rs) | Passing control |
-| [`audit_06_agent_retry_overflow_returns_compile_error`](../crates/runtara-workflows/tests/wasm_emitter_audit.rs) | Known defect; ignored by default, fails when selected |
-| [`audit_06_embed_retry_overflow_returns_compile_error`](../crates/runtara-workflows/tests/wasm_emitter_audit.rs) | Known defect; ignored by default, fails when selected |
+| `audit_06_{agent,embed,split,ai,ai_tool_loop}_retry_boundaries_below_overflow_compile` | Five tests each validate and compile omitted defaults, 0, 1, i32::MAX, i32::MAX + 1, u32::MAX − 2 and u32::MAX − 1; emitted components validate |
+| `audit_06_{agent,embed,split,ai,ai_tool_loop}_retry_overflow_returns_compile_error` | Five tests assert E129 and structured compile rejection at u32::MAX, with no panic or executable artifact |
+| `audit_06_nested_retry_overflow_is_rejected` | While, Split and onWait reject an overflowing nested Agent |
+| `audit_06_child_retry_overflow_is_rejected` | Closure validation attributes the error to the child; compilation rejects the child's overflowing Split |
+| `audit_06_planner_rejects_retry_overflow_without_support_gate` | Direct planning rejects modified AI records and a Split JSON count of u64::MAX |
+| `audit_06_planner_checks_unreachable_nested_and_child_retry_budgets` | Manifest preflight checks unreachable EmbedWorkflow records inside nested and child graphs |
+| `audit_06_{agent,embed,split}_emitted_retry_predicate_respects_unsigned_ceiling` | Three Wasmtime tests execute 45 production-predicate cases: zero/one retry, signed boundary, final attempt, retryable/permanent errors, exhausted wait budget and zero-delay rate limits |
+| `audit_06_retry_backoff_saturates_across_the_unsigned_attempt_domain` | Delay remains capped from attempts 64–67 through u32::MAX; tests the exact u64 power boundary as well |
+| `audit_06_retry_backoff_preserves_zero_override_and_attempt_caps` | Zero base/cap, retry-after overrides and total-attempt clamps retain their semantics |
+| `retry_count_overflow_maps_to_a_stable_save_error` | Server DTO preserves E129, step identity, field name and the allowed/rejected counts |
+
+Native fixtures: [wasm_emitter_audit.rs](../crates/runtara-workflows/tests/wasm_emitter_audit.rs).
+Planner tests are in `plan.rs`; executable predicate tests are in
+[retry_bounds_tests.rs](../crates/runtara-workflows/src/direct_wasm/compile/retry_bounds_tests.rs).
+
+```sh
+RUSTC_WRAPPER= cargo test -p runtara-workflows audit_06
+RUSTC_WRAPPER= cargo test --release -p runtara-workflows audit_06
+RUSTC_WRAPPER= cargo test -p runtara-workflow-stdlib --lib audit_06
+RUSTC_WRAPPER= cargo test --release -p runtara-workflow-stdlib --lib audit_06
+RUSTC_WRAPPER= cargo test -p runtara-server --lib retry_count_overflow_maps_to_a_stable_save_error
+```
+
+These tests establish counter arithmetic and rejection, not feasibility of
+billions of external invocations. The predicate harness executes the real emitted
+WASM at seeded counter values. Existing composed execution tests cover ordinary
+Agent/AI/Embed/Split retry behavior. This change does not alter retry defaults,
+backoff policy, the separate rate-limit budget, or existing artifact behavior.
 
 <a id="audit-07"></a>
 
@@ -690,7 +750,7 @@ No database/server E2E, production artifact migration or deployment was run.
 ### AUDIT-05 verification update · 2026-09-06
 
 - Committed AUDIT-04 as `70a21db8`; its pre-commit formatting and workspace
-  Clippy checks passed. AUDIT-05 is left uncommitted for review.
+  Clippy checks passed. AUDIT-05 was subsequently committed as `2c0a3df9` before starting AUDIT-06.
 - Before the fix, 2 controls passed and the 2 original timeout regressions failed:
   both resumed successfully after their original budget had expired.
 - Rebuilt **27 agent components and both shared workflow components**, then
@@ -720,3 +780,42 @@ Checks used Rust 1.97.0, `RUSTC_WRAPPER=`, and this worktree's own host build ca
 and guest components. No database/server E2E, production artifact migration or
 deployment was run. The fix preserves cooperative execution and the existing
 Split timeout error-routing policy described above.
+
+### AUDIT-06 verification update · 2026-09-06
+
+- Committed AUDIT-05 as `2c0a3df9`; its pre-commit formatting and workspace
+  Clippy checks passed. AUDIT-06 is left uncommitted for review.
+- Baseline retry-count run: **2 controls passed, 2 regressions failed** at the
+  intended panic assertions. The original ignores are now removed.
+- Debug and release AUDIT-06 runs: **12 native tests and 5 compiler unit tests
+  passed in each profile**. The latter include 45 actual Wasmtime executions of
+  the Agent/Embed/Split retry predicates and defensive manifest-planner checks.
+- Added backoff tests first: **both failed** with multiplication overflow.
+  After saturating exponentiation, **both pass in debug and release**. The full
+  stdlib library suite passes **230 tests**, with 1 existing benchmark ignored.
+- Server save-error mapping test: **1 passed**. Browser validation builds with
+  `cargo check -p runtara-validation-wasm --target wasm32-unknown-unknown`, which
+  also checks that E129 works without the compiler feature.
+- Refreshed **27 agent components and both shared workflow components** using
+  `scripts/build-agent-components.sh`. Component-host tests with the
+  `component-integration-tests` feature: **45 passed**, none ignored.
+- Final `cargo test -p runtara-workflows --features direct-wasm-integration-tests`
+  after the guest rebuild: **565 library tests, 220 composed execution tests and
+  41 native integration tests passed**. The only ignored audit regressions are
+  the 3 remaining AUDIT-07 cases; 1 existing doctest is also ignored. All 47
+  invoke-ABI audit cases and all 17 enabled native audit cases pass.
+- Explicitly reran the 3 ignored AUDIT-07 cases: all still fail at the intended
+  key/inner-ID validation assertion. They remain documented open defects.
+- Clippy for workflows, stdlib and server, all targets with
+  `runtara-workflows/direct-wasm-integration-tests` and `-D warnings`: passed.
+  Formatting and `git diff --check`: passed.
+- Interactive guide: **56 DOM scenarios passed**, including all five retry
+  shapes, exported DSL counts and AI tool edges, test links, detail navigation,
+  trace stepping/reset, and historical/fixed labels. Browser inspection confirmed
+  the fixed Split and AI tool-loop views and corrected an overflowing graph label.
+
+Checks used Rust 1.97.0, `RUSTC_WRAPPER=`, `SQLX_OFFLINE=true` for the server checks,
+and the audit worktree's own host cache and guest components. No database/server
+E2E, deployment, production artifact migration, or billions-of-retries stress run
+was performed. The new compiler contract applies to newly built artifacts; the
+backoff change requires rebuilding the shared stdlib and recomposing workflows.

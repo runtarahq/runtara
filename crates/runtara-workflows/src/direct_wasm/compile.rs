@@ -1630,6 +1630,9 @@ fn sha256_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+mod retry_bounds_tests;
+
 // AUDIT-05 timer scratch and nested deadline frames (append-only local layout).
 const DIRECT_LOOP_KEY_PTR_LOCAL: u32 = 130;
 const DIRECT_LOOP_KEY_LEN_LOCAL: u32 = 131;

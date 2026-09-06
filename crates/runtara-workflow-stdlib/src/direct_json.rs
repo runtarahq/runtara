@@ -2659,7 +2659,9 @@ impl DirectJsonManifest {
         }
 
         let backoff_attempt = attempt_number.min(total_attempts);
-        let delay_multiplier = 2u64.pow(backoff_attempt.saturating_sub(2));
+        // Saturate the exponentiation too: capping only the later product lets
+        // attempt 66 panic in debug or wrap the multiplier to zero in release.
+        let delay_multiplier = 2u64.saturating_pow(backoff_attempt.saturating_sub(2));
         base_delay_ms
             .saturating_mul(delay_multiplier)
             .min(max_delay_ms)
@@ -11858,6 +11860,71 @@ mod tests {
         );
 
         assert!(DirectJsonManifest::workflow_error_retryable(b"not-json"));
+    }
+
+    #[test]
+    fn audit_06_retry_backoff_saturates_across_the_unsigned_attempt_domain() {
+        for attempt in [
+            64,
+            65,
+            66,
+            67,
+            i32::MAX as u32,
+            i32::MAX as u32 + 1,
+            u32::MAX - 1,
+            u32::MAX,
+        ] {
+            assert_eq!(
+                DirectJsonManifest::retry_delay_ms(attempt, u32::MAX, 1_000, 60_000, None),
+                60_000,
+                "attempt {attempt}"
+            );
+            assert_eq!(
+                DirectJsonManifest::agent_retry_delay_ms(attempt, u32::MAX, 1_000, 60_000, None),
+                60_000,
+                "Agent attempt {attempt}"
+            );
+        }
+        assert_eq!(
+            DirectJsonManifest::retry_delay_ms(65, u32::MAX, 1, u64::MAX, None),
+            1u64 << 63
+        );
+        assert_eq!(
+            DirectJsonManifest::retry_delay_ms(66, u32::MAX, 1, u64::MAX, None),
+            u64::MAX
+        );
+    }
+
+    #[test]
+    fn audit_06_retry_backoff_preserves_zero_override_and_attempt_caps() {
+        for attempt in [66, u32::MAX] {
+            assert_eq!(
+                DirectJsonManifest::retry_delay_ms(attempt, u32::MAX, 0, 60_000, None),
+                0
+            );
+            assert_eq!(
+                DirectJsonManifest::retry_delay_ms(attempt, u32::MAX, 1_000, 0, None),
+                0
+            );
+            assert_eq!(
+                DirectJsonManifest::retry_delay_ms(attempt, u32::MAX, 1_000, 60_000, Some(17)),
+                17
+            );
+            assert_eq!(
+                DirectJsonManifest::retry_delay_ms(
+                    attempt,
+                    u32::MAX,
+                    1_000,
+                    60_000,
+                    Some(u64::MAX)
+                ),
+                60_000
+            );
+            assert_eq!(
+                DirectJsonManifest::retry_delay_ms(attempt, 4, 1_000, 60_000, None),
+                4_000
+            );
+        }
     }
 
     #[test]

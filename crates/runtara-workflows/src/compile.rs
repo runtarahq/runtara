@@ -309,6 +309,9 @@ fn direct_compile_error_to_io(err: DirectCompileError) -> io::Error {
             io::ErrorKind::Unsupported,
             DirectCompileError::Unsupported { report }.to_string(),
         ),
+        err @ DirectCompileError::InvalidRetryBudget { .. } => {
+            io::Error::new(io::ErrorKind::InvalidInput, err)
+        }
         DirectCompileError::Io(err) => err,
         DirectCompileError::Component(err) => io::Error::other(err),
     }
