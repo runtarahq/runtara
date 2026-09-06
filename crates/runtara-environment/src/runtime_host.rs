@@ -46,7 +46,7 @@ use runtara_core::instance_handlers::{
     CheckpointRequest, GetCheckpointRequest, InstanceEvent, InstanceEventType,
     InstanceHandlerState, PollSignalsRequest, RetryAttemptEvent, Signal, SignalAck, SignalType,
     SleepRequest, handle_checkpoint, handle_get_checkpoint, handle_instance_event,
-    handle_poll_signals, handle_retry_attempt, handle_signal_ack, handle_sleep,
+    handle_poll_signals, handle_retry_attempt, handle_signal_ack_decision, handle_sleep,
 };
 use runtara_core::persistence::Persistence;
 
@@ -280,7 +280,7 @@ impl PersistenceRuntimeHost {
 
     /// Apply only the command the guest actually observed.
     async fn ack_signal(&self, signal_type: SignalType, command_id: &str) -> Result<bool, String> {
-        handle_signal_ack(
+        handle_signal_ack_decision(
             &self.state,
             SignalAck {
                 command_id: command_id.to_owned(),
@@ -290,6 +290,7 @@ impl PersistenceRuntimeHost {
             },
         )
         .await
+        .map(|decision| decision.accepted())
         .map_err(Self::err)
     }
 
@@ -522,7 +523,9 @@ impl RuntimeHost for PersistenceRuntimeHost {
         if !self.ack_signal(kind, &command_id).await? {
             return Ok(false);
         }
-        if matches!(kind, SignalType::SignalCancel | SignalType::SignalShutdown) {
+        if runtara_core::lifecycle::execution_action(kind.into())
+            == runtara_core::lifecycle::ExecutionAction::Stop
+        {
             self.cancelled.store(true, Ordering::SeqCst);
         }
         Ok(true)

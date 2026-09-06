@@ -363,20 +363,20 @@ impl Persistence for MockPersistence {
         Ok(self.signals.lock().unwrap().get(instance_id).cloned())
     }
 
-    async fn acknowledge_signal(
+    async fn apply_lifecycle_command(
         &self,
         instance_id: &str,
         command_id: &str,
         signal_type: crate::domain::SignalType,
-    ) -> std::result::Result<bool, CoreError> {
+    ) -> std::result::Result<crate::lifecycle::Decision, CoreError> {
         use crate::domain::SignalType;
         let mut instances = self.instances.lock().unwrap();
         let mut signals = self.signals.lock().unwrap();
         let Some(signal) = signals.get(instance_id) else {
-            return Ok(false);
+            return Ok(crate::lifecycle::Decision::Rejected);
         };
         if signal.command_id != command_id || signal.signal_type != signal_type {
-            return Ok(false);
+            return Ok(crate::lifecycle::Decision::Rejected);
         }
         let instance =
             instances
@@ -385,8 +385,16 @@ impl Persistence for MockPersistence {
                     instance_id: instance_id.into(),
                 })?;
         if instance.status.is_terminal() && signal_type != SignalType::Cancel {
-            return Ok(false);
+            return Ok(crate::lifecycle::Decision::Rejected);
         }
+        let decision = crate::lifecycle::acknowledge(
+            instance.status,
+            Some(signal.command()),
+            crate::lifecycle::Receipt {
+                id: command_id,
+                kind: signal_type,
+            },
+        );
         match signal_type {
             SignalType::Cancel => {
                 instance.status = CoreInstanceStatus::Cancelled;
@@ -403,7 +411,15 @@ impl Persistence for MockPersistence {
             SignalType::Resume => {}
         }
         signals.remove(instance_id);
-        Ok(true)
+        Ok(decision)
+    }
+
+    async fn park_instance(
+        &self,
+        _instance_id: &str,
+        _request: crate::lifecycle::ParkRequest,
+    ) -> std::result::Result<crate::lifecycle::Decision, crate::error::CoreError> {
+        Ok(crate::lifecycle::Decision::Rejected)
     }
 
     async fn cancel_suspended_instances(

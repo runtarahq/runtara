@@ -17,8 +17,8 @@ use super::types::{
 
 /// Handle signal polling request.
 ///
-/// Returns the oldest pending signal for the instance, if any.
-/// Signals are: cancel, pause, resume.
+/// Returns the current pending command without consuming it.
+/// Commands are cancel, pause, resume, and shutdown.
 ///
 /// Note: The checkpoint response also includes pending signals for efficiency.
 /// This endpoint is for explicit polling when not checkpointing.
@@ -79,19 +79,22 @@ pub async fn handle_poll_signals(
 /// False means the receipt is stale or the requested transition is no longer valid.
 #[instrument(skip(state, ack), fields(instance_id = %ack.instance_id, command_id = %ack.command_id))]
 pub async fn handle_signal_ack(state: &InstanceHandlerState, ack: SignalAck) -> Result<bool> {
+    Ok(handle_signal_ack_decision(state, ack).await?.accepted())
+}
+
+/// Acknowledge a command while retaining its typed lifecycle disposition.
+pub async fn handle_signal_ack_decision(
+    state: &InstanceHandlerState,
+    ack: SignalAck,
+) -> Result<crate::lifecycle::Decision> {
     if !ack.acknowledged {
-        return Ok(false);
+        return Ok(crate::lifecycle::Decision::Rejected);
     }
-    let signal_type = match ack.signal_type {
-        0 => crate::domain::SignalType::Cancel,
-        1 => crate::domain::SignalType::Pause,
-        2 => crate::domain::SignalType::Resume,
-        3 => crate::domain::SignalType::Shutdown,
-        _ => anyhow::bail!("Unknown lifecycle signal type: {}", ack.signal_type),
-    };
+    let signal_type = SignalType::try_from_i32(ack.signal_type)
+        .ok_or_else(|| anyhow::anyhow!("Unknown lifecycle signal type: {}", ack.signal_type))?;
     Ok(state
         .persistence
-        .acknowledge_signal(&ack.instance_id, &ack.command_id, signal_type)
+        .apply_lifecycle_command(&ack.instance_id, &ack.command_id, signal_type.into())
         .await?)
 }
 

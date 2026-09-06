@@ -314,8 +314,8 @@ pub async fn handle_sleep(
 /// so burning the rest of the clock serves nobody; pause and resume are handled
 /// at the guest's own poll sites and leave the sleep alone.
 fn interrupts_sleep(signal: &Signal) -> bool {
-    signal.signal_type == i32::from(SignalType::SignalCancel)
-        || signal.signal_type == i32::from(SignalType::SignalShutdown)
+    SignalType::try_from_i32(signal.signal_type)
+        .is_some_and(|kind| crate::lifecycle::interrupts_sleep(kind.into()))
 }
 
 /// Record a heartbeat for a sleeping instance.

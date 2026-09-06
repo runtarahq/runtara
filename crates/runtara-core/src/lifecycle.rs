@@ -32,6 +32,8 @@ pub enum SuspensionReason {
 pub enum WakeDeadline {
     /// Make the instance eligible for immediate wake.
     Now,
+    /// A host-provided durable timer deadline.
+    At(chrono::DateTime<chrono::Utc>),
 }
 
 /// The identity and disposition of a stored lifecycle command.
@@ -61,6 +63,8 @@ pub struct Transition {
     pub status: Option<InstanceStatus>,
     /// Set finished_at to the transaction timestamp.
     pub finish_now: bool,
+    /// Clear output and error from the previous execution outcome.
+    pub clear_result: bool,
     /// Suspension reason update.
     pub reason: Change<SuspensionReason>,
     /// Wake deadline update.
@@ -120,6 +124,7 @@ pub fn acknowledge(
     let mut effects = Transition {
         status: None,
         finish_now: false,
+        clear_result: false,
         reason: Change::Keep,
         wake: Change::Keep,
         event: None,
@@ -170,6 +175,48 @@ pub fn cancel_parked(status: InstanceStatus, stored: Option<Command<'_>>) -> Dec
             kind: command.kind,
         },
     )
+}
+
+/// Kind of durable guest suspension; component-specific wake decoding belongs
+/// to the host rather than this policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParkReason {
+    /// Waiting for a timer.
+    Timer,
+    /// Waiting for a custom signal, optionally with a timeout.
+    Signal,
+}
+
+/// A durable suspension requested by an exiting guest.
+#[derive(Debug, Clone, Copy)]
+pub struct ParkRequest {
+    /// Why execution is parking.
+    pub reason: ParkReason,
+    /// Earliest requested timer or signal timeout.
+    pub deadline: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// Park only a currently running instance. Preserve unrelated termination
+/// metadata and emit no additional event, matching the invoke suspension path.
+pub fn park(status: InstanceStatus, request: ParkRequest) -> Decision {
+    if status != InstanceStatus::Running {
+        return Decision::Rejected;
+    }
+    Decision::Applied(Transition {
+        status: Some(InstanceStatus::Suspended),
+        finish_now: true,
+        clear_result: true,
+        reason: Change::Set(match request.reason {
+            ParkReason::Timer => SuspensionReason::Sleeping,
+            ParkReason::Signal => SuspensionReason::WaitingSignal,
+        }),
+        wake: request.deadline.map_or(Change::Keep, |deadline| {
+            Change::Set(WakeDeadline::At(deadline))
+        }),
+        event: None,
+        acknowledge: false,
+        report_completion: false,
+    })
 }
 
 /// Action performed locally after a successful command acknowledgment.
@@ -346,6 +393,47 @@ mod tests {
                 );
             }
             assert_eq!(cancel_parked(status, None), Decision::Rejected);
+        }
+    }
+
+    #[test]
+    fn parking_requires_running_and_preserves_unrelated_fields() {
+        let deadline = chrono::DateTime::from_timestamp(1_800_000_000, 0).unwrap();
+        for status in STATUSES {
+            for reason in [ParkReason::Timer, ParkReason::Signal] {
+                for wake in [None, Some(deadline)] {
+                    let decision = park(
+                        status,
+                        ParkRequest {
+                            reason,
+                            deadline: wake,
+                        },
+                    );
+                    if status != InstanceStatus::Running {
+                        assert_eq!(decision, Decision::Rejected);
+                        continue;
+                    }
+                    let Decision::Applied(effects) = decision else {
+                        panic!("running must park")
+                    };
+                    assert_eq!(effects.status, Some(InstanceStatus::Suspended));
+                    assert!(effects.finish_now && effects.clear_result);
+                    assert!(!effects.acknowledge && !effects.report_completion);
+                    assert_eq!(effects.event, None);
+                    assert_eq!(
+                        effects.reason,
+                        Change::Set(if reason == ParkReason::Timer {
+                            SuspensionReason::Sleeping
+                        } else {
+                            SuspensionReason::WaitingSignal
+                        })
+                    );
+                    assert_eq!(
+                        effects.wake,
+                        wake.map_or(Change::Keep, |d| Change::Set(WakeDeadline::At(d)))
+                    );
+                }
+            }
         }
     }
 

@@ -615,7 +615,29 @@ pub trait Persistence: Send + Sync {
         instance_id: &str,
         command_id: &str,
         signal_type: SignalType,
-    ) -> Result<bool, CoreError>;
+    ) -> Result<bool, CoreError> {
+        Ok(self
+            .apply_lifecycle_command(instance_id, command_id, signal_type)
+            .await?
+            .accepted())
+    }
+
+    /// Evaluate core command policy against locked state and atomically apply its
+    /// effects. Return the typed disposition, retaining idempotency information.
+    async fn apply_lifecycle_command(
+        &self,
+        instance_id: &str,
+        command_id: &str,
+        signal_type: SignalType,
+    ) -> Result<crate::lifecycle::Decision, CoreError>;
+
+    /// Evaluate the core parking guard and commit suspension metadata and its
+    /// deadline atomically. A concurrent terminal transition cannot be overwritten.
+    async fn park_instance(
+        &self,
+        instance_id: &str,
+        request: crate::lifecycle::ParkRequest,
+    ) -> Result<crate::lifecycle::Decision, CoreError>;
 
     /// Atomically cancel suspended instances with pending cancel commands, clear
     /// their wake deadlines, and acknowledge those exact commands. Returns only

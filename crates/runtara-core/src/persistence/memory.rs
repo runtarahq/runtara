@@ -61,6 +61,10 @@ impl Store {
         if let Some(status) = effects.status {
             instance.status = status;
         }
+        if effects.clear_result {
+            instance.output = None;
+            instance.error = None;
+        }
         if effects.finish_now {
             instance.finished_at = Some(now);
         }
@@ -82,6 +86,7 @@ impl Store {
             Change::Keep => {}
             Change::Clear => instance.sleep_until = None,
             Change::Set(WakeDeadline::Now) => instance.sleep_until = Some(now),
+            Change::Set(WakeDeadline::At(deadline)) => instance.sleep_until = Some(deadline),
         }
         if let Some(event_type) = effects.event {
             let id = self.next_id();
@@ -387,12 +392,12 @@ impl Persistence for InMemoryPersistence {
             .cloned())
     }
 
-    async fn acknowledge_signal(
+    async fn apply_lifecycle_command(
         &self,
         instance_id: &str,
         command_id: &str,
         signal_type: crate::domain::SignalType,
-    ) -> Result<bool, CoreError> {
+    ) -> Result<Decision, CoreError> {
         let mut store = self.store.lock().unwrap();
         let status = store.instance_mut(instance_id)?.status;
         let decision = lifecycle::acknowledge(
@@ -406,7 +411,20 @@ impl Persistence for InMemoryPersistence {
         if let Decision::Applied(effects) = decision {
             store.apply_transition(instance_id, effects, Utc::now())?;
         }
-        Ok(decision.accepted())
+        Ok(decision)
+    }
+
+    async fn park_instance(
+        &self,
+        instance_id: &str,
+        request: crate::lifecycle::ParkRequest,
+    ) -> Result<Decision, CoreError> {
+        let mut store = self.store.lock().unwrap();
+        let decision = lifecycle::park(store.instance_mut(instance_id)?.status, request);
+        if let Decision::Applied(effects) = decision {
+            store.apply_transition(instance_id, effects, Utc::now())?;
+        }
+        Ok(decision)
     }
 
     async fn cancel_suspended_instances(

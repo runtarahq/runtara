@@ -18,6 +18,7 @@
 //! - Memory metrics come from the store's resource limiter (exact guest
 //!   linear-memory peak); CPU metrics are absent.
 
+#[cfg(all(test, feature = "db-integration-tests"))]
 use runtara_core::domain::InstanceStatus as CoreInstanceStatus;
 
 use async_trait::async_trait;
@@ -1386,58 +1387,41 @@ async fn park_invoke_suspend(
         // Pure on-resume: already handled by the ack path.
         return;
     }
-    let wake_marker = if has_on_signal_wake(wakes) {
-        WAITING_SIGNAL_TERMINATION
-    } else {
-        "sleeping"
+    use runtara_core::lifecycle::{Decision, ParkReason, ParkRequest};
+    let deadline = deadline_ms
+        .and_then(|ms| chrono::DateTime::<chrono::Utc>::from_timestamp_millis(ms as i64));
+    if deadline_ms.is_some() && deadline.is_none() {
+        warn!(
+            instance_id,
+            ?deadline_ms,
+            "Suspend deadline out of range; leaving sleep_until unset"
+        );
+    }
+    let request = ParkRequest {
+        reason: if has_on_signal_wake(wakes) {
+            ParkReason::Signal
+        } else {
+            ParkReason::Timer
+        },
+        deadline,
     };
-    // status first, then sleep_until: the wake scan requires BOTH
-    // `status='suspended'` AND `sleep_until IS NOT NULL`, so neither ordering
-    // exposes a half-parked instance to a premature claim.
-    match persistence
-        .complete_instance(
-            runtara_core::persistence::CompleteInstanceParams::new(
-                instance_id,
-                CoreInstanceStatus::Suspended,
-            )
-            .if_running()
-            .with_termination(wake_marker, None),
-        )
-        .await
-    {
-        Ok(true) => {}
-        Ok(false) => {
-            // Already terminal (or otherwise not running) — a malformed guest
-            // that completed/failed and THEN returned suspended, or the
-            // monitor's timeout landed first. Never overwrite, never schedule.
+    match persistence.park_instance(instance_id, request).await {
+        Ok(Decision::Applied(_)) => {}
+        Ok(_) => {
             warn!(
                 instance_id,
                 "Invoke suspend ignored: instance is not running (terminal status preserved)"
             );
             return;
         }
-        Err(e) => {
-            warn!(instance_id, error = %e, "Failed to mark instance suspended after invoke suspend");
+        Err(error) => {
+            warn!(instance_id, %error, "Failed to park instance after invoke suspend");
+            return;
         }
     }
-    if wake_if_signal_already_arrived(persistence, instance_id, wakes).await {
-        return;
-    }
-    let Some(deadline_ms) = deadline_ms else {
-        // Deadline-less on-signal: parked as suspended; the waker relaunches it.
-        return;
-    };
-    let Some(deadline) = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(deadline_ms as i64)
-    else {
-        warn!(
-            instance_id,
-            deadline_ms, "Suspend deadline out of range; leaving sleep_until unset"
-        );
-        return;
-    };
-    if let Err(e) = persistence.set_instance_sleep(instance_id, deadline).await {
-        warn!(instance_id, error = %e, "Failed to set sleep_until after invoke suspend");
-    }
+    // Close the arrival-before-park race. Later arrivals observe suspended state
+    // and schedule their own immediate wake. Never overwrite it with the timer.
+    wake_if_signal_already_arrived(persistence, instance_id, wakes).await;
 }
 
 fn invoke_metrics_of(result: &runtara_component_host::InvokeRunResult) -> ContainerMetrics {

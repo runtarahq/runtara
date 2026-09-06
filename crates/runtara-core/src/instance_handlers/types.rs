@@ -22,6 +22,30 @@ pub enum SignalType {
     SignalShutdown = 3,
 }
 
+impl SignalType {
+    /// Decode a protocol command, rejecting unknown numeric values.
+    pub fn try_from_i32(value: i32) -> Option<Self> {
+        match value {
+            0 => Some(Self::SignalCancel),
+            1 => Some(Self::SignalPause),
+            2 => Some(Self::SignalResume),
+            3 => Some(Self::SignalShutdown),
+            _ => None,
+        }
+    }
+}
+
+impl From<SignalType> for CoreSignalType {
+    fn from(value: SignalType) -> Self {
+        match value {
+            SignalType::SignalCancel => Self::Cancel,
+            SignalType::SignalPause => Self::Pause,
+            SignalType::SignalResume => Self::Resume,
+            SignalType::SignalShutdown => Self::Shutdown,
+        }
+    }
+}
+
 impl From<SignalType> for i32 {
     fn from(s: SignalType) -> i32 {
         s as i32

@@ -84,17 +84,23 @@ pub(crate) async fn apply_transition(
         Change::Set(value) => Some(reason_label(value)),
         _ => None,
     };
+    let wake_at = match effects.wake {
+        Change::Set(WakeDeadline::At(deadline)) => Some(deadline),
+        _ => None,
+    };
     let wake_now = matches!(effects.wake, Change::Set(WakeDeadline::Now));
     sqlx::query(r#"
         UPDATE instances SET
             status = COALESCE($2::instance_status, status),
             finished_at = CASE WHEN $3 THEN NOW() ELSE finished_at END,
             termination_reason = CASE WHEN $4 THEN termination_reason ELSE $5::termination_reason END,
-            sleep_until = CASE WHEN $6 THEN sleep_until WHEN $7 THEN NOW() ELSE NULL END
+            sleep_until = CASE WHEN $6 THEN sleep_until WHEN $7 THEN NOW() ELSE $8 END,
+            output = CASE WHEN $9 THEN NULL ELSE output END,
+            error = CASE WHEN $9 THEN NULL ELSE error END
         WHERE instance_id = ANY($1)
     "#).bind(ids).bind(effects.status.map(crate::encoding::status_to_str)).bind(effects.finish_now)
         .bind(matches!(effects.reason, Change::Keep)).bind(reason)
-        .bind(matches!(effects.wake, Change::Keep)).bind(wake_now)
+        .bind(matches!(effects.wake, Change::Keep)).bind(wake_now).bind(wake_at).bind(effects.clear_result)
         .execute(&mut **tx).await.db()?;
     if let Some(event) = effects.event {
         sqlx::query("INSERT INTO instance_events (instance_id, event_type, created_at) SELECT unnest($1::text[]), $2::instance_event_type, NOW()")

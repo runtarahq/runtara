@@ -581,12 +581,12 @@ impl Persistence for PostgresPersistence {
         Self::op_get_pending_signal(&self.pool, instance_id).await
     }
 
-    async fn acknowledge_signal(
+    async fn apply_lifecycle_command(
         &self,
         instance_id: &str,
         command_id: &str,
         signal_type: CoreSignalType,
-    ) -> Result<bool, CoreError> {
+    ) -> Result<runtara_core::lifecycle::Decision, CoreError> {
         use runtara_core::lifecycle::{self, Decision, Receipt};
         let mut tx = self.pool.begin().await.db()?;
         let status = crate::lifecycle::lock_instance(&mut tx, instance_id).await?;
@@ -610,7 +610,22 @@ impl Persistence for PostgresPersistence {
         {
             report_completion(sink.as_ref(), &self.pool, instance_id).await;
         }
-        Ok(decision.accepted())
+        Ok(decision)
+    }
+
+    async fn park_instance(
+        &self,
+        instance_id: &str,
+        request: runtara_core::lifecycle::ParkRequest,
+    ) -> Result<runtara_core::lifecycle::Decision, CoreError> {
+        let mut tx = self.pool.begin().await.db()?;
+        let status = crate::lifecycle::lock_instance(&mut tx, instance_id).await?;
+        let decision = runtara_core::lifecycle::park(status, request);
+        if let runtara_core::lifecycle::Decision::Applied(effects) = decision {
+            crate::lifecycle::apply_transition(&mut tx, &[instance_id.to_owned()], effects).await?;
+        }
+        tx.commit().await.db()?;
+        Ok(decision)
     }
 
     async fn cancel_suspended_instances(
