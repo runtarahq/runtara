@@ -1,0 +1,6031 @@
+{
+  "date": "2026-09-06",
+  "source_revision": "0a04277c243fde9d2cee0ed416b2fb77ff0099ba",
+  "machine": "Apple M3 Max, 16 CPU cores, 64 GiB RAM",
+  "runs": [
+    {
+      "arch": "aarch64",
+      "backend": "legacy-production-default",
+      "dependency_hashes": [
+        {
+          "bytes": 498513,
+          "name": "runtara_agent_utils.wasm",
+          "sha256": "0b55a575dafff47dec1b512f569578508af280534eb879c14cc9ade87834a854"
+        },
+        {
+          "bytes": 2744013,
+          "name": "runtara_workflow_stdlib.wasm",
+          "sha256": "8105b5124bf633b2ae576ccc4ee98a2eb72e6d5c40347a05565060a4d4aa17f0"
+        },
+        {
+          "bytes": 395535,
+          "name": "runtara_workflow_runtime.wasm",
+          "sha256": "f636555784b630a406951a5350986cd8a15ae8acc8e598c8e3c5a613065512f1"
+        }
+      ],
+      "disk_cache": false,
+      "engine_and_executor_setup_us": 1512.4170000000001,
+      "format_version": 1,
+      "os": "macos",
+      "profile": "release",
+      "reports": [
+        {
+          "cached_full_run": {
+            "max_us": 278.792,
+            "min_us": 134.417,
+            "p50_us": 148.25,
+            "p95_us": 231.25,
+            "samples": 100
+          },
+          "captured_runtime_messages_last_sample": 4,
+          "checkpoint_count": 1,
+          "child_graph": null,
+          "compose": {
+            "max_us": 30908.5,
+            "min_us": 29154.0,
+            "p50_us": 29657.290999999997,
+            "p95_us": 30908.5,
+            "samples": 3
+          },
+          "durable_cached_result_replay": {
+            "max_us": 258.666,
+            "min_us": 124.49999999999999,
+            "p50_us": 135.167,
+            "p95_us": 172.417,
+            "samples": 100
+          },
+          "graph": {
+            "entryPoint": "r0",
+            "executionPlan": [
+              {
+                "fromStep": "r0",
+                "toStep": "finish"
+              }
+            ],
+            "name": "Random baseline",
+            "steps": {
+              "finish": {
+                "id": "finish",
+                "inputMapping": {
+                  "r0": {
+                    "value": "steps.r0.outputs",
+                    "valueType": "reference"
+                  }
+                },
+                "stepType": "Finish"
+              },
+              "r0": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r0",
+                "inputMapping": {},
+                "stepType": "Agent"
+              }
+            },
+            "variables": {}
+          },
+          "graph_sha256": "a66baec64ca581c5a30d4abb811afd9ee6e945169ad03df237fe1c7fd104231a",
+          "input_bytes": 26,
+          "input_sha256": "26ce61ef90782351aa134109ad745a43970cc4e57da28b6c988b31ee3bb9be5b",
+          "json_to_first_completed_run": {
+            "max_us": 250219.75000000003,
+            "min_us": 231504.75,
+            "p50_us": 231506.416,
+            "p95_us": 250219.75000000003,
+            "samples": 3
+          },
+          "json_to_wasm": {
+            "max_us": 37387.917,
+            "min_us": 33011.041,
+            "p50_us": 33348.416,
+            "p95_us": 37387.917,
+            "samples": 3
+          },
+          "largest_guest_memory_bytes": 1310720,
+          "name": "random_1_defaults",
+          "native_compile": {
+            "max_us": 210713.292,
+            "min_us": 197037.875,
+            "p50_us": 197182.66700000002,
+            "p95_us": 210713.292,
+            "samples": 3
+          },
+          "output_bytes_last_sample": 26,
+          "parse_and_emit": {
+            "max_us": 6478.9169999999995,
+            "min_us": 3690.9159999999997,
+            "p50_us": 3856.917,
+            "p95_us": 6478.9169999999995,
+            "samples": 3
+          },
+          "prepare_link": {
+            "max_us": 179.458,
+            "min_us": 31.584,
+            "p50_us": 32.0,
+            "p95_us": 179.458,
+            "samples": 3
+          },
+          "random_values": 1,
+          "sizes": {
+            "omit_runtime": false,
+            "parallel_pools": {},
+            "serialized_native_bytes": 12456600,
+            "wasm_sha256": "53871a9572d6c06c768ce12edb3db2dc3b5b83a79990407ff538466bb10e6e08",
+            "workflow_logic_wasm_bytes": 60967,
+            "workflow_wasm_bytes": 3308070,
+            "workflow_wasm_gzip_bytes": 848296
+          },
+          "track_events": false
+        },
+        {
+          "cached_full_run": {
+            "max_us": 231.292,
+            "min_us": 127.625,
+            "p50_us": 142.91600000000003,
+            "p95_us": 170.667,
+            "samples": 100
+          },
+          "captured_runtime_messages_last_sample": 1,
+          "checkpoint_count": 0,
+          "child_graph": null,
+          "compose": {
+            "max_us": 28669.125,
+            "min_us": 28594.458,
+            "p50_us": 28600.334000000003,
+            "p95_us": 28669.125,
+            "samples": 3
+          },
+          "durable_cached_result_replay": null,
+          "graph": {
+            "durable": false,
+            "entryPoint": "r0",
+            "executionPlan": [
+              {
+                "fromStep": "r0",
+                "toStep": "finish"
+              }
+            ],
+            "name": "Random baseline",
+            "steps": {
+              "finish": {
+                "id": "finish",
+                "inputMapping": {
+                  "r0": {
+                    "value": "steps.r0.outputs",
+                    "valueType": "reference"
+                  }
+                },
+                "stepType": "Finish"
+              },
+              "r0": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r0",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              }
+            },
+            "variables": {}
+          },
+          "graph_sha256": "bf2f88576578f13ffc96f2c3f31e06477ba9ceee285e8d733c2fa43d011c20f4",
+          "input_bytes": 26,
+          "input_sha256": "26ce61ef90782351aa134109ad745a43970cc4e57da28b6c988b31ee3bb9be5b",
+          "json_to_first_completed_run": {
+            "max_us": 223506.459,
+            "min_us": 220106.458,
+            "p50_us": 222916.0,
+            "p95_us": 223506.459,
+            "samples": 3
+          },
+          "json_to_wasm": {
+            "max_us": 32401.75,
+            "min_us": 32129.625000000004,
+            "p50_us": 32137.875000000004,
+            "p95_us": 32401.75,
+            "samples": 3
+          },
+          "largest_guest_memory_bytes": 1310720,
+          "name": "random_1",
+          "native_compile": {
+            "max_us": 190266.417,
+            "min_us": 186683.417,
+            "p50_us": 189426.209,
+            "p95_us": 190266.417,
+            "samples": 3
+          },
+          "output_bytes_last_sample": 25,
+          "parse_and_emit": {
+            "max_us": 3803.75,
+            "min_us": 3468.333,
+            "p50_us": 3528.25,
+            "p95_us": 3803.75,
+            "samples": 3
+          },
+          "prepare_link": {
+            "max_us": 35.292,
+            "min_us": 30.666,
+            "p50_us": 32.75,
+            "p95_us": 35.292,
+            "samples": 3
+          },
+          "random_values": 1,
+          "sizes": {
+            "omit_runtime": false,
+            "parallel_pools": {},
+            "serialized_native_bytes": 12456600,
+            "wasm_sha256": "e768bbc517ca2c3f76d7a1ae7b0d27fea24fe144bb7921385c5fdc9ab759bee1",
+            "workflow_logic_wasm_bytes": 58916,
+            "workflow_wasm_bytes": 3306019,
+            "workflow_wasm_gzip_bytes": 847880
+          },
+          "track_events": false
+        },
+        {
+          "cached_full_run": {
+            "max_us": 221.875,
+            "min_us": 135.458,
+            "p50_us": 147.875,
+            "p95_us": 175.417,
+            "samples": 100
+          },
+          "captured_runtime_messages_last_sample": 3,
+          "checkpoint_count": 1,
+          "child_graph": null,
+          "compose": {
+            "max_us": 29239.625,
+            "min_us": 28722.0,
+            "p50_us": 28733.708,
+            "p95_us": 29239.625,
+            "samples": 3
+          },
+          "durable_cached_result_replay": {
+            "max_us": 231.083,
+            "min_us": 126.08399999999999,
+            "p50_us": 140.708,
+            "p95_us": 159.958,
+            "samples": 100
+          },
+          "graph": {
+            "durable": true,
+            "entryPoint": "r0",
+            "executionPlan": [
+              {
+                "fromStep": "r0",
+                "toStep": "finish"
+              }
+            ],
+            "name": "Random baseline",
+            "steps": {
+              "finish": {
+                "id": "finish",
+                "inputMapping": {
+                  "r0": {
+                    "value": "steps.r0.outputs",
+                    "valueType": "reference"
+                  }
+                },
+                "stepType": "Finish"
+              },
+              "r0": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r0",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              }
+            },
+            "variables": {}
+          },
+          "graph_sha256": "79e4e205272a9be31ec6daec643e28ee0adcdc07d87484965d0243c0b652df0a",
+          "input_bytes": 26,
+          "input_sha256": "26ce61ef90782351aa134109ad745a43970cc4e57da28b6c988b31ee3bb9be5b",
+          "json_to_first_completed_run": {
+            "max_us": 230304.292,
+            "min_us": 220393.375,
+            "p50_us": 226341.417,
+            "p95_us": 230304.292,
+            "samples": 3
+          },
+          "json_to_wasm": {
+            "max_us": 32750.708000000002,
+            "min_us": 32333.374999999996,
+            "p50_us": 32532.875000000004,
+            "p95_us": 32750.708000000002,
+            "samples": 3
+          },
+          "largest_guest_memory_bytes": 1310720,
+          "name": "random_1_durable",
+          "native_compile": {
+            "max_us": 196568.083,
+            "min_us": 186511.45799999998,
+            "p50_us": 192786.583,
+            "p95_us": 196568.083,
+            "samples": 3
+          },
+          "output_bytes_last_sample": 26,
+          "parse_and_emit": {
+            "max_us": 3810.792,
+            "min_us": 3511.0,
+            "p50_us": 3598.875,
+            "p95_us": 3810.792,
+            "samples": 3
+          },
+          "prepare_link": {
+            "max_us": 45.458,
+            "min_us": 35.417,
+            "p50_us": 42.791,
+            "p95_us": 45.458,
+            "samples": 3
+          },
+          "random_values": 1,
+          "sizes": {
+            "omit_runtime": false,
+            "parallel_pools": {},
+            "serialized_native_bytes": 12456600,
+            "wasm_sha256": "5d801146f35394541b8267617b02c02f151fabbc3fcb14a9afe019aa82ff44ab",
+            "workflow_logic_wasm_bytes": 59320,
+            "workflow_wasm_bytes": 3306423,
+            "workflow_wasm_gzip_bytes": 847980
+          },
+          "track_events": false
+        },
+        {
+          "cached_full_run": {
+            "max_us": 461.91700000000003,
+            "min_us": 165.834,
+            "p50_us": 188.375,
+            "p95_us": 301.958,
+            "samples": 100
+          },
+          "captured_runtime_messages_last_sample": 5,
+          "checkpoint_count": 0,
+          "child_graph": null,
+          "compose": {
+            "max_us": 29719.208,
+            "min_us": 28779.458000000002,
+            "p50_us": 29101.833000000002,
+            "p95_us": 29719.208,
+            "samples": 3
+          },
+          "durable_cached_result_replay": null,
+          "graph": {
+            "durable": false,
+            "entryPoint": "r0",
+            "executionPlan": [
+              {
+                "fromStep": "r0",
+                "toStep": "finish"
+              }
+            ],
+            "name": "Random baseline",
+            "steps": {
+              "finish": {
+                "id": "finish",
+                "inputMapping": {
+                  "r0": {
+                    "value": "steps.r0.outputs",
+                    "valueType": "reference"
+                  }
+                },
+                "stepType": "Finish"
+              },
+              "r0": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r0",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              }
+            },
+            "variables": {}
+          },
+          "graph_sha256": "bf2f88576578f13ffc96f2c3f31e06477ba9ceee285e8d733c2fa43d011c20f4",
+          "input_bytes": 26,
+          "input_sha256": "26ce61ef90782351aa134109ad745a43970cc4e57da28b6c988b31ee3bb9be5b",
+          "json_to_first_completed_run": {
+            "max_us": 245913.95799999998,
+            "min_us": 230417.667,
+            "p50_us": 241138.167,
+            "p95_us": 245913.95799999998,
+            "samples": 3
+          },
+          "json_to_wasm": {
+            "max_us": 33357.917,
+            "min_us": 32569.167,
+            "p50_us": 32770.75,
+            "p95_us": 33357.917,
+            "samples": 3
+          },
+          "largest_guest_memory_bytes": 1310720,
+          "name": "random_1_events",
+          "native_compile": {
+            "max_us": 211818.41700000002,
+            "min_us": 196459.209,
+            "p50_us": 206468.875,
+            "p95_us": 211818.41700000002,
+            "samples": 3
+          },
+          "output_bytes_last_sample": 25,
+          "parse_and_emit": {
+            "max_us": 3789.542,
+            "min_us": 3638.4579999999996,
+            "p50_us": 3668.042,
+            "p95_us": 3789.542,
+            "samples": 3
+          },
+          "prepare_link": {
+            "max_us": 42.792,
+            "min_us": 32.916999999999994,
+            "p50_us": 33.166000000000004,
+            "p95_us": 42.792,
+            "samples": 3
+          },
+          "random_values": 1,
+          "sizes": {
+            "omit_runtime": false,
+            "parallel_pools": {},
+            "serialized_native_bytes": 12456600,
+            "wasm_sha256": "664634a5070302943aaca57ede4d2f2fae95672138d289b023c49a36d675b4bc",
+            "workflow_logic_wasm_bytes": 61173,
+            "workflow_wasm_bytes": 3308276,
+            "workflow_wasm_gzip_bytes": 848021
+          },
+          "track_events": true
+        },
+        {
+          "cached_full_run": {
+            "max_us": 701.125,
+            "min_us": 452.08299999999997,
+            "p50_us": 490.166,
+            "p95_us": 618.125,
+            "samples": 100
+          },
+          "captured_runtime_messages_last_sample": 1,
+          "checkpoint_count": 0,
+          "child_graph": null,
+          "compose": {
+            "max_us": 32098.083,
+            "min_us": 29193.791,
+            "p50_us": 29580.790999999997,
+            "p95_us": 32098.083,
+            "samples": 3
+          },
+          "durable_cached_result_replay": null,
+          "graph": {
+            "durable": false,
+            "entryPoint": "r0",
+            "executionPlan": [
+              {
+                "fromStep": "r0",
+                "toStep": "r1"
+              },
+              {
+                "fromStep": "r1",
+                "toStep": "r2"
+              },
+              {
+                "fromStep": "r2",
+                "toStep": "r3"
+              },
+              {
+                "fromStep": "r3",
+                "toStep": "r4"
+              },
+              {
+                "fromStep": "r4",
+                "toStep": "r5"
+              },
+              {
+                "fromStep": "r5",
+                "toStep": "r6"
+              },
+              {
+                "fromStep": "r6",
+                "toStep": "r7"
+              },
+              {
+                "fromStep": "r7",
+                "toStep": "r8"
+              },
+              {
+                "fromStep": "r8",
+                "toStep": "r9"
+              },
+              {
+                "fromStep": "r9",
+                "toStep": "finish"
+              }
+            ],
+            "name": "Random baseline",
+            "steps": {
+              "finish": {
+                "id": "finish",
+                "inputMapping": {
+                  "r0": {
+                    "value": "steps.r0.outputs",
+                    "valueType": "reference"
+                  },
+                  "r1": {
+                    "value": "steps.r1.outputs",
+                    "valueType": "reference"
+                  },
+                  "r2": {
+                    "value": "steps.r2.outputs",
+                    "valueType": "reference"
+                  },
+                  "r3": {
+                    "value": "steps.r3.outputs",
+                    "valueType": "reference"
+                  },
+                  "r4": {
+                    "value": "steps.r4.outputs",
+                    "valueType": "reference"
+                  },
+                  "r5": {
+                    "value": "steps.r5.outputs",
+                    "valueType": "reference"
+                  },
+                  "r6": {
+                    "value": "steps.r6.outputs",
+                    "valueType": "reference"
+                  },
+                  "r7": {
+                    "value": "steps.r7.outputs",
+                    "valueType": "reference"
+                  },
+                  "r8": {
+                    "value": "steps.r8.outputs",
+                    "valueType": "reference"
+                  },
+                  "r9": {
+                    "value": "steps.r9.outputs",
+                    "valueType": "reference"
+                  }
+                },
+                "stepType": "Finish"
+              },
+              "r0": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r0",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r1": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r1",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r2": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r2",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r3": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r3",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r4": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r4",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r5": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r5",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r6": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r6",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r7": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r7",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r8": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r8",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r9": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r9",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              }
+            },
+            "variables": {}
+          },
+          "graph_sha256": "de0deca8c48a6454a6d3089a93b476a2cf73d05adb2160c4aaa32245569af32b",
+          "input_bytes": 26,
+          "input_sha256": "26ce61ef90782351aa134109ad745a43970cc4e57da28b6c988b31ee3bb9be5b",
+          "json_to_first_completed_run": {
+            "max_us": 267864.75,
+            "min_us": 235060.291,
+            "p50_us": 251404.583,
+            "p95_us": 267864.75,
+            "samples": 3
+          },
+          "json_to_wasm": {
+            "max_us": 36214.75,
+            "min_us": 32994.958,
+            "p50_us": 33536.333,
+            "p95_us": 36214.75,
+            "samples": 3
+          },
+          "largest_guest_memory_bytes": 1310720,
+          "name": "random_chain_10",
+          "native_compile": {
+            "max_us": 230212.125,
+            "min_us": 200457.5,
+            "p50_us": 216120.625,
+            "p95_us": 230212.125,
+            "samples": 3
+          },
+          "output_bytes_last_sample": 244,
+          "parse_and_emit": {
+            "max_us": 4114.916,
+            "min_us": 3801.0409999999997,
+            "p50_us": 3955.2909999999997,
+            "p95_us": 4114.916,
+            "samples": 3
+          },
+          "prepare_link": {
+            "max_us": 37.791,
+            "min_us": 34.291000000000004,
+            "p50_us": 34.583,
+            "p95_us": 37.791,
+            "samples": 3
+          },
+          "random_values": 10,
+          "sizes": {
+            "omit_runtime": false,
+            "parallel_pools": {},
+            "serialized_native_bytes": 12489368,
+            "wasm_sha256": "3d306bede946a8457adcaa1c775d5af9ca4f3f121c36831881bfdb9e57aac505",
+            "workflow_logic_wasm_bytes": 77700,
+            "workflow_wasm_bytes": 3324803,
+            "workflow_wasm_gzip_bytes": 849099
+          },
+          "track_events": false
+        },
+        {
+          "cached_full_run": {
+            "max_us": 21199.625,
+            "min_us": 19596.708000000002,
+            "p50_us": 20129.0,
+            "p95_us": 20762.458000000002,
+            "samples": 30
+          },
+          "captured_runtime_messages_last_sample": 1,
+          "checkpoint_count": 0,
+          "child_graph": null,
+          "compose": {
+            "max_us": 30699.416,
+            "min_us": 29631.833,
+            "p50_us": 29866.375,
+            "p95_us": 30699.416,
+            "samples": 3
+          },
+          "durable_cached_result_replay": null,
+          "graph": {
+            "durable": false,
+            "entryPoint": "r0",
+            "executionPlan": [
+              {
+                "fromStep": "r0",
+                "toStep": "r1"
+              },
+              {
+                "fromStep": "r1",
+                "toStep": "r2"
+              },
+              {
+                "fromStep": "r2",
+                "toStep": "r3"
+              },
+              {
+                "fromStep": "r3",
+                "toStep": "r4"
+              },
+              {
+                "fromStep": "r4",
+                "toStep": "r5"
+              },
+              {
+                "fromStep": "r5",
+                "toStep": "r6"
+              },
+              {
+                "fromStep": "r6",
+                "toStep": "r7"
+              },
+              {
+                "fromStep": "r7",
+                "toStep": "r8"
+              },
+              {
+                "fromStep": "r8",
+                "toStep": "r9"
+              },
+              {
+                "fromStep": "r9",
+                "toStep": "r10"
+              },
+              {
+                "fromStep": "r10",
+                "toStep": "r11"
+              },
+              {
+                "fromStep": "r11",
+                "toStep": "r12"
+              },
+              {
+                "fromStep": "r12",
+                "toStep": "r13"
+              },
+              {
+                "fromStep": "r13",
+                "toStep": "r14"
+              },
+              {
+                "fromStep": "r14",
+                "toStep": "r15"
+              },
+              {
+                "fromStep": "r15",
+                "toStep": "r16"
+              },
+              {
+                "fromStep": "r16",
+                "toStep": "r17"
+              },
+              {
+                "fromStep": "r17",
+                "toStep": "r18"
+              },
+              {
+                "fromStep": "r18",
+                "toStep": "r19"
+              },
+              {
+                "fromStep": "r19",
+                "toStep": "r20"
+              },
+              {
+                "fromStep": "r20",
+                "toStep": "r21"
+              },
+              {
+                "fromStep": "r21",
+                "toStep": "r22"
+              },
+              {
+                "fromStep": "r22",
+                "toStep": "r23"
+              },
+              {
+                "fromStep": "r23",
+                "toStep": "r24"
+              },
+              {
+                "fromStep": "r24",
+                "toStep": "r25"
+              },
+              {
+                "fromStep": "r25",
+                "toStep": "r26"
+              },
+              {
+                "fromStep": "r26",
+                "toStep": "r27"
+              },
+              {
+                "fromStep": "r27",
+                "toStep": "r28"
+              },
+              {
+                "fromStep": "r28",
+                "toStep": "r29"
+              },
+              {
+                "fromStep": "r29",
+                "toStep": "r30"
+              },
+              {
+                "fromStep": "r30",
+                "toStep": "r31"
+              },
+              {
+                "fromStep": "r31",
+                "toStep": "r32"
+              },
+              {
+                "fromStep": "r32",
+                "toStep": "r33"
+              },
+              {
+                "fromStep": "r33",
+                "toStep": "r34"
+              },
+              {
+                "fromStep": "r34",
+                "toStep": "r35"
+              },
+              {
+                "fromStep": "r35",
+                "toStep": "r36"
+              },
+              {
+                "fromStep": "r36",
+                "toStep": "r37"
+              },
+              {
+                "fromStep": "r37",
+                "toStep": "r38"
+              },
+              {
+                "fromStep": "r38",
+                "toStep": "r39"
+              },
+              {
+                "fromStep": "r39",
+                "toStep": "r40"
+              },
+              {
+                "fromStep": "r40",
+                "toStep": "r41"
+              },
+              {
+                "fromStep": "r41",
+                "toStep": "r42"
+              },
+              {
+                "fromStep": "r42",
+                "toStep": "r43"
+              },
+              {
+                "fromStep": "r43",
+                "toStep": "r44"
+              },
+              {
+                "fromStep": "r44",
+                "toStep": "r45"
+              },
+              {
+                "fromStep": "r45",
+                "toStep": "r46"
+              },
+              {
+                "fromStep": "r46",
+                "toStep": "r47"
+              },
+              {
+                "fromStep": "r47",
+                "toStep": "r48"
+              },
+              {
+                "fromStep": "r48",
+                "toStep": "r49"
+              },
+              {
+                "fromStep": "r49",
+                "toStep": "r50"
+              },
+              {
+                "fromStep": "r50",
+                "toStep": "r51"
+              },
+              {
+                "fromStep": "r51",
+                "toStep": "r52"
+              },
+              {
+                "fromStep": "r52",
+                "toStep": "r53"
+              },
+              {
+                "fromStep": "r53",
+                "toStep": "r54"
+              },
+              {
+                "fromStep": "r54",
+                "toStep": "r55"
+              },
+              {
+                "fromStep": "r55",
+                "toStep": "r56"
+              },
+              {
+                "fromStep": "r56",
+                "toStep": "r57"
+              },
+              {
+                "fromStep": "r57",
+                "toStep": "r58"
+              },
+              {
+                "fromStep": "r58",
+                "toStep": "r59"
+              },
+              {
+                "fromStep": "r59",
+                "toStep": "r60"
+              },
+              {
+                "fromStep": "r60",
+                "toStep": "r61"
+              },
+              {
+                "fromStep": "r61",
+                "toStep": "r62"
+              },
+              {
+                "fromStep": "r62",
+                "toStep": "r63"
+              },
+              {
+                "fromStep": "r63",
+                "toStep": "r64"
+              },
+              {
+                "fromStep": "r64",
+                "toStep": "r65"
+              },
+              {
+                "fromStep": "r65",
+                "toStep": "r66"
+              },
+              {
+                "fromStep": "r66",
+                "toStep": "r67"
+              },
+              {
+                "fromStep": "r67",
+                "toStep": "r68"
+              },
+              {
+                "fromStep": "r68",
+                "toStep": "r69"
+              },
+              {
+                "fromStep": "r69",
+                "toStep": "r70"
+              },
+              {
+                "fromStep": "r70",
+                "toStep": "r71"
+              },
+              {
+                "fromStep": "r71",
+                "toStep": "r72"
+              },
+              {
+                "fromStep": "r72",
+                "toStep": "r73"
+              },
+              {
+                "fromStep": "r73",
+                "toStep": "r74"
+              },
+              {
+                "fromStep": "r74",
+                "toStep": "r75"
+              },
+              {
+                "fromStep": "r75",
+                "toStep": "r76"
+              },
+              {
+                "fromStep": "r76",
+                "toStep": "r77"
+              },
+              {
+                "fromStep": "r77",
+                "toStep": "r78"
+              },
+              {
+                "fromStep": "r78",
+                "toStep": "r79"
+              },
+              {
+                "fromStep": "r79",
+                "toStep": "r80"
+              },
+              {
+                "fromStep": "r80",
+                "toStep": "r81"
+              },
+              {
+                "fromStep": "r81",
+                "toStep": "r82"
+              },
+              {
+                "fromStep": "r82",
+                "toStep": "r83"
+              },
+              {
+                "fromStep": "r83",
+                "toStep": "r84"
+              },
+              {
+                "fromStep": "r84",
+                "toStep": "r85"
+              },
+              {
+                "fromStep": "r85",
+                "toStep": "r86"
+              },
+              {
+                "fromStep": "r86",
+                "toStep": "r87"
+              },
+              {
+                "fromStep": "r87",
+                "toStep": "r88"
+              },
+              {
+                "fromStep": "r88",
+                "toStep": "r89"
+              },
+              {
+                "fromStep": "r89",
+                "toStep": "r90"
+              },
+              {
+                "fromStep": "r90",
+                "toStep": "r91"
+              },
+              {
+                "fromStep": "r91",
+                "toStep": "r92"
+              },
+              {
+                "fromStep": "r92",
+                "toStep": "r93"
+              },
+              {
+                "fromStep": "r93",
+                "toStep": "r94"
+              },
+              {
+                "fromStep": "r94",
+                "toStep": "r95"
+              },
+              {
+                "fromStep": "r95",
+                "toStep": "r96"
+              },
+              {
+                "fromStep": "r96",
+                "toStep": "r97"
+              },
+              {
+                "fromStep": "r97",
+                "toStep": "r98"
+              },
+              {
+                "fromStep": "r98",
+                "toStep": "r99"
+              },
+              {
+                "fromStep": "r99",
+                "toStep": "finish"
+              }
+            ],
+            "name": "Random baseline",
+            "steps": {
+              "finish": {
+                "id": "finish",
+                "inputMapping": {
+                  "r0": {
+                    "value": "steps.r0.outputs",
+                    "valueType": "reference"
+                  },
+                  "r1": {
+                    "value": "steps.r1.outputs",
+                    "valueType": "reference"
+                  },
+                  "r10": {
+                    "value": "steps.r10.outputs",
+                    "valueType": "reference"
+                  },
+                  "r11": {
+                    "value": "steps.r11.outputs",
+                    "valueType": "reference"
+                  },
+                  "r12": {
+                    "value": "steps.r12.outputs",
+                    "valueType": "reference"
+                  },
+                  "r13": {
+                    "value": "steps.r13.outputs",
+                    "valueType": "reference"
+                  },
+                  "r14": {
+                    "value": "steps.r14.outputs",
+                    "valueType": "reference"
+                  },
+                  "r15": {
+                    "value": "steps.r15.outputs",
+                    "valueType": "reference"
+                  },
+                  "r16": {
+                    "value": "steps.r16.outputs",
+                    "valueType": "reference"
+                  },
+                  "r17": {
+                    "value": "steps.r17.outputs",
+                    "valueType": "reference"
+                  },
+                  "r18": {
+                    "value": "steps.r18.outputs",
+                    "valueType": "reference"
+                  },
+                  "r19": {
+                    "value": "steps.r19.outputs",
+                    "valueType": "reference"
+                  },
+                  "r2": {
+                    "value": "steps.r2.outputs",
+                    "valueType": "reference"
+                  },
+                  "r20": {
+                    "value": "steps.r20.outputs",
+                    "valueType": "reference"
+                  },
+                  "r21": {
+                    "value": "steps.r21.outputs",
+                    "valueType": "reference"
+                  },
+                  "r22": {
+                    "value": "steps.r22.outputs",
+                    "valueType": "reference"
+                  },
+                  "r23": {
+                    "value": "steps.r23.outputs",
+                    "valueType": "reference"
+                  },
+                  "r24": {
+                    "value": "steps.r24.outputs",
+                    "valueType": "reference"
+                  },
+                  "r25": {
+                    "value": "steps.r25.outputs",
+                    "valueType": "reference"
+                  },
+                  "r26": {
+                    "value": "steps.r26.outputs",
+                    "valueType": "reference"
+                  },
+                  "r27": {
+                    "value": "steps.r27.outputs",
+                    "valueType": "reference"
+                  },
+                  "r28": {
+                    "value": "steps.r28.outputs",
+                    "valueType": "reference"
+                  },
+                  "r29": {
+                    "value": "steps.r29.outputs",
+                    "valueType": "reference"
+                  },
+                  "r3": {
+                    "value": "steps.r3.outputs",
+                    "valueType": "reference"
+                  },
+                  "r30": {
+                    "value": "steps.r30.outputs",
+                    "valueType": "reference"
+                  },
+                  "r31": {
+                    "value": "steps.r31.outputs",
+                    "valueType": "reference"
+                  },
+                  "r32": {
+                    "value": "steps.r32.outputs",
+                    "valueType": "reference"
+                  },
+                  "r33": {
+                    "value": "steps.r33.outputs",
+                    "valueType": "reference"
+                  },
+                  "r34": {
+                    "value": "steps.r34.outputs",
+                    "valueType": "reference"
+                  },
+                  "r35": {
+                    "value": "steps.r35.outputs",
+                    "valueType": "reference"
+                  },
+                  "r36": {
+                    "value": "steps.r36.outputs",
+                    "valueType": "reference"
+                  },
+                  "r37": {
+                    "value": "steps.r37.outputs",
+                    "valueType": "reference"
+                  },
+                  "r38": {
+                    "value": "steps.r38.outputs",
+                    "valueType": "reference"
+                  },
+                  "r39": {
+                    "value": "steps.r39.outputs",
+                    "valueType": "reference"
+                  },
+                  "r4": {
+                    "value": "steps.r4.outputs",
+                    "valueType": "reference"
+                  },
+                  "r40": {
+                    "value": "steps.r40.outputs",
+                    "valueType": "reference"
+                  },
+                  "r41": {
+                    "value": "steps.r41.outputs",
+                    "valueType": "reference"
+                  },
+                  "r42": {
+                    "value": "steps.r42.outputs",
+                    "valueType": "reference"
+                  },
+                  "r43": {
+                    "value": "steps.r43.outputs",
+                    "valueType": "reference"
+                  },
+                  "r44": {
+                    "value": "steps.r44.outputs",
+                    "valueType": "reference"
+                  },
+                  "r45": {
+                    "value": "steps.r45.outputs",
+                    "valueType": "reference"
+                  },
+                  "r46": {
+                    "value": "steps.r46.outputs",
+                    "valueType": "reference"
+                  },
+                  "r47": {
+                    "value": "steps.r47.outputs",
+                    "valueType": "reference"
+                  },
+                  "r48": {
+                    "value": "steps.r48.outputs",
+                    "valueType": "reference"
+                  },
+                  "r49": {
+                    "value": "steps.r49.outputs",
+                    "valueType": "reference"
+                  },
+                  "r5": {
+                    "value": "steps.r5.outputs",
+                    "valueType": "reference"
+                  },
+                  "r50": {
+                    "value": "steps.r50.outputs",
+                    "valueType": "reference"
+                  },
+                  "r51": {
+                    "value": "steps.r51.outputs",
+                    "valueType": "reference"
+                  },
+                  "r52": {
+                    "value": "steps.r52.outputs",
+                    "valueType": "reference"
+                  },
+                  "r53": {
+                    "value": "steps.r53.outputs",
+                    "valueType": "reference"
+                  },
+                  "r54": {
+                    "value": "steps.r54.outputs",
+                    "valueType": "reference"
+                  },
+                  "r55": {
+                    "value": "steps.r55.outputs",
+                    "valueType": "reference"
+                  },
+                  "r56": {
+                    "value": "steps.r56.outputs",
+                    "valueType": "reference"
+                  },
+                  "r57": {
+                    "value": "steps.r57.outputs",
+                    "valueType": "reference"
+                  },
+                  "r58": {
+                    "value": "steps.r58.outputs",
+                    "valueType": "reference"
+                  },
+                  "r59": {
+                    "value": "steps.r59.outputs",
+                    "valueType": "reference"
+                  },
+                  "r6": {
+                    "value": "steps.r6.outputs",
+                    "valueType": "reference"
+                  },
+                  "r60": {
+                    "value": "steps.r60.outputs",
+                    "valueType": "reference"
+                  },
+                  "r61": {
+                    "value": "steps.r61.outputs",
+                    "valueType": "reference"
+                  },
+                  "r62": {
+                    "value": "steps.r62.outputs",
+                    "valueType": "reference"
+                  },
+                  "r63": {
+                    "value": "steps.r63.outputs",
+                    "valueType": "reference"
+                  },
+                  "r64": {
+                    "value": "steps.r64.outputs",
+                    "valueType": "reference"
+                  },
+                  "r65": {
+                    "value": "steps.r65.outputs",
+                    "valueType": "reference"
+                  },
+                  "r66": {
+                    "value": "steps.r66.outputs",
+                    "valueType": "reference"
+                  },
+                  "r67": {
+                    "value": "steps.r67.outputs",
+                    "valueType": "reference"
+                  },
+                  "r68": {
+                    "value": "steps.r68.outputs",
+                    "valueType": "reference"
+                  },
+                  "r69": {
+                    "value": "steps.r69.outputs",
+                    "valueType": "reference"
+                  },
+                  "r7": {
+                    "value": "steps.r7.outputs",
+                    "valueType": "reference"
+                  },
+                  "r70": {
+                    "value": "steps.r70.outputs",
+                    "valueType": "reference"
+                  },
+                  "r71": {
+                    "value": "steps.r71.outputs",
+                    "valueType": "reference"
+                  },
+                  "r72": {
+                    "value": "steps.r72.outputs",
+                    "valueType": "reference"
+                  },
+                  "r73": {
+                    "value": "steps.r73.outputs",
+                    "valueType": "reference"
+                  },
+                  "r74": {
+                    "value": "steps.r74.outputs",
+                    "valueType": "reference"
+                  },
+                  "r75": {
+                    "value": "steps.r75.outputs",
+                    "valueType": "reference"
+                  },
+                  "r76": {
+                    "value": "steps.r76.outputs",
+                    "valueType": "reference"
+                  },
+                  "r77": {
+                    "value": "steps.r77.outputs",
+                    "valueType": "reference"
+                  },
+                  "r78": {
+                    "value": "steps.r78.outputs",
+                    "valueType": "reference"
+                  },
+                  "r79": {
+                    "value": "steps.r79.outputs",
+                    "valueType": "reference"
+                  },
+                  "r8": {
+                    "value": "steps.r8.outputs",
+                    "valueType": "reference"
+                  },
+                  "r80": {
+                    "value": "steps.r80.outputs",
+                    "valueType": "reference"
+                  },
+                  "r81": {
+                    "value": "steps.r81.outputs",
+                    "valueType": "reference"
+                  },
+                  "r82": {
+                    "value": "steps.r82.outputs",
+                    "valueType": "reference"
+                  },
+                  "r83": {
+                    "value": "steps.r83.outputs",
+                    "valueType": "reference"
+                  },
+                  "r84": {
+                    "value": "steps.r84.outputs",
+                    "valueType": "reference"
+                  },
+                  "r85": {
+                    "value": "steps.r85.outputs",
+                    "valueType": "reference"
+                  },
+                  "r86": {
+                    "value": "steps.r86.outputs",
+                    "valueType": "reference"
+                  },
+                  "r87": {
+                    "value": "steps.r87.outputs",
+                    "valueType": "reference"
+                  },
+                  "r88": {
+                    "value": "steps.r88.outputs",
+                    "valueType": "reference"
+                  },
+                  "r89": {
+                    "value": "steps.r89.outputs",
+                    "valueType": "reference"
+                  },
+                  "r9": {
+                    "value": "steps.r9.outputs",
+                    "valueType": "reference"
+                  },
+                  "r90": {
+                    "value": "steps.r90.outputs",
+                    "valueType": "reference"
+                  },
+                  "r91": {
+                    "value": "steps.r91.outputs",
+                    "valueType": "reference"
+                  },
+                  "r92": {
+                    "value": "steps.r92.outputs",
+                    "valueType": "reference"
+                  },
+                  "r93": {
+                    "value": "steps.r93.outputs",
+                    "valueType": "reference"
+                  },
+                  "r94": {
+                    "value": "steps.r94.outputs",
+                    "valueType": "reference"
+                  },
+                  "r95": {
+                    "value": "steps.r95.outputs",
+                    "valueType": "reference"
+                  },
+                  "r96": {
+                    "value": "steps.r96.outputs",
+                    "valueType": "reference"
+                  },
+                  "r97": {
+                    "value": "steps.r97.outputs",
+                    "valueType": "reference"
+                  },
+                  "r98": {
+                    "value": "steps.r98.outputs",
+                    "valueType": "reference"
+                  },
+                  "r99": {
+                    "value": "steps.r99.outputs",
+                    "valueType": "reference"
+                  }
+                },
+                "stepType": "Finish"
+              },
+              "r0": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r0",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r1": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r1",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r10": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r10",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r11": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r11",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r12": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r12",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r13": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r13",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r14": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r14",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r15": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r15",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r16": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r16",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r17": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r17",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r18": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r18",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r19": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r19",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r2": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r2",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r20": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r20",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r21": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r21",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r22": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r22",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r23": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r23",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r24": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r24",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r25": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r25",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r26": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r26",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r27": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r27",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r28": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r28",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r29": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r29",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r3": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r3",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r30": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r30",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r31": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r31",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r32": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r32",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r33": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r33",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r34": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r34",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r35": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r35",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r36": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r36",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r37": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r37",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r38": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r38",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r39": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r39",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r4": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r4",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r40": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r40",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r41": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r41",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r42": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r42",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r43": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r43",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r44": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r44",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r45": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r45",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r46": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r46",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r47": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r47",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r48": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r48",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r49": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r49",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r5": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r5",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r50": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r50",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r51": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r51",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r52": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r52",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r53": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r53",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r54": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r54",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r55": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r55",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r56": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r56",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r57": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r57",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r58": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r58",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r59": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r59",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r6": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r6",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r60": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r60",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r61": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r61",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r62": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r62",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r63": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r63",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r64": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r64",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r65": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r65",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r66": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r66",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r67": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r67",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r68": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r68",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r69": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r69",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r7": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r7",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r70": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r70",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r71": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r71",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r72": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r72",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r73": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r73",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r74": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r74",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r75": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r75",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r76": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r76",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r77": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r77",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r78": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r78",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r79": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r79",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r8": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r8",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r80": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r80",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r81": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r81",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r82": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r82",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r83": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r83",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r84": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r84",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r85": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r85",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r86": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r86",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r87": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r87",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r88": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r88",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r89": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r89",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r9": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r9",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r90": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r90",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r91": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r91",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r92": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r92",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r93": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r93",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r94": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r94",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r95": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r95",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r96": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r96",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r97": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r97",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r98": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r98",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r99": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r99",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              }
+            },
+            "variables": {}
+          },
+          "graph_sha256": "23361a0031cba924bfc59fc214ff57625c4d41cf8472e41156a1d6c764afbbf3",
+          "input_bytes": 26,
+          "input_sha256": "26ce61ef90782351aa134109ad745a43970cc4e57da28b6c988b31ee3bb9be5b",
+          "json_to_first_completed_run": {
+            "max_us": 267967.958,
+            "min_us": 251415.542,
+            "p50_us": 255258.167,
+            "p95_us": 267967.958,
+            "samples": 3
+          },
+          "json_to_wasm": {
+            "max_us": 37709.791,
+            "min_us": 35970.416999999994,
+            "p50_us": 36364.792,
+            "p95_us": 37709.791,
+            "samples": 3
+          },
+          "largest_guest_memory_bytes": 1769472,
+          "name": "random_chain_100",
+          "native_compile": {
+            "max_us": 208561.708,
+            "min_us": 193670.208,
+            "p50_us": 198214.917,
+            "p95_us": 208561.708,
+            "samples": 3
+          },
+          "output_bytes_last_sample": 2501,
+          "parse_and_emit": {
+            "max_us": 7009.5419999999995,
+            "min_us": 6338.5,
+            "p50_us": 6498.375,
+            "p95_us": 7009.5419999999995,
+            "samples": 3
+          },
+          "prepare_link": {
+            "max_us": 43.541999999999994,
+            "min_us": 31.75,
+            "p50_us": 36.375,
+            "p95_us": 43.541999999999994,
+            "samples": 3
+          },
+          "random_values": 100,
+          "sizes": {
+            "omit_runtime": false,
+            "parallel_pools": {},
+            "serialized_native_bytes": 12964504,
+            "wasm_sha256": "bc34a1ac359b5b25d4bdab0f6a9b469b2bd4762a4d43f83f21acfb77e74808e3",
+            "workflow_logic_wasm_bytes": 268545,
+            "workflow_wasm_bytes": 3515648,
+            "workflow_wasm_gzip_bytes": 860233
+          },
+          "track_events": false
+        },
+        {
+          "cached_full_run": {
+            "max_us": 11443.333999999999,
+            "min_us": 10005.458,
+            "p50_us": 10499.332999999999,
+            "p95_us": 11090.457999999999,
+            "samples": 30
+          },
+          "captured_runtime_messages_last_sample": 1,
+          "checkpoint_count": 0,
+          "child_graph": null,
+          "compose": {
+            "max_us": 29929.833,
+            "min_us": 28938.541,
+            "p50_us": 29512.459000000003,
+            "p95_us": 29929.833,
+            "samples": 3
+          },
+          "durable_cached_result_replay": null,
+          "graph": {
+            "durable": false,
+            "entryPoint": "split",
+            "executionPlan": [
+              {
+                "fromStep": "split",
+                "toStep": "finish"
+              }
+            ],
+            "inputSchema": {
+              "items": {
+                "required": true,
+                "type": "array"
+              }
+            },
+            "name": "random_split_100_sequential",
+            "steps": {
+              "finish": {
+                "id": "finish",
+                "inputMapping": {
+                  "results": {
+                    "value": "steps.split.outputs",
+                    "valueType": "reference"
+                  }
+                },
+                "stepType": "Finish"
+              },
+              "split": {
+                "config": {
+                  "parallelism": 1,
+                  "sequential": true,
+                  "value": {
+                    "value": "data.items",
+                    "valueType": "reference"
+                  }
+                },
+                "id": "split",
+                "stepType": "Split",
+                "subgraph": {
+                  "durable": false,
+                  "entryPoint": "r0",
+                  "executionPlan": [
+                    {
+                      "fromStep": "r0",
+                      "toStep": "finish"
+                    }
+                  ],
+                  "name": "Random baseline",
+                  "steps": {
+                    "finish": {
+                      "id": "finish",
+                      "inputMapping": {
+                        "r0": {
+                          "value": "steps.r0.outputs",
+                          "valueType": "reference"
+                        }
+                      },
+                      "stepType": "Finish"
+                    },
+                    "r0": {
+                      "agentId": "utils",
+                      "capabilityId": "random-double",
+                      "id": "r0",
+                      "inputMapping": {},
+                      "maxRetries": 0,
+                      "stepType": "Agent"
+                    }
+                  },
+                  "variables": {}
+                }
+              }
+            }
+          },
+          "graph_sha256": "1e3fe932a53bb3150588c8d467247d4944b0b922c81e25ced5ce0c2702919c9f",
+          "input_bytes": 235,
+          "input_sha256": "4e5246437d0d50477b3cafd271594c6463f5bce5263bfe38b01a6be528d3484b",
+          "json_to_first_completed_run": {
+            "max_us": 248526.167,
+            "min_us": 239532.5,
+            "p50_us": 244521.25,
+            "p95_us": 248526.167,
+            "samples": 3
+          },
+          "json_to_wasm": {
+            "max_us": 34199.833,
+            "min_us": 32979.292,
+            "p50_us": 32984.125,
+            "p95_us": 34199.833,
+            "samples": 3
+          },
+          "largest_guest_memory_bytes": 1310720,
+          "name": "random_split_100_sequential",
+          "native_compile": {
+            "max_us": 204034.58299999998,
+            "min_us": 194951.83299999998,
+            "p50_us": 198887.16700000002,
+            "p95_us": 204034.58299999998,
+            "samples": 3
+          },
+          "output_bytes_last_sample": 2634,
+          "parse_and_emit": {
+            "max_us": 4269.125,
+            "min_us": 3471.5,
+            "p50_us": 4040.625,
+            "p95_us": 4269.125,
+            "samples": 3
+          },
+          "prepare_link": {
+            "max_us": 37.875,
+            "min_us": 30.5,
+            "p50_us": 37.208,
+            "p95_us": 37.875,
+            "samples": 3
+          },
+          "random_values": 100,
+          "sizes": {
+            "omit_runtime": false,
+            "parallel_pools": {},
+            "serialized_native_bytes": 12456600,
+            "wasm_sha256": "fadb66df2dd76c428732427e469b89a6a9f594cec3fa8609cab8311d769aa83f",
+            "workflow_logic_wasm_bytes": 63600,
+            "workflow_wasm_bytes": 3310703,
+            "workflow_wasm_gzip_bytes": 848716
+          },
+          "track_events": false
+        },
+        {
+          "cached_full_run": {
+            "max_us": 13457.25,
+            "min_us": 12151.583,
+            "p50_us": 12453.666000000001,
+            "p95_us": 12953.707999999999,
+            "samples": 30
+          },
+          "captured_runtime_messages_last_sample": 1,
+          "checkpoint_count": 0,
+          "child_graph": null,
+          "compose": {
+            "max_us": 30342.291,
+            "min_us": 29113.458,
+            "p50_us": 29558.916,
+            "p95_us": 30342.291,
+            "samples": 3
+          },
+          "durable_cached_result_replay": null,
+          "graph": {
+            "durable": false,
+            "entryPoint": "split",
+            "executionPlan": [
+              {
+                "fromStep": "split",
+                "toStep": "finish"
+              }
+            ],
+            "inputSchema": {
+              "items": {
+                "required": true,
+                "type": "array"
+              }
+            },
+            "name": "random_split_100_parallel4",
+            "steps": {
+              "finish": {
+                "id": "finish",
+                "inputMapping": {
+                  "results": {
+                    "value": "steps.split.outputs",
+                    "valueType": "reference"
+                  }
+                },
+                "stepType": "Finish"
+              },
+              "split": {
+                "config": {
+                  "parallelism": 4,
+                  "sequential": false,
+                  "value": {
+                    "value": "data.items",
+                    "valueType": "reference"
+                  }
+                },
+                "id": "split",
+                "stepType": "Split",
+                "subgraph": {
+                  "durable": false,
+                  "entryPoint": "r0",
+                  "executionPlan": [
+                    {
+                      "fromStep": "r0",
+                      "toStep": "finish"
+                    }
+                  ],
+                  "name": "Random baseline",
+                  "steps": {
+                    "finish": {
+                      "id": "finish",
+                      "inputMapping": {
+                        "r0": {
+                          "value": "steps.r0.outputs",
+                          "valueType": "reference"
+                        }
+                      },
+                      "stepType": "Finish"
+                    },
+                    "r0": {
+                      "agentId": "utils",
+                      "capabilityId": "random-double",
+                      "id": "r0",
+                      "inputMapping": {},
+                      "maxRetries": 0,
+                      "stepType": "Agent"
+                    }
+                  },
+                  "variables": {}
+                }
+              }
+            }
+          },
+          "graph_sha256": "141d0abce5e2020b5addfdc6c4e941c4ef24c5fff47d215a81eed3dda48b5181",
+          "input_bytes": 235,
+          "input_sha256": "4e5246437d0d50477b3cafd271594c6463f5bce5263bfe38b01a6be528d3484b",
+          "json_to_first_completed_run": {
+            "max_us": 244518.834,
+            "min_us": 242988.45799999998,
+            "p50_us": 243785.458,
+            "p95_us": 244518.834,
+            "samples": 3
+          },
+          "json_to_wasm": {
+            "max_us": 34424.125,
+            "min_us": 32986.916999999994,
+            "p50_us": 33229.208000000006,
+            "p95_us": 34424.125,
+            "samples": 3
+          },
+          "largest_guest_memory_bytes": 1310720,
+          "name": "random_split_100_parallel4",
+          "native_compile": {
+            "max_us": 197744.709,
+            "min_us": 195858.5,
+            "p50_us": 195974.292,
+            "p95_us": 197744.709,
+            "samples": 3
+          },
+          "output_bytes_last_sample": 2629,
+          "parse_and_emit": {
+            "max_us": 4080.833,
+            "min_us": 3670.208,
+            "p50_us": 3873.292,
+            "p95_us": 4080.833,
+            "samples": 3
+          },
+          "prepare_link": {
+            "max_us": 35.75,
+            "min_us": 32.417,
+            "p50_us": 33.75,
+            "p95_us": 35.75,
+            "samples": 3
+          },
+          "random_values": 100,
+          "sizes": {
+            "omit_runtime": false,
+            "parallel_pools": {
+              "utils": 4
+            },
+            "serialized_native_bytes": 12615512,
+            "wasm_sha256": "7af42acc4a5737e35aa255284e712159c5835f7c573e61b60bb55351b1ec151e",
+            "workflow_logic_wasm_bytes": 69523,
+            "workflow_wasm_bytes": 3318568,
+            "workflow_wasm_gzip_bytes": 850186
+          },
+          "track_events": false
+        },
+        {
+          "cached_full_run": {
+            "max_us": 501.584,
+            "min_us": 182.583,
+            "p50_us": 207.083,
+            "p95_us": 296.375,
+            "samples": 100
+          },
+          "captured_runtime_messages_last_sample": 1,
+          "checkpoint_count": 0,
+          "child_graph": {
+            "durable": false,
+            "entryPoint": "r0",
+            "executionPlan": [
+              {
+                "fromStep": "r0",
+                "toStep": "finish"
+              }
+            ],
+            "name": "Random baseline",
+            "steps": {
+              "finish": {
+                "id": "finish",
+                "inputMapping": {
+                  "r0": {
+                    "value": "steps.r0.outputs",
+                    "valueType": "reference"
+                  }
+                },
+                "stepType": "Finish"
+              },
+              "r0": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r0",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              }
+            },
+            "variables": {}
+          },
+          "compose": {
+            "max_us": 29363.666,
+            "min_us": 28964.208000000002,
+            "p50_us": 29326.083,
+            "p95_us": 29363.666,
+            "samples": 3
+          },
+          "durable_cached_result_replay": null,
+          "graph": {
+            "durable": false,
+            "entryPoint": "child",
+            "executionPlan": [
+              {
+                "fromStep": "child",
+                "toStep": "finish"
+              }
+            ],
+            "name": "Embed baseline",
+            "steps": {
+              "child": {
+                "childVersion": 1,
+                "childWorkflowId": "random-child",
+                "id": "child",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "EmbedWorkflow"
+              },
+              "finish": {
+                "id": "finish",
+                "inputMapping": {
+                  "result": {
+                    "value": "steps.child.outputs",
+                    "valueType": "reference"
+                  }
+                },
+                "stepType": "Finish"
+              }
+            }
+          },
+          "graph_sha256": "8784b666d5e0ed68fef861899ae1dfc3c73359297802bf8137dcb4cdaa81d0b2",
+          "input_bytes": 26,
+          "input_sha256": "26ce61ef90782351aa134109ad745a43970cc4e57da28b6c988b31ee3bb9be5b",
+          "json_to_first_completed_run": {
+            "max_us": 237030.959,
+            "min_us": 221080.5,
+            "p50_us": 227945.75,
+            "p95_us": 237030.959,
+            "samples": 3
+          },
+          "json_to_wasm": {
+            "max_us": 33095.917,
+            "min_us": 32775.791,
+            "p50_us": 32786.25,
+            "p95_us": 33095.917,
+            "samples": 3
+          },
+          "largest_guest_memory_bytes": 1310720,
+          "name": "random_embed_1",
+          "native_compile": {
+            "max_us": 202622.708,
+            "min_us": 186995.875,
+            "p50_us": 193949.583,
+            "p95_us": 202622.708,
+            "samples": 3
+          },
+          "output_bytes_last_sample": 37,
+          "parse_and_emit": {
+            "max_us": 3822.0,
+            "min_us": 3412.041,
+            "p50_us": 3769.042,
+            "p95_us": 3822.0,
+            "samples": 3
+          },
+          "prepare_link": {
+            "max_us": 41.125,
+            "min_us": 34.583,
+            "p50_us": 39.292,
+            "p95_us": 41.125,
+            "samples": 3
+          },
+          "random_values": 1,
+          "sizes": {
+            "omit_runtime": false,
+            "parallel_pools": {},
+            "serialized_native_bytes": 12456600,
+            "wasm_sha256": "c4314af457586454fd742d7d5960a14a700447076250ba3cd71f2fbf46eec75e",
+            "workflow_logic_wasm_bytes": 62372,
+            "workflow_wasm_bytes": 3309475,
+            "workflow_wasm_gzip_bytes": 848459
+          },
+          "track_events": false
+        },
+        {
+          "cached_full_run": {
+            "max_us": 121.417,
+            "min_us": 79.20899999999999,
+            "p50_us": 87.916,
+            "p95_us": 104.875,
+            "samples": 100
+          },
+          "captured_runtime_messages_last_sample": 1,
+          "checkpoint_count": 0,
+          "child_graph": null,
+          "compose": {
+            "max_us": 24815.708,
+            "min_us": 24616.458000000002,
+            "p50_us": 24751.833000000002,
+            "p95_us": 24815.708,
+            "samples": 3
+          },
+          "durable_cached_result_replay": null,
+          "graph": {
+            "durable": false,
+            "entryPoint": "finish",
+            "executionPlan": [],
+            "inputSchema": {
+              "value": {
+                "required": true,
+                "type": "string"
+              }
+            },
+            "name": "finish_only",
+            "steps": {
+              "finish": {
+                "id": "finish",
+                "inputMapping": {
+                  "result": {
+                    "value": "data.value",
+                    "valueType": "reference"
+                  }
+                },
+                "stepType": "Finish"
+              }
+            }
+          },
+          "graph_sha256": "22683ee64e2029cc0a92d826b582be21984bd4d097d78be190da75952b53983d",
+          "input_bytes": 52,
+          "input_sha256": "d57715d6de213548edfdbda17e0e428e23d65c35afc328b860d8160906ed34fd",
+          "json_to_first_completed_run": {
+            "max_us": 196938.875,
+            "min_us": 189988.708,
+            "p50_us": 191219.58299999998,
+            "p95_us": 196938.875,
+            "samples": 3
+          },
+          "json_to_wasm": {
+            "max_us": 28681.75,
+            "min_us": 28032.125,
+            "p50_us": 28381.166999999998,
+            "p95_us": 28681.75,
+            "samples": 3
+          },
+          "largest_guest_memory_bytes": 1179648,
+          "name": "finish_only",
+          "native_compile": {
+            "max_us": 168103.167,
+            "min_us": 160575.91700000002,
+            "p50_us": 161398.958,
+            "p95_us": 168103.167,
+            "samples": 3
+          },
+          "output_bytes_last_sample": 29,
+          "parse_and_emit": {
+            "max_us": 3864.959,
+            "min_us": 3415.5420000000004,
+            "p50_us": 3629.208,
+            "p95_us": 3864.959,
+            "samples": 3
+          },
+          "prepare_link": {
+            "max_us": 33.583,
+            "min_us": 30.875,
+            "p50_us": 31.0,
+            "p95_us": 33.583,
+            "samples": 3
+          },
+          "random_values": 0,
+          "sizes": {
+            "omit_runtime": false,
+            "parallel_pools": {},
+            "serialized_native_bytes": 10703536,
+            "wasm_sha256": "6bc50290f5f191f838d4ec1267f4ea16ac17c607df564a130fc27c8ec896e4aa",
+            "workflow_logic_wasm_bytes": 56144,
+            "workflow_wasm_bytes": 2803799,
+            "workflow_wasm_gzip_bytes": 691044
+          },
+          "track_events": false
+        },
+        {
+          "cached_full_run": {
+            "max_us": 4946.666,
+            "min_us": 4162.5,
+            "p50_us": 4556.290999999999,
+            "p95_us": 4883.625,
+            "samples": 30
+          },
+          "captured_runtime_messages_last_sample": 1,
+          "checkpoint_count": 0,
+          "child_graph": null,
+          "compose": {
+            "max_us": 25363.416999999998,
+            "min_us": 24717.958000000002,
+            "p50_us": 24913.25,
+            "p95_us": 25363.416999999998,
+            "samples": 3
+          },
+          "durable_cached_result_replay": null,
+          "graph": {
+            "durable": false,
+            "entryPoint": "finish",
+            "executionPlan": [],
+            "inputSchema": {
+              "value": {
+                "required": true,
+                "type": "string"
+              }
+            },
+            "name": "finish_payload_1mib",
+            "steps": {
+              "finish": {
+                "id": "finish",
+                "inputMapping": {
+                  "result": {
+                    "value": "data.value",
+                    "valueType": "reference"
+                  }
+                },
+                "stepType": "Finish"
+              }
+            }
+          },
+          "graph_sha256": "fc5e8e654b1d8c137e041d8f10cabf273ccc219ad7f7096a3df5bec564ea3959",
+          "input_bytes": 1048612,
+          "input_sha256": "022e7ac4dd444620ebf5828ee270c63f91f0dd0c18bc05065322b832854c8518",
+          "json_to_first_completed_run": {
+            "max_us": 205504.91700000002,
+            "min_us": 194450.54200000002,
+            "p50_us": 199345.542,
+            "p95_us": 205504.91700000002,
+            "samples": 3
+          },
+          "json_to_wasm": {
+            "max_us": 28838.625,
+            "min_us": 28432.791999999998,
+            "p50_us": 28600.0,
+            "p95_us": 28838.625,
+            "samples": 3
+          },
+          "largest_guest_memory_bytes": 8519680,
+          "name": "finish_payload_1mib",
+          "native_compile": {
+            "max_us": 171573.583,
+            "min_us": 160535.16700000002,
+            "p50_us": 164595.75,
+            "p95_us": 171573.583,
+            "samples": 3
+          },
+          "output_bytes_last_sample": 1048589,
+          "parse_and_emit": {
+            "max_us": 3881.2909999999997,
+            "min_us": 3475.083,
+            "p50_us": 3519.334,
+            "p95_us": 3881.2909999999997,
+            "samples": 3
+          },
+          "prepare_link": {
+            "max_us": 46.875,
+            "min_us": 36.75,
+            "p50_us": 40.083999999999996,
+            "p95_us": 46.875,
+            "samples": 3
+          },
+          "random_values": 0,
+          "sizes": {
+            "omit_runtime": false,
+            "parallel_pools": {},
+            "serialized_native_bytes": 10703536,
+            "wasm_sha256": "504dfef7a86bad2bc5c2d81691ec361da5dfab6c7eee3ccbe682bb0f68c93e57",
+            "workflow_logic_wasm_bytes": 56168,
+            "workflow_wasm_bytes": 2803823,
+            "workflow_wasm_gzip_bytes": 691050
+          },
+          "track_events": false
+        }
+      ],
+      "runtime": "in-memory CapturingRuntimeHost; no database/network/server queue",
+      "warmup_runs": 5,
+      "wasmtime": "46.0.1",
+      "workers": 4
+    },
+    {
+      "arch": "aarch64",
+      "backend": "legacy-production-default",
+      "dependency_hashes": [
+        {
+          "bytes": 498513,
+          "name": "runtara_agent_utils.wasm",
+          "sha256": "0b55a575dafff47dec1b512f569578508af280534eb879c14cc9ade87834a854"
+        },
+        {
+          "bytes": 2744013,
+          "name": "runtara_workflow_stdlib.wasm",
+          "sha256": "8105b5124bf633b2ae576ccc4ee98a2eb72e6d5c40347a05565060a4d4aa17f0"
+        },
+        {
+          "bytes": 395535,
+          "name": "runtara_workflow_runtime.wasm",
+          "sha256": "f636555784b630a406951a5350986cd8a15ae8acc8e598c8e3c5a613065512f1"
+        }
+      ],
+      "disk_cache": false,
+      "engine_and_executor_setup_us": 304.042,
+      "format_version": 1,
+      "os": "macos",
+      "profile": "release",
+      "reports": [
+        {
+          "cached_full_run": {
+            "max_us": 213.625,
+            "min_us": 130.416,
+            "p50_us": 143.208,
+            "p95_us": 159.375,
+            "samples": 100
+          },
+          "captured_runtime_messages_last_sample": 4,
+          "checkpoint_count": 1,
+          "child_graph": null,
+          "compose": {
+            "max_us": 29073.75,
+            "min_us": 27625.25,
+            "p50_us": 28910.167,
+            "p95_us": 29073.75,
+            "samples": 3
+          },
+          "durable_cached_result_replay": {
+            "max_us": 182.667,
+            "min_us": 122.08299999999998,
+            "p50_us": 129.917,
+            "p95_us": 146.0,
+            "samples": 100
+          },
+          "graph": {
+            "entryPoint": "r0",
+            "executionPlan": [
+              {
+                "fromStep": "r0",
+                "toStep": "finish"
+              }
+            ],
+            "name": "Random baseline",
+            "steps": {
+              "finish": {
+                "id": "finish",
+                "inputMapping": {
+                  "r0": {
+                    "value": "steps.r0.outputs",
+                    "valueType": "reference"
+                  }
+                },
+                "stepType": "Finish"
+              },
+              "r0": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r0",
+                "inputMapping": {},
+                "stepType": "Agent"
+              }
+            },
+            "variables": {}
+          },
+          "graph_sha256": "a66baec64ca581c5a30d4abb811afd9ee6e945169ad03df237fe1c7fd104231a",
+          "input_bytes": 26,
+          "input_sha256": "26ce61ef90782351aa134109ad745a43970cc4e57da28b6c988b31ee3bb9be5b",
+          "json_to_first_completed_run": {
+            "max_us": 235823.33299999998,
+            "min_us": 216630.125,
+            "p50_us": 230085.54200000002,
+            "p95_us": 235823.33299999998,
+            "samples": 3
+          },
+          "json_to_wasm": {
+            "max_us": 32646.875,
+            "min_us": 30930.5,
+            "p50_us": 32433.542,
+            "p95_us": 32646.875,
+            "samples": 3
+          },
+          "largest_guest_memory_bytes": 1310720,
+          "name": "random_1_defaults",
+          "native_compile": {
+            "max_us": 202239.66700000002,
+            "min_us": 184649.25,
+            "p50_us": 196325.25,
+            "p95_us": 202239.66700000002,
+            "samples": 3
+          },
+          "output_bytes_last_sample": 26,
+          "parse_and_emit": {
+            "max_us": 3572.5,
+            "min_us": 3305.167,
+            "p50_us": 3523.25,
+            "p95_us": 3572.5,
+            "samples": 3
+          },
+          "prepare_link": {
+            "max_us": 48.375,
+            "min_us": 30.709,
+            "p50_us": 35.375,
+            "p95_us": 48.375,
+            "samples": 3
+          },
+          "random_values": 1,
+          "sizes": {
+            "omit_runtime": false,
+            "parallel_pools": {},
+            "serialized_native_bytes": 12456600,
+            "wasm_sha256": "53871a9572d6c06c768ce12edb3db2dc3b5b83a79990407ff538466bb10e6e08",
+            "workflow_logic_wasm_bytes": 60967,
+            "workflow_wasm_bytes": 3308070,
+            "workflow_wasm_gzip_bytes": 848296
+          },
+          "track_events": false
+        },
+        {
+          "cached_full_run": {
+            "max_us": 169.166,
+            "min_us": 128.625,
+            "p50_us": 140.416,
+            "p95_us": 157.5,
+            "samples": 100
+          },
+          "captured_runtime_messages_last_sample": 1,
+          "checkpoint_count": 0,
+          "child_graph": null,
+          "compose": {
+            "max_us": 31630.458,
+            "min_us": 28094.25,
+            "p50_us": 28827.167,
+            "p95_us": 31630.458,
+            "samples": 3
+          },
+          "durable_cached_result_replay": null,
+          "graph": {
+            "durable": false,
+            "entryPoint": "r0",
+            "executionPlan": [
+              {
+                "fromStep": "r0",
+                "toStep": "finish"
+              }
+            ],
+            "name": "Random baseline",
+            "steps": {
+              "finish": {
+                "id": "finish",
+                "inputMapping": {
+                  "r0": {
+                    "value": "steps.r0.outputs",
+                    "valueType": "reference"
+                  }
+                },
+                "stepType": "Finish"
+              },
+              "r0": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r0",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              }
+            },
+            "variables": {}
+          },
+          "graph_sha256": "bf2f88576578f13ffc96f2c3f31e06477ba9ceee285e8d733c2fa43d011c20f4",
+          "input_bytes": 26,
+          "input_sha256": "26ce61ef90782351aa134109ad745a43970cc4e57da28b6c988b31ee3bb9be5b",
+          "json_to_first_completed_run": {
+            "max_us": 237095.041,
+            "min_us": 224852.542,
+            "p50_us": 228331.875,
+            "p95_us": 237095.041,
+            "samples": 3
+          },
+          "json_to_wasm": {
+            "max_us": 35050.583000000006,
+            "min_us": 31635.499999999996,
+            "p50_us": 32330.083000000002,
+            "p95_us": 35050.583000000006,
+            "samples": 3
+          },
+          "largest_guest_memory_bytes": 1310720,
+          "name": "random_1",
+          "native_compile": {
+            "max_us": 200924.58299999998,
+            "min_us": 192041.666,
+            "p50_us": 194837.333,
+            "p95_us": 200924.58299999998,
+            "samples": 3
+          },
+          "output_bytes_last_sample": 25,
+          "parse_and_emit": {
+            "max_us": 3540.417,
+            "min_us": 3419.8340000000003,
+            "p50_us": 3502.7909999999997,
+            "p95_us": 3540.417,
+            "samples": 3
+          },
+          "prepare_link": {
+            "max_us": 40.792,
+            "min_us": 31.708000000000002,
+            "p50_us": 32.625,
+            "p95_us": 40.792,
+            "samples": 3
+          },
+          "random_values": 1,
+          "sizes": {
+            "omit_runtime": false,
+            "parallel_pools": {},
+            "serialized_native_bytes": 12456600,
+            "wasm_sha256": "e768bbc517ca2c3f76d7a1ae7b0d27fea24fe144bb7921385c5fdc9ab759bee1",
+            "workflow_logic_wasm_bytes": 58916,
+            "workflow_wasm_bytes": 3306019,
+            "workflow_wasm_gzip_bytes": 847880
+          },
+          "track_events": false
+        },
+        {
+          "cached_full_run": {
+            "max_us": 170.625,
+            "min_us": 126.041,
+            "p50_us": 144.083,
+            "p95_us": 162.125,
+            "samples": 100
+          },
+          "captured_runtime_messages_last_sample": 3,
+          "checkpoint_count": 1,
+          "child_graph": null,
+          "compose": {
+            "max_us": 29056.042,
+            "min_us": 27464.25,
+            "p50_us": 28017.709,
+            "p95_us": 29056.042,
+            "samples": 3
+          },
+          "durable_cached_result_replay": {
+            "max_us": 163.291,
+            "min_us": 117.459,
+            "p50_us": 131.208,
+            "p95_us": 147.708,
+            "samples": 100
+          },
+          "graph": {
+            "durable": true,
+            "entryPoint": "r0",
+            "executionPlan": [
+              {
+                "fromStep": "r0",
+                "toStep": "finish"
+              }
+            ],
+            "name": "Random baseline",
+            "steps": {
+              "finish": {
+                "id": "finish",
+                "inputMapping": {
+                  "r0": {
+                    "value": "steps.r0.outputs",
+                    "valueType": "reference"
+                  }
+                },
+                "stepType": "Finish"
+              },
+              "r0": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r0",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              }
+            },
+            "variables": {}
+          },
+          "graph_sha256": "79e4e205272a9be31ec6daec643e28ee0adcdc07d87484965d0243c0b652df0a",
+          "input_bytes": 26,
+          "input_sha256": "26ce61ef90782351aa134109ad745a43970cc4e57da28b6c988b31ee3bb9be5b",
+          "json_to_first_completed_run": {
+            "max_us": 228879.95799999998,
+            "min_us": 216500.875,
+            "p50_us": 220656.875,
+            "p95_us": 228879.95799999998,
+            "samples": 3
+          },
+          "json_to_wasm": {
+            "max_us": 32384.042,
+            "min_us": 30879.75,
+            "p50_us": 31460.625,
+            "p95_us": 32384.042,
+            "samples": 3
+          },
+          "largest_guest_memory_bytes": 1310720,
+          "name": "random_1_durable",
+          "native_compile": {
+            "max_us": 195289.958,
+            "min_us": 183991.16700000002,
+            "p50_us": 188685.25,
+            "p95_us": 195289.958,
+            "samples": 3
+          },
+          "output_bytes_last_sample": 26,
+          "parse_and_emit": {
+            "max_us": 3442.25,
+            "min_us": 3327.875,
+            "p50_us": 3415.333,
+            "p95_us": 3442.25,
+            "samples": 3
+          },
+          "prepare_link": {
+            "max_us": 37.5,
+            "min_us": 33.583,
+            "p50_us": 37.458,
+            "p95_us": 37.5,
+            "samples": 3
+          },
+          "random_values": 1,
+          "sizes": {
+            "omit_runtime": false,
+            "parallel_pools": {},
+            "serialized_native_bytes": 12456600,
+            "wasm_sha256": "5d801146f35394541b8267617b02c02f151fabbc3fcb14a9afe019aa82ff44ab",
+            "workflow_logic_wasm_bytes": 59320,
+            "workflow_wasm_bytes": 3306423,
+            "workflow_wasm_gzip_bytes": 847980
+          },
+          "track_events": false
+        },
+        {
+          "cached_full_run": {
+            "max_us": 461.5,
+            "min_us": 158.958,
+            "p50_us": 170.875,
+            "p95_us": 262.375,
+            "samples": 100
+          },
+          "captured_runtime_messages_last_sample": 5,
+          "checkpoint_count": 0,
+          "child_graph": null,
+          "compose": {
+            "max_us": 29560.084,
+            "min_us": 28581.291,
+            "p50_us": 28632.958,
+            "p95_us": 29560.084,
+            "samples": 3
+          },
+          "durable_cached_result_replay": null,
+          "graph": {
+            "durable": false,
+            "entryPoint": "r0",
+            "executionPlan": [
+              {
+                "fromStep": "r0",
+                "toStep": "finish"
+              }
+            ],
+            "name": "Random baseline",
+            "steps": {
+              "finish": {
+                "id": "finish",
+                "inputMapping": {
+                  "r0": {
+                    "value": "steps.r0.outputs",
+                    "valueType": "reference"
+                  }
+                },
+                "stepType": "Finish"
+              },
+              "r0": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r0",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              }
+            },
+            "variables": {}
+          },
+          "graph_sha256": "bf2f88576578f13ffc96f2c3f31e06477ba9ceee285e8d733c2fa43d011c20f4",
+          "input_bytes": 26,
+          "input_sha256": "26ce61ef90782351aa134109ad745a43970cc4e57da28b6c988b31ee3bb9be5b",
+          "json_to_first_completed_run": {
+            "max_us": 251215.37500000003,
+            "min_us": 236252.0,
+            "p50_us": 247830.0,
+            "p95_us": 251215.37500000003,
+            "samples": 3
+          },
+          "json_to_wasm": {
+            "max_us": 33208.333,
+            "min_us": 32134.458,
+            "p50_us": 32366.041999999998,
+            "p95_us": 33208.333,
+            "samples": 3
+          },
+          "largest_guest_memory_bytes": 1310720,
+          "name": "random_1_events",
+          "native_compile": {
+            "max_us": 217640.95799999998,
+            "min_us": 201301.79200000002,
+            "p50_us": 214066.666,
+            "p95_us": 217640.95799999998,
+            "samples": 3
+          },
+          "output_bytes_last_sample": 27,
+          "parse_and_emit": {
+            "max_us": 3732.833,
+            "min_us": 3552.375,
+            "p50_us": 3648.125,
+            "p95_us": 3732.833,
+            "samples": 3
+          },
+          "prepare_link": {
+            "max_us": 55.25,
+            "min_us": 31.083000000000002,
+            "p50_us": 35.875,
+            "p95_us": 55.25,
+            "samples": 3
+          },
+          "random_values": 1,
+          "sizes": {
+            "omit_runtime": false,
+            "parallel_pools": {},
+            "serialized_native_bytes": 12456600,
+            "wasm_sha256": "664634a5070302943aaca57ede4d2f2fae95672138d289b023c49a36d675b4bc",
+            "workflow_logic_wasm_bytes": 61173,
+            "workflow_wasm_bytes": 3308276,
+            "workflow_wasm_gzip_bytes": 848021
+          },
+          "track_events": true
+        },
+        {
+          "cached_full_run": {
+            "max_us": 553.125,
+            "min_us": 437.666,
+            "p50_us": 453.916,
+            "p95_us": 505.87500000000006,
+            "samples": 100
+          },
+          "captured_runtime_messages_last_sample": 1,
+          "checkpoint_count": 0,
+          "child_graph": null,
+          "compose": {
+            "max_us": 31535.708000000002,
+            "min_us": 29150.542,
+            "p50_us": 29327.5,
+            "p95_us": 31535.708000000002,
+            "samples": 3
+          },
+          "durable_cached_result_replay": null,
+          "graph": {
+            "durable": false,
+            "entryPoint": "r0",
+            "executionPlan": [
+              {
+                "fromStep": "r0",
+                "toStep": "r1"
+              },
+              {
+                "fromStep": "r1",
+                "toStep": "r2"
+              },
+              {
+                "fromStep": "r2",
+                "toStep": "r3"
+              },
+              {
+                "fromStep": "r3",
+                "toStep": "r4"
+              },
+              {
+                "fromStep": "r4",
+                "toStep": "r5"
+              },
+              {
+                "fromStep": "r5",
+                "toStep": "r6"
+              },
+              {
+                "fromStep": "r6",
+                "toStep": "r7"
+              },
+              {
+                "fromStep": "r7",
+                "toStep": "r8"
+              },
+              {
+                "fromStep": "r8",
+                "toStep": "r9"
+              },
+              {
+                "fromStep": "r9",
+                "toStep": "finish"
+              }
+            ],
+            "name": "Random baseline",
+            "steps": {
+              "finish": {
+                "id": "finish",
+                "inputMapping": {
+                  "r0": {
+                    "value": "steps.r0.outputs",
+                    "valueType": "reference"
+                  },
+                  "r1": {
+                    "value": "steps.r1.outputs",
+                    "valueType": "reference"
+                  },
+                  "r2": {
+                    "value": "steps.r2.outputs",
+                    "valueType": "reference"
+                  },
+                  "r3": {
+                    "value": "steps.r3.outputs",
+                    "valueType": "reference"
+                  },
+                  "r4": {
+                    "value": "steps.r4.outputs",
+                    "valueType": "reference"
+                  },
+                  "r5": {
+                    "value": "steps.r5.outputs",
+                    "valueType": "reference"
+                  },
+                  "r6": {
+                    "value": "steps.r6.outputs",
+                    "valueType": "reference"
+                  },
+                  "r7": {
+                    "value": "steps.r7.outputs",
+                    "valueType": "reference"
+                  },
+                  "r8": {
+                    "value": "steps.r8.outputs",
+                    "valueType": "reference"
+                  },
+                  "r9": {
+                    "value": "steps.r9.outputs",
+                    "valueType": "reference"
+                  }
+                },
+                "stepType": "Finish"
+              },
+              "r0": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r0",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r1": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r1",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r2": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r2",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r3": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r3",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r4": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r4",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r5": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r5",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r6": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r6",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r7": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r7",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r8": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r8",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r9": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r9",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              }
+            },
+            "variables": {}
+          },
+          "graph_sha256": "de0deca8c48a6454a6d3089a93b476a2cf73d05adb2160c4aaa32245569af32b",
+          "input_bytes": 26,
+          "input_sha256": "26ce61ef90782351aa134109ad745a43970cc4e57da28b6c988b31ee3bb9be5b",
+          "json_to_first_completed_run": {
+            "max_us": 277587.58300000004,
+            "min_us": 222625.417,
+            "p50_us": 224326.75,
+            "p95_us": 277587.58300000004,
+            "samples": 3
+          },
+          "json_to_wasm": {
+            "max_us": 35325.917,
+            "min_us": 32991.125,
+            "p50_us": 33495.333,
+            "p95_us": 35325.917,
+            "samples": 3
+          },
+          "largest_guest_memory_bytes": 1310720,
+          "name": "random_chain_10",
+          "native_compile": {
+            "max_us": 242590.416,
+            "min_us": 185825.625,
+            "p50_us": 189816.667,
+            "p95_us": 242590.416,
+            "samples": 3
+          },
+          "output_bytes_last_sample": 239,
+          "parse_and_emit": {
+            "max_us": 4166.875,
+            "min_us": 3790.0,
+            "p50_us": 3840.417,
+            "p95_us": 4166.875,
+            "samples": 3
+          },
+          "prepare_link": {
+            "max_us": 42.959,
+            "min_us": 33.667,
+            "p50_us": 36.208999999999996,
+            "p95_us": 42.959,
+            "samples": 3
+          },
+          "random_values": 10,
+          "sizes": {
+            "omit_runtime": false,
+            "parallel_pools": {},
+            "serialized_native_bytes": 12489368,
+            "wasm_sha256": "3d306bede946a8457adcaa1c775d5af9ca4f3f121c36831881bfdb9e57aac505",
+            "workflow_logic_wasm_bytes": 77700,
+            "workflow_wasm_bytes": 3324803,
+            "workflow_wasm_gzip_bytes": 849099
+          },
+          "track_events": false
+        },
+        {
+          "cached_full_run": {
+            "max_us": 20294.084,
+            "min_us": 19177.415999999997,
+            "p50_us": 19855.333,
+            "p95_us": 20219.375,
+            "samples": 30
+          },
+          "captured_runtime_messages_last_sample": 1,
+          "checkpoint_count": 0,
+          "child_graph": null,
+          "compose": {
+            "max_us": 31520.834,
+            "min_us": 30716.958,
+            "p50_us": 30795.291999999998,
+            "p95_us": 31520.834,
+            "samples": 3
+          },
+          "durable_cached_result_replay": null,
+          "graph": {
+            "durable": false,
+            "entryPoint": "r0",
+            "executionPlan": [
+              {
+                "fromStep": "r0",
+                "toStep": "r1"
+              },
+              {
+                "fromStep": "r1",
+                "toStep": "r2"
+              },
+              {
+                "fromStep": "r2",
+                "toStep": "r3"
+              },
+              {
+                "fromStep": "r3",
+                "toStep": "r4"
+              },
+              {
+                "fromStep": "r4",
+                "toStep": "r5"
+              },
+              {
+                "fromStep": "r5",
+                "toStep": "r6"
+              },
+              {
+                "fromStep": "r6",
+                "toStep": "r7"
+              },
+              {
+                "fromStep": "r7",
+                "toStep": "r8"
+              },
+              {
+                "fromStep": "r8",
+                "toStep": "r9"
+              },
+              {
+                "fromStep": "r9",
+                "toStep": "r10"
+              },
+              {
+                "fromStep": "r10",
+                "toStep": "r11"
+              },
+              {
+                "fromStep": "r11",
+                "toStep": "r12"
+              },
+              {
+                "fromStep": "r12",
+                "toStep": "r13"
+              },
+              {
+                "fromStep": "r13",
+                "toStep": "r14"
+              },
+              {
+                "fromStep": "r14",
+                "toStep": "r15"
+              },
+              {
+                "fromStep": "r15",
+                "toStep": "r16"
+              },
+              {
+                "fromStep": "r16",
+                "toStep": "r17"
+              },
+              {
+                "fromStep": "r17",
+                "toStep": "r18"
+              },
+              {
+                "fromStep": "r18",
+                "toStep": "r19"
+              },
+              {
+                "fromStep": "r19",
+                "toStep": "r20"
+              },
+              {
+                "fromStep": "r20",
+                "toStep": "r21"
+              },
+              {
+                "fromStep": "r21",
+                "toStep": "r22"
+              },
+              {
+                "fromStep": "r22",
+                "toStep": "r23"
+              },
+              {
+                "fromStep": "r23",
+                "toStep": "r24"
+              },
+              {
+                "fromStep": "r24",
+                "toStep": "r25"
+              },
+              {
+                "fromStep": "r25",
+                "toStep": "r26"
+              },
+              {
+                "fromStep": "r26",
+                "toStep": "r27"
+              },
+              {
+                "fromStep": "r27",
+                "toStep": "r28"
+              },
+              {
+                "fromStep": "r28",
+                "toStep": "r29"
+              },
+              {
+                "fromStep": "r29",
+                "toStep": "r30"
+              },
+              {
+                "fromStep": "r30",
+                "toStep": "r31"
+              },
+              {
+                "fromStep": "r31",
+                "toStep": "r32"
+              },
+              {
+                "fromStep": "r32",
+                "toStep": "r33"
+              },
+              {
+                "fromStep": "r33",
+                "toStep": "r34"
+              },
+              {
+                "fromStep": "r34",
+                "toStep": "r35"
+              },
+              {
+                "fromStep": "r35",
+                "toStep": "r36"
+              },
+              {
+                "fromStep": "r36",
+                "toStep": "r37"
+              },
+              {
+                "fromStep": "r37",
+                "toStep": "r38"
+              },
+              {
+                "fromStep": "r38",
+                "toStep": "r39"
+              },
+              {
+                "fromStep": "r39",
+                "toStep": "r40"
+              },
+              {
+                "fromStep": "r40",
+                "toStep": "r41"
+              },
+              {
+                "fromStep": "r41",
+                "toStep": "r42"
+              },
+              {
+                "fromStep": "r42",
+                "toStep": "r43"
+              },
+              {
+                "fromStep": "r43",
+                "toStep": "r44"
+              },
+              {
+                "fromStep": "r44",
+                "toStep": "r45"
+              },
+              {
+                "fromStep": "r45",
+                "toStep": "r46"
+              },
+              {
+                "fromStep": "r46",
+                "toStep": "r47"
+              },
+              {
+                "fromStep": "r47",
+                "toStep": "r48"
+              },
+              {
+                "fromStep": "r48",
+                "toStep": "r49"
+              },
+              {
+                "fromStep": "r49",
+                "toStep": "r50"
+              },
+              {
+                "fromStep": "r50",
+                "toStep": "r51"
+              },
+              {
+                "fromStep": "r51",
+                "toStep": "r52"
+              },
+              {
+                "fromStep": "r52",
+                "toStep": "r53"
+              },
+              {
+                "fromStep": "r53",
+                "toStep": "r54"
+              },
+              {
+                "fromStep": "r54",
+                "toStep": "r55"
+              },
+              {
+                "fromStep": "r55",
+                "toStep": "r56"
+              },
+              {
+                "fromStep": "r56",
+                "toStep": "r57"
+              },
+              {
+                "fromStep": "r57",
+                "toStep": "r58"
+              },
+              {
+                "fromStep": "r58",
+                "toStep": "r59"
+              },
+              {
+                "fromStep": "r59",
+                "toStep": "r60"
+              },
+              {
+                "fromStep": "r60",
+                "toStep": "r61"
+              },
+              {
+                "fromStep": "r61",
+                "toStep": "r62"
+              },
+              {
+                "fromStep": "r62",
+                "toStep": "r63"
+              },
+              {
+                "fromStep": "r63",
+                "toStep": "r64"
+              },
+              {
+                "fromStep": "r64",
+                "toStep": "r65"
+              },
+              {
+                "fromStep": "r65",
+                "toStep": "r66"
+              },
+              {
+                "fromStep": "r66",
+                "toStep": "r67"
+              },
+              {
+                "fromStep": "r67",
+                "toStep": "r68"
+              },
+              {
+                "fromStep": "r68",
+                "toStep": "r69"
+              },
+              {
+                "fromStep": "r69",
+                "toStep": "r70"
+              },
+              {
+                "fromStep": "r70",
+                "toStep": "r71"
+              },
+              {
+                "fromStep": "r71",
+                "toStep": "r72"
+              },
+              {
+                "fromStep": "r72",
+                "toStep": "r73"
+              },
+              {
+                "fromStep": "r73",
+                "toStep": "r74"
+              },
+              {
+                "fromStep": "r74",
+                "toStep": "r75"
+              },
+              {
+                "fromStep": "r75",
+                "toStep": "r76"
+              },
+              {
+                "fromStep": "r76",
+                "toStep": "r77"
+              },
+              {
+                "fromStep": "r77",
+                "toStep": "r78"
+              },
+              {
+                "fromStep": "r78",
+                "toStep": "r79"
+              },
+              {
+                "fromStep": "r79",
+                "toStep": "r80"
+              },
+              {
+                "fromStep": "r80",
+                "toStep": "r81"
+              },
+              {
+                "fromStep": "r81",
+                "toStep": "r82"
+              },
+              {
+                "fromStep": "r82",
+                "toStep": "r83"
+              },
+              {
+                "fromStep": "r83",
+                "toStep": "r84"
+              },
+              {
+                "fromStep": "r84",
+                "toStep": "r85"
+              },
+              {
+                "fromStep": "r85",
+                "toStep": "r86"
+              },
+              {
+                "fromStep": "r86",
+                "toStep": "r87"
+              },
+              {
+                "fromStep": "r87",
+                "toStep": "r88"
+              },
+              {
+                "fromStep": "r88",
+                "toStep": "r89"
+              },
+              {
+                "fromStep": "r89",
+                "toStep": "r90"
+              },
+              {
+                "fromStep": "r90",
+                "toStep": "r91"
+              },
+              {
+                "fromStep": "r91",
+                "toStep": "r92"
+              },
+              {
+                "fromStep": "r92",
+                "toStep": "r93"
+              },
+              {
+                "fromStep": "r93",
+                "toStep": "r94"
+              },
+              {
+                "fromStep": "r94",
+                "toStep": "r95"
+              },
+              {
+                "fromStep": "r95",
+                "toStep": "r96"
+              },
+              {
+                "fromStep": "r96",
+                "toStep": "r97"
+              },
+              {
+                "fromStep": "r97",
+                "toStep": "r98"
+              },
+              {
+                "fromStep": "r98",
+                "toStep": "r99"
+              },
+              {
+                "fromStep": "r99",
+                "toStep": "finish"
+              }
+            ],
+            "name": "Random baseline",
+            "steps": {
+              "finish": {
+                "id": "finish",
+                "inputMapping": {
+                  "r0": {
+                    "value": "steps.r0.outputs",
+                    "valueType": "reference"
+                  },
+                  "r1": {
+                    "value": "steps.r1.outputs",
+                    "valueType": "reference"
+                  },
+                  "r10": {
+                    "value": "steps.r10.outputs",
+                    "valueType": "reference"
+                  },
+                  "r11": {
+                    "value": "steps.r11.outputs",
+                    "valueType": "reference"
+                  },
+                  "r12": {
+                    "value": "steps.r12.outputs",
+                    "valueType": "reference"
+                  },
+                  "r13": {
+                    "value": "steps.r13.outputs",
+                    "valueType": "reference"
+                  },
+                  "r14": {
+                    "value": "steps.r14.outputs",
+                    "valueType": "reference"
+                  },
+                  "r15": {
+                    "value": "steps.r15.outputs",
+                    "valueType": "reference"
+                  },
+                  "r16": {
+                    "value": "steps.r16.outputs",
+                    "valueType": "reference"
+                  },
+                  "r17": {
+                    "value": "steps.r17.outputs",
+                    "valueType": "reference"
+                  },
+                  "r18": {
+                    "value": "steps.r18.outputs",
+                    "valueType": "reference"
+                  },
+                  "r19": {
+                    "value": "steps.r19.outputs",
+                    "valueType": "reference"
+                  },
+                  "r2": {
+                    "value": "steps.r2.outputs",
+                    "valueType": "reference"
+                  },
+                  "r20": {
+                    "value": "steps.r20.outputs",
+                    "valueType": "reference"
+                  },
+                  "r21": {
+                    "value": "steps.r21.outputs",
+                    "valueType": "reference"
+                  },
+                  "r22": {
+                    "value": "steps.r22.outputs",
+                    "valueType": "reference"
+                  },
+                  "r23": {
+                    "value": "steps.r23.outputs",
+                    "valueType": "reference"
+                  },
+                  "r24": {
+                    "value": "steps.r24.outputs",
+                    "valueType": "reference"
+                  },
+                  "r25": {
+                    "value": "steps.r25.outputs",
+                    "valueType": "reference"
+                  },
+                  "r26": {
+                    "value": "steps.r26.outputs",
+                    "valueType": "reference"
+                  },
+                  "r27": {
+                    "value": "steps.r27.outputs",
+                    "valueType": "reference"
+                  },
+                  "r28": {
+                    "value": "steps.r28.outputs",
+                    "valueType": "reference"
+                  },
+                  "r29": {
+                    "value": "steps.r29.outputs",
+                    "valueType": "reference"
+                  },
+                  "r3": {
+                    "value": "steps.r3.outputs",
+                    "valueType": "reference"
+                  },
+                  "r30": {
+                    "value": "steps.r30.outputs",
+                    "valueType": "reference"
+                  },
+                  "r31": {
+                    "value": "steps.r31.outputs",
+                    "valueType": "reference"
+                  },
+                  "r32": {
+                    "value": "steps.r32.outputs",
+                    "valueType": "reference"
+                  },
+                  "r33": {
+                    "value": "steps.r33.outputs",
+                    "valueType": "reference"
+                  },
+                  "r34": {
+                    "value": "steps.r34.outputs",
+                    "valueType": "reference"
+                  },
+                  "r35": {
+                    "value": "steps.r35.outputs",
+                    "valueType": "reference"
+                  },
+                  "r36": {
+                    "value": "steps.r36.outputs",
+                    "valueType": "reference"
+                  },
+                  "r37": {
+                    "value": "steps.r37.outputs",
+                    "valueType": "reference"
+                  },
+                  "r38": {
+                    "value": "steps.r38.outputs",
+                    "valueType": "reference"
+                  },
+                  "r39": {
+                    "value": "steps.r39.outputs",
+                    "valueType": "reference"
+                  },
+                  "r4": {
+                    "value": "steps.r4.outputs",
+                    "valueType": "reference"
+                  },
+                  "r40": {
+                    "value": "steps.r40.outputs",
+                    "valueType": "reference"
+                  },
+                  "r41": {
+                    "value": "steps.r41.outputs",
+                    "valueType": "reference"
+                  },
+                  "r42": {
+                    "value": "steps.r42.outputs",
+                    "valueType": "reference"
+                  },
+                  "r43": {
+                    "value": "steps.r43.outputs",
+                    "valueType": "reference"
+                  },
+                  "r44": {
+                    "value": "steps.r44.outputs",
+                    "valueType": "reference"
+                  },
+                  "r45": {
+                    "value": "steps.r45.outputs",
+                    "valueType": "reference"
+                  },
+                  "r46": {
+                    "value": "steps.r46.outputs",
+                    "valueType": "reference"
+                  },
+                  "r47": {
+                    "value": "steps.r47.outputs",
+                    "valueType": "reference"
+                  },
+                  "r48": {
+                    "value": "steps.r48.outputs",
+                    "valueType": "reference"
+                  },
+                  "r49": {
+                    "value": "steps.r49.outputs",
+                    "valueType": "reference"
+                  },
+                  "r5": {
+                    "value": "steps.r5.outputs",
+                    "valueType": "reference"
+                  },
+                  "r50": {
+                    "value": "steps.r50.outputs",
+                    "valueType": "reference"
+                  },
+                  "r51": {
+                    "value": "steps.r51.outputs",
+                    "valueType": "reference"
+                  },
+                  "r52": {
+                    "value": "steps.r52.outputs",
+                    "valueType": "reference"
+                  },
+                  "r53": {
+                    "value": "steps.r53.outputs",
+                    "valueType": "reference"
+                  },
+                  "r54": {
+                    "value": "steps.r54.outputs",
+                    "valueType": "reference"
+                  },
+                  "r55": {
+                    "value": "steps.r55.outputs",
+                    "valueType": "reference"
+                  },
+                  "r56": {
+                    "value": "steps.r56.outputs",
+                    "valueType": "reference"
+                  },
+                  "r57": {
+                    "value": "steps.r57.outputs",
+                    "valueType": "reference"
+                  },
+                  "r58": {
+                    "value": "steps.r58.outputs",
+                    "valueType": "reference"
+                  },
+                  "r59": {
+                    "value": "steps.r59.outputs",
+                    "valueType": "reference"
+                  },
+                  "r6": {
+                    "value": "steps.r6.outputs",
+                    "valueType": "reference"
+                  },
+                  "r60": {
+                    "value": "steps.r60.outputs",
+                    "valueType": "reference"
+                  },
+                  "r61": {
+                    "value": "steps.r61.outputs",
+                    "valueType": "reference"
+                  },
+                  "r62": {
+                    "value": "steps.r62.outputs",
+                    "valueType": "reference"
+                  },
+                  "r63": {
+                    "value": "steps.r63.outputs",
+                    "valueType": "reference"
+                  },
+                  "r64": {
+                    "value": "steps.r64.outputs",
+                    "valueType": "reference"
+                  },
+                  "r65": {
+                    "value": "steps.r65.outputs",
+                    "valueType": "reference"
+                  },
+                  "r66": {
+                    "value": "steps.r66.outputs",
+                    "valueType": "reference"
+                  },
+                  "r67": {
+                    "value": "steps.r67.outputs",
+                    "valueType": "reference"
+                  },
+                  "r68": {
+                    "value": "steps.r68.outputs",
+                    "valueType": "reference"
+                  },
+                  "r69": {
+                    "value": "steps.r69.outputs",
+                    "valueType": "reference"
+                  },
+                  "r7": {
+                    "value": "steps.r7.outputs",
+                    "valueType": "reference"
+                  },
+                  "r70": {
+                    "value": "steps.r70.outputs",
+                    "valueType": "reference"
+                  },
+                  "r71": {
+                    "value": "steps.r71.outputs",
+                    "valueType": "reference"
+                  },
+                  "r72": {
+                    "value": "steps.r72.outputs",
+                    "valueType": "reference"
+                  },
+                  "r73": {
+                    "value": "steps.r73.outputs",
+                    "valueType": "reference"
+                  },
+                  "r74": {
+                    "value": "steps.r74.outputs",
+                    "valueType": "reference"
+                  },
+                  "r75": {
+                    "value": "steps.r75.outputs",
+                    "valueType": "reference"
+                  },
+                  "r76": {
+                    "value": "steps.r76.outputs",
+                    "valueType": "reference"
+                  },
+                  "r77": {
+                    "value": "steps.r77.outputs",
+                    "valueType": "reference"
+                  },
+                  "r78": {
+                    "value": "steps.r78.outputs",
+                    "valueType": "reference"
+                  },
+                  "r79": {
+                    "value": "steps.r79.outputs",
+                    "valueType": "reference"
+                  },
+                  "r8": {
+                    "value": "steps.r8.outputs",
+                    "valueType": "reference"
+                  },
+                  "r80": {
+                    "value": "steps.r80.outputs",
+                    "valueType": "reference"
+                  },
+                  "r81": {
+                    "value": "steps.r81.outputs",
+                    "valueType": "reference"
+                  },
+                  "r82": {
+                    "value": "steps.r82.outputs",
+                    "valueType": "reference"
+                  },
+                  "r83": {
+                    "value": "steps.r83.outputs",
+                    "valueType": "reference"
+                  },
+                  "r84": {
+                    "value": "steps.r84.outputs",
+                    "valueType": "reference"
+                  },
+                  "r85": {
+                    "value": "steps.r85.outputs",
+                    "valueType": "reference"
+                  },
+                  "r86": {
+                    "value": "steps.r86.outputs",
+                    "valueType": "reference"
+                  },
+                  "r87": {
+                    "value": "steps.r87.outputs",
+                    "valueType": "reference"
+                  },
+                  "r88": {
+                    "value": "steps.r88.outputs",
+                    "valueType": "reference"
+                  },
+                  "r89": {
+                    "value": "steps.r89.outputs",
+                    "valueType": "reference"
+                  },
+                  "r9": {
+                    "value": "steps.r9.outputs",
+                    "valueType": "reference"
+                  },
+                  "r90": {
+                    "value": "steps.r90.outputs",
+                    "valueType": "reference"
+                  },
+                  "r91": {
+                    "value": "steps.r91.outputs",
+                    "valueType": "reference"
+                  },
+                  "r92": {
+                    "value": "steps.r92.outputs",
+                    "valueType": "reference"
+                  },
+                  "r93": {
+                    "value": "steps.r93.outputs",
+                    "valueType": "reference"
+                  },
+                  "r94": {
+                    "value": "steps.r94.outputs",
+                    "valueType": "reference"
+                  },
+                  "r95": {
+                    "value": "steps.r95.outputs",
+                    "valueType": "reference"
+                  },
+                  "r96": {
+                    "value": "steps.r96.outputs",
+                    "valueType": "reference"
+                  },
+                  "r97": {
+                    "value": "steps.r97.outputs",
+                    "valueType": "reference"
+                  },
+                  "r98": {
+                    "value": "steps.r98.outputs",
+                    "valueType": "reference"
+                  },
+                  "r99": {
+                    "value": "steps.r99.outputs",
+                    "valueType": "reference"
+                  }
+                },
+                "stepType": "Finish"
+              },
+              "r0": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r0",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r1": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r1",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r10": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r10",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r11": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r11",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r12": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r12",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r13": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r13",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r14": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r14",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r15": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r15",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r16": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r16",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r17": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r17",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r18": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r18",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r19": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r19",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r2": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r2",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r20": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r20",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r21": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r21",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r22": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r22",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r23": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r23",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r24": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r24",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r25": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r25",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r26": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r26",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r27": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r27",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r28": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r28",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r29": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r29",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r3": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r3",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r30": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r30",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r31": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r31",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r32": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r32",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r33": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r33",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r34": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r34",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r35": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r35",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r36": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r36",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r37": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r37",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r38": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r38",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r39": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r39",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r4": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r4",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r40": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r40",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r41": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r41",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r42": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r42",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r43": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r43",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r44": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r44",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r45": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r45",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r46": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r46",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r47": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r47",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r48": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r48",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r49": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r49",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r5": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r5",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r50": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r50",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r51": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r51",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r52": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r52",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r53": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r53",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r54": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r54",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r55": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r55",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r56": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r56",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r57": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r57",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r58": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r58",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r59": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r59",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r6": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r6",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r60": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r60",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r61": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r61",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r62": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r62",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r63": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r63",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r64": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r64",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r65": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r65",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r66": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r66",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r67": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r67",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r68": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r68",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r69": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r69",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r7": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r7",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r70": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r70",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r71": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r71",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r72": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r72",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r73": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r73",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r74": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r74",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r75": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r75",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r76": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r76",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r77": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r77",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r78": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r78",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r79": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r79",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r8": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r8",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r80": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r80",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r81": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r81",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r82": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r82",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r83": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r83",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r84": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r84",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r85": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r85",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r86": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r86",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r87": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r87",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r88": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r88",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r89": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r89",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r9": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r9",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r90": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r90",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r91": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r91",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r92": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r92",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r93": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r93",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r94": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r94",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r95": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r95",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r96": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r96",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r97": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r97",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r98": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r98",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              },
+              "r99": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r99",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              }
+            },
+            "variables": {}
+          },
+          "graph_sha256": "23361a0031cba924bfc59fc214ff57625c4d41cf8472e41156a1d6c764afbbf3",
+          "input_bytes": 26,
+          "input_sha256": "26ce61ef90782351aa134109ad745a43970cc4e57da28b6c988b31ee3bb9be5b",
+          "json_to_first_completed_run": {
+            "max_us": 303489.959,
+            "min_us": 266894.29199999996,
+            "p50_us": 268244.625,
+            "p95_us": 303489.959,
+            "samples": 3
+          },
+          "json_to_wasm": {
+            "max_us": 37984.208,
+            "min_us": 37082.167,
+            "p50_us": 37174.125,
+            "p95_us": 37984.208,
+            "samples": 3
+          },
+          "largest_guest_memory_bytes": 1769472,
+          "name": "random_chain_100",
+          "native_compile": {
+            "max_us": 244707.41700000002,
+            "min_us": 207546.5,
+            "p50_us": 207726.416,
+            "p95_us": 244707.41700000002,
+            "samples": 3
+          },
+          "output_bytes_last_sample": 2509,
+          "parse_and_emit": {
+            "max_us": 6463.1669999999995,
+            "min_us": 6280.9169999999995,
+            "p50_us": 6457.0,
+            "p95_us": 6463.1669999999995,
+            "samples": 3
+          },
+          "prepare_link": {
+            "max_us": 40.125,
+            "min_us": 31.875000000000004,
+            "p50_us": 38.25,
+            "p95_us": 40.125,
+            "samples": 3
+          },
+          "random_values": 100,
+          "sizes": {
+            "omit_runtime": false,
+            "parallel_pools": {},
+            "serialized_native_bytes": 12964504,
+            "wasm_sha256": "bc34a1ac359b5b25d4bdab0f6a9b469b2bd4762a4d43f83f21acfb77e74808e3",
+            "workflow_logic_wasm_bytes": 268545,
+            "workflow_wasm_bytes": 3515648,
+            "workflow_wasm_gzip_bytes": 860233
+          },
+          "track_events": false
+        },
+        {
+          "cached_full_run": {
+            "max_us": 10197.917000000001,
+            "min_us": 9715.209,
+            "p50_us": 9782.291000000001,
+            "p95_us": 9997.875,
+            "samples": 30
+          },
+          "captured_runtime_messages_last_sample": 1,
+          "checkpoint_count": 0,
+          "child_graph": null,
+          "compose": {
+            "max_us": 28768.208,
+            "min_us": 27554.5,
+            "p50_us": 27672.084,
+            "p95_us": 28768.208,
+            "samples": 3
+          },
+          "durable_cached_result_replay": null,
+          "graph": {
+            "durable": false,
+            "entryPoint": "split",
+            "executionPlan": [
+              {
+                "fromStep": "split",
+                "toStep": "finish"
+              }
+            ],
+            "inputSchema": {
+              "items": {
+                "required": true,
+                "type": "array"
+              }
+            },
+            "name": "random_split_100_sequential",
+            "steps": {
+              "finish": {
+                "id": "finish",
+                "inputMapping": {
+                  "results": {
+                    "value": "steps.split.outputs",
+                    "valueType": "reference"
+                  }
+                },
+                "stepType": "Finish"
+              },
+              "split": {
+                "config": {
+                  "parallelism": 1,
+                  "sequential": true,
+                  "value": {
+                    "value": "data.items",
+                    "valueType": "reference"
+                  }
+                },
+                "id": "split",
+                "stepType": "Split",
+                "subgraph": {
+                  "durable": false,
+                  "entryPoint": "r0",
+                  "executionPlan": [
+                    {
+                      "fromStep": "r0",
+                      "toStep": "finish"
+                    }
+                  ],
+                  "name": "Random baseline",
+                  "steps": {
+                    "finish": {
+                      "id": "finish",
+                      "inputMapping": {
+                        "r0": {
+                          "value": "steps.r0.outputs",
+                          "valueType": "reference"
+                        }
+                      },
+                      "stepType": "Finish"
+                    },
+                    "r0": {
+                      "agentId": "utils",
+                      "capabilityId": "random-double",
+                      "id": "r0",
+                      "inputMapping": {},
+                      "maxRetries": 0,
+                      "stepType": "Agent"
+                    }
+                  },
+                  "variables": {}
+                }
+              }
+            }
+          },
+          "graph_sha256": "1e3fe932a53bb3150588c8d467247d4944b0b922c81e25ced5ce0c2702919c9f",
+          "input_bytes": 235,
+          "input_sha256": "4e5246437d0d50477b3cafd271594c6463f5bce5263bfe38b01a6be528d3484b",
+          "json_to_first_completed_run": {
+            "max_us": 248542.666,
+            "min_us": 229172.5,
+            "p50_us": 229375.375,
+            "p95_us": 248542.666,
+            "samples": 3
+          },
+          "json_to_wasm": {
+            "max_us": 32437.25,
+            "min_us": 31100.875,
+            "p50_us": 31229.583000000002,
+            "p95_us": 32437.25,
+            "samples": 3
+          },
+          "largest_guest_memory_bytes": 1310720,
+          "name": "random_split_100_sequential",
+          "native_compile": {
+            "max_us": 205084.958,
+            "min_us": 185272.95899999997,
+            "p50_us": 186818.084,
+            "p95_us": 205084.958,
+            "samples": 3
+          },
+          "output_bytes_last_sample": 2631,
+          "parse_and_emit": {
+            "max_us": 3674.4579999999996,
+            "min_us": 3428.6659999999997,
+            "p50_us": 3668.917,
+            "p95_us": 3674.4579999999996,
+            "samples": 3
+          },
+          "prepare_link": {
+            "max_us": 45.458,
+            "min_us": 32.792,
+            "p50_us": 38.416,
+            "p95_us": 45.458,
+            "samples": 3
+          },
+          "random_values": 100,
+          "sizes": {
+            "omit_runtime": false,
+            "parallel_pools": {},
+            "serialized_native_bytes": 12456600,
+            "wasm_sha256": "fadb66df2dd76c428732427e469b89a6a9f594cec3fa8609cab8311d769aa83f",
+            "workflow_logic_wasm_bytes": 63600,
+            "workflow_wasm_bytes": 3310703,
+            "workflow_wasm_gzip_bytes": 848716
+          },
+          "track_events": false
+        },
+        {
+          "cached_full_run": {
+            "max_us": 13595.125,
+            "min_us": 12275.583,
+            "p50_us": 12758.25,
+            "p95_us": 13190.5,
+            "samples": 30
+          },
+          "captured_runtime_messages_last_sample": 1,
+          "checkpoint_count": 0,
+          "child_graph": null,
+          "compose": {
+            "max_us": 29844.083,
+            "min_us": 27931.375,
+            "p50_us": 28502.708000000002,
+            "p95_us": 29844.083,
+            "samples": 3
+          },
+          "durable_cached_result_replay": null,
+          "graph": {
+            "durable": false,
+            "entryPoint": "split",
+            "executionPlan": [
+              {
+                "fromStep": "split",
+                "toStep": "finish"
+              }
+            ],
+            "inputSchema": {
+              "items": {
+                "required": true,
+                "type": "array"
+              }
+            },
+            "name": "random_split_100_parallel4",
+            "steps": {
+              "finish": {
+                "id": "finish",
+                "inputMapping": {
+                  "results": {
+                    "value": "steps.split.outputs",
+                    "valueType": "reference"
+                  }
+                },
+                "stepType": "Finish"
+              },
+              "split": {
+                "config": {
+                  "parallelism": 4,
+                  "sequential": false,
+                  "value": {
+                    "value": "data.items",
+                    "valueType": "reference"
+                  }
+                },
+                "id": "split",
+                "stepType": "Split",
+                "subgraph": {
+                  "durable": false,
+                  "entryPoint": "r0",
+                  "executionPlan": [
+                    {
+                      "fromStep": "r0",
+                      "toStep": "finish"
+                    }
+                  ],
+                  "name": "Random baseline",
+                  "steps": {
+                    "finish": {
+                      "id": "finish",
+                      "inputMapping": {
+                        "r0": {
+                          "value": "steps.r0.outputs",
+                          "valueType": "reference"
+                        }
+                      },
+                      "stepType": "Finish"
+                    },
+                    "r0": {
+                      "agentId": "utils",
+                      "capabilityId": "random-double",
+                      "id": "r0",
+                      "inputMapping": {},
+                      "maxRetries": 0,
+                      "stepType": "Agent"
+                    }
+                  },
+                  "variables": {}
+                }
+              }
+            }
+          },
+          "graph_sha256": "141d0abce5e2020b5addfdc6c4e941c4ef24c5fff47d215a81eed3dda48b5181",
+          "input_bytes": 235,
+          "input_sha256": "4e5246437d0d50477b3cafd271594c6463f5bce5263bfe38b01a6be528d3484b",
+          "json_to_first_completed_run": {
+            "max_us": 251079.79200000002,
+            "min_us": 230212.917,
+            "p50_us": 245143.04200000002,
+            "p95_us": 251079.79200000002,
+            "samples": 3
+          },
+          "json_to_wasm": {
+            "max_us": 33952.708999999995,
+            "min_us": 31722.624999999996,
+            "p50_us": 32308.542,
+            "p95_us": 33952.708999999995,
+            "samples": 3
+          },
+          "largest_guest_memory_bytes": 1310720,
+          "name": "random_split_100_parallel4",
+          "native_compile": {
+            "max_us": 203201.375,
+            "min_us": 185157.375,
+            "p50_us": 199431.709,
+            "p95_us": 203201.375,
+            "samples": 3
+          },
+          "output_bytes_last_sample": 2637,
+          "parse_and_emit": {
+            "max_us": 4108.209,
+            "min_us": 3791.167,
+            "p50_us": 3805.083,
+            "p95_us": 4108.209,
+            "samples": 3
+          },
+          "prepare_link": {
+            "max_us": 38.292,
+            "min_us": 30.916,
+            "p50_us": 31.833,
+            "p95_us": 38.292,
+            "samples": 3
+          },
+          "random_values": 100,
+          "sizes": {
+            "omit_runtime": false,
+            "parallel_pools": {
+              "utils": 4
+            },
+            "serialized_native_bytes": 12615512,
+            "wasm_sha256": "7af42acc4a5737e35aa255284e712159c5835f7c573e61b60bb55351b1ec151e",
+            "workflow_logic_wasm_bytes": 69523,
+            "workflow_wasm_bytes": 3318568,
+            "workflow_wasm_gzip_bytes": 850186
+          },
+          "track_events": false
+        },
+        {
+          "cached_full_run": {
+            "max_us": 509.625,
+            "min_us": 176.166,
+            "p50_us": 185.29199999999997,
+            "p95_us": 211.25,
+            "samples": 100
+          },
+          "captured_runtime_messages_last_sample": 1,
+          "checkpoint_count": 0,
+          "child_graph": {
+            "durable": false,
+            "entryPoint": "r0",
+            "executionPlan": [
+              {
+                "fromStep": "r0",
+                "toStep": "finish"
+              }
+            ],
+            "name": "Random baseline",
+            "steps": {
+              "finish": {
+                "id": "finish",
+                "inputMapping": {
+                  "r0": {
+                    "value": "steps.r0.outputs",
+                    "valueType": "reference"
+                  }
+                },
+                "stepType": "Finish"
+              },
+              "r0": {
+                "agentId": "utils",
+                "capabilityId": "random-double",
+                "id": "r0",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "Agent"
+              }
+            },
+            "variables": {}
+          },
+          "compose": {
+            "max_us": 29606.375,
+            "min_us": 28598.875,
+            "p50_us": 28643.25,
+            "p95_us": 29606.375,
+            "samples": 3
+          },
+          "durable_cached_result_replay": null,
+          "graph": {
+            "durable": false,
+            "entryPoint": "child",
+            "executionPlan": [
+              {
+                "fromStep": "child",
+                "toStep": "finish"
+              }
+            ],
+            "name": "Embed baseline",
+            "steps": {
+              "child": {
+                "childVersion": 1,
+                "childWorkflowId": "random-child",
+                "id": "child",
+                "inputMapping": {},
+                "maxRetries": 0,
+                "stepType": "EmbedWorkflow"
+              },
+              "finish": {
+                "id": "finish",
+                "inputMapping": {
+                  "result": {
+                    "value": "steps.child.outputs",
+                    "valueType": "reference"
+                  }
+                },
+                "stepType": "Finish"
+              }
+            }
+          },
+          "graph_sha256": "8784b666d5e0ed68fef861899ae1dfc3c73359297802bf8137dcb4cdaa81d0b2",
+          "input_bytes": 26,
+          "input_sha256": "26ce61ef90782351aa134109ad745a43970cc4e57da28b6c988b31ee3bb9be5b",
+          "json_to_first_completed_run": {
+            "max_us": 250878.58299999998,
+            "min_us": 217760.25,
+            "p50_us": 219271.042,
+            "p95_us": 250878.58299999998,
+            "samples": 3
+          },
+          "json_to_wasm": {
+            "max_us": 33131.75,
+            "min_us": 31978.584,
+            "p50_us": 32019.290999999997,
+            "p95_us": 33131.75,
+            "samples": 3
+          },
+          "largest_guest_memory_bytes": 1310720,
+          "name": "random_embed_1",
+          "native_compile": {
+            "max_us": 215940.875,
+            "min_us": 183949.0,
+            "p50_us": 185888.792,
+            "p95_us": 215940.875,
+            "samples": 3
+          },
+          "output_bytes_last_sample": 37,
+          "parse_and_emit": {
+            "max_us": 3524.292,
+            "min_us": 3375.75,
+            "p50_us": 3379.5,
+            "p95_us": 3524.292,
+            "samples": 3
+          },
+          "prepare_link": {
+            "max_us": 36.0,
+            "min_us": 33.666,
+            "p50_us": 33.875,
+            "p95_us": 36.0,
+            "samples": 3
+          },
+          "random_values": 1,
+          "sizes": {
+            "omit_runtime": false,
+            "parallel_pools": {},
+            "serialized_native_bytes": 12456600,
+            "wasm_sha256": "c4314af457586454fd742d7d5960a14a700447076250ba3cd71f2fbf46eec75e",
+            "workflow_logic_wasm_bytes": 62372,
+            "workflow_wasm_bytes": 3309475,
+            "workflow_wasm_gzip_bytes": 848459
+          },
+          "track_events": false
+        },
+        {
+          "cached_full_run": {
+            "max_us": 105.625,
+            "min_us": 74.083,
+            "p50_us": 80.583,
+            "p95_us": 91.833,
+            "samples": 100
+          },
+          "captured_runtime_messages_last_sample": 1,
+          "checkpoint_count": 0,
+          "child_graph": null,
+          "compose": {
+            "max_us": 24063.458,
+            "min_us": 23528.5,
+            "p50_us": 23693.5,
+            "p95_us": 24063.458,
+            "samples": 3
+          },
+          "durable_cached_result_replay": null,
+          "graph": {
+            "durable": false,
+            "entryPoint": "finish",
+            "executionPlan": [],
+            "inputSchema": {
+              "value": {
+                "required": true,
+                "type": "string"
+              }
+            },
+            "name": "finish_only",
+            "steps": {
+              "finish": {
+                "id": "finish",
+                "inputMapping": {
+                  "result": {
+                    "value": "data.value",
+                    "valueType": "reference"
+                  }
+                },
+                "stepType": "Finish"
+              }
+            }
+          },
+          "graph_sha256": "22683ee64e2029cc0a92d826b582be21984bd4d097d78be190da75952b53983d",
+          "input_bytes": 52,
+          "input_sha256": "d57715d6de213548edfdbda17e0e428e23d65c35afc328b860d8160906ed34fd",
+          "json_to_first_completed_run": {
+            "max_us": 187332.70799999998,
+            "min_us": 185363.70799999998,
+            "p50_us": 186589.542,
+            "p95_us": 187332.70799999998,
+            "samples": 3
+          },
+          "json_to_wasm": {
+            "max_us": 27415.792,
+            "min_us": 26904.5,
+            "p50_us": 26915.5,
+            "p95_us": 27415.792,
+            "samples": 3
+          },
+          "largest_guest_memory_bytes": 1179648,
+          "name": "finish_only",
+          "native_compile": {
+            "max_us": 159080.25,
+            "min_us": 157676.916,
+            "p50_us": 158785.291,
+            "p95_us": 159080.25,
+            "samples": 3
+          },
+          "output_bytes_last_sample": 29,
+          "parse_and_emit": {
+            "max_us": 3375.791,
+            "min_us": 3221.875,
+            "p50_us": 3351.541,
+            "p95_us": 3375.791,
+            "samples": 3
+          },
+          "prepare_link": {
+            "max_us": 34.708,
+            "min_us": 33.416,
+            "p50_us": 34.375,
+            "p95_us": 34.708,
+            "samples": 3
+          },
+          "random_values": 0,
+          "sizes": {
+            "omit_runtime": false,
+            "parallel_pools": {},
+            "serialized_native_bytes": 10703536,
+            "wasm_sha256": "6bc50290f5f191f838d4ec1267f4ea16ac17c607df564a130fc27c8ec896e4aa",
+            "workflow_logic_wasm_bytes": 56144,
+            "workflow_wasm_bytes": 2803799,
+            "workflow_wasm_gzip_bytes": 691044
+          },
+          "track_events": false
+        },
+        {
+          "cached_full_run": {
+            "max_us": 4441.875,
+            "min_us": 4127.5419999999995,
+            "p50_us": 4250.041,
+            "p95_us": 4439.417,
+            "samples": 30
+          },
+          "captured_runtime_messages_last_sample": 1,
+          "checkpoint_count": 0,
+          "child_graph": null,
+          "compose": {
+            "max_us": 24040.708000000002,
+            "min_us": 23611.5,
+            "p50_us": 24005.041,
+            "p95_us": 24040.708000000002,
+            "samples": 3
+          },
+          "durable_cached_result_replay": null,
+          "graph": {
+            "durable": false,
+            "entryPoint": "finish",
+            "executionPlan": [],
+            "inputSchema": {
+              "value": {
+                "required": true,
+                "type": "string"
+              }
+            },
+            "name": "finish_payload_1mib",
+            "steps": {
+              "finish": {
+                "id": "finish",
+                "inputMapping": {
+                  "result": {
+                    "value": "data.value",
+                    "valueType": "reference"
+                  }
+                },
+                "stepType": "Finish"
+              }
+            }
+          },
+          "graph_sha256": "fc5e8e654b1d8c137e041d8f10cabf273ccc219ad7f7096a3df5bec564ea3959",
+          "input_bytes": 1048612,
+          "input_sha256": "022e7ac4dd444620ebf5828ee270c63f91f0dd0c18bc05065322b832854c8518",
+          "json_to_first_completed_run": {
+            "max_us": 194256.166,
+            "min_us": 190510.0,
+            "p50_us": 192167.958,
+            "p95_us": 194256.166,
+            "samples": 3
+          },
+          "json_to_wasm": {
+            "max_us": 27430.583000000002,
+            "min_us": 26887.958,
+            "p50_us": 27283.208,
+            "p95_us": 27430.583000000002,
+            "samples": 3
+          },
+          "largest_guest_memory_bytes": 8519680,
+          "name": "finish_payload_1mib",
+          "native_compile": {
+            "max_us": 161236.375,
+            "min_us": 156859.70799999998,
+            "p50_us": 160358.33299999998,
+            "p95_us": 161236.375,
+            "samples": 3
+          },
+          "output_bytes_last_sample": 1048589,
+          "parse_and_emit": {
+            "max_us": 3389.833,
+            "min_us": 3275.792,
+            "p50_us": 3278.083,
+            "p95_us": 3389.833,
+            "samples": 3
+          },
+          "prepare_link": {
+            "max_us": 45.791999999999994,
+            "min_us": 32.75,
+            "p50_us": 33.708000000000006,
+            "p95_us": 45.791999999999994,
+            "samples": 3
+          },
+          "random_values": 0,
+          "sizes": {
+            "omit_runtime": false,
+            "parallel_pools": {},
+            "serialized_native_bytes": 10703536,
+            "wasm_sha256": "504dfef7a86bad2bc5c2d81691ec361da5dfab6c7eee3ccbe682bb0f68c93e57",
+            "workflow_logic_wasm_bytes": 56168,
+            "workflow_wasm_bytes": 2803823,
+            "workflow_wasm_gzip_bytes": 691050
+          },
+          "track_events": false
+        }
+      ],
+      "runtime": "in-memory CapturingRuntimeHost; no database/network/server queue",
+      "warmup_runs": 5,
+      "wasmtime": "46.0.1",
+      "workers": 4
+    }
+  ]
+}

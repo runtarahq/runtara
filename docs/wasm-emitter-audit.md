@@ -10,6 +10,15 @@ and durable suspend/resume through the production invoke ABI.
 All seven findings now have passing regressions. See the verification
 record for checks and limitations.
 
+An additional [independent step cancellation proof](isolated-step-cancellation-poc.md)
+tests a possible architecture for stopping non-cooperative step code while its
+parent continues. It uses guest-owned orchestration and one disposable Store per
+step; it does not change this PR's production emitter or E128 behavior.
+The follow-up [production research](isolated-step-production-research.md) measures
+setup costs and package sizes and examines resource limits and durable races.
+The [selective-isolation plan](selective-isolation-plan.md) maps the proposed
+implementation to every existing DSL construct without changing the DSL.
+
 [Open the interactive pattern guide](wasm-emitter-patterns.html) to compare tested
 controls, recorded failures, and proposed fixes with step-through diagrams and
 exportable example DSL. The guide is a standalone, offline HTML/CSS/JS page;
