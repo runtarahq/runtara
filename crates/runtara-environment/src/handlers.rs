@@ -7,7 +7,6 @@
 use chrono::{DateTime, Utc};
 use runtara_core::domain::InstanceStatus as CoreInstanceStatus;
 
-use serde::Serialize;
 use serde_json::Value;
 use sqlx::PgPool;
 use std::path::PathBuf;
@@ -1526,12 +1525,14 @@ pub fn spawn_container_monitor(
 //
 // The response types report what the store holds — instants as instants, bodies
 // as the bytes that were written. They used to be wire-shaped (`*_ms`
-// timestamps, base64 bodies) because a socket used to carry them; nothing has
-// serialized them since environment became a library the server links.
+// timestamps, base64 bodies, `Serialize` with the absent fields skipped)
+// because a socket used to carry them. Nothing has serialized them since
+// environment became a library the server links, so they are plain structs:
+// the one consumer reads their fields and builds its own types.
 // ============================================================================
 
 /// Image summary as the management protocol reports it.
-#[derive(Debug, Serialize)]
+#[derive(Debug)]
 pub struct ImageSummary {
     /// Image id.
     pub image_id: String,
@@ -1540,12 +1541,10 @@ pub struct ImageSummary {
     /// Image name.
     pub name: String,
     /// Optional description.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     /// Creation time.
     pub created_at: DateTime<Utc>,
     /// Free-form metadata recorded at registration.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<Value>,
 }
 
@@ -1631,65 +1630,47 @@ fn image_summary(img: crate::image_registry::Image) -> ImageSummary {
 }
 
 /// Full instance state as the management protocol reports it.
-#[derive(Debug, Serialize)]
+#[derive(Debug)]
 pub struct InstanceStatusResponse {
     /// Whether the instance exists.
     pub found: bool,
     /// Instance id (echoed even when not found).
     pub instance_id: String,
     /// Lifecycle status.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
     /// Owning tenant.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub tenant_id: Option<String>,
     /// Image the instance was launched from.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub image_id: Option<String>,
     /// Image name, resolved at read time.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub image_name: Option<String>,
     /// Most recent checkpoint.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub checkpoint_id: Option<String>,
     /// Creation time.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub created_at: Option<DateTime<Utc>>,
     /// First-run start time.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub started_at: Option<DateTime<Utc>>,
     /// Terminal time.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub finished_at: Option<DateTime<Utc>>,
     /// Output bytes exactly as the guest wrote them.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub output: Option<Vec<u8>>,
     /// Input bytes exactly as they were stored.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub input: Option<Vec<u8>>,
     /// Failure message, when the instance failed.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     /// Captured guest stderr.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub stderr: Option<String>,
     /// Attempts used so far.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub retry_count: Option<u32>,
     /// Attempt ceiling.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub max_retries: Option<u32>,
     /// Peak guest linear memory.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub memory_peak_bytes: Option<u64>,
     /// CPU time consumed.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub cpu_usage_usec: Option<u64>,
     /// Why the instance stopped.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub termination_reason: Option<String>,
     /// Guest exit code.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,
 }
 
@@ -1756,27 +1737,23 @@ pub async fn handle_get_instance_status(
 }
 
 /// Instance summary for list responses.
-#[derive(Debug, Serialize)]
+#[derive(Debug)]
 pub struct InstanceSummary {
     /// Instance id.
     pub instance_id: String,
     /// Owning tenant.
     pub tenant_id: String,
     /// Image the instance was launched from.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub image_id: Option<String>,
     /// Human-readable name of the image the instance was launched from.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub image_name: Option<String>,
     /// Lifecycle status.
     pub status: String,
     /// Creation time.
     pub created_at: DateTime<Utc>,
     /// First-run start time.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub started_at: Option<DateTime<Utc>>,
     /// Terminal time.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub finished_at: Option<DateTime<Utc>>,
     /// Whether a failure message is recorded.
     pub has_error: bool,
@@ -2005,7 +1982,7 @@ pub async fn wake_suspended_on_signal(persistence: &dyn Persistence, instance_id
 }
 
 /// Checkpoint summary.
-#[derive(Debug, Serialize)]
+#[derive(Debug)]
 pub struct CheckpointSummary {
     /// Checkpoint id.
     pub checkpoint_id: String,
@@ -2085,7 +2062,7 @@ pub async fn handle_list_checkpoints(
 }
 
 /// Event summary.
-#[derive(Debug, Serialize)]
+#[derive(Debug)]
 pub struct EventSummary {
     /// Row id.
     pub id: i64,
@@ -2094,15 +2071,12 @@ pub struct EventSummary {
     /// Event type.
     pub event_type: String,
     /// Checkpoint the event belongs to, when it has one.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub checkpoint_id: Option<String>,
     /// Payload bytes exactly as the emitter wrote them.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub payload: Option<Vec<u8>>,
     /// Creation time.
     pub created_at: DateTime<Utc>,
     /// Event subtype.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub subtype: Option<String>,
 }
 
@@ -2152,12 +2126,11 @@ pub async fn handle_list_events(
 }
 
 /// Step summary.
-#[derive(Debug, Serialize)]
+#[derive(Debug)]
 pub struct StepSummary {
     /// Step id.
     pub step_id: String,
     /// Human-readable step name.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub step_name: Option<String>,
     /// Step type.
     pub step_type: String,
@@ -2166,33 +2139,24 @@ pub struct StepSummary {
     /// Start time.
     pub started_at: DateTime<Utc>,
     /// Completion time.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub completed_at: Option<DateTime<Utc>>,
     /// Wall-clock duration.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<i64>,
     /// Real launch/settle wall-clock (epoch ms) of a parallel branch's async
     /// work — present only for concurrent steps, so the timeline/replay render
     /// the true overlapping interval instead of the sequential assemble cascade.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub launched_at_ms: Option<i64>,
     /// See [`Self::launched_at_ms`].
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub settled_at_ms: Option<i64>,
     /// Resolved step inputs.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub inputs: Option<Value>,
     /// Step outputs.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub outputs: Option<Value>,
     /// Failure detail.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<Value>,
     /// Scope this step ran in.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub scope_id: Option<String>,
     /// Enclosing scope.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_scope_id: Option<String>,
 }
 
@@ -2266,22 +2230,19 @@ pub async fn handle_list_step_summaries(
 }
 
 /// One scope in an ancestry chain.
-#[derive(Debug, Serialize)]
+#[derive(Debug)]
 pub struct ScopeInfo {
     /// Scope id.
     pub scope_id: String,
     /// Enclosing scope, absent at the root.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_scope_id: Option<String>,
     /// Step that opened the scope.
     pub step_id: String,
     /// Human-readable step name.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub step_name: Option<String>,
     /// Step type.
     pub step_type: String,
     /// Iteration index, for scopes opened per-iteration.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub index: Option<u32>,
     /// Creation time.
     pub created_at: DateTime<Utc>,
@@ -2409,7 +2370,7 @@ fn bucket_count(
 }
 
 /// One bucket of tenant execution metrics.
-#[derive(Debug, Serialize)]
+#[derive(Debug)]
 pub struct MetricsBucket {
     /// Bucket start.
     pub bucket_time: DateTime<Utc>,
@@ -2422,22 +2383,16 @@ pub struct MetricsBucket {
     /// Invocations that were cancelled.
     pub cancelled_count: i64,
     /// Mean duration.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub avg_duration_ms: Option<f64>,
     /// Fastest duration.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub min_duration_ms: Option<f64>,
     /// Slowest duration.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub max_duration_ms: Option<f64>,
     /// Mean peak memory.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub avg_memory_bytes: Option<i64>,
     /// Highest peak memory.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub max_memory_bytes: Option<i64>,
     /// Successes as a percentage of terminal invocations.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub success_rate_percent: Option<f64>,
 }
 
