@@ -449,8 +449,8 @@ existing lifecycle Cancel reaches WASM. The test requires closure before root
 acknowledgement and forbids retry/recovery/ordinary completion. Artifact checks
 still require a normal composed binary with no isolation inventory or tasks import.
 
-HTTP and Slack are now migrated; the other 25 Agent bindings, compiled workflow-
-agent cancellation, CPU cooperation points, deadline handling, emergency grace,
+At the end of this stage, HTTP and Slack were migrated; the other 25 Agent
+bindings, compiled workflow-agent cancellation, CPU cooperation points, deadline handling, emergency grace,
 terminal races, server E2E and performance/capacity gates remain open. The full
 plan has not been completed by these component tests.
 
@@ -489,3 +489,77 @@ release size/timing comparison or capacity measurement was run in this stage.
 Cancelling a later upload stage does not undo a URL/file allocation or bytes
 already accepted by the remote service; these tests establish local workflow
 interruption and resource cleanup, not external rollback.
+
+## AI provider bindings and emitted AiAgent cancellation
+
+OpenAI, Bedrock and AI-tools now use the same normal callback bindings and shared
+async capability dispatcher as HTTP and Slack. All 23 capabilities across these
+three Agents await their HTTP calls. Image, vision, structured-output, moderation,
+model-listing and embedding helpers use that path too. There is no product flag,
+new host task service or alternative workflow composition.
+
+AI-tools' `chat-completion`, `chat-turn` and `summarize-memory` also depended on
+`runtara-ai`'s synchronous provider abstraction. The normal Agent path now awaits
+`run_completion_async` and a required `CompletionModel::completion_async` method.
+The trait has no synchronous default for this method: such a fallback would hide
+an uninterruptible provider. Its boxed future permits the existing dynamic
+provider selection; it does not introduce an executor or host scheduling policy.
+
+Provider selection, timeout forwarding, request preparation and response parsing
+are shared with the existing synchronous entry points. Those entry points remain
+for legacy/native callers, rather than becoming a selectable workflow backend.
+As in the preceding stage, native HTTP remains blocking; cancellation evidence
+comes from the built WASM components and production component I/O linker.
+
+The new built-Agent tests cover 24 pending-I/O cases across OpenAI and Bedrock:
+headers and partial proxy bodies for provider-specific text completion, AI-tools
+text helpers, shared chat completion, chat turns, memory summaries and embeddings.
+Each case checks local request closure before the parent resumes, independent
+sibling completion, and a successful new call in the same Agent instance. For
+Bedrock embeddings, the second batch item must never start after the first is
+cancelled. The memory-summary cases must acknowledge cancellation rather than
+returning the ordinary provider-error fallback state.
+
+Additional tests preserve connection/tenant and provider forwarding, dispatch and
+validation errors, the HTTP 429/403/503 contracts, retry metadata, completion text,
+tool calls and usage parsing. They explicitly preserve the existing distinction
+between the provider-specific HTTP errors and shared completion errors. Ordinary
+summary failure still yields the existing fallback; cancellation drops the future
+before that fallback can execute.
+
+Three normal emitted-DSL tests exercise single-shot AiAgent completion, an AiAgent
+tool turn, and memory summarization after a completed turn. Existing lifecycle
+Cancel reaches guest-owned waits. They require I/O cleanup before acknowledgement
+and reject normal completion or `onError` recovery. The summary test also rejects
+memory writes after cancellation. It allows the existing object-model Agent's
+memory load to finish first; this does **not** qualify cancellation during that
+Agent's still-synchronous load/save I/O.
+
+Five of the 27 built-in Agent bindings are now migrated. The other 22 bindings,
+compiled workflow-agent cancellation, bounded CPU cooperation points, cooperative
+timeouts, emergency grace, terminal races, server E2E, Linux qualification and
+fresh release size/timing/capacity comparisons remain open. These tests do not
+establish those gates or undo any external provider work.
+
+Verification commands for this stage (the existing integration features select
+only test targets):
+
+```sh
+scripts/build-agent-components.sh
+cargo test -p runtara-ai -p runtara-agent-openai -p runtara-agent-bedrock -p runtara-agent-ai-tools
+cargo test -p runtara-component-host --features component-integration-tests --test cooperative_cancellation -- --test-threads=4
+cargo test -p runtara-workflows --features direct-wasm-integration-tests --test direct_wasm_execute -- --test-threads=4
+```
+
+Results: the normal build produced all 27 Agent components and both shared
+workflow components with metadata. All 54 focused native tests passed (29 shared
+AI, 19 AI-tools, five Bedrock, one OpenAI); the existing ignored documentation
+example remains ignored. All 25 component cancellation tests passed, including
+eight new AI test functions. The full emitted-workflow suite passed 266 tests
+with four test threads, including all 16 cooperative lifecycle cases. Its two
+existing manual release benchmarks remain ignored and supply no new performance
+evidence. Affected-crate and integration-target Clippy, formatting and diff
+whitespace checks passed. No external provider calls, database/server E2E, Linux
+qualification, release size/timing comparison or capacity run was performed.
+The six standard proofs also passed in the default test build, without staged
+Agent integration tests enabled.

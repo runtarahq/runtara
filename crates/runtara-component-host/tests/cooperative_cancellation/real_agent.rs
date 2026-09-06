@@ -1,7 +1,8 @@
-//! Built HTTP Agent + normal composition + production host I/O. The signal
-//! source remains a fixture; generated DSL/lifecycle wiring is a later gate.
+//! Built Agents + normal composition + production host I/O. The parent and
+//! signal source are fixtures; emitted DSL proofs live in runtara-workflows.
 use super::*;
 use runtara_component_host::{CallContext, HostState};
+use serde_json::Value;
 use std::path::PathBuf;
 use wac_graph::{CompositionGraph, EncodeOptions, types::Package};
 
@@ -11,7 +12,7 @@ fn agent_path(agent_id: &str) -> anyhow::Result<PathBuf> {
         .unwrap_or_else(|| {
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/wasm32-wasip2/release")
         });
-    let agent = directory.join(format!("runtara_agent_{agent_id}.wasm"));
+    let agent = directory.join(format!("runtara_agent_{}.wasm", agent_id.replace('-', "_")));
     anyhow::ensure!(
         agent.exists(),
         "run scripts/build-agent-components.sh first"
@@ -350,5 +351,49 @@ async fn async_http_preserves_coercion_proxy_context_and_error_response() -> any
     assert_eq!(output["headers"]["x-fixture"], "response");
     assert_eq!(output["success"], false);
     server.await??;
+    Ok(())
+}
+
+pub(super) async fn read_proxy(socket: &mut tokio::net::TcpStream) -> anyhow::Result<Value> {
+    let headers = String::from_utf8(request_headers(socket).await?)?;
+    anyhow::ensure!(
+        headers.starts_with("POST /proxy "),
+        "request bypassed the local proxy"
+    );
+    anyhow::ensure!(
+        headers
+            .to_lowercase()
+            .contains("x-org-id: fixture-tenant\r\n"),
+        "missing tenant context"
+    );
+    let length: usize = headers
+        .lines()
+        .filter_map(|line| line.split_once(':'))
+        .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+        .unwrap()
+        .1
+        .trim()
+        .parse()?;
+    anyhow::ensure!(length < 16_384, "unexpected request size");
+    let mut bytes = vec![0; length];
+    socket.read_exact(&mut bytes).await?;
+    Ok(serde_json::from_slice(&bytes)?)
+}
+
+pub(super) async fn respond(
+    socket: &mut tokio::net::TcpStream,
+    envelope: Value,
+) -> anyhow::Result<()> {
+    let bytes = serde_json::to_vec(&envelope)?;
+    socket
+        .write_all(
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                bytes.len()
+            )
+            .as_bytes(),
+        )
+        .await?;
+    socket.write_all(&bytes).await?;
     Ok(())
 }

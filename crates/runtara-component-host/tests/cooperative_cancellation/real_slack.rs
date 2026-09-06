@@ -1,5 +1,5 @@
 //! Real Slack WASM bindings, with every request confined to a local proxy stub.
-use super::real_agent::{cancel_and_reuse, compose_agent, invoke_named_agent, request_headers};
+use super::real_agent::{cancel_and_reuse, compose_agent, invoke_named_agent, read_proxy, respond};
 use super::*;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use runtara_component_host::CallContext;
@@ -10,47 +10,6 @@ fn connection() -> Value {
 }
 fn message(text: &str) -> Value {
     json!({"channel":"C-fixture","text":text,"unfurl_links":"false","_connection":connection()})
-}
-
-async fn read_proxy(socket: &mut tokio::net::TcpStream) -> anyhow::Result<Value> {
-    let headers = String::from_utf8(request_headers(socket).await?)?;
-    anyhow::ensure!(
-        headers.starts_with("POST /proxy "),
-        "request bypassed the local proxy"
-    );
-    anyhow::ensure!(
-        headers
-            .to_lowercase()
-            .contains("x-org-id: fixture-tenant\r\n"),
-        "missing tenant context"
-    );
-    let length: usize = headers
-        .lines()
-        .filter_map(|line| line.split_once(':'))
-        .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
-        .unwrap()
-        .1
-        .trim()
-        .parse()?;
-    anyhow::ensure!(length < 16_384, "unexpected request size");
-    let mut bytes = vec![0; length];
-    socket.read_exact(&mut bytes).await?;
-    Ok(serde_json::from_slice(&bytes)?)
-}
-
-async fn respond(socket: &mut tokio::net::TcpStream, envelope: Value) -> anyhow::Result<()> {
-    let bytes = serde_json::to_vec(&envelope)?;
-    socket
-        .write_all(
-            format!(
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                bytes.len()
-            )
-            .as_bytes(),
-        )
-        .await?;
-    socket.write_all(&bytes).await?;
-    Ok(())
 }
 
 async fn cancellation(

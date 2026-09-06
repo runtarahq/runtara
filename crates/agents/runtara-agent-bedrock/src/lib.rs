@@ -42,9 +42,8 @@ mod bindings {
     wit_bindgen::generate!({
         path: ["../../runtara-agent-wit/wit", "wit"],
         world: "runtara:agent-bedrock/agent",
-        // Sync impls of the async-TYPED invoke (sync lift; see
-        // spikes/wit-bindgen-async-typed).
-        async: false,
+        // Callback bindings allow cancellation to drop awaited component I/O.
+        async: ["export:runtara:agent-bedrock/capabilities@0.4.0#invoke"],
         generate_all,
     });
 }
@@ -192,7 +191,7 @@ fn require_connection(connection: Option<&RawConnection>) -> Result<&RawConnecti
 /// resolves the `aws_credentials` connection, computes SigV4, and rewrites the
 /// host to `https://bedrock-runtime.{region}.amazonaws.com`. We pass a
 /// placeholder host so the URL is well-formed for `runtara-http`.
-fn bedrock_post(
+async fn bedrock_post(
     connection: &RawConnection,
     path: &str,
     body: Value,
@@ -211,7 +210,8 @@ fn bedrock_post(
         .header("Accept", "application/json")
         .header("X-Runtara-Connection-Id", &connection.connection_id)
         .body_bytes(&body_bytes)
-        .call_agent()
+        .call_agent_async()
+        .await
         .map_err(|e| {
             AgentError::transient(
                 "NETWORK_ERROR",
@@ -277,7 +277,7 @@ fn bedrock_post(
 /// GET a Bedrock control-plane path (`bedrock.amazonaws.com`, distinct from
 /// the runtime endpoint). Same proxy routing as `bedrock_post` — the proxy
 /// resolves region/credentials from the connection.
-fn bedrock_get(
+async fn bedrock_get(
     connection: &RawConnection,
     path: &str,
     timeout_ms: u64,
@@ -289,7 +289,8 @@ fn bedrock_get(
         .request("GET", &url)
         .header("Accept", "application/json")
         .header("X-Runtara-Connection-Id", &connection.connection_id)
-        .call_agent()
+        .call_agent_async()
+        .await
         .map_err(|e| {
             AgentError::transient(
                 "NETWORK_ERROR",
@@ -448,7 +449,9 @@ pub struct TextCompletionOutput {
     module_integration_ids = "aws_credentials",
     module_secure = true
 )]
-pub fn text_completion(input: TextCompletionInput) -> Result<TextCompletionOutput, AgentError> {
+pub async fn text_completion(
+    input: TextCompletionInput,
+) -> Result<TextCompletionOutput, AgentError> {
     let connection = require_connection(input._connection.as_ref())?;
 
     let model = input
@@ -510,7 +513,8 @@ pub fn text_completion(input: TextCompletionInput) -> Result<TextCompletionOutpu
         &format!("/model/{}/invoke", model),
         request_body,
         120_000,
-    )?;
+    )
+    .await?;
 
     let (text, prompt_tokens, completion_tokens, finish_reason) = if is_claude {
         let text = resp["content"][0]["text"]
@@ -668,7 +672,9 @@ pub struct ImageGenerationOutput {
     display_name = "Image Generation (Bedrock)",
     description = "Generate images using AWS Bedrock models (Stable Diffusion)"
 )]
-pub fn image_generation(input: ImageGenerationInput) -> Result<ImageGenerationOutput, AgentError> {
+pub async fn image_generation(
+    input: ImageGenerationInput,
+) -> Result<ImageGenerationOutput, AgentError> {
     let connection = require_connection(input._connection.as_ref())?;
 
     let model = input
@@ -703,7 +709,8 @@ pub fn image_generation(input: ImageGenerationInput) -> Result<ImageGenerationOu
         &format!("/model/{}/invoke", model),
         body,
         runtara_dsl::DEFAULT_STEP_TIMEOUT_MS,
-    )?;
+    )
+    .await?;
 
     let image_data = resp["artifacts"][0]["base64"]
         .as_str()
@@ -797,7 +804,7 @@ pub struct StructuredOutputOutput {
     display_name = "Structured Output (Bedrock)",
     description = "Generate structured JSON output using AWS Bedrock models with prompt engineering"
 )]
-pub fn structured_output(
+pub async fn structured_output(
     input: StructuredOutputInput,
 ) -> Result<StructuredOutputOutput, AgentError> {
     let schema_str = serde_json::to_string_pretty(&input.json_schema).map_err(|e| {
@@ -823,7 +830,8 @@ pub fn structured_output(
         temperature: input.temperature,
         top_p: None,
         stop_sequences: None,
-    })?;
+    })
+    .await?;
 
     let output: Value = serde_json::from_str(&tc_result.text).map_err(|e| {
         AgentError::permanent(
@@ -931,7 +939,7 @@ fn bedrock_vision_model_supported(model: &str) -> bool {
     display_name = "Vision to Text (Bedrock)",
     description = "Analyze images and generate text descriptions using AWS Bedrock Claude models"
 )]
-pub fn vision_to_text(input: VisionToTextInput) -> Result<VisionToTextOutput, AgentError> {
+pub async fn vision_to_text(input: VisionToTextInput) -> Result<VisionToTextOutput, AgentError> {
     let connection = require_connection(input._connection.as_ref())?;
 
     let model = input
@@ -995,7 +1003,8 @@ pub fn vision_to_text(input: VisionToTextInput) -> Result<VisionToTextOutput, Ag
         &format!("/model/{}/invoke", model),
         body,
         120_000,
-    )?;
+    )
+    .await?;
 
     let text = resp["content"][0]["text"]
         .as_str()
@@ -1115,7 +1124,7 @@ pub struct VisionToImageOutput {
     display_name = "Vision to Image (Bedrock)",
     description = "Edit and manipulate images using AWS Bedrock Stable Diffusion models"
 )]
-pub fn vision_to_image(input: VisionToImageInput) -> Result<VisionToImageOutput, AgentError> {
+pub async fn vision_to_image(input: VisionToImageInput) -> Result<VisionToImageOutput, AgentError> {
     let connection = require_connection(input._connection.as_ref())?;
 
     let model = input
@@ -1143,7 +1152,8 @@ pub fn vision_to_image(input: VisionToImageInput) -> Result<VisionToImageOutput,
         &format!("/model/{}/invoke", model),
         body,
         runtara_dsl::DEFAULT_STEP_TIMEOUT_MS,
-    )?;
+    )
+    .await?;
 
     let image_data = resp["artifacts"][0]["base64"]
         .as_str()
@@ -1230,7 +1240,7 @@ pub struct BedrockInvokeModelOutput {
     display_name = "Invoke Model",
     description = "Directly invoke any AWS Bedrock model with custom request body"
 )]
-pub fn bedrock_invoke_model(
+pub async fn bedrock_invoke_model(
     input: BedrockInvokeModelInput,
 ) -> Result<BedrockInvokeModelOutput, AgentError> {
     let connection = require_connection(input._connection.as_ref())?;
@@ -1260,7 +1270,8 @@ pub fn bedrock_invoke_model(
         .header("Accept", &accept)
         .header("X-Runtara-Connection-Id", &connection.connection_id)
         .body_bytes(&body_bytes)
-        .call_agent()
+        .call_agent_async()
+        .await
         .map_err(|e| {
             AgentError::transient(
                 "NETWORK_ERROR",
@@ -1344,7 +1355,7 @@ pub struct BedrockListModelsOutput {
     display_name = "List Models",
     description = "List available foundation models in AWS Bedrock"
 )]
-pub fn bedrock_list_models(
+pub async fn bedrock_list_models(
     input: BedrockListModelsInput,
 ) -> Result<BedrockListModelsOutput, AgentError> {
     let connection = require_connection(input._connection.as_ref())?;
@@ -1352,7 +1363,7 @@ pub fn bedrock_list_models(
     // list-foundation-models is on the control-plane endpoint
     // (bedrock.region.amazonaws.com), not the runtime endpoint. The proxy
     // resolves the region from the connection.
-    let resp = bedrock_get(connection, "/foundation-models", 30_000)?;
+    let resp = bedrock_get(connection, "/foundation-models", 30_000).await?;
 
     let model_summaries = resp["modelSummaries"]
         .as_array()
@@ -1496,17 +1507,17 @@ struct Component;
 
 #[cfg(target_arch = "wasm32")]
 impl Guest for Component {
-    fn invoke(capability_id: String, input: Vec<u8>) -> Result<Vec<u8>, ErrorInfo> {
+    async fn invoke(capability_id: String, input: Vec<u8>) -> Result<Vec<u8>, ErrorInfo> {
         let value: serde_json::Value = serde_json::from_slice(&input).map_err(bad_json)?;
 
         let executor_result = match capability_id.as_str() {
-            "text-completion" => __executor_text_completion(value),
-            "image-generation" => __executor_image_generation(value),
-            "structured-output" => __executor_structured_output(value),
-            "vision-to-text" => __executor_vision_to_text(value),
-            "vision-to-image" => __executor_vision_to_image(value),
-            "bedrock-invoke-model" => __executor_bedrock_invoke_model(value),
-            "bedrock-list-models" => __executor_bedrock_list_models(value),
+            "text-completion" => __executor_text_completion(value).await,
+            "image-generation" => __executor_image_generation(value).await,
+            "structured-output" => __executor_structured_output(value).await,
+            "vision-to-text" => __executor_vision_to_text(value).await,
+            "vision-to-image" => __executor_vision_to_image(value).await,
+            "bedrock-invoke-model" => __executor_bedrock_invoke_model(value).await,
+            "bedrock-list-models" => __executor_bedrock_list_models(value).await,
             other => {
                 return Err(ErrorInfo {
                     code: "UNKNOWN_CAPABILITY".into(),
@@ -1638,9 +1649,11 @@ mod tests {
         assert_eq!(invoke.example, Some(DEFAULT_BEDROCK_MODEL));
     }
 
-    #[test]
-    fn vision_to_text_rejects_non_anthropic_model() {
-        let err = vision_to_text(vision_input(Some("qwen.qwen3-32b-v1:0".into()))).unwrap_err();
+    #[tokio::test]
+    async fn vision_to_text_rejects_non_anthropic_model() {
+        let err = vision_to_text(vision_input(Some("qwen.qwen3-32b-v1:0".into())))
+            .await
+            .unwrap_err();
         assert_eq!(err.code, "BEDROCK_UNSUPPORTED_MODEL");
     }
 

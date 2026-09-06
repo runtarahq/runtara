@@ -158,6 +158,9 @@ enum Scenario {
     BeforeLaunch,
     Headers,
     SlackHeaders,
+    AiSingle,
+    AiTurn,
+    AiSummary,
     PartialBody,
     SignalReadFailure,
     ParallelSplit,
@@ -171,6 +174,12 @@ enum Scenario {
 }
 
 impl Scenario {
+    fn is_ai(self) -> bool {
+        matches!(self, Self::AiSingle | Self::AiTurn | Self::AiSummary)
+    }
+    fn uses_proxy(self) -> bool {
+        self == Self::SlackHeaders || self.is_ai()
+    }
     fn drains_normally(self) -> bool {
         matches!(self, Self::PauseBranches | Self::ShutdownBranches)
     }
@@ -212,7 +221,7 @@ async fn run(scenario: Scenario) -> anyhow::Result<()> {
     );
     let expected_requests = if pre_cancel {
         0
-    } else if parallel {
+    } else if parallel || scenario == Scenario::AiSummary {
         2
     } else {
         1
@@ -249,6 +258,23 @@ async fn run(scenario: Scenario) -> anyhow::Result<()> {
             "text":immediate("local cancellation fixture".into()),
             "_connection":immediate(serde_json::json!({"connection_id":"fixture-connection","integration_id":"slack_bot","parameters":{}}))
         });
+    }
+    if scenario.is_ai() {
+        graph = serde_json::from_str(&match scenario {
+            Scenario::AiSingle => single_shot_ai_agent_graph_json(""),
+            Scenario::AiTurn => ai_agent_tool_loop_durable_graph_json(false),
+            Scenario::AiSummary => ai_agent_memory_graph_json(),
+            _ => unreachable!(),
+        })?;
+        graph["durable"] = false.into();
+        graph["steps"]["handled"] = serde_json::json!({"id":"handled","stepType":"Finish","inputMapping":{"recovered":immediate(true.into())}});
+        graph["executionPlan"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({"fromStep":"ai","toStep":"handled","label":"onError"}));
+        if scenario == Scenario::AiSummary {
+            graph["steps"]["ai"]["config"]["memory"]["compaction"]["strategy"] = "summarize".into();
+        }
     }
     if parallel {
         graph = if matches!(
@@ -323,10 +349,36 @@ async fn run(scenario: Scenario) -> anyhow::Result<()> {
                             anyhow::ensure!(n != 0, "request closed before headers");
                             request.extend_from_slice(&buffer[..n]);
                         }
-                        if scenario == Scenario::SlackHeaders {
+                        if scenario.is_ai() {
                             let end = request.windows(4).position(|bytes| bytes == b"\r\n\r\n").unwrap() + 4;
                             let headers = std::str::from_utf8(&request[..end])?;
-                            anyhow::ensure!(headers.starts_with("POST / "), "Slack request bypassed local proxy");
+                            let line = headers.lines().next().unwrap();
+                            if line.starts_with("GET /fixture-tenant/conn-1/metadata ") {
+                                let bytes = serde_json::to_vec(&serde_json::json!({"connectionId":"conn-1","integrationId":"openai_api_key","status":"ACTIVE","resources":[],"metadata":null}))?;
+                                stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", bytes.len()).as_bytes()).await?;
+                                stream.write_all(&bytes).await?;
+                                return anyhow::Ok(());
+                            }
+                            if line.contains(" /object-model/") {
+                                // Only loading memory is allowed before the summary. A
+                                // cancelled summary must never fall through to save-memory.
+                                assert!(scenario == Scenario::AiSummary);
+                                let reply = if line.starts_with("GET /object-model/schemas/ai_conversation_memory?connectionId=conn-1 ") {
+                                    serde_json::json!({"success":true,"schema":{}})
+                                } else {
+                                    assert!(line.starts_with("POST /object-model/instances/query?connectionId=conn-1 "), "memory was mutated after cancellation: {line}");
+                                    serde_json::json!({"success":true,"instances":[]})
+                                };
+                                let bytes = serde_json::to_vec(&reply)?;
+                                stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", bytes.len()).as_bytes()).await?;
+                                stream.write_all(&bytes).await?;
+                                return anyhow::Ok(());
+                            }
+                        }
+                        if scenario.uses_proxy() {
+                            let end = request.windows(4).position(|bytes| bytes == b"\r\n\r\n").unwrap() + 4;
+                            let headers = std::str::from_utf8(&request[..end])?;
+                            anyhow::ensure!(headers.starts_with("POST / "), "Agent request bypassed local proxy");
                             let length: usize = headers.lines().filter_map(|line| line.split_once(':'))
                                 .find(|(name, _)| name.eq_ignore_ascii_case("content-length")).unwrap().1.trim().parse()?;
                             anyhow::ensure!(length < 16_384, "unexpected proxy request size");
@@ -336,13 +388,30 @@ async fn run(scenario: Scenario) -> anyhow::Result<()> {
                                 request.extend_from_slice(&buffer[..n]);
                             }
                             let body: Value = serde_json::from_slice(&request[end..end + length])?;
-                            assert_eq!(body["url"], "https://slack.com/api/chat.postMessage");
-                            assert_eq!(body["connection_id"], "fixture-connection");
+                            if scenario.is_ai() {
+                                assert_eq!(body["url"], "/v1/chat/completions");
+                                assert_eq!(body["connection_id"], "conn-1");
+                                assert_eq!(body["ai_provider"], "openai");
+                                if scenario == Scenario::AiSummary && server_host.requests.load(Ordering::SeqCst) == 1 {
+                                    assert!(body["body"]["messages"][0]["content"].as_str().unwrap().contains("conversation summarizer"));
+                                }
+                            } else {
+                                assert_eq!(body["url"], "https://slack.com/api/chat.postMessage");
+                                assert_eq!(body["connection_id"], "fixture-connection");
+                            }
                         }
                         if partial_body {
                             stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\nx").await?;
                         }
                         let started = server_host.requests.fetch_add(1, Ordering::SeqCst) + 1;
+                        if scenario == Scenario::AiSummary && started == 1 {
+                            let bytes = serde_json::to_vec(&llm_ok("completed first turn"))?;
+                            stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", bytes.len()).as_bytes()).await?;
+                            stream.write_all(&bytes).await?;
+                            server_host.closed_count.fetch_add(1, Ordering::SeqCst);
+                            server_host.closed.notify_one();
+                            return anyhow::Ok(());
+                        }
                         if started == expected_requests {
                             server_host.requested.store(true, Ordering::SeqCst);
                         }
@@ -380,8 +449,8 @@ async fn run(scenario: Scenario) -> anyhow::Result<()> {
             .execute_invoke(
                 &pre,
                 runtara_component_host::WorkflowRunSpec {
-                    env: if scenario == Scenario::SlackHeaders {
-                        HashMap::from([("RUNTARA_HTTP_PROXY_URL".into(), url.clone()), ("RUNTARA_TENANT_ID".into(), "fixture-tenant".into())])
+                    env: if scenario.uses_proxy() {
+                        HashMap::from([("RUNTARA_HTTP_PROXY_URL".into(), url.clone()), ("RUNTARA_TENANT_ID".into(), "fixture-tenant".into()), ("CONNECTION_SERVICE_URL".into(), url.clone()), ("RUNTARA_OBJECT_MODEL_URL".into(), format!("{url}/object-model"))])
                     } else { HashMap::new() },
                     stderr: None,
                     timeout: Duration::from_secs(10),
@@ -494,4 +563,17 @@ async fn emitted_checkpoint_cancel_cleans_pending_sibling_before_ack() -> anyhow
 #[tokio::test]
 async fn emitted_cancel_interrupts_slack_without_retry_or_recovery() -> anyhow::Result<()> {
     run(Scenario::SlackHeaders).await
+}
+
+#[tokio::test]
+async fn emitted_ai_single_shot_cancels_without_on_error_recovery() -> anyhow::Result<()> {
+    run(Scenario::AiSingle).await
+}
+#[tokio::test]
+async fn emitted_ai_turn_cancels_without_dispatching_tools_or_recovery() -> anyhow::Result<()> {
+    run(Scenario::AiTurn).await
+}
+#[tokio::test]
+async fn emitted_ai_summary_cancels_without_saving_fallback_memory() -> anyhow::Result<()> {
+    run(Scenario::AiSummary).await
 }

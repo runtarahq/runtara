@@ -65,6 +65,27 @@ pub struct CompletionInvokeRequest {
 /// This is intentionally identical in behavior to the generated
 /// `__ai_llm_durable` body; keep the two in sync.
 pub fn run_completion(req: CompletionInvokeRequest) -> Result<CompletionResponse, String> {
+    let (model, request) = prepare_completion(req)?;
+    model
+        .completion(request)
+        .map_err(|e| format!("LLM call failed: {e}"))
+}
+
+/// Issue a completion through awaitable component I/O in WASM. Provider
+/// selection, request construction and errors match [`run_completion`].
+pub async fn run_completion_async(
+    req: CompletionInvokeRequest,
+) -> Result<CompletionResponse, String> {
+    let (model, request) = prepare_completion(req)?;
+    model
+        .completion_async(request)
+        .await
+        .map_err(|e| format!("LLM call failed: {e}"))
+}
+
+fn prepare_completion(
+    req: CompletionInvokeRequest,
+) -> Result<(Box<dyn crate::CompletionModel>, crate::CompletionRequest), String> {
     let conn_id_opt = if req.connection_id.is_empty() {
         None
     } else {
@@ -105,9 +126,7 @@ pub fn run_completion(req: CompletionInvokeRequest) -> Result<CompletionResponse
         builder = builder.message(msg.clone());
     }
 
-    model
-        .completion(builder.build())
-        .map_err(|e| format!("LLM call failed: {e}"))
+    Ok((model, builder.build()))
 }
 
 /// Resolve the provider-specific structured-output `additional_params` for a

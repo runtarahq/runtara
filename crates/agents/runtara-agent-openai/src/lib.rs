@@ -36,9 +36,8 @@ mod bindings {
     wit_bindgen::generate!({
         path: ["../../runtara-agent-wit/wit", "wit"],
         world: "runtara:agent-openai/agent",
-        // Sync impls of the async-TYPED invoke (sync lift; see
-        // spikes/wit-bindgen-async-typed).
-        async: false,
+        // Callback bindings allow cancellation to drop awaited component I/O.
+        async: ["export:runtara:agent-openai/capabilities@0.4.0#invoke"],
         generate_all,
     });
 }
@@ -185,7 +184,7 @@ fn require_connection(connection: Option<&RawConnection>) -> Result<&RawConnecti
 /// POST `body` to `https://api.openai.com{path}` via the runtara proxy. The
 /// proxy attaches `Authorization: Bearer <api_key>` based on the connection
 /// id header so the component never sees the secret.
-fn openai_post_json(
+async fn openai_post_json(
     connection: &RawConnection,
     path: &str,
     body: Value,
@@ -203,7 +202,8 @@ fn openai_post_json(
         .header("Content-Type", "application/json")
         .header("X-Runtara-Connection-Id", &connection.connection_id)
         .body_bytes(&body_bytes)
-        .call_agent()
+        .call_agent_async()
+        .await
         .map_err(|e| {
             AgentError::transient(
                 "NETWORK_ERROR",
@@ -394,7 +394,9 @@ pub struct TextCompletionOutput {
     module_integration_ids = "openai_api_key",
     module_secure = true
 )]
-pub fn text_completion(input: TextCompletionInput) -> Result<TextCompletionOutput, AgentError> {
+pub async fn text_completion(
+    input: TextCompletionInput,
+) -> Result<TextCompletionOutput, AgentError> {
     let connection = require_connection(input._connection.as_ref())?;
 
     let mut messages = Vec::new();
@@ -436,7 +438,7 @@ pub fn text_completion(input: TextCompletionInput) -> Result<TextCompletionOutpu
         body["stop"] = json!(stop);
     }
 
-    let resp = openai_post_json(connection, "/v1/chat/completions", body, 120_000)?;
+    let resp = openai_post_json(connection, "/v1/chat/completions", body, 120_000).await?;
 
     let text = resp["choices"][0]["message"]["content"]
         .as_str()
@@ -576,7 +578,9 @@ pub struct ImageGenerationOutput {
     display_name = "Image Generation (OpenAI)",
     description = "Generate images using OpenAI DALL-E models"
 )]
-pub fn image_generation(input: ImageGenerationInput) -> Result<ImageGenerationOutput, AgentError> {
+pub async fn image_generation(
+    input: ImageGenerationInput,
+) -> Result<ImageGenerationOutput, AgentError> {
     let connection = require_connection(input._connection.as_ref())?;
 
     let model = input.model.unwrap_or_else(|| "dall-e-3".to_string());
@@ -615,7 +619,8 @@ pub fn image_generation(input: ImageGenerationInput) -> Result<ImageGenerationOu
         "/v1/images/generations",
         body,
         runtara_dsl::DEFAULT_STEP_TIMEOUT_MS,
-    )?;
+    )
+    .await?;
 
     let image_data = resp["data"][0]["b64_json"]
         .as_str()
@@ -715,7 +720,7 @@ pub struct StructuredOutputOutput {
     display_name = "Structured Output (OpenAI)",
     description = "Generate structured JSON output using OpenAI models with schema validation"
 )]
-pub fn structured_output(
+pub async fn structured_output(
     input: StructuredOutputInput,
 ) -> Result<StructuredOutputOutput, AgentError> {
     let connection = require_connection(input._connection.as_ref())?;
@@ -742,7 +747,7 @@ pub fn structured_output(
         body["temperature"] = json!(temperature);
     }
 
-    let resp = openai_post_json(connection, "/v1/chat/completions", body, 120_000)?;
+    let resp = openai_post_json(connection, "/v1/chat/completions", body, 120_000).await?;
 
     let content = resp["choices"][0]["message"]["content"]
         .as_str()
@@ -851,7 +856,7 @@ pub struct VisionToTextOutput {
     display_name = "Vision to Text (OpenAI)",
     description = "Analyze images and generate text descriptions using OpenAI vision models"
 )]
-pub fn vision_to_text(input: VisionToTextInput) -> Result<VisionToTextOutput, AgentError> {
+pub async fn vision_to_text(input: VisionToTextInput) -> Result<VisionToTextOutput, AgentError> {
     let connection = require_connection(input._connection.as_ref())?;
 
     if input.image_data.is_none() && input.image_url.is_none() {
@@ -894,7 +899,7 @@ pub fn vision_to_text(input: VisionToTextInput) -> Result<VisionToTextOutput, Ag
         body["temperature"] = json!(temperature);
     }
 
-    let resp = openai_post_json(connection, "/v1/chat/completions", body, 120_000)?;
+    let resp = openai_post_json(connection, "/v1/chat/completions", body, 120_000).await?;
 
     let text = resp["choices"][0]["message"]["content"]
         .as_str()
@@ -1012,7 +1017,7 @@ pub struct VisionToImageOutput {
     display_name = "Vision to Image (OpenAI)",
     description = "Edit and manipulate images using OpenAI DALL-E models"
 )]
-pub fn vision_to_image(input: VisionToImageInput) -> Result<VisionToImageOutput, AgentError> {
+pub async fn vision_to_image(input: VisionToImageInput) -> Result<VisionToImageOutput, AgentError> {
     let connection = require_connection(input._connection.as_ref())?;
 
     let endpoint = if input.mask_data.is_some() {
@@ -1040,7 +1045,8 @@ pub fn vision_to_image(input: VisionToImageInput) -> Result<VisionToImageOutput,
         &format!("/v1/{endpoint}"),
         body,
         runtara_dsl::DEFAULT_STEP_TIMEOUT_MS,
-    )?;
+    )
+    .await?;
 
     let image_data = resp["data"][0]["b64_json"]
         .as_str()
@@ -1183,7 +1189,7 @@ pub struct OpenaiChatCompletionOutput {
     display_name = "Chat Completion",
     description = "OpenAI chat completion with full control over messages, tools, and parameters"
 )]
-pub fn openai_chat_completion(
+pub async fn openai_chat_completion(
     input: OpenaiChatCompletionInput,
 ) -> Result<OpenaiChatCompletionOutput, AgentError> {
     let connection = require_connection(input._connection.as_ref())?;
@@ -1237,7 +1243,7 @@ pub fn openai_chat_completion(
         body["tool_choice"] = json!(tool_choice);
     }
 
-    let resp = openai_post_json(connection, "/v1/chat/completions", body, 120_000)?;
+    let resp = openai_post_json(connection, "/v1/chat/completions", body, 120_000).await?;
 
     let choices = resp["choices"]
         .as_array()
@@ -1313,7 +1319,7 @@ pub struct OpenaiCreateEmbeddingOutput {
     display_name = "Create Embedding",
     description = "Generate embeddings for text using OpenAI embedding models"
 )]
-pub fn openai_create_embedding(
+pub async fn openai_create_embedding(
     input: OpenaiCreateEmbeddingInput,
 ) -> Result<OpenaiCreateEmbeddingOutput, AgentError> {
     let connection = require_connection(input._connection.as_ref())?;
@@ -1323,7 +1329,7 @@ pub fn openai_create_embedding(
         "input": input.input,
     });
 
-    let resp = openai_post_json(connection, "/v1/embeddings", body, 60_000)?;
+    let resp = openai_post_json(connection, "/v1/embeddings", body, 60_000).await?;
 
     let data = resp["data"]
         .as_array()
@@ -1389,7 +1395,7 @@ pub struct OpenaiModerateContentOutput {
     display_name = "Moderate Content",
     description = "Check content for policy violations using OpenAI moderation API"
 )]
-pub fn openai_moderate_content(
+pub async fn openai_moderate_content(
     input: OpenaiModerateContentInput,
 ) -> Result<OpenaiModerateContentOutput, AgentError> {
     let connection = require_connection(input._connection.as_ref())?;
@@ -1399,7 +1405,7 @@ pub fn openai_moderate_content(
         "model": input.model.unwrap_or_else(|| "text-moderation-latest".to_string()),
     });
 
-    let resp = openai_post_json(connection, "/v1/moderations", body, 30_000)?;
+    let resp = openai_post_json(connection, "/v1/moderations", body, 30_000).await?;
 
     let results = resp["results"]
         .as_array()
@@ -1553,18 +1559,18 @@ struct Component;
 
 #[cfg(target_arch = "wasm32")]
 impl Guest for Component {
-    fn invoke(capability_id: String, input: Vec<u8>) -> Result<Vec<u8>, ErrorInfo> {
+    async fn invoke(capability_id: String, input: Vec<u8>) -> Result<Vec<u8>, ErrorInfo> {
         let value: serde_json::Value = serde_json::from_slice(&input).map_err(bad_json)?;
 
         let executor_result = match capability_id.as_str() {
-            "text-completion" => __executor_text_completion(value),
-            "image-generation" => __executor_image_generation(value),
-            "structured-output" => __executor_structured_output(value),
-            "vision-to-text" => __executor_vision_to_text(value),
-            "vision-to-image" => __executor_vision_to_image(value),
-            "openai-chat-completion" => __executor_openai_chat_completion(value),
-            "openai-create-embedding" => __executor_openai_create_embedding(value),
-            "openai-moderate-content" => __executor_openai_moderate_content(value),
+            "text-completion" => __executor_text_completion(value).await,
+            "image-generation" => __executor_image_generation(value).await,
+            "structured-output" => __executor_structured_output(value).await,
+            "vision-to-text" => __executor_vision_to_text(value).await,
+            "vision-to-image" => __executor_vision_to_image(value).await,
+            "openai-chat-completion" => __executor_openai_chat_completion(value).await,
+            "openai-create-embedding" => __executor_openai_create_embedding(value).await,
+            "openai-moderate-content" => __executor_openai_moderate_content(value).await,
             other => {
                 return Err(ErrorInfo {
                     code: "UNKNOWN_CAPABILITY".into(),

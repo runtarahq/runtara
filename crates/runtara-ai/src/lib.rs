@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! AI/LLM integration for runtara workflows.
 //!
-//! This crate provides a synchronous completion abstraction:
+//! This crate provides synchronous and cooperative async completion APIs:
 //! - `CompletionModel` trait and request builder
 //! - Message types (user, assistant, tool calls, tool results)
 //! - `OneOrMany<T>` non-empty collection
@@ -23,4 +23,4 @@ pub mod types;
 pub use completion::{CompletionError, CompletionModel, CompletionRequest, CompletionResponse};
 pub use message::{AssistantContent, Message, UserContent};
 pub use one_or_many::OneOrMany;
-pub use orchestration::{CompletionInvokeRequest, run_completion};
+pub use orchestration::{CompletionInvokeRequest, run_completion, run_completion_async};

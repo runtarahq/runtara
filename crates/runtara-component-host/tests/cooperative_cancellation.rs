@@ -261,3 +261,7 @@ async fn cancelling_a_queued_call_resolves_before_entry_and_can_be_dropped() -> 
 #[cfg(feature = "component-integration-tests")]
 #[path = "cooperative_cancellation/real_slack.rs"]
 mod real_slack;
+
+#[cfg(feature = "component-integration-tests")]
+#[path = "cooperative_cancellation/real_ai.rs"]
+mod real_ai;
