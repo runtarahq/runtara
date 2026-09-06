@@ -973,7 +973,10 @@ export async function deliverSignal(
       'Content-Type': 'application/json',
       Authorization: `Bearer ${token}`,
     },
-    body: JSON.stringify(body),
+    body: JSON.stringify({
+      checkpointId: body.signalId,
+      payload: body.payload,
+    }),
   });
 
   if (!response.ok) {

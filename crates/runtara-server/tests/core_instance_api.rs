@@ -278,7 +278,6 @@ async fn typed_signals_round_trip_through_poll_checkpoint_and_ack() {
     for (signal_type, label, status) in [
         (SignalType::Cancel, "cancel", InstanceStatus::Cancelled),
         (SignalType::Pause, "pause", InstanceStatus::Suspended),
-        (SignalType::Resume, "resume", InstanceStatus::Running),
         (SignalType::Shutdown, "shutdown", InstanceStatus::Suspended),
     ] {
         let id = Uuid::new_v4().to_string();
@@ -328,4 +327,62 @@ async fn typed_signals_round_trip_through_poll_checkpoint_and_ack() {
         backend.delete_instances_batch(&[id]).await.unwrap();
     }
     runtime.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn custom_values_keep_identity_across_poll_and_checkpoint_without_guest_resume() {
+    use runtara_core::domain::InstanceStatus;
+    let pool = test_pool().await;
+    let backend = Arc::new(PostgresPersistence::new(pool));
+    let (runtime, addr) = start(backend.clone(), 0).await;
+    let id = Uuid::new_v4().to_string();
+    assert_eq!(register(addr, &id, "custom-contract").await, 200);
+    let signal_id = backend
+        .put_custom_signal(&id, "payment", b"{}")
+        .await
+        .unwrap();
+    let client = reqwest::Client::new();
+    let url = format!("http://{addr}/api/v1/instances/{id}");
+    for _ in 0..2 {
+        let poll: serde_json::Value = client
+            .get(format!("{url}/signals/payment"))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(poll["signal"].is_null());
+        assert_eq!(poll["custom_signal"]["signal_id"], signal_id);
+        assert_eq!(poll["custom_signal"]["checkpoint_id"], "payment");
+        assert_eq!(poll["custom_signal"]["payload"], "e30=");
+        let checkpoint: serde_json::Value = client
+            .post(format!("{url}/checkpoint"))
+            .json(&json!({"checkpoint_id": "payment", "state": "e30="}))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(checkpoint["custom_signal"], poll["custom_signal"]);
+        assert!(checkpoint["signal"].is_null());
+    }
+    let response = client
+        .post(format!("{url}/signals/ack"))
+        .json(&json!({"command_id": signal_id, "signal_type": "resume"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+    assert_eq!(
+        backend.get_instance(&id).await.unwrap().unwrap().status,
+        InstanceStatus::Running
+    );
+    backend.delete_instances_batch(&[id]).await.unwrap();
+    runtime.shutdown().await.unwrap();
 }

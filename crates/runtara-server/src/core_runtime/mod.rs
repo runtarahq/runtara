@@ -537,13 +537,22 @@ mod tests {
             Ok(None)
         }
 
-        async fn acknowledge_signal(
+        async fn apply_lifecycle_command(
             &self,
             _instance_id: &str,
             _command_id: &str,
             _signal_type: runtara_core::domain::SignalType,
-        ) -> Result<bool, CoreError> {
-            Ok(false)
+        ) -> Result<runtara_core::lifecycle::Decision, CoreError> {
+            Ok(runtara_core::lifecycle::Decision::Rejected)
+        }
+
+        async fn park_instance(
+            &self,
+            _instance_id: &str,
+            _request: runtara_core::lifecycle::ParkRequest,
+        ) -> std::result::Result<runtara_core::lifecycle::Decision, runtara_core::error::CoreError>
+        {
+            Ok(runtara_core::lifecycle::Decision::Rejected)
         }
 
         async fn cancel_suspended_instances(
@@ -557,16 +566,16 @@ mod tests {
             Ok(Vec::new())
         }
 
-        async fn insert_custom_signal(
+        async fn put_custom_signal(
             &self,
             _instance_id: &str,
             _checkpoint_id: &str,
             _payload: &[u8],
-        ) -> Result<(), CoreError> {
-            Ok(())
+        ) -> Result<String, CoreError> {
+            Ok("mock-custom-signal".into())
         }
 
-        async fn take_pending_custom_signal(
+        async fn get_custom_signal(
             &self,
             _instance_id: &str,
             _checkpoint_id: &str,
@@ -606,10 +615,11 @@ mod tests {
             Ok(0)
         }
 
-        async fn set_instance_sleep(
+        async fn schedule_wake(
             &self,
             _instance_id: &str,
             _sleep_until: DateTime<Utc>,
+            _reason: runtara_core::domain::WakeReason,
         ) -> Result<(), CoreError> {
             Ok(())
         }

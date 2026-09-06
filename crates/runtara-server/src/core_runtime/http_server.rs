@@ -99,6 +99,8 @@ pub struct SignalInfo {
 /// Custom signal information
 #[derive(Debug, Serialize)]
 pub struct CustomSignalInfo {
+    /// Identity of this retained value, distinct from its checkpoint address.
+    pub signal_id: String,
     pub checkpoint_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub payload: Option<String>,
@@ -166,7 +168,6 @@ fn signal_type_to_string(st: i32) -> String {
     match st {
         0 => "cancel".to_string(),   // SignalCancel
         1 => "pause".to_string(),    // SignalPause
-        2 => "resume".to_string(),   // SignalResume
         3 => "shutdown".to_string(), // SignalShutdown
         _ => format!("unknown({})", st),
     }
@@ -355,6 +356,7 @@ async fn checkpoint_handler(
             });
 
             let custom_signal = resp.custom_signal.map(|cs| CustomSignalInfo {
+                signal_id: cs.signal_id,
                 checkpoint_id: cs.checkpoint_id,
                 payload: if cs.payload.is_empty() {
                     None
@@ -402,6 +404,7 @@ async fn poll_signals_handler(
             });
 
             let custom_signal = resp.custom_signal.map(|cs| CustomSignalInfo {
+                signal_id: cs.signal_id,
                 checkpoint_id: cs.checkpoint_id,
                 payload: if cs.payload.is_empty() {
                     None
@@ -433,6 +436,7 @@ async fn poll_custom_signal_handler(
     match instance_handlers::handle_poll_signals(&state, request).await {
         Ok(resp) => {
             let custom_signal = resp.custom_signal.map(|cs| CustomSignalInfo {
+                signal_id: cs.signal_id,
                 checkpoint_id: cs.checkpoint_id,
                 payload: if cs.payload.is_empty() {
                     None
@@ -637,7 +641,6 @@ async fn signal_ack_handler(
     let signal_type = match body.signal_type.as_str() {
         "cancel" => SignalType::SignalCancel as i32,
         "pause" => SignalType::SignalPause as i32,
-        "resume" => SignalType::SignalResume as i32,
         "shutdown" => SignalType::SignalShutdown as i32,
         _ => {
             return (

@@ -70,7 +70,7 @@
 //! | `Sleep` | Durable sleep - persists a wake deadline |
 //! | `InstanceEvent` | Fire-and-forget events (heartbeat, completed, failed, suspended) |
 //! | `GetInstanceStatus` | Query instance status |
-//! | `PollSignals` | Poll for pending cancel/pause/resume signals |
+//! | `PollSignals` | Poll for pending cancel/pause/shutdown signals |
 //! | `SignalAck` | Acknowledge receipt of a signal |
 //!
 //! ## Checkpoint Semantics
@@ -156,6 +156,9 @@
 
 /// Execution domain types independent of storage and transport.
 pub mod domain;
+
+/// Pure lifecycle policy shared by storage backends and execution hosts.
+pub mod lifecycle;
 
 /// Persistence layer for instances, checkpoints, events, and signals.
 pub mod persistence;

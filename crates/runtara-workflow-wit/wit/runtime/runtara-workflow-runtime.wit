@@ -4,7 +4,7 @@
 // loading persisted input, completing/failing instances, event emission,
 // cancellation, heartbeat, and durable sleep.
 
-package runtara:workflow-runtime@0.2.0;
+package runtara:workflow-runtime@0.3.0;
 
 interface runtime {
     record signal-info {
@@ -15,6 +15,7 @@ interface runtime {
     }
 
     record custom-signal-info {
+        signal-id: string,
         checkpoint-id: string,
         payload: list<u8>,
     }

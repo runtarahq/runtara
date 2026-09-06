@@ -425,7 +425,7 @@ struct ServerState {
     /// Payloads served for custom-signal polls (`GET signals/{id}`), modeling
     /// the pending-signal row. Served **non-destructively** (peeked, never
     /// removed) so a replayed `WaitForSignal` re-reads the same signal — the
-    /// core `take_pending_custom_signal` is likewise a non-destructive read.
+    /// core `get_custom_signal` is likewise a non-destructive read.
     /// The first entry answers every poll; empty → no signal (the wait keeps
     /// polling), so a test that arms no signal would hang by design.
     custom_signals: Mutex<Vec<Value>>,
@@ -805,7 +805,7 @@ fn route(
                         .expect("custom_signal_polls lock") += 1;
                     let payload_b64 = base64::engine::general_purpose::STANDARD
                         .encode(serde_json::to_vec(&payload).expect("payload serializes"));
-                    serde_json::json!({"checkpoint_id": "wait", "payload": payload_b64})
+                    serde_json::json!({"signal_id": "retained-test-value", "checkpoint_id": "wait", "payload": payload_b64})
                 });
                 return (
                     200,
@@ -2121,7 +2121,7 @@ fn direct_compose_host_import_binding_surfaces_runtime_as_component_import() {
     assert!(
         host_imports
             .iter()
-            .any(|name| name == "runtara:workflow-runtime/runtime@0.2.0"),
+            .any(|name| name == "runtara:workflow-runtime/runtime@0.3.0"),
         "host-import binding must surface the runtime interface; imports: {host_imports:?}"
     );
     assert!(
@@ -6664,7 +6664,7 @@ fn direct_wasm_execute_agent_capabilities_keeps_runtime_for_durable_workflow() {
         compiled
             .component_artifacts
             .world_wit
-            .contains("import runtara:workflow-runtime/runtime@0.2.0;"),
+            .contains("import runtara:workflow-runtime/runtime@0.3.0;"),
         "durable agent must keep the runtime import:\n{}",
         compiled.component_artifacts.world_wit
     );

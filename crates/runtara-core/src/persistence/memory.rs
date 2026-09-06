@@ -13,6 +13,9 @@
 //! guard operations atomic.
 
 use crate::domain::InstanceStatus as CoreInstanceStatus;
+use crate::lifecycle::{
+    self, Change, Decision, Receipt, SuspensionReason, Transition, WakeDeadline,
+};
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -46,6 +49,69 @@ impl Store {
     fn next_id(&mut self) -> i64 {
         self.next_id += 1;
         self.next_id
+    }
+
+    fn apply_transition(
+        &mut self,
+        instance_id: &str,
+        effects: Transition,
+        now: DateTime<Utc>,
+    ) -> Result<(), CoreError> {
+        let instance = self.instance_mut(instance_id)?;
+        if let Some(status) = effects.status {
+            instance.status = status;
+        }
+        if effects.clear_result {
+            instance.output = None;
+            instance.error = None;
+        }
+        if effects.finish_now {
+            instance.finished_at = Some(now);
+        }
+        match effects.reason {
+            Change::Keep => {}
+            Change::Clear => instance.termination_reason = None,
+            Change::Set(reason) => {
+                instance.termination_reason = Some(
+                    match reason {
+                        SuspensionReason::Shutdown => "shutdown_requested",
+                        SuspensionReason::Sleeping => "sleeping",
+                        SuspensionReason::WaitingSignal => "waiting_signal",
+                    }
+                    .into(),
+                )
+            }
+        }
+        match effects.wake {
+            Change::Keep => {}
+            Change::Clear => instance.sleep_until = None,
+            Change::Set(WakeDeadline::Now) => instance.sleep_until = Some(now),
+            Change::Set(WakeDeadline::At(deadline)) => instance.sleep_until = Some(deadline),
+        }
+        match effects.wake_reason {
+            Change::Keep => {}
+            Change::Clear => instance.wake_reason = None,
+            Change::Set(reason) => instance.wake_reason = Some(reason),
+        }
+        if let Some(event_type) = effects.event {
+            let id = self.next_id();
+            self.events.push(EventRecord {
+                id: Some(id),
+                instance_id: instance_id.into(),
+                event_type,
+                checkpoint_id: None,
+                payload: None,
+                created_at: now,
+                subtype: None,
+            });
+        }
+        if effects.acknowledge {
+            self.signals
+                .get_mut(instance_id)
+                .expect("policy requires a stored command")
+                .acknowledged_at = Some(now);
+        }
+        Ok(())
     }
 
     fn instance_mut(&mut self, instance_id: &str) -> Result<&mut InstanceRecord, CoreError> {
@@ -107,6 +173,7 @@ impl Persistence for InMemoryPersistence {
                 output: None,
                 error: None,
                 sleep_until: None,
+                wake_reason: None,
                 termination_reason: None,
                 exit_code: None,
                 recovery_attempts: 0,
@@ -298,10 +365,9 @@ impl Persistence for InMemoryPersistence {
     ) -> Result<(), CoreError> {
         let mut store = self.store.lock().unwrap();
         store.instance_mut(instance_id)?;
-        if store.signals.get(instance_id).is_some_and(|signal| {
-            signal.acknowledged_at.is_none()
-                && signal.signal_type == crate::domain::SignalType::Cancel
-        }) {
+        if !lifecycle::may_replace_command(
+            store.signals.get(instance_id).map(SignalRecord::command),
+        ) {
             return Ok(());
         }
         store.signals.insert(
@@ -332,57 +398,39 @@ impl Persistence for InMemoryPersistence {
             .cloned())
     }
 
-    async fn acknowledge_signal(
+    async fn apply_lifecycle_command(
         &self,
         instance_id: &str,
         command_id: &str,
         signal_type: crate::domain::SignalType,
-    ) -> Result<bool, CoreError> {
-        use crate::domain::SignalType;
+    ) -> Result<Decision, CoreError> {
         let mut store = self.store.lock().unwrap();
-        let Some(signal) = store.signals.get(instance_id) else {
-            return Ok(false);
-        };
-        if signal.command_id != command_id || signal.signal_type != signal_type {
-            return Ok(false);
+        let status = store.instance_mut(instance_id)?.status;
+        let decision = lifecycle::acknowledge(
+            status,
+            store.signals.get(instance_id).map(SignalRecord::command),
+            Receipt {
+                id: command_id,
+                kind: signal_type,
+            },
+        );
+        if let Decision::Applied(effects) = decision {
+            store.apply_transition(instance_id, effects, Utc::now())?;
         }
-        if signal.acknowledged_at.is_some() {
-            return Ok(true);
+        Ok(decision)
+    }
+
+    async fn park_instance(
+        &self,
+        instance_id: &str,
+        request: crate::lifecycle::ParkRequest,
+    ) -> Result<Decision, CoreError> {
+        let mut store = self.store.lock().unwrap();
+        let decision = lifecycle::park(store.instance_mut(instance_id)?.status, request);
+        if let Decision::Applied(effects) = decision {
+            store.apply_transition(instance_id, effects, Utc::now())?;
         }
-        let instance = store.instance_mut(instance_id)?;
-        if instance.status.is_terminal() && signal_type != SignalType::Cancel {
-            return Ok(false);
-        }
-        let now = Utc::now();
-        match signal_type {
-            SignalType::Cancel => {
-                instance.status = CoreInstanceStatus::Cancelled;
-                instance.finished_at = Some(now);
-                instance.sleep_until = None;
-            }
-            SignalType::Pause | SignalType::Shutdown => {
-                instance.status = CoreInstanceStatus::Suspended;
-                instance.finished_at = Some(now);
-                instance.sleep_until = (signal_type == SignalType::Shutdown).then_some(now);
-                instance.termination_reason =
-                    (signal_type == SignalType::Shutdown).then(|| "shutdown_requested".into());
-            }
-            SignalType::Resume => {}
-        }
-        if matches!(signal_type, SignalType::Pause | SignalType::Shutdown) {
-            let event_id = store.next_id();
-            store.events.push(EventRecord {
-                id: Some(event_id),
-                instance_id: instance_id.to_owned(),
-                event_type: crate::domain::EventType::Suspended,
-                checkpoint_id: None,
-                payload: None,
-                created_at: now,
-                subtype: None,
-            });
-        }
-        store.signals.get_mut(instance_id).unwrap().acknowledged_at = Some(now);
-        Ok(true)
+        Ok(decision)
     }
 
     async fn cancel_suspended_instances(
@@ -394,57 +442,61 @@ impl Persistence for InMemoryPersistence {
         let mut candidates: Vec<_> = store
             .instances
             .values()
-            .filter(|instance| {
-                instance.status == CoreInstanceStatus::Suspended
-                    && instance_id.is_none_or(|id| id == instance.instance_id)
-                    && store
+            .filter(|instance| instance_id.is_none_or(|id| id == instance.instance_id))
+            .filter_map(|instance| {
+                let Decision::Applied(effects) = lifecycle::cancel_parked(
+                    instance.status,
+                    store
                         .signals
                         .get(&instance.instance_id)
-                        .is_some_and(|signal| {
-                            signal.signal_type == crate::domain::SignalType::Cancel
-                                && signal.acknowledged_at.is_none()
-                        })
+                        .map(SignalRecord::command),
+                ) else {
+                    return None;
+                };
+                Some((
+                    instance.instance_id.clone(),
+                    instance.tenant_id.clone(),
+                    effects,
+                ))
             })
-            .map(|instance| instance.instance_id.clone())
             .collect();
-        candidates.sort();
+        candidates.sort_by(|a, b| a.0.cmp(&b.0));
         candidates.truncate(limit.max(0) as usize);
         let now = Utc::now();
         let mut cancelled = Vec::new();
-        for id in candidates {
-            let instance = store.instances.get_mut(&id).unwrap();
-            instance.status = CoreInstanceStatus::Cancelled;
-            instance.finished_at = Some(now);
-            instance.sleep_until = None;
+        for (id, tenant_id, effects) in candidates {
+            store.apply_transition(&id, effects, now)?;
             cancelled.push(crate::persistence::CancelledInstance {
-                instance_id: id.clone(),
-                tenant_id: instance.tenant_id.clone(),
+                instance_id: id,
+                tenant_id,
             });
-            store.signals.get_mut(&id).unwrap().acknowledged_at = Some(now);
         }
         Ok(cancelled)
     }
 
-    async fn insert_custom_signal(
+    async fn put_custom_signal(
         &self,
         instance_id: &str,
         checkpoint_id: &str,
         payload: &[u8],
-    ) -> Result<(), CoreError> {
+    ) -> Result<String, CoreError> {
         let mut store = self.store.lock().unwrap();
+        store.instance_mut(instance_id)?;
+        let signal_id = uuid::Uuid::new_v4().to_string();
         store.custom_signals.insert(
             (instance_id.to_string(), checkpoint_id.to_string()),
             CustomSignalRecord {
+                signal_id: signal_id.clone(),
                 instance_id: instance_id.to_string(),
                 checkpoint_id: checkpoint_id.to_string(),
                 payload: (!payload.is_empty()).then(|| payload.to_vec()),
                 created_at: Utc::now(),
             },
         );
-        Ok(())
+        Ok(signal_id)
     }
 
-    async fn take_pending_custom_signal(
+    async fn get_custom_signal(
         &self,
         instance_id: &str,
         checkpoint_id: &str,
@@ -514,14 +566,16 @@ impl Persistence for InMemoryPersistence {
             .count() as i64)
     }
 
-    async fn set_instance_sleep(
+    async fn schedule_wake(
         &self,
         instance_id: &str,
         sleep_until: DateTime<Utc>,
+        reason: crate::domain::WakeReason,
     ) -> Result<(), CoreError> {
         let mut store = self.store.lock().unwrap();
         let instance = store.instance_mut(instance_id)?;
         instance.sleep_until = (!instance.status.is_terminal()).then_some(sleep_until);
+        instance.wake_reason = (!instance.status.is_terminal()).then_some(reason);
         Ok(())
     }
 
@@ -879,6 +933,8 @@ mod tests {
         crate::persistence::conformance::run_conformance_sequence(&backend).await;
         crate::persistence::conformance::run_lifecycle_command_sequence(&backend).await;
         crate::persistence::conformance::run_parked_cancellation_sequence(&backend).await;
+        crate::persistence::conformance::run_lifecycle_policy_matrix(&backend).await;
+        crate::persistence::conformance::run_wake_reason_sequence(&backend).await;
     }
 
     fn foreign_vocabulary() -> EventVocabulary {

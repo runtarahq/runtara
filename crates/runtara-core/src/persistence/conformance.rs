@@ -519,26 +519,57 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
 
     // --- custom checkpoint signals -----------------------------------------
     let custom_payload = br#"{"wait-key":"payment"}"#.to_vec();
-    backend
-        .insert_custom_signal(&instance_id, checkpoint_id, &custom_payload)
+    let first_signal_id = backend
+        .put_custom_signal(&instance_id, checkpoint_id, &custom_payload)
         .await
-        .expect("insert_custom_signal failed");
+        .expect("put_custom_signal failed");
     let taken = backend
-        .take_pending_custom_signal(&instance_id, checkpoint_id)
+        .get_custom_signal(&instance_id, checkpoint_id)
         .await
-        .expect("take_pending_custom_signal failed")
+        .expect("get_custom_signal failed")
         .expect("custom signal should be readable");
     assert_eq!(taken.checkpoint_id, checkpoint_id);
     // Reads are non-destructive: a replayed WaitForSignal re-reads the same
     // signal after a drain/resume, so a second read returns the row again
     // rather than None. Instance deletion reclaims the signal.
     let taken_again = backend
-        .take_pending_custom_signal(&instance_id, checkpoint_id)
+        .get_custom_signal(&instance_id, checkpoint_id)
         .await
-        .expect("take_pending_custom_signal second call failed")
+        .expect("get_custom_signal second call failed")
         .expect("custom signal must remain re-readable (non-destructive)");
     assert_eq!(taken_again.checkpoint_id, checkpoint_id);
     assert_eq!(taken_again.payload, taken.payload);
+    assert_eq!(taken.signal_id, first_signal_id);
+    assert_eq!(taken_again.signal_id, first_signal_id);
+    assert_ne!(first_signal_id, checkpoint_id);
+    // Identical retries create a new value identity: no implicit deduplication.
+    let retry_id = backend
+        .put_custom_signal(&instance_id, checkpoint_id, &custom_payload)
+        .await
+        .unwrap();
+    assert_ne!(retry_id, first_signal_id);
+    let replacement = b"replacement";
+    let replacement_id = backend
+        .put_custom_signal(&instance_id, checkpoint_id, replacement)
+        .await
+        .unwrap();
+    assert_ne!(replacement_id, retry_id);
+    for _ in 0..2 {
+        let value = backend
+            .get_custom_signal(&instance_id, checkpoint_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(value.signal_id, replacement_id);
+        assert_eq!(value.payload.as_deref(), Some(replacement.as_slice()));
+    }
+    assert!(
+        backend
+            .get_custom_signal(&instance_id, "different-address")
+            .await
+            .unwrap()
+            .is_none()
+    );
 
     // --- paired records -----------------------------------------------------
     // This harness emits none of this vocabulary's start events, so the paired
@@ -1009,7 +1040,7 @@ pub async fn run_lifecycle_command_sequence<P: Persistence>(backend: &P) {
         .await
         .unwrap();
     let cancel = backend.get_pending_signal(&id).await.unwrap().unwrap();
-    for kind in [Kind::Pause, Kind::Shutdown, Kind::Resume, Kind::Cancel] {
+    for kind in [Kind::Pause, Kind::Shutdown, Kind::Cancel] {
         backend.insert_signal(&id, kind, b"later").await.unwrap();
         assert_eq!(
             backend
@@ -1150,4 +1181,253 @@ pub async fn run_parked_cancellation_sequence<P: Persistence>(backend: &P) {
         recovered.iter().any(|instance| instance.instance_id == id),
         "recovery discovers parked cancellation without a sleep deadline"
     );
+}
+
+/// Observable lifecycle matrix shared by every backend. Expected values are
+/// specified independently of the pure policy implementation.
+pub async fn run_lifecycle_policy_matrix<P: Persistence>(backend: &P) {
+    use crate::{
+        domain::{InstanceStatus as S, SignalType as K},
+        lifecycle::{Decision, ParkReason, ParkRequest},
+    };
+    let statuses = [
+        S::Pending,
+        S::Running,
+        S::Suspended,
+        S::Completed,
+        S::Failed,
+        S::Cancelled,
+    ];
+    let kinds = [K::Cancel, K::Pause, K::Shutdown];
+    for status in statuses {
+        for kind in kinds {
+            let id = Uuid::new_v4().to_string();
+            backend
+                .register_instance(&id, "policy-matrix")
+                .await
+                .unwrap();
+            backend
+                .complete_instance(
+                    CompleteInstanceParams::new(&id, status)
+                        .with_output(b"previous-output")
+                        .with_error("previous-error")
+                        .with_termination("crashed", Some(91))
+                        .with_checkpoint("previous-checkpoint"),
+                )
+                .await
+                .unwrap();
+            backend.insert_signal(&id, kind, b"payload").await.unwrap();
+            let command = backend.get_pending_signal(&id).await.unwrap().unwrap();
+            let before = backend.get_instance(&id).await.unwrap().unwrap();
+            let decision = backend
+                .apply_lifecycle_command(&id, &command.command_id, kind)
+                .await
+                .unwrap();
+            let rejects =
+                matches!(status, S::Completed | S::Failed | S::Cancelled) && kind != K::Cancel;
+            if rejects {
+                assert_eq!(decision, Decision::Rejected);
+            } else {
+                assert!(matches!(decision, Decision::Applied(_)));
+            }
+            let after = backend.get_instance(&id).await.unwrap().unwrap();
+            let expected_status = if rejects {
+                status
+            } else {
+                match kind {
+                    K::Cancel => S::Cancelled,
+                    K::Pause | K::Shutdown => S::Suspended,
+                }
+            };
+            assert_eq!(after.status, expected_status, "{status:?} + {kind:?}");
+            let reason = if rejects {
+                Some("crashed")
+            } else {
+                match kind {
+                    K::Pause => None,
+                    K::Shutdown => Some("shutdown_requested"),
+                    _ => Some("crashed"),
+                }
+            };
+            assert_eq!(after.termination_reason.as_deref(), reason);
+            assert_eq!(after.output, before.output);
+            assert_eq!(after.error, before.error);
+            assert_eq!(after.exit_code, before.exit_code);
+            assert_eq!(after.checkpoint_id, before.checkpoint_id);
+            assert_eq!(after.sleep_until.is_some(), !rejects && kind == K::Shutdown);
+            assert_eq!(
+                after.wake_reason,
+                if !rejects && kind == K::Shutdown {
+                    Some(crate::domain::WakeReason::Recovery)
+                } else {
+                    before.wake_reason
+                }
+            );
+            let event_count = backend
+                .count_events(&id, &ListEventsFilter::default())
+                .await
+                .unwrap();
+            assert_eq!(
+                event_count,
+                i64::from(!rejects && matches!(kind, K::Pause | K::Shutdown))
+            );
+            if !rejects {
+                assert!(backend.get_pending_signal(&id).await.unwrap().is_none());
+                assert_eq!(
+                    backend
+                        .apply_lifecycle_command(&id, &command.command_id, kind)
+                        .await
+                        .unwrap(),
+                    Decision::AlreadyApplied
+                );
+                let repeated = backend.get_instance(&id).await.unwrap().unwrap();
+                assert_eq!(repeated.finished_at, after.finished_at);
+                assert_eq!(repeated.sleep_until, after.sleep_until);
+                assert_eq!(
+                    backend
+                        .count_events(&id, &ListEventsFilter::default())
+                        .await
+                        .unwrap(),
+                    event_count
+                );
+            } else {
+                assert_eq!(
+                    backend
+                        .get_pending_signal(&id)
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .command_id,
+                    command.command_id
+                );
+            }
+            backend.delete_instances_batch(&[id]).await.unwrap();
+        }
+        for reason in [ParkReason::Timer, ParkReason::Signal] {
+            for with_deadline in [false, true] {
+                let id = Uuid::new_v4().to_string();
+                backend
+                    .register_instance(&id, "park-policy-matrix")
+                    .await
+                    .unwrap();
+                backend
+                    .complete_instance(
+                        CompleteInstanceParams::new(&id, status)
+                            .with_output(b"old-result")
+                            .with_error("old-error")
+                            .with_termination("crashed", Some(91))
+                            .with_checkpoint("saved"),
+                    )
+                    .await
+                    .unwrap();
+                backend.insert_signal(&id, K::Cancel, b"").await.unwrap();
+                let receipt = backend.get_pending_signal(&id).await.unwrap().unwrap();
+                let before = backend.get_instance(&id).await.unwrap().unwrap();
+                let deadline = with_deadline.then(|| Utc::now() + Duration::hours(1));
+                let result = backend
+                    .park_instance(&id, ParkRequest { reason, deadline })
+                    .await
+                    .unwrap();
+                let after = backend.get_instance(&id).await.unwrap().unwrap();
+                if status == S::Running {
+                    assert!(matches!(result, Decision::Applied(_)));
+                    assert_eq!(after.status, S::Suspended);
+                    assert_eq!(
+                        after.termination_reason.as_deref(),
+                        Some(if reason == ParkReason::Timer {
+                            "sleeping"
+                        } else {
+                            "waiting_signal"
+                        })
+                    );
+                    assert_eq!(
+                        after.sleep_until.map(|d| d.timestamp_millis()),
+                        deadline.map(|d| d.timestamp_millis())
+                    );
+                    assert!(after.finished_at.is_some());
+                    assert!(after.output.is_none() && after.error.is_none());
+                } else {
+                    assert_eq!(result, Decision::Rejected);
+                    assert_eq!(after.status, before.status);
+                    assert_eq!(after.finished_at, before.finished_at);
+                    assert_eq!(after.termination_reason, before.termination_reason);
+                    assert_eq!(after.sleep_until, before.sleep_until);
+                    assert_eq!(after.output, before.output);
+                    assert_eq!(after.error, before.error);
+                }
+                assert_eq!(after.checkpoint_id, before.checkpoint_id);
+                assert_eq!(after.exit_code, before.exit_code);
+                assert_eq!(
+                    backend
+                        .get_pending_signal(&id)
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .command_id,
+                    receipt.command_id
+                );
+                assert_eq!(
+                    backend
+                        .count_events(&id, &ListEventsFilter::default())
+                        .await
+                        .unwrap(),
+                    0
+                );
+                backend.delete_instances_batch(&[id]).await.unwrap();
+            }
+        }
+    }
+}
+
+/// Wake causes survive claiming and re-launching, and never become guest commands.
+pub async fn run_wake_reason_sequence<P: Persistence>(backend: &P) {
+    use crate::domain::{InstanceStatus, WakeReason};
+    for reason in [
+        WakeReason::Timer,
+        WakeReason::CustomSignal,
+        WakeReason::ManualResume,
+        WakeReason::Recovery,
+    ] {
+        let id = uuid::Uuid::new_v4().to_string();
+        backend
+            .register_instance(&id, "wake-contract")
+            .await
+            .unwrap();
+        backend
+            .update_instance_status(&id, InstanceStatus::Suspended, None)
+            .await
+            .unwrap();
+        backend
+            .schedule_wake(&id, Utc::now() - Duration::seconds(1), reason)
+            .await
+            .unwrap();
+        let due = backend.get_sleeping_instances_due(1000).await.unwrap();
+        assert_eq!(
+            due.iter()
+                .find(|row| row.instance_id == id)
+                .unwrap()
+                .wake_reason,
+            Some(reason)
+        );
+        assert!(backend.claim_sleeping_instance(&id).await.unwrap());
+        backend
+            .mark_instance_running(&id, Utc::now())
+            .await
+            .unwrap();
+        let running = backend.get_instance(&id).await.unwrap().unwrap();
+        assert_eq!(running.wake_reason, Some(reason));
+        assert!(backend.get_pending_signal(&id).await.unwrap().is_none());
+        backend
+            .update_instance_status(&id, InstanceStatus::Completed, None)
+            .await
+            .unwrap();
+        backend
+            .schedule_wake(&id, Utc::now(), reason)
+            .await
+            .unwrap();
+        let ended = backend.get_instance(&id).await.unwrap().unwrap();
+        assert!(ended.sleep_until.is_none());
+        assert!(ended.wake_reason.is_none());
+        backend.delete_instances_batch(&[id]).await.unwrap();
+    }
 }

@@ -738,6 +738,18 @@ impl LaunchRepository {
                 .fetch_optional(&mut *tx)
                 .await?
             {
+                if matches!(request.kind, LaunchKind::Resume | LaunchKind::Wake) {
+                    let reason = (request.kind == LaunchKind::Resume).then_some(
+                        runtara_store_postgres::encoding::wake_reason_to_str(
+                            runtara_core::domain::WakeReason::ManualResume,
+                        ),
+                    );
+                    sqlx::query("UPDATE instances SET wake_reason = COALESCE($2, wake_reason), sleep_until = NULL WHERE instance_id = $1")
+                        .bind(&request.instance_id)
+                        .bind(reason)
+                        .execute(&mut *tx)
+                        .await?;
+                }
                 tx.commit().await?;
                 return Ok(EnqueueOutcome::Enqueued(row.try_into()?));
             }
@@ -797,6 +809,23 @@ impl LaunchRepository {
         &self,
         limit: usize,
     ) -> Result<Vec<Launch>, LaunchQueueError> {
+        self.reconcile_released(limit, None).await
+    }
+
+    /// Release a finished generation before an explicit resume can mistake it
+    /// for an already queued relaunch. Starting/queued generations stay active.
+    pub async fn reconcile_released_instance(
+        &self,
+        instance_id: &str,
+    ) -> Result<Vec<Launch>, LaunchQueueError> {
+        self.reconcile_released(1, Some(instance_id)).await
+    }
+
+    async fn reconcile_released(
+        &self,
+        limit: usize,
+        instance_id: Option<&str>,
+    ) -> Result<Vec<Launch>, LaunchQueueError> {
         if limit == 0 {
             return Ok(Vec::new());
         }
@@ -809,7 +838,8 @@ impl LaunchRepository {
                 JOIN instances AS core_instance
                   ON core_instance.instance_id = launch.instance_id
                  AND core_instance.tenant_id = launch.tenant_id
-                WHERE launch.state IN ('queued', 'preparing', 'leased', 'starting', 'running')
+                WHERE ($2::TEXT IS NULL OR launch.instance_id = $2)
+                  AND launch.state IN ('queued', 'preparing', 'leased', 'starting', 'running')
                   AND (
                         core_instance.status IN ('completed', 'failed', 'cancelled')
                         OR (
@@ -840,6 +870,7 @@ impl LaunchRepository {
         rows_to_launches(
             sqlx::query_as::<_, LaunchRow>(&query)
                 .bind(limit)
+                .bind(instance_id)
                 .fetch_all(&self.pool)
                 .await?,
         )

@@ -59,9 +59,10 @@ pub async fn handle_checkpoint(
             get_pending_signal(state.persistence.as_ref(), &request.instance_id).await?;
         let custom_signal = state
             .persistence
-            .take_pending_custom_signal(&request.instance_id, &request.checkpoint_id)
+            .get_custom_signal(&request.instance_id, &request.checkpoint_id)
             .await?
             .map(|sig| CustomSignal {
+                signal_id: sig.signal_id,
                 checkpoint_id: request.checkpoint_id.clone(),
                 payload: sig.payload.unwrap_or_default(),
             });
@@ -105,9 +106,10 @@ pub async fn handle_checkpoint(
         get_pending_signal(state.persistence.as_ref(), &request.instance_id).await?;
     let custom_signal = state
         .persistence
-        .take_pending_custom_signal(&request.instance_id, &request.checkpoint_id)
+        .get_custom_signal(&request.instance_id, &request.checkpoint_id)
         .await?
         .map(|sig| CustomSignal {
+            signal_id: sig.signal_id,
             checkpoint_id: request.checkpoint_id.clone(),
             payload: sig.payload.unwrap_or_default(),
         });
@@ -311,11 +313,11 @@ pub async fn handle_sleep(
 }
 
 /// Signals that end a sleep early. Cancel and shutdown both terminate the run,
-/// so burning the rest of the clock serves nobody; pause and resume are handled
+/// so burning the rest of the clock serves nobody; pause is handled
 /// at the guest's own poll sites and leave the sleep alone.
 fn interrupts_sleep(signal: &Signal) -> bool {
-    signal.signal_type == i32::from(SignalType::SignalCancel)
-        || signal.signal_type == i32::from(SignalType::SignalShutdown)
+    SignalType::try_from_i32(signal.signal_type)
+        .is_some_and(|kind| crate::lifecycle::interrupts_sleep(kind.into()))
 }
 
 /// Record a heartbeat for a sleeping instance.
@@ -455,6 +457,7 @@ mod tests {
     #[tokio::test]
     async fn test_checkpoint_returns_custom_signal() {
         let custom_signal = CustomSignalRecord {
+            signal_id: "test-signal-value".into(),
             instance_id: "inst-1".to_string(),
             checkpoint_id: "cp-1".to_string(),
             payload: Some(b"custom payload".to_vec()),

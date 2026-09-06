@@ -75,7 +75,6 @@ impl EmbeddedBackend {
         let signal_type = match record.signal_type {
             CoreSignalType::Cancel => SignalType::Cancel,
             CoreSignalType::Pause => SignalType::Pause,
-            CoreSignalType::Resume => SignalType::Resume,
             CoreSignalType::Shutdown => SignalType::Shutdown,
         };
         Ok(Some(Signal {
@@ -426,12 +425,10 @@ impl SdkBackend for EmbeddedBackend {
         let custom = match checkpoint_id {
             Some(id) => self
                 .rt
-                .block_on(
-                    self.persistence
-                        .take_pending_custom_signal(&self.instance_id, id),
-                )
+                .block_on(self.persistence.get_custom_signal(&self.instance_id, id))
                 .map_err(|e| SdkError::Internal(e.to_string()))?
                 .map(|signal| CustomSignal {
+                    signal_id: signal.signal_id,
                     checkpoint_id: signal.checkpoint_id,
                     payload: signal.payload.unwrap_or_default(),
                 }),
@@ -444,7 +441,6 @@ impl SdkBackend for EmbeddedBackend {
         let signal_type = match signal_type {
             SignalType::Cancel => CoreSignalType::Cancel,
             SignalType::Pause => CoreSignalType::Pause,
-            SignalType::Resume => CoreSignalType::Resume,
             SignalType::Shutdown => CoreSignalType::Shutdown,
         };
         self.rt
@@ -684,6 +680,7 @@ mod tests {
                     output: inst.output.clone(),
                     error: inst.error.clone(),
                     sleep_until: inst.sleep_until,
+                    wake_reason: None,
                     termination_reason: None,
                     exit_code: None,
                     recovery_attempts: 0,
@@ -806,13 +803,22 @@ mod tests {
             Ok(None)
         }
 
-        async fn acknowledge_signal(
+        async fn apply_lifecycle_command(
             &self,
             _instance_id: &str,
             _command_id: &str,
             _signal_type: runtara_core::domain::SignalType,
-        ) -> CoreResult<bool> {
-            Ok(false)
+        ) -> CoreResult<runtara_core::lifecycle::Decision> {
+            Ok(runtara_core::lifecycle::Decision::Rejected)
+        }
+
+        async fn park_instance(
+            &self,
+            _instance_id: &str,
+            _request: runtara_core::lifecycle::ParkRequest,
+        ) -> std::result::Result<runtara_core::lifecycle::Decision, runtara_core::error::CoreError>
+        {
+            Ok(runtara_core::lifecycle::Decision::Rejected)
         }
 
         async fn cancel_suspended_instances(
@@ -826,16 +832,16 @@ mod tests {
             Ok(Vec::new())
         }
 
-        async fn insert_custom_signal(
+        async fn put_custom_signal(
             &self,
             _instance_id: &str,
             _checkpoint_id: &str,
             _payload: &[u8],
-        ) -> CoreResult<()> {
-            Ok(())
+        ) -> CoreResult<String> {
+            Ok("mock-custom-signal".into())
         }
 
-        async fn take_pending_custom_signal(
+        async fn get_custom_signal(
             &self,
             _instance_id: &str,
             _checkpoint_id: &str,
@@ -871,10 +877,11 @@ mod tests {
             Ok(0)
         }
 
-        async fn set_instance_sleep(
+        async fn schedule_wake(
             &self,
             instance_id: &str,
             sleep_until: DateTime<Utc>,
+            _reason: runtara_core::domain::WakeReason,
         ) -> CoreResult<()> {
             let mut instances = self.instances.write().await;
             if let Some(inst) = instances.get_mut(instance_id) {

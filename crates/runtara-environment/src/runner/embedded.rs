@@ -18,6 +18,7 @@
 //! - Memory metrics come from the store's resource limiter (exact guest
 //!   linear-memory peak); CPU metrics are absent.
 
+#[cfg(all(test, feature = "db-integration-tests"))]
 use runtara_core::domain::InstanceStatus as CoreInstanceStatus;
 
 use async_trait::async_trait;
@@ -1260,7 +1261,7 @@ fn on_signal_checkpoint_ids(
 /// Re-reading here, after the row is visible to the waker, closes it: if the
 /// signal is already present we self-wake by stamping `sleep_until = now`, which
 /// is exactly what the waker would have done. The read is non-destructive
-/// (`take_pending_custom_signal` retains the row, despite its name), so the
+/// (`get_custom_signal` retains the row), so the
 /// replayed guest still observes the signal.
 ///
 /// Returns true when it woke the instance.
@@ -1271,12 +1272,16 @@ async fn wake_if_signal_already_arrived(
 ) -> bool {
     for checkpoint_id in on_signal_checkpoint_ids(wakes) {
         match persistence
-            .take_pending_custom_signal(instance_id, checkpoint_id)
+            .get_custom_signal(instance_id, checkpoint_id)
             .await
         {
             Ok(Some(_)) => {
                 if let Err(e) = persistence
-                    .set_instance_sleep(instance_id, chrono::Utc::now())
+                    .schedule_wake(
+                        instance_id,
+                        chrono::Utc::now(),
+                        runtara_core::domain::WakeReason::CustomSignal,
+                    )
                     .await
                 {
                     warn!(instance_id, error = %e, "Failed to self-wake after a signal raced the park");
@@ -1386,58 +1391,41 @@ async fn park_invoke_suspend(
         // Pure on-resume: already handled by the ack path.
         return;
     }
-    let wake_marker = if has_on_signal_wake(wakes) {
-        WAITING_SIGNAL_TERMINATION
-    } else {
-        "sleeping"
+    use runtara_core::lifecycle::{Decision, ParkReason, ParkRequest};
+    let deadline = deadline_ms
+        .and_then(|ms| chrono::DateTime::<chrono::Utc>::from_timestamp_millis(ms as i64));
+    if deadline_ms.is_some() && deadline.is_none() {
+        warn!(
+            instance_id,
+            ?deadline_ms,
+            "Suspend deadline out of range; leaving sleep_until unset"
+        );
+    }
+    let request = ParkRequest {
+        reason: if has_on_signal_wake(wakes) {
+            ParkReason::Signal
+        } else {
+            ParkReason::Timer
+        },
+        deadline,
     };
-    // status first, then sleep_until: the wake scan requires BOTH
-    // `status='suspended'` AND `sleep_until IS NOT NULL`, so neither ordering
-    // exposes a half-parked instance to a premature claim.
-    match persistence
-        .complete_instance(
-            runtara_core::persistence::CompleteInstanceParams::new(
-                instance_id,
-                CoreInstanceStatus::Suspended,
-            )
-            .if_running()
-            .with_termination(wake_marker, None),
-        )
-        .await
-    {
-        Ok(true) => {}
-        Ok(false) => {
-            // Already terminal (or otherwise not running) — a malformed guest
-            // that completed/failed and THEN returned suspended, or the
-            // monitor's timeout landed first. Never overwrite, never schedule.
+    match persistence.park_instance(instance_id, request).await {
+        Ok(Decision::Applied(_)) => {}
+        Ok(_) => {
             warn!(
                 instance_id,
                 "Invoke suspend ignored: instance is not running (terminal status preserved)"
             );
             return;
         }
-        Err(e) => {
-            warn!(instance_id, error = %e, "Failed to mark instance suspended after invoke suspend");
+        Err(error) => {
+            warn!(instance_id, %error, "Failed to park instance after invoke suspend");
+            return;
         }
     }
-    if wake_if_signal_already_arrived(persistence, instance_id, wakes).await {
-        return;
-    }
-    let Some(deadline_ms) = deadline_ms else {
-        // Deadline-less on-signal: parked as suspended; the waker relaunches it.
-        return;
-    };
-    let Some(deadline) = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(deadline_ms as i64)
-    else {
-        warn!(
-            instance_id,
-            deadline_ms, "Suspend deadline out of range; leaving sleep_until unset"
-        );
-        return;
-    };
-    if let Err(e) = persistence.set_instance_sleep(instance_id, deadline).await {
-        warn!(instance_id, error = %e, "Failed to set sleep_until after invoke suspend");
-    }
+    // Close the arrival-before-park race. Later arrivals observe suspended state
+    // and schedule their own immediate wake. Never overwrite it with the timer.
+    wake_if_signal_already_arrived(persistence, instance_id, wakes).await;
 }
 
 fn invoke_metrics_of(result: &runtara_component_host::InvokeRunResult) -> ContainerMetrics {
@@ -2206,6 +2194,10 @@ mod tests {
             .expect("instance exists");
         assert_eq!(inst.status, CoreInstanceStatus::Suspended);
         assert_eq!(
+            inst.wake_reason,
+            Some(runtara_core::domain::WakeReason::Timer)
+        );
+        assert_eq!(
             inst.sleep_until.map(|dt| dt.timestamp_millis() as u64),
             Some(deadline_ms),
             "sleep_until must be the wake deadline so the wake scan selects it"
@@ -2294,7 +2286,7 @@ mod tests {
         // forever with its signal already in the table.
         let (persistence, instance_id) = running_instance().await;
         persistence
-            .insert_custom_signal(&instance_id, "raced-sig", b"{}")
+            .put_custom_signal(&instance_id, "raced-sig", b"{}")
             .await
             .expect("insert signal");
 
@@ -2314,6 +2306,10 @@ mod tests {
             .expect("get")
             .expect("instance exists");
         assert_eq!(inst.status, CoreInstanceStatus::Suspended);
+        assert_eq!(
+            inst.wake_reason,
+            Some(runtara_core::domain::WakeReason::CustomSignal)
+        );
         assert!(
             inst.sleep_until.is_some(),
             "a signal already present at park time must self-wake the instance, \
@@ -2322,7 +2318,7 @@ mod tests {
         // Non-destructive: the replayed guest still observes the signal.
         assert!(
             persistence
-                .take_pending_custom_signal(&instance_id, "raced-sig")
+                .get_custom_signal(&instance_id, "raced-sig")
                 .await
                 .expect("read signal")
                 .is_some(),

@@ -49,6 +49,9 @@ pub struct InstanceRecord {
     pub error: Option<String>,
     /// When a sleeping instance should be woken.
     pub sleep_until: Option<DateTime<Utc>>,
+    /// Scheduled or most recently claimed host wake cause. Preserved across claim/retry and execution
+    /// start; lifecycle commands can clear an obsolete wake intent.
+    pub wake_reason: Option<crate::domain::WakeReason>,
     /// How/why the instance reached its terminal state.
     pub termination_reason: Option<String>,
     /// Process exit code if available.
@@ -106,7 +109,7 @@ pub struct SignalRecord {
     pub command_id: String,
     /// Instance this signal is for.
     pub instance_id: String,
-    /// Type of signal (cancel, pause, resume).
+    /// Type of signal (cancel, pause, shutdown).
     pub signal_type: SignalType,
     /// Optional signal payload data.
     pub payload: Option<Vec<u8>>,
@@ -114,6 +117,17 @@ pub struct SignalRecord {
     pub created_at: DateTime<Utc>,
     /// When the signal was acknowledged by the instance.
     pub acknowledged_at: Option<DateTime<Utc>>,
+}
+
+impl SignalRecord {
+    /// Borrow the command facts used by the pure lifecycle policy.
+    pub fn command(&self) -> crate::lifecycle::Command<'_> {
+        crate::lifecycle::Command {
+            id: &self.command_id,
+            kind: self.signal_type,
+            acknowledged: self.acknowledged_at.is_some(),
+        }
+    }
 }
 
 /// Instance whose pending cancellation was applied without a running guest.
@@ -128,6 +142,8 @@ pub struct CancelledInstance {
 /// Pending custom signal scoped to a specific checkpoint.
 #[derive(Debug, Clone)]
 pub struct CustomSignalRecord {
+    /// Identity of this retained value, distinct from its checkpoint address.
+    pub signal_id: String,
     /// Instance this signal is for.
     pub instance_id: String,
     /// Target checkpoint/wait key.
@@ -604,7 +620,29 @@ pub trait Persistence: Send + Sync {
         instance_id: &str,
         command_id: &str,
         signal_type: SignalType,
-    ) -> Result<bool, CoreError>;
+    ) -> Result<bool, CoreError> {
+        Ok(self
+            .apply_lifecycle_command(instance_id, command_id, signal_type)
+            .await?
+            .accepted())
+    }
+
+    /// Evaluate core command policy against locked state and atomically apply its
+    /// effects. Return the typed disposition, retaining idempotency information.
+    async fn apply_lifecycle_command(
+        &self,
+        instance_id: &str,
+        command_id: &str,
+        signal_type: SignalType,
+    ) -> Result<crate::lifecycle::Decision, CoreError>;
+
+    /// Evaluate the core parking guard and commit suspension metadata and its
+    /// deadline atomically. A concurrent terminal transition cannot be overwritten.
+    async fn park_instance(
+        &self,
+        instance_id: &str,
+        request: crate::lifecycle::ParkRequest,
+    ) -> Result<crate::lifecycle::Decision, CoreError>;
 
     /// Atomically cancel suspended instances with pending cancel commands, clear
     /// their wake deadlines, and acknowledge those exact commands. Returns only
@@ -617,14 +655,20 @@ pub trait Persistence: Send + Sync {
         limit: i64,
     ) -> Result<Vec<CancelledInstance>, CoreError>;
 
-    async fn insert_custom_signal(
+    /// Replace the retained value at an instance/checkpoint address. Last write
+    /// wins; every successful write receives a fresh signal ID, even for identical
+    /// payloads. This is neither a queue nor retry deduplication. Returns that ID.
+    async fn put_custom_signal(
         &self,
         instance_id: &str,
         checkpoint_id: &str,
         payload: &[u8],
-    ) -> Result<(), CoreError>;
+    ) -> Result<String, CoreError>;
 
-    async fn take_pending_custom_signal(
+    /// Read the current retained value without consuming it. Replays see the
+    /// same identity and payload until a later write replaces it. The checkpoint
+    /// ID is an address; the returned signal ID identifies the stored value.
+    async fn get_custom_signal(
         &self,
         instance_id: &str,
         checkpoint_id: &str,
@@ -721,6 +765,18 @@ pub trait Persistence: Send + Sync {
         &self,
         instance_id: &str,
         sleep_until: DateTime<Utc>,
+    ) -> Result<(), CoreError> {
+        self.schedule_wake(instance_id, sleep_until, crate::domain::WakeReason::Timer)
+            .await
+    }
+
+    /// Atomically persist a wake deadline and its host-side cause. Terminal
+    /// instances retain no scheduled wake. A wake reason is never a guest signal.
+    async fn schedule_wake(
+        &self,
+        instance_id: &str,
+        deadline: DateTime<Utc>,
+        reason: crate::domain::WakeReason,
     ) -> Result<(), CoreError>;
 
     /// Clear the sleep_until timestamp for an instance.

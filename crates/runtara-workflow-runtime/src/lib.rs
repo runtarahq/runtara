@@ -80,6 +80,8 @@ pub struct RuntimeSignalInfo {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeCustomSignalInfo {
+    /// Identity of this retained value, distinct from its checkpoint address.
+    pub signal_id: String,
     pub checkpoint_id: String,
     pub payload: Vec<u8>,
 }
@@ -96,7 +98,6 @@ fn signal_type_name(signal_type: SignalType) -> &'static str {
     match signal_type {
         SignalType::Cancel => "cancel",
         SignalType::Pause => "pause",
-        SignalType::Resume => "resume",
         SignalType::Shutdown => "shutdown",
     }
 }
@@ -121,6 +122,7 @@ fn runtime_signal(signal: Signal) -> RuntimeSignalInfo {
 
 fn runtime_custom_signal(signal: CustomSignal) -> RuntimeCustomSignalInfo {
     RuntimeCustomSignalInfo {
+        signal_id: signal.signal_id,
         checkpoint_id: signal.checkpoint_id,
         payload: signal.payload,
     }
@@ -277,6 +279,7 @@ mod component {
 
     fn custom_signal_info(signal: super::RuntimeCustomSignalInfo) -> CustomSignalInfo {
         CustomSignalInfo {
+            signal_id: signal.signal_id,
             checkpoint_id: signal.checkpoint_id,
             payload: signal.payload,
         }
@@ -473,7 +476,6 @@ mod tests {
     fn signal_type_names_match_runtime_abi() {
         assert_eq!(signal_type_name(SignalType::Cancel), "cancel");
         assert_eq!(signal_type_name(SignalType::Pause), "pause");
-        assert_eq!(signal_type_name(SignalType::Resume), "resume");
         assert_eq!(signal_type_name(SignalType::Shutdown), "shutdown");
     }
 
@@ -507,6 +509,7 @@ mod tests {
                 checkpoint_id: Some("step-a".to_string()),
             }),
             custom_signal: Some(CustomSignal {
+                signal_id: "test-signal-value".into(),
                 checkpoint_id: "wait-a".to_string(),
                 payload: br#"{"resume":true}"#.to_vec(),
             }),
@@ -521,6 +524,7 @@ mod tests {
         assert_eq!(signal.payload, b"pause-now");
         assert_eq!(signal.checkpoint_id.as_deref(), Some("step-a"));
         let custom = wire.custom_signal.expect("custom signal");
+        assert_eq!(custom.signal_id, "test-signal-value");
         assert_eq!(custom.checkpoint_id, "wait-a");
         assert_eq!(custom.payload, br#"{"resume":true}"#);
     }

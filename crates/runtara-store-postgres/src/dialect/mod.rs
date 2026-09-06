@@ -91,16 +91,12 @@ pub(crate) trait Dialect: Send + Sync + 'static {
 
     /// SQL for reading a pending custom signal by `(instance_id, checkpoint_id)`.
     ///
-    /// **Non-destructive**: this SELECTs the row and leaves it in place. A
-    /// replay-from-start engine treats checkpoints as a result cache, so a
-    /// guest waiting on a signal must be able to re-read the one it already
-    /// consumed when the instance is drained/restarted and replayed. A
-    /// destructive take made that wait the only non-replayable durable
-    /// operation and dead-hung post-consume resumes. Rows are reclaimed by
-    /// `ON DELETE CASCADE` when the instance is deleted.
+    /// Non-destructive: returns the current value and its signal ID until a
+    /// subsequent write replaces them. Checkpoint IDs are slot addresses.
+    /// Rows are reclaimed when their instance is deleted.
     ///
     /// Binds (in order): instance_id, checkpoint_id.
-    fn sql_take_pending_custom_signal() -> &'static str;
+    fn sql_get_custom_signal() -> &'static str;
 
     /// SQL for upserting a checkpoint row.
     ///

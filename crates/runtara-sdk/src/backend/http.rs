@@ -307,6 +307,8 @@ struct SignalResp {
 
 #[derive(Deserialize)]
 struct CustomSignalResp {
+    /// Identity of this retained value, distinct from its checkpoint address.
+    signal_id: String,
     checkpoint_id: String,
     #[serde(default)]
     payload: Option<String>, // base64
@@ -391,21 +393,23 @@ fn parse_instance_status(s: &str) -> InstanceStatus {
     }
 }
 
-fn parse_signal_type(s: &str) -> SignalType {
-    match s {
+fn parse_signal_type(s: &str) -> Result<SignalType> {
+    Ok(match s {
         "cancel" => SignalType::Cancel,
         "pause" => SignalType::Pause,
-        "resume" => SignalType::Resume,
         "shutdown" => SignalType::Shutdown,
-        _ => SignalType::Cancel, // safe default
-    }
+        _ => {
+            return Err(SdkError::Internal(format!(
+                "Unsupported lifecycle command: {s}"
+            )));
+        }
+    })
 }
 
 fn signal_type_str(st: &SignalType) -> &'static str {
     match st {
         SignalType::Cancel => "cancel",
         SignalType::Pause => "pause",
-        SignalType::Resume => "resume",
         SignalType::Shutdown => "shutdown",
     }
 }
@@ -445,17 +449,18 @@ fn encode_b64(data: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(data)
 }
 
-fn parse_signal(resp: &SignalResp) -> Signal {
-    Signal {
+fn parse_signal(resp: &SignalResp) -> Result<Signal> {
+    Ok(Signal {
         command_id: resp.command_id.clone(),
-        signal_type: parse_signal_type(&resp.signal_type),
+        signal_type: parse_signal_type(&resp.signal_type)?,
         payload: resp.payload.as_deref().map(decode_b64).unwrap_or_default(),
         checkpoint_id: None,
-    }
+    })
 }
 
 fn parse_custom_signal(resp: &CustomSignalResp) -> CustomSignal {
     CustomSignal {
+        signal_id: resp.signal_id.clone(),
         checkpoint_id: resp.checkpoint_id.clone(),
         payload: resp.payload.as_deref().map(decode_b64).unwrap_or_default(),
     }
@@ -532,7 +537,7 @@ impl SdkBackend for HttpBackend {
         Ok(CheckpointResult {
             found: resp.found,
             state: resp.state.as_deref().map(decode_b64).unwrap_or_default(),
-            pending_signal: resp.signal.as_ref().map(parse_signal),
+            pending_signal: resp.signal.as_ref().map(parse_signal).transpose()?,
             custom_signal: resp.custom_signal.as_ref().map(parse_custom_signal),
         })
     }
@@ -712,7 +717,7 @@ impl SdkBackend for HttpBackend {
         };
 
         let resp: PollSignalsResp = self.get(&url)?;
-        let signal = resp.signal.as_ref().map(parse_signal);
+        let signal = resp.signal.as_ref().map(parse_signal).transpose()?;
         let custom = resp.custom_signal.as_ref().map(parse_custom_signal);
         Ok((signal, custom))
     }
@@ -807,6 +812,17 @@ mod config_tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn unsupported_commands_are_not_interpreted_as_cancellation() {
+        for kind in ["resume", "future-command", ""] {
+            assert!(super::parse_signal_type(kind).is_err());
+        }
+        assert_eq!(
+            super::parse_signal_type("cancel").unwrap(),
+            crate::types::SignalType::Cancel
+        );
     }
 
     #[test]

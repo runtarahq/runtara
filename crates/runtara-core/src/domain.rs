@@ -36,10 +36,22 @@ pub enum SignalType {
     Cancel,
     /// Pause execution.
     Pause,
-    /// Resume execution.
-    Resume,
     /// Suspend for a server restart.
     Shutdown,
+}
+
+/// Host-side cause of a wake or explicit resume. These are scheduling metadata,
+/// never commands delivered to the guest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WakeReason {
+    /// A durable timer or signal timeout elapsed.
+    Timer,
+    /// A custom value arrived at a waiting checkpoint address.
+    CustomSignal,
+    /// An operator requested the explicit host resume operation.
+    ManualResume,
+    /// Execution is being recovered after shutdown or host failure.
+    Recovery,
 }
 
 /// An event in an instance's persisted timeline.

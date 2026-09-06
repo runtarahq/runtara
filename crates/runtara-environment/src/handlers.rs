@@ -894,6 +894,17 @@ pub async fn handle_resume_instance(
         };
 
     let repository = LaunchRepository::new(state.pool.clone());
+    for released in repository
+        .reconcile_released_instance(&request.instance_id)
+        .await
+        .map_err(|error| {
+            crate::error::Error::Other(format!("Failed to reconcile parked launch: {error}"))
+        })?
+    {
+        state
+            .lifecycle_observers
+            .notify_released(&released, "reconciled");
+    }
     let enqueue = EnqueueRequest::immediate(
         uuid::Uuid::new_v4().to_string(),
         request.instance_id.clone(),
@@ -904,16 +915,8 @@ pub async fn handle_resume_instance(
     );
     match repository.enqueue(enqueue).await {
         Ok(EnqueueOutcome::Enqueued(launch)) | Ok(EnqueueOutcome::Existing(launch)) => {
-            // A manual resume supersedes an old timed wake claim. The durable
-            // queue row already fences duplicate runner handoffs, so a failed
-            // clear is safe to retry and does not invalidate this acceptance.
-            if let Err(error) = state
-                .persistence
-                .clear_instance_sleep(&request.instance_id)
-                .await
-            {
-                warn!(instance_id = %request.instance_id, error = %error, "Failed to clear sleep_until after queuing manual resume");
-            }
+            // Enqueuing a new resume clears the old timer in its transaction.
+            // Clearing here could erase a timer set by a fast resumed guest.
             state.launch_notifier.notify_one();
             info!(
                 instance_id = %request.instance_id,
@@ -1401,9 +1404,10 @@ pub fn spawn_container_monitor(
                                             // instance with no checkpoint stays
                                             // suspended forever.
                                             if let Err(e) = persistence
-                                                .set_instance_sleep(
+                                                .schedule_wake(
                                                     &instance_id,
                                                     chrono::Utc::now(),
+                                                    runtara_core::domain::WakeReason::Recovery,
                                                 )
                                                 .await
                                             {
@@ -1850,14 +1854,14 @@ pub enum SendSignalOutcome {
         /// The status that refused it.
         status: String,
     },
-    /// The signal type is not one of `cancel`, `pause`, `resume`.
+    /// The signal type is not one of `cancel`, `pause`.
     UnknownSignalType {
         /// What the caller asked for.
         signal_type: String,
     },
 }
 
-/// Send a lifecycle signal (`cancel`, `pause`, `resume`) to an instance.
+/// Send a lifecycle signal (`cancel`, `pause`) to an instance.
 pub async fn handle_send_signal(
     state: &EnvironmentHandlerState,
     instance_id: &str,
@@ -1880,7 +1884,6 @@ pub async fn handle_send_signal(
     let signal_type = match signal_type {
         "cancel" => runtara_core::domain::SignalType::Cancel,
         "pause" => runtara_core::domain::SignalType::Pause,
-        "resume" => runtara_core::domain::SignalType::Resume,
         _ => {
             return Ok(SendSignalOutcome::UnknownSignalType {
                 signal_type: signal_type.to_string(),
@@ -1914,7 +1917,10 @@ pub async fn handle_send_signal(
 #[derive(Debug, PartialEq, Eq)]
 pub enum SendCustomSignalOutcome {
     /// The signal was stored, and a parked instance woken if one was waiting.
-    Delivered,
+    Delivered {
+        /// Identity of the retained value written by this request.
+        signal_id: String,
+    },
     /// No such instance.
     InstanceNotFound,
 }
@@ -1942,13 +1948,13 @@ pub async fn handle_send_custom_signal(
     }
 
     let payload = payload.map(|p| p.as_bytes().to_vec()).unwrap_or_default();
-    state
+    let signal_id = state
         .persistence
-        .insert_custom_signal(instance_id, checkpoint_id, &payload)
+        .put_custom_signal(instance_id, checkpoint_id, &payload)
         .await?;
 
     wake_suspended_on_signal(state.persistence.as_ref(), instance_id).await;
-    Ok(SendCustomSignalOutcome::Delivered)
+    Ok(SendCustomSignalOutcome::Delivered { signal_id })
 }
 
 /// On-signal waker (store-freeing Wait): a Wait compiled with the store-freeing
@@ -1974,7 +1980,11 @@ pub async fn wake_suspended_on_signal(persistence: &dyn Persistence, instance_id
                     == Some(crate::runner::embedded::WAITING_SIGNAL_TERMINATION) =>
         {
             if let Err(e) = persistence
-                .set_instance_sleep(instance_id, chrono::Utc::now())
+                .schedule_wake(
+                    instance_id,
+                    chrono::Utc::now(),
+                    runtara_core::domain::WakeReason::CustomSignal,
+                )
                 .await
             {
                 warn!(instance_id, error = %e, "Failed to wake suspended instance after custom signal");

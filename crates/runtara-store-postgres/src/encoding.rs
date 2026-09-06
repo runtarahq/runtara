@@ -37,7 +37,6 @@ pub fn signal_type_to_str(value: SignalType) -> &'static str {
     match value {
         SignalType::Cancel => "cancel",
         SignalType::Pause => "pause",
-        SignalType::Resume => "resume",
         SignalType::Shutdown => "shutdown",
     }
 }
@@ -47,7 +46,6 @@ pub fn signal_type_from_str(value: &str) -> Result<SignalType, sqlx::Error> {
     match value {
         "cancel" => Ok(SignalType::Cancel),
         "pause" => Ok(SignalType::Pause),
-        "resume" => Ok(SignalType::Resume),
         "shutdown" => Ok(SignalType::Shutdown),
         _ => Err(sqlx::Error::Decode(
             "unrecognized stored signal_type".into(),
@@ -82,6 +80,29 @@ pub fn event_type_from_str(value: &str) -> Result<EventType, sqlx::Error> {
     }
 }
 
+/// Encode host wake metadata independently of lifecycle command labels.
+pub fn wake_reason_to_str(value: runtara_core::domain::WakeReason) -> &'static str {
+    use runtara_core::domain::WakeReason;
+    match value {
+        WakeReason::Timer => "timer",
+        WakeReason::CustomSignal => "custom_signal",
+        WakeReason::ManualResume => "manual_resume",
+        WakeReason::Recovery => "recovery",
+    }
+}
+
+/// Decode a stored host wake reason.
+pub fn wake_reason_from_str(value: &str) -> Result<runtara_core::domain::WakeReason, sqlx::Error> {
+    use runtara_core::domain::WakeReason;
+    match value {
+        "timer" => Ok(WakeReason::Timer),
+        "custom_signal" => Ok(WakeReason::CustomSignal),
+        "manual_resume" => Ok(WakeReason::ManualResume),
+        "recovery" => Ok(WakeReason::Recovery),
+        _ => Err(sqlx::Error::Decode("unrecognized wake reason".into())),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -101,7 +122,7 @@ mod tests {
         for invalid in ["", "unknown", "INVALID"] {
             assert!(status_from_str(invalid).is_err());
         }
-        for label in ["cancel", "pause", "resume", "shutdown"] {
+        for label in ["cancel", "pause", "shutdown"] {
             assert_eq!(
                 signal_type_to_str(signal_type_from_str(label).unwrap()),
                 label

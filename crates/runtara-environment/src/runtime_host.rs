@@ -46,7 +46,7 @@ use runtara_core::instance_handlers::{
     CheckpointRequest, GetCheckpointRequest, InstanceEvent, InstanceEventType,
     InstanceHandlerState, PollSignalsRequest, RetryAttemptEvent, Signal, SignalAck, SignalType,
     SleepRequest, handle_checkpoint, handle_get_checkpoint, handle_instance_event,
-    handle_poll_signals, handle_retry_attempt, handle_signal_ack, handle_sleep,
+    handle_poll_signals, handle_retry_attempt, handle_signal_ack_decision, handle_sleep,
 };
 use runtara_core::persistence::Persistence;
 
@@ -280,7 +280,7 @@ impl PersistenceRuntimeHost {
 
     /// Apply only the command the guest actually observed.
     async fn ack_signal(&self, signal_type: SignalType, command_id: &str) -> Result<bool, String> {
-        handle_signal_ack(
+        handle_signal_ack_decision(
             &self.state,
             SignalAck {
                 command_id: command_id.to_owned(),
@@ -290,6 +290,7 @@ impl PersistenceRuntimeHost {
             },
         )
         .await
+        .map(|decision| decision.accepted())
         .map_err(Self::err)
     }
 
@@ -329,7 +330,6 @@ impl PersistenceRuntimeHost {
         match value {
             0 => Some(SignalType::SignalCancel),
             1 => Some(SignalType::SignalPause),
-            2 => Some(SignalType::SignalResume),
             3 => Some(SignalType::SignalShutdown),
             _ => None,
         }
@@ -341,7 +341,6 @@ impl PersistenceRuntimeHost {
         match Self::signal_type_of(signal_type) {
             Some(SignalType::SignalCancel) => "cancel",
             Some(SignalType::SignalPause) => "pause",
-            Some(SignalType::SignalResume) => "resume",
             Some(SignalType::SignalShutdown) => "shutdown",
             // Unknown types degrade to cancel, matching handle_poll_signals'
             // own unknown-type fallback.
@@ -501,6 +500,7 @@ impl RuntimeHost for PersistenceRuntimeHost {
             custom_signal: response
                 .custom_signal
                 .map(|signal| RuntimeCustomSignalInfo {
+                    signal_id: signal.signal_id,
                     checkpoint_id: signal.checkpoint_id,
                     payload: signal.payload,
                 }),
@@ -522,7 +522,9 @@ impl RuntimeHost for PersistenceRuntimeHost {
         if !self.ack_signal(kind, &command_id).await? {
             return Ok(false);
         }
-        if matches!(kind, SignalType::SignalCancel | SignalType::SignalShutdown) {
+        if runtara_core::lifecycle::execution_action(kind.into())
+            == runtara_core::lifecycle::ExecutionAction::Stop
+        {
             self.cancelled.store(true, Ordering::SeqCst);
         }
         Ok(true)
@@ -674,7 +676,7 @@ mod tests {
     async fn custom_signal_poll_is_idempotent_rereads() {
         let (p, host, inst_id) = setup().await;
         assert_eq!(host.poll_custom_signal("sig-1".into()).await.unwrap(), None);
-        p.insert_custom_signal(inst_id.as_str(), "sig-1", b"payload-1")
+        p.put_custom_signal(inst_id.as_str(), "sig-1", b"payload-1")
             .await
             .unwrap();
         // Non-destructive read (wait-replay fix): both polls see the payload.

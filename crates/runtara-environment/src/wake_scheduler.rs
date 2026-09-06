@@ -311,7 +311,13 @@ impl WakeScheduler {
                     );
                     if let Err(e) = scheduler
                         .persistence
-                        .set_instance_sleep(&instance.instance_id, chrono::Utc::now())
+                        .schedule_wake(
+                            &instance.instance_id,
+                            chrono::Utc::now(),
+                            instance
+                                .wake_reason
+                                .unwrap_or(runtara_core::domain::WakeReason::Timer),
+                        )
                         .await
                     {
                         warn!(
@@ -387,7 +393,13 @@ impl WakeScheduler {
         if result.is_err()
             && let Err(restore_err) = self
                 .persistence
-                .set_instance_sleep(&instance.instance_id, self.retry_deadline())
+                .schedule_wake(
+                    &instance.instance_id,
+                    self.retry_deadline(),
+                    instance
+                        .wake_reason
+                        .unwrap_or(runtara_core::domain::WakeReason::Timer),
+                )
                 .await
         {
             warn!(
@@ -464,6 +476,17 @@ impl WakeScheduler {
         };
 
         let repository = LaunchRepository::new(self.pool.clone());
+        for released in repository
+            .reconcile_released_instance(&instance.instance_id)
+            .await
+            .map_err(|error| {
+                crate::error::Error::Other(format!("Failed to reconcile parked launch: {error}"))
+            })?
+        {
+            self.lifecycle_observers
+                .notify_released(&released, "reconciled");
+        }
+
         let request = EnqueueRequest::immediate(
             uuid::Uuid::new_v4().to_string(),
             instance.instance_id.clone(),
@@ -474,17 +497,8 @@ impl WakeScheduler {
         );
         match repository.enqueue(request).await {
             Ok(EnqueueOutcome::Enqueued(launch)) | Ok(EnqueueOutcome::Existing(launch)) => {
-                // The core wake claim is no longer needed once a durable launch
-                // generation owns this handoff. If this clear is interrupted,
-                // another scan only observes the same active generation and
-                // cannot start a duplicate guest.
-                if let Err(error) = self
-                    .persistence
-                    .clear_instance_sleep(&instance.instance_id)
-                    .await
-                {
-                    warn!(instance_id = %instance.instance_id, error = %error, "Failed to clear wake claim after queuing launch");
-                }
+                // A new generation clears its wake claim inside enqueue's
+                // transaction. A late clear here could erase its next timer.
                 self.launch_notifier.notify_one();
                 info!(
                     instance_id = %instance.instance_id,
@@ -500,7 +514,13 @@ impl WakeScheduler {
                 // healthy suspended instance into a failure or silently
                 // discarding its due wake.
                 self.persistence
-                    .set_instance_sleep(&instance.instance_id, self.retry_deadline())
+                    .schedule_wake(
+                        &instance.instance_id,
+                        self.retry_deadline(),
+                        instance
+                            .wake_reason
+                            .unwrap_or(runtara_core::domain::WakeReason::Timer),
+                    )
                     .await?;
                 info!(
                     instance_id = %instance.instance_id,
