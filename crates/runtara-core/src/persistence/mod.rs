@@ -116,6 +116,17 @@ pub struct SignalRecord {
     pub acknowledged_at: Option<DateTime<Utc>>,
 }
 
+impl SignalRecord {
+    /// Borrow the command facts used by the pure lifecycle policy.
+    pub fn command(&self) -> crate::lifecycle::Command<'_> {
+        crate::lifecycle::Command {
+            id: &self.command_id,
+            kind: self.signal_type,
+            acknowledged: self.acknowledged_at.is_some(),
+        }
+    }
+}
+
 /// Instance whose pending cancellation was applied without a running guest.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CancelledInstance {

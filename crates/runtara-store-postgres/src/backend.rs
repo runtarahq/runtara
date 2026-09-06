@@ -355,33 +355,28 @@ async fn insert_signal(
     signal_type: CoreSignalType,
     payload: &[u8],
 ) -> Result<(), CoreError> {
-    let payload_opt = if payload.is_empty() {
-        None
-    } else {
-        Some(payload)
-    };
-
+    let mut tx = pool.begin().await.db()?;
+    crate::lifecycle::lock_instance(&mut tx, instance_id).await?;
+    let commands = crate::lifecycle::lock_commands(&mut tx, &[instance_id.to_owned()]).await?;
+    if !runtara_core::lifecycle::may_replace_command(commands.first().map(|c| c.command())) {
+        return Ok(());
+    }
     sqlx::query(
         r#"
         INSERT INTO pending_signals (instance_id, signal_type, payload, created_at)
         VALUES ($1, $2::signal_type, $3, NOW())
         ON CONFLICT (instance_id) DO UPDATE
-        SET signal_type = EXCLUDED.signal_type,
-            payload = EXCLUDED.payload,
-            created_at = NOW(),
-            acknowledged_at = NULL,
-            command_id = gen_random_uuid()
-        WHERE pending_signals.acknowledged_at IS NOT NULL
-           OR pending_signals.signal_type <> 'cancel'
-        "#,
+        SET signal_type = EXCLUDED.signal_type, payload = EXCLUDED.payload,
+            created_at = NOW(), acknowledged_at = NULL, command_id = gen_random_uuid()
+    "#,
     )
     .bind(instance_id)
     .bind(crate::encoding::signal_type_to_str(signal_type))
-    .bind(payload_opt)
-    .execute(pool)
+    .bind((!payload.is_empty()).then_some(payload))
+    .execute(&mut *tx)
     .await
     .db()?;
-
+    tx.commit().await.db()?;
     Ok(())
 }
 
@@ -592,70 +587,30 @@ impl Persistence for PostgresPersistence {
         command_id: &str,
         signal_type: CoreSignalType,
     ) -> Result<bool, CoreError> {
-        // Lock the instance before its command. Lifecycle transitions and future
-        // parked cancellation use this ordering too.
+        use runtara_core::lifecycle::{self, Decision, Receipt};
         let mut tx = self.pool.begin().await.db()?;
-        let status: Option<String> = sqlx::query_scalar(
-            "SELECT status::text FROM instances WHERE instance_id = $1 FOR UPDATE",
-        )
-        .bind(instance_id)
-        .fetch_optional(&mut *tx)
-        .await
-        .db()?;
-        let Some(status) = status else {
-            return Err(CoreError::InstanceNotFound {
-                instance_id: instance_id.into(),
-            });
-        };
-        let command: Option<(String, String, Option<DateTime<Utc>>)> = sqlx::query_as(
-            "SELECT command_id::text, signal_type::text, acknowledged_at FROM pending_signals WHERE instance_id = $1 FOR UPDATE"
-        ).bind(instance_id).fetch_optional(&mut *tx).await.db()?;
-        let Some((stored_id, stored_type, acknowledged_at)) = command else {
-            return Ok(false);
-        };
-        if stored_id != command_id
-            || stored_type != crate::encoding::signal_type_to_str(signal_type)
-        {
-            return Ok(false);
+        let status = crate::lifecycle::lock_instance(&mut tx, instance_id).await?;
+        let ids = [instance_id.to_owned()];
+        let commands = crate::lifecycle::lock_commands(&mut tx, &ids).await?;
+        let decision = lifecycle::acknowledge(
+            status,
+            commands.first().map(|c| c.command()),
+            Receipt {
+                id: command_id,
+                kind: signal_type,
+            },
+        );
+        if let Decision::Applied(effects) = decision {
+            crate::lifecycle::apply_transition(&mut tx, &ids, effects).await?;
         }
-        if acknowledged_at.is_some() {
-            return Ok(true);
-        }
-        if is_reportable_terminal_status(&status) && signal_type != CoreSignalType::Cancel {
-            return Ok(false);
-        }
-        match signal_type {
-            CoreSignalType::Cancel => {
-                sqlx::query("UPDATE instances SET status = 'cancelled', finished_at = NOW(), sleep_until = NULL WHERE instance_id = $1")
-                    .bind(instance_id).execute(&mut *tx).await.db()?;
-            }
-            CoreSignalType::Pause | CoreSignalType::Shutdown => {
-                let shutdown = signal_type == CoreSignalType::Shutdown;
-                sqlx::query("UPDATE instances SET status = 'suspended', finished_at = NOW(), termination_reason = CASE WHEN $2 THEN 'shutdown_requested'::termination_reason ELSE NULL END, sleep_until = CASE WHEN $2 THEN NOW() ELSE NULL END WHERE instance_id = $1")
-                    .bind(instance_id).bind(shutdown).execute(&mut *tx).await.db()?;
-            }
-            CoreSignalType::Resume => {}
-        }
-        if matches!(
-            signal_type,
-            CoreSignalType::Pause | CoreSignalType::Shutdown
-        ) {
-            sqlx::query("INSERT INTO instance_events (instance_id, event_type, created_at) VALUES ($1, 'suspended', NOW())")
-                .bind(instance_id).execute(&mut *tx).await.db()?;
-        }
-        sqlx::query("UPDATE pending_signals SET acknowledged_at = NOW() WHERE instance_id = $1")
-            .bind(instance_id)
-            .execute(&mut *tx)
-            .await
-            .db()?;
         tx.commit().await.db()?;
-        if signal_type == CoreSignalType::Cancel
-            && !is_reportable_terminal_status(&status)
+        if let Decision::Applied(effects) = decision
+            && effects.report_completion
             && let Some(sink) = &self.metrics_sink
         {
             report_completion(sink.as_ref(), &self.pool, instance_id).await;
         }
-        Ok(true)
+        Ok(decision.accepted())
     }
 
     async fn cancel_suspended_instances(
@@ -663,48 +618,60 @@ impl Persistence for PostgresPersistence {
         instance_id: Option<&str>,
         limit: i64,
     ) -> Result<Vec<runtara_core::persistence::CancelledInstance>, CoreError> {
-        // Lock instances first, as in explicit acknowledgment. The command ID
-        // joins both writes so a replaced/handled receipt cannot cancel a run.
-        // One statement commits status, deadline clearing and receipt together.
-        let rows: Vec<(String, String)> = sqlx::query_as(
+        use runtara_core::lifecycle::{self, Decision};
+        let mut tx = self.pool.begin().await.db()?;
+        // Candidate predicates narrow the indexed scan; core policy is evaluated
+        // against locked instances and commands before any writes are applied.
+        let rows: Vec<(String, String, String)> = sqlx::query_as(
             r#"
-            WITH candidates AS MATERIALIZED (
-                SELECT i.instance_id, s.command_id
-                FROM instances i JOIN pending_signals s USING (instance_id)
-                WHERE i.status = 'suspended'
-                  AND s.signal_type = 'cancel' AND s.acknowledged_at IS NULL
-                  AND ($1::text IS NULL OR i.instance_id = $1)
-                ORDER BY i.instance_id
-                LIMIT $2
-                FOR UPDATE OF i SKIP LOCKED
-            ), acknowledged AS (
-                UPDATE pending_signals s SET acknowledged_at = NOW()
-                FROM candidates c
-                WHERE s.instance_id = c.instance_id AND s.command_id = c.command_id
-                  AND s.signal_type = 'cancel' AND s.acknowledged_at IS NULL
-                RETURNING s.instance_id
-            )
-            UPDATE instances i
-            SET status = 'cancelled', finished_at = NOW(), sleep_until = NULL
-            FROM acknowledged a
-            WHERE i.instance_id = a.instance_id
-            RETURNING i.instance_id, i.tenant_id
+            SELECT i.instance_id, i.tenant_id, i.status::text
+            FROM instances i JOIN pending_signals s USING (instance_id)
+            WHERE i.status = 'suspended' AND s.signal_type = 'cancel'
+              AND s.acknowledged_at IS NULL AND ($1::text IS NULL OR i.instance_id = $1)
+            ORDER BY i.instance_id LIMIT $2 FOR UPDATE OF i SKIP LOCKED
         "#,
         )
         .bind(instance_id)
         .bind(limit.max(0))
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *tx)
         .await
         .db()?;
+        let ids: Vec<_> = rows.iter().map(|r| r.0.clone()).collect();
+        let commands = crate::lifecycle::lock_commands(&mut tx, &ids).await?;
+        let commands: std::collections::HashMap<_, _> = commands
+            .iter()
+            .map(|c| (c.instance_id.as_str(), c.command()))
+            .collect();
+        let mut groups: Vec<(runtara_core::lifecycle::Transition, Vec<String>)> = Vec::new();
         let mut cancelled = Vec::new();
-        for (instance_id, tenant_id) in rows {
-            if let Some(sink) = &self.metrics_sink {
-                report_completion(sink.as_ref(), &self.pool, &instance_id).await;
+        for (id, tenant_id, status) in rows {
+            let status = crate::encoding::status_from_str(&status).db()?;
+            if let Decision::Applied(effects) =
+                lifecycle::cancel_parked(status, commands.get(id.as_str()).copied())
+            {
+                if let Some((_, ids)) = groups.iter_mut().find(|(effect, _)| *effect == effects) {
+                    ids.push(id.clone());
+                } else {
+                    groups.push((effects, vec![id.clone()]));
+                }
+                cancelled.push(runtara_core::persistence::CancelledInstance {
+                    instance_id: id,
+                    tenant_id,
+                });
             }
-            cancelled.push(runtara_core::persistence::CancelledInstance {
-                instance_id,
-                tenant_id,
-            });
+        }
+        for (effects, ids) in &groups {
+            crate::lifecycle::apply_transition(&mut tx, ids, *effects).await?;
+        }
+        tx.commit().await.db()?;
+        for (effects, ids) in groups {
+            if effects.report_completion
+                && let Some(sink) = &self.metrics_sink
+            {
+                for id in ids {
+                    report_completion(sink.as_ref(), &self.pool, &id).await;
+                }
+            }
         }
         Ok(cancelled)
     }

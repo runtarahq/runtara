@@ -25,6 +25,7 @@ pub mod encoding;
 
 mod backend;
 mod dialect;
+mod lifecycle;
 mod ops_common;
 mod vocabulary;
 
