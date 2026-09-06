@@ -22,6 +22,7 @@ pub mod dispatcher;
 pub mod engine;
 pub(crate) mod host_io;
 pub mod host_state;
+pub mod isolated_tasks;
 pub mod lifecycle;
 pub mod precompile;
 pub mod registry;
