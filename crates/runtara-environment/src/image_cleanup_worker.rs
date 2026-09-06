@@ -29,6 +29,7 @@ use tokio::sync::Notify;
 use tracing::{debug, error, info, warn};
 
 use crate::error::Result;
+use crate::image_registry::ImageRegistry;
 
 /// Configuration for the image cleanup worker.
 #[derive(Debug, Clone)]
@@ -303,14 +304,13 @@ impl ImageCleanupWorker {
             return Ok(0);
         }
 
+        // Deleting an image row is ImageRegistry's operation; this worker
+        // decides *which* images are stale, which is its own concern.
+        let images = ImageRegistry::new(self.pool.clone());
         let mut cleaned = 0u64;
         for (image_id, tenant_id, name) in &stale_images {
             // Delete from DB (CASCADE handles instance_images)
-            if let Err(e) = sqlx::query("DELETE FROM images WHERE image_id = $1")
-                .bind(image_id)
-                .execute(&self.pool)
-                .await
-            {
+            if let Err(e) = images.delete(image_id).await {
                 warn!(
                     image_id = %image_id,
                     error = %e,
