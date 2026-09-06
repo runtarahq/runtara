@@ -1112,6 +1112,44 @@ impl DirectJsonManifest {
         })
     }
 
+    /// Separate timer and completion records for this exact loop invocation.
+    pub fn loop_deadline_key(
+        &self,
+        step_id: &str,
+        source: &[u8],
+        complete: bool,
+    ) -> Result<String, String> {
+        let source: Value = serde_json::from_slice(source)
+            .map_err(|err| format!("failed to parse loop deadline source: {err}"))?;
+        let step = self.step(step_id, &source)?;
+        if !matches!(step.step_type.as_str(), "While" | "Split") {
+            return Err(format!("direct step '{step_id}' is not a loop"));
+        }
+        let kind = if complete {
+            "loop-complete"
+        } else {
+            "loop-deadline"
+        };
+        Ok(durable_key_v2(
+            &source,
+            kind,
+            serde_json::json!([step.step_type, step.graph_scope, step_id]),
+        )
+        .unwrap_or_else(|| {
+            format!(
+                "runtara:loop:v1:{}",
+                serde_json::json!([
+                    kind,
+                    durable_workflow(&source),
+                    durable_namespace(&source),
+                    identity_variable(&source, "_loop_indices"),
+                    step.step_type,
+                    step_id
+                ])
+            )
+        }))
+    }
+
     /// Per-invocation durable Delay identity. New artifacts use structured v2
     /// keys; legacy artifacts retain bare root IDs and numeric loop suffixes.
     pub fn delay_sleep_key(&self, step_id: &str, source: &[u8]) -> Result<String, String> {
@@ -13474,3 +13512,7 @@ mod audit03_tests;
 #[cfg(test)]
 #[path = "direct_json_audit04_tests.rs"]
 mod audit04_tests;
+
+#[cfg(test)]
+#[path = "direct_json_audit05_tests.rs"]
+mod audit05_tests;

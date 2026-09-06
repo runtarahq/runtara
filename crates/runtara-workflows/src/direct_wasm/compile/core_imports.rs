@@ -78,6 +78,7 @@ pub(super) struct DirectCoreImportIndices {
     stdlib_while_output: Option<u32>,
     stdlib_delay_duration_ms: Option<u32>,
     stdlib_delay: Option<u32>,
+    stdlib_loop_deadline_key: Option<u32>,
     stdlib_delay_sleep_key: Option<u32>,
     stdlib_invoke_error_fields: Option<u32>,
     stdlib_breakpoint_key: Option<u32>,
@@ -364,6 +365,10 @@ impl DirectCoreImportIndices {
                 "stdlib.delay-duration-ms",
             )?,
             stdlib_delay: require_import(self.stdlib_delay, "stdlib.delay")?,
+            stdlib_loop_deadline_key: require_import(
+                self.stdlib_loop_deadline_key,
+                "stdlib.loop-deadline-key",
+            )?,
             stdlib_delay_sleep_key: require_import(
                 self.stdlib_delay_sleep_key,
                 "stdlib.delay-sleep-key",
@@ -701,6 +706,7 @@ pub(super) struct DirectCoreFunctionIndices {
     pub(super) stdlib_while_output: u32,
     pub(super) stdlib_delay_duration_ms: u32,
     pub(super) stdlib_delay: u32,
+    pub(super) stdlib_loop_deadline_key: u32,
     pub(super) stdlib_delay_sleep_key: u32,
     pub(super) stdlib_invoke_error_fields: u32,
     pub(super) stdlib_breakpoint_key: u32,
@@ -1066,6 +1072,8 @@ pub(super) fn import_core_function(
         import_indices.stdlib_delay_duration_ms = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "delay") {
         import_indices.stdlib_delay = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "loop-deadline-key") {
+        import_indices.stdlib_loop_deadline_key = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "delay-sleep-key") {
         import_indices.stdlib_delay_sleep_key = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "invoke-error-fields") {

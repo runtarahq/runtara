@@ -5,21 +5,21 @@ Scope: DSL validation, direct-WASM manifest/planning/lowering, JSON stdlib,
 and durable suspend/resume through the production invoke ABI.
 
 **Update 2026-09-06:** AUDIT-01 is committed as `2b6bf542` and AUDIT-02 as
-`d787556e`, and AUDIT-03 as `a0629d99`. AUDIT-04 is fixed in the audit
-worktree. AUDIT-05 through AUDIT-07 remain open. See the verification record for checks and limitations.
+`d787556e`, AUDIT-03 as `a0629d99`, and AUDIT-04 as `70a21db8`. AUDIT-05 is
+fixed in the audit worktree. AUDIT-06 and AUDIT-07 remain open. See the verification record for checks and limitations.
 
 [Open the interactive pattern guide](wasm-emitter-patterns.html) to compare tested
 controls, recorded failures, and proposed fixes with step-through diagrams and
 exportable example DSL. The guide is a standalone, offline HTML/CSS/JS page;
 its traces illustrate the audit evidence and do not run WASM.
 
-Seven findings are documented below. The accompanying **46 audit tests** now
-include **39 passing tests** and **7 known-defect regressions**. There are also
-**29 passing unit tests**: 8 graph-analysis tests for AUDIT-01, 6 arena tests for
+Seven findings are documented below. The accompanying **59 audit tests** now
+include **54 passing tests** and **5 known-defect regressions**. There are also
+**31 passing unit tests**: 8 graph-analysis tests for AUDIT-01, 6 arena tests for
 AUDIT-02, 7 identity tests and 1 compiler-version test for AUDIT-03, and 6 scoped
-configuration tests and 1 compiler-version test for AUDIT-04. Two remaining
-regressions execute composed WASM; five exercise validation or compilation
-natively. The original AUDIT-01 through AUDIT-04 regressions now run normally;
+configuration tests and 1 compiler-version test for AUDIT-04, plus 2 timer identity
+tests for AUDIT-05. All five remaining regressions exercise validation or compilation
+natively. The original AUDIT-01 through AUDIT-05 regressions now run normally;
 their ignores were removed after the fixes.
 
 The known-defect tests assert the **desired correct behavior** and currently fail.
@@ -56,11 +56,10 @@ RUSTC_WRAPPER= RUNTARA_ONLY_WORKFLOW_COMPONENTS=1 RUNTARA_NO_INSTALL_TOOLS=1 scr
 RUSTC_WRAPPER= cargo test -p runtara-workflows --test wasm_emitter_audit
 RUSTC_WRAPPER= cargo test -p runtara-workflows --features direct-wasm-integration-tests --test direct_wasm_execute wasm_emitter_audit
 
-# Explicit defect reproductions. BOTH commands currently exit nonzero:
+# Explicit remaining defect reproductions; exits nonzero:
 RUSTC_WRAPPER= cargo test -p runtara-workflows --test wasm_emitter_audit -- --ignored --nocapture
-RUSTC_WRAPPER= cargo test -p runtara-workflows --features direct-wasm-integration-tests --test direct_wasm_execute wasm_emitter_audit -- --ignored --nocapture
 
-# One finding, including its controls and known defects:
+# One fixed finding, including controls and enabled regressions:
 RUSTC_WRAPPER= cargo test -p runtara-workflows --features direct-wasm-integration-tests --test direct_wasm_execute wasm_emitter_audit::audit_05 -- --include-ignored --nocapture
 ```
 
@@ -387,30 +386,96 @@ RUSTC_WRAPPER= cargo test -p runtara-workflows --features direct-wasm-integratio
 
 ## AUDIT-05 · P2 — While and Split timeouts restart after durable suspension
 
-A While with timeout 1,000 ms contains a Delay of 60,000 ms. A clock-controlled
-invoke at time 1,000,000 parks until 1,060,000. Resuming at 1,060,001 completes
-successfully instead of failing the While timeout.
+**Fixed on 2026-09-06.** A While or Split with a 1,000 ms budget containing
+a 60,000 ms Delay now parks at the enclosing deadline, then returns
+`WHILE_TIMEOUT` or `SPLIT_TIMEOUT`. Replaying early preserves the same deadline;
+replaying late cannot grant a new budget. The two original regressions are enabled.
 
-The timeout is stored only in a WASM local and recomputed as now+timeout on replay.
-It also does not constrain the returned wake to the enclosing deadline. Split
-uses the same local-deadline pattern and reproduces the same failure in compiled
-WASM. Both loop types complete normally when the delay is only 500 ms.
-The loop iteration-limit exit precedes the next timeout check, so final-body
-overruns also need coverage.
+Before the fix, only a WASM local held `now + timeout`. Recreating the Store reset
+that value, and the child's wake could postpone timeout handling by a full minute.
+The iteration-count exit also preceded the timeout check, allowing final-body
+overruns to complete successfully.
 
-Source: [While deadline lowering](../crates/runtara-workflows/src/direct_wasm/compile/while_loop.rs), [Split deadline lowering](../crates/runtara-workflows/src/direct_wasm/compile/split.rs).
+The compiler now maintains two records per completed timed-loop invocation:
 
-Fix direction: checkpoint the absolute deadline, restore it on replay, propagate
-it into child suspension wakes, and check it before successful completion.
+- `loop-deadline`: the absolute deadline as eight little-endian bytes, created on
+  first entry and restored on replay. A malformed deadline record fails with
+  `LOOP_DEADLINE_STATE` instead of silently restarting the budget.
+- `loop-complete`: a nonempty one-byte successful-exit marker. An empty checkpoint
+  payload is a read-only probe in the runtime, so it cannot be used as this marker.
+  Completed loops may still replay to reconstruct their outputs, but their old
+  deadline no longer expires them after a later step suspends. This preserves
+  existing result-cache behavior, including Split with `durable:false`.
 
-Tests:
+Keys include operation, workflow, child ancestry, loop invocation path, loop type,
+lexical defining graph and local ID. Timers therefore remain separate across
+sibling loops, nested iterations and child calls. The stdlib's additive
+`loop-deadline-key` export builds these keys and resolves interned ancestry.
 
-| Test | Status on audited code |
+Loop frames carry the earliest active enclosing deadline. Delay and retry `At`
+wakes are clamped to this bound; signal waits keep their signal identity and gain
+an earlier deadline when needed, including waits without their own timeout. The
+child's own persisted deadline is unchanged. Normal returns and handled-error
+unwinds restore the enclosing budget before a continuation or recovery handler
+can suspend. Lifecycle pause/cancel remains an `OnResume` suspension, preserving
+its existing semantics; elapsed wall time still counts when explicitly resumed.
+
+Checks run before retry dispatch and at iteration boundaries, including the
+final count-limit exit. Split's failed-attempt cache cannot bypass the deadline
+check during replay. Expiry remains inclusive (`now >= deadline`). Zero or absent
+timeouts continue to mean no timeout, as specified by the existing planner;
+`now + timeout` saturates at `u64::MAX` instead of wrapping.
+
+This is a cooperative wall-clock budget: a synchronous agent or blocking child
+call is not preempted mid-call. Overrun is detected when control returns to the
+loop boundary. While timeout errors retain their existing `onError` handling;
+Split preserves its existing hard timeout failure, bypassing item aggregation,
+retry and its own `onError` route. Changing that Split error-routing policy is
+outside this deadline fix.
+
+**Compatibility:** rebuild the shared stdlib and compiler together and recompile
+future artifacts. The new compiler requires `loop-deadline-key`; existing artifacts
+retain their old behavior. Keep parked instances on their original artifacts.
+There is no checkpoint migration or authored DSL schema change. Timed loops now
+write timer metadata even when result caching is disabled.
+
+Source: [shared timer lowering](../crates/runtara-workflows/src/direct_wasm/compile/loop_deadline.rs),
+[While boundaries](../crates/runtara-workflows/src/direct_wasm/compile/while_loop.rs),
+[Split boundaries/retries](../crates/runtara-workflows/src/direct_wasm/compile/split.rs),
+[wake emission](../crates/runtara-workflows/src/direct_wasm/compile/abi.rs),
+[key construction](../crates/runtara-workflow-stdlib/src/direct_json.rs).
+
+Invoke tests in [`execution.rs`](../crates/runtara-workflows/tests/wasm_emitter_audit/execution.rs)
+(all enabled and passing):
+
+| Test | Contract verified |
 | --- | --- |
-| [`audit_05_while_completes_when_resume_is_within_timeout`](../crates/runtara-workflows/tests/wasm_emitter_audit/execution.rs) | Passing control |
-| [`audit_05_split_completes_when_resume_is_within_timeout`](../crates/runtara-workflows/tests/wasm_emitter_audit/execution.rs) | Passing control |
-| [`audit_05_while_timeout_survives_suspend_resume`](../crates/runtara-workflows/tests/wasm_emitter_audit/execution.rs) | Known defect; ignored by default, fails when selected |
-| [`audit_05_split_timeout_survives_suspend_resume`](../crates/runtara-workflows/tests/wasm_emitter_audit/execution.rs) | Known defect; ignored by default, fails when selected |
+| `audit_05_while_completes_when_resume_is_within_timeout` | Original 500 ms control |
+| `audit_05_split_completes_when_resume_is_within_timeout` | Original Split control |
+| `audit_05_while_timeout_survives_suspend_resume` | Original late-replay regression |
+| `audit_05_split_timeout_survives_suspend_resume` | Original Split regression |
+| `audit_05_wakes_clamp_and_early_replay_keeps_the_original_deadline` | Wake at the loop deadline, unchanged checkpoints on early replay, expiry at equality |
+| `audit_05_completed_loops_do_not_expire_during_later_replay` | A later Delay outlives an already completed loop; includes uncached Split results |
+| `audit_05_final_body_overrun_fails_without_suspending` | Controlled clock advances at body Finish; final iteration fails without a park |
+| `audit_05_signal_wakes_respect_the_enclosing_budget` | Waits with absent, shorter and longer timeouts; response inside the budget completes |
+| `audit_05_nested_mixed_loops_keep_the_earliest_budget` | All four While/Split nesting pairs, with either inner or outer deadline earlier |
+| `audit_05_sibling_loop_budgets_start_at_each_invocation` | Independent start times; expired completed sibling does not affect the next loop |
+| `audit_05_invalid_deadline_checkpoint_fails_instead_of_resetting` | Malformed persisted bytes produce a structured error |
+| `audit_05_zero_and_overflowing_timeouts_have_defined_boundaries` | Zero disables the budget; overflowing absolute deadlines saturate |
+| `audit_05_split_retry_wait_does_not_extend_the_total_budget` | A 5-second retry backoff respects the 1-second whole-loop budget |
+| `audit_05_embedded_child_wake_respects_parent_loop_deadline` | Child Delay wake intersects the parent's While/Split budget |
+| `audit_05_handled_timeout_removes_the_expired_scope_before_recovery` | While onError recovery can park independently and replay to completion |
+| `audit_05_child_timeout_unwind_restores_the_parent_budget` | A timed child fails into parent recovery without leaking its deadline |
+| `audit_05_aggregated_inner_failure_does_not_leak_its_budget` | Split aggregation restores the active budget after an inner-loop error |
+
+[Two stdlib unit tests](../crates/runtara-workflow-stdlib/src/direct_json_audit05_tests.rs)
+check timer/completion separation, lexical and invocation identity, child namespaces,
+Unicode/delimiters, non-loop rejection, replay stability and large interned paths.
+
+```sh
+RUSTC_WRAPPER= cargo test -p runtara-workflow-stdlib --lib audit_05
+RUSTC_WRAPPER= cargo test -p runtara-workflows --features direct-wasm-integration-tests --test direct_wasm_execute wasm_emitter_audit::audit_05
+```
 
 <a id="audit-06"></a>
 
@@ -492,7 +557,7 @@ Source review suggests broader exposure worth covering during fixes:
 
 - AUDIT-03: production rollout with real persisted instances across artifact versions remains an operational integration check; local coverage now includes cached Agent/Split outputs, nested paths, version selection, and exact legacy addresses.
 - AUDIT-04: local coverage now includes repeated IDs with different types, wait actions and response schemas; the existing global child-preload call-site uniqueness gate remains in force.
-- AUDIT-05: enclosing-deadline wake clamping and timeout overrun in the final iteration without suspension.
+- AUDIT-05: wake clamping, final-body overrun and completed replay are now tested. Mid-call preemption and changing Split timeout error-routing policy remain outside this fix.
 - AUDIT-06: release-profile behavior and other arithmetic limits in timeout/backoff lowering.
 
 ### AUDIT-01 verification update · 2026-09-06
@@ -587,7 +652,7 @@ already parked instances. No checkpoint or signal data migration is performed.
 ### AUDIT-04 verification update · 2026-09-06
 
 - Committed AUDIT-03 as `a0629d99`; its pre-commit formatting and workspace
-  Clippy checks passed. AUDIT-04 is left uncommitted for review.
+  Clippy checks passed. AUDIT-04 was subsequently committed as `70a21db8` before starting AUDIT-05.
 - Before the fix, both distinct-ID controls passed and both duplicate-ID native
   regressions failed at the expected second-timeout assertion (100 instead of 200).
   After the fix, all **4 native AUDIT-04 tests pass**, with both ignores removed.
@@ -620,3 +685,38 @@ causing component composition to fail before execution. All final checks above
 use this worktree's own host target directory and staged guest components. Use
 separate Cargo target directories when these worktrees have different WIT inputs.
 No database/server E2E, production artifact migration or deployment was run.
+
+
+### AUDIT-05 verification update · 2026-09-06
+
+- Committed AUDIT-04 as `70a21db8`; its pre-commit formatting and workspace
+  Clippy checks passed. AUDIT-05 is left uncommitted for review.
+- Before the fix, 2 controls passed and the 2 original timeout regressions failed:
+  both resumed successfully after their original budget had expired.
+- Rebuilt **27 agent components and both shared workflow components**, then
+  refreshed the shared components after finalizing timer identity construction.
+- Final AUDIT-05 invoke run: **17 passed, none ignored**. Both original regression
+  ignores are removed. The final two cases verify embedded-child and aggregation
+  error unwinds; the child-recovery fixture explicitly disables Embed retries.
+- Timer identity unit tests: **2 passed**. Full stdlib library suite: **228 passed**,
+  with 1 existing performance benchmark ignored.
+- `cargo test -p runtara-workflows`: **558 library tests and 30 native integration
+  tests passed**; 5 remaining AUDIT-06/07 defects and 1 existing doctest ignored.
+- Component-host suite with `component-integration-tests`: **45 passed**.
+- Full `direct_wasm_execute` run: **218 passed, 0 failed, 0 ignored**. The later
+  final AUDIT-05 run includes the 2 additional unwind tests. Comparing the current
+  target's test listing against both passing logs confirms **all 220 current
+  execution tests are covered** across those runs. No WASM audit regression is
+  still ignored. Existing AI, retry, parallel, replay and memory tests remain green.
+- Final Clippy for stdlib, workflow WIT and workflows, all targets with the
+  direct-WASM integration feature and `-D warnings`: passed. Formatting and
+  `git diff --check` passed.
+- Interactive guide: **47 DOM scenarios passed**, checking supported/historical/
+  fixed views, timeout DSL variants, expected outputs, trace navigation/reset and
+  links to all 17 execution cases. Browser inspection confirmed the updated
+  deadline diagram and implemented-solution explanation.
+
+Checks used Rust 1.97.0, `RUSTC_WRAPPER=`, and this worktree's own host build cache
+and guest components. No database/server E2E, production artifact migration or
+deployment was run. The fix preserves cooperative execution and the existing
+Split timeout error-routing policy described above.

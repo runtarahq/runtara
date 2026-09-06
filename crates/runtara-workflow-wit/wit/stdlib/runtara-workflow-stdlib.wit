@@ -235,6 +235,9 @@ interface json {
     // bare step id at top level, `{step-id}::{indices}` inside Split/While
     // iterations (folding `variables._loop_indices` like breakpoint-key) —
     // without the fold, per-item durable delays collide on ONE key.
+    /// Timer/completion checkpoint identity for one loop invocation.
+    loop-deadline-key: func(step-id: string, source: list<u8>, complete: bool) -> result<list<u8>, string>;
+
     delay-sleep-key: func(
         step-id: string,
         source: list<u8>,

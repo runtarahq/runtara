@@ -7311,6 +7311,7 @@ fn spawn_retry_http_proxy(
 struct CheckpointingRuntimeHost {
     input: Vec<u8>,
     custom_events: Mutex<Vec<(String, Vec<u8>)>>,
+    advance_clock_on_step_end: Mutex<Option<(String, u64)>>,
     checkpoints: Mutex<HashMap<String, Vec<u8>>>,
     completed: Mutex<Option<Vec<u8>>>,
     sleeps: Mutex<Vec<String>>,
@@ -7350,6 +7351,7 @@ impl CheckpointingRuntimeHost {
         Self {
             input: input.to_vec(),
             custom_events: Mutex::new(Vec::new()),
+            advance_clock_on_step_end: Mutex::new(None),
             checkpoints: Mutex::new(HashMap::new()),
             completed: Mutex::new(None),
             sleeps: Mutex::new(Vec::new()),
@@ -7439,6 +7441,13 @@ impl runtara_component_host::runtime_host::RuntimeHost for CheckpointingRuntimeH
         Ok(())
     }
     async fn custom_event(&self, kind: String, payload: Vec<u8>) -> Result<(), String> {
+        if kind == "step_debug_end"
+            && let Some((step, elapsed)) = self.advance_clock_on_step_end.lock().unwrap().as_ref()
+            && serde_json::from_slice::<Value>(&payload).unwrap()["step_id"] == *step
+            && let Some(clock) = self.pinned_clock_ms.lock().unwrap().as_mut()
+        {
+            *clock = clock.saturating_add(*elapsed);
+        }
         self.custom_events.lock().unwrap().push((kind, payload));
         Ok(())
     }

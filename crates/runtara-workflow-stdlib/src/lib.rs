@@ -490,6 +490,22 @@ mod component {
             })
         }
 
+        fn loop_deadline_key(
+            step_id: String,
+            source: Vec<u8>,
+            complete: bool,
+        ) -> Result<Vec<u8>, String> {
+            MANIFEST.with(|slot| {
+                let slot = slot.borrow();
+                let manifest = slot
+                    .as_ref()
+                    .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
+                manifest
+                    .loop_deadline_key(&step_id, &source, complete)
+                    .map(String::into_bytes)
+            })
+        }
+
         fn delay_sleep_key(step_id: String, source: Vec<u8>) -> Result<Vec<u8>, String> {
             MANIFEST.with(|slot| {
                 let slot = slot.borrow();

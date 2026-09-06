@@ -39,6 +39,9 @@ pub(super) const DIRECT_AGENT_RATE_LIMIT_WAIT: &[u8] = b"rate_limit_wait";
 /// behavior, so this payload is owned by the direct emitter rather than mirrored
 /// from generated code.
 pub(super) const DIRECT_WHILE_TIMEOUT_ERROR: &[u8] = br#"{"code":"WHILE_TIMEOUT","message":"While step exceeded its configured timeout","category":"timeout","severity":"error"}"#;
+
+/// Malformed persisted timer state must fail instead of restarting the budget.
+pub(super) const DIRECT_LOOP_DEADLINE_STATE_ERROR: &[u8] = br#"{"code":"LOOP_DEADLINE_STATE","message":"Loop deadline checkpoint must contain exactly eight bytes","category":"permanent","severity":"error"}"#;
 /// Structured failure payload emitted when a `Split` step exceeds its configured
 /// timeout. As with `While`, generated Rust parses `SplitConfig.timeout` without
 /// enforcing it; direct mode owns this payload as the first correct
@@ -156,6 +159,7 @@ pub(super) struct DirectCoreStaticData {
     pub(super) agent_empty_parameters: DirectDataSegment,
     pub(super) output_null: DirectDataSegment,
     pub(super) agent_rate_limit_wait: DirectDataSegment,
+    pub(super) loop_deadline_state_error: DirectDataSegment,
     pub(super) while_timeout_error: DirectDataSegment,
     pub(super) split_timeout_error: DirectDataSegment,
     step_ids: BTreeMap<String, DirectDataSegment>,
@@ -275,6 +279,12 @@ impl DirectCoreStaticData {
             16,
         );
 
+        let loop_deadline_state_error =
+            DirectDataSegment::new(offset, DIRECT_LOOP_DEADLINE_STATE_ERROR);
+        offset = align_i32(
+            checked_offset_add(offset, DIRECT_LOOP_DEADLINE_STATE_ERROR.len())?,
+            16,
+        );
         let while_timeout_error = DirectDataSegment::new(offset, DIRECT_WHILE_TIMEOUT_ERROR);
         offset = align_i32(
             checked_offset_add(offset, DIRECT_WHILE_TIMEOUT_ERROR.len())?,
@@ -334,6 +344,7 @@ impl DirectCoreStaticData {
             agent_empty_parameters,
             output_null,
             agent_rate_limit_wait,
+            loop_deadline_state_error,
             while_timeout_error,
             split_timeout_error,
             step_ids,
@@ -399,6 +410,7 @@ impl DirectCoreStaticData {
             &self.agent_empty_parameters,
             &self.output_null,
             &self.agent_rate_limit_wait,
+            &self.loop_deadline_state_error,
             &self.while_timeout_error,
             &self.split_timeout_error,
         ];

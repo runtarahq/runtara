@@ -41,6 +41,7 @@ mod embed_retry;
 mod embed_workflow;
 mod error_step;
 mod log;
+mod loop_deadline;
 mod mapping;
 mod retry_park;
 mod split;
@@ -1628,3 +1629,17 @@ fn sha256_hex(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests;
+
+// AUDIT-05 timer scratch and nested deadline frames (append-only local layout).
+const DIRECT_LOOP_KEY_PTR_LOCAL: u32 = 130;
+const DIRECT_LOOP_KEY_LEN_LOCAL: u32 = 131;
+const DIRECT_LOOP_STATE_PTR_LOCAL: u32 = 132;
+const DIRECT_LOOP_STATE_LEN_LOCAL: u32 = 133;
+const DIRECT_LOOP_COMPLETED_LOCAL: u32 = 134;
+const DIRECT_ACTIVE_DEADLINE_FLAG_LOCAL: u32 = 135;
+const DIRECT_ACTIVE_DEADLINE_MS_LOCAL: u32 = 136;
+const DIRECT_LOOP_NOW_MS_LOCAL: u32 = 137;
+const DIRECT_FAILURE_LOOP_COMPLETED_LOCAL: u32 = 138;
+const DIRECT_FAILURE_ACTIVE_DEADLINE_FLAG_LOCAL: u32 = 139;
+const DIRECT_FAILURE_ACTIVE_DEADLINE_MS_LOCAL: u32 = 140;
+const DIRECT_FAILURE_SPLIT_DEADLINE_MS_LOCAL: u32 = 141;

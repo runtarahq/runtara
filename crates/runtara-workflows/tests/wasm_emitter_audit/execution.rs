@@ -1074,13 +1074,371 @@ fn assert_timeout_failure(exit: InvokeExit, expected_code: &str) {
 }
 
 #[test]
-#[ignore = "AUDIT-05: While deadline is recomputed after suspension"]
 fn audit_05_while_timeout_survives_suspend_resume() {
     assert_timeout_failure(resume_after_delay(60_000, false), "WHILE_TIMEOUT");
 }
 
 #[test]
-#[ignore = "AUDIT-05: Split deadline is recomputed after suspension"]
 fn audit_05_split_timeout_survives_suspend_resume() {
     assert_timeout_failure(resume_after_delay(60_000, true), "SPLIT_TIMEOUT");
+}
+
+fn audit_deadline_host(now: u64) -> Arc<CheckpointingRuntimeHost> {
+    let host = Arc::new(CheckpointingRuntimeHost::new(b"{}"));
+    *host.pinned_clock_ms.lock().unwrap() = Some(now);
+    host
+}
+fn assert_at(exit: InvokeExit, deadline: u64) {
+    let InvokeExit::Suspended(wakes) = exit else {
+        panic!("expected timed suspension, got {exit:?}")
+    };
+    assert!(
+        matches!(wakes.as_slice(), [WorkflowWake::At(at)] if *at == deadline),
+        "{wakes:?}"
+    );
+}
+
+#[test]
+fn audit_05_wakes_clamp_and_early_replay_keeps_the_original_deadline() {
+    for split in [false, true] {
+        let (_temp, artifact) = compile("audit-clamp", timeout_graph(60_000, split));
+        let host = audit_deadline_host(1_000_000);
+        let invoke = || run_invoke_once(&artifact.wasm_path, host.clone(), b"{}".to_vec());
+        assert_at(invoke(), 1_001_000);
+        let recorded = host.checkpoints.lock().unwrap().clone();
+        *host.pinned_clock_ms.lock().unwrap() = Some(1_000_999);
+        assert_at(invoke(), 1_001_000);
+        assert_eq!(*host.checkpoints.lock().unwrap(), recorded);
+        *host.pinned_clock_ms.lock().unwrap() = Some(1_001_000);
+        assert_timeout_failure(
+            invoke(),
+            if split {
+                "SPLIT_TIMEOUT"
+            } else {
+                "WHILE_TIMEOUT"
+            },
+        );
+    }
+}
+
+#[test]
+fn audit_05_completed_loops_do_not_expire_during_later_replay() {
+    for split in [false, true] {
+        for durable in [false, true] {
+            let mut graph = timeout_graph(0, split);
+            graph["steps"]["loop"]["subgraph"] =
+                json!({"entryPoint":"body_finish","steps":{"body_finish":finish("body_finish")}});
+            if split {
+                graph["steps"]["loop"]["durable"] = json!(durable);
+            }
+            graph["steps"]["later"] =
+                json!({"id":"later","stepType":"Delay","durationMs":immediate(json!(60_000))});
+            graph["executionPlan"] = json!([{"fromStep":"loop","toStep":"later"},{"fromStep":"later","toStep":"finish"}]);
+            let (_temp, artifact) = compile("audit-completed", graph);
+            let host = audit_deadline_host(1_000_000);
+            let invoke = || run_invoke_once(&artifact.wasm_path, host.clone(), b"{}".to_vec());
+            assert_at(invoke(), 1_060_000);
+            assert!(host.checkpoints.lock().unwrap().iter().any(|(key, value)| {
+                key.starts_with("runtara:v2:[\"loop-complete\"") && value == &[1]
+            }));
+            *host.pinned_clock_ms.lock().unwrap() = Some(1_060_001);
+            assert_eq!(completed(invoke()), json!({"ok":true}));
+        }
+    }
+}
+
+#[test]
+fn audit_05_final_body_overrun_fails_without_suspending() {
+    for split in [false, true] {
+        let mut graph = timeout_graph(0, split);
+        graph["steps"]["loop"]["subgraph"] =
+            json!({"entryPoint":"body_finish","steps":{"body_finish":finish("body_finish")}});
+        let (_temp, artifact) =
+            compile_configured_tracking("audit-final-overrun", graph, vec![], None, true);
+        let host = audit_deadline_host(1_000_000);
+        *host.advance_clock_on_step_end.lock().unwrap() = Some(("body_finish".into(), 1_001));
+        assert_timeout_failure(
+            run_invoke_once(&artifact.wasm_path, host, b"{}".to_vec()),
+            if split {
+                "SPLIT_TIMEOUT"
+            } else {
+                "WHILE_TIMEOUT"
+            },
+        );
+    }
+}
+
+#[test]
+fn audit_05_signal_wakes_respect_the_enclosing_budget() {
+    for split in [false, true] {
+        for wait_timeout in [None, Some(500), Some(60_000)] {
+            let mut graph = timeout_graph(0, split);
+            let mut wait = json!({"id":"wait","stepType":"WaitForSignal"});
+            if let Some(ms) = wait_timeout {
+                wait["timeoutMs"] = immediate(json!(ms));
+            }
+            graph["steps"]["loop"]["subgraph"] = json!({"entryPoint":"wait","steps":{"wait":wait,"body_finish":finish("body_finish")},"executionPlan":[{"fromStep":"wait","toStep":"body_finish"}]});
+            let (_temp, artifact) = compile("audit-wait-budget", graph);
+            let host = audit_deadline_host(1_000_000);
+            let invoke = || run_invoke_once(&artifact.wasm_path, host.clone(), b"{}".to_vec());
+            let first = invoke();
+            let InvokeExit::Suspended(ref wakes) = first else {
+                panic!("{first:?}")
+            };
+            let WorkflowWake::OnSignal(ref wait) = wakes[0] else {
+                panic!("{wakes:?}")
+            };
+            assert_eq!(
+                wait.deadline_ms,
+                Some(1_000_000 + wait_timeout.unwrap_or(1_000).min(1_000))
+            );
+            let key = signal_key(first);
+            *host.pinned_clock_ms.lock().unwrap() = Some(1_000_250);
+            host.deliver_signal(&key, b"{}");
+            assert_eq!(completed(invoke()), json!({"ok":true}));
+        }
+    }
+}
+
+#[test]
+fn audit_05_nested_mixed_loops_keep_the_earliest_budget() {
+    for (outer, inner) in [
+        ("While", "While"),
+        ("While", "Split"),
+        ("Split", "While"),
+        ("Split", "Split"),
+    ] {
+        for outer_is_earlier in [false, true] {
+            let leaf = timeout_graph(60_000, false)["steps"]["loop"]["subgraph"].clone();
+            let mut inner_step = audit_loop("inner", inner, 1, leaf);
+            inner_step["config"]["timeout"] = json!(if outer_is_earlier { 2_000 } else { 500 });
+            let mut outer_step = audit_loop(
+                "outer",
+                outer,
+                1,
+                json!({"entryPoint":"inner","steps":{"inner":inner_step,"done":finish("done")},"executionPlan":[{"fromStep":"inner","toStep":"done"}]}),
+            );
+            outer_step["config"]["timeout"] = json!(1_000);
+            let graph = json!({"entryPoint":"outer","steps":{"outer":outer_step,"finish":finish("finish")},"executionPlan":[{"fromStep":"outer","toStep":"finish"}]});
+            let (_temp, artifact) = compile("audit-nested-deadlines", graph);
+            let host = audit_deadline_host(1_000_000);
+            let invoke = || run_invoke_once(&artifact.wasm_path, host.clone(), b"{}".to_vec());
+            let deadline = if outer_is_earlier {
+                1_001_000
+            } else {
+                1_000_500
+            };
+            assert_at(invoke(), deadline);
+            *host.pinned_clock_ms.lock().unwrap() = Some(deadline);
+            let owner = if outer_is_earlier { outer } else { inner };
+            assert_timeout_failure(
+                invoke(),
+                if owner == "Split" {
+                    "SPLIT_TIMEOUT"
+                } else {
+                    "WHILE_TIMEOUT"
+                },
+            );
+        }
+    }
+}
+
+#[test]
+fn audit_05_sibling_loop_budgets_start_at_each_invocation() {
+    for kind in ["While", "Split"] {
+        let leaf = timeout_graph(500, false)["steps"]["loop"]["subgraph"].clone();
+        let timed = |id: &str| {
+            let mut step = audit_loop(id, kind, 1, leaf.clone());
+            step["config"]["timeout"] = json!(1_000);
+            step
+        };
+        let graph = json!({"entryPoint":"a","steps":{"a":timed("a"),"b":timed("b"),"finish":finish("finish")},"executionPlan":[{"fromStep":"a","toStep":"b"},{"fromStep":"b","toStep":"finish"}]});
+        let (_temp, artifact) = compile("audit-sibling-budgets", graph);
+        let host = audit_deadline_host(1_000_000);
+        let invoke = || run_invoke_once(&artifact.wasm_path, host.clone(), b"{}".to_vec());
+        assert_at(invoke(), 1_000_500);
+        *host.pinned_clock_ms.lock().unwrap() = Some(1_000_600);
+        assert_at(invoke(), 1_001_100);
+        *host.pinned_clock_ms.lock().unwrap() = Some(1_001_200);
+        assert_eq!(completed(invoke()), json!({"ok":true}));
+    }
+}
+
+#[test]
+fn audit_05_invalid_deadline_checkpoint_fails_instead_of_resetting() {
+    for split in [false, true] {
+        let (_temp, artifact) = compile("audit-invalid-deadline", timeout_graph(60_000, split));
+        let host = audit_deadline_host(1_000_000);
+        let invoke = || run_invoke_once(&artifact.wasm_path, host.clone(), b"{}".to_vec());
+        assert_at(invoke(), 1_001_000);
+        for (key, value) in host.checkpoints.lock().unwrap().iter_mut() {
+            if key.starts_with("runtara:v2:[\"loop-deadline\"") {
+                *value = vec![1, 2, 3];
+            }
+        }
+        assert_timeout_failure(invoke(), "LOOP_DEADLINE_STATE");
+    }
+}
+
+#[test]
+fn audit_05_zero_and_overflowing_timeouts_have_defined_boundaries() {
+    for split in [false, true] {
+        let mut graph = timeout_graph(60_000, split);
+        graph["steps"]["loop"]["config"]["timeout"] = json!(0);
+        let (_temp, artifact) = compile("audit-zero-deadline", graph.clone());
+        let host = audit_deadline_host(0);
+        assert_at(
+            run_invoke_once(&artifact.wasm_path, host.clone(), b"{}".to_vec()),
+            60_000,
+        );
+        assert!(
+            !host
+                .checkpoints
+                .lock()
+                .unwrap()
+                .keys()
+                .any(|key| key.contains("loop-deadline"))
+        );
+        graph["steps"]["loop"]["config"]["timeout"] = json!(u64::MAX);
+        let (_temp, artifact) = compile("audit-overflow-deadline", graph);
+        let host = audit_deadline_host(1_000_000);
+        assert_at(
+            run_invoke_once(&artifact.wasm_path, host.clone(), b"{}".to_vec()),
+            1_060_000,
+        );
+        assert!(
+            host.checkpoints
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(k, v)| k.starts_with("runtara:v2:[\"loop-deadline\"")
+                    && v.as_slice() == u64::MAX.to_le_bytes())
+        );
+    }
+}
+
+#[test]
+fn audit_05_split_retry_wait_does_not_extend_the_total_budget() {
+    let mut graph: Value = serde_json::from_str(&super::lifecycle_retry_split_graph()).unwrap();
+    graph["steps"]["split"]["config"]["timeout"] = json!(1_000);
+    let (_temp, artifact) = compile("audit-retry-budget", graph);
+    let host = audit_deadline_host(1_000_000);
+    let invoke = || run_invoke_once(&artifact.wasm_path, host.clone(), b"{}".to_vec());
+    assert_at(invoke(), 1_001_000);
+    *host.pinned_clock_ms.lock().unwrap() = Some(1_001_000);
+    assert_timeout_failure(invoke(), "SPLIT_TIMEOUT");
+}
+
+#[test]
+fn audit_05_embedded_child_wake_respects_parent_loop_deadline() {
+    for split in [false, true] {
+        let mut graph = timeout_graph(0, split);
+        graph["steps"]["loop"]["subgraph"] = json!({"entryPoint":"call","steps":{
+            "call":{"id":"call","stepType":"EmbedWorkflow","childWorkflowId":"child","childVersion":"latest"},
+            "body_finish":finish("body_finish")
+        },"executionPlan":[{"fromStep":"call","toStep":"body_finish"}]});
+        let child = timeout_graph(60_000, false)["steps"]["loop"]["subgraph"].clone();
+        let (_temp, artifact) = compile_with_children(
+            "audit-child-budget",
+            graph,
+            vec![ChildWorkflowInput {
+                step_id: "call".into(),
+                workflow_id: "child".into(),
+                version_requested: "latest".into(),
+                version_resolved: 1,
+                execution_graph: serde_json::from_value(child).unwrap(),
+            }],
+        );
+        let host = audit_deadline_host(1_000_000);
+        let invoke = || run_invoke_once(&artifact.wasm_path, host.clone(), b"{}".to_vec());
+        assert_at(invoke(), 1_001_000);
+        *host.pinned_clock_ms.lock().unwrap() = Some(1_001_000);
+        assert_timeout_failure(
+            invoke(),
+            if split {
+                "SPLIT_TIMEOUT"
+            } else {
+                "WHILE_TIMEOUT"
+            },
+        );
+    }
+}
+
+#[test]
+fn audit_05_handled_timeout_removes_the_expired_scope_before_recovery() {
+    let mut graph = timeout_graph(60_000, false);
+    graph["executionPlan"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"fromStep":"loop","toStep":"recover","label":"onError"}));
+    graph["steps"]["recover"] =
+        json!({"id":"recover","stepType":"Delay","durationMs":immediate(json!(60_000))});
+    graph["executionPlan"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"fromStep":"recover","toStep":"finish"}));
+    let (_temp, artifact) = compile("audit-timeout-recovery", graph);
+    let host = audit_deadline_host(1_000_000);
+    let invoke = || run_invoke_once(&artifact.wasm_path, host.clone(), b"{}".to_vec());
+    assert_at(invoke(), 1_001_000);
+    *host.pinned_clock_ms.lock().unwrap() = Some(1_001_000);
+    assert_at(invoke(), 1_061_000);
+    *host.pinned_clock_ms.lock().unwrap() = Some(1_061_001);
+    assert_eq!(completed(invoke()), json!({"ok":true}));
+}
+
+#[test]
+fn audit_05_child_timeout_unwind_restores_the_parent_budget() {
+    let graph = json!({"entryPoint":"call","steps":{
+        "call":{"id":"call","stepType":"EmbedWorkflow","childWorkflowId":"child","childVersion":"latest","maxRetries":0},
+        "recover":{"id":"recover","stepType":"Delay","durationMs":immediate(json!(60_000))},
+        "finish":finish("finish")
+    },"executionPlan":[{"fromStep":"call","toStep":"finish"},{"fromStep":"call","toStep":"recover","label":"onError"},{"fromStep":"recover","toStep":"finish"}]});
+    let (_temp, artifact) = compile_with_children(
+        "audit-child-timeout-unwind",
+        graph,
+        vec![ChildWorkflowInput {
+            step_id: "call".into(),
+            workflow_id: "child".into(),
+            version_requested: "latest".into(),
+            version_resolved: 1,
+            execution_graph: serde_json::from_value(timeout_graph(60_000, false)).unwrap(),
+        }],
+    );
+    let host = audit_deadline_host(1_000_000);
+    let invoke = || run_invoke_once(&artifact.wasm_path, host.clone(), b"{}".to_vec());
+    assert_at(invoke(), 1_001_000);
+    *host.pinned_clock_ms.lock().unwrap() = Some(1_001_000);
+    assert_at(invoke(), 1_061_000);
+    *host.pinned_clock_ms.lock().unwrap() = Some(1_061_001);
+    assert_eq!(completed(invoke()), json!({"ok":true}));
+}
+
+#[test]
+fn audit_05_aggregated_inner_failure_does_not_leak_its_budget() {
+    let mut inner = audit_loop(
+        "inner",
+        "While",
+        1,
+        json!({"entryPoint":"error","steps":{
+            "error":{"id":"error","stepType":"Error","code":"ITEM_ERROR","message":"expected"}
+        }}),
+    );
+    inner["config"]["timeout"] = json!(1_000);
+    let mut outer = audit_loop(
+        "outer",
+        "Split",
+        2,
+        json!({"entryPoint":"inner","steps":{"inner":inner,"done":finish("done")},"executionPlan":[{"fromStep":"inner","toStep":"done"}]}),
+    );
+    outer["config"]["dontStopOnFailed"] = json!(true);
+    let graph = json!({"entryPoint":"outer","steps":{
+        "outer":outer,"later":{"id":"later","stepType":"Delay","durationMs":immediate(json!(60_000))},"finish":finish("finish")
+    },"executionPlan":[{"fromStep":"outer","toStep":"later"},{"fromStep":"later","toStep":"finish"}]});
+    let (_temp, artifact) = compile("audit-aggregate-budget", graph);
+    let host = audit_deadline_host(1_000_000);
+    assert_at(
+        run_invoke_once(&artifact.wasm_path, host, b"{}".to_vec()),
+        1_060_000,
+    );
 }

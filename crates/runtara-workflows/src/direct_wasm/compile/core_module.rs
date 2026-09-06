@@ -644,6 +644,11 @@ const CANONICAL_LOCAL_GROUPS: &[(u32, ValType)] = &[
     (1, ValType::I64),
     // 129: run-local value arena boundary, saved/restored with each loop frame.
     (1, ValType::I64),
+    // 130-141: loop deadline scratch, active bound, and failure frame.
+    (6, ValType::I32),
+    (2, ValType::I64),
+    (2, ValType::I32),
+    (2, ValType::I64),
 ];
 
 /// Drop `n` leading local slots from `groups`, splitting (never merging) the
