@@ -43,7 +43,8 @@ pub(super) struct DirectCoreImportIndices {
     runtime_durable_sleep_checkpoint: Option<u32>,
     connection_resolver_describe: Option<u32>,
     stdlib_init_manifest: Option<u32>,
-    stdlib_value_store_retain: Option<u32>,
+    stdlib_value_store_retain_scoped: Option<u32>,
+    stdlib_value_store_scope: Option<u32>,
     stdlib_build_source: Option<u32>,
     stdlib_apply_mapping: Option<u32>,
     stdlib_eval_condition: Option<u32>,
@@ -77,6 +78,7 @@ pub(super) struct DirectCoreImportIndices {
     stdlib_while_output: Option<u32>,
     stdlib_delay_duration_ms: Option<u32>,
     stdlib_delay: Option<u32>,
+    stdlib_loop_deadline_key: Option<u32>,
     stdlib_delay_sleep_key: Option<u32>,
     stdlib_invoke_error_fields: Option<u32>,
     stdlib_breakpoint_key: Option<u32>,
@@ -265,9 +267,13 @@ impl DirectCoreImportIndices {
                 self.stdlib_init_manifest,
                 "stdlib.init-manifest",
             )?,
-            stdlib_value_store_retain: require_import(
-                self.stdlib_value_store_retain,
-                "stdlib.value-store-retain",
+            stdlib_value_store_scope: require_import(
+                self.stdlib_value_store_scope,
+                "stdlib.value-store-scope",
+            )?,
+            stdlib_value_store_retain_scoped: require_import(
+                self.stdlib_value_store_retain_scoped,
+                "stdlib.value-store-retain-scoped",
             )?,
             stdlib_build_source: require_import(self.stdlib_build_source, "stdlib.build-source")?,
             stdlib_apply_mapping: require_import(
@@ -359,6 +365,10 @@ impl DirectCoreImportIndices {
                 "stdlib.delay-duration-ms",
             )?,
             stdlib_delay: require_import(self.stdlib_delay, "stdlib.delay")?,
+            stdlib_loop_deadline_key: require_import(
+                self.stdlib_loop_deadline_key,
+                "stdlib.loop-deadline-key",
+            )?,
             stdlib_delay_sleep_key: require_import(
                 self.stdlib_delay_sleep_key,
                 "stdlib.delay-sleep-key",
@@ -397,7 +407,7 @@ impl DirectCoreImportIndices {
             )?,
             stdlib_wait_poll_interval_ms: require_import(
                 self.stdlib_wait_poll_interval_ms,
-                "stdlib.wait-poll-interval-ms",
+                "stdlib.wait-poll-interval-ms-scoped",
             )?,
             stdlib_wait_event: require_import(self.stdlib_wait_event, "stdlib.wait-event")?,
             stdlib_wait_debug_start: require_import(
@@ -431,7 +441,7 @@ impl DirectCoreImportIndices {
             )?,
             stdlib_embed_workflow_error: require_import(
                 self.stdlib_embed_workflow_error,
-                "stdlib.embed-workflow-error",
+                "stdlib.embed-workflow-error-scoped",
             )?,
             stdlib_retry_sleep_key: require_import(
                 self.stdlib_retry_sleep_key,
@@ -661,7 +671,8 @@ pub(super) struct DirectCoreFunctionIndices {
     pub(super) runtime_blocking_sleep: u32,
     pub(super) runtime_durable_sleep_checkpoint: u32,
     pub(super) stdlib_init_manifest: u32,
-    pub(super) stdlib_value_store_retain: u32,
+    pub(super) stdlib_value_store_retain_scoped: u32,
+    pub(super) stdlib_value_store_scope: u32,
     pub(super) stdlib_build_source: u32,
     pub(super) stdlib_apply_mapping: u32,
     pub(super) stdlib_eval_condition: u32,
@@ -695,6 +706,7 @@ pub(super) struct DirectCoreFunctionIndices {
     pub(super) stdlib_while_output: u32,
     pub(super) stdlib_delay_duration_ms: u32,
     pub(super) stdlib_delay: u32,
+    pub(super) stdlib_loop_deadline_key: u32,
     pub(super) stdlib_delay_sleep_key: u32,
     pub(super) stdlib_invoke_error_fields: u32,
     pub(super) stdlib_breakpoint_key: u32,
@@ -990,8 +1002,10 @@ pub(super) fn import_core_function(
         import_indices.runtime_durable_sleep_checkpoint = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "init-manifest") {
         import_indices.stdlib_init_manifest = Some(function_index);
-    } else if is_stdlib_import(resolve, interface, function, "value-store-retain") {
-        import_indices.stdlib_value_store_retain = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "value-store-scope") {
+        import_indices.stdlib_value_store_scope = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "value-store-retain-scoped") {
+        import_indices.stdlib_value_store_retain_scoped = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "build-source") {
         import_indices.stdlib_build_source = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "apply-mapping") {
@@ -1058,6 +1072,8 @@ pub(super) fn import_core_function(
         import_indices.stdlib_delay_duration_ms = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "delay") {
         import_indices.stdlib_delay = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "loop-deadline-key") {
+        import_indices.stdlib_loop_deadline_key = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "delay-sleep-key") {
         import_indices.stdlib_delay_sleep_key = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "invoke-error-fields") {
@@ -1076,7 +1092,7 @@ pub(super) fn import_core_function(
         import_indices.stdlib_wait_on_wait_variables = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "wait-on-wait-error") {
         import_indices.stdlib_wait_on_wait_error = Some(function_index);
-    } else if is_stdlib_import(resolve, interface, function, "wait-poll-interval-ms") {
+    } else if is_stdlib_import(resolve, interface, function, "wait-poll-interval-ms-scoped") {
         import_indices.stdlib_wait_poll_interval_ms = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "wait-event") {
         import_indices.stdlib_wait_event = Some(function_index);
@@ -1101,7 +1117,7 @@ pub(super) fn import_core_function(
         "embed-workflow-output-from-result",
     ) {
         import_indices.stdlib_embed_workflow_output_from_result = Some(function_index);
-    } else if is_stdlib_import(resolve, interface, function, "embed-workflow-error") {
+    } else if is_stdlib_import(resolve, interface, function, "embed-workflow-error-scoped") {
         import_indices.stdlib_embed_workflow_error = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "retry-sleep-key") {
         import_indices.stdlib_retry_sleep_key = Some(function_index);

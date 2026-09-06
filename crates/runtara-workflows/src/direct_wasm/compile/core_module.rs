@@ -101,7 +101,8 @@ impl DirectCoreConfig {
         track_events: bool,
         workflow_id: Option<&str>,
     ) -> Result<Self, DirectCompileError> {
-        let variables_json = direct_core_variables_json(&manifest.graph.variables, workflow_id)?;
+        let variables_json =
+            direct_core_variables_json(&manifest.graph.variables, workflow_id, manifest.version)?;
         Ok(Self {
             abi: crate::direct_wasm::component::WorkflowAbi::default(),
             omit_runtime: false,
@@ -610,7 +611,7 @@ fn export_initialize(
 /// the ~100 hand-assigned `DIRECT_*_LOCAL` indices are ABSOLUTE, dropping params
 /// off the front keeps each surviving declared local at its original absolute
 /// index with its original type — the invariant the lowerers depend on.
-const CANONICAL_LOCAL_GROUPS: &[(u32, ValType)] = &[
+pub(super) const CANONICAL_LOCAL_GROUPS: &[(u32, ValType)] = &[
     (16, ValType::I32),
     (2, ValType::I64),
     (10, ValType::I32),
@@ -641,6 +642,13 @@ const CANONICAL_LOCAL_GROUPS: &[(u32, ValType)] = &[
     // DIRECT_* local index across all ABI parameter foldings.
     (2, ValType::I32),
     (1, ValType::I64),
+    // 129: run-local value arena boundary, saved/restored with each loop frame.
+    (1, ValType::I64),
+    // 130-141: loop deadline scratch, active bound, and failure frame.
+    (6, ValType::I32),
+    (2, ValType::I64),
+    (2, ValType::I32),
+    (2, ValType::I64),
 ];
 
 /// Drop `n` leading local slots from `groups`, splitting (never merging) the

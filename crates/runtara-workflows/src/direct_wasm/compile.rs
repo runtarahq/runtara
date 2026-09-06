@@ -41,6 +41,7 @@ mod embed_retry;
 mod embed_workflow;
 mod error_step;
 mod log;
+mod loop_deadline;
 mod mapping;
 mod retry_park;
 mod split;
@@ -353,6 +354,10 @@ const DIRECT_CONDITION_RESULT_LOCAL: u32 = 107;
 /// Split and While frames so nested loops keep distinct marks; i32 local.
 const DIRECT_SPLIT_HEAP_BASE_LOCAL: u32 = 108;
 const DIRECT_WHILE_HEAP_BASE_LOCAL: u32 = DIRECT_SPLIT_HEAP_BASE_LOCAL;
+
+/// Arena allocation boundary for the active loop, saved with BOTH frame types.
+/// An i64 appended to the canonical locals, independent of the guest heap mark.
+const DIRECT_VALUE_STORE_SCOPE_LOCAL: u32 = 129;
 
 /// Heap watermark for the `AiAgent` chat-turn loop, the analog of
 /// [`DIRECT_SPLIT_HEAP_BASE_LOCAL`] for that loop. Captured once above the
@@ -1624,3 +1629,20 @@ fn sha256_hex(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod retry_bounds_tests;
+
+// AUDIT-05 timer scratch and nested deadline frames (append-only local layout).
+const DIRECT_LOOP_KEY_PTR_LOCAL: u32 = 130;
+const DIRECT_LOOP_KEY_LEN_LOCAL: u32 = 131;
+const DIRECT_LOOP_STATE_PTR_LOCAL: u32 = 132;
+const DIRECT_LOOP_STATE_LEN_LOCAL: u32 = 133;
+const DIRECT_LOOP_COMPLETED_LOCAL: u32 = 134;
+const DIRECT_ACTIVE_DEADLINE_FLAG_LOCAL: u32 = 135;
+const DIRECT_ACTIVE_DEADLINE_MS_LOCAL: u32 = 136;
+const DIRECT_LOOP_NOW_MS_LOCAL: u32 = 137;
+const DIRECT_FAILURE_LOOP_COMPLETED_LOCAL: u32 = 138;
+const DIRECT_FAILURE_ACTIVE_DEADLINE_FLAG_LOCAL: u32 = 139;
+const DIRECT_FAILURE_ACTIVE_DEADLINE_MS_LOCAL: u32 = 140;
+const DIRECT_FAILURE_SPLIT_DEADLINE_MS_LOCAL: u32 = 141;

@@ -69,6 +69,7 @@ fn push_embed_workflow_frame(
     route_ptr_local: u32,
     route_len_local: u32,
 ) {
+    super::loop_deadline::push_frame(body);
     body.instruction(&Instruction::LocalGet(DIRECT_EMBED_PARENT_SOURCE_PTR_LOCAL));
     body.instruction(&Instruction::LocalGet(DIRECT_EMBED_PARENT_SOURCE_LEN_LOCAL));
     body.instruction(&Instruction::LocalGet(DIRECT_EMBED_SAVED_DATA_PTR_LOCAL));
@@ -94,6 +95,7 @@ fn pop_embed_workflow_frame(
     body.instruction(&Instruction::LocalSet(DIRECT_EMBED_SAVED_DATA_PTR_LOCAL));
     body.instruction(&Instruction::LocalSet(DIRECT_EMBED_PARENT_SOURCE_LEN_LOCAL));
     body.instruction(&Instruction::LocalSet(DIRECT_EMBED_PARENT_SOURCE_PTR_LOCAL));
+    super::loop_deadline::pop_frame(body);
 }
 
 fn push_embed_workflow_attempt_frame(
@@ -105,6 +107,7 @@ fn push_embed_workflow_attempt_frame(
     route_ptr_local: u32,
     route_len_local: u32,
 ) {
+    super::loop_deadline::push_frame(body);
     body.instruction(&Instruction::LocalGet(
         DIRECT_EMBED_CHILD_VARIABLES_PTR_LOCAL,
     ));
@@ -148,6 +151,7 @@ fn pop_embed_workflow_attempt_frame(
     body.instruction(&Instruction::LocalSet(
         DIRECT_EMBED_CHILD_VARIABLES_PTR_LOCAL,
     ));
+    super::loop_deadline::pop_frame(body);
 }
 
 fn emit_wrapped_child_error(
@@ -158,6 +162,8 @@ fn emit_wrapped_child_error(
     output_len_local: u32,
 ) {
     push_segment_args(body, step_id_segment);
+    body.instruction(&Instruction::LocalGet(DIRECT_EMBED_PARENT_SOURCE_PTR_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_EMBED_PARENT_SOURCE_LEN_LOCAL));
     body.instruction(&Instruction::LocalGet(DIRECT_EMBED_CHILD_ERROR_PTR_LOCAL));
     body.instruction(&Instruction::LocalGet(DIRECT_EMBED_CHILD_ERROR_LEN_LOCAL));
     push_retptr_arg(body);

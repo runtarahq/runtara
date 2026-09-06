@@ -39,6 +39,9 @@ pub(super) const DIRECT_AGENT_RATE_LIMIT_WAIT: &[u8] = b"rate_limit_wait";
 /// behavior, so this payload is owned by the direct emitter rather than mirrored
 /// from generated code.
 pub(super) const DIRECT_WHILE_TIMEOUT_ERROR: &[u8] = br#"{"code":"WHILE_TIMEOUT","message":"While step exceeded its configured timeout","category":"timeout","severity":"error"}"#;
+
+/// Malformed persisted timer state must fail instead of restarting the budget.
+pub(super) const DIRECT_LOOP_DEADLINE_STATE_ERROR: &[u8] = br#"{"code":"LOOP_DEADLINE_STATE","message":"Loop deadline checkpoint must contain exactly eight bytes","category":"permanent","severity":"error"}"#;
 /// Structured failure payload emitted when a `Split` step exceeds its configured
 /// timeout. As with `While`, generated Rust parses `SplitConfig.timeout` without
 /// enforcing it; direct mode owns this payload as the first correct
@@ -51,6 +54,7 @@ const DIRECT_STATIC_DATA_OFFSET: i32 = 256;
 pub(super) fn direct_core_variables_json(
     variables: &serde_json::Value,
     workflow_id: Option<&str>,
+    manifest_version: u32,
 ) -> Result<Vec<u8>, DirectCompileError> {
     // Declared workflow variables arrive as `{name: {"type": ..., "value": ...}}`
     // (the DSL `Variable` struct). Workflow logic references them as
@@ -58,6 +62,26 @@ pub(super) fn direct_core_variables_json(
     // declaration to its `value`. Entries that are not `{type, value}` structs
     // are already bare values and kept unchanged.
     let mut variables = flatten_declared_variables(variables);
+    if manifest_version >= 3 {
+        if !variables.is_object() {
+            variables = serde_json::json!({"_variables": variables});
+        }
+        let map = variables.as_object_mut().expect("object above");
+        // Identity is compiler-owned, never authored workflow data.
+        map.insert("_durable_key_version".into(), serde_json::json!(2));
+        map.insert("_loop_path".into(), serde_json::json!([]));
+    } else if let Some(map) = variables.as_object_mut() {
+        map.remove("_durable_key_version");
+        map.remove("_loop_path");
+    }
+
+    if let Some(map) = variables.as_object_mut() {
+        if manifest_version >= 4 {
+            map.insert("_manifest_graph_path".into(), serde_json::json!([]));
+        } else {
+            map.remove("_manifest_graph_path");
+        }
+    }
 
     let Some(workflow_id) = workflow_id else {
         return serde_json::to_vec(&variables).map_err(DirectCompileError::Serialize);
@@ -135,6 +159,7 @@ pub(super) struct DirectCoreStaticData {
     pub(super) agent_empty_parameters: DirectDataSegment,
     pub(super) output_null: DirectDataSegment,
     pub(super) agent_rate_limit_wait: DirectDataSegment,
+    pub(super) loop_deadline_state_error: DirectDataSegment,
     pub(super) while_timeout_error: DirectDataSegment,
     pub(super) split_timeout_error: DirectDataSegment,
     step_ids: BTreeMap<String, DirectDataSegment>,
@@ -254,6 +279,12 @@ impl DirectCoreStaticData {
             16,
         );
 
+        let loop_deadline_state_error =
+            DirectDataSegment::new(offset, DIRECT_LOOP_DEADLINE_STATE_ERROR);
+        offset = align_i32(
+            checked_offset_add(offset, DIRECT_LOOP_DEADLINE_STATE_ERROR.len())?,
+            16,
+        );
         let while_timeout_error = DirectDataSegment::new(offset, DIRECT_WHILE_TIMEOUT_ERROR);
         offset = align_i32(
             checked_offset_add(offset, DIRECT_WHILE_TIMEOUT_ERROR.len())?,
@@ -313,6 +344,7 @@ impl DirectCoreStaticData {
             agent_empty_parameters,
             output_null,
             agent_rate_limit_wait,
+            loop_deadline_state_error,
             while_timeout_error,
             split_timeout_error,
             step_ids,
@@ -378,6 +410,7 @@ impl DirectCoreStaticData {
             &self.agent_empty_parameters,
             &self.output_null,
             &self.agent_rate_limit_wait,
+            &self.loop_deadline_state_error,
             &self.while_timeout_error,
             &self.split_timeout_error,
         ];
@@ -581,14 +614,49 @@ mod tests {
     }
 
     #[test]
+    fn audit_04_manifest_version_selects_compiler_owned_graph_path() {
+        let authored = serde_json::json!({"_manifest_graph_path": [["forged", "scope"]]});
+        for version in [2, 3, 4] {
+            let vars: serde_json::Value = serde_json::from_slice(
+                &direct_core_variables_json(&authored, Some("wf"), version).unwrap(),
+            )
+            .unwrap();
+            if version >= 4 {
+                assert_eq!(vars["_manifest_graph_path"], serde_json::json!([]));
+            } else {
+                assert!(vars.get("_manifest_graph_path").is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn audit_03_manifest_version_selects_compiler_owned_identity() {
+        let authored = serde_json::json!({"_durable_key_version": 1, "_loop_path": ["forged"]});
+        for version in [1, 2, 3] {
+            let variables: serde_json::Value = serde_json::from_slice(
+                &direct_core_variables_json(&authored, None, version).unwrap(),
+            )
+            .unwrap();
+            if version >= 3 {
+                assert_eq!(variables["_durable_key_version"], 2);
+                assert_eq!(variables["_loop_path"], serde_json::json!([]));
+            } else {
+                assert!(variables.get("_durable_key_version").is_none());
+                assert!(variables.get("_loop_path").is_none());
+            }
+        }
+    }
+
+    #[test]
     fn variables_json_injects_workflow_id_and_wraps_non_object_variables() {
-        let bytes = direct_core_variables_json(&serde_json::json!({"existing": true}), Some("wf"))
-            .expect("object variables");
+        let bytes =
+            direct_core_variables_json(&serde_json::json!({"existing": true}), Some("wf"), 2)
+                .expect("object variables");
         let variables: serde_json::Value = serde_json::from_slice(&bytes).expect("object json");
         assert_eq!(variables["_workflow_id"], "wf");
         assert_eq!(variables["existing"], true);
 
-        let bytes = direct_core_variables_json(&serde_json::json!(["value"]), Some("wf"))
+        let bytes = direct_core_variables_json(&serde_json::json!(["value"]), Some("wf"), 2)
             .expect("array variables");
         let variables: serde_json::Value = serde_json::from_slice(&bytes).expect("array json");
         assert_eq!(variables["_workflow_id"], "wf");
@@ -597,7 +665,7 @@ mod tests {
 
     #[test]
     fn variables_json_preserves_variables_without_compile_workflow_id() {
-        let bytes = direct_core_variables_json(&serde_json::json!({"user": "value"}), None)
+        let bytes = direct_core_variables_json(&serde_json::json!({"user": "value"}), None, 2)
             .expect("variables");
         let variables: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
         assert_eq!(variables, serde_json::json!({"user": "value"}));
@@ -614,7 +682,7 @@ mod tests {
             "count": { "type": "integer", "value": 3, "description": "n" },
             "nested": { "type": "object", "value": { "value": "inner", "k": 1 } }
         });
-        let bytes = direct_core_variables_json(&declared, Some("wf")).expect("variables");
+        let bytes = direct_core_variables_json(&declared, Some("wf"), 2).expect("variables");
         let variables: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
         assert_eq!(variables["greeting"], "hello");
         assert_eq!(variables["count"], 3);

@@ -116,6 +116,8 @@ pub(super) fn emit_ai_wait_tool_arm(
 
     // poll_interval = wait-poll-interval-ms(wait_step)
     push_segment_args(body, wait_step_segment);
+    body.instruction(&Instruction::LocalGet(source_ptr_local));
+    body.instruction(&Instruction::LocalGet(source_len_local));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.stdlib_wait_poll_interval_ms));
     return_if_retptr_error(body, indices);
@@ -420,6 +422,8 @@ pub(super) fn emit_wait_for_signal_plan(
     return_if_retptr_error(body, indices);
 
     push_segment_args(body, step_id_segment);
+    body.instruction(&Instruction::LocalGet(source_ptr_local));
+    body.instruction(&Instruction::LocalGet(source_len_local));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.stdlib_wait_poll_interval_ms));
     emit_retptr_error_or_return(

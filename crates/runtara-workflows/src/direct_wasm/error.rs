@@ -27,6 +27,13 @@ pub enum DirectCompileError {
         /// Deterministic support report with exact unsupported features.
         report: Box<DirectWorkflowSupportReport>,
     },
+    /// Retry configuration cannot fit the initial attempt and retries in u32.
+    InvalidRetryBudget {
+        /// Step owning the invalid retry configuration.
+        step_id: String,
+        /// Rejected number of retries.
+        max_retries: u64,
+    },
     /// Filesystem write or metadata read failed.
     Io(std::io::Error),
     /// Component-model artifact emission failed.
@@ -47,6 +54,14 @@ impl fmt::Display for DirectCompileError {
                 f,
                 "direct workflow compiler does not support this graph yet: {}",
                 unsupported_summary(&report.unsupported)
+            ),
+            DirectCompileError::InvalidRetryBudget {
+                step_id,
+                max_retries,
+            } => write!(
+                f,
+                "Step '{step_id}': {}",
+                crate::retry_budget::retry_count_message(*max_retries)
             ),
             DirectCompileError::Io(err) => {
                 write!(f, "direct workflow artifact write failed: {err}")
