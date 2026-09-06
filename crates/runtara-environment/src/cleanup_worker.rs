@@ -15,7 +15,9 @@ use std::time::Duration;
 use crate::config::parse_enabled;
 use chrono::{DateTime, Utc};
 use tokio::sync::Notify;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
+
+use crate::periodic::PeriodicLoop;
 
 /// Configuration for the cleanup worker.
 #[derive(Debug, Clone)]
@@ -114,43 +116,15 @@ impl CleanupWorker {
             "Cleanup worker started"
         );
 
-        // Eager first pass: enforce retention immediately on startup so that
-        // cleanup runs even when the server restarts more frequently than
-        // `poll_interval`. Race against the shutdown signal so a slow or
-        // hanging cleanup cannot block shutdown.
-        tokio::select! {
-            biased;
-
-            _ = self.shutdown.notified() => {
-                info!("Cleanup worker received shutdown signal during eager pass");
-                return;
-            }
-
-            res = self.cleanup_old_directories() => {
-                if let Err(e) = res {
-                    error!(error = %e, "Failed to cleanup old directories");
-                }
-            }
+        PeriodicLoop {
+            name: "Cleanup worker",
+            poll_interval: self.config.poll_interval,
+            shutdown: &self.shutdown,
+            eager_first_pass: true,
+            pass_error: "Failed to cleanup old directories",
         }
-
-        loop {
-            tokio::select! {
-                biased;
-
-                _ = self.shutdown.notified() => {
-                    info!("Cleanup worker received shutdown signal");
-                    break;
-                }
-
-                _ = tokio::time::sleep(self.config.poll_interval) => {
-                    if let Err(e) = self.cleanup_old_directories().await {
-                        error!(error = %e, "Failed to cleanup old directories");
-                    }
-                }
-            }
-        }
-
-        info!("Cleanup worker stopped");
+        .run(|| self.cleanup_old_directories())
+        .await;
     }
 
     /// Scan for and remove old run directories.
