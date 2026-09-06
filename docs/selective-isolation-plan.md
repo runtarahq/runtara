@@ -379,9 +379,14 @@ uses its original format. The sidecar reports `packageVersion` for inspection,
 but execution must use the inventory bound to the verified package.
 
 This inventory identifies workflow, binding, Agent, capability, step and allowed
-AI invocation domains. It is an input to the future production authority policy;
-it does not yet validate namespace/loop ancestry or fence durable attempts. Do
-not enable the scoped production runner based only on its presence.
+AI invocation domains. The prepared launcher now validates those static identity
+parts before asking the scope factory for runtime authority. Its shared decoder
+requires canonical v2 paths, structured child/loop frames and valid counters;
+auxiliary AI calls retain their compiler-defined attempt/activation convention.
+Decoding a frame does not prove permission to use it. The remaining production
+policy must validate namespace/loop membership against the compiled call site,
+authorize checkpoint addresses and fence durable attempts. Do not enable the
+scoped production runner based only on a successful static identity check.
 
 | Existing entry/runtime mode | Compatibility policy |
 |---|---|

@@ -702,6 +702,46 @@ This bounds ordinary lifecycle polling across the scoped execution tree. It does
 not add targeted command routing, durable fencing, production runner selection,
 or change Pause into a sleep interrupt. Those remain separate plan requirements.
 
+### Enforced static invocation identity checks
+
+The prepared launcher now checks every request for a v2 Agent package against
+its verified compiler inventory before calling the scope factory. A shared
+`AgentInvocationPath` decoder requires the exact canonical v2 tuple and two
+fixed-width a–p counters. It decodes structured child/tool-child namespaces and
+Split/While indices, rejects malformed/ambiguous encodings, and preserves authored
+Unicode and delimiter characters as data. Lookup checks workflow, binding,
+Agent, capability, step and domain. Attempts must be nonzero; AI auxiliary calls
+use attempt 1, while only AI turn/tool domains accept activation counters.
+
+This enforces the previously transported static inventory at the actual prepared
+launch boundary. It does not authorize arbitrary well-formed namespaces: the
+mandatory scope factory still needs the compiler-backed membership policy and
+checkpoint grants. In particular, the flat inventory alone cannot distinguish
+the same Agent/step identity in different graph scopes. The next integration must
+bind those scopes to compiler ancestry before granting persistence. Durable
+attempt arbitration and the production runner selector remain pending. Legacy
+packages without this inventory retain their existing scope-factory contract.
+
+Verification: **21 workflow-WIT/package tests** and **132 component-host tests**
+passed, with one manual host benchmark ignored. All **11 emitted Agent isolation
+checks** passed through the new launcher check. The cache-on/cache-off test now
+rejects ten malformed or mismatched request cases before scope allocation,
+verifies that a well-formed foreign namespace still requires the scope policy,
+and executes the valid retained utils child afterward. The comparison smoke
+passed both backends across all 11 workloads. No database code changed and no
+database tests were rerun for this static launcher check. Feature-enabled
+all-target Clippy for both affected crates passed with `-D warnings`.
+
+The first host build hit a Serde trait mismatch in unchanged native-agent tests
+while another Cargo process used the shared target directory. Dependency
+inspection found one Serde version. A fresh build in the separate
+`target/selective-isolation-check` directory passed the full host suite; no
+shared caches were removed and no unrelated processes were interrupted.
+
+The decoder is a host/compiler helper and adds no guest interface or DSL field.
+Fresh v2 performance measurements must include its per-invocation parsing and
+lookup costs; the historical v1 benchmark does not exercise this check.
+
 ## Remaining required work
 
 - P0: extend explicit differential selection and invocation-count evidence to all

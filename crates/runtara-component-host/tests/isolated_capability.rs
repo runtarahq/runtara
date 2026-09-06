@@ -9,13 +9,18 @@ use runtara_component_host::{
     ChildInvocationScope, InvocationScopeFactory, PreparedInvocationLauncher,
 };
 
-struct CachedChildScope;
+#[derive(Default)]
+struct CachedChildScope {
+    authorizations: std::sync::atomic::AtomicUsize,
+}
 const CACHE_CALL_PATH: &str = r#"runtara:v2:["agent","cache-test",[],[],["utils","random-double","random"]]:aaaaaaaa:aaaaaaaa"#;
 impl InvocationScopeFactory for CachedChildScope {
     fn prepare_child(
         &self,
         request: &StartRequest,
     ) -> Result<ChildInvocationScope, ExecutionError> {
+        self.authorizations
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         if request.context.path != CACHE_CALL_PATH || request.context.attempt != 1 {
             return Err(ExecutionError::InvalidContext);
         }
@@ -265,14 +270,87 @@ async fn prepared_catalog_survives_queue_and_enabled_cache() {
         root_result.exit,
         runtara_component_host::WorkflowExit::Completed
     ));
+    let scopes = Arc::new(CachedChildScope::default());
     let launcher = PreparedInvocationLauncher::new(
         executor,
         prepared.child_catalog().unwrap().clone(),
-        Arc::new(CachedChildScope),
+        scopes.clone(),
     )
     .unwrap();
     drop(prepared);
     let tasks = IsolatedTasks::new(engine, 1, 1024).unwrap();
+    for mode in [
+        "workflow",
+        "step",
+        "agent",
+        "capability",
+        "domain",
+        "attempt",
+        "activation",
+        "legacy",
+        "loop",
+        "canonical",
+    ] {
+        let mut path = CACHE_CALL_PATH.to_string();
+        let mut capability = "random-double";
+        let mut attempt = 1;
+        match mode {
+            "workflow" => path = path.replace("cache-test", "other-root"),
+            "step" => path = path.replace("\"random\"", "\"sibling\""),
+            "agent" => path = path.replace("utils", "forged"),
+            "capability" => capability = "copy",
+            "domain" => path = path.replace(":aaaaaaaa:aaaaaaaa", ":aaaaaaac:aaaaaaaa"),
+            "attempt" => attempt = 0,
+            "activation" => path.push('a'),
+            "legacy" => path = "agent:utils".into(),
+            "loop" => path = path.replace(",[],[],", ",[],[[\"Split\",\"loop\",-1]],"),
+            "canonical" => path = path.replace("[\"agent\",", "[\"agent\", "),
+            _ => unreachable!(),
+        }
+        assert!(
+            matches!(
+                launcher.prepare(StartRequest {
+                    binding: "agent:utils".into(),
+                    entry: Entry::Capability(capability.into()),
+                    input: b"{}".to_vec(),
+                    context: InvocationContext { path, attempt },
+                }),
+                Err(ExecutionError::InvalidContext)
+            ),
+            "accepted {mode}"
+        );
+    }
+    assert_eq!(
+        scopes
+            .authorizations
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "invalid calls reached authority allocation"
+    );
+    // Static inventory is not namespace permission. A structurally valid
+    // foreign scope must still reach (and be rejected by) the mandatory policy.
+    let foreign_scope = CACHE_CALL_PATH.replace(
+        ",[],[],",
+        ",[[\"child\",\"cache-test\",[],[\"sibling\"]]],[],",
+    );
+    assert!(matches!(
+        launcher.prepare(StartRequest {
+            binding: "agent:utils".into(),
+            entry: Entry::Capability("random-double".into()),
+            input: b"{}".to_vec(),
+            context: InvocationContext {
+                path: foreign_scope,
+                attempt: 1
+            },
+        }),
+        Err(ExecutionError::InvalidContext)
+    ));
+    assert_eq!(
+        scopes
+            .authorizations
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
     let invocation = launcher
         .prepare(StartRequest {
             binding: "agent:utils".into(),
@@ -284,6 +362,12 @@ async fn prepared_catalog_survives_queue_and_enabled_cache() {
             },
         })
         .unwrap();
+    assert_eq!(
+        scopes
+            .authorizations
+            .load(std::sync::atomic::Ordering::SeqCst),
+        2
+    );
     assert!(invocation.cleanup.is_none());
     let id = tasks.spawn(invocation.run).unwrap();
     drop(launcher);

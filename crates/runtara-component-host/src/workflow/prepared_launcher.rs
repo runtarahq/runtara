@@ -96,6 +96,22 @@ impl InvocationLauncher for PreparedInvocationLauncher {
         if lifecycle != matches!(request.entry, Entry::Workflow) {
             return Err(ExecutionError::InvalidBinding);
         }
+        if let Some(invocations) = self.catalog.invocations() {
+            let Entry::Capability(capability) = &request.entry else {
+                return Err(ExecutionError::InvalidBinding);
+            };
+            // Versioned Agent packages must match their verified compiler
+            // inventory before even asking for runtime authority. Namespace
+            // grants and durable attempt fencing remain the scope policy's job.
+            invocations
+                .resolve_agent_invocation(
+                    &request.binding,
+                    capability,
+                    &request.context.path,
+                    request.context.attempt,
+                )
+                .map_err(|_| ExecutionError::InvalidContext)?;
+        }
         let scope = self.scopes.prepare_child(&request)?;
         let cleanup = scope
             .execution
