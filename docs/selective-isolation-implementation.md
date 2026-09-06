@@ -399,6 +399,32 @@ exploratory; they do not provide the required production tail evidence. Direct
 Agent/parent-step spans, aggregate memory, server persistence and cancellation
 measurements remain pending.
 
+### Measured Agent-only comparison
+
+Committed harness `fe014566` completed three serial release sessions, alternating
+legacy/isolated/legacy first. All 11 workloads passed on both backends in every
+session, including output checks, real child-count assertions and checkpoint
+replay. The [comparison report](research/workflow-performance-comparison.md) and
+[raw samples](research/workflow-performance-comparison.json) retain executable,
+source, workload and component identities; the report validator accepted all three
+sessions together. There were no excluded failed samples.
+
+For default random-double + Finish, full WASM grows from 3,308,198 to 3,314,102 bytes
+(+0.18%), gzip grows 0.16%, and complete native worker payload grows 0.61%. Prepared
+full-run p50 rises from 0.155–0.162 ms to 0.215–0.227 ms (+33–47%). Ten random calls
+rise from 0.474–0.487 ms to 1.041–1.127 ms (+117–131%). These costs require evaluation
+against deployment budgets; small file-size growth does not imply small execution
+overhead. Cold phases have just three samples per session and visible control
+variation, so they are exploratory evidence rather than acceptance thresholds.
+
+Verification: all 22 backend/workload combinations passed the debug smoke test;
+10 focused precompile tests (including explicit engine configuration and package
+round trips) passed; nine report-validator tests passed. Integration-feature
+all-target Clippy and the workspace commit hook passed. The historical baseline
+is retained separately because its preparation boundary differs. Direct Agent
+and parent-step spans, full aggregate resource accounting and server timings are
+still pending; the candidate is not production qualification.
+
 ## Remaining required work
 
 - P0: extend explicit differential selection and invocation-count evidence to all
@@ -411,11 +437,12 @@ measurements remain pending.
   scopes, deadlines, checkpoint keys and existing reference ABI modes.
 - P4: durable attempt transitions, root and targeted command routing, crash/lease
   fencing, resource/tenant ownership and parked invocation handling.
-- P5: all compatibility gates, actual baseline/candidate measurements, full unit
-  and integration suites, local server plus isolated persistence E2E.
+- P5: all compatibility gates, extend the paired Agent measurements to direct
+  step spans, aggregate resources and production qualification; full unit and
+  integration suites, local server plus isolated persistence E2E.
 - P6: controlled opt-in and artifact-compatible rollback; no default enablement
   before all gates above pass.
 
 No local server has been launched yet. The experimental emitted Agent path has
-correctness evidence, but no paired performance measurements yet. Those tests do
-not establish durable targeted cancellation or completion of the full plan.
+correctness and paired local performance evidence. It does not yet establish
+durable targeted cancellation or completion of the full plan.

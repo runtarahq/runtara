@@ -51,6 +51,6 @@ The memory column is the largest individual guest memory, **not aggregate guest 
 
 The runtime is the existing in-memory capturing test host. No database, external HTTP service, sleep or signal wait is involved; durable figures exclude network/storage latency. Random-double uses the real utils component and WASI randomness. Event tracking uses in-memory capture, not production log ingestion.
 
-Selective-isolation results are **not yet available**. This baseline is not evidence of isolated DSL performance. Re-run these exact cases through the implemented backend and compare raw sizes, p50/p95, preparation and full-run totals. Earlier per-Store microbenchmarks must not be substituted or simply multiplied into these numbers.
+These historical runs measured the legacy backend only. The [paired Agent-only comparison](workflow-performance-comparison.md) now reports a matched legacy/candidate experiment using the implemented guest adapter. Its preparation boundary differs, so use its own legacy column for overhead calculations. This historical baseline is not evidence of isolated DSL performance; earlier per-Store microbenchmarks must not be substituted or multiplied into these numbers.
 
 Raw data includes workload definitions and hashes, dependency hashes, compiler artifact hashes, sample counts and configuration. Use `workflow_baseline_report.py --compare baseline.json candidate.json` for deltas after measuring a candidate on the same host; run identity and dependency differences require review.

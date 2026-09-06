@@ -449,8 +449,9 @@ records **11 real emitted workflow cases**, measured twice in release mode on an
 Apple M3 Max (16 cores, 64 GiB). The
 [machine-readable measurements](research/workflow-performance-baseline.json)
 include exact graph definitions, input/dependency/artifact hashes, sizes and
-timing summaries. These are baseline results; the isolated DSL backend does not
-exist yet and has no measured column to report.
+timing summaries. These are historical legacy-only results. The current
+Agent-only candidate has a separate paired comparison below; use that comparison's
+same-revision legacy measurements when calculating overhead.
 
 | Representative case | Composed WASM | Cached full execution p50 | JSON → first result p50 |
 |---|---:|---:|---:|
@@ -498,6 +499,47 @@ Comparison conclusions limited to this baseline:
 - Durability and event tracking are separate cases. In-memory checkpoint timing
   must not stand in for deployed persistence latency, and larger payloads need
   separate tests for materialization/copying costs.
+
+### Current Agent-only paired comparison
+
+The [paired report](research/workflow-performance-comparison.md) and
+[raw samples](research/workflow-performance-comparison.json) record three release
+sessions at implementation `fe014566d3ee8d28e0f3e5bf3f26f7610bb868ba` on the same M3
+Max. Backend order alternates. Both sides use identical workloads and dependency
+hashes, and the same bounded worker preparation path with disk caching disabled.
+The exact benchmark executable hash is retained and checked across sessions.
+
+| Measurement | Matched legacy | Isolated Agent adapter | Paired change |
+|---|---:|---:|---:|
+| Default random-double + Finish, complete WASM | 3,308,198 bytes | 3,314,102 bytes | +5,904 bytes / +0.18% |
+| Same workflow, complete gzip | 848,314 bytes | 849,699 bytes | +1,385 bytes / +0.16% |
+| Same workflow, complete native worker payload | 12,456,600 bytes | 12,532,110 bytes | +75,510 bytes / +0.61% |
+| Same workflow, prepared full-run p50 | 0.155–0.162 ms | 0.215–0.227 ms | +33–47% |
+| Ten random calls, prepared full-run p50 | 0.474–0.487 ms | 1.041–1.127 ms | +117–131% |
+| 100 random calls, prepared full-run p50 | 20.104–20.612 ms | 26.246–27.056 ms | +31% |
+| Parallel Split, 100 calls/window 4, full-run p50 | 12.267–12.782 ms | 15.120–16.045 ms | +20–26% |
+| Default single random workflow, DSL → first result p50 | 284.119–299.156 ms | 301.488–323.097 ms | +3–8% |
+
+Ranges are per-session medians, not confidence intervals; percentage changes use
+paired sessions. Binary growth is small in these cases, but execution overhead is
+material for cheap CPU-only Agent calls. The ten-call graph more than doubles its
+prepared latency. Do not translate these total-run differences into exact
+Agent-only service time or predict HTTP/AI behavior without separate measurements.
+
+Each isolated random case contains one unique packaged utils component, even for
+100 calls or parallel pools. Separate instrumented runs assert real child launches,
+released task results and zero launches on byte-identical checkpoint replay.
+Headline warm runs omit the optional launch counter; the report shows the
+instrumentation comparison separately. No failures are excluded from the samples.
+
+This candidate isolates Agent calls only. Embed remains inline, and Finish-only
+workloads run the legacy executor on both sides as controls. The cold preparation
+phases have only three samples per session; even the unchanged Finish controls
+show substantial cold-time variation. These are exploratory results, not a
+production acceptance gate. Direct step spans, aggregate memory/RSS, server
+persistence, cancellation responsiveness and Linux load/tail qualification remain
+required. Earlier historical cold timings use a different preparation boundary
+and must not be substituted for the matched legacy column above.
 
 ### Measurement contract for baseline versus candidate
 
@@ -696,12 +738,13 @@ tool, not a performance acceptance gate.
 
 ### Required candidate comparison
 
-When P2/P3 provide the real isolated backend, add backend selection to this
-benchmark without changing its workload definitions or correctness checks. Assert
-isolated invocation counts and boundary identity, so an accidental fallback cannot
-produce a misleading “isolated” result. Re-run the baseline and candidate together
-on the deployment Linux host; keep the current macOS numbers as local evidence,
-not a cross-machine acceptance target.
+The first Agent-only comparison now runs the real composed adapter backend.
+Extend it as P2/P3 add logical invocation scopes, all auxiliary calls and isolated
+child graphs, without changing the reference workload definitions or correctness
+checks. Continue asserting actual invocation counts and boundary identity; an
+inline Embed or an absent Agent boundary cannot claim child-graph isolation.
+Re-run baseline and candidate together on the deployment Linux host; retain the
+macOS results as local evidence, not a cross-machine acceptance target.
 
 For every case compare absolute values and percentage deltas for raw/gzip/logic
 WASM size, serialized native size, JSON-to-WASM, native compilation, prepared
