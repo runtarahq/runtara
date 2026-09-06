@@ -96,6 +96,9 @@ pub mod schema_fields_validation;
 ))]
 pub mod standalone;
 
+mod graph_identity;
+mod retry_budget;
+
 /// Workflow validation for security and correctness.
 pub mod validation;
 

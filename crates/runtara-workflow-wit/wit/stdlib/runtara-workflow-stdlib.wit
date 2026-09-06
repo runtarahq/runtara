@@ -31,12 +31,20 @@ interface json {
 
     init-manifest: func(manifest: list<u8>) -> result<_, string>;
 
+    // Legacy unscoped collection. Callers must supply all live roots; new
+    // emitters use value-store-retain-scoped to protect enclosing frames.
     // Free interned scope values not reachable from the given loop roots (the
     // parent source and the surviving accumulator/state). Called at a loop
     // iteration boundary to reclaim the previous iteration's superseded values,
     // bounding a growing-accumulator loop to ~one live copy. Best-effort: a
     // root that fails to parse frees nothing.
     value-store-retain: func(parent-source: list<u8>, survivor: list<u8>) -> result<_, string>;
+
+    // Run-local allocation boundary; saved/restored with each loop frame.
+    value-store-scope: func() -> u64;
+    // Preserve entries predating scope as well as transitive local roots.
+    // New emitters use this for sequential iterations and parallel chunk resets.
+    value-store-retain-scoped: func(parent-source: list<u8>, survivor: list<u8>, scope: u64) -> result<_, string>;
 
     build-source: func(
         data: list<u8>,
@@ -227,6 +235,9 @@ interface json {
     // bare step id at top level, `{step-id}::{indices}` inside Split/While
     // iterations (folding `variables._loop_indices` like breakpoint-key) —
     // without the fold, per-item durable delays collide on ONE key.
+    /// Timer/completion checkpoint identity for one loop invocation.
+    loop-deadline-key: func(step-id: string, source: list<u8>, complete: bool) -> result<list<u8>, string>;
+
     delay-sleep-key: func(
         step-id: string,
         source: list<u8>,
@@ -294,6 +305,12 @@ interface json {
         step-id: string,
     ) -> result<u64, string>;
 
+    /// Graph-qualified variant; legacy callers retain wait-poll-interval-ms.
+    wait-poll-interval-ms-scoped: func(
+        step-id: string,
+        source: list<u8>,
+    ) -> result<u64, string>;
+
     wait-event: func(
         step-id: string,
         signal-id: string,
@@ -357,6 +374,13 @@ interface json {
 
     embed-workflow-error: func(
         step-id: string,
+        child-error: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    /// Graph-qualified variant for the current EmbedWorkflow call site.
+    embed-workflow-error-scoped: func(
+        step-id: string,
+        source: list<u8>,
         child-error: list<u8>,
     ) -> result<list<u8>, string>;
 

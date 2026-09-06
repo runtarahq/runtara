@@ -104,6 +104,22 @@ mod component {
             Ok(())
         }
 
+        fn value_store_scope() -> u64 {
+            direct_json::value_store_scope()
+        }
+
+        fn value_store_retain_scoped(
+            parent_source: Vec<u8>,
+            survivor: Vec<u8>,
+            scope: u64,
+        ) -> Result<(), String> {
+            direct_json::value_store_retain_scoped(
+                &[parent_source.as_slice(), survivor.as_slice()],
+                scope,
+            );
+            Ok(())
+        }
+
         fn build_source(
             data: Vec<u8>,
             variables: Vec<u8>,
@@ -474,6 +490,22 @@ mod component {
             })
         }
 
+        fn loop_deadline_key(
+            step_id: String,
+            source: Vec<u8>,
+            complete: bool,
+        ) -> Result<Vec<u8>, String> {
+            MANIFEST.with(|slot| {
+                let slot = slot.borrow();
+                let manifest = slot
+                    .as_ref()
+                    .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
+                manifest
+                    .loop_deadline_key(&step_id, &source, complete)
+                    .map(String::into_bytes)
+            })
+        }
+
         fn delay_sleep_key(step_id: String, source: Vec<u8>) -> Result<Vec<u8>, String> {
             MANIFEST.with(|slot| {
                 let slot = slot.borrow();
@@ -603,6 +635,16 @@ mod component {
                     .as_ref()
                     .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
                 manifest.wait_poll_interval_ms(&step_id)
+            })
+        }
+
+        fn wait_poll_interval_ms_scoped(step_id: String, source: Vec<u8>) -> Result<u64, String> {
+            MANIFEST.with(|slot| {
+                let slot = slot.borrow();
+                let manifest = slot
+                    .as_ref()
+                    .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
+                manifest.wait_poll_interval_ms_scoped(&step_id, &source)
             })
         }
 
@@ -741,6 +783,20 @@ mod component {
                     .as_ref()
                     .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
                 manifest.embed_workflow_error(&step_id, &child_error)
+            })
+        }
+
+        fn embed_workflow_error_scoped(
+            step_id: String,
+            source: Vec<u8>,
+            child_error: Vec<u8>,
+        ) -> Result<Vec<u8>, String> {
+            MANIFEST.with(|slot| {
+                let slot = slot.borrow();
+                let manifest = slot
+                    .as_ref()
+                    .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
+                manifest.embed_workflow_error_scoped(&step_id, &source, &child_error)
             })
         }
 

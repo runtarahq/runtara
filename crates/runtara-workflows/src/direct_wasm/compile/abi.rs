@@ -468,6 +468,7 @@ pub(super) fn emit_agent_suspend_sentinel_check(
 /// wake element layout (8-aligned, past the 80-byte result area): disc u8 @88
 /// = 0 (at), payload u64 @96 = deadline.
 pub(super) fn emit_entry_suspend_at(function: &mut WasmFunction, deadline_local: u32) {
+    super::loop_deadline::clamp(function, deadline_local, None);
     // Zero result area + wake element (0..120).
     function.instruction(&Instruction::I32Const(0));
     function.instruction(&Instruction::I32Const(0));
@@ -526,7 +527,7 @@ pub(super) fn emit_entry_suspend_at(function: &mut WasmFunction, deadline_local:
 /// `deadline` is the timeout fallback: `Some((present_flag_local, value_local))`
 /// writes the `option<u64>` tag from the RUNTIME present flag (a wait's timeout
 /// is dynamic) and the value from `value_local`; `None` is a wait with no
-/// timeout (tag stays 0/none — the custom-signal waker is the only wake path).
+/// timeout of its own; an active enclosing loop may still supply a deadline.
 ///
 /// wake element layout (past the 80-byte result area): disc u8 @88 = 1
 /// (on-signal); signal-wait record @96 = { checkpoint-id: string (ptr @96,
@@ -537,6 +538,22 @@ pub(super) fn emit_entry_suspend_on_signal(
     signal_id_len_local: u32,
     deadline: Option<(u32, u32)>,
 ) {
+    // Every emitted wait carries a runtime optional deadline, including no-timeout waits.
+    let deadline = match deadline {
+        Some(pair) => pair,
+        None => {
+            function.instruction(&Instruction::I32Const(0));
+            function.instruction(&Instruction::LocalSet(
+                super::DIRECT_WAIT_TIMEOUT_PRESENT_LOCAL,
+            ));
+            (
+                super::DIRECT_WAIT_TIMEOUT_PRESENT_LOCAL,
+                super::DIRECT_WAIT_DEADLINE_MS_LOCAL,
+            )
+        }
+    };
+    super::loop_deadline::clamp(function, deadline.1, Some(deadline.0));
+
     // Zero result area + wake element (0..120).
     function.instruction(&Instruction::I32Const(0));
     function.instruction(&Instruction::I32Const(0));
@@ -591,7 +608,8 @@ pub(super) fn emit_entry_suspend_on_signal(
     // signal-wait.deadline-ms option<u64>: tag @104 (runtime present flag),
     // value @112. When the flag is 0 the value is ignored, so it is written
     // unconditionally; when there is no timeout at all the tag stays 0 (none).
-    if let Some((present_flag_local, value_local)) = deadline {
+    {
+        let (present_flag_local, value_local) = deadline;
         function.instruction(&Instruction::I32Const(0));
         function.instruction(&Instruction::LocalGet(present_flag_local));
         function.instruction(&Instruction::I32Store8(MemArg {
@@ -607,7 +625,6 @@ pub(super) fn emit_entry_suspend_on_signal(
             memory_index: 0,
         }));
     }
-    // else: tag @104 stays 0 (none), value @112 stays 0 (both zeroed above).
     function.instruction(&Instruction::I32Const(0));
     function.instruction(&Instruction::Return);
 }

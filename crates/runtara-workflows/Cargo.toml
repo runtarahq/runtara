@@ -59,6 +59,8 @@ wac-graph = { version = "0.10", optional = true }
 wasmparser = { version = "0.247", optional = true }
 
 [dev-dependencies]
+# Execute emitted retry predicates at u32 boundaries without billions of invocations.
+wasmtime = { version = "46", default-features = false, features = ["std", "runtime", "cranelift"] }
 async-trait = "0.1"
 tempfile = "3"
 base64 = { workspace = true }

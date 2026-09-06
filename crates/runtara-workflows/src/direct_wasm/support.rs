@@ -23,6 +23,7 @@ use runtara_dsl::{
 };
 
 use crate::compile::ChildWorkflowInput;
+use crate::graph_identity::{identity_message, identity_mismatches, step_id};
 use crate::workflow_features::{WorkflowFeatureSummary, analyze_workflow_features};
 
 /// Unsupported feature found while deciding whether direct emission can run.
@@ -361,6 +362,29 @@ fn analyze_direct_wasm_support_inner(
     graph: &ExecutionGraph,
     child_workflows: DirectSupportChildWorkflows<'_>,
 ) -> DirectWorkflowSupportReport {
+    let mut mismatches = identity_mismatches(graph, "");
+    for (index, child) in child_workflows.graphs.iter().enumerate() {
+        mismatches.extend(identity_mismatches(
+            child,
+            &format!("/childWorkflows/{index}/executionGraph"),
+        ));
+    }
+    if !mismatches.is_empty() {
+        // Routing analyses use map keys; do not run them against conflicting IDs.
+        return DirectWorkflowSupportReport {
+            supported: false,
+            unsupported: mismatches
+                .into_iter()
+                .map(|error| UnsupportedWorkflowFeature {
+                    reason: identity_message(&error.graph_path, &error.step_key, &error.step_id),
+                    step_id: Some(error.step_key),
+                    step_type: None,
+                    feature: "step-id-mismatch".into(),
+                })
+                .collect(),
+            feature_summary: analyze_workflow_features(graph),
+        };
+    }
     let mut unsupported = Vec::new();
     let embed_step_ids = embed_workflow_step_ids_with_child_workflows(graph, &child_workflows);
     for step_id in &child_workflows.duplicate_step_ids {
@@ -1665,6 +1689,16 @@ fn collect_step_support(
     direct_control: bool,
     unsupported: &mut Vec<UnsupportedWorkflowFeature>,
 ) {
+    if let Some(max_retries) = crate::retry_budget::step_max_retries(step)
+        && max_retries > crate::retry_budget::MAX_RETRIES
+    {
+        unsupported_step(
+            step,
+            "retry-count-overflow",
+            &crate::retry_budget::retry_count_message(u64::from(max_retries)),
+            unsupported,
+        );
+    }
     match step {
         Step::Finish(_) => {}
         Step::Agent(step) if supports_agent_step_baseline(graph, step) => {}
@@ -1926,25 +1960,6 @@ fn unsupported_step(
         feature: feature.to_string(),
         reason: reason.to_string(),
     });
-}
-
-fn step_id(step: &Step) -> &str {
-    match step {
-        Step::Finish(step) => &step.id,
-        Step::Agent(step) => &step.id,
-        Step::Conditional(step) => &step.id,
-        Step::Split(step) => &step.id,
-        Step::Switch(step) => &step.id,
-        Step::EmbedWorkflow(step) => &step.id,
-        Step::While(step) => &step.id,
-        Step::Log(step) => &step.id,
-        Step::Error(step) => &step.id,
-        Step::Filter(step) => &step.id,
-        Step::GroupBy(step) => &step.id,
-        Step::Delay(step) => &step.id,
-        Step::WaitForSignal(step) => &step.id,
-        Step::AiAgent(step) => &step.id,
-    }
 }
 
 fn step_type_name(step: &Step) -> &'static str {
