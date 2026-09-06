@@ -7,10 +7,10 @@ use runtara_core::domain::InstanceStatus as CoreInstanceStatus;
 mod common;
 
 use chrono::Utc;
+use runtara_core::domain::InstanceStatus;
 use runtara_core::persistence::{CompleteInstanceParams, Persistence};
-use runtara_environment::db::{self, Instance};
 use runtara_environment::handlers::DrainController;
-use runtara_environment::instance_repository::ListInstancesOptions;
+use runtara_environment::instance_repository::{InstanceRepository, ListInstancesOptions};
 use runtara_environment::launch_queue::{LaunchKind, LaunchRepository, LaunchState};
 use runtara_environment::runner::{MockRunner, Runner};
 use runtara_environment::wake_scheduler::{WakeScheduler, WakeSchedulerConfig};
@@ -254,7 +254,8 @@ async fn test_create_and_get_instance() {
 
     create_test_instance(&pool, &instance_id, tenant_id, &image_id).await;
 
-    let instance = db::get_instance_full(&pool, &instance_id)
+    let instance = InstanceRepository::new(pool.clone())
+        .detail(&instance_id)
         .await
         .expect("Failed to get instance")
         .expect("Instance should exist");
@@ -262,7 +263,7 @@ async fn test_create_and_get_instance() {
     assert_eq!(instance.instance_id, instance_id);
     assert_eq!(instance.tenant_id, tenant_id);
     assert_eq!(instance.image_id, Some(image_id.clone()));
-    assert_eq!(instance.status, "pending");
+    assert_eq!(instance.status, InstanceStatus::Pending);
     assert!(instance.output.is_none());
     assert!(instance.error.is_none());
 
@@ -284,21 +285,23 @@ async fn test_update_instance_status() {
     // Update to running
     update_test_instance_status(&pool, &instance_id, "running", None).await;
 
-    let instance = db::get_instance(&pool, &instance_id)
+    let instance = InstanceRepository::new(pool.clone())
+        .detail(&instance_id)
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(instance.status, "running");
+    assert_eq!(instance.status, InstanceStatus::Running);
     assert!(instance.started_at.is_some()); // Should be set when status = running
 
     // Update to completed
     update_test_instance_status(&pool, &instance_id, "completed", Some("cp-final")).await;
 
-    let instance = db::get_instance(&pool, &instance_id)
+    let instance = InstanceRepository::new(pool.clone())
+        .detail(&instance_id)
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(instance.status, "completed");
+    assert_eq!(instance.status, InstanceStatus::Completed);
     assert_eq!(instance.checkpoint_id, Some("cp-final".to_string()));
     assert!(instance.finished_at.is_some());
 
@@ -331,11 +334,12 @@ async fn test_update_instance_result() {
     )
     .await;
 
-    let instance = db::get_instance(&pool, &instance_id)
+    let instance = InstanceRepository::new(pool.clone())
+        .detail(&instance_id)
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(instance.status, "completed");
+    assert_eq!(instance.status, InstanceStatus::Completed);
     assert_eq!(instance.output, Some(output_bytes));
     assert!(instance.error.is_none());
     assert!(instance.stderr.is_none());
@@ -367,11 +371,12 @@ async fn test_update_instance_result_with_error() {
     )
     .await;
 
-    let instance = db::get_instance(&pool, &instance_id)
+    let instance = InstanceRepository::new(pool.clone())
+        .detail(&instance_id)
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(instance.status, "failed");
+    assert_eq!(instance.status, InstanceStatus::Failed);
     assert!(instance.output.is_none());
     assert_eq!(instance.error, Some("Connection refused".to_string()));
     assert_eq!(
@@ -414,7 +419,11 @@ async fn test_list_instances() {
         limit: 100,
         ..Default::default()
     };
-    let instances = db::list_instances(&pool, &options).await.unwrap();
+    let instances = InstanceRepository::new(pool.clone())
+        .list(&options)
+        .await
+        .unwrap()
+        .instances;
     assert_eq!(instances.len(), 2);
 
     // List running for tenant-a
@@ -424,7 +433,11 @@ async fn test_list_instances() {
         limit: 100,
         ..Default::default()
     };
-    let instances = db::list_instances(&pool, &options).await.unwrap();
+    let instances = InstanceRepository::new(pool.clone())
+        .list(&options)
+        .await
+        .unwrap()
+        .instances;
     assert_eq!(instances.len(), 1);
 
     // List all with limit
@@ -432,7 +445,11 @@ async fn test_list_instances() {
         limit: 2,
         ..Default::default()
     };
-    let instances = db::list_instances(&pool, &options).await.unwrap();
+    let instances = InstanceRepository::new(pool.clone())
+        .list(&options)
+        .await
+        .unwrap()
+        .instances;
     assert_eq!(instances.len(), 2);
 
     // List with offset. Scoped to this test's own tenant: unscoped, both pages
@@ -443,70 +460,28 @@ async fn test_list_instances() {
         limit: 100,
         ..Default::default()
     };
-    let all = db::list_instances(&pool, &all_options).await.unwrap();
+    let all = InstanceRepository::new(pool.clone())
+        .list(&all_options)
+        .await
+        .unwrap()
+        .instances;
     let offset_options = ListInstancesOptions {
         tenant_id: Some("list-test-tenant-a".to_string()),
         limit: 100,
         offset: 1,
         ..Default::default()
     };
-    let with_offset = db::list_instances(&pool, &offset_options).await.unwrap();
+    let with_offset = InstanceRepository::new(pool.clone())
+        .list(&offset_options)
+        .await
+        .unwrap()
+        .instances;
     assert_eq!(with_offset.len(), all.len().saturating_sub(1));
 
     cleanup(&pool, &instance1).await;
     cleanup(&pool, &instance2).await;
     cleanup(&pool, &instance3).await;
     cleanup_image(&pool, &image_id).await;
-}
-
-// ============================================================================
-// Instance Record Tests
-// ============================================================================
-
-#[test]
-fn test_instance_debug() {
-    let instance = Instance {
-        instance_id: "inst-123".to_string(),
-        tenant_id: "tenant-456".to_string(),
-        status: "running".to_string(),
-        checkpoint_id: Some("cp-1".to_string()),
-        attempt: 1,
-        max_attempts: 3,
-        created_at: Utc::now(),
-        started_at: Some(Utc::now()),
-        finished_at: None,
-        output: None,
-        error: None,
-        stderr: None,
-    };
-
-    let debug_str = format!("{:?}", instance);
-    assert!(debug_str.contains("inst-123"));
-    assert!(debug_str.contains("tenant-456"));
-    assert!(debug_str.contains("running"));
-}
-
-#[test]
-fn test_instance_clone() {
-    let instance = Instance {
-        instance_id: "i1".to_string(),
-        tenant_id: "t1".to_string(),
-        status: "pending".to_string(),
-        checkpoint_id: None,
-        attempt: 0,
-        max_attempts: 3,
-        created_at: Utc::now(),
-        started_at: None,
-        finished_at: None,
-        output: None,
-        error: None,
-        stderr: None,
-    };
-
-    let cloned = instance.clone();
-    assert_eq!(instance.instance_id, cloned.instance_id);
-    assert_eq!(instance.tenant_id, cloned.tenant_id);
-    assert_eq!(instance.status, cloned.status);
 }
 
 // ============================================================================

@@ -869,8 +869,9 @@ pub async fn handle_resume_instance(
     info!(instance_id = %request.instance_id, "Resume instance request received");
 
     // Get instance from DB
-    let instance = match db::get_instance(&state.pool, &request.instance_id).await? {
-        Some(inst) => inst,
+    let (status, tenant_id) = match db::instance_identity(&state.pool, &request.instance_id).await?
+    {
+        Some(identity) => identity,
         None => {
             return Ok(ResumeInstanceResponse {
                 success: false,
@@ -883,12 +884,12 @@ pub async fn handle_resume_instance(
     // cancelled instances are terminal; accepting them here used to bypass
     // their terminal lifecycle state by flipping it to running before a
     // detached runner launch.
-    if instance.status != "suspended" {
+    if status != "suspended" {
         return Ok(ResumeInstanceResponse {
             success: false,
             error: Some(format!(
                 "Cannot resume instance in '{}' state (must be suspended)",
-                instance.status
+                status
             )),
         });
     }
@@ -923,7 +924,7 @@ pub async fn handle_resume_instance(
     let enqueue = EnqueueRequest::immediate(
         uuid::Uuid::new_v4().to_string(),
         request.instance_id.clone(),
-        instance.tenant_id,
+        tenant_id,
         image_id,
         LaunchKind::Resume,
         DEFAULT_LAUNCH_QUEUE_TIMEOUT,

@@ -9,7 +9,6 @@ mod common;
 use chrono::Utc;
 use runtara_core::persistence::{CompleteInstanceParams, Persistence};
 use runtara_environment::container_registry::{ContainerInfo, ContainerRegistry};
-use runtara_environment::db;
 use runtara_environment::handlers::{
     DrainController, EnvironmentHandlerState, MAX_METRIC_BUCKETS, ResumeInstanceRequest,
     StartInstanceRequest, StartRejection, StopInstanceRequest, TenantMetricsOptions,
@@ -228,12 +227,13 @@ async fn test_start_instance_success() {
     assert!(!response.instance_id.is_empty());
 
     // Verify instance was created in DB
-    let instance = db::get_instance(&pool, &response.instance_id)
+    let instance = InstanceRepository::new(pool.clone())
+        .detail(&response.instance_id)
         .await
         .unwrap()
         .unwrap();
     assert_eq!(instance.tenant_id, "test-tenant");
-    assert_eq!(instance.status, "pending");
+    assert_eq!(instance.status, CoreInstanceStatus::Pending);
     assert_eq!(
         active_launch(&pool, &response.instance_id).await.state,
         LaunchState::Queued,
@@ -647,7 +647,8 @@ async fn test_start_instance_missing_artifact_does_not_reserve_instance_id() {
         Some(StartRejection::ImageNotRunnable { .. })
     ));
     assert!(
-        db::get_instance(&pool, &instance_id)
+        InstanceRepository::new(pool.clone())
+            .detail(&instance_id)
             .await
             .unwrap()
             .is_none(),
@@ -737,7 +738,8 @@ async fn test_start_instance_association_failure_does_not_leave_unbound_pending_
     let failed = handle_start_instance(&state, request())
         .await
         .expect("the handler should report an association error in its response");
-    let after_failed_start = db::get_instance(&pool, &instance_id)
+    let after_failed_start = InstanceRepository::new(pool.clone())
+        .detail(&instance_id)
         .await
         .expect("failed to inspect instance after injected association failure");
 
@@ -1008,11 +1010,12 @@ async fn test_stop_instance_with_registered_container() {
     assert!(response.success, "Error: {:?}", response.error);
 
     // Verify instance status was updated
-    let instance = db::get_instance(&pool, &instance_id)
+    let instance = InstanceRepository::new(pool.clone())
+        .detail(&instance_id)
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(instance.status, "cancelled");
+    assert_eq!(instance.status, CoreInstanceStatus::Cancelled);
 
     cleanup(&pool, Some(&instance_id), Some(&image_id)).await;
 }
@@ -1173,11 +1176,12 @@ async fn test_resume_instance_success() {
     assert!(response.success, "Error: {:?}", response.error);
 
     // The dispatcher, not the request path, promotes the instance to running.
-    let instance = db::get_instance(&pool, &instance_id)
+    let instance = InstanceRepository::new(pool.clone())
+        .detail(&instance_id)
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(instance.status, "suspended");
+    assert_eq!(instance.status, CoreInstanceStatus::Suspended);
     assert_eq!(
         active_launch(&pool, &instance_id).await.kind,
         LaunchKind::Resume
