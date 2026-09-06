@@ -4,6 +4,7 @@
 //!
 //! Handles requests from Management SDK and proxies to Core when needed.
 
+use chrono::{DateTime, Utc};
 use runtara_core::domain::InstanceStatus as CoreInstanceStatus;
 
 use serde::Serialize;
@@ -1540,8 +1541,8 @@ pub struct ImageSummary {
     /// Optional description.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    /// Creation time, epoch milliseconds.
-    pub created_at_ms: i64,
+    /// Creation time.
+    pub created_at: DateTime<Utc>,
     /// Free-form metadata recorded at registration.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<Value>,
@@ -1623,7 +1624,7 @@ fn image_summary(img: crate::image_registry::Image) -> ImageSummary {
         tenant_id: img.tenant_id,
         name: img.name,
         description: img.description,
-        created_at_ms: img.created_at.timestamp_millis(),
+        created_at: img.created_at,
         metadata: img.metadata,
     }
 }
@@ -1650,15 +1651,15 @@ pub struct InstanceStatusResponse {
     /// Most recent checkpoint.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub checkpoint_id: Option<String>,
-    /// Creation time, epoch milliseconds.
+    /// Creation time.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub created_at_ms: Option<i64>,
-    /// First-run start time, epoch milliseconds.
+    pub created_at: Option<DateTime<Utc>>,
+    /// First-run start time.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub started_at_ms: Option<i64>,
-    /// Terminal time, epoch milliseconds.
+    pub started_at: Option<DateTime<Utc>>,
+    /// Terminal time.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub finished_at_ms: Option<i64>,
+    pub finished_at: Option<DateTime<Utc>>,
     /// Base64-encoded output.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output: Option<String>,
@@ -1703,9 +1704,9 @@ impl InstanceStatusResponse {
             image_id: None,
             image_name: None,
             checkpoint_id: None,
-            created_at_ms: None,
-            started_at_ms: None,
-            finished_at_ms: None,
+            created_at: None,
+            started_at: None,
+            finished_at: None,
             output: None,
             input: None,
             error: None,
@@ -1739,9 +1740,9 @@ pub async fn handle_get_instance_status(
         image_id: inst.image_id,
         image_name: inst.image_name,
         checkpoint_id: inst.checkpoint_id,
-        created_at_ms: Some(inst.created_at.timestamp_millis()),
-        started_at_ms: inst.started_at.map(|t| t.timestamp_millis()),
-        finished_at_ms: inst.finished_at.map(|t| t.timestamp_millis()),
+        created_at: Some(inst.created_at),
+        started_at: inst.started_at,
+        finished_at: inst.finished_at,
         output: inst
             .output
             .map(|o| base64::engine::general_purpose::STANDARD.encode(&o)),
@@ -1774,14 +1775,14 @@ pub struct InstanceSummary {
     pub image_name: Option<String>,
     /// Lifecycle status.
     pub status: String,
-    /// Creation time, epoch milliseconds.
-    pub created_at_ms: i64,
-    /// First-run start time, epoch milliseconds.
+    /// Creation time.
+    pub created_at: DateTime<Utc>,
+    /// First-run start time.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub started_at_ms: Option<i64>,
-    /// Terminal time, epoch milliseconds.
+    pub started_at: Option<DateTime<Utc>>,
+    /// Terminal time.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub finished_at_ms: Option<i64>,
+    pub finished_at: Option<DateTime<Utc>>,
     /// Whether a failure message is recorded.
     pub has_error: bool,
 }
@@ -1837,9 +1838,9 @@ pub async fn handle_list_instances(
                 image_id: inst.image_id,
                 image_name: inst.image_name,
                 status: inst.status,
-                created_at_ms: inst.created_at.timestamp_millis(),
-                started_at_ms: inst.started_at.map(|t| t.timestamp_millis()),
-                finished_at_ms: inst.finished_at.map(|t| t.timestamp_millis()),
+                created_at: inst.created_at,
+                started_at: inst.started_at,
+                finished_at: inst.finished_at,
                 has_error: inst.error.is_some(),
             })
             .collect(),
@@ -2017,8 +2018,8 @@ pub struct CheckpointSummary {
     pub checkpoint_id: String,
     /// Owning instance.
     pub instance_id: String,
-    /// Creation time, epoch milliseconds.
-    pub created_at_ms: i64,
+    /// Creation time.
+    pub created_at: DateTime<Utc>,
     /// Size of the stored state.
     pub data_size_bytes: u64,
 }
@@ -2082,7 +2083,7 @@ pub async fn handle_list_checkpoints(
             .map(|cp| CheckpointSummary {
                 checkpoint_id: cp.checkpoint_id,
                 instance_id: cp.instance_id,
-                created_at_ms: cp.created_at.timestamp_millis(),
+                created_at: cp.created_at,
                 data_size_bytes: cp.state.len() as u64,
             })
             .collect(),
@@ -2105,8 +2106,8 @@ pub struct EventSummary {
     /// Base64-encoded payload.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub payload: Option<String>,
-    /// Creation time, epoch milliseconds.
-    pub created_at_ms: i64,
+    /// Creation time.
+    pub created_at: DateTime<Utc>,
     /// Event subtype.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subtype: Option<String>,
@@ -2153,7 +2154,7 @@ pub async fn handle_list_events(
                 payload: ev
                     .payload
                     .map(|p| base64::engine::general_purpose::STANDARD.encode(&p)),
-                created_at_ms: ev.created_at.timestamp_millis(),
+                created_at: ev.created_at,
                 subtype: ev.subtype,
             })
             .collect(),
@@ -2173,11 +2174,11 @@ pub struct StepSummary {
     pub step_type: String,
     /// `running`, `completed` or `failed`.
     pub status: String,
-    /// Start time, epoch milliseconds.
-    pub started_at_ms: i64,
-    /// Completion time, epoch milliseconds.
+    /// Start time.
+    pub started_at: DateTime<Utc>,
+    /// Completion time.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub completed_at_ms: Option<i64>,
+    pub completed_at: Option<DateTime<Utc>>,
     /// Wall-clock duration.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<i64>,
@@ -2259,8 +2260,8 @@ pub async fn handle_list_step_summaries(
                 step_id: step.correlation_id,
                 step_name: step.label,
                 step_type: step.kind,
-                started_at_ms: step.started_at.timestamp_millis(),
-                completed_at_ms: step.completed_at.map(|t| t.timestamp_millis()),
+                started_at: step.started_at,
+                completed_at: step.completed_at,
                 duration_ms: step.duration_ms,
                 launched_at_ms: step.launched_at_ms,
                 settled_at_ms: step.settled_at_ms,
@@ -2293,8 +2294,8 @@ pub struct ScopeInfo {
     /// Iteration index, for scopes opened per-iteration.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub index: Option<u32>,
-    /// Creation time, epoch milliseconds.
-    pub created_at_ms: i64,
+    /// Creation time.
+    pub created_at: DateTime<Utc>,
 }
 
 /// Walk a scope's ancestry, innermost first.
@@ -2373,7 +2374,7 @@ pub async fn handle_get_scope_ancestors(
                     .get("index")
                     .and_then(|v| v.as_u64())
                     .map(|i| i as u32),
-                created_at_ms: event.created_at.timestamp_millis(),
+                created_at: event.created_at,
             },
         );
     }
@@ -2421,8 +2422,8 @@ fn bucket_count(
 /// One bucket of tenant execution metrics.
 #[derive(Debug, Serialize)]
 pub struct MetricsBucket {
-    /// Bucket start, epoch milliseconds.
-    pub bucket_time_ms: i64,
+    /// Bucket start.
+    pub bucket_time: DateTime<Utc>,
     /// Invocations started in the bucket.
     pub invocation_count: i64,
     /// Invocations that completed successfully.
@@ -2490,7 +2491,7 @@ pub async fn handle_get_tenant_metrics(
         .map(|row| {
             let terminal_count = row.success_count + row.failure_count + row.cancelled_count;
             MetricsBucket {
-                bucket_time_ms: row.bucket_time.timestamp_millis(),
+                bucket_time: row.bucket_time,
                 invocation_count: row.invocation_count,
                 success_count: row.success_count,
                 failure_count: row.failure_count,
@@ -2816,6 +2817,57 @@ mod tests {
             SendSignalOutcome::UnknownSignalType {
                 signal_type: "detonate".to_string(),
             }
+        );
+    }
+
+    /// An instant a handler reports must be the instant the store holds,
+    /// down to the microsecond Postgres actually keeps.
+    ///
+    /// These fields used to cross as `created_at_ms: i64` built with
+    /// `timestamp_millis()`, so every timestamp the server read had been
+    /// silently rounded down to the millisecond. Nothing asserted on it, so
+    /// nothing caught it. A time carrying microseconds is the cheapest way to
+    /// pin that the truncation is gone and does not come back.
+    #[tokio::test]
+    async fn instants_survive_the_handler_without_losing_precision() {
+        use chrono::TimeZone;
+        use runtara_core::domain::EventType;
+        use runtara_core::persistence::{EventRecord, ListEventsFilter};
+
+        let (state, persistence) = in_memory_state();
+        // 123_456_000 ns = 123.456 ms. Anything below the millisecond is what
+        // the old `timestamp_millis()` hop discarded.
+        let precise = Utc
+            .timestamp_opt(1_700_000_000, 123_456_000)
+            .single()
+            .expect("a representable instant");
+        assert_ne!(
+            precise.timestamp_subsec_micros() % 1_000,
+            0,
+            "the fixture must carry sub-millisecond detail or it proves nothing"
+        );
+
+        persistence
+            .insert_event(&EventRecord {
+                id: None,
+                instance_id: "precision-1".to_string(),
+                event_type: EventType::Custom,
+                checkpoint_id: None,
+                payload: None,
+                created_at: precise,
+                subtype: None,
+            })
+            .await
+            .expect("insert event");
+
+        let page = handle_list_events(&state, "precision-1", &ListEventsFilter::default(), 10, 0)
+            .await
+            .expect("list events");
+
+        assert_eq!(page.events.len(), 1);
+        assert_eq!(
+            page.events[0].created_at, precise,
+            "the handler must report the stored instant, not a rounded copy"
         );
     }
 

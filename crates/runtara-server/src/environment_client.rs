@@ -8,16 +8,16 @@
 //! round trip, and nothing to connect to or reconnect to.
 //!
 //! What remains is the shape conversion the old HTTP client did after
-//! deserializing: environment reports wire-shaped values (`*_ms` timestamps,
-//! base64 bodies, statuses as strings) and [`crate::runtime_types`] holds the
-//! richer forms the server's handlers want (`DateTime`, decoded JSON, enums).
-//! Every method here is that mapping and nothing else.
+//! deserializing: environment reports base64 bodies and statuses as strings,
+//! and [`crate::runtime_types`] holds the richer forms the server's handlers
+//! want (decoded JSON, enums). Timestamps no longer round-trip through epoch
+//! milliseconds — environment hands over the `DateTime<Utc>` it read.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use base64::Engine;
-use chrono::{TimeZone, Utc};
+use chrono::Utc;
 use runtara_environment::db;
 use runtara_environment::handlers::{
     self, EnvironmentHandlerState, ResumeInstanceRequest, SendCustomSignalOutcome,
@@ -112,12 +112,12 @@ impl EnvironmentClient {
             tenant_id: json.tenant_id.unwrap_or_default(),
             status: instance_status_from_string(json.status.as_deref().unwrap_or("unknown")),
             checkpoint_id: json.checkpoint_id,
-            created_at: json
-                .created_at_ms
-                .map(ms_to_datetime)
-                .unwrap_or_else(Utc::now),
-            started_at: opt_ms_to_datetime(json.started_at_ms),
-            finished_at: opt_ms_to_datetime(json.finished_at_ms),
+            // `created_at` is NOT NULL and the handler fills it whenever the
+            // instance exists, which the `found` check above has already
+            // established — the fallback is unreachable, not a real default.
+            created_at: json.created_at.unwrap_or_else(Utc::now),
+            started_at: json.started_at,
+            finished_at: json.finished_at,
             input: json.input.as_deref().and_then(decode_base64_json),
             output: json.output.as_deref().and_then(decode_base64_json),
             error: json.error,
@@ -168,9 +168,9 @@ impl EnvironmentClient {
                     image_id: inst.image_id.unwrap_or_default(),
                     image_name: inst.image_name.unwrap_or_default(),
                     status: instance_status_from_string(&inst.status),
-                    created_at: ms_to_datetime(inst.created_at_ms),
-                    started_at: opt_ms_to_datetime(inst.started_at_ms),
-                    finished_at: opt_ms_to_datetime(inst.finished_at_ms),
+                    created_at: inst.created_at,
+                    started_at: inst.started_at,
+                    finished_at: inst.finished_at,
                     has_error: inst.has_error,
                 })
                 .collect(),
@@ -508,7 +508,7 @@ impl EnvironmentClient {
                 .map(|cp| CheckpointSummary {
                     checkpoint_id: cp.checkpoint_id,
                     instance_id: cp.instance_id,
-                    created_at: ms_to_datetime(cp.created_at_ms),
+                    created_at: cp.created_at,
                     data_size_bytes: cp.data_size_bytes,
                 })
                 .collect(),
@@ -583,7 +583,7 @@ impl EnvironmentClient {
                     event_type: ev.event_type,
                     checkpoint_id: ev.checkpoint_id,
                     payload: ev.payload.as_deref().and_then(decode_base64_json),
-                    created_at: ms_to_datetime(ev.created_at_ms),
+                    created_at: ev.created_at,
                     subtype: ev.subtype,
                 })
                 .collect(),
@@ -645,8 +645,8 @@ impl EnvironmentClient {
                     step_name: step.step_name,
                     step_type: step.step_type,
                     status: step_status_from_string(&step.status),
-                    started_at: ms_to_datetime(step.started_at_ms),
-                    completed_at: opt_ms_to_datetime(step.completed_at_ms),
+                    started_at: step.started_at,
+                    completed_at: step.completed_at,
                     duration_ms: step.duration_ms,
                     launched_at_ms: step.launched_at_ms,
                     settled_at_ms: step.settled_at_ms,
@@ -683,7 +683,7 @@ impl EnvironmentClient {
                     step_name: info.step_name,
                     step_type: info.step_type,
                     index: info.index,
-                    created_at: ms_to_datetime(info.created_at_ms),
+                    created_at: info.created_at,
                 })
                 .collect(),
         )
@@ -730,7 +730,7 @@ impl EnvironmentClient {
             buckets: buckets
                 .into_iter()
                 .map(|b| MetricsBucket {
-                    bucket_time: ms_to_datetime(b.bucket_time_ms),
+                    bucket_time: b.bucket_time,
                     invocation_count: b.invocation_count,
                     success_count: b.success_count,
                     failure_count: b.failure_count,
@@ -765,7 +765,7 @@ fn image_summary(img: runtara_environment::handlers::ImageSummary) -> ImageSumma
         tenant_id: img.tenant_id,
         name: img.name,
         description: img.description,
-        created_at: ms_to_datetime(img.created_at_ms),
+        created_at: img.created_at,
         metadata: img.metadata,
     }
 }
@@ -814,16 +814,6 @@ fn step_status_from_string(s: &str) -> StepStatus {
         "failed" => StepStatus::Failed,
         _ => StepStatus::Running,
     }
-}
-
-fn ms_to_datetime(ms: i64) -> chrono::DateTime<Utc> {
-    Utc.timestamp_millis_opt(ms)
-        .single()
-        .unwrap_or_else(Utc::now)
-}
-
-fn opt_ms_to_datetime(ms: Option<i64>) -> Option<chrono::DateTime<Utc>> {
-    ms.and_then(|ms| Utc.timestamp_millis_opt(ms).single())
 }
 
 /// Decode a base64-encoded string to JSON Value, or None if empty/invalid.
