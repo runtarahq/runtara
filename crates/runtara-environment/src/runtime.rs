@@ -1015,7 +1015,11 @@ async fn fail_interrupted_pending_starts<'e, E>(
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
 {
-    let rows: Vec<(bool,)> = sqlx::query_as(
+    // The seventh copy of the active-state list lived here, in another module
+    // from the queue that owns it. It comes from LaunchState now like the rest.
+    let active_states =
+        crate::launch_queue::LaunchState::sql_list(crate::launch_queue::LaunchState::ACTIVE);
+    let rows: Vec<(bool,)> = sqlx::query_as(&format!(
         r#"
         WITH candidates AS (
             SELECT
@@ -1037,7 +1041,7 @@ where
                     SELECT 1
                     FROM instance_launches launch
                     WHERE launch.instance_id = i.instance_id
-                      AND launch.state IN ('queued', 'preparing', 'leased', 'starting', 'running')
+                      AND launch.state IN ({active_states})
               )
         )
         UPDATE instances i
@@ -1055,8 +1059,8 @@ where
         WHERE i.instance_id = candidates.instance_id
           AND i.status = 'pending'
         RETURNING candidates.has_image
-        "#,
-    )
+        "#
+    ))
     .bind(started_before)
     .fetch_all(executor)
     .await?;

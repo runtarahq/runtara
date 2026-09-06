@@ -122,23 +122,72 @@ impl LaunchState {
         }
     }
 
+    /// Every state a launch can be stored in.
+    ///
+    /// The database `CHECK` constraint lists the same set. They are checked
+    /// against each other by a test rather than generated from one another,
+    /// because a migration cannot be rewritten once committed: adding a state
+    /// always needs a forward migration, and the test turns forgetting one into
+    /// a failure here instead of a constraint violation on first insert.
+    pub const ALL: &'static [Self] = &[
+        Self::Queued,
+        Self::Preparing,
+        Self::Leased,
+        Self::Starting,
+        Self::Running,
+        Self::Suspended,
+        Self::Completed,
+        Self::Failed,
+        Self::Cancelled,
+    ];
+
+    /// States in which a generation still owns the instance's live launch slot.
+    pub const ACTIVE: &'static [Self] = &[
+        Self::Queued,
+        Self::Preparing,
+        Self::Leased,
+        Self::Starting,
+        Self::Running,
+    ];
+
+    /// States a generation passes through before any runner has it, where
+    /// cancelling is free: no guest exists, so the row terminalizes outright.
+    pub const PRE_RUNNER: &'static [Self] = &[Self::Queued, Self::Preparing, Self::Leased];
+
+    /// States in which a runner may already hold the generation, so
+    /// cancellation goes through the start gate rather than the row.
+    pub const LIVE: &'static [Self] = &[Self::Starting, Self::Running];
+
+    /// States owned by a dispatcher's claim, and recoverable when it expires.
+    pub const CLAIMED: &'static [Self] = &[Self::Preparing, Self::Leased, Self::Starting];
+
+    /// A set rendered as a SQL literal list, for `state IN ({...})`.
+    ///
+    /// Deliberately interpolation rather than a bound `= ANY($n)`. These are
+    /// compile-time constants, so there is nothing to inject, and the rendered
+    /// text is byte-identical to the hand-written lists it replaces — which
+    /// means the partial indexes these queries lean on keep the plans they had.
+    /// Changing the shape to `ANY` would risk trading a duplicated list for a
+    /// sequential scan on the claim path, the worse bargain of the two.
+    pub fn sql_list(states: &[Self]) -> String {
+        states
+            .iter()
+            .map(|state| format!("'{}'", state.as_str()))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
     /// Whether this generation still owns the instance's live launch slot.
-    pub const fn is_active(self) -> bool {
-        matches!(
-            self,
-            Self::Queued | Self::Preparing | Self::Leased | Self::Starting | Self::Running
-        )
+    pub fn is_active(self) -> bool {
+        Self::ACTIVE.contains(&self)
     }
 
     /// Whether this generation has stopped owning runner/start capacity.
     ///
     /// `Suspended` is terminal for the physical generation even though the
     /// durable instance is not terminal: a later wake creates a new launch.
-    pub const fn is_terminal(self) -> bool {
-        matches!(
-            self,
-            Self::Suspended | Self::Completed | Self::Failed | Self::Cancelled
-        )
+    pub fn is_terminal(self) -> bool {
+        !self.is_active()
     }
 
     fn from_db(value: String) -> Result<Self, LaunchQueueError> {
@@ -449,12 +498,13 @@ impl LaunchRepository {
             .env
             .filter(|values| !values.is_empty())
             .map(|values| serde_json::to_value(values).unwrap_or_default());
+        let active_states = LaunchState::sql_list(LaunchState::ACTIVE);
         let active = format!(
             r#"
             SELECT {LAUNCH_COLUMNS}
             FROM instance_launches
             WHERE instance_id = $1
-              AND state IN ('queued', 'preparing', 'leased', 'starting', 'running')
+              AND state IN ({active_states})
             LIMIT 1
             "#
         );
@@ -607,12 +657,13 @@ impl LaunchRepository {
             "#
         );
 
+        let active_states = LaunchState::sql_list(LaunchState::ACTIVE);
         let active = format!(
             r#"
             SELECT {LAUNCH_COLUMNS}
             FROM instance_launches
             WHERE instance_id = $1
-              AND state IN ('queued', 'preparing', 'leased', 'starting', 'running')
+              AND state IN ({active_states})
             LIMIT 1
             "#
         );
@@ -779,12 +830,13 @@ impl LaunchRepository {
         &self,
         instance_id: &str,
     ) -> Result<Option<Launch>, LaunchQueueError> {
+        let active_states = LaunchState::sql_list(LaunchState::ACTIVE);
         let query = format!(
             r#"
             SELECT {LAUNCH_COLUMNS}
             FROM instance_launches
             WHERE instance_id = $1
-              AND state IN ('queued', 'preparing', 'leased', 'starting', 'running')
+              AND state IN ({active_states})
             LIMIT 1
             "#
         );
@@ -830,6 +882,7 @@ impl LaunchRepository {
             return Ok(Vec::new());
         }
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let active_states = LaunchState::sql_list(LaunchState::ACTIVE);
         let query = format!(
             r#"
             WITH candidates AS (
@@ -839,7 +892,7 @@ impl LaunchRepository {
                   ON core_instance.instance_id = launch.instance_id
                  AND core_instance.tenant_id = launch.tenant_id
                 WHERE ($2::TEXT IS NULL OR launch.instance_id = $2)
-                  AND launch.state IN ('queued', 'preparing', 'leased', 'starting', 'running')
+                  AND launch.state IN ({active_states})
                   AND (
                         core_instance.status IN ('completed', 'failed', 'cancelled')
                         OR (
@@ -1446,6 +1499,7 @@ impl LaunchRepository {
         last_error: Option<&str>,
     ) -> Result<Option<Launch>, LaunchQueueError> {
         let retry_after_us = duration_to_micros(retry_after, "retry_after")?;
+        let claimed_states = LaunchState::sql_list(LaunchState::CLAIMED);
         let query = format!(
             r#"
             UPDATE instance_launches
@@ -1459,7 +1513,7 @@ impl LaunchRepository {
             WHERE launch_id = $1
               AND lease_owner = $2
               AND attempt_count = $3
-              AND state IN ('preparing', 'leased', 'starting')
+              AND state IN ({claimed_states})
               AND lease_expires_at > clock_timestamp()
               AND deadline_at > clock_timestamp()
             RETURNING {LAUNCH_COLUMNS}
@@ -1491,6 +1545,7 @@ impl LaunchRepository {
         error: &str,
     ) -> Result<Option<Launch>, LaunchQueueError> {
         let mut tx = self.pool.begin().await?;
+        let claimed_states = LaunchState::sql_list(LaunchState::CLAIMED);
         let update = format!(
             r#"
             UPDATE instance_launches
@@ -1503,7 +1558,7 @@ impl LaunchRepository {
             WHERE launch_id = $1
               AND lease_owner = $2
               AND attempt_count = $3
-              AND state IN ('preparing', 'leased', 'starting')
+              AND state IN ({claimed_states})
               AND lease_expires_at > clock_timestamp()
               AND deadline_at > clock_timestamp()
             RETURNING {LAUNCH_COLUMNS}
@@ -1556,6 +1611,7 @@ impl LaunchRepository {
         launch_id: &str,
     ) -> Result<Option<Launch>, LaunchQueueError> {
         let mut tx = self.pool.begin().await?;
+        let live_states = LaunchState::sql_list(LaunchState::LIVE);
         let query = format!(
             r#"
             UPDATE instance_launches
@@ -1565,7 +1621,7 @@ impl LaunchRepository {
                 start_gate_deadline_at = NULL,
                 updated_at = NOW()
             WHERE launch_id = $1
-              AND state IN ('starting', 'running')
+              AND state IN ({live_states})
             RETURNING {LAUNCH_COLUMNS}
             "#
         );
@@ -1613,6 +1669,7 @@ impl LaunchRepository {
         if !state.is_terminal() {
             return Err(LaunchQueueError::NonTerminalCompletion { state });
         }
+        let active_states = LaunchState::sql_list(LaunchState::ACTIVE);
         let query = format!(
             r#"
             UPDATE instance_launches
@@ -1623,7 +1680,7 @@ impl LaunchRepository {
                 last_error = $3,
                 updated_at = NOW()
             WHERE launch_id = $1
-              AND state IN ('queued', 'preparing', 'leased', 'starting', 'running')
+              AND state IN ({active_states})
             RETURNING {LAUNCH_COLUMNS}
             "#
         );
@@ -1650,12 +1707,13 @@ impl LaunchRepository {
         }
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
         let mut tx = self.pool.begin().await?;
+        let pre_runner_states = LaunchState::sql_list(LaunchState::PRE_RUNNER);
         let select = format!(
             r#"
             SELECT {LAUNCH_COLUMNS}
             FROM instance_launches
             WHERE (
-                    state IN ('queued', 'preparing', 'leased')
+                    state IN ({pre_runner_states})
                     OR (state = 'starting' AND start_gate_deadline_at IS NOT NULL)
                 )
               AND deadline_at <= clock_timestamp()
@@ -1683,6 +1741,7 @@ impl LaunchRepository {
 
         let launch_ids: Vec<String> = due.iter().map(|row| row.launch_id.clone()).collect();
         let instance_ids: Vec<String> = due.iter().map(|row| row.instance_id.clone()).collect();
+        let pre_runner_states = LaunchState::sql_list(LaunchState::PRE_RUNNER);
         let update_launches = format!(
             r#"
             UPDATE instance_launches
@@ -1695,7 +1754,7 @@ impl LaunchRepository {
             WHERE launch_id = ANY($1)
               AND (
                     (
-                        state IN ('queued', 'preparing', 'leased')
+                        state IN ({pre_runner_states})
                         OR (state = 'starting' AND start_gate_deadline_at IS NOT NULL)
                     )
                     AND deadline_at <= clock_timestamp()
@@ -1761,6 +1820,8 @@ impl LaunchRepository {
         launch_id: &str,
     ) -> Result<CancelOutcome, LaunchQueueError> {
         let mut tx = self.pool.begin().await?;
+        let live_states = LaunchState::sql_list(LaunchState::LIVE);
+        let pre_runner_states = LaunchState::sql_list(LaunchState::PRE_RUNNER);
         let update = format!(
             r#"
             UPDATE instance_launches
@@ -1771,8 +1832,8 @@ impl LaunchRepository {
                 updated_at = NOW()
             WHERE launch_id = $1
               AND (
-                    state IN ('queued', 'preparing', 'leased')
-                    OR (state IN ('starting', 'running') AND start_gate_deadline_at IS NOT NULL)
+                    state IN ({pre_runner_states})
+                    OR (state IN ({live_states}) AND start_gate_deadline_at IS NOT NULL)
                 )
             RETURNING {LAUNCH_COLUMNS}
             "#
@@ -1938,17 +1999,18 @@ async fn has_active_workflow_launch(
     tenant_id: &str,
     workflow_id: &str,
 ) -> Result<bool, LaunchQueueError> {
-    Ok(sqlx::query_scalar(
+    let active_states = LaunchState::sql_list(LaunchState::ACTIVE);
+    Ok(sqlx::query_scalar(&format!(
         r#"
         SELECT EXISTS(
             SELECT 1
             FROM instance_launches
             WHERE tenant_id = $1
               AND workflow_id = $2
-              AND state IN ('queued', 'preparing', 'leased', 'starting', 'running')
+              AND state IN ({active_states})
         )
-        "#,
-    )
+        "#
+    ))
     .bind(tenant_id)
     .bind(workflow_id)
     .fetch_one(&mut **tx)
@@ -1965,6 +2027,113 @@ fn duration_to_micros(duration: Duration, field: &'static str) -> Result<i64, La
 
 #[cfg(test)]
 mod tests {
+    /// The Rust vocabulary and the database `CHECK` constraint must agree.
+    ///
+    /// They cannot be generated from one another: a committed migration is
+    /// immutable, so a new state always needs a forward migration. What this
+    /// catches is the half-done change — a variant added to [`LaunchState`]
+    /// with no migration widening the constraint — which would otherwise
+    /// surface as a constraint violation the first time that state is written,
+    /// in whatever code path happened to write it first.
+    #[cfg(feature = "db-integration-tests")]
+    #[tokio::test]
+    async fn the_check_constraint_lists_exactly_the_states_rust_knows() {
+        use super::LaunchState;
+
+        let pool = crate::test_support::pool().await;
+        let definition: String = sqlx::query_scalar(
+            "SELECT pg_get_constraintdef(oid) FROM pg_constraint \
+             WHERE conrelid = 'instance_launches'::regclass \
+               AND contype = 'c' \
+               AND pg_get_constraintdef(oid) LIKE '%state%'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("instance_launches must have a state CHECK constraint");
+
+        for state in LaunchState::ALL {
+            assert!(
+                definition.contains(state.as_str()),
+                "{state:?} is known to Rust but missing from the CHECK constraint; \
+                 it needs a forward migration. Constraint: {definition}"
+            );
+        }
+
+        // And nothing the database allows is unknown to Rust, which would mean
+        // a row could be stored that `from_db` then refuses to read back.
+        for stored in definition
+            .split('\'')
+            .filter(|piece| piece.chars().all(|c| c.is_ascii_lowercase() || c == '_'))
+            .filter(|piece| !piece.is_empty())
+        {
+            assert!(
+                LaunchState::ALL
+                    .iter()
+                    .any(|state| state.as_str() == stored),
+                "the CHECK constraint allows '{stored}', which LaunchState cannot read back"
+            );
+        }
+    }
+
+    /// The rendered sets must stay byte-identical to the hand-written lists
+    /// they replaced. That equality is the entire safety argument for
+    /// interpolating them: identical SQL text means the partial indexes these
+    /// queries lean on keep the plans they had, so this is a behavioural
+    /// assertion and not a formatting one.
+    #[test]
+    fn rendered_state_sets_match_the_lists_they_replaced() {
+        use super::LaunchState;
+
+        assert_eq!(
+            LaunchState::sql_list(LaunchState::ACTIVE),
+            "'queued', 'preparing', 'leased', 'starting', 'running'"
+        );
+        assert_eq!(
+            LaunchState::sql_list(LaunchState::PRE_RUNNER),
+            "'queued', 'preparing', 'leased'"
+        );
+        assert_eq!(
+            LaunchState::sql_list(LaunchState::LIVE),
+            "'starting', 'running'"
+        );
+        assert_eq!(
+            LaunchState::sql_list(LaunchState::CLAIMED),
+            "'preparing', 'leased', 'starting'"
+        );
+    }
+
+    /// Every state belongs to exactly one side of the active/terminal split,
+    /// and the sets that carve up the active side stay inside it.
+    #[test]
+    fn the_state_sets_partition_cleanly() {
+        use super::LaunchState;
+
+        for state in LaunchState::ALL {
+            assert_ne!(
+                state.is_active(),
+                state.is_terminal(),
+                "{state:?} must be active or terminal, never both or neither"
+            );
+        }
+        for subset in [
+            LaunchState::PRE_RUNNER,
+            LaunchState::LIVE,
+            LaunchState::CLAIMED,
+        ] {
+            for state in subset {
+                assert!(
+                    state.is_active(),
+                    "{state:?} is in a pre-terminal subset but not ACTIVE"
+                );
+            }
+        }
+        assert_eq!(
+            LaunchState::ALL.len(),
+            9,
+            "a new state needs a forward migration and a place in these sets"
+        );
+    }
+
     use super::*;
 
     #[test]
