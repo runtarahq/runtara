@@ -2146,8 +2146,8 @@ fn direct_core_emits_arena_reset_memory_copy_for_loops() {
 }
 
 /// Deterministic guard for the per-iteration value-store GC (Stage 2): at each
-/// loop reset the emitter calls the stdlib `value-store-retain`, handing it the
-/// parent source + the surviving accumulator as roots so the prior iteration's
+/// loop reset the emitter calls the stdlib `value-store-retain-scoped`, handing it the
+/// parent source + the surviving accumulator as roots and an allocation boundary so the prior iteration's
 /// superseded interned values are mark-swept away (otherwise a growing-accumulator
 /// loop interns O(N) blobs per iteration → O(N²) host memory). The full stdlib
 /// interface is always imported, so presence proves nothing — the signal is the
@@ -2165,20 +2165,21 @@ fn direct_core_emits_value_store_retain_for_loops() {
         let (resolve, world) = build_direct_component_resolve().expect("resolve");
         let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
         let (imports, run_calls) = direct_core_imports_and_run_calls(&core);
-        let index = direct_core_import(&imports, STDLIB_MODULE, "value-store-retain");
-        run_calls.contains(&index)
+        let index = direct_core_import(&imports, STDLIB_MODULE, "value-store-retain-scoped");
+        let scope = direct_core_import(&imports, STDLIB_MODULE, "value-store-scope");
+        run_calls.contains(&index) && run_calls.contains(&scope)
     }
 
     for fixture_name in ["split_timeout", "while_timeout"] {
         assert!(
             core_calls_retain(fixture(fixture_name)),
-            "{fixture_name}: loop must call value-store-retain at its reset"
+            "{fixture_name}: loop must call value-store-retain-scoped at its reset"
         );
     }
 
     assert!(
         !core_calls_retain(fixture("simple")),
-        "a loop-free workflow must not call value-store-retain"
+        "a loop-free workflow must not call value-store-retain-scoped"
     );
 }
 

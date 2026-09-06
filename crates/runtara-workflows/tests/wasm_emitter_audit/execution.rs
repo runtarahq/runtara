@@ -43,8 +43,18 @@ fn compile_with_children(
     value: Value,
     children: Vec<ChildWorkflowInput>,
 ) -> (tempfile::TempDir, DirectCompilationResult) {
+    compile_configured(id, value, children, None)
+}
+
+fn compile_configured(
+    id: &str,
+    value: Value,
+    children: Vec<ChildWorkflowInput>,
+    catalog: Option<Arc<AgentCatalog>>,
+) -> (tempfile::TempDir, DirectCompilationResult) {
     let graph: ExecutionGraph = serde_json::from_value(value).expect("audit graph parses");
-    let validation = validate_workflow(&graph, &AgentCatalog::default());
+    let empty = AgentCatalog::default();
+    let validation = validate_workflow(&graph, catalog.as_deref().unwrap_or(&empty));
     assert!(
         validation.errors.is_empty(),
         "audit graph must validate: {:?}",
@@ -60,7 +70,7 @@ fn compile_with_children(
             child_workflows: children,
             output_dir: temp.path().into(),
             track_events: false,
-            agent_catalog: None,
+            agent_catalog: catalog,
             agent_slug: None,
         },
         direct_e2e_components_dir(),
@@ -346,9 +356,266 @@ fn audit_02_single_loop_preserves_large_outer_value() {
 }
 
 #[test]
-#[ignore = "AUDIT-02: inner loop GC omits outer frame roots"]
 fn audit_02_nested_loop_preserves_large_outer_value() {
     assert_gc_preserves_value(100_000, true);
+}
+
+fn sized_filter(id: &str, value: Value) -> Value {
+    json!({"id":id,"stepType":"Filter","config":{"value":immediate(json!([value])),"condition":condition(true)}})
+}
+
+fn nested_gc_body(kinds: &[&str], depth: usize, leaf: Value) -> Value {
+    let Some((kind, rest)) = kinds.split_first() else {
+        return leaf;
+    };
+    let id = format!("loop_{depth}");
+    let done = format!("done_{depth}");
+    let body = nested_gc_body(rest, depth + 1, leaf);
+    let step = if *kind == "While" {
+        json!({"id":id,"stepType":"While","condition":condition(true),"config":{"maxIterations":2},"subgraph":body})
+    } else {
+        json!({"id":id,"stepType":"Split","config":{"value":immediate(json!([{},{}])),"sequential":true},"subgraph":body})
+    };
+    json!({"entryPoint":id,"steps":{id.clone():step,done.clone():finish(&done)},"executionPlan":[{"fromStep":id,"toStep":done}]})
+}
+
+fn preserve_outer_source(body: Value) -> Value {
+    let mut graph = body;
+    let entry = graph["entryPoint"].clone();
+    graph["steps"]["saved_filter"] =
+        sized_filter("saved_filter", json!({"large":"x".repeat(100_000)}));
+    // Replace the body's terminal Finish with a continuation that reads the root.
+    for step in graph["steps"].as_object_mut().unwrap().values_mut() {
+        if step["stepType"] == "Finish" {
+            step["inputMapping"] = json!({"saved":{"valueType":"reference","value":"steps.saved_filter.outputs.items.0.large"}});
+        }
+    }
+    graph["steps"]
+        .as_object_mut()
+        .unwrap()
+        .remove("saved_finish");
+    graph["entryPoint"] = json!("saved_filter");
+    graph["executionPlan"]
+        .as_array_mut()
+        .unwrap()
+        .insert(0, json!({"fromStep":"saved_filter","toStep":entry}));
+    graph
+}
+
+fn assert_saved_large(output: &Value) {
+    assert!(
+        output["saved"].as_str() == Some("x".repeat(100_000).as_str()),
+        "outer 100 KB value must survive collection"
+    );
+}
+
+#[test]
+fn audit_02_mixed_nested_loops_preserve_outer_source() {
+    for kinds in [
+        vec!["While", "While"],
+        vec!["While", "Split"],
+        vec!["Split", "While"],
+        vec!["Split", "Split"],
+        vec!["While", "Split", "While"],
+        vec!["Split", "While", "Split"],
+    ] {
+        let leaf = json!({"entryPoint":"leaf","steps":{"leaf":finish("leaf")}});
+        assert_saved_large(&run(
+            "audit-mixed-gc",
+            preserve_outer_source(nested_gc_body(&kinds, 0, leaf)),
+        ));
+    }
+}
+
+#[test]
+fn audit_02_nested_loop_preserves_value_near_intern_threshold() {
+    for size in [16_000, 16_383, 16_384, 16_385, 32_768] {
+        assert_gc_preserves_value(size, true);
+    }
+}
+
+#[test]
+fn audit_02_child_loop_preserves_caller_source() {
+    let child = nested_gc_body(
+        &["While", "Split"],
+        0,
+        json!({"entryPoint":"leaf","steps":{"leaf":finish("leaf")}}),
+    );
+    let parent = preserve_outer_source(json!({"entryPoint":"call","steps":{
+        "call":{"id":"call","stepType":"EmbedWorkflow","childWorkflowId":"gc-child","childVersion":"latest"},
+        "parent_done":finish("parent_done")
+    },"executionPlan":[{"fromStep":"call","toStep":"parent_done"}]}));
+    let (_temp, artifact) = compile_with_children(
+        "audit-child-gc",
+        parent,
+        vec![ChildWorkflowInput {
+            step_id: "call".into(),
+            workflow_id: "gc-child".into(),
+            version_requested: "latest".into(),
+            version_resolved: 1,
+            execution_graph: serde_json::from_value(child).unwrap(),
+        }],
+    );
+    assert_saved_large(&completed(run_invoke_once(
+        &artifact.wasm_path,
+        Arc::new(CheckpointingRuntimeHost::new(b"{}")),
+        b"{}".to_vec(),
+    )));
+}
+
+#[test]
+fn audit_02_nested_collection_survives_suspend_and_replay() {
+    let leaf = json!({"entryPoint":"delay","steps":{
+        "delay":{"id":"delay","stepType":"Delay","durationMs":immediate(json!(60000))},"leaf_done":finish("leaf_done")
+    },"executionPlan":[{"fromStep":"delay","toStep":"leaf_done"}]});
+    let mut graph = nested_gc_body(&["While", "While"], 0, leaf);
+    graph["steps"]["loop_0"]["config"]["maxIterations"] = json!(1);
+    graph["steps"]["loop_0"]["subgraph"]["steps"]["loop_1"]["config"]["maxIterations"] = json!(1);
+    let (_temp, artifact) = compile("audit-replay-gc", preserve_outer_source(graph));
+    let host = Arc::new(CheckpointingRuntimeHost::new(b"{}"));
+    *host.pinned_clock_ms.lock().unwrap() = Some(1_000_000);
+    let invoke = || run_invoke_once(&artifact.wasm_path, host.clone(), b"{}".to_vec());
+    for _ in 0..2 {
+        assert!(matches!(invoke(), InvokeExit::Suspended(_)));
+    }
+    *host.pinned_clock_ms.lock().unwrap() = Some(1_060_001);
+    assert_saved_large(&completed(invoke()));
+    for bytes in host.checkpoints.lock().unwrap().values() {
+        let text = String::from_utf8_lossy(bytes);
+        assert!(
+            !text.contains("$wfref") && !text.contains("$wfnonce"),
+            "checkpoints must contain materialized values"
+        );
+    }
+}
+
+#[test]
+fn audit_02_nested_error_handler_preserves_outer_source() {
+    let leaf = json!({"entryPoint":"error","steps":{"error":{"id":"error","stepType":"Error","code":"AUDIT_ERROR","message":"expected"}}});
+    let mut graph = preserve_outer_source(nested_gc_body(&["While", "Split"], 0, leaf));
+    graph["steps"]["handler"] = json!({"id":"handler","stepType":"Finish","inputMapping":{
+        "saved":{"valueType":"reference","value":"steps.saved_filter.outputs.items.0.large"},"handled":immediate(json!(true))
+    }});
+    graph["executionPlan"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"fromStep":"loop_0","toStep":"handler","label":"onError"}));
+    let output = run("audit-error-gc", graph);
+    assert_saved_large(&output);
+    assert_eq!(output["handled"], true);
+}
+
+#[test]
+fn audit_02_parallel_split_preserves_live_chunk_and_outer_values() {
+    let inner = nested_gc_body(
+        &["While"],
+        0,
+        json!({"entryPoint":"leaf","steps":{"leaf":finish("leaf")}}),
+    );
+    let mut body = inner;
+    body["steps"]["invoke"] = json!({"id":"invoke","stepType":"Agent","agentId":"utils","capabilityId":"return-input",
+        "maxRetries":0,"inputMapping":{"value":{"valueType":"reference","value":"item"}}});
+    body["entryPoint"] = json!("invoke");
+    body["executionPlan"]
+        .as_array_mut()
+        .unwrap()
+        .insert(0, json!({"fromStep":"invoke","toStep":"loop_0"}));
+    body["steps"]["done_0"]["inputMapping"] =
+        json!({"value":{"valueType":"reference","value":"steps.invoke.outputs"}});
+    let values = vec![
+        "a".repeat(100_000),
+        "b".repeat(100_000),
+        "c".repeat(100_000),
+        "d".repeat(100_000),
+    ];
+    let mut graph = preserve_outer_source(json!({"entryPoint":"parallel","steps":{
+        "parallel":{"id":"parallel","stepType":"Split","config":{"value":immediate(json!(values)),"sequential":false,"parallelism":2},"subgraph":body},
+        "done":finish("done")
+    },"executionPlan":[{"fromStep":"parallel","toStep":"done"}]}));
+    graph["steps"]["done"]["inputMapping"]["results"] =
+        json!({"valueType":"reference","value":"steps.parallel.outputs"});
+    let utils_meta =
+        std::fs::read(direct_e2e_components_dir().join("runtara_agent_utils.meta.json")).unwrap();
+    let catalog = Arc::new(AgentCatalog::from_agents(vec![
+        serde_json::from_slice(&utils_meta).unwrap(),
+    ]));
+    let (_temp, artifact) = compile_configured("audit-parallel-gc", graph, vec![], Some(catalog));
+    let logic = std::fs::read(&artifact.workflow_logic_wasm_path).unwrap();
+    assert!(
+        logic
+            .windows(b"[waitable-set-new]".len())
+            .any(|w| w == b"[waitable-set-new]"),
+        "must exercise real parallel lowering"
+    );
+    let output = completed(run_invoke_once(
+        &artifact.wasm_path,
+        Arc::new(CheckpointingRuntimeHost::new(b"{}")),
+        b"{}".to_vec(),
+    ));
+    assert_saved_large(&output);
+    let results = output["results"].as_array().expect("parallel results");
+    assert_eq!(results.len(), values.len());
+    for (result, expected) in results.iter().zip(values) {
+        assert!(
+            result["value"].as_str() == Some(expected.as_str()),
+            "every parallel item's value survives nested collection: actual type/length={:?}, keys={:?}",
+            result["value"]
+                .as_str()
+                .map(|s| (s.len(), s.chars().next())),
+            result.as_object().map(|o| o.keys().collect::<Vec<_>>())
+        );
+    }
+}
+
+#[test]
+fn audit_02_nested_growing_accumulator_completes_with_bounded_memory() {
+    let accumulator: Value =
+        serde_json::from_str(&super::while_accumulator_graph(64 * 1024)).unwrap();
+    let mut graph = preserve_outer_source(nested_gc_body(&["While"], 0, accumulator));
+    graph["steps"]["done_0"]["inputMapping"]["innerIterations"] =
+        json!({"valueType":"reference","value":"steps.loop_0.outputs.outputs.iterations"});
+    graph["steps"]["done_0"]["inputMapping"]["outerIterations"] =
+        json!({"valueType":"reference","value":"steps.loop_0.outputs.iterations"});
+    let (_temp, artifact) = compile("audit-bounded-nested-gc", graph);
+    let input = br#"{"count":60}"#.to_vec();
+    let host = Arc::new(CheckpointingRuntimeHost::new(&input));
+    let executor = super::embedded_executor();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let result = runtime.block_on(async {
+        let pre = executor
+            .load_instance_pre(&artifact.wasm_path)
+            .await
+            .unwrap();
+        executor
+            .execute_invoke(
+                &pre,
+                runtara_component_host::WorkflowRunSpec {
+                    env: Default::default(),
+                    stderr: None,
+                    timeout: std::time::Duration::from_secs(60),
+                    cancel: None,
+                    limits: runtara_component_host::WorkflowLimits {
+                        max_memory_bytes: 96 * 1024 * 1024,
+                        ..Default::default()
+                    },
+                    runtime: Some(host),
+                },
+                input,
+            )
+            .await
+    });
+    let output = completed(result.exit);
+    assert_saved_large(&output);
+    assert_eq!(
+        output["innerIterations"], 60,
+        "inner loop must actually complete, not fail early"
+    );
+    assert_eq!(output["outerIterations"], 2);
+    assert!(
+        result.memory_peak_bytes < 64 * 1024 * 1024,
+        "nested accumulator must stay bounded: {} bytes",
+        result.memory_peak_bytes
+    );
 }
 
 fn waits_graph(second_id: &str) -> Value {

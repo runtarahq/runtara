@@ -43,7 +43,8 @@ pub(super) struct DirectCoreImportIndices {
     runtime_durable_sleep_checkpoint: Option<u32>,
     connection_resolver_describe: Option<u32>,
     stdlib_init_manifest: Option<u32>,
-    stdlib_value_store_retain: Option<u32>,
+    stdlib_value_store_retain_scoped: Option<u32>,
+    stdlib_value_store_scope: Option<u32>,
     stdlib_build_source: Option<u32>,
     stdlib_apply_mapping: Option<u32>,
     stdlib_eval_condition: Option<u32>,
@@ -265,9 +266,13 @@ impl DirectCoreImportIndices {
                 self.stdlib_init_manifest,
                 "stdlib.init-manifest",
             )?,
-            stdlib_value_store_retain: require_import(
-                self.stdlib_value_store_retain,
-                "stdlib.value-store-retain",
+            stdlib_value_store_scope: require_import(
+                self.stdlib_value_store_scope,
+                "stdlib.value-store-scope",
+            )?,
+            stdlib_value_store_retain_scoped: require_import(
+                self.stdlib_value_store_retain_scoped,
+                "stdlib.value-store-retain-scoped",
             )?,
             stdlib_build_source: require_import(self.stdlib_build_source, "stdlib.build-source")?,
             stdlib_apply_mapping: require_import(
@@ -661,7 +666,8 @@ pub(super) struct DirectCoreFunctionIndices {
     pub(super) runtime_blocking_sleep: u32,
     pub(super) runtime_durable_sleep_checkpoint: u32,
     pub(super) stdlib_init_manifest: u32,
-    pub(super) stdlib_value_store_retain: u32,
+    pub(super) stdlib_value_store_retain_scoped: u32,
+    pub(super) stdlib_value_store_scope: u32,
     pub(super) stdlib_build_source: u32,
     pub(super) stdlib_apply_mapping: u32,
     pub(super) stdlib_eval_condition: u32,
@@ -990,8 +996,10 @@ pub(super) fn import_core_function(
         import_indices.runtime_durable_sleep_checkpoint = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "init-manifest") {
         import_indices.stdlib_init_manifest = Some(function_index);
-    } else if is_stdlib_import(resolve, interface, function, "value-store-retain") {
-        import_indices.stdlib_value_store_retain = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "value-store-scope") {
+        import_indices.stdlib_value_store_scope = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "value-store-retain-scoped") {
+        import_indices.stdlib_value_store_retain_scoped = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "build-source") {
         import_indices.stdlib_build_source = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "apply-mapping") {

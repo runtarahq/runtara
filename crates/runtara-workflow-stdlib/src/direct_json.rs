@@ -126,6 +126,8 @@ pub fn reset_value_store() {
     WFREF_NONCE.with(|nonce| nonce.set(fresh_nonce()));
 }
 
+/// Legacy unscoped collection: the caller must supply EVERY live root. New
+/// emitters use [`value_store_retain_scoped`] to protect enclosing frames.
 /// Free every interned value not reachable from `roots`. Called at a loop
 /// iteration boundary with the loop's live roots (the parent source plus the
 /// surviving accumulator/state), so the previous iteration's superseded values
@@ -134,6 +136,25 @@ pub fn reset_value_store() {
 /// so a handle that carries other handles is marked correctly. This is the GC
 /// that bounds a growing-accumulator loop to ~one live copy.
 pub fn value_store_retain(roots: &[&[u8]]) {
+    value_store_retain_scoped(roots, 0);
+}
+
+/// Arena allocation boundary captured before entering a loop. Entries are
+/// immutable and IDs are monotonically allocated, so every enclosing frame's
+/// handles predate this mark, including handles hidden from the child's source.
+/// The mark is run-local and must never be persisted across suspend/replay.
+pub fn value_store_scope() -> u64 {
+    VALUE_STORE.with(|store| store.borrow().next_id)
+}
+
+/// Collect only entries allocated within this loop's lifetime. Older entries
+/// may belong to any enclosing loop, child-call frame or parallel branch and
+/// remain protected even if absent from the supplied local roots. On return to
+/// the enclosing loop its earlier mark allows these entries to be collected.
+/// This needs no push/pop registry: normal, error and suspension exits cannot
+/// leak a registered root. Scratch allocated after the mark is still reclaimed
+/// each iteration, keeping long-running inner loops bounded.
+pub fn value_store_retain_scoped(roots: &[&[u8]], scope: u64) {
     // Collect the root handle ids first. If any root fails to parse we cannot
     // determine reachability, so free nothing rather than risk dropping a live
     // value — GC is an optimization; never let it corrupt state.
@@ -149,6 +170,7 @@ pub fn value_store_retain(roots: &[&[u8]]) {
         if store.entries.is_empty() {
             return;
         }
+        work.extend(store.entries.keys().copied().filter(|id| *id < scope));
         let mut marked: std::collections::HashSet<u64> = std::collections::HashSet::new();
         while let Some(id) = work.pop() {
             if marked.insert(id)
@@ -290,32 +312,26 @@ fn intern_scope_entries(map: &mut Map<String, Value>) {
 /// Resolve a `{"$wfref": id}` handle to its concrete value (parsing the stored
 /// bytes); borrow non-handle values unchanged.
 fn deref_handle(value: &Value) -> Cow<'_, Value> {
-    if let Some(id) = wfref_id(value)
-        && let Some(bytes) =
-            VALUE_STORE.with(|store| store.borrow().entries.get(&id).map(|e| e.bytes.clone()))
-        && let Ok(inner) = serde_json::from_slice::<Value>(&bytes)
-    {
-        return Cow::Owned(inner);
+    match wfref_id(value) {
+        Some(id) => Cow::Owned(stored_value(id)),
+        None => Cow::Borrowed(value),
     }
-    Cow::Borrowed(value)
 }
 
-/// Fully resolve every `{"$wfref": id}` handle in `value`. Used at boundaries
-/// that serialize a value for an external consumer (checkpoint blob, cache key,
-/// final output) where a handle must never leak; ordinary reads go through
-/// `lookup_source_path`, which resolves handles as it traverses.
+fn stored_value(id: u64) -> Value {
+    let bytes = VALUE_STORE
+        .with(|store| store.borrow().entries.get(&id).map(|e| e.bytes.clone()))
+        .expect("workflow value arena invariant violated: dangling handle");
+    // Arena entries are serialized parsed Values, never untrusted raw bytes.
+    serde_json::from_slice(&bytes).expect("workflow value arena invariant violated: invalid JSON")
+}
+
+/// Fully resolve handles at external boundaries. A same-run dangling handle is
+/// an internal invariant failure, never a successful null output. Foreign-run
+/// or user-shaped handles remain ordinary data because wfref_id rejects them.
 fn materialize(value: Value) -> Value {
     if let Some(id) = wfref_id(&value) {
-        // Resolve from the arena. A missing id is a dangling handle (its value
-        // was collected) — return Null rather than recursing on the handle, which
-        // would loop forever. A correct GC never frees a still-referenced value,
-        // so this is only a fail-safe.
-        let bytes =
-            VALUE_STORE.with(|store| store.borrow().entries.get(&id).map(|e| e.bytes.clone()));
-        return match bytes.and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok()) {
-            Some(inner) => materialize(inner),
-            None => Value::Null,
-        };
+        return materialize(stored_value(id));
     }
     match value {
         Value::Array(items) => Value::Array(items.into_iter().map(materialize).collect()),
@@ -7540,9 +7556,9 @@ mod tests {
             keep,
             "reachable value must survive"
         );
-        assert_eq!(
-            materialize(drop_handle),
-            Value::Null,
+        let drop_id = wfref_id(&drop_handle).unwrap();
+        assert!(
+            VALUE_STORE.with(|store| !store.borrow().entries.contains_key(&drop_id)),
             "unreachable value must be collected"
         );
     }
@@ -7563,6 +7579,105 @@ mod tests {
             materialized["inner"], inner,
             "nested handle survives transitively"
         );
+    }
+
+    #[test]
+    fn audit_02_scoped_collection_preserves_hidden_outer_roots() {
+        reset_value_store();
+        let hidden = intern_if_large(json!("outer".repeat(5000)));
+        let scope = value_store_scope();
+        let live = intern_if_large(json!({"pad":"live".repeat(5000)}));
+        let garbage = intern_if_large(json!("scratch".repeat(5000)));
+        let roots = serde_json::to_vec(&live).unwrap();
+        value_store_retain_scoped(&[&roots], scope);
+        assert_eq!(materialize(hidden), json!("outer".repeat(5000)));
+        assert_eq!(materialize(live)["pad"], json!("live".repeat(5000)));
+        assert!(VALUE_STORE.with(|store| {
+            !store
+                .borrow()
+                .entries
+                .contains_key(&wfref_id(&garbage).unwrap())
+        }));
+    }
+
+    #[test]
+    fn audit_02_inner_collection_bounds_repeated_scratch() {
+        reset_value_store();
+        let parent = intern_if_large(json!("outer".repeat(5000)));
+        let scope = value_store_scope();
+        for iteration in 0..100 {
+            let live = intern_if_large(json!({"iteration":iteration,"pad":"live".repeat(5000)}));
+            let _scratch =
+                intern_if_large(json!({"iteration":iteration,"pad":"garbage".repeat(5000)}));
+            let roots = serde_json::to_vec(&live).unwrap();
+            value_store_retain_scoped(&[&roots], scope);
+            VALUE_STORE.with(|store| {
+                let store = store.borrow();
+                assert_eq!(
+                    store.entries.len(),
+                    2,
+                    "only parent and current survivor stay live"
+                );
+                assert_eq!(store.content_index.len(), 2, "dedup index is swept too");
+            });
+            assert_eq!(materialize(live)["iteration"], iteration);
+        }
+        assert_eq!(materialize(parent), json!("outer".repeat(5000)));
+    }
+
+    #[test]
+    fn audit_02_returning_to_outer_scope_reclaims_inner_values() {
+        reset_value_store();
+        let parent = intern_if_large(json!("parent".repeat(5000)));
+        let outer_scope = value_store_scope();
+        let outer_state = intern_if_large(json!("state".repeat(5000)));
+        let inner_scope = value_store_scope();
+        let inner_state = intern_if_large(json!("inner".repeat(5000)));
+        let inner_roots = serde_json::to_vec(&inner_state).unwrap();
+        value_store_retain_scoped(&[&inner_roots], inner_scope);
+        assert_eq!(VALUE_STORE.with(|store| store.borrow().entries.len()), 3);
+        // The parent may keep a result that transitively refers to inner state.
+        let result =
+            intern_if_large(json!({"inner":inner_state.clone(),"pad":"result".repeat(5000)}));
+        let outer_roots = serde_json::to_vec(&result).unwrap();
+        value_store_retain_scoped(&[&outer_roots], outer_scope);
+        assert_eq!(materialize(result)["inner"], json!("inner".repeat(5000)));
+        assert!(VALUE_STORE.with(|store| {
+            !store
+                .borrow()
+                .entries
+                .contains_key(&wfref_id(&outer_state).unwrap())
+        }));
+        value_store_retain_scoped(&[b"null"], outer_scope);
+        assert_eq!(VALUE_STORE.with(|store| store.borrow().entries.len()), 1);
+        assert_eq!(materialize(parent), json!("parent".repeat(5000)));
+    }
+
+    #[test]
+    fn audit_02_invalid_roots_skip_collection() {
+        reset_value_store();
+        let scope = value_store_scope();
+        let value = intern_if_large(json!("keep".repeat(5000)));
+        value_store_retain_scoped(&[b"null", b"invalid JSON"], scope);
+        assert_eq!(materialize(value), json!("keep".repeat(5000)));
+    }
+
+    #[test]
+    #[should_panic(expected = "workflow value arena invariant violated: dangling handle")]
+    fn audit_02_dangling_materialization_fails_loudly() {
+        reset_value_store();
+        let handle = intern_if_large(json!("lost".repeat(5000)));
+        value_store_retain(&[b"null"]);
+        materialize(handle);
+    }
+
+    #[test]
+    #[should_panic(expected = "workflow value arena invariant violated: dangling handle")]
+    fn audit_02_dangling_reference_fails_loudly() {
+        reset_value_store();
+        let handle = intern_if_large(json!({"value":"lost".repeat(5000)}));
+        value_store_retain(&[b"null"]);
+        lookup_segments_detailed(&handle, &["value".into()]);
     }
 
     fn manifest(mapping_value: Value) -> Vec<u8> {

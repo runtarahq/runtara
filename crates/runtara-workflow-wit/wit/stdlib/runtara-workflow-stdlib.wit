@@ -31,12 +31,20 @@ interface json {
 
     init-manifest: func(manifest: list<u8>) -> result<_, string>;
 
+    // Legacy unscoped collection. Callers must supply all live roots; new
+    // emitters use value-store-retain-scoped to protect enclosing frames.
     // Free interned scope values not reachable from the given loop roots (the
     // parent source and the surviving accumulator/state). Called at a loop
     // iteration boundary to reclaim the previous iteration's superseded values,
     // bounding a growing-accumulator loop to ~one live copy. Best-effort: a
     // root that fails to parse frees nothing.
     value-store-retain: func(parent-source: list<u8>, survivor: list<u8>) -> result<_, string>;
+
+    // Run-local allocation boundary; saved/restored with each loop frame.
+    value-store-scope: func() -> u64;
+    // Preserve entries predating scope as well as transitive local roots.
+    // New emitters use this for sequential iterations and parallel chunk resets.
+    value-store-retain-scoped: func(parent-source: list<u8>, survivor: list<u8>, scope: u64) -> result<_, string>;
 
     build-source: func(
         data: list<u8>,

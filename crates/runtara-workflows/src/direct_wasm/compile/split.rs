@@ -52,12 +52,13 @@ use super::{
     DIRECT_SPLIT_RETRY_SLEEP_KEY_PTR_LOCAL, DIRECT_SPLIT_RETRY_SLEEP_MS_LOCAL,
     DIRECT_SPLIT_RETRYABLE_LOCAL, DIRECT_SPLIT_VARIABLES_LEN_LOCAL,
     DIRECT_SPLIT_VARIABLES_PTR_LOCAL, DIRECT_STEP_ERROR_FLAG_LOCAL, DIRECT_STEP_ERROR_LEN_LOCAL,
-    DIRECT_STEP_ERROR_PTR_LOCAL, DirectCoreFunctionIndices, DirectCoreStaticData,
-    DirectDataSegment, DirectErrorRoutePlan, DirectFailureTarget, DirectHandledTarget,
-    DirectRunPlan, DirectVariables, emit_runtime_fail_return,
+    DIRECT_STEP_ERROR_PTR_LOCAL, DIRECT_VALUE_STORE_SCOPE_LOCAL, DirectCoreFunctionIndices,
+    DirectCoreStaticData, DirectDataSegment, DirectErrorRoutePlan, DirectFailureTarget,
+    DirectHandledTarget, DirectRunPlan, DirectVariables, emit_runtime_fail_return,
 };
 
 fn push_split_frame(body: &mut WasmFunction) {
+    body.instruction(&Instruction::LocalGet(DIRECT_VALUE_STORE_SCOPE_LOCAL));
     body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_COUNT_LOCAL));
     body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_INDEX_LOCAL));
     body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_ITEM_PTR_LOCAL));
@@ -119,6 +120,7 @@ fn pop_split_frame(body: &mut WasmFunction) {
     body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_ITEM_PTR_LOCAL));
     body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_INDEX_LOCAL));
     body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_COUNT_LOCAL));
+    body.instruction(&Instruction::LocalSet(DIRECT_VALUE_STORE_SCOPE_LOCAL));
 }
 
 /// Compact a loop's surviving buffer (`buf_ptr`/`buf_len`) down to the captured
@@ -163,7 +165,9 @@ pub(super) fn emit_loop_iteration_heap_reset(
 /// (the parent source plus the surviving accumulator/state), reclaiming the
 /// previous iteration's superseded interned values from the stdlib arena. The
 /// companion to the heap reset above: that reclaims the workflow guest heap,
-/// this reclaims the host-side value arena. Best-effort — the result is ignored.
+/// this reclaims the stdlib value arena. The saved allocation boundary protects
+/// ALL enclosing frames, including roots absent from this iteration's source.
+/// Best-effort — invalid JSON roots cause no collection.
 pub(super) fn emit_value_store_retain(
     body: &mut WasmFunction,
     indices: &DirectCoreFunctionIndices,
@@ -176,8 +180,9 @@ pub(super) fn emit_value_store_retain(
     body.instruction(&Instruction::LocalGet(parent_source_len_local));
     body.instruction(&Instruction::LocalGet(survivor_ptr_local));
     body.instruction(&Instruction::LocalGet(survivor_len_local));
+    body.instruction(&Instruction::LocalGet(DIRECT_VALUE_STORE_SCOPE_LOCAL));
     push_retptr_arg(body);
-    body.instruction(&Instruction::Call(indices.stdlib_value_store_retain));
+    body.instruction(&Instruction::Call(indices.stdlib_value_store_retain_scoped));
 }
 
 fn push_split_failure_frame(body: &mut WasmFunction) {
@@ -400,6 +405,8 @@ pub(super) fn emit_split_plan(
     }
 
     push_split_frame(body);
+    body.instruction(&Instruction::Call(indices.stdlib_value_store_scope));
+    body.instruction(&Instruction::LocalSet(DIRECT_VALUE_STORE_SCOPE_LOCAL));
     body.instruction(&Instruction::LocalGet(source_ptr_local));
     body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_PARENT_SOURCE_PTR_LOCAL));
     body.instruction(&Instruction::LocalGet(source_len_local));

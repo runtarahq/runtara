@@ -4,20 +4,21 @@ Audited 2026-09-05 against `cdcf9ee4ee0e5f28c0600b524c4984f89cbfe700`.
 Scope: DSL validation, direct-WASM manifest/planning/lowering, JSON stdlib,
 and durable suspend/resume through the production invoke ABI.
 
-**Update 2026-09-06:** AUDIT-01 is fixed and verified in the audit worktree
-(on base `183f2de7`). AUDIT-02 through AUDIT-07 remain open.
+**Update 2026-09-06:** AUDIT-01 is committed as `2b6bf542`. AUDIT-02 is also
+fixed and verified in the audit worktree. AUDIT-03 through AUDIT-07 remain open.
 
 [Open the interactive pattern guide](wasm-emitter-patterns.html) to compare tested
 controls, recorded failures, and proposed fixes with step-through diagrams and
 exportable example DSL. The guide is a standalone, offline HTML/CSS/JS page;
 its traces illustrate the audit evidence and do not run WASM.
 
-Seven findings are documented below. The accompanying **31 audit tests** now
-include **20 passing tests** and **11 known-defect regressions**. There are also
-**8 passing graph-analysis unit tests** for AUDIT-01. Four remaining regressions
+Seven findings are documented below. The accompanying **38 audit tests** now
+include **28 passing tests** and **10 known-defect regressions**. There are also
+**8 passing graph-analysis unit tests** for AUDIT-01 and **6 arena unit tests**
+for AUDIT-02. Three remaining regressions
 execute composed WASM; seven exercise validation, compilation, or manifest/stdlib
-behavior natively. The original AUDIT-01 regression runs normally; its ignore was
-removed after the fix.
+behavior natively. The original AUDIT-01 and AUDIT-02 regressions now run normally; their ignores
+were removed after the fixes.
 
 The known-defect tests assert the **desired correct behavior** and currently fail.
 They carry explicit `#[ignore = "AUDIT-XX: ..."]` reasons so normal CI stays green
@@ -27,7 +28,8 @@ that finding's controls, not just the previously failing case.
 
 P1 denotes silent wrong execution or data loss; P2 denotes broken configuration,
 deadline, or compiler/validation contracts. These findings do not establish Rust
-memory-safety undefined behavior. The AUDIT-01 change fixes compiler graph analysis; it does not change the runtime or DSL schema.
+memory-safety undefined behavior. AUDIT-01 fixes compiler graph analysis. AUDIT-02 changes arena collection and
+adds two internal stdlib WIT functions; neither changes the authored DSL schema.
 
 ## Running the tests
 
@@ -61,8 +63,10 @@ RUSTC_WRAPPER= cargo test -p runtara-workflows --features direct-wasm-integratio
 ```
 
 The compiler-only tests do not need prebuilt components. Execution tests need
-current shared workflow components but no agents, database, credentials, external
-services, or listening sockets. Do not omit the integration feature: Cargo would
+current shared workflow components. The AUDIT-02 parallel case additionally needs
+the Utils component and its metadata; run the build script without
+`RUNTARA_ONLY_WORKFLOW_COMPONENTS=1` to build all agents. The audit tests need no
+database, credentials, external services, or listening sockets. Do not omit the integration feature: Cargo would
 otherwise skip the execution target.
 
 <a id="audit-01"></a>
@@ -138,28 +142,75 @@ RUSTC_WRAPPER= cargo test -p runtara-workflows --features direct-wasm-integratio
 
 ## AUDIT-02 · P1 — nested loop garbage collection deletes live outer values
 
-A Filter produces a 100,000-character value; a While containing another While
-executes; the final Finish reads `steps.filter.outputs`. Compiled WASM reports
-success with `{saved:null}`. The controls preserve a small value through nested
-loops and the same large value through a single loop.
+**Fixed and verified on 2026-09-06.** A Filter's complete 100,000-character value
+now survives a While containing another While. Before the fix this accepted
+workflow completed with `{saved:null}`: inner mark/sweep saw only its own source
+and state, so it deleted values still referenced by hidden outer frames.
 
-The inner loop's mark/sweep call supplies only its own parent source and state.
-Outer frames retain other live source/accumulator buffers which are absent from
-those roots. Collected handle materialization silently yields null.
+The fix uses **allocation boundaries for scoped collection**:
 
-Source: [While GC roots](../crates/runtara-workflows/src/direct_wasm/compile/while_loop.rs), [Split GC roots](../crates/runtara-workflows/src/direct_wasm/compile/split.rs), [stdlib arena](../crates/runtara-workflow-stdlib/src/direct_json.rs) (`value_store_retain`, `materialize`).
+- `value-store-scope` captures the arena's next allocation ID on entry to each
+  While/Split. Both frame types save and restore the boundary alongside their
+  existing heap watermark and loop state.
+- `value-store-retain-scoped` preserves all entries older than that boundary,
+  plus everything transitively reachable from the local source and survivor.
+  It sweeps newer unreachable scratch on every sequential iteration or parallel
+  chunk. It therefore protects outer frames without requiring their individual
+  buffers to appear in a nested source.
+- Once an inner loop exits, the restored enclosing boundary permits reclamation
+  of its discarded values. No root registry needs cleanup on error/suspension.
+  Boundaries are run-local, recreated on replay, and never checkpointed.
+- Same-run dangling handles now fail with an explicit arena invariant panic
+  (a guest failure when executing WASM), both during materialization and reference
+  traversal. They cannot silently become a successful null or leak an internal
+  handle. User-shaped and foreign-run handles remain ordinary data.
 
-Fix direction: register every active frame's live arena roots, or scope collection
-so inner loops cannot collect outer-frame values. Treat dangling internal handles
-as invariant failures rather than successful null output.
+This is conservative: entries created before a loop starts remain protected for
+its lifetime, including entries it does not itself reference. Memory still stays
+bounded by those earlier allocations plus the local live state and scratch;
+collection is not disabled for nested loops. Arena entries are immutable and IDs
+monotonically allocated, which makes the allocation boundary safe.
 
-Tests:
+The WIT additions are additive; `value-store-retain` remains for older callers.
+**Rebuild the stdlib and recompile workflows to use the fix.** Existing composed
+WASM artifacts retain their old emitter/stdlib code. Newly generated workflow
+logic requires the new exports and will not compose with an older stdlib.
 
-| Test | Status on audited code |
+Source: [arena collection and invariant checks](../crates/runtara-workflow-stdlib/src/direct_json.rs),
+[stdlib exports](../crates/runtara-workflow-stdlib/src/lib.rs),
+[WIT contract](../crates/runtara-workflow-wit/wit/stdlib/runtara-workflow-stdlib.wit),
+[While frames](../crates/runtara-workflows/src/direct_wasm/compile/while_loop.rs),
+[Split frames/shared collector](../crates/runtara-workflows/src/direct_wasm/compile/split.rs),
+[parallel chunk reset](../crates/runtara-workflows/src/direct_wasm/compile/split_parallel.rs).
+
+Invoke-ABI tests in [`execution.rs`](../crates/runtara-workflows/tests/wasm_emitter_audit/execution.rs)
+(all enabled and passing):
+
+| Test | Contract verified |
 | --- | --- |
-| [`audit_02_nested_loop_preserves_small_outer_value`](../crates/runtara-workflows/tests/wasm_emitter_audit/execution.rs) | Passing control |
-| [`audit_02_single_loop_preserves_large_outer_value`](../crates/runtara-workflows/tests/wasm_emitter_audit/execution.rs) | Passing control |
-| [`audit_02_nested_loop_preserves_large_outer_value`](../crates/runtara-workflows/tests/wasm_emitter_audit/execution.rs) | Known defect; ignored by default, fails when selected |
+| `audit_02_nested_loop_preserves_small_outer_value` | Original small-value control |
+| `audit_02_single_loop_preserves_large_outer_value` | Original single-loop control |
+| `audit_02_nested_loop_preserves_large_outer_value` | Original 100 KB regression; full contents survive |
+| `audit_02_mixed_nested_loops_preserve_outer_source` | All four While/Split pairs and two alternating three-level combinations, with repeated iterations |
+| `audit_02_nested_loop_preserves_value_near_intern_threshold` | 16,000 / 16,383 / 16,384 / 16,385 / 32,768-byte strings |
+| `audit_02_child_loop_preserves_caller_source` | Embedded child with nested loops preserves caller state |
+| `audit_02_nested_collection_survives_suspend_and_replay` | Repeated suspension and completion preserve the value; checkpoints contain no handles |
+| `audit_02_nested_error_handler_preserves_outer_source` | Outer onError handler can still read the original large value |
+| `audit_02_parallel_split_preserves_live_chunk_and_outer_values` | Real parallel lowering with four distinct 100 KB results across two chunks; nested While runs during assembly |
+| `audit_02_nested_growing_accumulator_completes_with_bounded_memory` | Two outer passes each complete 60 inner iterations growing by 64 KiB, below a 64 MiB peak assertion under a 96 MiB per-memory cap |
+
+Six stdlib unit tests additionally prove hidden outer-root retention, reclamation
+of 100 generations of inner scratch (exactly two live entries and two dedup-index
+entries after each collection), reclamation after restoring an outer boundary,
+transitive survivor retention, malformed-root no-op behavior, and explicit
+failures for dangling materialization and reference lookup. The compiler's
+existing GC wiring test now checks calls to both new exports.
+
+```sh
+RUSTC_WRAPPER= RUNTARA_NO_INSTALL_TOOLS=1 scripts/build-agent-components.sh
+RUSTC_WRAPPER= cargo test -p runtara-workflow-stdlib --lib audit_02
+RUSTC_WRAPPER= cargo test -p runtara-workflows --features direct-wasm-integration-tests --test direct_wasm_execute wasm_emitter_audit::audit_02
+```
 
 <a id="audit-03"></a>
 
@@ -321,7 +372,6 @@ rebuilds, and release-profile overflow execution were not run during the origina
 The AUDIT-01 verification update below records the later checks.
 Source review suggests broader exposure worth covering during fixes:
 
-- AUDIT-02: mixed While/Split nesting and live parallel-branch arena roots.
 - AUDIT-03: Agent/Split checkpoint collisions, nested loop paths, and compatibility with already parked instances.
 - AUDIT-04: repeated step IDs with different types, wait actions, or response schemas.
 - AUDIT-05: enclosing-deadline wake clamping and timeout overrun in the final iteration without suspension.
@@ -352,3 +402,30 @@ shared/agent components in the original checkout. The first worktree invocation
 reported missing components at the default worktree-relative path; rerunning with
 the explicit component path passed. No guest component source changed. Database
 and server APIs are outside this compiler fix; no database/server E2E was run.
+
+### AUDIT-02 verification update · 2026-09-06
+
+- Baseline reproduction before the fix: 2 controls passed and the original large
+  nested-loop regression failed at the full-value assertion.
+- Rebuilt all **27 agent components and both shared workflow components** with
+  `scripts/build-agent-components.sh` into this worktree's own target directory.
+- AUDIT-02 invoke-ABI tests: **10 passed, none ignored**.
+- `cargo test -p runtara-workflow-stdlib --lib`: **213 passed**, 1 existing
+  performance benchmark ignored; includes all 6 new arena unit tests.
+- `cargo test -p runtara-workflows --lib`: **556 passed**.
+- `cargo test -p runtara-component-host --features component-integration-tests --tests`:
+  **45 passed** across library and component integration targets.
+- Full `direct_wasm_execute` suite with the integration feature: **196 passed,
+  0 failed, 3 ignored** (the remaining AUDIT-03/05 defects). AUDIT-01 stays green.
+- Clippy for `runtara-workflow-stdlib`, `runtara-workflow-wit`, and
+  `runtara-workflows`, all targets with the direct-WASM integration feature and
+  `-D warnings`: passed. Formatting and `git diff --check`: passed.
+- Interactive guide: **42 DOM scenarios** passed (navigation, variants, outputs,
+  stepping/reset, DSL, test lists and fixed/proposed labels). Browser inspection
+  confirmed the AUDIT-02 implemented-fix view and scoped-collection explanation.
+
+The pinned Rust 1.97.0 toolchain was used with `RUSTC_WRAPPER=`. Host builds
+reused the original checkout's Cargo target cache; WASM components were built and
+loaded from the audit worktree to keep its new stdlib separate. Database/server
+E2E and production deployment were not run; the changed boundary is DSL compilation,
+component composition, guest arena collection, and invoke execution.

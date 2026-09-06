@@ -352,6 +352,10 @@ const DIRECT_CONDITION_RESULT_LOCAL: u32 = 107;
 const DIRECT_SPLIT_HEAP_BASE_LOCAL: u32 = 108;
 const DIRECT_WHILE_HEAP_BASE_LOCAL: u32 = DIRECT_SPLIT_HEAP_BASE_LOCAL;
 
+/// Arena allocation boundary for the active loop, saved with BOTH frame types.
+/// An i64 appended to the canonical locals, independent of the guest heap mark.
+const DIRECT_VALUE_STORE_SCOPE_LOCAL: u32 = 129;
+
 /// Heap watermark for the `AiAgent` chat-turn loop, the analog of
 /// [`DIRECT_SPLIT_HEAP_BASE_LOCAL`] for that loop. Captured once above the
 /// pre-loop persistent buffers (base turn config, conversation, initial
