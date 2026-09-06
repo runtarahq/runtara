@@ -320,62 +320,6 @@ pub async fn count_instances(
 // Instance Images
 // ============================================================================
 
-/// Get the effective per-instance execution timeout recorded at first launch.
-///
-/// Returns `None` when no value was persisted (e.g. instances created before
-/// this column existed); callers should fall back to a configured default.
-pub async fn get_instance_timeout_seconds(
-    pool: &PgPool,
-    instance_id: &str,
-) -> Result<Option<i64>, sqlx::Error> {
-    let result: Option<(Option<i64>,)> =
-        sqlx::query_as("SELECT timeout_seconds FROM instance_images WHERE instance_id = $1")
-            .bind(instance_id)
-            .fetch_optional(pool)
-            .await?;
-
-    Ok(result.and_then(|(timeout,)| timeout))
-}
-
-/// Get the image ID for an instance.
-pub async fn get_instance_image_id(
-    pool: &PgPool,
-    instance_id: &str,
-) -> Result<Option<String>, sqlx::Error> {
-    let result: Option<(String,)> = sqlx::query_as(
-        r#"
-        SELECT image_id FROM instance_images WHERE instance_id = $1
-        "#,
-    )
-    .bind(instance_id)
-    .fetch_optional(pool)
-    .await?;
-
-    Ok(result.map(|(id,)| id))
-}
-
-/// Get the image ID and custom env vars for an instance.
-pub async fn get_instance_image_with_env(
-    pool: &PgPool,
-    instance_id: &str,
-) -> Result<Option<(String, std::collections::HashMap<String, String>)>, sqlx::Error> {
-    let result: Option<(String, Option<serde_json::Value>)> = sqlx::query_as(
-        r#"
-        SELECT image_id, env FROM instance_images WHERE instance_id = $1
-        "#,
-    )
-    .bind(instance_id)
-    .fetch_optional(pool)
-    .await?;
-
-    Ok(result.map(|(image_id, env_json)| {
-        let env = env_json
-            .and_then(|v| serde_json::from_value(v).ok())
-            .unwrap_or_default();
-        (image_id, env)
-    }))
-}
-
 // ============================================================================
 // Tenant Metrics
 // ============================================================================

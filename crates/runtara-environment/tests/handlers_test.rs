@@ -773,9 +773,11 @@ async fn test_start_instance_association_failure_does_not_leave_unbound_pending_
     assert!(!retried.deduplicated);
     assert_eq!(retried.instance_id, instance_id);
     assert_eq!(
-        db::get_instance_image_id(&pool, &instance_id)
+        InstanceRepository::new(pool.clone())
+            .image_binding(&instance_id)
             .await
-            .expect("failed to inspect retry image association"),
+            .expect("failed to inspect retry image association")
+            .map(|binding| binding.image_id),
         Some(image_id.clone()),
         "the successful retry must create the immutable image association"
     );
@@ -1375,11 +1377,13 @@ async fn test_start_instance_stores_env() {
     assert!(response.is_accepted(), "Error: {:?}", response.rejection);
 
     // Verify env vars were stored in the database
-    let result = db::get_instance_image_with_env(&pool, &response.instance_id)
+    let result = InstanceRepository::new(pool.clone())
+        .image_binding(&response.instance_id)
         .await
         .expect("Failed to get instance env");
 
-    let (retrieved_image_id, retrieved_env) = result.expect("Instance not found");
+    let binding = result.expect("Instance not found");
+    let (retrieved_image_id, retrieved_env) = (binding.image_id, binding.env);
     assert_eq!(retrieved_image_id, image_id);
     assert_eq!(retrieved_env.len(), 2);
     assert_eq!(
@@ -1429,11 +1433,12 @@ async fn test_start_instance_empty_env() {
     assert!(response.is_accepted(), "Error: {:?}", response.rejection);
 
     // Verify empty env is stored correctly (should return empty HashMap)
-    let result = db::get_instance_image_with_env(&pool, &response.instance_id)
+    let result = InstanceRepository::new(pool.clone())
+        .image_binding(&response.instance_id)
         .await
         .expect("Failed to get instance env");
 
-    let (_, retrieved_env) = result.expect("Instance not found");
+    let retrieved_env = result.expect("Instance not found").env;
     assert!(
         retrieved_env.is_empty(),
         "Expected empty env, got {:?}",

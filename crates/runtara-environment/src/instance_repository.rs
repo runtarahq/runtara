@@ -24,6 +24,8 @@
 //! leave a pending instance that no generation owns, and splitting it across
 //! repositories would cost exactly that atomicity.
 
+use std::collections::HashMap;
+
 use chrono::{DateTime, Utc};
 use runtara_core::domain::InstanceStatus;
 use runtara_core::persistence::InstanceCompletionMetrics;
@@ -103,6 +105,23 @@ pub struct InstanceListItem {
     pub has_error: bool,
 }
 
+/// What an instance was launched from, as `instance_images` recorded it.
+///
+/// The three reads this replaces — image id, image id plus env, timeout —
+/// were separate queries against a table whose primary key is `instance_id`,
+/// so they could only ever return parts of one row. Callers that wanted two of
+/// the three issued two queries for it.
+#[derive(Debug, Clone)]
+pub struct InstanceImageBinding {
+    /// Image the instance is bound to.
+    pub image_id: String,
+    /// Custom environment variables recorded at launch.
+    pub env: HashMap<String, String>,
+    /// Effective execution timeout recorded at first launch; `None` for rows
+    /// written before the column existed.
+    pub timeout_seconds: Option<i64>,
+}
+
 /// Options for listing instances.
 #[derive(Debug, Clone, Default)]
 pub struct ListInstancesOptions {
@@ -151,6 +170,31 @@ impl InstanceRepository {
     /// Bind the repository to a pool.
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
+    }
+
+    /// What the instance was launched from, or `None` if it has no binding.
+    ///
+    /// One row, one query: `instance_images.instance_id` is that table's
+    /// primary key, so there is nothing to page and no join that could change
+    /// the cardinality.
+    pub async fn image_binding(&self, instance_id: &str) -> Result<Option<InstanceImageBinding>> {
+        let row: Option<(String, Option<serde_json::Value>, Option<i64>)> = sqlx::query_as(
+            "SELECT image_id, env, timeout_seconds FROM instance_images WHERE instance_id = $1",
+        )
+        .bind(instance_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| Error::Other(format!("image_binding: {e}")))?;
+
+        Ok(
+            row.map(|(image_id, env, timeout_seconds)| InstanceImageBinding {
+                image_id,
+                env: env
+                    .and_then(|v| serde_json::from_value(v).ok())
+                    .unwrap_or_default(),
+                timeout_seconds,
+            }),
+        )
     }
 
     /// Everything the server reports about one instance. `None` if there is no

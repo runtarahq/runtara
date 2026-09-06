@@ -8,7 +8,7 @@ mod common;
 
 use runtara_core::persistence::{CompleteInstanceParams, Persistence};
 use runtara_environment::db;
-use runtara_environment::instance_repository::ListInstancesOptions;
+use runtara_environment::instance_repository::{InstanceRepository, ListInstancesOptions};
 use runtara_store_postgres::PostgresPersistence;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -559,11 +559,13 @@ async fn test_create_instance_with_env() {
     create_test_instance_with_env(&pool, &instance_id, tenant_id, &image_id, Some(&env)).await;
 
     // Retrieve and verify env vars
-    let result = db::get_instance_image_with_env(&pool, &instance_id)
+    let result = InstanceRepository::new(pool.clone())
+        .image_binding(&instance_id)
         .await
         .expect("Failed to get instance env");
 
-    let (retrieved_image_id, retrieved_env) = result.expect("Instance not found");
+    let binding = result.expect("Instance not found");
+    let (retrieved_image_id, retrieved_env) = (binding.image_id, binding.env);
 
     assert_eq!(retrieved_image_id, image_id);
     assert_eq!(retrieved_env.len(), 2);
@@ -604,11 +606,13 @@ async fn test_create_instance_without_env() {
     create_test_instance(&pool, &instance_id, tenant_id, &image_id).await;
 
     // Retrieve and verify empty env
-    let result = db::get_instance_image_with_env(&pool, &instance_id)
+    let result = InstanceRepository::new(pool.clone())
+        .image_binding(&instance_id)
         .await
         .expect("Failed to get instance env");
 
-    let (retrieved_image_id, retrieved_env) = result.expect("Instance not found");
+    let binding = result.expect("Instance not found");
+    let (retrieved_image_id, retrieved_env) = (binding.image_id, binding.env);
 
     assert_eq!(retrieved_image_id, image_id);
     assert!(
@@ -635,7 +639,8 @@ async fn test_get_instance_image_with_env_not_found() {
     skip_if_no_db!();
     let pool = get_pool().await.expect("Failed to connect to database");
 
-    let result = db::get_instance_image_with_env(&pool, "nonexistent-instance")
+    let result = InstanceRepository::new(pool.clone())
+        .image_binding("nonexistent-instance")
         .await
         .expect("Query should succeed");
 
@@ -664,9 +669,11 @@ async fn test_instance_timeout_seconds_round_trips() {
     // Persist a per-instance timeout larger than the legacy hardcoded 300s.
     seed_instance_image(&pool, &instance_id, &image_id, tenant_id, None, Some(1800)).await;
 
-    let timeout = db::get_instance_timeout_seconds(&pool, &instance_id)
+    let timeout = InstanceRepository::new(pool.clone())
+        .image_binding(&instance_id)
         .await
-        .expect("Query should succeed");
+        .expect("Query should succeed")
+        .and_then(|binding| binding.timeout_seconds);
     assert_eq!(timeout, Some(1800), "Persisted timeout should round-trip");
 
     // Cleanup
@@ -698,16 +705,19 @@ async fn test_instance_timeout_seconds_absent_is_none() {
     // Associate without a timeout (e.g. rows predating the column).
     create_test_instance(&pool, &instance_id, tenant_id, &image_id).await;
 
-    let timeout = db::get_instance_timeout_seconds(&pool, &instance_id)
+    let timeout = InstanceRepository::new(pool.clone())
+        .image_binding(&instance_id)
         .await
-        .expect("Query should succeed");
+        .expect("Query should succeed")
+        .and_then(|binding| binding.timeout_seconds);
     assert_eq!(timeout, None, "Absent timeout should read back as None");
 
     // A nonexistent instance is also None (no row).
-    let missing = db::get_instance_timeout_seconds(&pool, "nonexistent-instance")
+    let missing = InstanceRepository::new(pool.clone())
+        .image_binding("nonexistent-instance")
         .await
         .expect("Query should succeed");
-    assert_eq!(missing, None);
+    assert!(missing.is_none());
 
     // Cleanup
     sqlx::query("DELETE FROM instances WHERE instance_id = $1")

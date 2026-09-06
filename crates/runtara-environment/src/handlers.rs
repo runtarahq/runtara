@@ -22,6 +22,7 @@ use crate::db;
 use crate::error::Result;
 use crate::execution_timeout::ExecutionTimeoutPolicy;
 use crate::image_registry::{ImageBuilder, ImageRegistry, require_current_workflow_entrypoint};
+use crate::instance_repository::InstanceRepository;
 use crate::launch_dispatcher::{DEFAULT_LAUNCH_QUEUE_TIMEOUT, LaunchLifecycleObservers};
 use crate::launch_queue::{
     CancelOutcome, EnqueueOutcome, EnqueueRequest, InitialLaunchOutcome, InitialLaunchRequest,
@@ -359,7 +360,11 @@ async fn existing_start_response(
         )));
     }
 
-    match db::get_instance_image_id(&state.pool, instance_id).await? {
+    match InstanceRepository::new(state.pool.clone())
+        .image_binding(instance_id)
+        .await?
+        .map(|binding| binding.image_id)
+    {
         Some(existing_image_id) if existing_image_id == image_id => {}
         Some(existing_image_id) => {
             warn!(
@@ -890,16 +895,18 @@ pub async fn handle_resume_instance(
 
     // Read only the durable image binding. Artifact and timeout preflight is
     // owned by the dispatcher, after this request has a recoverable queue row.
-    let (image_id, _) =
-        match db::get_instance_image_with_env(&state.pool, &request.instance_id).await? {
-            Some(result) => result,
-            None => {
-                return Ok(ResumeInstanceResponse {
-                    success: false,
-                    error: Some("Instance has no associated image".to_string()),
-                });
-            }
-        };
+    let image_id = match InstanceRepository::new(state.pool.clone())
+        .image_binding(&request.instance_id)
+        .await?
+    {
+        Some(binding) => binding.image_id,
+        None => {
+            return Ok(ResumeInstanceResponse {
+                success: false,
+                error: Some("Instance has no associated image".to_string()),
+            });
+        }
+    };
 
     let repository = LaunchRepository::new(state.pool.clone());
     for released in repository

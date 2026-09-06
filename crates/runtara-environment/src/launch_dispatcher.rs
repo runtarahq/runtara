@@ -21,10 +21,10 @@ use tokio::time::{Instant, timeout_at};
 use tracing::{debug, error, info, warn};
 
 use crate::container_registry::{ContainerInfo, ContainerRegistry};
-use crate::db;
 use crate::execution_timeout::ExecutionTimeoutPolicy;
 use crate::handlers::{DrainController, spawn_container_monitor};
 use crate::image_registry::{Image, ImageRegistry};
+use crate::instance_repository::InstanceRepository;
 use crate::launch_queue::{
     LAUNCH_QUEUE_TIMEOUT, Launch, LaunchKind, LaunchRepository, PREPARATION_CAPACITY_UNAVAILABLE,
     PREPARATION_TIMEOUT, RUNNER_CAPACITY_UNAVAILABLE,
@@ -280,6 +280,7 @@ pub struct LaunchDispatcher {
     persistence: Arc<dyn Persistence>,
     runner: Arc<dyn Runner>,
     image_registry: ImageRegistry,
+    instances: InstanceRepository,
     execution_timeout_policy: ExecutionTimeoutPolicy,
     config: LaunchDispatcherConfig,
     /// Bounds local detached preparation workers before they can take the
@@ -301,6 +302,7 @@ impl Clone for LaunchDispatcher {
             persistence: self.persistence.clone(),
             runner: self.runner.clone(),
             image_registry: ImageRegistry::new(self.pool.clone()),
+            instances: InstanceRepository::new(self.pool.clone()),
             execution_timeout_policy: self.execution_timeout_policy,
             config: self.config.clone(),
             preparation_workers: self.preparation_workers.clone(),
@@ -325,6 +327,7 @@ impl LaunchDispatcher {
         let config = LaunchDispatcherConfig::default();
         Self {
             image_registry: ImageRegistry::new(pool.clone()),
+            instances: InstanceRepository::new(pool.clone()),
             pool,
             persistence,
             runner,
@@ -1177,12 +1180,17 @@ impl LaunchDispatcher {
             ));
         }
 
-        let (bound_image_id, env) =
-            db::get_instance_image_with_env(&self.pool, &launch.instance_id)
-                .await
-                .map_err(|error| format!("failed to read image binding: {error}"))?
-                .ok_or_else(|| "instance has no associated image".to_string())?;
-        if bound_image_id != launch.image_id {
+        // One read of the binding row, not two. `image_id`, `env` and
+        // `timeout_seconds` are columns of the same `instance_images` row and
+        // are all immutable after `claim_initial` writes it, so reading them
+        // together is the same answer the two queries gave.
+        let binding = self
+            .instances
+            .image_binding(&launch.instance_id)
+            .await
+            .map_err(|error| format!("failed to read image binding: {error}"))?
+            .ok_or_else(|| "instance has no associated image".to_string())?;
+        if binding.image_id != launch.image_id {
             return Err("image binding no longer matches launch".to_string());
         }
         let image = self
@@ -1205,12 +1213,9 @@ impl LaunchDispatcher {
         } else {
             None
         };
-        let stored_timeout = db::get_instance_timeout_seconds(&self.pool, &launch.instance_id)
-            .await
-            .map_err(|error| format!("failed to read persisted execution timeout: {error}"))?;
         let timeout = self
             .execution_timeout_policy
-            .resolve_persisted(stored_timeout)
+            .resolve_persisted(binding.timeout_seconds)
             .map_err(|error| format!("invalid persisted execution timeout: {error}"))?
             .as_duration();
         let input_bytes = instance
@@ -1233,7 +1238,7 @@ impl LaunchDispatcher {
             input,
             timeout,
             checkpoint_id: instance.checkpoint_id,
-            env,
+            env: binding.env,
             // The queue is durable; even a first start reads its authoritative
             // committed envelope rather than retaining request memory.
             prepersisted_input: None,
