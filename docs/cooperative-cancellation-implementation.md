@@ -1,12 +1,15 @@
 # Cooperative cancellation implementation record
 
-Status: initial standards proof, 2026-09-06. Governing contract:
-[cooperative cancellation plan](selective-isolation-plan.md). This record does not
-supersede the plan's full scope. Production defaults are unchanged.
+Status: standard HTTP Agent cancellation, 2026-09-06. Governing contract:
+[cooperative cancellation plan](selective-isolation-plan.md). Update the existing
+implementation directly; no new product feature flags or alternate backend.
+Emitted workflow signal/timeout integration and the remaining plan gates are
+still incomplete.
 
-## P0: current ABI inventory
+## P0: initial ABI inventory
 
-Inspected the existing source and the dependencies resolved by the current build:
+The following records the starting state before the HTTP binding update below
+(the standards proof was committed as `5c8863f7`):
 
 - Wasmtime 46.0.1 has Component Model async enabled in the host dependency. The
   proof uses the existing engine builder, without optional async extensions,
@@ -85,10 +88,73 @@ Next implementation: expose a cancellation-capable async HTTP transport/agent
 binding using the existing request interface and preserve request shaping,
 connection proxy behavior and error coercion. Prove the built agent in standard
 composition, then wire emitted workflow waits to existing lifecycle signals.
-Keep the synchronous/reference path until differential behavior is qualified.
+Use a separately built baseline revision for differential qualification, without
+adding a flag-selected production path.
 
 P1 remains incomplete until the built HTTP agent and emitted DSL pass; P0 still
 needs the fresh baseline and experimental-artifact usage inventory. The complete
 construct parity, persistence/lifecycle races, timeout integration, emergency
 abort qualification, size/timing comparison, Linux capacity and local-server E2E
 gates remain pending. No production code or default was changed by this proof.
+
+## Existing HTTP agent: standard async bindings
+
+The normal `runtara-agent-http` WASM export now uses wit-bindgen's async callback
+ABI and awaits `runtara-http::RequestBuilder::call_agent_async`. The normal
+component build produces this implementation; there is no opt-in flag or separate
+candidate artifact. The native synchronous capability remains available for its
+existing callers and metadata executor. Other agents' synchronous paths have not
+yet been migrated, and are not claimed to acknowledge cooperative cancellation.
+
+The HTTP library provides standard async bindings for its existing
+`runtara:host-io/http.request` import. Request encoding, response decoding, proxy
+request construction and proxy response handling are shared with the existing
+blocking API. The WIT is now a source file used by both binding generations;
+wit-bindgen's documented `type_section_suffix` prevents their compile-time type
+metadata from colliding. This introduces no runtime task interface, host task
+registry or custom artifact package. The host I/O implementation is unchanged.
+
+Added real-agent tests under the existing `component-integration-tests` gate,
+using the normal `RUNTARA_AGENT_COMPONENTS_DIR` bundle. The existing CI component
+suite discovers these tests without a new test feature or workflow selector.
+The fixture uses wac-graph to compose the real HTTP agent with a WASM parent and
+runs the normal host linker/I/O. Its signal source is still a test gate.
+
+- Withheld response headers: parent WASM cancels the real Agent subtask; the
+  endpoint observes connection closure, an independent pending operation finishes,
+  and parent WASM successfully invokes HTTP again in the same Agent instance.
+- Partial response: the endpoint sends headers and an incomplete body before the
+  cancellation signal; the same closure/reuse assertions pass. This does not
+  independently observe the exact host body-read phase. The earlier transport
+  fixture proves cancellation after entering body consumption; a phase-observed
+  production body-read case remains part of G3 qualification.
+- Direct async export: malformed JSON, unknown capability and invalid typed input
+  preserve permanent error codes/severity/retryability and decoding precedence.
+- Proxy/coercion: string timeout/bool inputs are coerced; tenant, connection and
+  endpoint context and escaped query parameters reach the existing proxy;
+  control headers are excluded from forwarded headers; a proxied 503 with
+  `fail_on_error=false` preserves response body, headers and success=false.
+
+Verified so far for this update:
+
+- `scripts/build-agent-components.sh`: all 27 Agent components plus stdlib/runtime
+  and their generated metadata rebuilt through the normal path.
+- `cargo test -p runtara-http --features native`: 12 tests passed.
+- `cargo test -p runtara-agent-http`: 16 tests passed.
+- `cargo test -p runtara-component-host --features component-integration-tests,isolated-step-poc --tests`:
+  145 tests passed, one pre-existing manual benchmark ignored. This run contained
+  the five primitive cases and two built-agent cancellation cases.
+- Subsequent focused real-agent run: all four real-agent cases passed, including
+  the two new input/proxy compatibility tests (147 distinct host tests across the
+  broad and focused runs).
+- Native affected-crate all-target Clippy, including all four real-agent tests,
+  and WASM-target HTTP Agent Clippy passed with `-D warnings`. Formatting and
+  diff whitespace checks also passed.
+- `cargo test -p runtara-workflows --features direct-wasm-integration-tests --test direct_wasm_execute`:
+  250 tests passed; the two existing manual performance benchmarks were ignored.
+  This covers emitted workflow compatibility with the normally built HTTP Agent,
+  including audit fixtures, parallel HTTP overlap and pause behavior.
+
+No emitted cancellation selection, lifecycle acknowledgement changes, cooperative deadline
+handling, emergency grace integration, production rollout qualification or fresh
+size/latency comparison is established by these Agent-level tests.

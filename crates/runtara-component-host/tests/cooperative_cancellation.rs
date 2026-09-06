@@ -231,3 +231,7 @@ async fn async_typing_with_synchronous_bindings_does_not_acknowledge_cancellatio
     );
     Ok(())
 }
+
+#[cfg(feature = "component-integration-tests")]
+#[path = "cooperative_cancellation/real_agent.rs"]
+mod real_agent;

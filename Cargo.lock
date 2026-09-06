@@ -4728,6 +4728,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+ "wac-graph",
  "wasmparser 0.247.0",
  "wasmtime",
  "wasmtime-wasi",

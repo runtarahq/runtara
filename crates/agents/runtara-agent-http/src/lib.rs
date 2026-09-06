@@ -45,16 +45,10 @@ use strum::VariantNames;
 #[cfg(target_arch = "wasm32")]
 #[allow(warnings)]
 mod bindings {
-    // Bindings are generated at compile time by the wit-bindgen macro (no
-    // committed bindings.rs, no cargo-component). `path` lists the shared
-    // `runtara:agent` package first (dependency), then this crate's
-    // build.rs-generated `wit/agent.wit`.
     wit_bindgen::generate!({
         path: ["../../runtara-agent-wit/wit", "wit"],
         world: "runtara:agent-http/agent",
-        // Sync impls of the async-TYPED invoke (sync lift; see
-        // spikes/wit-bindgen-async-typed).
-        async: false,
+        async: ["export:runtara:agent-http/capabilities@0.4.0#invoke"],
         generate_all,
     });
 }
@@ -431,6 +425,11 @@ pub enum HttpResponseBody {
     module_secure = true
 )]
 pub fn http_request(input: HttpRequestInput) -> Result<HttpResponse, AgentError> {
+    let request = prepare_http_request(&input);
+    finish_http_request(&input, request.call_agent())
+}
+
+fn prepare_http_request(input: &HttpRequestInput) -> runtara_http::RequestBuilder {
     let mut headers = input.headers.clone();
     let mut url = input.url.clone();
     let query_parameters = input.query_parameters.clone();
@@ -507,8 +506,13 @@ pub fn http_request(input: HttpRequestInput) -> Result<HttpResponse, AgentError>
     // `X-Runtara-Connection-Id` header); connectionless requests get the same
     // filtering minus the base-URL pin. When no proxy is configured (SDK/local),
     // `call_agent` falls back to a direct call.
-    let response_result = request.call_agent();
+    request
+}
 
+fn finish_http_request(
+    input: &HttpRequestInput,
+    response_result: Result<runtara_http::HttpResponse, runtara_http::HttpError>,
+) -> Result<HttpResponse, AgentError> {
     let response = match response_result {
         Ok(r) => r,
         Err(e) => {
@@ -687,11 +691,11 @@ struct Component;
 
 #[cfg(target_arch = "wasm32")]
 impl Guest for Component {
-    fn invoke(capability_id: String, input: Vec<u8>) -> Result<Vec<u8>, ErrorInfo> {
+    async fn invoke(capability_id: String, input: Vec<u8>) -> Result<Vec<u8>, ErrorInfo> {
         let value: serde_json::Value = serde_json::from_slice(&input).map_err(bad_json)?;
 
         let executor_result = match capability_id.as_str() {
-            "http-request" => __executor_http_request(value),
+            "http-request" => execute_http_request_async(value).await,
             other => {
                 return Err(ErrorInfo {
                     code: "UNKNOWN_CAPABILITY".into(),
@@ -708,6 +712,41 @@ impl Guest for Component {
             .map_err(error_string_to_error_info)
             .and_then(|out_value| serde_json::to_vec(&out_value).map_err(bad_json))
     }
+}
+
+// Preserve the macro executor's coercion and JSON error envelope. The native
+// executor remains synchronous; this guest path awaits the same request shaping
+// and response handling through the standard async transport.
+#[cfg(target_arch = "wasm32")]
+async fn execute_http_request_async(value: Value) -> Result<Value, String> {
+    let error = |code: &str, message: String| {
+        serde_json::json!({
+            "code": code, "message": message, "category": "permanent", "severity": "error"
+        })
+        .to_string()
+    };
+    let value = runtara_dsl::coercion::coerce_input(value, &__INPUT_META_HttpRequestInput);
+    let input: HttpRequestInput = serde_json::from_value(value).map_err(|e| {
+        error(
+            "INPUT_DESERIALIZATION_ERROR",
+            format!("Invalid input for http-request: {e}"),
+        )
+    })?;
+    let result = prepare_http_request(&input).call_agent_async().await;
+    let output = finish_http_request(&input, result).map_err(|e| {
+        let text: String = e.into();
+        if text.starts_with('{') {
+            text
+        } else {
+            error("CAPABILITY_ERROR", text)
+        }
+    })?;
+    serde_json::to_value(output).map_err(|e| {
+        error(
+            "OUTPUT_SERIALIZATION_ERROR",
+            format!("Failed to serialize result for http-request: {e}"),
+        )
+    })
 }
 
 #[cfg(target_arch = "wasm32")]

@@ -1,0 +1,13 @@
+package runtara:host-io@0.1.0;
+
+interface http {
+    /// Buffered request/response envelopes (JSON bytes):
+    ///   input:  { method, url, headers: [[k,v]...], body_b64 }
+    ///   output: { status, headers: [[k,v]...], body_b64 }
+    /// Err carries a transport-level message.
+    request: async func(input: list<u8>) -> result<list<u8>, string>;
+}
+
+world host-io-client {
+    import http;
+}

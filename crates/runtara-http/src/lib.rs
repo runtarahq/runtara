@@ -177,6 +177,39 @@ impl RequestBuilder {
     /// The original request is serialized as JSON and POSTed to the proxy URL.
     /// The proxy response is deserialized back into an `HttpResponse`.
     fn call_via_proxy(self, proxy_url: &str) -> Result<HttpResponse, HttpError> {
+        let proxy_request = self.prepare_proxy_request(proxy_url);
+        // Execute directly (bypass proxy check to avoid recursion). Under
+        // WASI the proxy hop rides the host-io import (func_wrap_concurrent
+        // host-side) so concurrent Split subtasks overlap their agent I/O —
+        // the p2 wasi:http pollable wait would hold the whole store.
+        #[cfg(feature = "native")]
+        let proxy_response = native::execute(proxy_request)?;
+        #[cfg(all(feature = "wasi", not(feature = "native")))]
+        let proxy_response = host_io::execute(proxy_request)?;
+
+        Self::decode_proxy_response(proxy_response)
+    }
+
+    /// Await a host HTTP operation using the standard Component Model async ABI.
+    #[cfg(all(feature = "wasi", not(feature = "native")))]
+    pub async fn call_async(self) -> Result<HttpResponse, HttpError> {
+        host_io::execute_async(self).await
+    }
+
+    /// Preserve the existing proxy/connection policy while allowing cancellation.
+    #[cfg(all(feature = "wasi", not(feature = "native")))]
+    pub async fn call_agent_async(self) -> Result<HttpResponse, HttpError> {
+        static PROXY_URL: OnceLock<Option<String>> = OnceLock::new();
+        let proxy_url = PROXY_URL.get_or_init(|| std::env::var("RUNTARA_HTTP_PROXY_URL").ok());
+        if let Some(proxy) = proxy_url {
+            let response = host_io::execute_async(self.prepare_proxy_request(proxy)).await?;
+            Self::decode_proxy_response(response)
+        } else {
+            self.call_async().await
+        }
+    }
+
+    fn prepare_proxy_request(self, proxy_url: &str) -> RequestBuilder {
         use base64::Engine as _;
         use base64::engine::general_purpose::STANDARD as BASE64;
 
@@ -274,15 +307,12 @@ impl RequestBuilder {
                 .push(("X-Org-Id".to_string(), tenant_id.clone()));
         }
 
-        // Execute directly (bypass proxy check to avoid recursion). Under
-        // WASI the proxy hop rides the host-io import (func_wrap_concurrent
-        // host-side) so concurrent Split subtasks overlap their agent I/O —
-        // the p2 wasi:http pollable wait would hold the whole store.
-        #[cfg(feature = "native")]
-        let proxy_response = native::execute(proxy_request)?;
-        #[cfg(all(feature = "wasi", not(feature = "native")))]
-        let proxy_response = host_io::execute(proxy_request)?;
+        proxy_request
+    }
 
+    fn decode_proxy_response(proxy_response: HttpResponse) -> Result<HttpResponse, HttpError> {
+        use base64::Engine as _;
+        use base64::engine::general_purpose::STANDARD as BASE64;
         // Parse proxy response
         let resp_json: serde_json::Value = serde_json::from_slice(&proxy_response.body)
             .map_err(|e| HttpError::Transport(format!("Failed to parse proxy response: {}", e)))?;

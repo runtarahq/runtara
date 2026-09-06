@@ -13,6 +13,12 @@ design's gates.
 
 ## Decision and guarantees
 
+Update the existing implementation directly. Do not introduce opt-in product
+features, alternative cancellation backends, runtime selectors or rollout flags.
+Compare the current implementation against a separately built baseline revision;
+existing test-only integration gates are sufficient. This supersedes the earlier
+proposal to retain a flag-selected synchronous path during development.
+
 Keep a single, normally composed `workflow.wasm`, with orchestration, cancellation
 selection, timeout handling, cleanup and recovery in WASM. Use Component Model
 async calls, waitable sets and subtask cancellation instead of a Runtara task
@@ -78,8 +84,7 @@ must send headers and then block the body. No custom isolated executor may be
 used to make either proof pass.
 
 If the pinned stack cannot implement the standard path, document the exact
-missing binding/runtime capability and a scoped upgrade proposal. Keep the
-existing default; do not silently fall back to the superseded isolation design.
+missing binding/runtime capability and a scoped upgrade proposal. Do not silently fall back to the superseded isolation design.
 
 Primary references, checked 2026-09-06:
 
@@ -197,8 +202,8 @@ composition. This document update does not delete code, migrations or artifacts.
 
 ## Tests and release gates
 
-Run the existing full emitted-workflow harness against baseline and cooperative
-modes with identical fixture inputs, scripted services, signal schedules and
+Run the existing full emitted-workflow harness against the separately built
+baseline revision and current implementation with identical fixture inputs, scripted services, signal schedules and
 preloaded checkpoints. Verify actual standard cancellation events and resulting
 cleanup; a test that routes through isolated tasks or waits for the remote server
 to finish cannot establish this design. Compare outputs, errors, request counts,
@@ -261,9 +266,10 @@ single random-double, chains of 10/100, sequential/parallel Split, nested Embed,
 small/16-KiB-boundary/MiB payloads, real HTTP header/body waits, replay and root
 abort. Assert concurrent overlap and standard ABI use; no sequential fallback.
 
-Run both modes from the same revision on the same host with identical dependency,
-artifact, compiler, runtime and fixture settings. Record hashes, versions, machine
-specifications and actual ABI modes. Keep legacy and candidate runs paired across
+Run the baseline and current revisions on the same host with matching dependency,
+compiler, runtime and fixture settings wherever unaffected by the change. Record
+all necessary differences explicitly; no product backend selector is introduced. Record hashes, versions,
+machine specifications and actual ABI modes. Keep legacy and candidate runs paired across
 at least three independent sessions, alternating order. Prepared runs require at
 least five warmups and 1,000 measured executions per condition. Declare separate
 sample counts for expensive cold/server/load cases and do not publish unsupported
@@ -285,9 +291,9 @@ Do not claim real-time termination guarantees from observed cooperative latency.
 | P2 Guest cooperative execution | Wire generated waits and agent cleanup, retain component lifetimes/composition, prove single-step and nested/parallel parity; publish first size and timing comparison |
 | P3 Signals, lifecycle and timeout integration | Reuse root signals, define acknowledgement/terminal ordering and timeout reasons, implement grace/full abort; targeted control only with explicit same-mechanism scope semantics |
 | P4 Qualification and cleanup | Complete G1–G10 and local-server E2E, publish paired report; retire superseded paths safely while retaining any required old-artifact support |
-| P5 Enablement | Enable only qualified compiler/runtime combinations within agreed budgets; rollback preserves active/parked artifacts and restores legacy generation |
+| P5 Release | Release the updated existing implementation after qualification; retain supported active/parked artifact contracts and document rollback compatibility |
 
-Keep production defaults unchanged until the gates pass. Small tested commits
+Complete the gates before merging/releasing the updated implementation. Small tested commits
 should separate standard ABI/binding changes, emitter behavior, lifecycle changes
 and cleanup of the superseded experiment. No independent hard-cancel mechanism,
 custom host task manager or new invocation ledger is part of this plan.

@@ -14,9 +14,10 @@
 //! internal agent (notably Object Model) from bypassing the host's absolute
 //! deadline and response-body policy through raw `wasi:http`.
 //!
-//! The import is async-TYPED (blocking is legal for its callers under ABI v2)
-//! but sync-LOWERED here (`async: false`): the agent's task blocks until the
-//! host future resolves.
+//! The existing blocking API synchronously lowers the async-typed import.
+//! The async API uses wit-bindgen's standard async lowering so cancellation of
+//! the guest future can cancel its pending host operation. Both share the same
+//! WIT interface, request encoding, response decoding and host policy.
 
 use std::collections::HashMap;
 
@@ -25,27 +26,40 @@ use crate::{Body, HttpError, HttpResponse, RequestBuilder};
 #[allow(warnings)]
 mod bindings {
     wit_bindgen::generate!({
-        inline: "
-            package runtara:host-io@0.1.0;
-
-            interface http {
-                /// Buffered request/response envelopes (JSON bytes):
-                ///   input:  { method, url, headers: [[k,v]...], body_b64 }
-                ///   output: { status, headers: [[k,v]...], body_b64 }
-                /// Err carries a transport-level message.
-                request: async func(input: list<u8>) -> result<list<u8>, string>;
-            }
-
-            world host-io-client {
-                import http;
-            }
-        ",
+        path: "wit",
         world: "host-io-client",
         async: false,
     });
 }
 
+#[allow(warnings)]
+mod async_bindings {
+    wit_bindgen::generate!({
+        path: "wit",
+        world: "host-io-client",
+        async: true,
+        // Both ABI bindings describe the same WIT world. Keep their encoded
+        // type sections distinct so the linker can merge them normally.
+        type_section_suffix: "async",
+    });
+}
+
 pub(crate) fn execute(request: RequestBuilder) -> Result<HttpResponse, HttpError> {
+    let input = encode_request(request)?;
+    let output = bindings::runtara::host_io::http::request(&input).map_err(HttpError::Transport)?;
+    decode_response(&output)
+}
+
+/// Dropping this future uses wit-bindgen's standard subtask cancellation.
+pub(crate) async fn execute_async(request: RequestBuilder) -> Result<HttpResponse, HttpError> {
+    let input = encode_request(request)?;
+    let output = async_bindings::runtara::host_io::http::request(input)
+        .await
+        .map_err(HttpError::Transport)?;
+    decode_response(&output)
+}
+
+fn encode_request(request: RequestBuilder) -> Result<Vec<u8>, HttpError> {
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD as BASE64;
 
@@ -76,8 +90,13 @@ pub(crate) fn execute(request: RequestBuilder) -> Result<HttpResponse, HttpError
     let input =
         serde_json::to_vec(&input).map_err(|error| HttpError::Transport(error.to_string()))?;
 
-    let output = bindings::runtara::host_io::http::request(&input).map_err(HttpError::Transport)?;
-    let envelope: serde_json::Value = serde_json::from_slice(&output)
+    Ok(input)
+}
+
+fn decode_response(output: &[u8]) -> Result<HttpResponse, HttpError> {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD as BASE64;
+    let envelope: serde_json::Value = serde_json::from_slice(output)
         .map_err(|error| HttpError::Transport(format!("parse host-io response: {error}")))?;
 
     let status = envelope["status"].as_u64().unwrap_or(0) as u16;
