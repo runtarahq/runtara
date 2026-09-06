@@ -395,3 +395,114 @@ fn policy_rejects_grants_overlapping_inline_embed_checkpoints_without_agent_call
         }
     }
 }
+
+#[test]
+fn policy_falls_back_for_unsupported_root_abis_without_changing_legacy_bytes() {
+    let components = direct_e2e_components_dir();
+    let dir = tempfile::tempdir().unwrap();
+    for abi in [WorkflowAbi::CliRunHttp, WorkflowAbi::AgentCapabilities] {
+        let graph = super::super::wasm_performance_baseline::random_chain(1, false);
+        let mut compilation_input = input(graph, &dir.path().join(format!("{abi:?}-legacy")));
+        compilation_input.agent_slug = Some("fallback-test".into());
+        let mut legacy = runtara_workflows::direct_wasm::compile_direct_workflow_with_abi(
+            compilation_input.clone(),
+            abi,
+            false,
+        )
+        .unwrap();
+        compose_direct_workflow(&mut legacy, &components).unwrap();
+        compilation_input.output_dir = dir.path().join(format!("{abi:?}-policy"));
+        let fallback = compile_direct_workflow_composed_with_isolation_policy(
+            compilation_input,
+            abi,
+            false,
+            &components,
+            &[],
+            approved(&components),
+            limits(),
+        )
+        .unwrap();
+        assert_eq!(
+            decisions(&fallback)["utils"],
+            Reason::UnsupportedRootRuntime
+        );
+        assert!(fallback.scoped_agents.is_empty());
+        assert!(fallback.invocation_manifest.is_none());
+        assert_eq!(
+            fs::read(fallback.wasm_path).unwrap(),
+            fs::read(legacy.wasm_path).unwrap()
+        );
+    }
+}
+
+#[test]
+fn policy_rechecks_shared_bytes_before_replacing_a_composed_artifact() {
+    let components = direct_e2e_components_dir();
+    let dir = tempfile::tempdir().unwrap();
+    let graph = super::super::wasm_performance_baseline::random_chain(1, false);
+    let legacy = compile(graph.clone(), &dir.path().join("legacy"));
+    for dep in legacy
+        .artifact_metadata
+        .shared_components
+        .iter()
+        .chain(&legacy.artifact_metadata.agent_components)
+    {
+        fs::copy(
+            components.join(&dep.wasm_filename),
+            dir.path().join(&dep.wasm_filename),
+        )
+        .unwrap();
+        let meta = components.join(&dep.meta_filename);
+        if meta.exists() {
+            fs::copy(meta, dir.path().join(&dep.meta_filename)).unwrap();
+        }
+    }
+    let mut compiled = compile_direct_workflow_composed_with_isolation_policy(
+        input(graph, &dir.path().join("selected")),
+        WorkflowAbi::InvokeHostImports,
+        false,
+        dir.path(),
+        &[],
+        approved(dir.path()),
+        limits(),
+    )
+    .unwrap();
+    let original = fs::read(&compiled.wasm_path).unwrap();
+    let report = compiled
+        .artifact_metadata
+        .isolation_selection
+        .as_ref()
+        .unwrap();
+    assert!(!report.shared_components.is_empty());
+    let dep = compiled
+        .artifact_metadata
+        .shared_components
+        .iter()
+        .find(|d| report.shared_components.contains_key(&d.package))
+        .unwrap();
+    let path = dir.path().join(&dep.wasm_filename);
+    let mut bytes = fs::read(&path).unwrap();
+    bytes.extend_from_slice(&[0, 1, 0]);
+    fs::write(path, &bytes).unwrap();
+    let sidecar = dir.path().join(&dep.meta_filename);
+    let mut metadata: Value = serde_json::from_slice(&fs::read(&sidecar).unwrap()).unwrap();
+    metadata["sha256"] = artifact_digest(&bytes).into();
+    metadata["sizeBytes"] = bytes.len().into();
+    fs::write(sidecar, serde_json::to_vec(&metadata).unwrap()).unwrap();
+    let error = compose_direct_workflow_with_isolated_agents(
+        &mut compiled,
+        dir.path(),
+        &[],
+        &selected(dir.path()),
+        limits(),
+    )
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("shared component")
+            && error
+                .to_string()
+                .contains("changed after isolation selection"),
+        "{error}"
+    );
+    assert_eq!(fs::read(&compiled.wasm_path).unwrap(), original);
+}

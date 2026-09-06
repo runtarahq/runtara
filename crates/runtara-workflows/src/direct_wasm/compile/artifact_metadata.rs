@@ -430,6 +430,13 @@ fn check_workflow_agent_checkpoint_scope(
 /// don't count: only what the composed child still asks the outside world
 /// for matters.
 fn component_imports_workflow_runtime(wasm: &[u8]) -> Result<bool, DirectCompileError> {
+    component_imports_prefix(wasm, "runtara:workflow-runtime/runtime")
+}
+
+pub(super) fn component_imports_prefix(
+    wasm: &[u8],
+    prefix: &str,
+) -> Result<bool, DirectCompileError> {
     let parse_error = |err: wasmparser::BinaryReaderError| {
         DirectCompileError::Component(format!(
             "failed to parse staged workflow-agent component: {err}"
@@ -444,11 +451,7 @@ fn component_imports_workflow_runtime(wasm: &[u8]) -> Result<bool, DirectCompile
             wasmparser::Payload::ComponentImportSection(reader) if depth == 0 => {
                 for import in reader {
                     let import = import.map_err(parse_error)?;
-                    if import
-                        .name
-                        .0
-                        .starts_with("runtara:workflow-runtime/runtime")
-                    {
+                    if import.name.0.starts_with(prefix) {
                         return Ok(true);
                     }
                 }
@@ -586,6 +589,30 @@ pub(super) fn write_artifact_metadata(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn import_classification_ignores_nested_components_but_scans_later_root_sections() {
+        use wasm_encoder::{
+            Component, ComponentImportSection, ComponentTypeRef, ComponentTypeSection,
+            InstanceType, NestedComponentSection,
+        };
+        let mut types = ComponentTypeSection::new();
+        types.instance(&InstanceType::new());
+        let mut imports = ComponentImportSection::new();
+        imports.import(
+            "wasi:http/outgoing-handler@0.2.0",
+            ComponentTypeRef::Instance(0),
+        );
+        let mut child = Component::new();
+        child.section(&types).section(&imports);
+        let mut root = Component::new();
+        root.section(&NestedComponentSection(&child));
+        assert!(!component_imports_prefix(root.as_slice(), "wasi:http/").unwrap());
+        root.section(&types).section(&imports);
+        assert!(component_imports_prefix(root.as_slice(), "wasi:http/").unwrap());
+        assert!(!component_imports_workflow_runtime(root.as_slice()).unwrap());
+        assert!(component_imports_prefix(b"invalid wasm", "wasi:http/").is_err());
+    }
 
     fn component_requirement() -> DirectAgentComponentRequirement {
         DirectAgentComponentRequirement {

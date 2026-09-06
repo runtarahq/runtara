@@ -36,6 +36,8 @@ pub enum AgentIsolationReason {
     Disabled,
     /// The selected runner cannot enforce the current compiler contract.
     RuntimeUnavailable,
+    /// Root runtime/ABI cannot defer persistence through the scoped host.
+    UnsupportedRootRuntime,
     /// No review exists for this dependency.
     UnreviewedPackage,
     /// Fresh stores were not approved for this package.
@@ -75,6 +77,9 @@ pub struct AgentIsolationReport {
     pub version: u32,
     /// Decisions in canonical Agent ID order; unrelated review IDs are ignored.
     pub agents: Vec<AgentIsolationDecision>,
+    /// Shared bytes inspected for root-runtime compatibility before emission.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub shared_components: BTreeMap<String, String>,
 }
 
 /// Compile once with review-driven lowering, then compose the exact selection.
@@ -137,6 +142,7 @@ impl AgentLoweringSelection {
         self,
         manifest: &DirectWorkflowManifest,
         workflow_id: &str,
+        root_supports_isolation: bool,
     ) -> Result<(BTreeSet<String>, Option<AgentIsolationReport>), DirectCompileError> {
         let Self::Policy {
             components_dir,
@@ -161,16 +167,18 @@ impl AgentLoweringSelection {
             &requirements,
         )?;
         let mut agents = dependencies
-            .into_iter()
+            .iter()
             .map(|dep| {
-                let agent_id = dep.metadata.agent_id.unwrap();
-                let sha256 = dep.metadata.wasm.unwrap().sha256;
+                let agent_id = dep.metadata.agent_id.clone().unwrap();
+                let sha256 = dep.metadata.wasm.as_ref().unwrap().sha256.clone();
                 let review = policy.reviews.get(&agent_id);
                 use AgentIsolationReason::*;
                 let reason = if !policy.enabled {
                     Disabled
                 } else if !policy.runtime_supports_inventory_v4 {
                     RuntimeUnavailable
+                } else if !root_supports_isolation {
+                    UnsupportedRootRuntime
                 } else if let Some(review) = review {
                     if !review.reset_safe {
                         ResetNotApproved
@@ -277,11 +285,158 @@ impl AgentLoweringSelection {
                 }
             }
         }
+        let mut shared_components = BTreeMap::new();
+        if agents
+            .iter()
+            .any(|a| a.reason == AgentIsolationReason::Isolated)
+        {
+            let requirements = super::super::component::DIRECT_SHARED_COMPONENT_REQUIREMENTS
+                .iter()
+                .filter(|c| c.package != "runtara:workflow-runtime")
+                .copied()
+                .collect::<Vec<_>>();
+            let shared = resolve_shared_component_dependencies(&components_dir, &requirements)?;
+            let mut unsupported = false;
+            for dep in &shared {
+                shared_components.insert(
+                    dep.package.clone(),
+                    dep.metadata.wasm.as_ref().unwrap().sha256.clone(),
+                );
+                unsupported |= artifact_metadata::component_imports_prefix(
+                    &fs::read(&dep.wasm_path)?,
+                    "wasi:http/",
+                )?;
+            }
+            // Isolated dependencies no longer contribute imports to the root.
+            for dep in &dependencies {
+                if agents.iter().any(|a| {
+                    Some(&a.agent_id) == dep.metadata.agent_id.as_ref()
+                        && a.reason != AgentIsolationReason::Isolated
+                }) {
+                    unsupported |= artifact_metadata::component_imports_prefix(
+                        &fs::read(&dep.wasm_path)?,
+                        "wasi:http/",
+                    )?;
+                }
+            }
+            if unsupported {
+                for agent in &mut agents {
+                    if agent.reason == AgentIsolationReason::Isolated {
+                        agent.reason = AgentIsolationReason::UnsupportedRootRuntime;
+                    }
+                }
+            }
+        }
         let selected = agents
             .iter()
             .filter(|a| a.reason == AgentIsolationReason::Isolated)
             .map(|a| a.agent_id.clone())
             .collect();
-        Ok((selected, Some(AgentIsolationReport { version: 1, agents })))
+        Ok((
+            selected,
+            Some(AgentIsolationReport {
+                version: 1,
+                agents,
+                shared_components,
+            }),
+        ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wasm_encoder::{
+        Component, ComponentImportSection, ComponentTypeRef, ComponentTypeSection, InstanceType,
+    };
+
+    fn fixture(http: bool) -> Vec<u8> {
+        let mut component = Component::new();
+        if http {
+            let mut types = ComponentTypeSection::new();
+            types.instance(&InstanceType::new());
+            let mut imports = ComponentImportSection::new();
+            imports.import(
+                "wasi:http/outgoing-handler@0.2.0",
+                ComponentTypeRef::Instance(0),
+            );
+            component.section(&types).section(&imports);
+        }
+        component.finish()
+    }
+
+    // Selection inspects actual imports, independently of composition. Tiny
+    // components here deliberately test only that pre-emission boundary.
+    #[test]
+    fn root_http_imports_force_legacy_but_isolated_child_imports_do_not() {
+        let graph = serde_json::from_value(serde_json::json!({"durable":false,"entryPoint":"random","steps":{
+            "random":{"id":"random","stepType":"Agent","agentId":"utils","capabilityId":"random-double","inputMapping":{}},
+            "date":{"id":"date","stepType":"Agent","agentId":"datetime","capabilityId":"get-current-date","inputMapping":{}},
+            "finish":{"id":"finish","stepType":"Finish"}},"executionPlan":[{"fromStep":"random","toStep":"date"},{"fromStep":"date","toStep":"finish"}]})).unwrap();
+        let manifest =
+            super::super::super::manifest::build_direct_workflow_manifest(&graph).unwrap();
+        for (shared_http, legacy_http, child_http, supported_root) in [
+            (false, false, false, true),
+            (false, false, true, true),
+            (true, false, false, true),
+            (false, true, false, true),
+            (false, false, false, false),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            for req in super::super::super::component::DIRECT_SHARED_COMPONENT_REQUIREMENTS {
+                fs::write(
+                    dir.path().join(req.bundle_wasm_filename),
+                    fixture(shared_http),
+                )
+                .unwrap();
+            }
+            let child = fixture(child_http);
+            fs::write(dir.path().join("runtara_agent_utils.wasm"), &child).unwrap();
+            fs::write(
+                dir.path().join("runtara_agent_datetime.wasm"),
+                fixture(legacy_http),
+            )
+            .unwrap();
+            let (selected, report) = AgentLoweringSelection::Policy {
+                components_dir: dir.path().into(),
+                extra_component_dirs: vec![],
+                policy: AgentIsolationPolicy {
+                    enabled: true,
+                    runtime_supports_inventory_v4: true,
+                    reviews: [(
+                        "utils".into(),
+                        AgentIsolationReview {
+                            sha256: runtara_workflow_wit::isolation_package::artifact_digest(
+                                &child,
+                            ),
+                            reset_safe: true,
+                            compiler_checkpoint_contract: true,
+                        },
+                    )]
+                    .into(),
+                },
+            }
+            .resolve(&manifest, "root-http-test", supported_root)
+            .unwrap();
+            let expected = supported_root && !shared_http && !legacy_http;
+            assert_eq!(selected.contains("utils"), expected);
+            let report = report.unwrap();
+            assert_eq!(
+                report
+                    .agents
+                    .iter()
+                    .find(|a| a.agent_id == "utils")
+                    .unwrap()
+                    .reason,
+                if expected {
+                    AgentIsolationReason::Isolated
+                } else {
+                    AgentIsolationReason::UnsupportedRootRuntime
+                }
+            );
+            if supported_root {
+                assert!(!report.shared_components.is_empty());
+            }
+        }
     }
 }

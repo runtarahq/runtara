@@ -705,6 +705,19 @@ fn compose_direct_workflow_selected(
         &result.component_artifacts.agent_components,
     )?;
     if let Some(report) = &result.artifact_metadata.isolation_selection {
+        for (package, digest) in &report.shared_components {
+            if shared_components
+                .iter()
+                .find(|c| &c.package == package)
+                .and_then(|c| c.metadata.wasm.as_ref())
+                .map(|w| &w.sha256)
+                != Some(digest)
+            {
+                return Err(component_error(format!(
+                    "shared component `{package}` changed after isolation selection"
+                )));
+            }
+        }
         for agent in &report.agents {
             let current = agent_components
                 .iter()
@@ -1150,7 +1163,7 @@ fn workflow_abi_tag(abi: super::component::WorkflowAbi) -> &'static str {
 /// and the additive `runtime.complete`/`fail` fire as today. Set to `1`/`true`
 /// to let eligible workflows compile agent-shaped (zero runtime imports). This
 /// is the compile lever behind workflow-as-agent.
-fn omit_runtime_from_env() -> bool {
+pub(crate) fn omit_runtime_from_env() -> bool {
     omit_runtime_from_raw(std::env::var("RUNTARA_DIRECT_OMIT_RUNTIME").ok().as_deref())
 }
 
@@ -1330,7 +1343,12 @@ fn compile_direct_workflow_inner(
         _ => None,
     };
 
-    let (scoped_agents, selection_report) = selection.resolve(&manifest, &input.workflow_id)?;
+    let runtime_binding = runtime_binding_from_env();
+    let root_supports_isolation = abi == super::component::WorkflowAbi::InvokeHostImports
+        && !omit_runtime
+        && runtime_binding == super::component::RuntimeBinding::HostImport;
+    let (scoped_agents, selection_report) =
+        selection.resolve(&manifest, &input.workflow_id, root_supports_isolation)?;
     for agent in &scoped_agents {
         if !manifest.feature_summary.agent_ids.contains(agent) {
             return Err(component_error(format!(
@@ -1362,7 +1380,7 @@ fn compile_direct_workflow_inner(
     });
     let component_artifacts = super::component::emit_direct_component_artifacts_scoped(
         &manifest.feature_summary.agent_ids,
-        runtime_binding_from_env(),
+        runtime_binding,
         abi,
         omit_runtime,
         export_agent_id.as_deref(),
