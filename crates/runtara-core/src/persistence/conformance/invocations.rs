@@ -8,6 +8,14 @@ async fn root(p: &dyn Persistence) -> (String, InvocationLease) {
     p.update_instance_status(&id, InstanceStatus::Running, None)
         .await
         .unwrap();
+    assert!(
+        p.invocation_fences()
+            .unwrap()
+            .get_invocation_lease("fence-tenant", &id)
+            .await
+            .unwrap()
+            .is_none()
+    );
     let lease = p
         .invocation_fences()
         .unwrap()
@@ -63,6 +71,17 @@ pub async fn lease_ownership(p: &dyn Persistence) {
             .await,
         FenceRejection::LeaseMismatch,
     );
+    assert_eq!(
+        f.get_invocation_lease("fence-tenant", &id).await.unwrap(),
+        Some(InvocationLeaseState {
+            lease: lease.clone(),
+            active: false
+        })
+    );
+    rejected(
+        f.get_invocation_lease("other-tenant", &id).await,
+        FenceRejection::UnknownRoot,
+    );
     let next = f
         .claim_invocation_lease("fence-tenant", &id, "launch-two", Some(1))
         .await
@@ -77,6 +96,13 @@ pub async fn lease_ownership(p: &dyn Persistence) {
             .await
             .unwrap(),
         next
+    );
+    assert_eq!(
+        f.get_invocation_lease("fence-tenant", &id).await.unwrap(),
+        Some(InvocationLeaseState {
+            lease: next.clone(),
+            active: true
+        })
     );
     p.update_instance_status(&id, InstanceStatus::Completed, None)
         .await

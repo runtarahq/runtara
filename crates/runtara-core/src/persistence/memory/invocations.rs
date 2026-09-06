@@ -72,6 +72,22 @@ fn checkpoint(
 
 #[async_trait]
 impl InvocationFences for InMemoryPersistence {
+    async fn get_invocation_lease(
+        &self,
+        tenant: &str,
+        instance: &str,
+    ) -> FenceResult<Option<InvocationLeaseState>> {
+        let store = self.store.lock().unwrap();
+        root(&store, tenant, instance, false)?;
+        Ok(store
+            .invocation_leases
+            .get(instance)
+            .map(|(lease, active)| InvocationLeaseState {
+                lease: lease.clone(),
+                active: *active,
+            }))
+    }
+
     async fn claim_invocation_lease(
         &self,
         tenant: &str,

@@ -1096,6 +1096,79 @@ component code changed; the emitted tests used the previously built components.
 Targeted interruption, recursive children, aggregate quotas and final local-server
 qualification remain outstanding.
 
+## Transactional invocation fencing contract
+
+Core now exposes an optional `Persistence::invocation_fences` capability, with
+independent in-memory and PostgreSQL implementations. PostgreSQL migration 025
+adds root leases and invocation control records. These records contain no result
+payloads and do not alter existing checkpoint keys. Existing persistence methods
+and runtime paths continue to behave as before; the scoped runtime has **not yet
+been switched to these methods**.
+
+A root lease contains trusted tenant/root identity, a host launch ID and a
+store-allocated epoch. Recovery can inspect the tenant-owned lease record and then revoke/claim using
+its exact epoch; a read snapshot does not bypass the transition checks. Claims
+require a running root. Replacing an owner requires
+exactly its revoked epoch; an active owner cannot be silently displaced. Repeated
+claim requests return the same lease. Revocation fences future writes but does
+not stop a native task or release its memory/capacity: runner teardown and join
+remain required before resources are reclaimed.
+
+The store allocates invocation generations independently of guest retry counters.
+Admission retains a host start ID so retries of the same request return the same
+attempt. Another active start at the same logical path is rejected. A settled
+invocation can run again with a fresh start/generation; this is control state,
+not success memoization. After lease revocation, a new owner can reclaim an
+abandoned active path. A cancellation winner instead returns its retained
+logical-path tombstone on replay, before a Store or external IO should start.
+An old generation cannot cancel a later generation, and exact cancellation does
+not imply prefix/group cancellation of descendants.
+
+Cancellation and settlement serialize with fenced checkpoint writes. Settlement
+may atomically commit an existing logical checkpoint and the attempt's terminal
+control state. Cancellation wins prevent those bytes from being written;
+settlement wins make late cancellation a no-op. Read-or-insert preserves the
+first committed checkpoint bytes, returns them on a hit, and treats an empty
+payload as a probe. A settlement response carries any existing checkpoint value
+so callers can honor replay semantics. Root checkpoint pointers update in the
+same transaction as insertion. Retention deletes leases and tombstones with the
+root instance.
+
+Every PostgreSQL operation first locks the tenant-owned root instance row. This
+serializes it with root terminal transitions as well as other fenced mutations.
+Opaque path equality is checked in full; hash indexes avoid btree entry-size
+limits for long paths without treating hashes as identities. Operations under
+this contract serialize per root and retain attempt history. Their latency,
+contention and retention cost must be measured and bounded before rollout.
+Ordinary non-durable invocations must continue using live in-memory arbitration;
+adding this optional capability introduces no automatic per-step database IO.
+
+Eight shared contract cases cover ownership, request idempotency, concurrent
+admission, cancellation/replay, settlement/checkpoint semantics, lease takeover,
+cancellation races and retention against both backends. PostgreSQL adds a forced
+settlement failure after checkpoint insertion to prove rollback, and an observed
+blocked-writer test: the test checks that the writer's exact backend PID is
+waiting on the controlled root lock, commits cancellation or revocation, and
+verifies that no late checkpoint or pointer is published. Tests use an isolated
+local database. Fresh parallel setup exposed a `CREATE EXTENSION IF NOT EXISTS`
+race; shared test initialization now serializes extension creation.
+
+Verification passed 76 core unit tests and the full PostgreSQL suite (72 backend
+unit tests plus 18 conformance/integration tests), 166 tests total. The 18-test
+suite also passed with parallel execution against a newly created database.
+Feature-enabled all-target Clippy passed with warnings denied. The existing
+migration documentation example remains explicitly ignored by Rustdoc; no new
+check was skipped. These are library/persistence tests, not local-server E2E.
+
+Required integration remains: bind leases to runner launch/recovery ownership;
+admit/settle attempts asynchronously around real child execution; fence all
+child write families (including retry records, sleep/wakes and events); arbitrate
+parent checkpoint/result publication; route deduplicated tenant-scoped targeted
+commands; expose runtime invocation addresses; and preserve non-durable behavior.
+These primitives alone do not enable user cancellation of one step, remove E128,
+or establish crash-safe production execution. Local-server E2E and fresh
+performance comparisons remain required.
+
 ## Remaining required work
 
 - P0: extend explicit differential selection and invocation-count evidence to all
@@ -1107,8 +1180,9 @@ qualification remain outstanding.
   eligibility. Basic emitted Agent paths and attempts are wired above.
 - P3: recursive Embed extraction and production scoped-runtime integration, suspension/wake sets,
   scopes, deadlines, checkpoint keys and existing reference ABI modes.
-- P4: durable attempt transitions, production root-coordinator and targeted command routing, crash/lease
-  fencing, resource/tenant ownership and parked invocation handling.
+- P4: integrate the transactional lease/attempt contract with production child IO,
+  root coordination and targeted commands; qualify crash/recovery, resource
+  ownership and parked invocation handling.
 - P5: all compatibility gates, extend the paired Agent measurements to direct
   step spans, aggregate resources and production qualification; full unit and
   integration suites, local server plus isolated persistence E2E.

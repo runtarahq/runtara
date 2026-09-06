@@ -50,11 +50,18 @@ async fn postgres_test_pool() -> (PgPool, Option<ContainerAsync<Postgres>>) {
         let pool = PgPool::connect(&url)
             .await
             .expect("required core conformance database must accept connections");
-        // Ensure pgcrypto for `gen_random_uuid()` used by migrations.
-        sqlx::query("CREATE EXTENSION IF NOT EXISTS pgcrypto")
-            .execute(&pool)
-            .await
-            .expect("pgcrypto extension must be available");
+        // IF NOT EXISTS still races on pg_extension's unique index when fresh
+        // database tests initialize concurrently. Serialize this shared setup;
+        // each fallback container below remains independently initialized.
+        static EXTENSION_READY: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
+        EXTENSION_READY
+            .get_or_init(|| async {
+                sqlx::query("CREATE EXTENSION IF NOT EXISTS pgcrypto")
+                    .execute(&pool)
+                    .await
+                    .expect("pgcrypto extension must be available");
+            })
+            .await;
         runtara_store_postgres::migrations::POSTGRES
             .run(&pool)
             .await
@@ -542,4 +549,270 @@ async fn legacy_resume_is_retired_and_not_delivered_by_old_writers() {
         SignalType::Pause
     );
     backend.delete_instances_batch(&[id]).await.unwrap();
+}
+
+#[tokio::test]
+async fn invocation_fences_lease_ownership() {
+    let (pool, _container) = postgres_test_pool().await;
+    runtara_core::persistence::conformance::invocations::lease_ownership(
+        &PostgresPersistence::new(pool),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn invocation_fences_attempt_admission() {
+    let (pool, _container) = postgres_test_pool().await;
+    runtara_core::persistence::conformance::invocations::attempt_admission(
+        &PostgresPersistence::new(pool),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn invocation_fences_cancellation_replay() {
+    let (pool, _container) = postgres_test_pool().await;
+    runtara_core::persistence::conformance::invocations::cancellation_replay(
+        &PostgresPersistence::new(pool),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn invocation_fences_checkpoint_settlement() {
+    let (pool, _container) = postgres_test_pool().await;
+    runtara_core::persistence::conformance::invocations::checkpoint_settlement(
+        &PostgresPersistence::new(pool),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn invocation_fences_lease_takeover() {
+    let (pool, _container) = postgres_test_pool().await;
+    runtara_core::persistence::conformance::invocations::lease_takeover(&PostgresPersistence::new(
+        pool,
+    ))
+    .await;
+}
+
+#[tokio::test]
+async fn invocation_fences_cancellation_races() {
+    let (pool, _container) = postgres_test_pool().await;
+    runtara_core::persistence::conformance::invocations::cancellation_races(
+        &PostgresPersistence::new(pool),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn invocation_fences_retention() {
+    let (pool, _container) = postgres_test_pool().await;
+    runtara_core::persistence::conformance::invocations::retention(&PostgresPersistence::new(pool))
+        .await;
+}
+
+#[tokio::test]
+async fn invocation_fences_concurrent_admission() {
+    let (pool, _container) = postgres_test_pool().await;
+    runtara_core::persistence::conformance::invocations::concurrent_admission(
+        &PostgresPersistence::new(pool),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn invocation_settlement_rolls_back_checkpoint_and_pointer_on_storage_failure() {
+    use runtara_core::{
+        domain::InstanceStatus,
+        persistence::{Persistence, invocations::*},
+    };
+    let (pool, _container) = postgres_test_pool().await;
+    let backend = PostgresPersistence::new(pool.clone());
+    let id = uuid::Uuid::new_v4().to_string();
+    backend.register_instance(&id, "rollback").await.unwrap();
+    backend
+        .update_instance_status(&id, InstanceStatus::Running, None)
+        .await
+        .unwrap();
+    let lease = backend
+        .claim_invocation_lease("rollback", &id, "owner", None)
+        .await
+        .unwrap();
+    let attempt = backend
+        .begin_invocation_attempt(&lease, "child", "start")
+        .await
+        .unwrap();
+    let constraint = format!("invocation_failure_{}", uuid::Uuid::new_v4().simple());
+    sqlx::query(&format!("ALTER TABLE invocation_attempts ADD CONSTRAINT {constraint} CHECK (instance_id <> '{id}' OR state <> 'settled')")).execute(&pool).await.unwrap();
+    let checkpoint = InvocationCheckpoint {
+        checkpoint_id: "child::finish".into(),
+        state: b"result".to_vec(),
+    };
+    let result = backend
+        .settle_invocation_attempt(&attempt.fence, Some(&checkpoint))
+        .await;
+    sqlx::query(&format!(
+        "ALTER TABLE invocation_attempts DROP CONSTRAINT {constraint}"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert!(matches!(result, Err(InvocationFenceError::Storage(_))));
+    assert!(
+        backend
+            .load_checkpoint(&id, &checkpoint.checkpoint_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        backend
+            .get_instance(&id)
+            .await
+            .unwrap()
+            .unwrap()
+            .checkpoint_id,
+        None
+    );
+    assert_eq!(
+        backend
+            .begin_invocation_attempt(&lease, "child", "start")
+            .await
+            .unwrap()
+            .state,
+        AttemptState::Active
+    );
+    assert_eq!(
+        backend
+            .settle_invocation_attempt(&attempt.fence, Some(&checkpoint))
+            .await
+            .unwrap()
+            .state,
+        AttemptState::Settled
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn invocation_write_waiting_on_a_database_lock_observes_committed_fence() {
+    use runtara_core::{
+        domain::InstanceStatus,
+        persistence::{Persistence, invocations::*},
+    };
+    use std::time::Duration;
+    let (pool, _container) = postgres_test_pool().await;
+    let backend = PostgresPersistence::new(pool.clone());
+    // A dedicated one-connection writer lets the test verify that this exact
+    // operation is blocked, rather than assuming a sleep gave it time to start.
+    let writer_pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with((*pool.connect_options()).clone())
+        .await
+        .unwrap();
+    let writer_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&writer_pool)
+        .await
+        .unwrap();
+    for revoke_lease in [false, true] {
+        let id = uuid::Uuid::new_v4().to_string();
+        backend
+            .register_instance(&id, "blocked-write")
+            .await
+            .unwrap();
+        backend
+            .update_instance_status(&id, InstanceStatus::Running, None)
+            .await
+            .unwrap();
+        let lease = backend
+            .claim_invocation_lease("blocked-write", &id, "owner", None)
+            .await
+            .unwrap();
+        let attempt = backend
+            .begin_invocation_attempt(&lease, "child", "start")
+            .await
+            .unwrap();
+        let mut control = pool.begin().await.unwrap();
+        sqlx::query("SELECT instance_id FROM instances WHERE instance_id=$1 FOR UPDATE")
+            .bind(&id)
+            .fetch_one(&mut *control)
+            .await
+            .unwrap();
+        let writer = PostgresPersistence::new(writer_pool.clone());
+        let pending = tokio::spawn(async move {
+            writer
+                .invocation_checkpoint(
+                    &attempt.fence,
+                    &InvocationCheckpoint {
+                        checkpoint_id: "child::late".into(),
+                        state: b"late".to_vec(),
+                    },
+                )
+                .await
+        });
+        let blocked = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let event: Option<String> =
+                    sqlx::query_scalar("SELECT wait_event_type FROM pg_stat_activity WHERE pid=$1")
+                        .bind(writer_pid)
+                        .fetch_one(&pool)
+                        .await
+                        .unwrap();
+                if event.as_deref() == Some("Lock") {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        if blocked.is_err() {
+            pending.abort();
+            panic!("the checkpoint writer never reached the controlled row lock");
+        }
+        // Commit the same state mutation as cancellation/revocation while
+        // holding the shared root lock. The waiting writer must revalidate it.
+        if revoke_lease {
+            sqlx::query("UPDATE invocation_root_leases SET active=false WHERE instance_id=$1")
+                .bind(&id)
+                .execute(&mut *control)
+                .await
+                .unwrap();
+        } else {
+            sqlx::query("UPDATE invocation_attempts SET state='cancelled' WHERE instance_id=$1")
+                .bind(&id)
+                .execute(&mut *control)
+                .await
+                .unwrap();
+        }
+        control.commit().await.unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(5), pending)
+            .await
+            .unwrap()
+            .unwrap();
+        let expected = if revoke_lease {
+            FenceRejection::LeaseMismatch
+        } else {
+            FenceRejection::Cancelled
+        };
+        assert!(
+            matches!(result,Err(InvocationFenceError::Rejected(reason)) if reason == expected),
+            "{result:?}"
+        );
+        assert!(
+            backend
+                .load_checkpoint(&id, "child::late")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            backend
+                .get_instance(&id)
+                .await
+                .unwrap()
+                .unwrap()
+                .checkpoint_id,
+            None
+        );
+    }
+    writer_pool.close().await;
 }

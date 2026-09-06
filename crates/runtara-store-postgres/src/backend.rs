@@ -22,7 +22,7 @@ use ::runtara_core::persistence::{InstanceCompletionMetrics, InstanceMetricsSink
 /// PostgreSQL-backed persistence implementation.
 #[derive(Clone)]
 pub struct PostgresPersistence {
-    pool: PgPool,
+    pub(crate) pool: PgPool,
     metrics_sink: Option<Arc<dyn InstanceMetricsSink>>,
 }
 
@@ -425,6 +425,12 @@ async fn put_custom_signal(
 
 #[async_trait::async_trait]
 impl Persistence for PostgresPersistence {
+    fn invocation_fences(
+        &self,
+    ) -> Option<&dyn runtara_core::persistence::invocations::InvocationFences> {
+        Some(self)
+    }
+
     async fn register_instance(&self, instance_id: &str, tenant_id: &str) -> Result<(), CoreError> {
         Self::op_register_instance(&self.pool, instance_id, tenant_id).await
     }

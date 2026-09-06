@@ -21,6 +21,15 @@ pub struct InvocationLease {
     pub epoch: i64,
 }
 
+/// Durable owner facts for crash recovery before an exact revocation/CAS claim.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InvocationLeaseState {
+    /// Current owner and its epoch.
+    pub lease: InvocationLease,
+    /// False after revocation; revocation does not establish that teardown ended.
+    pub active: bool,
+}
+
 /// Exact execution attempt; neither a bare step ID nor guest-selected authority.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AttemptFence {
@@ -134,6 +143,15 @@ pub fn validate_identity(value: &str) -> FenceResult<()> {
 /// still join the old execution before releasing its capacity.
 #[async_trait]
 pub trait InvocationFences: Send + Sync {
+    /// Inspect the current owner for a tenant-owned root, including parked or
+    /// terminal roots. A root with no lease returns None. This snapshot grants
+    /// no mutation authority by itself; subsequent transitions still use CAS.
+    async fn get_invocation_lease(
+        &self,
+        tenant: &str,
+        instance: &str,
+    ) -> FenceResult<Option<InvocationLeaseState>>;
+
     /// Claim first ownership with `None`, or replace exactly the revoked epoch.
     /// A retry with the same owner and expected epoch returns the same lease.
     /// Running owners cannot be silently displaced, and epochs never repeat.
