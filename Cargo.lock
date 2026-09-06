@@ -4599,6 +4599,7 @@ dependencies = [
  "runtara-http",
  "serde",
  "serde_json",
+ "tokio",
  "wit-bindgen 0.58.0",
 ]
 

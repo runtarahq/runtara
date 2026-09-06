@@ -31,6 +31,10 @@ pub(super) fn compose_agent(
     second_capability: &str,
     second: &[u8],
 ) -> anyhow::Result<Vec<u8>> {
+    anyhow::ensure!(
+        input.len() <= 6144 && second.len() <= 24576,
+        "fixture inputs overlap static memory or heap"
+    );
     let agent = agent_path(agent_id)?;
     let escape = |bytes: &[u8]| {
         bytes
@@ -396,4 +400,37 @@ pub(super) async fn respond(
         .await?;
     socket.write_all(&bytes).await?;
     Ok(())
+}
+
+/// Join the standard cancellation proof and its owned local endpoint, with
+/// bounded failure cleanup so a broken Agent cannot leave a fixture running.
+pub(super) async fn run_cancellation_fixture(
+    bytes: Vec<u8>,
+    context: CallContext,
+    started: Arc<Notify>,
+    cleaned: Arc<Notify>,
+    mut server: tokio::task::JoinHandle<anyhow::Result<()>>,
+) -> anyhow::Result<Value> {
+    let result = tokio::time::timeout(
+        Duration::from_secs(15),
+        cancel_and_reuse(bytes, context, started, cleaned),
+    )
+    .await;
+    let output = match result {
+        Ok(Ok(output)) => output,
+        other => {
+            server.abort();
+            let _ = server.await;
+            anyhow::bail!("cancellation/reuse failed: {other:?}");
+        }
+    };
+    match tokio::time::timeout(Duration::from_secs(5), &mut server).await {
+        Ok(result) => result??,
+        Err(error) => {
+            server.abort();
+            let _ = server.await;
+            return Err(error.into());
+        }
+    }
+    Ok(output)
 }

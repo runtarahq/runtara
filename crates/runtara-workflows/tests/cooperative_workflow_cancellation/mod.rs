@@ -158,6 +158,10 @@ enum Scenario {
     BeforeLaunch,
     Headers,
     SlackHeaders,
+    Mailgun,
+    TeamsChunks,
+    McpInitialize,
+    McpTool,
     AiSingle,
     AiTurn,
     AiSummary,
@@ -191,8 +195,13 @@ impl Scenario {
                 | Self::AiMemorySave
         )
     }
+    fn is_mcp(self) -> bool {
+        matches!(self, Self::McpInitialize | Self::McpTool)
+    }
     fn uses_proxy(self) -> bool {
-        self == Self::SlackHeaders || self.is_ai()
+        matches!(self, Self::SlackHeaders | Self::Mailgun | Self::TeamsChunks)
+            || self.is_ai()
+            || self.is_mcp()
     }
     fn drains_normally(self) -> bool {
         matches!(self, Self::PauseBranches | Self::ShutdownBranches)
@@ -235,7 +244,14 @@ async fn run(scenario: Scenario) -> anyhow::Result<()> {
     );
     let expected_requests = if pre_cancel {
         0
-    } else if parallel || matches!(scenario, Scenario::AiSummary | Scenario::AiMemorySave) {
+    } else if scenario == Scenario::McpTool {
+        3
+    } else if parallel
+        || matches!(
+            scenario,
+            Scenario::AiSummary | Scenario::AiMemorySave | Scenario::TeamsChunks
+        )
+    {
         2
     } else {
         1
@@ -272,6 +288,35 @@ async fn run(scenario: Scenario) -> anyhow::Result<()> {
             "text":immediate("local cancellation fixture".into()),
             "_connection":immediate(serde_json::json!({"connection_id":"fixture-connection","integration_id":"slack_bot","parameters":{}}))
         });
+    }
+    if matches!(scenario, Scenario::Mailgun | Scenario::TeamsChunks) || scenario.is_mcp() {
+        let (agent, capability, input) = match scenario {
+            Scenario::Mailgun => (
+                "mailgun",
+                "send-email",
+                serde_json::json!({"to":"fixture@example.invalid","subject":"fixture","text":"fixture","_connection":{"connection_id":"fixture-connection","integration_id":"mailgun","parameters":{"domain":"example.invalid"}}}),
+            ),
+            Scenario::TeamsChunks => (
+                "teams",
+                "send-message",
+                serde_json::json!({"target":"fixture-ref","conversation_id":"fixture","text":"x".repeat(4001),"_connection":{"connection_id":"fixture-connection","integration_id":"teams_bot","parameters":{}}}),
+            ),
+            Scenario::McpInitialize | Scenario::McpTool => (
+                "mcp",
+                "mcp-tool-invoke",
+                serde_json::json!({"tool_name":"echo","args":{"value":"fixture"},"_connection":{"connection_id":"fixture-connection","integration_id":"mcp","parameters":{"url":"https://mcp.invalid/rpc","tool_scope":["echo"]}}}),
+            ),
+            _ => unreachable!(),
+        };
+        graph["steps"]["fetch"]["agentId"] = agent.into();
+        graph["steps"]["fetch"]["capabilityId"] = capability.into();
+        graph["steps"]["fetch"]["inputMapping"] = input
+            .as_object()
+            .unwrap()
+            .iter()
+            .map(|(key, value)| (key.clone(), immediate(value.clone())))
+            .collect::<serde_json::Map<String, Value>>()
+            .into();
     }
     if scenario.is_object() {
         graph["steps"]["fetch"]["agentId"] = "object-model".into();
@@ -465,14 +510,37 @@ async fn run(scenario: Scenario) -> anyhow::Result<()> {
                                     assert!(body["body"]["messages"][0]["content"].as_str().unwrap().contains("conversation summarizer"));
                                 }
                             } else {
-                                assert_eq!(body["url"], "https://slack.com/api/chat.postMessage");
                                 assert_eq!(body["connection_id"], "fixture-connection");
+                                match scenario {
+                                    Scenario::SlackHeaders => assert_eq!(body["url"], "https://slack.com/api/chat.postMessage"),
+                                    Scenario::Mailgun => assert_eq!(body["url"], "/v3/example.invalid/messages"),
+                                    Scenario::TeamsChunks => {
+                                        assert_eq!(body["url"], "/v3/conversations/fixture/activities");
+                                        assert_eq!(body["endpoint_ref"], "fixture-ref");
+                                    },
+                                    Scenario::McpInitialize | Scenario::McpTool => {
+                                        assert_eq!(body["url"], "https://mcp.invalid/rpc");
+                                        let stage = server_host.requests.load(Ordering::SeqCst);
+                                        assert_eq!(body["body"]["method"], match stage {0=>"initialize",1=>"notifications/initialized",_=>"tools/call"});
+                                        if stage > 0 { assert_eq!(body["headers"]["Mcp-Session-Id"], "fixture-session"); }
+                                    },
+                                    _ => unreachable!(),
+                                }
                             }
                         }
                         if partial_body {
                             stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\nx").await?;
                         }
                         let started = server_host.requests.fetch_add(1, Ordering::SeqCst) + 1;
+                        if (scenario == Scenario::TeamsChunks && started == 1) || (scenario == Scenario::McpTool && started < 3) {
+                            let body = if scenario == Scenario::TeamsChunks {serde_json::json!({"id":"first"})} else {serde_json::json!({"jsonrpc":"2.0","id":1,"result":{}})};
+                            let bytes = serde_json::to_vec(&serde_json::json!({"status":if scenario.is_mcp() && started==2 {202} else {200},"headers":{"mcp-session-id":"fixture-session"},"body":body}))?;
+                            stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",bytes.len()).as_bytes()).await?;
+                            stream.write_all(&bytes).await?;
+                            server_host.closed_count.fetch_add(1,Ordering::SeqCst);
+                            server_host.closed.notify_one();
+                            return anyhow::Ok(());
+                        }
                         if matches!(scenario, Scenario::AiSummary | Scenario::AiMemorySave) && started == 1 {
                             let bytes = serde_json::to_vec(&llm_ok("completed first turn"))?;
                             stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", bytes.len()).as_bytes()).await?;
@@ -662,4 +730,22 @@ async fn emitted_sql_query_cancel_bypasses_retries_and_recovery() -> anyhow::Res
 #[tokio::test]
 async fn emitted_sql_execute_cancel_bypasses_retries_and_recovery() -> anyhow::Result<()> {
     run(Scenario::ObjectExecute).await
+}
+
+#[tokio::test]
+async fn emitted_mailgun_cancel_bypasses_retries_and_recovery() -> anyhow::Result<()> {
+    run(Scenario::Mailgun).await
+}
+#[tokio::test]
+async fn emitted_teams_cancel_interrupts_second_chunk_without_recovery() -> anyhow::Result<()> {
+    run(Scenario::TeamsChunks).await
+}
+#[tokio::test]
+async fn emitted_mcp_cancel_interrupts_initialization_without_recovery() -> anyhow::Result<()> {
+    run(Scenario::McpInitialize).await
+}
+#[tokio::test]
+async fn emitted_mcp_cancel_interrupts_tool_after_handshake_without_recovery() -> anyhow::Result<()>
+{
+    run(Scenario::McpTool).await
 }

@@ -29,7 +29,7 @@
 //! the proxy injects auth headers server-side.
 //!
 //! Routing:
-//!   runtara_http::HttpClient::request(...).call_agent()
+//!   runtara_http::HttpClient::request(...).call_agent_async().await
 //!     → POST $RUNTARA_HTTP_PROXY_URL with body = JSON-RPC envelope
 //!     → server-side: resolve connection → inject Authorization → forward
 //!     → MCP server: respond with tools/list or tools/call payload
@@ -57,9 +57,8 @@ mod bindings {
     wit_bindgen::generate!({
         path: ["../../runtara-agent-wit/wit", "wit"],
         world: "runtara:agent-mcp/agent",
-        // Sync impls of the async-TYPED invoke (sync lift; see
-        // spikes/wit-bindgen-async-typed).
-        async: false,
+        // Callback bindings allow standard cancellation to release awaited I/O.
+        async: ["export:runtara:agent-mcp/capabilities@0.4.0#invoke"],
         generate_all,
     });
 }
@@ -175,7 +174,9 @@ pub struct RawConnection {
 /// proxy uses the same endpoint internally — this just gives the agent
 /// the same view so it can read `url` / `tool_hints` / `tool_scope` /
 /// `extra_headers` directly.
-fn resolve_connection_params(connection: &RawConnection) -> Result<RawConnection, AgentError> {
+async fn resolve_connection_params(
+    connection: &RawConnection,
+) -> Result<RawConnection, AgentError> {
     let params_is_empty = connection
         .parameters
         .as_object()
@@ -217,13 +218,17 @@ fn resolve_connection_params(connection: &RawConnection) -> Result<RawConnection
         connection.connection_id
     );
     let client = runtara_http::HttpClient::with_timeout(std::time::Duration::from_millis(10_000));
-    let resp = client.request("GET", &endpoint).call().map_err(|e| {
-        AgentError::permanent(
-            "MCP_NO_PARAMS",
-            format!("fallback fetch of connection params from {endpoint} failed: {e}"),
-        )
-        .with_attr("integration", "MCP")
-    })?;
+    let resp = client
+        .request("GET", &endpoint)
+        .call_async()
+        .await
+        .map_err(|e| {
+            AgentError::permanent(
+                "MCP_NO_PARAMS",
+                format!("fallback fetch of connection params from {endpoint} failed: {e}"),
+            )
+            .with_attr("integration", "MCP")
+        })?;
     if !(200..300).contains(&resp.status) {
         return Err(AgentError::permanent(
             "MCP_NO_PARAMS",
@@ -380,16 +385,17 @@ pub struct McpToolSearchOutput {
     side_effects = false,
     tags = "mcp:search"
 )]
-pub fn mcp_tool_search(input: McpToolSearchInput) -> Result<McpToolSearchOutput, AgentError> {
+pub async fn mcp_tool_search(input: McpToolSearchInput) -> Result<McpToolSearchOutput, AgentError> {
     let raw = require_connection(input._connection.as_ref())?;
-    let connection = resolve_connection_params(raw)?;
+    let connection = resolve_connection_params(raw).await?;
     let url = extract_url(&connection)?;
     let hints = extract_hints(&connection);
     let scope = extract_scope(&connection);
     let extra_headers = extract_extra_headers(&connection);
     let limit = input.limit.map(|n| n as usize).unwrap_or(5).clamp(1, 20);
 
-    let tools: Vec<Tool> = client::list_tools(&url, &connection.connection_id, &extra_headers)?;
+    let tools: Vec<Tool> =
+        client::list_tools(&url, &connection.connection_id, &extra_headers).await?;
     let total = tools.len() as u32;
 
     let results = search::search(&tools, &hints, &scope, &input.query, limit);
@@ -463,9 +469,9 @@ pub struct McpToolInvokeOutput {
     side_effects = true,
     tags = "mcp:invoke"
 )]
-pub fn mcp_tool_invoke(input: McpToolInvokeInput) -> Result<McpToolInvokeOutput, AgentError> {
+pub async fn mcp_tool_invoke(input: McpToolInvokeInput) -> Result<McpToolInvokeOutput, AgentError> {
     let raw = require_connection(input._connection.as_ref())?;
-    let connection = resolve_connection_params(raw)?;
+    let connection = resolve_connection_params(raw).await?;
     let url = extract_url(&connection)?;
     let scope = extract_scope(&connection);
     let extra_headers = extract_extra_headers(&connection);
@@ -488,7 +494,8 @@ pub fn mcp_tool_invoke(input: McpToolInvokeInput) -> Result<McpToolInvokeOutput,
         &extra_headers,
         &input.tool_name,
         &input.args,
-    )?;
+    )
+    .await?;
     let text = result.to_text();
     let content_json: Vec<Value> = result
         .content
@@ -576,12 +583,12 @@ struct Component;
 
 #[cfg(target_arch = "wasm32")]
 impl Guest for Component {
-    fn invoke(capability_id: String, input: Vec<u8>) -> Result<Vec<u8>, ErrorInfo> {
+    async fn invoke(capability_id: String, input: Vec<u8>) -> Result<Vec<u8>, ErrorInfo> {
         let value: serde_json::Value = serde_json::from_slice(&input).map_err(bad_json)?;
 
         let executor_result = match capability_id.as_str() {
-            "mcp-tool-search" => __executor_mcp_tool_search(value),
-            "mcp-tool-invoke" => __executor_mcp_tool_invoke(value),
+            "mcp-tool-search" => __executor_mcp_tool_search(value).await,
+            "mcp-tool-invoke" => __executor_mcp_tool_invoke(value).await,
             other => {
                 return Err(ErrorInfo {
                     code: "UNKNOWN_CAPABILITY".into(),

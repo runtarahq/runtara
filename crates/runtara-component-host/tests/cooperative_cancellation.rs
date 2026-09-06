@@ -269,3 +269,11 @@ mod real_ai;
 #[cfg(feature = "component-integration-tests")]
 #[path = "cooperative_cancellation/real_object_model.rs"]
 mod real_object_model;
+
+#[cfg(feature = "component-integration-tests")]
+#[path = "cooperative_cancellation/real_messaging.rs"]
+mod real_messaging;
+
+#[cfg(feature = "component-integration-tests")]
+#[path = "cooperative_cancellation/real_mcp.rs"]
+mod real_mcp;

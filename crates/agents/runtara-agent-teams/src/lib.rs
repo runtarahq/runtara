@@ -36,7 +36,7 @@ mod bindings {
     wit_bindgen::generate!({
         path: ["../../runtara-agent-wit/wit", "wit"],
         world: "runtara:agent-teams/agent",
-        async: false,
+        async: ["export:runtara:agent-teams/capabilities@0.4.0#invoke"],
         generate_all,
     });
 }
@@ -143,7 +143,7 @@ struct BotConnectorResponse {
 /// POST an activity to the Bot Connector via the proxy. `path` is a RELATIVE
 /// Bot Connector path — the proxy joins it under the conversation's serviceUrl
 /// (bound by `endpoint_ref`) and injects the bearer token (by connection id).
-fn bot_connector_post(
+async fn bot_connector_post(
     path: &str,
     connection: &RawConnection,
     endpoint_ref: &str,
@@ -165,7 +165,8 @@ fn bot_connector_post(
         .header("X-Runtara-Connection-Id", &connection.connection_id)
         .header("X-Runtara-Endpoint-Ref", endpoint_ref)
         .body_bytes(&body_bytes)
-        .call_agent()
+        .call_agent_async()
+        .await
         .map_err(|e| {
             AgentError::transient(
                 "TEAMS_NETWORK_ERROR",
@@ -437,7 +438,7 @@ pub struct SendMessageOutput {
     module_integration_ids = "teams_bot",
     module_secure = true
 )]
-pub fn send_message(input: SendMessageInput) -> Result<SendMessageOutput, AgentError> {
+pub async fn send_message(input: SendMessageInput) -> Result<SendMessageOutput, AgentError> {
     let connection = input._connection.as_ref().ok_or_else(|| {
         AgentError::permanent(
             "TEAMS_MISSING_CONNECTION",
@@ -532,8 +533,8 @@ pub fn send_message(input: SendMessageInput) -> Result<SendMessageOutput, AgentE
             activity["attachments"] = attachments.clone();
         }
 
-        let resp =
-            bot_connector_post(&base_path, connection, &input.target, &activity, timeout_ms)?;
+        let resp = bot_connector_post(&base_path, connection, &input.target, &activity, timeout_ms)
+            .await?;
         if let Some(id) = resp.activity_id {
             activity_ids.push(id);
         }
@@ -706,11 +707,11 @@ struct Component;
 
 #[cfg(target_arch = "wasm32")]
 impl Guest for Component {
-    fn invoke(capability_id: String, input: Vec<u8>) -> Result<Vec<u8>, ErrorInfo> {
+    async fn invoke(capability_id: String, input: Vec<u8>) -> Result<Vec<u8>, ErrorInfo> {
         let value: serde_json::Value = serde_json::from_slice(&input).map_err(bad_json)?;
 
         let executor_result = match capability_id.as_str() {
-            "send-message" => __executor_send_message(value),
+            "send-message" => __executor_send_message(value).await,
             other => {
                 return Err(ErrorInfo {
                     code: "UNKNOWN_CAPABILITY".into(),
@@ -819,8 +820,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn send_message_requires_connection() {
+    #[tokio::test]
+    async fn send_message_requires_connection() {
         let err = send_message(SendMessageInput {
             _connection: None,
             target: "ref".into(),
@@ -830,6 +831,7 @@ mod tests {
             reply_to_activity_id: None,
             timeout_ms: None,
         })
+        .await
         .expect_err("connection required");
         assert_eq!(err.code, "TEAMS_MISSING_CONNECTION");
     }
@@ -844,8 +846,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn send_message_requires_target_and_conversation() {
+    #[tokio::test]
+    async fn send_message_requires_target_and_conversation() {
         let missing_target = send_message(SendMessageInput {
             _connection: Some(conn()),
             target: "  ".into(),
@@ -855,6 +857,7 @@ mod tests {
             reply_to_activity_id: None,
             timeout_ms: None,
         })
+        .await
         .expect_err("target required");
         assert_eq!(missing_target.code, "TEAMS_MISSING_TARGET");
 
@@ -867,12 +870,13 @@ mod tests {
             reply_to_activity_id: None,
             timeout_ms: None,
         })
+        .await
         .expect_err("conversation required");
         assert_eq!(missing_conv.code, "TEAMS_MISSING_CONVERSATION");
     }
 
-    #[test]
-    fn send_message_requires_text_or_card() {
+    #[tokio::test]
+    async fn send_message_requires_text_or_card() {
         let err = send_message(SendMessageInput {
             _connection: Some(conn()),
             target: "ref".into(),
@@ -882,6 +886,7 @@ mod tests {
             reply_to_activity_id: None,
             timeout_ms: None,
         })
+        .await
         .expect_err("text or card required");
         assert_eq!(err.code, "TEAMS_EMPTY_MESSAGE");
     }

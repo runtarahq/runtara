@@ -35,9 +35,8 @@ mod bindings {
     wit_bindgen::generate!({
         path: ["../../runtara-agent-wit/wit", "wit"],
         world: "runtara:agent-mailgun/agent",
-        // Sync impls of the async-TYPED invoke (sync lift; see
-        // spikes/wit-bindgen-async-typed).
-        async: false,
+        // Callback bindings allow standard cancellation to release awaited I/O.
+        async: ["export:runtara:agent-mailgun/capabilities@0.4.0#invoke"],
         generate_all,
     });
 }
@@ -225,7 +224,7 @@ pub struct SendEmailOutput {
     module_integration_ids = "mailgun",
     module_secure = true
 )]
-pub fn send_email(input: SendEmailInput) -> Result<SendEmailOutput, AgentError> {
+pub async fn send_email(input: SendEmailInput) -> Result<SendEmailOutput, AgentError> {
     let connection = input._connection.as_ref().ok_or_else(|| {
         AgentError::permanent(
             "MAILGUN_MISSING_CONNECTION",
@@ -294,7 +293,8 @@ pub fn send_email(input: SendEmailInput) -> Result<SendEmailOutput, AgentError> 
         .header("X-Runtara-Connection-Id", &connection.connection_id)
         .header("Content-Type", "application/x-www-form-urlencoded")
         .body_bytes(encoded_body.as_bytes())
-        .call_agent()
+        .call_agent_async()
+        .await
         .map_err(|e| {
             AgentError::transient(
                 "MAILGUN_NETWORK_ERROR",
@@ -467,11 +467,11 @@ struct Component;
 
 #[cfg(target_arch = "wasm32")]
 impl Guest for Component {
-    fn invoke(capability_id: String, input: Vec<u8>) -> Result<Vec<u8>, ErrorInfo> {
+    async fn invoke(capability_id: String, input: Vec<u8>) -> Result<Vec<u8>, ErrorInfo> {
         let value: serde_json::Value = serde_json::from_slice(&input).map_err(bad_json)?;
 
         let executor_result = match capability_id.as_str() {
-            "send-email" => __executor_send_email(value),
+            "send-email" => __executor_send_email(value).await,
             other => {
                 return Err(ErrorInfo {
                     code: "UNKNOWN_CAPABILITY".into(),

@@ -4,7 +4,7 @@
 //! handshake in a single ephemeral session: `initialize` → grab the
 //! `Mcp-Session-Id` from the response → `notifications/initialized` →
 //! the real request (`tools/list` / `tools/call`). Credentials never
-//! enter the .wasm binary — `runtara_http::call_agent()` routes the POSTs
+//! enter the .wasm binary — the awaited `runtara_http` proxy client routes POSTs
 //! through the runtara proxy with `X-Runtara-Connection-Id`, which
 //! injects the right Authorization / api-key header server-side.
 //!
@@ -40,7 +40,7 @@ const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// `text/event-stream`) when the server has streaming capability, so we
 /// pick the JSON out of the last `data:` line rather than parsing the
 /// raw body as JSON.
-fn rpc_call(
+async fn rpc_call(
     url: &str,
     connection_id: &str,
     extra_headers: &[(String, String)],
@@ -58,7 +58,7 @@ fn rpc_call(
             "clientInfo": { "name": CLIENT_NAME, "version": CLIENT_VERSION },
         },
     });
-    let init_resp = send_http(url, connection_id, extra_headers, &init_body, None)?;
+    let init_resp = send_http(url, connection_id, extra_headers, &init_body, None).await?;
     if !(200..300).contains(&init_resp.status) {
         return Err(McpError::Http(format!(
             "MCP initialize returned HTTP {}",
@@ -81,7 +81,8 @@ fn rpc_call(
         extra_headers,
         &notify_body,
         session_id.as_deref(),
-    )?;
+    )
+    .await?;
 
     // ── 3. real request ──────────────────────────────────────────────────────
     let body = json!({
@@ -96,7 +97,8 @@ fn rpc_call(
         extra_headers,
         &body,
         session_id.as_deref(),
-    )?;
+    )
+    .await?;
     if !(200..300).contains(&resp.status) {
         return Err(McpError::Http(format!(
             "MCP {method} returned HTTP {}",
@@ -114,7 +116,7 @@ struct McpResp {
     mcp_session_id: Option<String>,
 }
 
-fn send_http(
+async fn send_http(
     url: &str,
     connection_id: &str,
     extra_headers: &[(String, String)],
@@ -137,7 +139,8 @@ fn send_http(
     }
     let resp = req
         .body_json(body)
-        .call_agent()
+        .call_agent_async()
+        .await
         .map_err(|e| McpError::Http(format!("network error calling MCP server: {e}")))?;
     // runtara_http stores response headers with lowercase keys, so a
     // direct lookup is sufficient.
@@ -209,12 +212,12 @@ fn parse_jsonrpc_body(body: &[u8], context: &str) -> Result<Value, McpError> {
 }
 
 /// MCP `tools/list` — returns the server's tools.
-pub fn list_tools(
+pub async fn list_tools(
     url: &str,
     connection_id: &str,
     extra_headers: &[(String, String)],
 ) -> Result<Vec<Tool>, McpError> {
-    let result = rpc_call(url, connection_id, extra_headers, "tools/list", json!({}))?;
+    let result = rpc_call(url, connection_id, extra_headers, "tools/list", json!({})).await?;
     let tools = result
         .get("tools")
         .and_then(|v| v.as_array())
@@ -224,7 +227,7 @@ pub fn list_tools(
 }
 
 /// MCP `tools/call` — invoke a tool by name with JSON args.
-pub fn call_tool(
+pub async fn call_tool(
     url: &str,
     connection_id: &str,
     extra_headers: &[(String, String)],
@@ -240,7 +243,8 @@ pub fn call_tool(
             "name": name,
             "arguments": args,
         }),
-    )?;
+    )
+    .await?;
 
     serde_json::from_value::<ToolResult>(result)
         .map_err(|e| McpError::Deserialize(format!("could not parse tool result: {e}")))

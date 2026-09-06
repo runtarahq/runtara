@@ -613,3 +613,56 @@ includes all 20 cooperative lifecycle cases. Affected-crate all-target Clippy wi
 the existing integration test features, formatting and diff whitespace checks
 passed. No database/server E2E, Linux run or fresh performance/capacity measurement
 was performed in this stage.
+
+## Mailgun, Teams and MCP I/O
+
+Mailgun, Teams and MCP now use their normal callback exports and the shared
+async capability dispatcher. Mailgun awaits its existing form submission. Teams
+awaits each Bot Connector activity, so cancellation can stop text chunking after
+an earlier activity has already completed. MCP awaits connection-parameter lookup,
+initialization, the initialized notification and the final tools/list or tools/call
+request. Its existing ephemeral session and scope rules remain guest-owned; no
+host workflow task manager or product selector was added.
+
+The component tests cover 20 blocked-request cases, each before headers and during
+a partial response body: Mailgun sends, both chunks of a Teams message, MCP
+connection lookup, and all three handshake stages for both search and invocation.
+Each cancellation must close local I/O, permit the independent sibling to finish,
+and allow a fresh invocation in the same Agent instance. A new MCP invocation
+must initialize a fresh session rather than continue the cancelled handshake.
+The tests check Teams endpoint references, encoded conversation paths, text/card
+chunking and timeout coercion; Mailgun form fields and repeated tags; and MCP
+session headers, extra headers and SSE responses. Additional cases preserve
+HTTP error/retry classification, MCP protocol/server errors, forbidden-tool
+rejection and successful search scope/schema handling.
+
+Four normal emitted workflows exercise Mailgun cancellation, cancellation during
+the second Teams chunk, MCP initialization, and an MCP tool request after its
+handshake completed. The existing root lifecycle signal causes guest cleanup
+before acknowledgement and bypasses retries, normal continuation and `onError`.
+Earlier completed requests remain completed; none of these tests claims to undo
+an accepted email/activity, an allocated remote MCP session or remote tool work.
+All endpoints are local fixtures; no real message or remote tool call is sent.
+
+Nine of 27 built-in Agent bindings are now migrated. The other 18 bindings and the
+nested-workflow, CPU-cooperation, timeout, emergency-abort, terminal-race, E2E and
+performance/capacity gates remain open. Native HTTP still uses its existing
+blocking backend; the cancellation proofs execute built WASM components.
+
+```sh
+scripts/build-agent-components.sh
+cargo test -p runtara-agent-mailgun -p runtara-agent-teams -p runtara-agent-mcp
+cargo test -p runtara-component-host --features component-integration-tests --test cooperative_cancellation -- --test-threads=4
+cargo test -p runtara-workflows --features direct-wasm-integration-tests --test direct_wasm_execute -- --test-threads=4
+```
+
+Results: the normal build regenerated all 27 Agent components and both shared
+workflow components with metadata. The focused native suites passed 35 tests
+(18 Teams tests and 17 MCP tests; Mailgun has no existing native tests). All 37
+component cancellation tests passed, including the eight new messaging/MCP test
+functions. The full emitted-workflow suite passed 274 tests with four test threads,
+including all 24 cooperative lifecycle cases; its two manual release benchmarks
+remain ignored. Affected-crate all-target Clippy with the existing integration
+test features, formatting and diff whitespace checks passed. No real service,
+database/server E2E, Linux qualification or new performance/capacity measurement
+was run in this stage.
