@@ -26,10 +26,11 @@ use crate::config::parse_enabled;
 use chrono::Utc;
 use sqlx::PgPool;
 use tokio::sync::Notify;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 use crate::error::Result;
 use crate::image_registry::ImageRegistry;
+use crate::periodic::PeriodicLoop;
 
 /// Configuration for the image cleanup worker.
 #[derive(Debug, Clone)]
@@ -140,43 +141,15 @@ impl ImageCleanupWorker {
             "Image cleanup worker started"
         );
 
-        // Eager first pass: enforce retention immediately on startup so that
-        // cleanup runs even when the server restarts more frequently than
-        // `poll_interval`. Race against the shutdown signal so a slow or
-        // hanging cleanup (e.g. unreachable DB) cannot block shutdown.
-        tokio::select! {
-            biased;
-
-            _ = self.shutdown.notified() => {
-                info!("Image cleanup worker received shutdown signal during eager pass");
-                return;
-            }
-
-            res = self.cleanup_images() => {
-                if let Err(e) = res {
-                    error!(error = %e, "Failed to cleanup images");
-                }
-            }
+        PeriodicLoop {
+            name: "Image cleanup worker",
+            poll_interval: self.config.poll_interval,
+            shutdown: &self.shutdown,
+            eager_first_pass: true,
+            pass_error: "Failed to cleanup images",
         }
-
-        loop {
-            tokio::select! {
-                biased;
-
-                _ = self.shutdown.notified() => {
-                    info!("Image cleanup worker received shutdown signal");
-                    break;
-                }
-
-                _ = tokio::time::sleep(self.config.poll_interval) => {
-                    if let Err(e) = self.cleanup_images().await {
-                        error!(error = %e, "Failed to cleanup images");
-                    }
-                }
-            }
-        }
-
-        info!("Image cleanup worker stopped");
+        .run(|| self.cleanup_images())
+        .await;
     }
 
     /// Run both cleanup phases.

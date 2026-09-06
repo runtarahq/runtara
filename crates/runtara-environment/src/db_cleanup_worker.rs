@@ -22,9 +22,10 @@ use chrono::Utc;
 use runtara_core::persistence::Persistence;
 use sqlx::PgPool;
 use tokio::sync::Notify;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 use crate::error::Result;
+use crate::periodic::PeriodicLoop;
 
 /// Configuration for the database cleanup worker.
 #[derive(Debug, Clone)]
@@ -196,43 +197,15 @@ impl DbCleanupWorker {
             "Database cleanup worker started"
         );
 
-        // Eager first pass: enforce retention immediately on startup so that
-        // cleanup runs even when the server restarts more frequently than
-        // `poll_interval`. Race against the shutdown signal so a slow or
-        // hanging cleanup (e.g. unreachable DB) cannot block shutdown.
-        tokio::select! {
-            biased;
-
-            _ = self.shutdown.notified() => {
-                info!("Database cleanup worker received shutdown signal during eager pass");
-                return;
-            }
-
-            res = self.run_cleanup_pass() => {
-                if let Err(e) = res {
-                    error!(error = %e, "Failed to cleanup old instances");
-                }
-            }
+        PeriodicLoop {
+            name: "Database cleanup worker",
+            poll_interval: self.config.poll_interval,
+            shutdown: &self.shutdown,
+            eager_first_pass: true,
+            pass_error: "Failed to cleanup old instances",
         }
-
-        loop {
-            tokio::select! {
-                biased;
-
-                _ = self.shutdown.notified() => {
-                    info!("Database cleanup worker received shutdown signal");
-                    break;
-                }
-
-                _ = tokio::time::sleep(self.config.poll_interval) => {
-                    if let Err(e) = self.run_cleanup_pass().await {
-                        error!(error = %e, "Failed to cleanup old instances");
-                    }
-                }
-            }
-        }
-
-        info!("Database cleanup worker stopped");
+        .run(|| self.run_cleanup_pass())
+        .await;
     }
 
     /// One retention pass: expired instances, then expired debug events.
