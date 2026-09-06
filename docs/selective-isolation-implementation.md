@@ -793,11 +793,55 @@ Fresh paired measurements must include the v3 bridge, larger per-call-site
 inventory, and launch-time decoding. The historical v1 comparison does not
 measure these costs; no new performance claim follows from this identity fix.
 
+### Compiler-backed invocation namespace membership
+
+The compiler now emits inner invocation inventory version 3, containing allowed
+relative namespace shapes for each call-site token. Split and While bodies append
+their authored loop kind and ID. An inline Embed captures the parent loop shape
+in a child frame and resets the child's local loops. WaitForSignal.onWait keeps
+the enclosing loop shape; its Agent definition remains distinguished by the
+qualified token. Reused inline children accumulate their permitted shapes.
+Definitions outside the traversed root graph closure have an empty allowed set.
+This metadata contains address
+membership, not runtime edges, scheduling decisions or workflow inputs.
+
+`PreparedInvocationLauncher` checks this inventory before asking the scope
+factory for runtime authority. The check requires exact frame counts, child IDs,
+workflow IDs, loop kinds and loop IDs; dynamic indices retain the canonical
+unsigned representation. A nested launcher may bind an immutable inherited
+namespace supplied by its host parent. Its frames, including actual parent loop
+indices and tool-call counters, must match exactly before the relative pattern is
+checked. Request input cannot replace that inherited authority.
+
+The raw/native envelope and v3 invocation ABI remain unchanged; inventory version
+3 requires the new reader. Versions 1 and 2 retain their existing interpretation
+and scope-factory requirements. Durable checkpoint key bytes and graph execution
+remain unchanged. This completes the static namespace-membership check at the
+prepared launch boundary. It does not establish that an iteration is currently
+live, grant checkpoint IO, or wire the production runner. Per-child checkpoint
+grants, durable attempt arbitration and production ownership integration remain
+necessary before enabling the backend.
+
+Verification: **26 workflow-WIT/package tests**, **132 component-host tests**,
+**567 default-feature workflow unit tests**, and all **14 emitted isolation tests**
+passed. The Embed test additionally executes two outer and two inner iterations
+and verifies all four distinct cross-boundary addresses. Every recorded emitted
+Agent request is checked with forged extra child and loop frames; rejection
+occurs before the scope factory is called. Package tests cover missing/duplicate
+scope declarations, old-version rejection, exact inherited tool namespaces,
+foreign workflow/child IDs, and missing/extra/wrong-kind loops. Native transport
+roundtrips all three inventory versions. All 27 Agent and two shared workflow
+components rebuilt successfully. Feature-enabled all-target Clippy
+passed. No database code or guest runtime/WIT implementation changed; database
+and full legacy integration suites were not rerun for this metadata check.
+Fresh size and timing measurements must include these additional inventory bytes
+and per-invocation membership checks.
+
 ## Remaining required work
 
 - P0: extend explicit differential selection and invocation-count evidence to all
   required constructs and production artifact inspection.
-- P1: compiler-backed invocation authority and environment ownership integration, aggregate
+- P1: checkpoint grants and production environment ownership integration, aggregate
   input/transport/guest resource reservations and root fencing on cleanup failure.
 - P2: qualify logical scopes across every AI auxiliary invocation and nested
   construct, integrate the production scope factory and certify package reset/state

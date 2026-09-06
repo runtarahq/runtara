@@ -1,6 +1,6 @@
 //! Compiler-owned call-site inventory; contains no inputs, credentials or graph
 //! scheduling rules. Package v2 and the native worker envelope bind it to code.
-use super::{Binding, PackageError};
+use super::{Binding, InvocationScopePattern, PackageError};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -19,7 +19,7 @@ pub struct AgentCallSite {
 
 /// Immutable inventory produced from the same normalized compiler manifest as
 /// the workflow code. It supplies static invocation authority, not execution
-/// order, live attempt fencing or checkpoint namespace policy.
+/// order, live attempt fencing or checkpoint IO grants.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InvocationManifest {
@@ -28,6 +28,11 @@ pub struct InvocationManifest {
     pub agent_calls: Vec<AgentCallSite>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub call_sites: Vec<InvocationCallSite>,
+    /// Version 3 maps every token to sorted unique relative scopes. An empty
+    /// list denies execution of an unreachable definition. Earlier versions
+    /// omit this field and retain their original external scope policy.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub scope_paths: BTreeMap<u32, Vec<InvocationScopePattern>>,
 }
 
 /// A compiler definition and caller, independent of authored step IDs. `token`
@@ -46,7 +51,7 @@ impl InvocationManifest {
     /// Validate references and deterministic, unambiguous encoding before
     /// admission. Byte/allocation bounds come from the enclosing package limit.
     pub fn validate(&self, bindings: &BTreeMap<String, Binding>) -> Result<(), PackageError> {
-        if !matches!(self.version, 1 | 2) {
+        if !matches!(self.version, 1..=3) {
             return Err(PackageError::UnsupportedVersion);
         }
         let mut used = BTreeSet::new();
@@ -109,6 +114,22 @@ impl InvocationManifest {
                     return Err(PackageError::MissingArtifact);
                 }
             }
+        }
+        if self.version < 3 {
+            if !self.scope_paths.is_empty() {
+                return Err(PackageError::InvalidManifest);
+            }
+        } else if self.scope_paths.len() != self.call_sites.len()
+            || self
+                .call_sites
+                .iter()
+                .any(|site| !self.scope_paths.contains_key(&site.token))
+            || self
+                .scope_paths
+                .values()
+                .any(|patterns| patterns.windows(2).any(|pair| pair[0] >= pair[1]))
+        {
+            return Err(PackageError::InvalidManifest);
         }
         Ok(())
     }

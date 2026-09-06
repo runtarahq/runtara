@@ -128,10 +128,19 @@ pub(super) fn build(
         .enumerate()
         .map(|(i, key)| Ok((key.clone(), u32::try_from(i).map_err(component_error)?)))
         .collect::<Result<BTreeMap<_, _>, DirectCompileError>>()?;
+    let scopes = super::invocation_scopes::build(manifest)?;
+    let mut scope_paths = BTreeMap::new();
     let mut call_sites = Vec::new();
     for ((agent_reference, caller_reference, domain), token) in sites {
         let agent = agents[&agent_reference];
         if let Some(&identity) = indices.get(&identity(agent)) {
+            scope_paths.insert(
+                token,
+                scopes
+                    .get(&caller_reference)
+                    .map(|patterns| patterns.iter().cloned().collect())
+                    .unwrap_or_default(),
+            );
             call_sites.push(InvocationCallSite {
                 token,
                 identity,
@@ -143,7 +152,8 @@ pub(super) fn build(
     }
     call_sites.sort_by_key(|site| site.token);
     Ok(InvocationManifest {
-        version: 2,
+        version: 3,
+        scope_paths,
         workflow_id: workflow_id.into(),
         call_sites,
         agent_calls: calls

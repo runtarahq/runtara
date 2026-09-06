@@ -13,11 +13,13 @@ use sha2::{Digest, Sha256};
 
 mod invocation_manifest;
 mod invocation_path;
+mod invocation_scope;
 pub use invocation_manifest::{AgentCallSite, InvocationCallSite, InvocationManifest};
 pub use invocation_path::{
     AgentInvocationPath, InvocationPathError, InvocationSelector, LoopFrame, LoopKind,
     NamespaceFrame,
 };
+pub use invocation_scope::{ChildScopePattern, InvocationScopePattern, LoopPattern};
 
 pub const SECTION_NAME: &str = "runtara:isolated-package@1";
 const COMPONENT_HEADER: &[u8; 8] = b"\0asm\x0d\0\x01\0";

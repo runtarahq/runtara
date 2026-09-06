@@ -63,6 +63,7 @@ fn rewritten_from(original: Vec<u8>, mutate: impl FnOnce(&mut Manifest)) -> Vec<
 
 fn invocations() -> InvocationManifest {
     InvocationManifest {
+        scope_paths: Default::default(),
         call_sites: Vec::new(),
         version: 1,
         workflow_id: "workflow::雪".into(),
@@ -124,7 +125,7 @@ fn invocation_authority_versions_references_domains_and_duplicate_identities_are
             _ => {
                 let inv = m.invocations.as_mut().unwrap();
                 match mode {
-                    "version" => inv.version = 3,
+                    "version" => inv.version = 4,
                     "binding" => inv.agent_calls[0].binding = "agent:missing".into(),
                     "agent" => inv.agent_calls[0].agent_id = "missing".into(),
                     "duplicate" => inv.agent_calls.push(inv.agent_calls[0].clone()),
@@ -441,4 +442,163 @@ fn qualified_inventory_rejects_ambiguous_or_uncovered_authority_at_admission() {
         });
         assert!(parse(&bytes, limits()).is_err(), "accepted {mode}");
     }
+}
+
+fn scoped_invocations() -> InvocationManifest {
+    let mut inventory = qualified_invocations();
+    inventory.version = 3;
+    inventory.scope_paths = inventory
+        .call_sites
+        .iter()
+        .map(|site| {
+            (
+                site.token,
+                vec![InvocationScopePattern {
+                    namespace: vec![ChildScopePattern {
+                        step_id: "child::雪".into(),
+                        loops: vec![LoopPattern(LoopKind::Split, "outer".into())],
+                    }],
+                    loops: vec![LoopPattern(LoopKind::While, "inner".into())],
+                }],
+            )
+        })
+        .collect();
+    inventory
+}
+
+#[test]
+fn scoped_inventory_roundtrips_and_rejects_missing_duplicate_or_unversioned_scopes() {
+    let valid = rewritten_from(package_v2(), |m| m.invocations = Some(scoped_invocations()));
+    assert_eq!(
+        parse(&valid, limits()).unwrap().unwrap().invocations(),
+        Some(&scoped_invocations())
+    );
+    for mode in ["old", "missing", "extra", "duplicate", "order"] {
+        let bytes = rewritten_from(valid.clone(), |m| {
+            let inv = m.invocations.as_mut().unwrap();
+            match mode {
+                "old" => inv.version = 2,
+                "missing" => {
+                    inv.scope_paths.remove(&7);
+                }
+                "extra" => {
+                    inv.scope_paths.insert(u32::MAX, vec![]);
+                }
+                "duplicate" => {
+                    let pattern = inv.scope_paths[&7][0].clone();
+                    inv.scope_paths.get_mut(&7).unwrap().push(pattern);
+                }
+                "order" => {
+                    inv.scope_paths
+                        .get_mut(&7)
+                        .unwrap()
+                        .push(InvocationScopePattern::default());
+                }
+                _ => unreachable!(),
+            }
+        });
+        assert!(parse(&bytes, limits()).is_err(), "accepted {mode}");
+    }
+    // Unreachable definitions have no permitted paths, rather than authority
+    // over arbitrary ancestry. They can still be transported without execution.
+    let empty = rewritten_from(valid, |m| {
+        m.invocations
+            .as_mut()
+            .unwrap()
+            .scope_paths
+            .insert(7, vec![]);
+    });
+    assert!(parse(&empty, limits()).is_ok());
+}
+
+#[test]
+fn scope_resolution_checks_each_loop_and_child_frame_and_exact_inherited_namespace() {
+    use serde_json::json;
+    let inv = scoped_invocations();
+    let key = json!([
+        "agent",
+        "workflow::雪",
+        [[
+            "child",
+            "workflow::雪",
+            [["Split", "outer", 4294967295u32]],
+            ["child::雪"]
+        ]],
+        [["While", "inner", 23]],
+        ["utils", "random-double", "step::雪"]
+    ]);
+    let encode = |key: &serde_json::Value| format!("runtara:v3:{key}:aaaaaaah:aaaaaaaa");
+    let resolve = |key: &serde_json::Value, inherited: &[NamespaceFrame]| {
+        inv.resolve_scoped_agent_invocation(
+            "agent:utils",
+            "random-double",
+            &encode(key),
+            2,
+            inherited,
+        )
+    };
+    assert!(resolve(&key, &[]).is_ok());
+    for mode in [
+        "no-child",
+        "extra-child",
+        "child-id",
+        "child-workflow",
+        "parent-loop-id",
+        "parent-loop-kind",
+        "no-parent-loop",
+        "loop-id",
+        "loop-kind",
+        "extra-loop",
+        "no-loop",
+    ] {
+        let mut forged = key.clone();
+        match mode {
+            "no-child" => forged[2] = json!([]),
+            "extra-child" => {
+                let frame = forged[2][0].clone();
+                forged[2].as_array_mut().unwrap().push(frame);
+            }
+            "child-id" => forged[2][0][3][0] = "sibling".into(),
+            "child-workflow" => forged[2][0][1] = "foreign".into(),
+            "parent-loop-id" => forged[2][0][2][0][1] = "sibling".into(),
+            "parent-loop-kind" => forged[2][0][2][0][0] = "While".into(),
+            "no-parent-loop" => forged[2][0][2] = json!([]),
+            "loop-id" => forged[3][0][1] = "sibling".into(),
+            "loop-kind" => forged[3][0][0] = "Split".into(),
+            "extra-loop" => forged[3]
+                .as_array_mut()
+                .unwrap()
+                .push(json!(["While", "inner", 0])),
+            "no-loop" => forged[3] = json!([]),
+            _ => unreachable!(),
+        }
+        // The flat identity remains valid: namespace membership is the reason
+        // this request must not reach the scope factory.
+        assert!(
+            inv.resolve_agent_invocation("agent:utils", "random-double", &encode(&forged), 2)
+                .is_ok()
+        );
+        assert!(resolve(&forged, &[]).is_err(), "accepted {mode}");
+    }
+    let inherited = NamespaceFrame::ToolChild {
+        workflow_id: "parent".into(),
+        loops: vec![],
+        ai_step_id: "ai".into(),
+        label: "tool".into(),
+        call_counter: 8,
+    };
+    let mut nested = key.clone();
+    nested[2]
+        .as_array_mut()
+        .unwrap()
+        .insert(0, json!(["tool-child", "parent", [], ["ai", "tool", 8]]));
+    assert!(resolve(&nested, std::slice::from_ref(&inherited)).is_ok());
+    assert!(resolve(&nested, &[]).is_err());
+    nested[2][0][3][2] = 9.into();
+    assert!(resolve(&nested, &[inherited]).is_err());
+    assert!(
+        qualified_invocations()
+            .resolve_scoped_agent_invocation("agent:utils", "random-double", &encode(&key), 2, &[])
+            .is_err()
+    );
 }

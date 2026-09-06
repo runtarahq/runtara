@@ -13,6 +13,7 @@ use runtara_component_host::{
     PreparedInvocationLauncher, WorkflowExecutor, WorkflowRunSpec,
 };
 use runtara_workflow_wit::isolation_package::{PackageLimits, artifact_digest, parse};
+use runtara_workflows::compile::ChildWorkflowInput;
 use runtara_workflows::direct_wasm::{
     DirectCompilationResult, compose_direct_workflow_with_isolated_agents,
 };
@@ -104,12 +105,20 @@ fn compile(graph: Value, dir: &Path) -> DirectCompilationResult {
     compile_selected(graph, dir, false)
 }
 fn compile_selected(graph: Value, dir: &Path, scoped: bool) -> DirectCompilationResult {
+    compile_children(graph, dir, scoped, vec![])
+}
+fn compile_children(
+    graph: Value,
+    dir: &Path,
+    scoped: bool,
+    children: Vec<ChildWorkflowInput>,
+) -> DirectCompilationResult {
     let input = DirectCompilationInput {
         workflow_id: "isolated-agent-test".into(),
         version: 1,
         source_checksum: None,
         execution_graph: serde_json::from_value(graph).unwrap(),
-        child_workflows: vec![],
+        child_workflows: children,
         output_dir: dir.to_owned(),
         track_events: false,
         agent_catalog: None,
@@ -220,9 +229,19 @@ async fn run_graph_faults(
     replay: bool,
     succeed_at: u64,
 ) -> (InvokeExit, usize, Vec<(String, u64)>) {
+    run_graph_children(graph, input, isolate, replay, succeed_at, vec![]).await
+}
+async fn run_graph_children(
+    graph: Value,
+    input: Value,
+    isolate: bool,
+    replay: bool,
+    succeed_at: u64,
+    children: Vec<ChildWorkflowInput>,
+) -> (InvokeExit, usize, Vec<(String, u64)>) {
     let components = direct_e2e_components_dir();
     let dir = tempfile::tempdir().unwrap();
-    let mut compiled = compile_selected(graph, dir.path(), isolate);
+    let mut compiled = compile_children(graph, dir.path(), isolate, children);
     if isolate {
         compose_direct_workflow_with_isolated_agents(
             &mut compiled,
@@ -386,6 +405,15 @@ async fn run_graph_faults(
     assert_eq!(tasks.retained_result_bytes(), 0);
     let recorded = contexts.lock().unwrap().clone();
     if let Some(invocations) = expected_invocations {
+        let guard = PreparedInvocationLauncher::new(
+            executor.clone(),
+            prepared.child_catalog().unwrap().clone(),
+            Arc::new(Scopes {
+                starts: starts.clone(),
+                contexts: contexts.clone(),
+            }),
+        )
+        .unwrap();
         for (path, attempt) in &recorded {
             assert!(*attempt > 0);
             let decoded =
@@ -395,9 +423,46 @@ async fn run_graph_faults(
                 runtara_workflow_wit::isolation_package::InvocationSelector::CallSite(_)
             ));
             invocations
-                .resolve_agent_invocation("agent:utils", &decoded.capability, path, *attempt)
+                .resolve_scoped_agent_invocation(
+                    "agent:utils",
+                    &decoded.capability,
+                    path,
+                    *attempt,
+                    &[],
+                )
                 .unwrap();
+            // Keep the valid token/entry but forge compiler ancestry. Neither
+            // a Store nor runtime authority may be allocated for these calls.
+            let (base, activation) = path.rsplit_once(':').unwrap();
+            let (base, token) = base.rsplit_once(':').unwrap();
+            let key: Value =
+                serde_json::from_str(base.strip_prefix("runtara:v3:").unwrap()).unwrap();
+            for field in [2, 3] {
+                let mut forged = key.clone();
+                forged[field].as_array_mut().unwrap().push(if field == 2 {
+                    serde_json::json!(["child", decoded.workflow_id, [], ["foreign-child"]])
+                } else {
+                    serde_json::json!(["Split", "foreign-loop", 0])
+                });
+                assert!(matches!(
+                    guard.prepare(StartRequest {
+                        binding: "agent:utils".into(),
+                        entry: Entry::Capability(decoded.capability.clone()),
+                        input: b"{}".to_vec(),
+                        context: runtara_component_host::execution_host::InvocationContext {
+                            path: format!("runtara:v3:{forged}:{token}:{activation}"),
+                            attempt: *attempt
+                        },
+                    }),
+                    Err(ExecutionError::InvalidContext)
+                ));
+            }
         }
+        assert_eq!(
+            *contexts.lock().unwrap(),
+            recorded,
+            "rejected ancestry reached scope factory"
+        );
     }
     (result.exit, starts.load(Ordering::SeqCst), recorded)
 }
@@ -831,4 +896,69 @@ fn scoped_shared_ai_tool_has_distinct_caller_tokens_stable_across_selection() {
     assert_eq!(full[0].1, full[1].1);
     assert_ne!(full[0].2, full[1].2);
     assert_eq!(full, tool_sites(&inventories[1]));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn scoped_agent_inside_embed_preserves_inline_child_ancestry() {
+    use serde_json::json;
+    let graph = json!({"durable":false,"entryPoint":"child","steps":{
+        "child":{"stepType":"EmbedWorkflow","id":"child","childWorkflowId":"nested","childVersion":1,"inputMapping":{},"maxRetries":0},
+        "finish":{"stepType":"Finish","id":"finish","inputMapping":{}}},
+        "executionPlan":[{"fromStep":"child","toStep":"finish"}]});
+    let wrap = |body: Value, name: &str| {
+        json!({"durable":false,"entryPoint":name,"steps":{
+        name:{"stepType":"Split","id":name,"config":{"value":{"valueType":"immediate","value":[0,1]},"parallelism":1,"sequential":true},"subgraph":body},
+        "finish":{"stepType":"Finish","id":"finish","inputMapping":{}}},"executionPlan":[{"fromStep":name,"toStep":"finish"}]})
+    };
+    for looped in [false, true] {
+        let child = super::wasm_performance_baseline::random_chain(1, false);
+        let children = vec![ChildWorkflowInput {
+            step_id: "child".into(),
+            workflow_id: "nested".into(),
+            version_requested: "1".into(),
+            version_resolved: 1,
+            execution_graph: serde_json::from_value(if looped {
+                wrap(child, "inner")
+            } else {
+                child
+            })
+            .unwrap(),
+        }];
+        let graph = if looped {
+            wrap(graph.clone(), "outer")
+        } else {
+            graph.clone()
+        };
+        let (exit, starts, paths) =
+            run_graph_children(graph, json!({}), true, false, 1, children).await;
+        completed(exit);
+        assert_eq!(starts, if looped { 4 } else { 1 });
+        let mut indices = std::collections::BTreeSet::new();
+        for (path, _) in paths {
+            let decoded =
+                runtara_workflow_wit::isolation_package::AgentInvocationPath::decode(&path)
+                    .unwrap();
+            let [
+                runtara_workflow_wit::isolation_package::NamespaceFrame::Child {
+                    step_id,
+                    loops,
+                    ..
+                },
+            ] = &decoded.namespace[..]
+            else {
+                panic!("unexpected child ancestry")
+            };
+            assert_eq!(step_id, "child");
+            if looped {
+                assert_eq!(loops[0].1, "outer");
+                assert_eq!(decoded.loops[0].1, "inner");
+                indices.insert((loops[0].2, decoded.loops[0].2));
+            } else {
+                assert!(loops.is_empty() && decoded.loops.is_empty());
+            }
+        }
+        if looped {
+            assert_eq!(indices, [(0, 0), (0, 1), (1, 0), (1, 1)].into());
+        }
+    }
 }

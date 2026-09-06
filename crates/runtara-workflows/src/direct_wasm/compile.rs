@@ -41,6 +41,7 @@ mod embed_retry;
 mod embed_workflow;
 mod error_step;
 pub(super) mod invocation_manifest;
+mod invocation_scopes;
 mod isolation_adapter;
 #[cfg(test)]
 mod isolation_adapter_tests;

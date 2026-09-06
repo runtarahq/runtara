@@ -4,6 +4,7 @@ use crate::execution_host::{
     Entry, ExecutionError, InvocationLauncher, PreparedInvocation, StartRequest,
 };
 use crate::isolated_tasks::TaskCancellation;
+use runtara_workflow_wit::isolation_package::NamespaceFrame;
 
 /// Runtime authority for one invocation. Constructing the spec happens inside
 /// the owned task, after the registry's pre-start cancellation check, so its
@@ -65,6 +66,7 @@ pub struct PreparedInvocationLauncher {
     executor: Arc<WorkflowExecutor>,
     catalog: Arc<PreparedChildCatalog>,
     scopes: Arc<dyn InvocationScopeFactory>,
+    inherited_namespace: Vec<NamespaceFrame>,
 }
 
 impl PreparedInvocationLauncher {
@@ -78,7 +80,14 @@ impl PreparedInvocationLauncher {
             executor,
             catalog,
             scopes,
+            inherited_namespace: Vec::new(),
         })
+    }
+    /// Bind this launcher to its host-authorized parent namespace. Root workflows
+    /// use the empty default. Never derive this from an incoming StartRequest.
+    pub fn with_inherited_namespace(mut self, namespace: Vec<NamespaceFrame>) -> Self {
+        self.inherited_namespace = namespace;
+        self
     }
 }
 
@@ -100,17 +109,25 @@ impl InvocationLauncher for PreparedInvocationLauncher {
             let Entry::Capability(capability) = &request.entry else {
                 return Err(ExecutionError::InvalidBinding);
             };
-            // Versioned Agent packages must match their verified compiler
-            // inventory before even asking for runtime authority. Namespace
-            // grants and durable attempt fencing remain the scope policy's job.
-            invocations
-                .resolve_agent_invocation(
+            // Compiler namespace membership is checked before scope allocation.
+            // Checkpoint grants and durable attempt fencing remain mandatory.
+            let resolved = if invocations.version == 3 {
+                invocations.resolve_scoped_agent_invocation(
+                    &request.binding,
+                    capability,
+                    &request.context.path,
+                    request.context.attempt,
+                    &self.inherited_namespace,
+                )
+            } else {
+                invocations.resolve_agent_invocation(
                     &request.binding,
                     capability,
                     &request.context.path,
                     request.context.attempt,
                 )
-                .map_err(|_| ExecutionError::InvalidContext)?;
+            };
+            resolved.map_err(|_| ExecutionError::InvalidContext)?;
         }
         let scope = self.scopes.prepare_child(&request)?;
         let cleanup = scope

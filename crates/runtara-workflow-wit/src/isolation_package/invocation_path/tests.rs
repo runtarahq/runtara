@@ -4,6 +4,7 @@ use serde_json::json;
 
 fn manifest() -> InvocationManifest {
     InvocationManifest {
+        scope_paths: Default::default(),
         call_sites: Vec::new(),
         version: 1,
         workflow_id: "root::雪".into(),

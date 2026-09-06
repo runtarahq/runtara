@@ -253,8 +253,13 @@ mod tests {
         })
         .unwrap();
         let child = root();
-        for version in [1, 2] {
+        for version in [1, 2, 3] {
             let expected = InvocationManifest {
+                scope_paths: if version == 3 {
+                    [(7, vec![Default::default()]), (8, vec![Default::default()])].into()
+                } else {
+                    Default::default()
+                },
                 call_sites: if version == 1 {
                     Vec::new()
                 } else {
@@ -316,7 +321,7 @@ mod tests {
                         index.invocations.as_mut().unwrap().agent_calls[0].binding =
                             "agent:other".into()
                     }
-                    _ => index.invocations.as_mut().unwrap().version = 3,
+                    _ => index.invocations.as_mut().unwrap().version = 4,
                 }
                 let json = serde_json::to_vec(&index).unwrap();
                 let mut changed = MAGIC_V2.to_vec();

@@ -3,7 +3,7 @@ use super::InvocationManifest;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum LoopKind {
     Split,
     While,
@@ -166,7 +166,7 @@ impl InvocationManifest {
         let path = AgentInvocationPath::decode(path)?;
         let (domain, required_identity) = match (self.version, path.selector) {
             (1, InvocationSelector::Domain(domain)) => (domain, None),
-            (2, InvocationSelector::CallSite(token)) => {
+            (2 | 3, InvocationSelector::CallSite(token)) => {
                 let index = self
                     .call_sites
                     .binary_search_by_key(&token, |site| site.token)
