@@ -11,12 +11,10 @@ use runtara_core::persistence::{CompleteInstanceParams, Persistence};
 use runtara_environment::container_registry::{ContainerInfo, ContainerRegistry};
 use runtara_environment::db;
 use runtara_environment::handlers::{
-    DrainController, EnvironmentHandlerState, MAX_METRIC_BUCKETS, RegisterImageRequest,
-    ResumeInstanceRequest, StartInstanceRequest, StartRejection, StopInstanceRequest,
-    handle_get_tenant_metrics, handle_health_check, handle_register_image, handle_resume_instance,
-    handle_start_instance, handle_stop_instance, spawn_container_monitor,
+    DrainController, EnvironmentHandlerState, MAX_METRIC_BUCKETS, ResumeInstanceRequest,
+    StartInstanceRequest, StartRejection, StopInstanceRequest, handle_get_tenant_metrics,
+    handle_resume_instance, handle_start_instance, handle_stop_instance, spawn_container_monitor,
 };
-use runtara_environment::image_registry::ImageRegistry;
 use runtara_environment::launch_dispatcher::LaunchLifecycleObservers;
 use runtara_environment::launch_queue::{LaunchKind, LaunchRepository, LaunchState};
 use runtara_environment::runner::MockRunner;
@@ -111,9 +109,20 @@ async fn create_test_instance(pool: &PgPool, instance_id: &str, tenant_id: &str,
         .register_instance(instance_id, tenant_id)
         .await
         .expect("Failed to register instance");
-    db::associate_instance_image(pool, instance_id, image_id, tenant_id, None, None)
-        .await
-        .expect("Failed to associate instance image");
+    // The production path writes this row inside `LaunchRepository::claim_initial`;
+    // a fixture seeds it directly rather than keeping a `db` helper alive that
+    // nothing but tests would call.
+    sqlx::query(
+        "INSERT INTO instance_images \
+             (instance_id, image_id, tenant_id, env, timeout_seconds, created_at) \
+         VALUES ($1, $2, $3, NULL, NULL, NOW())",
+    )
+    .bind(instance_id)
+    .bind(image_id)
+    .bind(tenant_id)
+    .execute(pool)
+    .await
+    .expect("Failed to associate instance image");
 }
 
 /// Helper to update instance status using the Persistence trait.
@@ -170,134 +179,6 @@ async fn test_handler_state_uptime() {
     let uptime2 = state.uptime_ms();
 
     assert!(uptime2 >= uptime1);
-}
-
-// ============================================================================
-// Health Check Tests
-// ============================================================================
-
-#[tokio::test]
-async fn test_health_check_handler() {
-    skip_if_no_db!();
-    let pool = get_test_pool().await;
-
-    let temp_dir = tempfile::TempDir::new().unwrap();
-    let state = create_test_state(pool, temp_dir.path().to_path_buf());
-
-    let response = handle_health_check(&state)
-        .await
-        .expect("Health check should succeed");
-
-    assert!(response.healthy);
-    assert!(!response.version.is_empty());
-    assert!(response.uptime_ms >= 0);
-}
-
-// ============================================================================
-// Register Image Tests
-// ============================================================================
-
-#[tokio::test]
-async fn test_register_image_success() {
-    skip_if_no_db!();
-    let pool = get_test_pool().await;
-
-    let temp_dir = tempfile::TempDir::new().unwrap();
-    let state = create_test_state(pool.clone(), temp_dir.path().to_path_buf());
-
-    let request = RegisterImageRequest {
-        tenant_id: "test-tenant".to_string(),
-        name: "test-image".to_string(),
-        description: Some("Test image description".to_string()),
-        binary: vec![0x7f, 0x45, 0x4c, 0x46], // ELF magic bytes
-        metadata: Some(serde_json::json!({"key": "value"})),
-    };
-
-    let response = handle_register_image(&state, request)
-        .await
-        .expect("Register should succeed");
-
-    assert!(response.success, "Error: {:?}", response.error);
-    assert!(!response.image_id.is_empty());
-
-    // Verify image was created
-    let image_registry = ImageRegistry::new(pool.clone());
-    let image = image_registry
-        .get(&response.image_id)
-        .await
-        .unwrap()
-        .unwrap();
-
-    assert_eq!(image.tenant_id, "test-tenant");
-    assert_eq!(image.name, "test-image");
-
-    cleanup(&pool, None, Some(&response.image_id)).await;
-}
-
-#[tokio::test]
-async fn test_register_image_empty_tenant_id() {
-    skip_if_no_db!();
-    let pool = get_test_pool().await;
-
-    let temp_dir = tempfile::TempDir::new().unwrap();
-    let state = create_test_state(pool, temp_dir.path().to_path_buf());
-
-    let request = RegisterImageRequest {
-        tenant_id: String::new(), // Empty
-        name: "test-image".to_string(),
-        description: None,
-        binary: vec![1, 2, 3],
-        metadata: None,
-    };
-
-    let response = handle_register_image(&state, request).await.unwrap();
-
-    assert!(!response.success);
-    assert!(response.error.as_ref().unwrap().contains("tenant_id"));
-}
-
-#[tokio::test]
-async fn test_register_image_empty_name() {
-    skip_if_no_db!();
-    let pool = get_test_pool().await;
-
-    let temp_dir = tempfile::TempDir::new().unwrap();
-    let state = create_test_state(pool, temp_dir.path().to_path_buf());
-
-    let request = RegisterImageRequest {
-        tenant_id: "test-tenant".to_string(),
-        name: String::new(), // Empty
-        description: None,
-        binary: vec![1, 2, 3],
-        metadata: None,
-    };
-
-    let response = handle_register_image(&state, request).await.unwrap();
-
-    assert!(!response.success);
-    assert!(response.error.as_ref().unwrap().contains("name"));
-}
-
-#[tokio::test]
-async fn test_register_image_empty_binary() {
-    skip_if_no_db!();
-    let pool = get_test_pool().await;
-
-    let temp_dir = tempfile::TempDir::new().unwrap();
-    let state = create_test_state(pool, temp_dir.path().to_path_buf());
-
-    let request = RegisterImageRequest {
-        tenant_id: "test-tenant".to_string(),
-        name: "test-image".to_string(),
-        description: None,
-        binary: vec![], // Empty
-        metadata: None,
-    };
-
-    let response = handle_register_image(&state, request).await.unwrap();
-
-    assert!(!response.success);
-    assert!(response.error.as_ref().unwrap().contains("binary"));
 }
 
 // ============================================================================
@@ -1278,19 +1159,6 @@ async fn test_resume_instance_success() {
 // ============================================================================
 // Response Type Tests
 // ============================================================================
-
-#[test]
-fn test_health_check_response_debug() {
-    let response = runtara_environment::handlers::HealthCheckResponse {
-        healthy: true,
-        version: "1.0.0".to_string(),
-        uptime_ms: 12345,
-    };
-    let debug_str = format!("{:?}", response);
-    assert!(debug_str.contains("healthy"));
-    assert!(debug_str.contains("1.0.0"));
-    assert!(debug_str.contains("12345"));
-}
 
 // ============================================================================
 // Multi-Tenant Isolation Tests (Issue #1)
