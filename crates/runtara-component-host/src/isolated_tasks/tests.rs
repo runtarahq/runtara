@@ -228,12 +228,12 @@ async fn shutdown_reaps_pending_children_and_is_idempotent() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_non_cooperative_wasm_is_interrupted_and_its_store_dropped() {
-    assert_wasm_is_stopped(false).await;
+    assert_wasm_is_stopped(false, false).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn infinite_wasm_initializer_is_interrupted_and_its_store_dropped() {
-    assert_wasm_is_stopped(true).await;
+    assert_wasm_is_stopped(true, false).await;
 }
 
 #[test]
@@ -246,9 +246,9 @@ fn spawn_outside_runtime_is_an_error_without_poisoning_registry() {
     assert_eq!(tasks.retained_result_bytes(), 0);
 }
 
-async fn assert_wasm_is_stopped(initializer: bool) {
-    let tasks = registry(2, 1024);
-    let engine = tasks.engine.clone();
+async fn assert_wasm_is_stopped(initializer: bool, nested: bool) {
+    let children = Arc::new(registry(2, 1024));
+    let engine = children.engine.clone();
     let entry = if initializer {
         "(start $busy) (func (export \"run\"))"
     } else {
@@ -266,49 +266,64 @@ async fn assert_wasm_is_stopped(initializer: bool) {
     let (tx, rx) = oneshot::channel();
     let dropped = Arc::new(AtomicBool::new(false));
     let guard = Dropped(dropped.clone());
-    let id = tasks
-        .spawn(move |cancel| async move {
-            let mut store = wasmtime::Store::new(&engine, (cancel, Some(tx), guard));
-            store.epoch_deadline_callback(|ctx| {
-                Ok(if ctx.data().0.is_requested() {
-                    wasmtime::UpdateDeadline::Interrupt
-                } else {
-                    wasmtime::UpdateDeadline::Yield(1)
-                })
-            });
-            store.set_epoch_deadline(1);
-            let mut linker = wasmtime::Linker::new(&engine);
-            linker
-                .func_wrap(
-                    "host",
-                    "started",
-                    |mut caller: wasmtime::Caller<
-                        '_,
-                        (TaskCancellation, Option<oneshot::Sender<()>>, Dropped),
-                    >| {
-                        caller.data_mut().1.take().unwrap().send(()).unwrap();
-                    },
-                )
-                .unwrap();
-            let instance = match linker.instantiate_async(&mut store, &module).await {
-                Ok(instance) => instance,
-                Err(error) => {
-                    return InvokeExit::Trapped {
-                        reason: error.to_string(),
-                    };
-                }
-            };
-            let run = instance
-                .get_typed_func::<(), ()>(&mut store, "run")
-                .unwrap();
-            match run.call_async(&mut store, ()).await {
-                Ok(()) => InvokeExit::Completed(vec![]),
-                Err(e) => InvokeExit::Trapped {
-                    reason: e.to_string(),
+    let child_factory = move |cancel: TaskCancellation| async move {
+        let mut store = wasmtime::Store::new(&engine, (cancel, Some(tx), guard));
+        store.epoch_deadline_callback(|ctx| {
+            Ok(if ctx.data().0.is_requested() {
+                wasmtime::UpdateDeadline::Interrupt
+            } else {
+                wasmtime::UpdateDeadline::Yield(1)
+            })
+        });
+        store.set_epoch_deadline(1);
+        let mut linker = wasmtime::Linker::new(&engine);
+        linker
+            .func_wrap(
+                "host",
+                "started",
+                |mut caller: wasmtime::Caller<
+                    '_,
+                    (TaskCancellation, Option<oneshot::Sender<()>>, Dropped),
+                >| {
+                    caller.data_mut().1.take().unwrap().send(()).unwrap();
                 },
+            )
+            .unwrap();
+        let instance = match linker.instantiate_async(&mut store, &module).await {
+            Ok(instance) => instance,
+            Err(error) => {
+                return InvokeExit::Trapped {
+                    reason: error.to_string(),
+                };
             }
-        })
-        .unwrap();
+        };
+        let run = instance
+            .get_typed_func::<(), ()>(&mut store, "run")
+            .unwrap();
+        match run.call_async(&mut store, ()).await {
+            Ok(()) => InvokeExit::Completed(vec![]),
+            Err(e) => InvokeExit::Trapped {
+                reason: e.to_string(),
+            },
+        }
+    };
+    let (tasks, id) = if nested {
+        let parents = Arc::new(IsolatedTasks::new(children.engine.clone(), 2, 1024).unwrap());
+        let (run_children, cleanup_children) = (children.clone(), children.clone());
+        let id = parents
+            .spawn_scoped(
+                move |_| async move {
+                    run_children.spawn(child_factory).unwrap();
+                    std::future::pending().await
+                },
+                Box::pin(async move { cleanup_children.shutdown().await }),
+            )
+            .unwrap();
+        (parents, id)
+    } else {
+        let id = children.spawn(child_factory).unwrap();
+        (children, id)
+    };
     let sibling = tasks
         .spawn(|_| async { InvokeExit::Completed(vec![42]) })
         .unwrap();
@@ -327,4 +342,126 @@ async fn assert_wasm_is_stopped(initializer: bool) {
         matches!(tasks.join(sibling).await.unwrap().outcome(),InvokeExit::Completed(b) if b==&[42])
     );
     tasks.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn scoped_cancel_waits_for_cleanup_before_publishing() {
+    let tasks = registry(2, 1024);
+    let (cleanup_started, started) = oneshot::channel();
+    let (finish_cleanup, finish) = oneshot::channel();
+    let id = tasks
+        .spawn_scoped(
+            |_| async { std::future::pending().await },
+            Box::pin(async move {
+                cleanup_started.send(()).unwrap();
+                finish.await.unwrap();
+                Ok(())
+            }),
+        )
+        .unwrap();
+    tasks.cancel(id).unwrap();
+    started.await.unwrap();
+    assert!(
+        tasks.task(id).unwrap().result.borrow().is_none(),
+        "published before descendant cleanup"
+    );
+    let sibling = tasks
+        .spawn(|_| async { InvokeExit::Completed(vec![9]) })
+        .unwrap();
+    assert!(
+        matches!(tasks.join(sibling).await.unwrap().outcome(), InvokeExit::Completed(bytes) if bytes == &[9])
+    );
+    finish_cleanup.send(()).unwrap();
+    assert!(matches!(
+        tasks.join(id).await.unwrap().outcome(),
+        InvokeExit::Cancelled
+    ));
+    tasks.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn scoped_prestart_cancel_runs_cleanup_without_running_factory() {
+    let tasks = registry(1, 1024);
+    let called = Arc::new(AtomicBool::new(false));
+    let cleaned = Arc::new(AtomicBool::new(false));
+    let (run_flag, cleanup_flag) = (called.clone(), cleaned.clone());
+    let id = tasks
+        .spawn_scoped(
+            move |_| {
+                run_flag.store(true, Ordering::Release);
+                async { InvokeExit::Completed(vec![]) }
+            },
+            Box::pin(async move {
+                cleanup_flag.store(true, Ordering::Release);
+                Ok(())
+            }),
+        )
+        .unwrap();
+    tasks.cancel(id).unwrap();
+    assert!(matches!(
+        tasks.join(id).await.unwrap().outcome(),
+        InvokeExit::Cancelled
+    ));
+    assert!(!called.load(Ordering::Acquire));
+    assert!(cleaned.load(Ordering::Acquire));
+    tasks.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn scoped_parent_panic_reaps_grandchildren_before_returning_trap() {
+    let parents = registry(1, 1024);
+    let children = Arc::new(registry(1, 1024));
+    let dropped = Arc::new(AtomicBool::new(false));
+    let (run_children, cleanup_children) = (children.clone(), children.clone());
+    let guard = Dropped(dropped.clone());
+    let id = parents
+        .spawn_scoped(
+            move |_| async move {
+                let (tx, rx) = oneshot::channel();
+                run_children
+                    .spawn(move |_| async move {
+                        let _guard = guard;
+                        tx.send(()).unwrap();
+                        std::future::pending().await
+                    })
+                    .unwrap();
+                rx.await.unwrap();
+                panic!("parent failed with an active child");
+            },
+            Box::pin(async move { cleanup_children.shutdown().await }),
+        )
+        .unwrap();
+    let result = parents.join(id).await.unwrap();
+    assert!(matches!(result.outcome(), InvokeExit::Trapped { .. }));
+    assert!(dropped.load(Ordering::Acquire));
+    assert_eq!(
+        children.spawn(|_| async { InvokeExit::Completed(vec![]) }),
+        Err(TaskError::Closed)
+    );
+    parents.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn failed_or_panicking_cleanup_never_publishes_a_guest_outcome() {
+    for panic in [false, true] {
+        let tasks = registry(1, 1024);
+        let id = tasks
+            .spawn_scoped(
+                |_| async { InvokeExit::Completed(vec![1]) },
+                Box::pin(async move {
+                    assert!(!panic, "cleanup panic");
+                    Err(TaskError::WorkerLost)
+                }),
+            )
+            .unwrap();
+        tasks.cancel(id).unwrap();
+        assert!(matches!(tasks.join(id).await, Err(TaskError::WorkerLost)));
+        assert_eq!(tasks.shutdown().await, Err(TaskError::WorkerLost));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancelling_a_parent_reaps_non_cooperative_wasm_grandchildren() {
+    assert_wasm_is_stopped(false, true).await;
+    assert_wasm_is_stopped(true, true).await;
 }

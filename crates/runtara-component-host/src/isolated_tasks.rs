@@ -8,6 +8,7 @@
 
 use std::collections::BTreeMap;
 use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -16,6 +17,12 @@ use tokio::task::JoinHandle;
 use wasmtime::Engine;
 
 use crate::InvokeExit;
+
+/// Owned descendant teardown. Construct before starting the parent task, and
+/// only start descendants inside that task's execution future. This must finish
+/// after all descendant execution resources have been destroyed; no guest result
+/// is published when cleanup fails or panics.
+pub type TaskCleanup = Pin<Box<dyn Future<Output = Result<(), TaskError>> + Send + 'static>>;
 
 static NEXT_OWNER: AtomicU64 = AtomicU64::new(1);
 
@@ -235,6 +242,25 @@ impl IsolatedTasks {
         F: FnOnce(TaskCancellation) -> Fut + Send + 'static,
         Fut: Future<Output = InvokeExit> + Send + 'static,
     {
+        self.spawn_inner(run, None)
+    }
+
+    /// Run descendant teardown after dropping execution, even on pre-start
+    /// cancellation or panic. The supervisor owns cleanup outside the child
+    /// future, so cancellation cannot skip it by dropping that future.
+    pub fn spawn_scoped<F, Fut>(&self, run: F, cleanup: TaskCleanup) -> Result<TaskId, TaskError>
+    where
+        F: FnOnce(TaskCancellation) -> Fut + Send + 'static,
+        Fut: Future<Output = InvokeExit> + Send + 'static,
+    {
+        self.spawn_inner(run, Some(cleanup))
+    }
+
+    fn spawn_inner<F, Fut>(&self, run: F, cleanup: Option<TaskCleanup>) -> Result<TaskId, TaskError>
+    where
+        F: FnOnce(TaskCancellation) -> Fut + Send + 'static,
+        Fut: Future<Output = InvokeExit> + Send + 'static,
+    {
         let mut state = self.state.lock().unwrap();
         if state.closed {
             return Err(TaskError::Closed);
@@ -272,12 +298,21 @@ impl IsolatedTasks {
         });
         let finish_control = control.clone();
         let budget = self.budget.clone();
+        let cleanup_runtime = runtime.clone();
         let supervisor = runtime.spawn(async move {
             // Join also observes native panics and waits for task-owned values
             // to be dropped; an executor panic cannot strand join indefinitely.
             let mut outcome = worker.await.unwrap_or_else(|_| InvokeExit::Trapped {
                 reason: "isolated execution worker failed".into(),
             });
+            if let Some(cleanup) = cleanup {
+                // A distinct owned task converts a cleanup panic into a host
+                // failure. Leaves do not allocate this task. Do not publish a
+                // cancelled/trapped guest result if teardown is unconfirmed.
+                if !matches!(cleanup_runtime.spawn(cleanup).await, Ok(Ok(()))) {
+                    return; // closes the result channel: join reports WorkerLost
+                }
+            }
             let mut phase = finish_control.phase.lock().unwrap();
             if *phase == Phase::Stopping {
                 outcome = InvokeExit::Cancelled;

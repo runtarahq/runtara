@@ -14,7 +14,9 @@ use wasmtime::{
 use crate::lifecycle::{WorkflowErrorInfo, WorkflowWake};
 use crate::{
     InvokeExit,
-    isolated_tasks::{CancelResult, IsolatedTasks, TaskCancellation, TaskError, TaskId},
+    isolated_tasks::{
+        CancelResult, IsolatedTasks, TaskCancellation, TaskCleanup, TaskError, TaskId,
+    },
 };
 
 pub use runtara_workflow_wit::EXECUTION_INTERFACE_NAME;
@@ -161,10 +163,23 @@ pub struct StartRequest {
 pub type ExecutionFuture = Pin<Box<dyn Future<Output = InvokeExit> + Send + 'static>>;
 pub type InvocationFactory = Box<dyn FnOnce(TaskCancellation) -> ExecutionFuture + Send + 'static>;
 
+/// An execution future and optional separately owned descendant teardown.
+/// Cleanup must not live inside `run`: cancelling that future would skip it.
+pub struct PreparedInvocation {
+    pub run: InvocationFactory,
+    pub cleanup: Option<TaskCleanup>,
+}
+
+impl PreparedInvocation {
+    pub fn leaf(run: InvocationFactory) -> Self {
+        Self { run, cleanup: None }
+    }
+}
+
 /// Must bind and validate relative context against the parent's authority and
 /// prepared catalog. No mutable guest Store may be captured by the factory.
 pub trait InvocationLauncher: Send + Sync {
-    fn prepare(&self, request: StartRequest) -> Result<InvocationFactory, ExecutionError>;
+    fn prepare(&self, request: StartRequest) -> Result<PreparedInvocation, ExecutionError>;
 }
 
 /// Owned outside the parent Store. The root runner must await `shutdown` after
@@ -192,6 +207,12 @@ impl ExecutionContext {
             launcher,
             handles: Arc::new(Semaphore::new(max_handles)),
         }))
+    }
+
+    /// Move an owned child scope into its parent's task supervisor. This future
+    /// must be kept outside the guest execution future so cancellation runs it.
+    pub fn into_cleanup(self: Arc<Self>) -> TaskCleanup {
+        Box::pin(async move { self.shutdown().await.map_err(|_| TaskError::WorkerLost) })
     }
 
     pub async fn shutdown(&self) -> Result<(), ExecutionError> {
@@ -278,7 +299,11 @@ pub fn add_execution_to_linker<T: ExecutionView>(linker: &mut Linker<T>) -> anyh
                 Err(TryAcquireError::Closed) => return Ok((Err(ExecutionError::Closed),)),
                 Err(TryAcquireError::NoPermits) => return Ok((Err(ExecutionError::Capacity),)),
             };
-            let id = match owner.tasks.spawn(factory) {
+            let started = match factory.cleanup {
+                Some(cleanup) => owner.tasks.spawn_scoped(factory.run, cleanup),
+                None => owner.tasks.spawn(factory.run),
+            };
+            let id = match started {
                 Ok(id) => id,
                 Err(error) => return Ok((Err(ExecutionError::from(error)),)),
             };

@@ -37,7 +37,7 @@ struct Launcher {
     dropped: Arc<AtomicBool>,
 }
 impl InvocationLauncher for Launcher {
-    fn prepare(&self, request: StartRequest) -> Result<InvocationFactory, ExecutionError> {
+    fn prepare(&self, request: StartRequest) -> Result<PreparedInvocation, ExecutionError> {
         if request.context.path != "parent/step" {
             return Err(ExecutionError::InvalidContext);
         }
@@ -47,7 +47,7 @@ impl InvocationLauncher for Launcher {
         let calls = self.calls.clone();
         let started = self.started.clone();
         let dropped = self.dropped.clone();
-        Ok(Box::new(move |_token| {
+        Ok(PreparedInvocation::leaf(Box::new(move |_token| {
             Box::pin(async move {
                 let _guard = Dropped(dropped);
                 let pending = request.entry == Entry::Capability("pending".into());
@@ -87,7 +87,7 @@ impl InvocationLauncher for Launcher {
                     _ => InvokeExit::Completed(request.input),
                 }
             })
-        }))
+        })))
     }
 }
 
@@ -511,4 +511,74 @@ async fn released_but_undropped_resources_remain_charged() {
     assert!(next.is_ok());
     drop(store);
     fx.context.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn scoped_wire_join_waits_for_cleanup_and_surfaces_cleanup_failure() {
+    struct ScopedLauncher {
+        cleaned: Arc<AtomicBool>,
+        fail: bool,
+    }
+    impl InvocationLauncher for ScopedLauncher {
+        fn prepare(&self, _: StartRequest) -> Result<PreparedInvocation, ExecutionError> {
+            let cleaned = self.cleaned.clone();
+            let fail = self.fail;
+            Ok(PreparedInvocation {
+                run: Box::new(|_| Box::pin(async { InvokeExit::Completed(vec![42]) })),
+                cleanup: Some(Box::pin(async move {
+                    cleaned.store(true, Ordering::Release);
+                    if fail {
+                        Err(TaskError::WorkerLost)
+                    } else {
+                        Ok(())
+                    }
+                })),
+            })
+        }
+    }
+    for fail in [false, true] {
+        let mut fx = Fixture::new(1);
+        let cleaned = Arc::new(AtomicBool::new(false));
+        fx.context = ExecutionContext::new(
+            fx.context.tasks.clone(),
+            Arc::new(ScopedLauncher {
+                cleaned: cleaned.clone(),
+                fail,
+            }),
+            1,
+        )
+        .unwrap();
+        let (mut store, instance) = fx.proxy().await;
+        let start: Start = func(&mut store, &instance, "start");
+        let join: Join = func(&mut store, &instance, "join");
+        let handle = start
+            .call_async(&mut store, args(Entry::Workflow, vec![]))
+            .await
+            .unwrap()
+            .0
+            .unwrap();
+        let result = join
+            .call_async(&mut store, (Resource::new_borrow(handle.rep()),))
+            .await
+            .unwrap()
+            .0;
+        assert!(cleaned.load(Ordering::Acquire));
+        assert_eq!(
+            result,
+            if fail {
+                Err(ExecutionError::WorkerLost)
+            } else {
+                Ok(TaskOutcome::Completed(vec![42]))
+            }
+        );
+        drop(store);
+        assert_eq!(
+            fx.context.shutdown().await,
+            if fail {
+                Err(ExecutionError::WorkerLost)
+            } else {
+                Ok(())
+            }
+        );
+    }
 }

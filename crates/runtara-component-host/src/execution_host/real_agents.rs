@@ -14,7 +14,7 @@ struct RealLauncher {
     results: Arc<Mutex<Vec<TaskOutcome>>>,
 }
 impl InvocationLauncher for RealLauncher {
-    fn prepare(&self, request: StartRequest) -> Result<InvocationFactory, ExecutionError> {
+    fn prepare(&self, request: StartRequest) -> Result<PreparedInvocation, ExecutionError> {
         if request.context.path != "parent/step" {
             return Err(ExecutionError::InvalidContext);
         }
@@ -28,7 +28,7 @@ impl InvocationLauncher for RealLauncher {
         };
         let executor = self.executor.clone();
         let results = self.results.clone();
-        Ok(Box::new(move |token| {
+        Ok(PreparedInvocation::leaf(Box::new(move |token| {
             Box::pin(async move {
                 let result = executor
                     .execute_isolated_capability(
@@ -55,7 +55,7 @@ impl InvocationLauncher for RealLauncher {
                     .push(TaskOutcome::from(&result.exit));
                 result.exit
             })
-        }))
+        })))
     }
 }
 

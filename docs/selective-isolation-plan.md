@@ -149,6 +149,12 @@ Use resource ownership and invocation generations, not guest-chosen integer IDs
 that can address another tenant's tasks. Invalid, stale and released handles have
 defined errors; cancellation and release are idempotent at the command layer.
 Cancellation acknowledgement is distinct from `join` confirming teardown.
+Keep descendant teardown outside the cancellable execution future: the task
+supervisor must await it even after that future is dropped or panics. A cleanup
+failure (`worker-lost` at the execution interface) is a host failure requiring
+root fencing/termination, not a recoverable guest trap or an ordinary step retry.
+The scoped task primitive and resource adapter now have tests for this ordering;
+production scope construction and durable fencing are still required.
 
 Prepare/cache code before admission; install CPU epoch and pending-I/O guards
 before instantiation. Store destruction and descendant reaping precede publishing

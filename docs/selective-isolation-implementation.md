@@ -166,16 +166,46 @@ The complete component-host suite with both integration/PoC features passed
 for both component-host and the WIT crate.
 
 This is the execution ABI and its host adapter. The production root Store still
-needs context wiring, a real scoped launcher/runtime adapter, and descendant
-cleanup before a parent task publishes its result. Aggregate input/transport/guest
+needs context wiring and a real scoped launcher/runtime adapter. The descendant
+cleanup primitive described below is available for that wiring. Aggregate input/transport/guest
 memory accounting is also still required; the handle quota does not replace it.
 No DSL backend or production linker default has been enabled by this chunk.
+
+### Descendant cleanup before publication
+
+`IsolatedTasks::spawn_scoped` keeps a separate cleanup future in the supervisor,
+not inside the cancellable execution future. The supervisor first joins/drops
+execution, then awaits descendant teardown, then arbitrates and publishes the
+terminal result. This ordering also applies to pre-start cancellation and worker
+panic. A cleanup failure or panic closes the result channel with `WorkerLost`;
+it never fabricates a successful, cancelled or recoverable guest-trap outcome
+when teardown cannot be confirmed. The production coordinator must treat this
+as a host failure and fence/stop the root, not run ordinary step recovery.
+
+`PreparedInvocation` carries the execution factory and optional cleanup into the
+resource adapter. `ExecutionContext::into_cleanup` transfers an owned child scope
+to its parent's supervisor. Leaves keep the existing two-task execution path;
+scopes with descendants use an additional supervised cleanup task to observe
+cleanup panics. Its overhead belongs in the candidate comparison measurements.
+
+Verification: five new registry tests plus one resource-ABI test passed. They
+prove publication waits at an explicit cleanup barrier, cleanup runs after
+pre-start cancellation and parent panic, and failed cleanup reaches the ABI as a
+host error. Actual non-cooperative WASM loops and infinite initializers run as
+grandchildren; cancelling their parent destroys their Stores before the parent's
+join completes, while preserving a root sibling. The full component-host suite
+passed **102 tests**, with one manual benchmark ignored; focused all-target
+Clippy passed.
+
+The production launcher must still construct and register these child scopes;
+no generated workflow is using the new execution ABI yet. This primitive does
+not implement durable attempt fencing or native blocking-work interruption.
 
 ## Remaining required work
 
 - P0: add explicit legacy/isolated differential selection and coverage counters.
 - P1: production root/child context wiring, aggregate input/transport/guest
-  resource reservations and tree teardown.
+  resource reservations and integration of scoped tree teardown.
 - P2: sequential/parallel Agent call backend and every AI auxiliary invocation,
   preserving package state eligibility and existing invocation semantics.
 - P3: recursive Embed extraction and scoped child runtime, suspension/wake sets,
