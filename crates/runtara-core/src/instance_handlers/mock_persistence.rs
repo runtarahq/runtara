@@ -149,6 +149,7 @@ pub fn make_instance(
         output: None,
         error: None,
         sleep_until: None,
+        wake_reason: None,
         termination_reason: None,
         exit_code: None,
         recovery_attempts: 0,
@@ -169,6 +170,7 @@ pub fn make_checkpoint(instance_id: &str, checkpoint_id: &str, state: &[u8]) -> 
 /// Build an unacknowledged `SignalRecord` with no payload.
 pub fn make_signal(instance_id: &str, signal_type: crate::domain::SignalType) -> SignalRecord {
     SignalRecord {
+        command_id: uuid::Uuid::new_v4().to_string(),
         instance_id: instance_id.to_string(),
         signal_type,
         payload: None,
@@ -362,21 +364,83 @@ impl Persistence for MockPersistence {
         Ok(self.signals.lock().unwrap().get(instance_id).cloned())
     }
 
-    async fn acknowledge_signal(&self, instance_id: &str) -> std::result::Result<(), CoreError> {
-        self.signals.lock().unwrap().remove(instance_id);
-        Ok(())
+    async fn apply_lifecycle_command(
+        &self,
+        instance_id: &str,
+        command_id: &str,
+        signal_type: crate::domain::SignalType,
+    ) -> std::result::Result<crate::lifecycle::Decision, CoreError> {
+        use crate::domain::SignalType;
+        let mut instances = self.instances.lock().unwrap();
+        let mut signals = self.signals.lock().unwrap();
+        let Some(signal) = signals.get(instance_id) else {
+            return Ok(crate::lifecycle::Decision::Rejected);
+        };
+        if signal.command_id != command_id || signal.signal_type != signal_type {
+            return Ok(crate::lifecycle::Decision::Rejected);
+        }
+        let instance =
+            instances
+                .get_mut(instance_id)
+                .ok_or_else(|| CoreError::InstanceNotFound {
+                    instance_id: instance_id.into(),
+                })?;
+        if instance.status.is_terminal() && signal_type != SignalType::Cancel {
+            return Ok(crate::lifecycle::Decision::Rejected);
+        }
+        let decision = crate::lifecycle::acknowledge(
+            instance.status,
+            Some(signal.command()),
+            crate::lifecycle::Receipt {
+                id: command_id,
+                kind: signal_type,
+            },
+        );
+        match signal_type {
+            SignalType::Cancel => {
+                instance.status = CoreInstanceStatus::Cancelled;
+                instance.finished_at = Some(Utc::now());
+                instance.sleep_until = None;
+            }
+            SignalType::Pause | SignalType::Shutdown => {
+                instance.status = CoreInstanceStatus::Suspended;
+                instance.finished_at = Some(Utc::now());
+                instance.sleep_until = (signal_type == SignalType::Shutdown).then(Utc::now);
+                instance.termination_reason =
+                    (signal_type == SignalType::Shutdown).then(|| "shutdown_requested".into());
+            }
+        }
+        signals.remove(instance_id);
+        Ok(decision)
     }
 
-    async fn insert_custom_signal(
+    async fn park_instance(
+        &self,
+        _instance_id: &str,
+        _request: crate::lifecycle::ParkRequest,
+    ) -> std::result::Result<crate::lifecycle::Decision, crate::error::CoreError> {
+        Ok(crate::lifecycle::Decision::Rejected)
+    }
+
+    async fn cancel_suspended_instances(
+        &self,
+        _instance_id: Option<&str>,
+        _limit: i64,
+    ) -> std::result::Result<Vec<crate::persistence::CancelledInstance>, crate::error::CoreError>
+    {
+        Ok(Vec::new())
+    }
+
+    async fn put_custom_signal(
         &self,
         _instance_id: &str,
         _checkpoint_id: &str,
         _payload: &[u8],
-    ) -> std::result::Result<(), CoreError> {
-        Ok(())
+    ) -> std::result::Result<String, CoreError> {
+        Ok("mock-custom-signal".into())
     }
 
-    async fn take_pending_custom_signal(
+    async fn get_custom_signal(
         &self,
         instance_id: &str,
         checkpoint_id: &str,
@@ -419,10 +483,11 @@ impl Persistence for MockPersistence {
         Ok(self.active_instance_count.lock().unwrap().unwrap_or(0))
     }
 
-    async fn set_instance_sleep(
+    async fn schedule_wake(
         &self,
         instance_id: &str,
         sleep_until: DateTime<Utc>,
+        _reason: crate::domain::WakeReason,
     ) -> std::result::Result<(), CoreError> {
         if let Some(inst) = self.instances.lock().unwrap().get_mut(instance_id) {
             inst.sleep_until = Some(sleep_until);

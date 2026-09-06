@@ -9,7 +9,10 @@ pub const WORKFLOW_WIT_VERSION: &str = "0.1.0";
 pub const STDLIB_PACKAGE: &str = "runtara:workflow-stdlib@0.1.0";
 
 /// WIT package name for the runtime/SDK lifecycle component.
-pub const RUNTIME_PACKAGE: &str = "runtara:workflow-runtime@0.1.0";
+pub const RUNTIME_PACKAGE: &str = "runtara:workflow-runtime@0.3.0";
+
+/// Runtime interface imported by compiled workflows and implemented by the host.
+pub const RUNTIME_INTERFACE_NAME: &str = "runtara:workflow-runtime/runtime@0.3.0";
 
 /// WIT package name for safe runtime connection resolution.
 pub const CONNECTION_RESOLVER_PACKAGE: &str = "runtara:connection-resolver@0.1.0";
@@ -35,7 +38,7 @@ pub const LIFECYCLE_INTERFACE_NAME_V1: &str = "runtara:workflow-lifecycle/lifecy
 /// WIT text for `runtara:workflow-stdlib@0.1.0`.
 pub const STDLIB_WIT: &str = include_str!("../wit/stdlib/runtara-workflow-stdlib.wit");
 
-/// WIT text for `runtara:workflow-runtime@0.1.0`.
+/// WIT text for `runtara:workflow-runtime@0.3.0`.
 pub const RUNTIME_WIT: &str = include_str!("../wit/runtime/runtara-workflow-runtime.wit");
 
 /// WIT text for `runtara:connection-resolver@0.1.0`.

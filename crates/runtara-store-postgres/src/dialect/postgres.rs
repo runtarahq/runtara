@@ -77,10 +77,10 @@ impl Dialect for PostgresDialect {
         expr.to_string()
     }
 
-    fn sql_take_pending_custom_signal() -> &'static str {
+    fn sql_get_custom_signal() -> &'static str {
         // Non-destructive read: SELECT and leave the row in place so a
         // replayed WaitForSignal re-reads the same signal (see the trait doc).
-        "SELECT instance_id, checkpoint_id, payload, created_at \
+        "SELECT instance_id, signal_id::text as signal_id, checkpoint_id, payload, created_at \
          FROM pending_checkpoint_signals \
          WHERE instance_id = $1 AND checkpoint_id = $2"
     }
@@ -113,15 +113,9 @@ impl Dialect for PostgresDialect {
     }
 
     fn sql_get_pending_signal() -> &'static str {
-        "SELECT instance_id, signal_type::text as signal_type, payload, created_at, acknowledged_at \
+        "SELECT instance_id, command_id::text as command_id, signal_type::text as signal_type, payload, created_at, acknowledged_at \
          FROM pending_signals \
-         WHERE instance_id = $1 AND acknowledged_at IS NULL"
-    }
-
-    fn sql_acknowledge_signal() -> &'static str {
-        "UPDATE pending_signals \
-         SET acknowledged_at = NOW() \
-         WHERE instance_id = $1 AND acknowledged_at IS NULL"
+         WHERE instance_id = $1 AND acknowledged_at IS NULL AND signal_type <> 'resume'"
     }
 
     fn sql_health_check() -> &'static str {

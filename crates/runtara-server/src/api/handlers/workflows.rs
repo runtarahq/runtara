@@ -2344,9 +2344,7 @@ pub async fn stop_instance_handler(
         Ok(StopOutcome::Stopped { previous_status }) => {
             let response = ApiResponse::success_with_message(
                 format!(
-                    "Cancellation requested for instance {} (was: {}). \
-                     The instance stops at its next signal checkpoint and \
-                     lands on status `cancelled`.",
+                    "Cancellation requested for instance {} (was: {}).",
                     instance_id, previous_status
                 ),
                 serde_json::Value::Null,

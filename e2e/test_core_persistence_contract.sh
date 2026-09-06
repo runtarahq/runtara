@@ -50,11 +50,12 @@ assert status["status"] == "completed" and status["output"] == output
 request(path + "/checkpoint", {"checkpoint_id": "after", "state": state}, expected=409)
 print("PASS checkpoint replay, heartbeat/custom events, completion and terminal guard")
 
-for label, expected in [("cancel", "cancelled"), ("pause", "suspended"), ("resume", "running"), ("shutdown", "suspended")]:
+for label in ["cancel", "pause", "shutdown"]:
     path = instance()
-    assert request(path + "/signals/ack", {"signal_type": label})["success"]
-    assert request(path + "/status")["status"] == expected
-print("PASS all lifecycle acknowledgement transitions")
+    assert not request(path + "/signals/ack", {"command_id": uuid.uuid4().hex, "signal_type": label})["success"]
+    assert request(path + "/status")["status"] == "running"
+request(path + "/signals/ack", {"command_id": uuid.uuid4().hex, "signal_type": "resume"}, expected=400)
+print("PASS unobserved lifecycle receipts cannot change instance status; guest resume rejected")
 
 path = instance()
 request(path + "/events", {"event_type": "failed", "payload": base64.b64encode(b"expected failure").decode()})

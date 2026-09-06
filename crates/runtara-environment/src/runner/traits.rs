@@ -105,6 +105,16 @@ impl PreparedLaunch {
         &self.launch_id
     }
 
+    /// Whether preparation was a no-op, so discarding this token costs nothing.
+    ///
+    /// [`Self::passthrough`] boxes a unit payload; [`Self::new`] boxes real
+    /// work — a compiled component, a held preparation permit. That difference
+    /// is what makes the default [`Runner::try_launch_prepared_detached`] safe
+    /// for one and wrong for the other.
+    pub fn is_passthrough(&self) -> bool {
+        self.payload.downcast_ref::<()>().is_some()
+    }
+
     /// Take an implementation-specific payload back out of this token.
     pub(crate) fn take<T>(self) -> Result<T>
     where
@@ -609,8 +619,11 @@ pub trait Runner: Send + Sync {
     /// The default discards the token and delegates to
     /// [`Self::try_launch_detached`], which is correct only for a runner whose
     /// preparation is a no-op — the passthrough token costs nothing to drop.
-    /// A runner that does real preparation and inherits this default throws
-    /// that work away and re-does it; see the note on `try_launch_detached`.
+    /// A real token is refused here rather than dropped: silently discarding a
+    /// compiled component and its preparation permit would re-do that work on
+    /// the delegated path, doubling preparation pressure precisely when
+    /// preparation is the bottleneck, and it would do so without a symptom
+    /// anyone could trace back to a missing override.
     async fn try_launch_prepared_detached(
         &self,
         options: &LaunchOptions,
@@ -619,6 +632,13 @@ pub trait Runner: Send + Sync {
         if prepared.launch_id() != options.launch_id {
             return Err(RunnerError::StartFailed(
                 "prepared launch does not match the requested generation".to_string(),
+            ));
+        }
+        if !prepared.is_passthrough() {
+            return Err(RunnerError::StartFailed(
+                "runner prepared a real launch but does not implement \
+                 try_launch_prepared_detached; the default would discard it"
+                    .to_string(),
             ));
         }
         drop(prepared);
@@ -779,6 +799,127 @@ mod start_gate_tests {
             monitor.await.expect("monitor must not panic"),
             StartGateOutcome::TimedOut,
             "the monitor must not remain behind a stalled confirmation"
+        );
+    }
+}
+
+#[cfg(test)]
+mod prepared_launch_tests {
+    use super::{
+        ContainerMetrics, LaunchOptions, PreparedLaunch, Result, Runner, RunnerError, RunnerHandle,
+    };
+
+    /// A runner that does real preparation but forgets to override
+    /// `try_launch_prepared_detached` — the mistake the default guards against.
+    struct ForgetfulRunner;
+
+    struct RealPreparation {
+        _artifact: Vec<u8>,
+    }
+
+    #[async_trait::async_trait]
+    impl Runner for ForgetfulRunner {
+        fn runner_type(&self) -> &'static str {
+            "forgetful"
+        }
+
+        async fn try_launch_detached(&self, _options: &LaunchOptions) -> Result<RunnerHandle> {
+            panic!("the default must refuse before it ever delegates here");
+        }
+
+        async fn try_prepare_launch(&self, options: &LaunchOptions) -> Result<PreparedLaunch> {
+            Ok(PreparedLaunch::new(
+                &options.launch_id,
+                RealPreparation {
+                    _artifact: vec![0u8; 8],
+                },
+            ))
+        }
+
+        async fn is_running(&self, _handle: &RunnerHandle) -> bool {
+            false
+        }
+
+        async fn stop(&self, _handle: &RunnerHandle) -> Result<()> {
+            Ok(())
+        }
+
+        async fn collect_result(
+            &self,
+            _handle: &RunnerHandle,
+        ) -> (Option<serde_json::Value>, Option<String>, ContainerMetrics) {
+            (None, None, ContainerMetrics::default())
+        }
+    }
+
+    fn options(launch_id: &str) -> LaunchOptions {
+        LaunchOptions {
+            launch_id: launch_id.to_string(),
+            instance_id: "instance-1".to_string(),
+            tenant_id: "tenant-1".to_string(),
+            wasm_path: std::path::PathBuf::from("/nonexistent.wasm"),
+            requires_lifecycle_invoke: false,
+            expected_workflow_checksum: None,
+            preparation_attempt: None,
+            preparation_deadline: None,
+            input: serde_json::Value::Null,
+            timeout: std::time::Duration::from_secs(1),
+            checkpoint_id: None,
+            env: std::collections::HashMap::new(),
+            prepersisted_input: None,
+            start_gate: None,
+        }
+    }
+
+    #[test]
+    fn a_passthrough_token_is_recognised_as_free_to_drop() {
+        assert!(PreparedLaunch::passthrough("launch-1").is_passthrough());
+        assert!(
+            !PreparedLaunch::new("launch-1", RealPreparation { _artifact: vec![1] })
+                .is_passthrough(),
+            "a real payload must never look free to discard"
+        );
+    }
+
+    /// The default consumes the token by dropping it, which is only free for a
+    /// passthrough. Handed real preparation it refuses, rather than throwing a
+    /// compiled component away and silently re-doing the work on the delegated
+    /// path — a cost that would show up only as preparation pressure.
+    #[tokio::test]
+    async fn the_default_refuses_to_discard_real_preparation() {
+        let runner = ForgetfulRunner;
+        let options = options("launch-1");
+        let prepared = runner.try_prepare_launch(&options).await.expect("prepare");
+
+        let error = runner
+            .try_launch_prepared_detached(&options, prepared)
+            .await
+            .expect_err("the default must not silently drop real preparation");
+
+        assert!(
+            matches!(error, RunnerError::StartFailed(ref message)
+                if message.contains("try_launch_prepared_detached")),
+            "the refusal must name the override that is missing: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_mismatched_generation_is_refused_before_the_payload_is_examined() {
+        let runner = ForgetfulRunner;
+        let prepared = runner
+            .try_prepare_launch(&options("launch-1"))
+            .await
+            .expect("prepare");
+
+        let error = runner
+            .try_launch_prepared_detached(&options("launch-2"), prepared)
+            .await
+            .expect_err("a token from another generation must be refused");
+
+        assert!(
+            matches!(error, RunnerError::StartFailed(ref message)
+                if message.contains("does not match the requested generation")),
+            "generation mismatch must be reported as such: {error}"
         );
     }
 }

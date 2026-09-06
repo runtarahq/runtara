@@ -130,7 +130,7 @@
 //! Background workers: the `RUNTARA_{RUN_DIR,DB,IMAGE}_CLEANUP_*` families,
 //! `RUNTARA_EVENT_DEBUG_RETENTION_HOURS`, `RUNTARA_AUTO_RECOVER` and
 //! `RUNTARA_MAX_AUTO_RESTARTS`. Every `*_ENABLED` switch and
-//! `RUNTARA_AUTO_RECOVER` share `runtara_core::config::parse_enabled_env`, so
+//! `RUNTARA_AUTO_RECOVER` share `crate::config::parse_enabled`, so
 //! all of them answer to `false`/`0`/`no`/`off`/`disabled` and default to on.
 //!
 //! # Modules
@@ -193,6 +193,9 @@ pub mod step_vocabulary;
 
 /// Durable sleep wake scheduling.
 pub mod wake_scheduler;
+
+/// Pure configuration parsing shared by environment and server callers.
+pub mod config;
 
 /// Background worker for cleaning up old run directories.
 pub mod cleanup_worker;

@@ -85,8 +85,6 @@ pub enum SignalType {
     Cancel,
     /// Pause execution (checkpoint and wait).
     Pause,
-    /// Resume paused execution.
-    Resume,
     /// Server draining: suspend at next checkpoint so the instance can be
     /// resumed after restart.
     Shutdown,
@@ -97,7 +95,6 @@ impl From<SignalType> for i32 {
         match signal {
             SignalType::Cancel => 0,
             SignalType::Pause => 1,
-            SignalType::Resume => 2,
             SignalType::Shutdown => 3,
         }
     }
@@ -532,45 +529,6 @@ impl ListInstancesOptions {
 }
 
 /// Runner type for images.
-/// Options for registering an image.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct RegisterImageOptions {
-    /// Tenant ID that owns this image.
-    pub tenant_id: String,
-    /// Human-readable name (unique per tenant).
-    pub name: String,
-    /// Optional description.
-    pub description: Option<String>,
-    /// Compiled binary content.
-    pub binary: Vec<u8>,
-    /// Optional metadata (JSON).
-    pub metadata: Option<serde_json::Value>,
-}
-
-impl RegisterImageOptions {
-    /// Create new options with required fields.
-    pub fn new(tenant_id: impl Into<String>, name: impl Into<String>, binary: Vec<u8>) -> Self {
-        Self {
-            tenant_id: tenant_id.into(),
-            name: name.into(),
-            binary,
-            ..Default::default()
-        }
-    }
-
-    /// Set the description.
-    pub fn with_description(mut self, description: impl Into<String>) -> Self {
-        self.description = Some(description.into());
-        self
-    }
-
-    /// Set metadata.
-    pub fn with_metadata(mut self, metadata: serde_json::Value) -> Self {
-        self.metadata = Some(metadata);
-        self
-    }
-}
-
 /// Result of registering an image.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegisterImageResult {
@@ -1505,7 +1463,6 @@ mod tests {
     fn test_signal_type_to_i32() {
         assert_eq!(i32::from(SignalType::Cancel), 0);
         assert_eq!(i32::from(SignalType::Pause), 1);
-        assert_eq!(i32::from(SignalType::Resume), 2);
     }
 
     #[test]
@@ -1790,32 +1747,6 @@ mod tests {
 
         let deserialized: ListInstancesOrder = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized, ListInstancesOrder::FinishedAtDesc);
-    }
-
-    // ========================================================================
-    // RegisterImageOptions tests
-    // ========================================================================
-
-    #[test]
-    fn test_register_image_options_builder() {
-        let binary = vec![1, 2, 3, 4];
-        let opts = RegisterImageOptions::new("tenant-1", "my-image", binary.clone())
-            .with_description("Test image")
-            .with_metadata(json!({"version": "1.0"}));
-
-        assert_eq!(opts.tenant_id, "tenant-1");
-        assert_eq!(opts.name, "my-image");
-        assert_eq!(opts.binary, binary);
-        assert_eq!(opts.description, Some("Test image".to_string()));
-        assert_eq!(opts.metadata, Some(json!({"version": "1.0"})));
-    }
-
-    #[test]
-    fn test_register_image_options_defaults() {
-        let opts = RegisterImageOptions::new("tenant-1", "my-image", vec![1, 2, 3]);
-
-        assert!(opts.description.is_none());
-        assert!(opts.metadata.is_none());
     }
 
     // ========================================================================

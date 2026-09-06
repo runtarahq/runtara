@@ -643,7 +643,7 @@ impl RuntimeClient {
         let sdk = &self.client;
 
         // Use resume_instance() which sends ResumeInstance request to relaunch the workflow
-        // Note: send_signal(Resume) only stores a signal which won't work since the process exited
+        // Resume is an explicit host launch operation, never a guest lifecycle command.
         sdk.resume_instance(instance_id)
             .await
             .map_err(|e| RuntimeError::SdkError(e.to_string()))?;
@@ -655,22 +655,23 @@ impl RuntimeClient {
     /// Send a custom signal to a workflow instance.
     ///
     /// Used for human-in-the-loop interactions where an AI Agent step is waiting
-    /// for external input via WaitForSignal. The signal_id must match exactly
-    /// what the workflow is polling for.
+    /// for external input via WaitForSignal. The checkpoint address must match
+    /// what the workflow polls. Returns the new retained value's signal ID.
     pub async fn send_custom_signal(
         &self,
         instance_id: &str,
-        signal_id: &str,
+        checkpoint_id: &str,
         payload: Option<&[u8]>,
-    ) -> Result<(), RuntimeError> {
+    ) -> Result<String, RuntimeError> {
         let sdk = &self.client;
 
-        sdk.send_custom_signal(instance_id, signal_id, payload)
+        let signal_id = sdk
+            .send_custom_signal(instance_id, checkpoint_id, payload)
             .await
             .map_err(|e| RuntimeError::SdkError(e.to_string()))?;
 
         info!(instance_id = %instance_id, signal_id = %signal_id, "Sent custom signal to workflow instance");
-        Ok(())
+        Ok(signal_id)
     }
 
     /// Get image info by image ID

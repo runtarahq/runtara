@@ -7,6 +7,7 @@ mod common;
 use std::{sync::Arc, time::Duration};
 
 use common::TestContext;
+use runtara_core::persistence::Persistence;
 use runtara_environment::runner::{MockRunner, Runner, RunnerHandle};
 use runtara_environment::{
     db,
@@ -35,19 +36,32 @@ async fn fixture(context: &TestContext) -> LaunchFixture {
         .await
         .to_string();
     let instance_id = Uuid::new_v4().to_string();
-    assert!(
-        db::claim_instance_with_image(
-            &context.pool,
-            &instance_id,
-            &image_id,
-            &tenant_id,
-            Some(br#"{}"#),
-            None,
-            None,
-        )
+    // Seed the pending instance and its image binding the way
+    // `LaunchRepository::claim_initial` does, without going through the
+    // repository this file is testing.
+    let persistence = PostgresPersistence::new(context.pool.clone());
+    persistence
+        .register_instance(&instance_id, &tenant_id)
         .await
-        .expect("instance/image claim must succeed"),
-    );
+        .expect("instance must register");
+    // The dispatcher's preflight reads the durable input before it will hand a
+    // generation to a runner, so a fixture that registers without one leaves the
+    // launch stuck in the queue rather than failing loudly.
+    persistence
+        .store_instance_input(&instance_id, br#"{}"#)
+        .await
+        .expect("durable input must persist");
+    sqlx::query(
+        "INSERT INTO instance_images \
+             (instance_id, image_id, tenant_id, env, timeout_seconds, created_at) \
+         VALUES ($1, $2, $3, NULL, NULL, NOW())",
+    )
+    .bind(&instance_id)
+    .bind(&image_id)
+    .bind(&tenant_id)
+    .execute(&context.pool)
+    .await
+    .expect("image binding must persist");
 
     LaunchFixture {
         tenant_id,
@@ -999,4 +1013,94 @@ async fn dispatcher_hands_off_a_durable_row_without_a_runner_waiter() {
         .expect("mock runner stop must succeed");
 
     context.cleanup().await;
+}
+
+#[tokio::test]
+async fn parked_cancellation_and_launch_start_are_serialized() {
+    use runtara_core::{
+        domain::{InstanceStatus, SignalType},
+        persistence::Persistence,
+    };
+    let context = TestContext::new().await.expect("test database must start");
+    let repository = LaunchRepository::new(context.pool.clone());
+    let persistence = PostgresPersistence::new(context.pool.clone());
+    for turn in 0..12 {
+        let fixture = fixture(&context).await;
+        set_instance_status(&context.pool, &fixture.instance_id, "suspended").await;
+        let launch_id = Uuid::new_v4().to_string();
+        repository
+            .enqueue(request(
+                &fixture,
+                &launch_id,
+                LaunchKind::Wake,
+                Duration::from_secs(60),
+            ))
+            .await
+            .unwrap();
+        let claim = repository
+            .claim_ready("cancel-race", Duration::from_secs(60), 1)
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(claim.launch_id, launch_id);
+        repository
+            .begin_start(&launch_id, "cancel-race", claim.attempt_count)
+            .await
+            .unwrap()
+            .unwrap();
+        persistence
+            .insert_signal(&fixture.instance_id, SignalType::Cancel, b"")
+            .await
+            .unwrap();
+        // Also force the cancellation-first ordering; the other iterations race.
+        if turn == 0 {
+            assert_eq!(
+                persistence
+                    .cancel_suspended_instances(Some(&fixture.instance_id), 1)
+                    .await
+                    .unwrap()
+                    .len(),
+                1
+            );
+        }
+        let (cancelled, started) = tokio::join!(
+            persistence.cancel_suspended_instances(Some(&fixture.instance_id), 1),
+            repository.mark_running(&launch_id, "cancel-race", claim.attempt_count),
+        );
+        let cancelled = cancelled.unwrap();
+        let instance = persistence
+            .get_instance(&fixture.instance_id)
+            .await
+            .unwrap()
+            .unwrap();
+        if turn == 0 || !cancelled.is_empty() {
+            assert_eq!(instance.status, InstanceStatus::Cancelled);
+            assert!(matches!(
+                started,
+                Err(LaunchQueueError::InstanceNoLongerPreStart { .. })
+            ));
+            assert!(
+                persistence
+                    .get_pending_signal(&fixture.instance_id)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        } else {
+            assert!(started.unwrap().is_some());
+            assert_eq!(instance.status, InstanceStatus::Running);
+            assert_eq!(
+                persistence
+                    .get_pending_signal(&fixture.instance_id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .signal_type,
+                SignalType::Cancel,
+                "a start that wins must retain the cancellation for its guest"
+            );
+        }
+        context.cleanup_tenant(&fixture.tenant_id).await;
+    }
 }

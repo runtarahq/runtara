@@ -125,7 +125,7 @@ macro_rules! impl_instance_ops {
                     "SELECT instance_id, tenant_id, definition_version, \
                             {status_col}, {termination_col}, exit_code, checkpoint_id, \
                             attempt, max_attempts, \
-                            created_at, started_at, finished_at, output, error, sleep_until, \
+                            created_at, started_at, finished_at, output, error, sleep_until, wake_reason, \
                             recovery_attempts, recovery_marker \
                      FROM instances \
                      WHERE instance_id = {p1}"
@@ -153,7 +153,7 @@ macro_rules! impl_instance_ops {
                     "SELECT instance_id, tenant_id, definition_version, \
                             {status_col}, {termination_col}, exit_code, checkpoint_id, \
                             attempt, max_attempts, \
-                            created_at, started_at, finished_at, input, output, error, sleep_until, \
+                            created_at, started_at, finished_at, input, output, error, sleep_until, wake_reason, \
                             recovery_attempts, recovery_marker \
                      FROM instances \
                      WHERE instance_id = {p1}"
@@ -464,7 +464,7 @@ macro_rules! impl_instance_ops {
                     "SELECT instance_id, tenant_id, definition_version, \
                             {status_col}, {termination_col}, exit_code, checkpoint_id, \
                             attempt, max_attempts, \
-                            created_at, started_at, finished_at, output, error, sleep_until \
+                            created_at, started_at, finished_at, output, error, sleep_until, wake_reason \
                      FROM instances \
                      WHERE ({p1} IS NULL OR tenant_id = {p1}) \
                        AND ({p2} IS NULL OR status = {p2}{status_cast}) \

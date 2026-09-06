@@ -88,9 +88,20 @@ async fn create_test_instance(pool: &PgPool, instance_id: &str, tenant_id: &str,
         .register_instance(instance_id, tenant_id)
         .await
         .expect("Failed to register instance");
-    db::associate_instance_image(pool, instance_id, image_id, tenant_id, None, None)
-        .await
-        .expect("Failed to associate instance image");
+    // The production path writes this row inside `LaunchRepository::claim_initial`;
+    // a fixture seeds it directly rather than keeping a `db` helper alive that
+    // nothing but tests would call.
+    sqlx::query(
+        "INSERT INTO instance_images \
+             (instance_id, image_id, tenant_id, env, timeout_seconds, created_at) \
+         VALUES ($1, $2, $3, NULL, NULL, NOW())",
+    )
+    .bind(instance_id)
+    .bind(image_id)
+    .bind(tenant_id)
+    .execute(pool)
+    .await
+    .expect("Failed to associate instance image");
 }
 
 /// Helper to update instance status using the Persistence trait.
@@ -445,17 +456,6 @@ async fn test_list_instances() {
     cleanup(&pool, &instance2).await;
     cleanup(&pool, &instance3).await;
     cleanup_image(&pool, &image_id).await;
-}
-
-#[tokio::test]
-async fn test_health_check() {
-    skip_if_no_db!();
-    let pool = get_test_pool().await;
-
-    let result = db::health_check(&pool)
-        .await
-        .expect("Health check should succeed");
-    assert!(result);
 }
 
 // ============================================================================
@@ -857,4 +857,79 @@ async fn a_batch_is_woken_concurrently_and_stays_within_its_bound() {
         cleanup(&pool, id).await;
     }
     cleanup_image(&pool, &image_id).await;
+}
+
+#[tokio::test]
+async fn scheduler_recovers_parked_cancellation_without_waiting_for_a_deadline() {
+    let pool = get_test_pool().await;
+    let image = create_test_image(&pool, "parked-recovery").await;
+    let no_deadline = park_due_instance(&pool, "parked-recovery", &image).await;
+    let future = park_due_instance(&pool, "parked-recovery", &image).await;
+    let persistence = Arc::new(PostgresPersistence::new(pool.clone()));
+    persistence
+        .clear_instance_sleep(&no_deadline)
+        .await
+        .unwrap();
+    persistence
+        .set_instance_sleep(&future, Utc::now() + chrono::Duration::hours(24))
+        .await
+        .unwrap();
+    for id in [&no_deadline, &future] {
+        // Only persist the request: model a crash before immediate application.
+        persistence
+            .insert_signal(id, runtara_core::domain::SignalType::Cancel, b"")
+            .await
+            .unwrap();
+    }
+    let scheduler = WakeScheduler::new(
+        pool.clone(),
+        persistence.clone(),
+        WakeSchedulerConfig {
+            poll_interval: Duration::from_millis(50),
+            batch_size: 10,
+            ..Default::default()
+        },
+    );
+    let shutdown = scheduler.shutdown_handle();
+    let task = tokio::spawn(scheduler.run());
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut done = false;
+    while std::time::Instant::now() < deadline {
+        done = true;
+        for id in [&no_deadline, &future] {
+            done &= persistence.get_instance(id).await.unwrap().unwrap().status
+                == CoreInstanceStatus::Cancelled;
+        }
+        if done {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    shutdown.notify_one();
+    task.await.unwrap();
+    assert!(
+        done,
+        "cancellation must not depend on a guest or a due timer"
+    );
+    for id in [&no_deadline, &future] {
+        assert!(persistence.get_pending_signal(id).await.unwrap().is_none());
+        assert!(
+            persistence
+                .get_instance(id)
+                .await
+                .unwrap()
+                .unwrap()
+                .sleep_until
+                .is_none()
+        );
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM instance_launches WHERE instance_id = $1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(count, 0, "recovery must not enqueue a new launch");
+        cleanup(&pool, id).await;
+    }
+    cleanup_image(&pool, &image).await;
 }

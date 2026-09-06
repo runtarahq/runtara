@@ -21,9 +21,8 @@ use chrono::{TimeZone, Utc};
 use runtara_environment::db;
 use runtara_environment::handlers::{
     self, EnvironmentHandlerState, ResumeInstanceRequest, SendCustomSignalOutcome,
-    SendSignalOutcome, StartInstanceRequest, StopInstanceRequest,
+    SendSignalOutcome, StartInstanceRequest, StartRejection, StopInstanceRequest,
 };
-use runtara_environment::launch_queue::SINGLE_INSTANCE_ACTIVE;
 use thiserror::Error;
 use tracing::{debug, info, instrument};
 
@@ -200,25 +199,34 @@ impl EnvironmentClient {
         )
         .await?;
 
-        if !resp.success && resp.error.as_deref() == Some(SINGLE_INSTANCE_ACTIVE) {
-            return Err(EnvironmentError::SingleInstanceActive);
+        // Environment reports a typed refusal, so the category is read from
+        // the variant rather than recovered by searching the message. Matching
+        // on the text used to fold a database failure that happened to say
+        // "not found" into ImageNotFound, whose handler deletes the workflow's
+        // compilation record and forces a rebuild.
+        match resp.rejection {
+            None => Ok(StartInstanceResult {
+                success: true,
+                instance_id: resp.instance_id,
+                deduplicated: resp.deduplicated,
+                error: None,
+            }),
+            Some(StartRejection::SingleInstanceActive) => {
+                Err(EnvironmentError::SingleInstanceActive)
+            }
+            // Both are repaired by registering the image again, which is what
+            // the caller's ImageNotFound handler does.
+            Some(rejection @ StartRejection::ImageNotFound { .. })
+            | Some(rejection @ StartRejection::ImageNotRunnable { .. }) => {
+                Err(EnvironmentError::ImageNotFound(rejection.to_string()))
+            }
+            Some(rejection) => Ok(StartInstanceResult {
+                success: false,
+                instance_id: resp.instance_id,
+                deduplicated: resp.deduplicated,
+                error: Some(rejection.to_string()),
+            }),
         }
-
-        // A refusal naming a missing image is reported as such rather than as a
-        // generic failure: callers retry the former by re-registering the image.
-        if !resp.success
-            && let Some(ref error) = resp.error
-            && error.contains("not found")
-        {
-            return Err(EnvironmentError::ImageNotFound(error.clone()));
-        }
-
-        Ok(StartInstanceResult {
-            success: resp.success,
-            instance_id: resp.instance_id,
-            deduplicated: resp.deduplicated,
-            error: resp.error,
-        })
     }
 
     /// Stop a running instance.
@@ -269,16 +277,10 @@ impl EnvironmentClient {
     ) -> Result<()> {
         info!("Sending signal to instance");
 
-        // Resume is handled via resume_instance()
-        if signal_type == SignalType::Resume {
-            return self.resume_instance(instance_id).await;
-        }
-
         let signal_str = match signal_type {
             SignalType::Cancel => "cancel",
             SignalType::Pause => "pause",
             SignalType::Shutdown => "shutdown",
-            SignalType::Resume => unreachable!(),
         };
 
         let payload_str = payload.map(|p| String::from_utf8_lossy(p).to_string());
@@ -306,13 +308,13 @@ impl EnvironmentClient {
     }
 
     /// Send a custom (workflow-defined) signal addressed to one checkpoint.
-    #[instrument(skip(self, payload), fields(instance_id = %instance_id, signal_id = %signal_id))]
+    #[instrument(skip(self, payload), fields(instance_id = %instance_id, checkpoint_id = %checkpoint_id))]
     pub async fn send_custom_signal(
         &self,
         instance_id: &str,
-        signal_id: &str,
+        checkpoint_id: &str,
         payload: Option<&[u8]>,
-    ) -> Result<()> {
+    ) -> Result<String> {
         info!("Sending custom signal to instance");
 
         let payload_str = payload.map(|p| String::from_utf8_lossy(p).to_string());
@@ -320,12 +322,12 @@ impl EnvironmentClient {
         match handlers::handle_send_custom_signal(
             &self.state,
             instance_id,
-            signal_id,
+            checkpoint_id,
             payload_str.as_deref(),
         )
         .await?
         {
-            SendCustomSignalOutcome::Delivered => Ok(()),
+            SendCustomSignalOutcome::Delivered { signal_id } => Ok(signal_id),
             SendCustomSignalOutcome::InstanceNotFound => {
                 Err(EnvironmentError::InstanceNotFound(instance_id.to_string()))
             }

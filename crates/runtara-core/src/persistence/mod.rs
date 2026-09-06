@@ -49,6 +49,9 @@ pub struct InstanceRecord {
     pub error: Option<String>,
     /// When a sleeping instance should be woken.
     pub sleep_until: Option<DateTime<Utc>>,
+    /// Scheduled or most recently claimed host wake cause. Preserved across claim/retry and execution
+    /// start; lifecycle commands can clear an obsolete wake intent.
+    pub wake_reason: Option<crate::domain::WakeReason>,
     /// How/why the instance reached its terminal state.
     pub termination_reason: Option<String>,
     /// Process exit code if available.
@@ -102,9 +105,11 @@ pub struct EventRecord {
 /// Signal record from the persistence layer.
 #[derive(Debug, Clone)]
 pub struct SignalRecord {
+    /// Opaque identity of this command; replacements receive a fresh identity.
+    pub command_id: String,
     /// Instance this signal is for.
     pub instance_id: String,
-    /// Type of signal (cancel, pause, resume).
+    /// Type of signal (cancel, pause, shutdown).
     pub signal_type: SignalType,
     /// Optional signal payload data.
     pub payload: Option<Vec<u8>>,
@@ -114,9 +119,31 @@ pub struct SignalRecord {
     pub acknowledged_at: Option<DateTime<Utc>>,
 }
 
+impl SignalRecord {
+    /// Borrow the command facts used by the pure lifecycle policy.
+    pub fn command(&self) -> crate::lifecycle::Command<'_> {
+        crate::lifecycle::Command {
+            id: &self.command_id,
+            kind: self.signal_type,
+            acknowledged: self.acknowledged_at.is_some(),
+        }
+    }
+}
+
+/// Instance whose pending cancellation was applied without a running guest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CancelledInstance {
+    /// Cancelled instance identity.
+    pub instance_id: String,
+    /// Tenant to notify when releasing execution admission.
+    pub tenant_id: String,
+}
+
 /// Pending custom signal scoped to a specific checkpoint.
 #[derive(Debug, Clone)]
 pub struct CustomSignalRecord {
+    /// Identity of this retained value, distinct from its checkpoint address.
+    pub signal_id: String,
     /// Instance this signal is for.
     pub instance_id: String,
     /// Target checkpoint/wait key.
@@ -568,6 +595,8 @@ pub trait Persistence: Send + Sync {
     /// duration into the interval between two writes.
     async fn insert_event(&self, event: &EventRecord) -> Result<(), CoreError>;
 
+    /// Store a fresh lifecycle command, replacing the previous slot. An unacknowledged
+    /// cancellation dominates subsequent commands and retains its identity and payload.
     async fn insert_signal(
         &self,
         instance_id: &str,
@@ -580,16 +609,66 @@ pub trait Persistence: Send + Sync {
         instance_id: &str,
     ) -> Result<Option<SignalRecord>, CoreError>;
 
-    async fn acknowledge_signal(&self, instance_id: &str) -> Result<(), CoreError>;
+    /// Atomically acknowledge exactly the delivered command and apply its lifecycle
+    /// transition and suspension event. Shutdown also schedules immediate wake.
+    /// Returns false for a replaced/missing command, a type mismatch, or a transition
+    /// that would revive a terminal instance. Repeating an accepted acknowledgment
+    /// returns true without applying its transition again. Cancel may override a
+    /// completed/failed run when the runner discovers an unhandled cancellation.
+    async fn acknowledge_signal(
+        &self,
+        instance_id: &str,
+        command_id: &str,
+        signal_type: SignalType,
+    ) -> Result<bool, CoreError> {
+        Ok(self
+            .apply_lifecycle_command(instance_id, command_id, signal_type)
+            .await?
+            .accepted())
+    }
 
-    async fn insert_custom_signal(
+    /// Evaluate core command policy against locked state and atomically apply its
+    /// effects. Return the typed disposition, retaining idempotency information.
+    async fn apply_lifecycle_command(
+        &self,
+        instance_id: &str,
+        command_id: &str,
+        signal_type: SignalType,
+    ) -> Result<crate::lifecycle::Decision, CoreError>;
+
+    /// Evaluate the core parking guard and commit suspension metadata and its
+    /// deadline atomically. A concurrent terminal transition cannot be overwritten.
+    async fn park_instance(
+        &self,
+        instance_id: &str,
+        request: crate::lifecycle::ParkRequest,
+    ) -> Result<crate::lifecycle::Decision, CoreError>;
+
+    /// Atomically cancel suspended instances with pending cancel commands, clear
+    /// their wake deadlines, and acknowledge those exact commands. Returns only
+    /// newly cancelled instances. Active runs and terminal instances are untouched.
+    /// `Some(id)` targets an API request; `None` recovers interrupted delivery in
+    /// bounded batches. Locked instances may be skipped for the next recovery pass.
+    async fn cancel_suspended_instances(
+        &self,
+        instance_id: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<CancelledInstance>, CoreError>;
+
+    /// Replace the retained value at an instance/checkpoint address. Last write
+    /// wins; every successful write receives a fresh signal ID, even for identical
+    /// payloads. This is neither a queue nor retry deduplication. Returns that ID.
+    async fn put_custom_signal(
         &self,
         instance_id: &str,
         checkpoint_id: &str,
         payload: &[u8],
-    ) -> Result<(), CoreError>;
+    ) -> Result<String, CoreError>;
 
-    async fn take_pending_custom_signal(
+    /// Read the current retained value without consuming it. Replays see the
+    /// same identity and payload until a later write replaces it. The checkpoint
+    /// ID is an address; the returned signal ID identifies the stored value.
+    async fn get_custom_signal(
         &self,
         instance_id: &str,
         checkpoint_id: &str,
@@ -680,10 +759,24 @@ pub trait Persistence: Send + Sync {
     }
 
     /// Set the sleep_until timestamp for an instance.
+    /// Terminal instances retain no wake deadline, including when this write
+    /// races with cancellation or completion.
     async fn set_instance_sleep(
         &self,
         instance_id: &str,
         sleep_until: DateTime<Utc>,
+    ) -> Result<(), CoreError> {
+        self.schedule_wake(instance_id, sleep_until, crate::domain::WakeReason::Timer)
+            .await
+    }
+
+    /// Atomically persist a wake deadline and its host-side cause. Terminal
+    /// instances retain no scheduled wake. A wake reason is never a guest signal.
+    async fn schedule_wake(
+        &self,
+        instance_id: &str,
+        deadline: DateTime<Utc>,
+        reason: crate::domain::WakeReason,
     ) -> Result<(), CoreError>;
 
     /// Clear the sleep_until timestamp for an instance.

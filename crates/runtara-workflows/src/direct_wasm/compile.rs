@@ -62,8 +62,8 @@ use std::time::Instant;
 
 use runtara_dsl::ExecutionGraph;
 use runtara_workflow_wit::{
-    ABI_WIT, CONNECTION_RESOLVER_WIT, LIFECYCLE_INTERFACE_NAME, LIFECYCLE_WIT, RUNTIME_WIT,
-    STDLIB_WIT, WORKFLOW_WIT_VERSION,
+    ABI_WIT, CONNECTION_RESOLVER_WIT, LIFECYCLE_INTERFACE_NAME, LIFECYCLE_WIT,
+    RUNTIME_INTERFACE_NAME, RUNTIME_WIT, STDLIB_WIT, WORKFLOW_WIT_VERSION,
 };
 use sha2::{Digest, Sha256};
 use wasm_encoder::{CustomSection, Encode, Function as WasmFunction, Instruction, Section};
@@ -166,6 +166,8 @@ const DIRECT_CHECKPOINT_FOUND_OFFSET: u64 = 4;
 const DIRECT_CHECKPOINT_PENDING_SIGNAL_TAG_OFFSET: u64 = 16;
 const DIRECT_CHECKPOINT_SIGNAL_TYPE_PTR_OFFSET: u64 = 20;
 const DIRECT_CHECKPOINT_SIGNAL_TYPE_LEN_OFFSET: u64 = 24;
+const DIRECT_CHECKPOINT_COMMAND_ID_PTR_OFFSET: u64 = 28;
+const DIRECT_CHECKPOINT_COMMAND_ID_LEN_OFFSET: u64 = 32;
 /// Fixed 8-byte scratch slot in the reserved 256-byte low-memory region (past
 /// the retptr scratch at 0 and the agent-args scratch at 128, below the static
 /// data base at 256). Used to marshal a `WaitForSignal` absolute timeout
@@ -1466,9 +1468,7 @@ fn build_direct_component_resolve_configured(
              import runtara:workflow-stdlib/json@{WORKFLOW_WIT_VERSION};\n"
     );
     if !omit_runtime {
-        workflow_wit.push_str(&format!(
-            "    import runtara:workflow-runtime/runtime@{WORKFLOW_WIT_VERSION};\n"
-        ));
+        workflow_wit.push_str(&format!("    import {RUNTIME_INTERFACE_NAME};\n"));
     }
     if has_connections {
         workflow_wit.push_str("    import runtara:connection-resolver/resolver@0.1.0;\n");

@@ -12,6 +12,17 @@
 //! composition binds `runtara:workflow-runtime/runtime` as a host import, and
 //! those calls reach the same core handlers in-process without a socket.
 //!
+//! # Deployment configuration
+//!
+//! The server loads [`RuntimeOverrides`] before constructing the runtime and
+//! passes settings to core's handlers explicitly. Unset values preserve the
+//! builder's defaults:
+//!
+//! | Variable | Default | Description |
+//! |----------|---------|-------------|
+//! | `RUNTARA_MAX_CONCURRENT_INSTANCES` | `0` (uncapped) | Maximum running instances; resumes are exempt. |
+//! | `RUNTARA_CORE_SHUTDOWN_GRACE_MS` | `5000` | Milliseconds to wait for in-flight instance requests during shutdown, after the execution drain. |
+//!
 //! # Example
 //!
 //! ```rust,ignore
@@ -53,7 +64,7 @@ use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
-use runtara_core::config::RuntimeOverrides;
+use crate::config::RuntimeOverrides;
 use runtara_core::instance_handlers::{InstanceEventObserver, InstanceHandlerState};
 use runtara_core::persistence::Persistence;
 
@@ -164,7 +175,7 @@ impl CoreRuntimeBuilder {
     ///
     /// Hosts that embed the runtime should prefer this to the individual
     /// setters: it is one call for the whole set, so a call site cannot wire
-    /// half of core's configuration and silently drop the rest.
+    /// half of the instance runtime's configuration and silently drop the rest.
     pub fn apply_overrides(mut self, overrides: RuntimeOverrides) -> Self {
         if let Some(limit) = overrides.max_concurrent_instances {
             self.max_concurrent_instances = limit;
@@ -526,20 +537,45 @@ mod tests {
             Ok(None)
         }
 
-        async fn acknowledge_signal(&self, _instance_id: &str) -> Result<(), CoreError> {
-            Ok(())
+        async fn apply_lifecycle_command(
+            &self,
+            _instance_id: &str,
+            _command_id: &str,
+            _signal_type: runtara_core::domain::SignalType,
+        ) -> Result<runtara_core::lifecycle::Decision, CoreError> {
+            Ok(runtara_core::lifecycle::Decision::Rejected)
         }
 
-        async fn insert_custom_signal(
+        async fn park_instance(
+            &self,
+            _instance_id: &str,
+            _request: runtara_core::lifecycle::ParkRequest,
+        ) -> std::result::Result<runtara_core::lifecycle::Decision, runtara_core::error::CoreError>
+        {
+            Ok(runtara_core::lifecycle::Decision::Rejected)
+        }
+
+        async fn cancel_suspended_instances(
+            &self,
+            _instance_id: Option<&str>,
+            _limit: i64,
+        ) -> std::result::Result<
+            Vec<runtara_core::persistence::CancelledInstance>,
+            runtara_core::error::CoreError,
+        > {
+            Ok(Vec::new())
+        }
+
+        async fn put_custom_signal(
             &self,
             _instance_id: &str,
             _checkpoint_id: &str,
             _payload: &[u8],
-        ) -> Result<(), CoreError> {
-            Ok(())
+        ) -> Result<String, CoreError> {
+            Ok("mock-custom-signal".into())
         }
 
-        async fn take_pending_custom_signal(
+        async fn get_custom_signal(
             &self,
             _instance_id: &str,
             _checkpoint_id: &str,
@@ -579,10 +615,11 @@ mod tests {
             Ok(0)
         }
 
-        async fn set_instance_sleep(
+        async fn schedule_wake(
             &self,
             _instance_id: &str,
             _sleep_until: DateTime<Utc>,
+            _reason: runtara_core::domain::WakeReason,
         ) -> Result<(), CoreError> {
             Ok(())
         }

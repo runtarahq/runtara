@@ -354,44 +354,37 @@ impl RuntaraSdk {
     pub fn poll_signal_now(&mut self) -> Result<Option<Signal>> {
         self.last_signal_poll = Instant::now();
 
-        let (signal, custom) = self.backend.poll_signals(None)?;
+        let (signal, _custom) = self.backend.poll_signals(None)?;
 
         if let Some(sig) = signal {
             debug!(signal_type = ?sig.signal_type, "Signal received");
             return Ok(Some(sig));
         }
 
-        if let Some(custom) = custom {
-            let sdk_signal = Signal {
-                signal_type: SignalType::Resume, // custom signals are scoped; type unused here
-                payload: custom.payload,
-                checkpoint_id: Some(custom.checkpoint_id),
-            };
-            debug!("Custom signal received for checkpoint");
-            return Ok(Some(sdk_signal));
-        }
-
         Ok(None)
     }
 
-    /// Poll for a custom signal scoped to a specific checkpoint/signal ID.
-    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self), fields(instance_id = %self.backend.instance_id(), signal_id = %signal_id)))]
-    pub fn poll_custom_signal(&mut self, signal_id: &str) -> Result<Option<Vec<u8>>> {
-        let (_signal, custom) = self.backend.poll_signals(Some(signal_id))?;
+    /// Read the retained custom signal at a checkpoint address without consuming
+    /// it. The returned signal ID identifies the value, not the address.
+    pub fn get_custom_signal(
+        &mut self,
+        checkpoint_id: &str,
+    ) -> Result<Option<crate::types::CustomSignal>> {
+        let (_, custom) = self.backend.poll_signals(Some(checkpoint_id))?;
+        Ok(custom)
+    }
 
-        if let Some(custom) = custom {
-            debug!(signal_id = %signal_id, "Custom signal received");
-            return Ok(Some(custom.payload));
-        }
-        Ok(None)
+    /// Read only the payload at a checkpoint address, preserving it for replay.
+    pub fn poll_custom_signal(&mut self, checkpoint_id: &str) -> Result<Option<Vec<u8>>> {
+        Ok(self
+            .get_custom_signal(checkpoint_id)?
+            .map(|signal| signal.payload))
     }
 
     /// Acknowledge a received signal.
     #[cfg_attr(feature = "tracing", tracing::instrument(skip(self), fields(instance_id = %self.backend.instance_id())))]
-    pub fn acknowledge_signal(&self, signal_type: SignalType) -> Result<()> {
-        self.backend.acknowledge_signal(signal_type)?;
-        debug!("Signal acknowledged");
-        Ok(())
+    pub fn acknowledge_signal(&self, command_id: &str, signal_type: SignalType) -> Result<bool> {
+        self.backend.acknowledge_signal(command_id, signal_type)
     }
 
     /// Check for cancellation and return error if cancelled.
@@ -427,10 +420,6 @@ impl RuntaraSdk {
                 SignalType::Cancel => return Err(SdkError::Cancelled),
                 SignalType::Pause => return Err(SdkError::Paused),
                 SignalType::Shutdown => return Err(SdkError::ShuttingDown),
-                SignalType::Resume => {
-                    // Resume is informational, cache it but don't error
-                    self.pending_signal = Some(signal);
-                }
             }
         }
         Ok(())

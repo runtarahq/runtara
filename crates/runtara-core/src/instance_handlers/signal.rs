@@ -2,23 +2,23 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Signal handlers: polling and acknowledgement.
 
+#[cfg(test)]
 use crate::domain::InstanceStatus as CoreInstanceStatus;
 #[cfg(test)]
 use crate::domain::SignalType as CoreSignalType;
 
 use anyhow::Result;
-use tracing::{debug, info, instrument, warn};
+use tracing::{debug, instrument};
 
 use super::state::InstanceHandlerState;
 use super::types::{
     CustomSignal, PollSignalsRequest, PollSignalsResponse, Signal, SignalAck, SignalType,
 };
-use crate::persistence::CompleteInstanceParams;
 
 /// Handle signal polling request.
 ///
-/// Returns the oldest pending signal for the instance, if any.
-/// Signals are: cancel, pause, resume.
+/// Returns the current pending command without consuming it.
+/// Commands are cancel, pause, and shutdown.
 ///
 /// Note: The checkpoint response also includes pending signals for efficiency.
 /// This endpoint is for explicit polling when not checkpointing.
@@ -39,7 +39,7 @@ pub async fn handle_poll_signals(
     let custom = if let Some(checkpoint_id) = request.checkpoint_id.as_deref() {
         state
             .persistence
-            .take_pending_custom_signal(&request.instance_id, checkpoint_id)
+            .get_custom_signal(&request.instance_id, checkpoint_id)
             .await?
     } else {
         None
@@ -49,6 +49,7 @@ pub async fn handle_poll_signals(
         let signal_type = SignalType::from(sig.signal_type);
 
         Signal {
+            command_id: sig.command_id,
             instance_id: request.instance_id.clone(),
             signal_type: signal_type.into(),
             payload: sig.payload.unwrap_or_default(),
@@ -56,6 +57,7 @@ pub async fn handle_poll_signals(
     });
 
     let custom_signal = custom.map(|sig| CustomSignal {
+        signal_id: sig.signal_id,
         checkpoint_id: sig.checkpoint_id,
         payload: sig.payload.unwrap_or_default(),
     });
@@ -74,94 +76,27 @@ pub async fn handle_poll_signals(
     })
 }
 
-/// Handle signal acknowledgement (fire-and-forget).
-///
-/// Applies the signal's status transition — a cancel ack also moves the
-/// instance to `cancelled` — and only then marks the signal acknowledged, so a
-/// transition that fails leaves the signal pending to be retried rather than
-/// consumed.
-#[instrument(skip(state, ack), fields(
-    instance_id = %ack.instance_id,
-    signal_type = ?ack.signal_type(),
-))]
-pub async fn handle_signal_ack(state: &InstanceHandlerState, ack: SignalAck) -> Result<()> {
-    debug!(
-        signal_type = ?ack.signal_type,
-        acknowledged = ack.acknowledged,
-        "Received signal acknowledgement"
-    );
+/// Acknowledge the delivered command and its lifecycle transition atomically.
+/// False means the receipt is stale or the requested transition is no longer valid.
+#[instrument(skip(state, ack), fields(instance_id = %ack.instance_id, command_id = %ack.command_id))]
+pub async fn handle_signal_ack(state: &InstanceHandlerState, ack: SignalAck) -> Result<bool> {
+    Ok(handle_signal_ack_decision(state, ack).await?.accepted())
+}
 
-    if ack.acknowledged {
-        // Handle signal-specific side effects
-        match ack.signal_type() {
-            SignalType::SignalCancel => {
-                // Update instance status to cancelled with finished_at
-                state
-                    .persistence
-                    .complete_instance(CompleteInstanceParams::new(
-                        &ack.instance_id,
-                        CoreInstanceStatus::Cancelled,
-                    ))
-                    .await?;
-                info!("Instance cancelled");
-            }
-            SignalType::SignalPause => {
-                // Update instance status to suspended
-                state
-                    .persistence
-                    .update_instance_status(&ack.instance_id, CoreInstanceStatus::Suspended, None)
-                    .await?;
-                info!("Instance paused/suspended");
-            }
-            SignalType::SignalResume => {
-                // Instance should resume execution
-                debug!("Resume signal acknowledged");
-            }
-            SignalType::SignalShutdown => {
-                // Suspend with termination_reason so the instance can be resumed
-                // after restart. Retain "suspended" status so heartbeat-monitor
-                // recovery treats it as a normal suspension.
-                state
-                    .persistence
-                    .complete_instance(
-                        CompleteInstanceParams::new(
-                            &ack.instance_id,
-                            CoreInstanceStatus::Suspended,
-                        )
-                        .with_termination("shutdown_requested", None),
-                    )
-                    .await?;
-                // Mark the instance as immediately due for wake so the wake
-                // scheduler relaunches it after the server restarts. Drain
-                // pauses the scheduler, so this cannot fire mid-shutdown.
-                if let Err(e) = state
-                    .persistence
-                    .set_instance_sleep(&ack.instance_id, chrono::Utc::now())
-                    .await
-                {
-                    warn!(error = %e, "Failed to schedule post-restart wake for shutdown suspend");
-                }
-                info!("Instance suspended for shutdown");
-            }
-        }
-
-        // Acknowledge last, once the status transition above has landed.
-        // Acknowledging first consumes the signal whether or not the
-        // transition succeeded, and callers log-and-continue on the error, so
-        // a transient persistence failure would leave an instance that was told
-        // to cancel recorded as a clean success: the guest's next poll would
-        // no longer see the signal, and the end-of-run cancel backstop would
-        // find nothing to enforce. Acking here instead leaves an unhandled
-        // signal pending, which is what both of those retry paths key on.
-        state
-            .persistence
-            .acknowledge_signal(&ack.instance_id)
-            .await?;
-    } else {
-        warn!("Signal was not acknowledged by instance");
+/// Acknowledge a command while retaining its typed lifecycle disposition.
+pub async fn handle_signal_ack_decision(
+    state: &InstanceHandlerState,
+    ack: SignalAck,
+) -> Result<crate::lifecycle::Decision> {
+    if !ack.acknowledged {
+        return Ok(crate::lifecycle::Decision::Rejected);
     }
-
-    Ok(())
+    let signal_type = SignalType::try_from_i32(ack.signal_type)
+        .ok_or_else(|| anyhow::anyhow!("Unknown lifecycle signal type: {}", ack.signal_type))?;
+    Ok(state
+        .persistence
+        .apply_lifecycle_command(&ack.instance_id, &ack.command_id, signal_type.into())
+        .await?)
 }
 
 #[cfg(test)]
@@ -173,13 +108,48 @@ mod tests {
     use crate::persistence::Persistence;
 
     #[tokio::test]
+    async fn retired_resume_value_cannot_acknowledge_a_command() {
+        let backend = Arc::new(crate::persistence::memory::InMemoryPersistence::new());
+        backend.register_instance("retired", "test").await.unwrap();
+        backend
+            .insert_signal("retired", crate::domain::SignalType::Pause, b"")
+            .await
+            .unwrap();
+        let command = backend
+            .get_pending_signal("retired")
+            .await
+            .unwrap()
+            .unwrap();
+        let state = InstanceHandlerState::new(backend.clone());
+        let result = handle_signal_ack(
+            &state,
+            SignalAck {
+                instance_id: "retired".into(),
+                command_id: command.command_id.clone(),
+                signal_type: 2,
+                acknowledged: true,
+            },
+        )
+        .await;
+        assert!(result.is_err());
+        assert_eq!(
+            backend
+                .get_pending_signal("retired")
+                .await
+                .unwrap()
+                .unwrap()
+                .command_id,
+            command.command_id
+        );
+    }
+
+    #[tokio::test]
     async fn checkpoint_and_poll_deliver_every_signal_identically() {
         use crate::domain::{InstanceStatus, SignalType as StoredSignal};
         use crate::instance_handlers::{CheckpointRequest, handle_checkpoint};
         for signal_type in [
             StoredSignal::Cancel,
             StoredSignal::Pause,
-            StoredSignal::Resume,
             StoredSignal::Shutdown,
         ] {
             let persistence = Arc::new(
@@ -281,7 +251,7 @@ mod tests {
                     "tenant-1",
                     CoreInstanceStatus::Running,
                 ))
-                .with_signal(make_signal("inst-1", CoreSignalType::Pause)),
+                .with_signal(make_signal("inst-1", crate::domain::SignalType::Pause)),
         );
         let state = InstanceHandlerState::new(persistence);
 
@@ -310,6 +280,12 @@ mod tests {
         let state = InstanceHandlerState::new(persistence.clone());
 
         let request = SignalAck {
+            command_id: persistence
+                .get_pending_signal("inst-1")
+                .await
+                .unwrap()
+                .unwrap()
+                .command_id,
             instance_id: "inst-1".to_string(),
             signal_type: SignalType::SignalCancel as i32,
             acknowledged: true,
@@ -342,6 +318,12 @@ mod tests {
         let state = InstanceHandlerState::new(persistence.clone());
 
         let ack = SignalAck {
+            command_id: persistence
+                .get_pending_signal("inst-1")
+                .await
+                .unwrap()
+                .unwrap()
+                .command_id,
             instance_id: "inst-1".to_string(),
             signal_type: SignalType::SignalCancel as i32,
             acknowledged: true,
@@ -375,6 +357,12 @@ mod tests {
         let state = InstanceHandlerState::new(persistence.clone());
 
         let ack = SignalAck {
+            command_id: persistence
+                .get_pending_signal("inst-1")
+                .await
+                .unwrap()
+                .unwrap()
+                .command_id,
             instance_id: "inst-1".to_string(),
             signal_type: SignalType::SignalShutdown as i32,
             acknowledged: true,

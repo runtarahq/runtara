@@ -14,7 +14,8 @@
 //! names imports it never defines, and `wac` resolves them.
 
 use runtara_workflow_wit::{
-    LIFECYCLE_INTERFACE_NAME, RUNTIME_PACKAGE, STDLIB_PACKAGE, WORKFLOW_WIT_VERSION,
+    LIFECYCLE_INTERFACE_NAME, RUNTIME_INTERFACE_NAME, RUNTIME_PACKAGE, STDLIB_PACKAGE,
+    WORKFLOW_WIT_VERSION,
 };
 
 /// Package name used by direct-emitted workflow logic components.
@@ -322,9 +323,7 @@ fn emit_world_wit(
          \x20   import runtara:workflow-stdlib/json@{WORKFLOW_WIT_VERSION};\n",
     );
     if !omit_runtime {
-        out.push_str(&format!(
-            "    import runtara:workflow-runtime/runtime@{WORKFLOW_WIT_VERSION};\n"
-        ));
+        out.push_str(&format!("    import {RUNTIME_INTERFACE_NAME};\n"));
     }
     if has_connections {
         out.push_str("    import runtara:connection-resolver/resolver@0.1.0;\n");
@@ -446,7 +445,7 @@ mod tests {
         assert!(
             artifacts
                 .world_wit
-                .contains("import runtara:workflow-runtime/runtime@0.1.0;")
+                .contains("import runtara:workflow-runtime/runtime@0.3.0;")
         );
         // The Phase-5 default exports the invoke lifecycle; the legacy run
         // export remains reachable via the explicit CliRunHttp ABI.
@@ -510,7 +509,7 @@ package runtara:workflow@0.1.0;
 
 world workflow {
     import runtara:workflow-stdlib/json@0.1.0;
-    import runtara:workflow-runtime/runtime@0.1.0;
+    import runtara:workflow-runtime/runtime@0.3.0;
     import runtara:agent-crypto/capabilities@0.4.0;
     import runtara:agent-object-model/capabilities@0.4.0;
     export runtara:workflow-lifecycle/lifecycle@0.2.0;
@@ -659,7 +658,7 @@ world workflow {
         assert!(
             artifacts
                 .world_wit
-                .contains("import runtara:workflow-runtime/runtime@0.1.0;")
+                .contains("import runtara:workflow-runtime/runtime@0.3.0;")
         );
     }
 
@@ -701,7 +700,7 @@ world workflow {
                 },
                 DirectSharedComponentRequirement {
                     package: "runtara:workflow-runtime",
-                    package_with_version: "runtara:workflow-runtime@0.1.0",
+                    package_with_version: "runtara:workflow-runtime@0.3.0",
                     bundle_wasm_filename: "runtara_workflow_runtime.wasm",
                     bundle_meta_filename: "runtara_workflow_runtime.meta.json",
                     cas_wasm_filename: "runtara-workflow-runtime.wasm",

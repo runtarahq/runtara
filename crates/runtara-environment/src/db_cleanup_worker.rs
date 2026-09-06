@@ -17,8 +17,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::config::parse_enabled;
 use chrono::Utc;
-use runtara_core::config::parse_enabled_env;
 use runtara_core::persistence::Persistence;
 use sqlx::PgPool;
 use tokio::sync::Notify;
@@ -75,7 +75,7 @@ impl DbCleanupWorkerConfig {
     ///   disables the sweep, leaving debug events to age out with their
     ///   instance as before.
     pub fn from_env() -> Self {
-        let enabled = parse_enabled_env("RUNTARA_DB_CLEANUP_ENABLED");
+        let enabled = parse_enabled(std::env::var("RUNTARA_DB_CLEANUP_ENABLED").ok().as_deref());
 
         let poll_interval_secs = positive_or_default(
             std::env::var("RUNTARA_DB_CLEANUP_POLL_INTERVAL_SECS")

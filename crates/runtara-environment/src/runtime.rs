@@ -687,7 +687,11 @@ impl EnvironmentRuntime {
                         if let Err(e) = self
                             .state
                             .persistence
-                            .set_instance_sleep(&info.instance_id, chrono::Utc::now())
+                            .schedule_wake(
+                                &info.instance_id,
+                                chrono::Utc::now(),
+                                runtara_core::domain::WakeReason::Recovery,
+                            )
                             .await
                         {
                             warn!(

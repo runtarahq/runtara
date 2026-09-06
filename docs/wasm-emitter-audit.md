@@ -6,8 +6,8 @@ and durable suspend/resume through the production invoke ABI.
 
 **Update 2026-09-06:** AUDIT-01 is committed as `2b6bf542` and AUDIT-02 as
 `d787556e`, AUDIT-03 as `a0629d99`, AUDIT-04 as `70a21db8`, and AUDIT-05 as
-`2c0a3df9`. AUDIT-06 is committed as `53ecca2c`. AUDIT-07 is fixed in the audit
-worktree. All seven findings now have passing regressions. See the verification
+`2c0a3df9`. AUDIT-06 is committed as `53ecca2c` and AUDIT-07 as `b83f6243`.
+All seven findings now have passing regressions. See the verification
 record for checks and limitations.
 
 [Open the interactive pattern guide](wasm-emitter-patterns.html) to compare tested
@@ -877,7 +877,8 @@ backoff change requires rebuilding the shared stdlib and recomposing workflows.
 ### AUDIT-07 verification update · 2026-09-06
 
 - Committed AUDIT-06 as `53ecca2c`; its pre-commit formatting and workspace
-  Clippy checks passed. AUDIT-07 is left uncommitted for review.
+  Clippy checks passed. AUDIT-07 was subsequently committed as `b83f6243` with
+  the same checks passing.
 - Baseline: **1 control passed and 3 regressions failed** at their intended
   identity-rejection assertions. All three ignores have now been removed.
 - AUDIT-07 native tests: **14 passed**, covering all 14 step variants, every
@@ -907,3 +908,31 @@ Checks used Rust 1.97.0, `RUSTC_WRAPPER=`, `SQLX_OFFLINE=true` for server checks
 and the audit worktree's own host build cache and staged guest components from
 AUDIT-06. No WIT or guest source changed, so components were reused. No database
 E2E, deployment, or migration of existing definitions/artifacts was performed.
+
+### Upstream integration verification · 2026-09-06
+
+Merged upstream `main` at `6f7db0c4a6539bc288f0e114fdf27331e3674ae1`
+into the audit branch. The merge includes upstream's workflow runtime WIT
+`0.3.0` and command-identity handling. Rebuilt all **27 agent components and
+2 shared workflow components** in the audit worktree before execution checks.
+
+- Full workflows suite with `direct-wasm-integration-tests`: **565 library,
+  221 composed execution, and 54 native integration tests passed**. This includes
+  all **77 audit cases** and upstream's command-identity execution regression.
+  One existing doctest remains ignored.
+- Stdlib suite: **230 unit tests and 1 doctest passed**; one existing performance
+  benchmark remains ignored.
+- Component host with `component-integration-tests --tests`: **45 passed**,
+  including the full-bundle dispatcher drift detector.
+- Browser validator: **22 passed**; its `wasm32-unknown-unknown` check passed.
+- Server workflow DTO tests: **25 passed**, including E128, E129 and E130 mappings.
+- Clippy for workflows, server and browser validation, all targets with the
+  workflow integration feature and `-D warnings`: passed. Formatting and
+  `git diff --check`: passed.
+- Interactive guide: all **66 DOM scenarios passed** again.
+
+Checks used pinned Rust 1.97.0, the worktree's own component/build caches,
+`RUSTC_WRAPPER=`, and `SQLX_OFFLINE=true` for server checks. The complete CI
+service matrix, database E2E, deployment and production artifact migration were
+not run locally. Earlier verification records above describe their original
+bases; this section records the combined result after integrating upstream.

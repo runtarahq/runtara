@@ -12,7 +12,7 @@
 //! - **Checkpointing**: Save state for durability with automatic resume handling
 //! - **Durable Sleep**: Request sleep with automatic checkpoint/wake
 //! - **Lifecycle Events**: Send heartbeat, completed, failed events
-//! - **Signal Handling**: Poll and handle cancel, pause, resume signals
+//! - **Signal Handling**: Poll and handle cancel, pause, shutdown signals
 //! - **Status Queries**: Query instance status and server health
 //!
 //! # Quick Start
