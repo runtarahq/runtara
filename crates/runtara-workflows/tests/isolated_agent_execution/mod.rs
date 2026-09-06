@@ -1,5 +1,6 @@
 //! Real emitted workflow -> guest adapter -> prepared fresh child Store.
 use super::*;
+mod selection;
 use runtara_component_host::execution_host::{
     Entry, ExecutionContext, ExecutionError, InvocationLauncher, PreparedInvocation, StartRequest,
 };
@@ -254,6 +255,16 @@ async fn run_graph_children(
     } else {
         compose_direct_workflow(&mut compiled, &components).unwrap();
     }
+    run_composed(compiled, input, isolate, replay, succeed_at).await
+}
+
+async fn run_composed(
+    compiled: DirectCompilationResult,
+    input: Value,
+    isolate: bool,
+    replay: bool,
+    succeed_at: u64,
+) -> (InvokeExit, usize, Vec<(String, u64)>) {
     let bytes = fs::read(&compiled.wasm_path).unwrap();
     assert_eq!(compiled.wasm_checksum, artifact_digest(&bytes));
     assert_eq!(compiled.wasm_size, bytes.len());

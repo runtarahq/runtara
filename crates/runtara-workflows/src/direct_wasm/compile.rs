@@ -45,6 +45,7 @@ mod invocation_scopes;
 mod isolation_adapter;
 #[cfg(test)]
 mod isolation_adapter_tests;
+mod isolation_selection;
 mod log;
 mod loop_deadline;
 mod mapping;
@@ -88,6 +89,11 @@ use artifact_metadata::{
 };
 use core_imports::{DirectAgentInvokeImport, DirectCoreFunctionIndices};
 use core_module::{DirectCoreConfig, DirectVariables, emit_direct_core_module};
+use isolation_selection::AgentLoweringSelection;
+pub use isolation_selection::{
+    AgentIsolationDecision, AgentIsolationPolicy, AgentIsolationReason, AgentIsolationReport,
+    AgentIsolationReview, compile_direct_workflow_composed_with_isolation_policy,
+};
 
 use super::component::{DIRECT_AGENT_WIT_VERSION, DirectComponentArtifacts};
 use super::error::DirectCompileError;
@@ -698,6 +704,23 @@ fn compose_direct_workflow_selected(
         extra_component_dirs,
         &result.component_artifacts.agent_components,
     )?;
+    if let Some(report) = &result.artifact_metadata.isolation_selection {
+        for agent in &report.agents {
+            let current = agent_components
+                .iter()
+                .find(|c| c.metadata.agent_id.as_ref() == Some(&agent.agent_id));
+            if current
+                .and_then(|c| c.metadata.wasm.as_ref())
+                .map(|w| &w.sha256)
+                != Some(&agent.sha256)
+            {
+                return Err(component_error(format!(
+                    "Agent `{}` changed after isolation selection",
+                    agent.agent_id
+                )));
+            }
+        }
+    }
     tracing::debug!(
         target: "runtara::direct_compile::profile",
         elapsed_ms = resolve_deps_start.elapsed().as_secs_f64() * 1000.0,
@@ -1190,13 +1213,27 @@ pub fn compile_direct_workflow_with_scoped_agents(
     omit_runtime: bool,
     scoped_agents: std::collections::BTreeSet<String>,
 ) -> Result<DirectCompilationResult, DirectCompileError> {
+    compile_direct_workflow_selected(
+        input,
+        abi,
+        omit_runtime,
+        AgentLoweringSelection::Exact(scoped_agents),
+    )
+}
+
+fn compile_direct_workflow_selected(
+    input: DirectCompilationInput,
+    abi: super::component::WorkflowAbi,
+    omit_runtime: bool,
+    selection: AgentLoweringSelection,
+) -> Result<DirectCompilationResult, DirectCompileError> {
     let span = tracing::Span::current();
     let handle = std::thread::Builder::new()
         .name("direct-compile".to_string())
         .stack_size(DIRECT_COMPILE_STACK_SIZE)
         .spawn(move || {
             let _span = span.entered();
-            compile_direct_workflow_inner(input, abi, omit_runtime, scoped_agents)
+            compile_direct_workflow_inner(input, abi, omit_runtime, selection)
         })
         .map_err(DirectCompileError::Io)?;
     match handle.join() {
@@ -1209,7 +1246,7 @@ fn compile_direct_workflow_inner(
     input: DirectCompilationInput,
     abi: super::component::WorkflowAbi,
     omit_runtime_requested: bool,
-    scoped_agents: std::collections::BTreeSet<String>,
+    selection: AgentLoweringSelection,
 ) -> Result<DirectCompilationResult, DirectCompileError> {
     // The agent catalog is supplied by the caller (the server passes the
     // runtime catalog loaded from component `meta.json`). When absent, the
@@ -1293,6 +1330,7 @@ fn compile_direct_workflow_inner(
         _ => None,
     };
 
+    let (scoped_agents, selection_report) = selection.resolve(&manifest, &input.workflow_id)?;
     for agent in &scoped_agents {
         if !manifest.feature_summary.agent_ids.contains(agent) {
             return Err(component_error(format!(
@@ -1347,7 +1385,7 @@ fn compile_direct_workflow_inner(
     let artifact_metadata_path = build_dir.join(DIRECT_WORKFLOW_ARTIFACT_METADATA_FILENAME);
     let world_wit_path = build_dir.join("wit/world.wit");
     let wac_path = build_dir.join("workflow.wac");
-    let artifact_metadata = initial_artifact_metadata(InitialArtifactMetadataInput {
+    let mut artifact_metadata = initial_artifact_metadata(InitialArtifactMetadataInput {
         workflow_id: &input.workflow_id,
         workflow_version: input.version,
         source_checksum: input.source_checksum.as_deref(),
@@ -1362,6 +1400,7 @@ fn compile_direct_workflow_inner(
         child_workflows: &child_workflow_metadata,
     });
 
+    artifact_metadata.isolation_selection = selection_report;
     fs::write(&wasm_path, &wasm)?;
     fs::write(&manifest_path, &manifest_json)?;
     fs::write(&support_report_path, &support_json)?;

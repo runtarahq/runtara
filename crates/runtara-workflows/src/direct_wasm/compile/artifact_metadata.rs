@@ -70,6 +70,9 @@ pub struct DirectArtifactMetadata {
     /// Explicit experimental isolated Agent selection; absent for legacy artifacts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub isolation: Option<DirectIsolationMetadata>,
+    /// Policy decisions, including reasons for packages retained on the legacy path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub isolation_selection: Option<super::AgentIsolationReport>,
     /// Preloaded child workflows that will be statically inlined by the direct
     /// emitter once `EmbedWorkflow` lowering is enabled.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -215,6 +218,7 @@ pub(super) fn initial_artifact_metadata(
         },
         composed_wasm: None,
         isolation: None,
+        isolation_selection: None,
         shared_components: input
             .component_artifacts
             .shared_components

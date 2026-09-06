@@ -311,7 +311,7 @@ pub(super) fn emit_direct_component_artifacts_scoped(
     }
 }
 
-fn agent_component(agent: &str) -> DirectAgentComponentRequirement {
+pub(super) fn agent_component(agent: &str) -> DirectAgentComponentRequirement {
     let snake = agent.replace('-', "_");
     let package = format!("runtara:agent-{agent}");
     DirectAgentComponentRequirement {

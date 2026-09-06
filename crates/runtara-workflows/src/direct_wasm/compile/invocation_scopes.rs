@@ -8,13 +8,25 @@ use std::collections::{BTreeMap, BTreeSet};
 
 type Scopes = BTreeMap<u32, BTreeSet<InvocationScopePattern>>;
 
+#[derive(Default)]
+pub(super) struct ScopeInventory {
+    pub(super) agents: Scopes,
+    pub(super) inline_children: BTreeSet<Vec<ChildScopePattern>>,
+}
+
 pub(super) fn build(manifest: &DirectWorkflowManifest) -> Result<Scopes, DirectCompileError> {
+    Ok(build_inventory(manifest)?.agents)
+}
+
+pub(super) fn build_inventory(
+    manifest: &DirectWorkflowManifest,
+) -> Result<ScopeInventory, DirectCompileError> {
     let children = manifest
         .child_workflows
         .iter()
         .map(|child| (child.step_id.as_str(), child))
         .collect();
-    let mut scopes = BTreeMap::new();
+    let mut scopes = ScopeInventory::default();
     collect(
         &manifest.graph,
         &children,
@@ -30,10 +42,14 @@ fn collect<'a>(
     children: &BTreeMap<&'a str, &'a DirectChildWorkflowGraphManifest>,
     scope: &InvocationScopePattern,
     visiting: &mut Vec<&'a str>,
-    scopes: &mut Scopes,
+    scopes: &mut ScopeInventory,
 ) -> Result<(), DirectCompileError> {
     for agent in &graph.agents {
-        scopes.entry(agent.id).or_default().insert(scope.clone());
+        scopes
+            .agents
+            .entry(agent.id)
+            .or_default()
+            .insert(scope.clone());
     }
     for step in &graph.steps {
         for nested in &step.nested_graphs {
@@ -65,6 +81,7 @@ fn collect<'a>(
                 step_id: step.id.clone(),
                 loops: std::mem::take(&mut child_scope.loops),
             });
+            scopes.inline_children.insert(child_scope.namespace.clone());
             visiting.push(&child.step_id);
             collect(&child.graph, children, &child_scope, visiting, scopes)?;
             visiting.pop();

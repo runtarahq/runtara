@@ -860,7 +860,8 @@ even though their qualified invocation tokens differ. The inventory now reports
 identical and ancestor/descendant grant conflicts. This is an eligibility input:
 the production selector must retain the legacy backend for affected packages,
 rather than silently changing checkpoint keys or permitting overlapping isolated
-grants. That automatic fallback is still pending.
+grants. The review-driven compiler selector described below now applies this
+fallback; production selection remains pending.
 
 Verification: **30 shared contract/package tests** and **132 component-host tests**
 passed. The **16 emitted-isolation checks** include agreement with the existing
@@ -900,17 +901,69 @@ scope policies retain their original path. Feature-enabled all-target Clippy
 passed with warnings denied. The test PostgreSQL container was stopped afterward.
 
 This supplies a concrete persistence policy; it does not enable a production
-backend. The selector must still certify component reset behavior and structured-
-key support, retain legacy execution for unsupported or conflicting packages,
-and bind the factory/root coordinator to the production runner. Durable attempt
+backend. The compiler selector below now requires explicit reviews of reset
+behavior and checkpoint IO, and retains legacy execution for unsupported or
+conflicting packages. Production still needs package reviews and must bind the
+factory/root coordinator to the runner. Durable attempt
 fencing is still required for database requests already in flight at cancellation.
 Local-server qualification and fresh performance comparisons remain pending.
+
+### Review-driven compiler selection and legacy fallback
+
+`compile_direct_workflow_composed_with_isolation_policy` resolves actual graph
+dependencies through the existing component and workflow-agent safety gates,
+selects packages before WASM emission, and composes that exact selection. It
+emits the workflow once. Existing compilation APIs and exact-selection tests
+retain their previous semantics; the production default is unchanged.
+
+The embedding supplies an explicit policy and asserts that its chosen runner
+supports inventory v4 and compiler checkpoint authority. Each dependency needs
+a review of its exact SHA-256 bytes, approval of fresh per-call stores, and
+approval of the compiler's checkpoint contract. The latter means no checkpoint
+IO for native capabilities, or structured v2 keys beneath the supplied namespace
+for workflow-agents. These are trusted operator reviews, not workflow-controlled
+flags or automatic claims about an agent's behavior. Unknown and stateful
+packages without that approval keep their original component lifetime.
+
+The sidecar's optional `isolationSelection` report lists actual dependencies in
+canonical order, resolved and reviewed digests, and the first failed gate:
+disabled policy, unavailable runtime, missing review, unapproved reset behavior,
+unapproved checkpoint contract, changed digest, unsupported invocation contract,
+or checkpoint overlap. Successful entries are marked `isolated`. The report
+exists even when every package falls back. Old APIs omit it; fallback does not
+add custom sections or change emitted legacy WASM bytes. Unrelated review IDs
+are ignored and never become filesystem paths.
+
+Conflict checking includes all workflow-agent definitions, including dependencies
+left on the legacy path. It also includes inline Embed namespaces whose child
+graphs contain no Agent calls. A grant that could contain an inline child's
+checkpoints forces its whole Agent package onto legacy execution. Unrelated
+eligible packages can remain isolated. Existing checkpoint keys are preserved.
+Missing or inconsistent component artifacts remain errors. Composition rechecks
+the selected dependency identities; changed bytes fail before replacing the
+previously composed artifact.
+
+Verification: **567 compiler unit tests** and **21 emitted-isolation tests**
+passed. Five new integration checks cover the basic fallback gates with exact
+legacy logic/component byte comparisons; real mixed execution and child counts;
+same-package and cross-package grant aliases; inline Embed aliases and a renamed
+non-conflicting control; sidecar roundtrips; changed bytes after selection; and
+invalid artifact rejection even with the policy disabled. Feature-enabled
+all-target Clippy passed with warnings denied. Component fixtures use existing
+staged components; no guest runtime or Agent component implementation changed
+in this increment.
+
+This API is not yet called by the production compilation service. Production
+runtime capability negotiation, policy-aware cache keys, package review storage,
+and runner construction remain required before enabling it. Fresh benchmarks
+must use the complete scoped runtime path; historical adapter-v1 measurements
+do not measure this selector or compiler checkpoint authority.
 
 ## Remaining required work
 
 - P0: extend explicit differential selection and invocation-count evidence to all
   required constructs and production artifact inspection.
-- P1: conflict-aware package eligibility and production scope-factory wiring, aggregate
+- P1: production integration of conflict-aware package eligibility and scope-factory wiring, aggregate
   input/transport/guest resource reservations and root fencing on cleanup failure.
 - P2: qualify logical scopes across every AI auxiliary invocation and nested
   construct, integrate the production scope factory and certify package reset/state
