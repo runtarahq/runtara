@@ -376,6 +376,19 @@ impl PreparedWorkflow {
         crate::lifecycle::exports_lifecycle_invoke(&self.instance_pre, engine)
     }
 
+    /// Whether lifecycle persistence can be supervised through the native host.
+    /// Internally composed HTTP runtimes cannot defer their terminal writes.
+    pub fn supports_scoped_runtime(&self, engine: &Arc<Engine>) -> bool {
+        if !Engine::same(self.instance_pre.component().engine(), engine) {
+            return false;
+        }
+        let ty = self.instance_pre.component().component_type();
+        let imports: Vec<_> = ty.imports(engine).map(|(name, _)| name).collect();
+        self.is_lifecycle_invoke(engine)
+            && imports.contains(&runtara_workflow_wit::RUNTIME_INTERFACE_NAME)
+            && !imports.iter().any(|name| name.starts_with("wasi:http/"))
+    }
+
     /// The linked invoke-shaped component, when [`Self::is_lifecycle_invoke`]
     /// is true.
     pub fn instance_pre(&self) -> &Arc<wasmtime::component::InstancePre<WorkflowState>> {

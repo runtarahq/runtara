@@ -113,6 +113,9 @@ impl WorkflowStartConfirmation for GateWorkflowStartConfirmation {
     }
 }
 
+mod scoped;
+pub use scoped::ScopedAgentRunnerConfig;
+
 type TaskRegistry = Arc<Mutex<HashMap<String, Arc<InstanceTask>>>>;
 
 /// Remove a detached task only when this generation still owns the registry
@@ -157,6 +160,7 @@ impl Drop for TaskCompletionGuard {
 /// In-process workflow runner backed by an embedded wasmtime engine.
 pub struct EmbeddedWasmRunner {
     config: WorkflowRunnerConfig,
+    scoped_agents: Option<ScopedAgentRunnerConfig>,
     /// Address legacy HTTP-composed artifacts use for runtara-core. Modern
     /// HostImport-composed artifacts receive the native runtime host instead.
     core_http_url: Option<String>,
@@ -788,6 +792,7 @@ impl EmbeddedWasmRunner {
         Ok(Self {
             config,
             core_http_url: None,
+            scoped_agents: None,
             limits: limits_from_env(),
             preparation_permits: Arc::new(tokio::sync::Semaphore::new(preparation_limit)),
             preparation_limit,
@@ -803,6 +808,14 @@ impl EmbeddedWasmRunner {
             tasks: Arc::new(Mutex::new(HashMap::new())),
             handler_state,
         })
+    }
+
+    /// Opt into reviewed scoped Agent packages. Legacy artifacts retain their
+    /// existing path. Package reviews must come from trusted operator policy.
+    pub fn with_scoped_agents(mut self, config: ScopedAgentRunnerConfig) -> Result<Self> {
+        config.validate()?;
+        self.scoped_agents = Some(config);
+        Ok(self)
     }
 
     /// Attach an observer that counts guest events as they cross the host.
@@ -866,7 +879,10 @@ impl EmbeddedWasmRunner {
         timeout: Duration,
         cancel: Option<CancelToken>,
         prepared_input: Option<Vec<u8>>,
-    ) -> WorkflowRunSpec {
+    ) -> (
+        WorkflowRunSpec,
+        Arc<crate::runtime_host::PersistenceRuntimeHost>,
+    ) {
         // Always attach the native runtime host. A HostImport-composed
         // artifact consumes it; a legacy composed artifact satisfies the
         // runtime interface internally (HTTP loopback) and never calls it —
@@ -896,14 +912,17 @@ impl EmbeddedWasmRunner {
             host = host.with_guest_interrupt(Arc::new(move || engine.increment_epoch()));
         }
         let runtime = Arc::new(host);
-        WorkflowRunSpec {
-            env,
-            stderr,
-            timeout,
-            cancel,
-            limits: self.limits.clone(),
-            runtime: Some(runtime),
-        }
+        (
+            WorkflowRunSpec {
+                env,
+                stderr,
+                timeout,
+                cancel,
+                limits: self.limits.clone(),
+                runtime: Some(runtime.clone()),
+            },
+            runtime,
+        )
     }
 
     /// Load the exact durable envelope required by a queued preparation.
@@ -985,6 +1004,8 @@ impl EmbeddedWasmRunner {
                     .to_string(),
             ));
         }
+
+        scoped::admit(&workflow, &self.executor, self.scoped_agents.as_ref())?;
 
         // This is a cancellable database operation, so it observes the same
         // absolute preparation lease deadline as the dispatcher. Missing or
@@ -1511,6 +1532,12 @@ impl Runner for EmbeddedWasmRunner {
             input,
         } = prepared.take()?;
 
+        // A prepared token can outlive configuration construction or come from
+        // another runner. Recheck policy before taking any active run capacity.
+        let scoped_authority =
+            scoped::admit(&workflow, &self.executor, self.scoped_agents.as_ref())?;
+        let scoped_config = self.scoped_agents.clone();
+
         // The child compiler already read, hashed, compiled, and returned the
         // exact serialized component held by `workflow`; no parent artifact
         // reread is permitted at this boundary. Releasing preparation before
@@ -1577,7 +1604,7 @@ impl Runner for EmbeddedWasmRunner {
         // its epoch/watchdog rings cover guest work after the start gate
         // opens. `Duration::MAX` overflows its monotonic HTTP deadline and
         // lets an otherwise healthy gated run panic before it can park.
-        let spec = self.run_spec(
+        let (spec, runtime_host) = self.run_spec(
             options,
             env,
             // Durable prepared launches intentionally do not create a
@@ -1653,14 +1680,28 @@ impl Runner for EmbeddedWasmRunner {
                 if !supervisor_owns_lifecycle {
                     mark_running(persistence.as_ref(), &instance_id).await;
                 }
-                let run = executor
-                    .execute_invoke_with_start_confirmation(
-                        workflow.instance_pre(),
+                let run = if let Some(authority) = scoped_authority {
+                    scoped::execute(
+                        &executor,
+                        &workflow,
                         spec,
+                        runtime_host,
                         input,
                         start_confirmation.clone(),
+                        authority,
+                        scoped_config.as_ref().expect("admitted scoped policy"),
                     )
-                    .await;
+                    .await
+                } else {
+                    executor
+                        .execute_invoke_with_start_confirmation(
+                            workflow.instance_pre(),
+                            spec,
+                            input,
+                            start_confirmation.clone(),
+                        )
+                        .await
+                };
                 {
                     let mut guard = metrics_for_task.lock().await;
                     *guard = invoke_metrics_of(&run);

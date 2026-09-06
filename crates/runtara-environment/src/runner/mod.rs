@@ -10,7 +10,7 @@ pub mod mock;
 mod traits;
 
 pub use common::WorkflowRunnerConfig;
-pub use embedded::EmbeddedWasmRunner;
+pub use embedded::{EmbeddedWasmRunner, ScopedAgentRunnerConfig};
 pub use mock::MockRunner;
 pub use traits::*;
 

@@ -4813,6 +4813,7 @@ dependencies = [
  "runtara-core",
  "runtara-store-postgres",
  "runtara-workflow-wit",
+ "runtara-workflows",
  "serde",
  "serde_json",
  "sqlx",

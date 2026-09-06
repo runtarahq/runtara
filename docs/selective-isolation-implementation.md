@@ -959,14 +959,71 @@ and runner construction remain required before enabling it. Fresh benchmarks
 must use the complete scoped runtime path; historical adapter-v1 measurements
 do not measure this selector or compiler checkpoint authority.
 
+### Opt-in EmbeddedWasmRunner execution
+
+`EmbeddedWasmRunner::with_scoped_agents` now admits and executes reviewed Agent
+packages through the real runner. Its explicit configuration pins approved
+Agent IDs and component digests and bounds child task slots, retained result
+bytes, and canonical handles per root. Approval covers fresh-store behavior and
+the compiler checkpoint contract. The constructor and server startup still
+leave this path disabled; ordinary artifacts keep their existing execution.
+
+Preparation verifies the package before reading persisted input or taking an
+active run permit. It requires inventory v4 without checkpoint grant conflicts,
+matching runtime reviews, a root from the runner's engine, a lifecycle export,
+and native runtime imports. Roots exposing raw WASI HTTP imports are
+conservatively excluded because their persistence cannot be assumed to pass
+through the supervised native runtime. Preparation is not a recompilation point:
+incompatible packaged artifacts fail admission. Compiler-side fallback remains
+responsible for producing legacy artifacts where isolation is unsuitable.
+Admission is checked again when consuming a prepared token, covering a changed
+runner policy and a token passed to another engine.
+
+After the start gate opens, the runner constructs `ScopedRuntimeOwner`, the
+compiler authority, `ScopedInvocationFactory`, prepared launcher, task registry,
+and a fresh execution context. All children inherit the root's approved
+environment, cancellation signal, memory/table limits and one absolute active
+deadline. Queue/gate waiting does not consume that active budget. The root uses
+`ScopedRootRuntime` as both its runtime and coordinator; the existing supervised
+execution API closes children and finalizes root control before publishing a
+staged terminal callback. The detached runner retains its run slot through that
+await and then applies its existing cancellation/suspension handling.
+
+The new `scoped_runner_test` suite compiles real DSL through the review-driven
+compiler API, prepares the actual package through the precompile protocol, and
+runs it against PostgreSQL using `EmbeddedWasmRunner`. Six tests cover approved
+and legacy execution, disabled/unreviewed/changed/old/runtime-less admission,
+prepared-policy withdrawal and foreign engines, start-gate timing, durable
+suspension and exact checkpoint replay, and a hung HTTP child stopped by either
+`Runner::stop` or the root deadline. The HTTP fixture remains blocked until the
+workflow has exited; releasing it afterward does not publish root success.
+This confirms whole-workflow interruption through the scoped runner, not durable
+cancellation of one step while the rest continues.
+
+CI now runs this suite in `components-build`, with staged components and an
+isolated PostgreSQL service. Its feature is also included in the authoritative
+lint/build matrix. Local verification passed the six new integration tests,
+five existing embedded-runner integration tests, 23 embedded-runner unit tests,
+and 48 runtime-host tests against isolated PostgreSQL, plus 103 component-host
+unit tests. Feature-enabled all-target Clippy passed with warnings denied. The CI YAML and feature wiring were parsed
+and checked locally; the remote CI job has not been run for this commit.
+
+Server startup policy, shared compiler/runner review configuration, compatibility
+fallback for unsupported root runtime contracts, and policy-aware compilation
+cache keys still need integration. Per-root task/result/handle bounds do not
+establish aggregate input, guest memory, transport or descendant quotas; reported
+runner memory remains the root Store's metric. Durable attempt fences, targeted
+commands, recursive extracted children, fresh benchmarks, Linux/capacity gates,
+and final local-server testing remain required before rollout.
+
 ## Remaining required work
 
 - P0: extend explicit differential selection and invocation-count evidence to all
   required constructs and production artifact inspection.
-- P1: production integration of conflict-aware package eligibility and scope-factory wiring, aggregate
+- P1: server integration of conflict-aware package eligibility and scoped-runner policy, aggregate
   input/transport/guest resource reservations and root fencing on cleanup failure.
 - P2: qualify logical scopes across every AI auxiliary invocation and nested
-  construct, integrate the production scope factory and certify package reset/state
+  construct, qualify the runner scope factory for workflow-agents and certify package reset/state
   eligibility. Basic emitted Agent paths and attempts are wired above.
 - P3: recursive Embed extraction and production scoped-runtime integration, suspension/wake sets,
   scopes, deadlines, checkpoint keys and existing reference ABI modes.

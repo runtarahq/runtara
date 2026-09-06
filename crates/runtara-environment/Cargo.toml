@@ -15,6 +15,7 @@ path = "src/lib.rs"
 
 [features]
 db-integration-tests = []
+scoped-workflow-integration-tests = ["db-integration-tests"]
 
 # Needs the real database: it pre-seeds what the SDK would have reported so
 # run()'s output/error mapping can be exercised against real persistence.
@@ -62,6 +63,7 @@ base64 = "0.22"
 async-trait = "0.1"
 
 [dev-dependencies]
+runtara-workflows = { path = "../runtara-workflows" }
 tokio = { version = "1", features = ["test-util", "macros", "rt-multi-thread"] }
 tempfile = "3"
 futures = "0.3"
@@ -115,3 +117,7 @@ required-features = ["db-integration-tests"]
 name = "wake_scheduler_test"
 path = "tests/wake_scheduler_test.rs"
 required-features = ["db-integration-tests"]
+
+[[test]]
+name = "scoped_runner_test"
+required-features = ["scoped-workflow-integration-tests"]

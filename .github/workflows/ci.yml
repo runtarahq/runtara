@@ -39,7 +39,7 @@ env:
   # plus embed-ui. Used by the lint and build jobs so `--all-targets` really
   # means all targets. Static value — no workflow-context interpolation.
   GATE_FEATURES: >-
-    runtara-server/embed-ui,runtara-server/db-integration-tests,runtara-server/valkey-integration-tests,runtara-server/valkey-tls-integration-tests,runtara-object-store/db-integration-tests,runtara-environment/db-integration-tests,runtara-store-postgres/db-integration-tests,runtara-component-host/component-integration-tests,runtara-workflows/direct-wasm-integration-tests
+    runtara-server/embed-ui,runtara-server/db-integration-tests,runtara-server/valkey-integration-tests,runtara-server/valkey-tls-integration-tests,runtara-object-store/db-integration-tests,runtara-environment/db-integration-tests,runtara-environment/scoped-workflow-integration-tests,runtara-store-postgres/db-integration-tests,runtara-component-host/component-integration-tests,runtara-workflows/direct-wasm-integration-tests
   WASM_PACK_VERSION: "0.13.1"
   WIT_DEPS_VERSION: "0.6.0"
   WASM_TOOLS_VERSION: "1.252.0"
@@ -592,6 +592,20 @@ jobs:
     runs-on: ubuntu-latest
     needs: wit-package
 
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: scoped_runner_test
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
     steps:
       - uses: actions/checkout@v4
         with:
@@ -653,6 +667,12 @@ jobs:
           cargo test -p runtara-workflows \
             --features direct-wasm-integration-tests \
             --test direct_wasm_execute
+
+      - name: Run scoped runner DSL and persistence integration tests
+        env:
+          TEST_ENVIRONMENT_DATABASE_URL: postgres://postgres@localhost:5432/scoped_runner_test
+          RUNTARA_AGENT_COMPONENTS_DIR: ${{ github.workspace }}/target/wasm32-wasip2/release
+        run: cargo test -p runtara-environment --features scoped-workflow-integration-tests --test scoped_runner_test
 
   notify-result:
     # Posts success or failure once all build/test jobs finish.
