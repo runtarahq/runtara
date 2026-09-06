@@ -4,7 +4,7 @@ use crate::direct_wasm::manifest::{
     DirectAgentManifest, DirectChildWorkflowGraphManifest, DirectGraphManifest,
 };
 use runtara_workflow_wit::isolation_package::{
-    AgentCallSite, InvocationCallSite, InvocationManifest,
+    AgentCallSite, CheckpointContract, InvocationCallSite, InvocationManifest,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -15,10 +15,10 @@ pub(crate) type CallOrigin = (u32, u32, u32);
 
 fn definitions<'a>(
     graph: &'a DirectGraphManifest,
-    out: &mut BTreeMap<u32, &'a DirectAgentManifest>,
+    out: &mut BTreeMap<u32, (&'a DirectAgentManifest, &'a DirectGraphManifest)>,
 ) {
     for agent in &graph.agents {
-        out.insert(agent.id, agent);
+        out.insert(agent.id, (agent, graph));
     }
     for step in &graph.steps {
         for nested in &step.nested_graphs {
@@ -118,7 +118,7 @@ pub(super) fn build(
     }
     let mut calls = BTreeMap::<Identity, BTreeSet<u32>>::new();
     for &(agent, _, domain) in sites.keys() {
-        let agent = agents[&agent];
+        let agent = agents[&agent].0;
         if selected.contains(&agent.agent_id) {
             calls.entry(identity(agent)).or_default().insert(domain);
         }
@@ -130,10 +130,49 @@ pub(super) fn build(
         .collect::<Result<BTreeMap<_, _>, DirectCompileError>>()?;
     let scopes = super::invocation_scopes::build(manifest)?;
     let mut scope_paths = BTreeMap::new();
+    let mut checkpoint_contracts = BTreeMap::new();
     let mut call_sites = Vec::new();
     for ((agent_reference, caller_reference, domain), token) in sites {
-        let agent = agents[&agent_reference];
+        let agent = agents[&agent_reference].0;
         if let Some(&identity) = indices.get(&identity(agent)) {
+            let (caller, graph) = agents[&caller_reference];
+            let contract = if !agent.is_workflow_agent {
+                CheckpointContract::None
+            } else {
+                match domain {
+                    0 => CheckpointContract::Child,
+                    3 => {
+                        let labels: BTreeSet<_> = graph
+                            .edges
+                            .iter()
+                            .filter(|edge| {
+                                edge.from_step == caller.step_id && edge.to_step == agent.step_id
+                            })
+                            .filter_map(|edge| edge.label.as_ref())
+                            .filter(|label| {
+                                !matches!(label.as_str(), "next" | "onError" | "memory")
+                                    && !label.starts_with("mcp.")
+                            })
+                            .cloned()
+                            .collect();
+                        if labels.is_empty() {
+                            return Err(component_error(
+                                "workflow-agent tool has no checkpoint scope labels",
+                            ));
+                        }
+                        CheckpointContract::Tool {
+                            ai_step_id: caller.step_id.clone(),
+                            labels: labels.into_iter().collect(),
+                        }
+                    }
+                    _ => {
+                        return Err(component_error(
+                            "workflow-agent auxiliary checkpoint scope is unsupported",
+                        ));
+                    }
+                }
+            };
+            checkpoint_contracts.insert(token, contract);
             scope_paths.insert(
                 token,
                 scopes
@@ -152,7 +191,8 @@ pub(super) fn build(
     }
     call_sites.sort_by_key(|site| site.token);
     Ok(InvocationManifest {
-        version: 3,
+        version: 4,
+        checkpoint_contracts,
         scope_paths,
         workflow_id: workflow_id.into(),
         call_sites,

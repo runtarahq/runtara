@@ -253,9 +253,27 @@ mod tests {
         })
         .unwrap();
         let child = root();
-        for version in [1, 2, 3] {
+        for version in [1, 2, 3, 4] {
             let expected = InvocationManifest {
-                scope_paths: if version == 3 {
+                checkpoint_contracts: if version == 4 {
+                    [
+                        (
+                            7,
+                            runtara_workflow_wit::isolation_package::CheckpointContract::Child,
+                        ),
+                        (
+                            8,
+                            runtara_workflow_wit::isolation_package::CheckpointContract::Tool {
+                                ai_step_id: "ai".into(),
+                                labels: vec!["tool".into()],
+                            },
+                        ),
+                    ]
+                    .into()
+                } else {
+                    Default::default()
+                },
+                scope_paths: if version >= 3 {
                     [(7, vec![Default::default()]), (8, vec![Default::default()])].into()
                 } else {
                     Default::default()
@@ -321,7 +339,7 @@ mod tests {
                         index.invocations.as_mut().unwrap().agent_calls[0].binding =
                             "agent:other".into()
                     }
-                    _ => index.invocations.as_mut().unwrap().version = 4,
+                    _ => index.invocations.as_mut().unwrap().version = 5,
                 }
                 let json = serde_json::to_vec(&index).unwrap();
                 let mut changed = MAGIC_V2.to_vec();

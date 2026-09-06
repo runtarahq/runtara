@@ -962,3 +962,138 @@ async fn scoped_agent_inside_embed_preserves_inline_child_ancestry() {
         }
     }
 }
+
+#[test]
+fn compiler_checkpoint_contracts_match_existing_workflow_agent_scope_helpers() {
+    use runtara_workflow_stdlib::direct_json::DirectJsonManifest;
+    use runtara_workflow_wit::isolation_package::{AgentInvocationPath, CheckpointContract};
+    use serde_json::json;
+    let mut graph: Value = serde_json::from_str(&super::ai_agent_tool_loop_graph_json()).unwrap();
+    graph["steps"]["echo_tool"]["agentId"] = "scoped-child".into();
+    graph["steps"]["echo_tool"]["capabilityId"] = "run".into();
+    let info = super::certified_workflow_agent_info(
+        "scoped-child",
+        "Child",
+        "",
+        &HashMap::new(),
+        &HashMap::new(),
+    );
+    let catalog = runtara_dsl::agent_meta::AgentCatalog::from_agents(vec![info]);
+    let dir = tempfile::tempdir().unwrap();
+    let compiled = runtara_workflows::direct_wasm::compile_direct_workflow_with_scoped_agents(
+        DirectCompilationInput {
+            workflow_id: "contract-root".into(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: serde_json::from_value(graph).unwrap(),
+            child_workflows: vec![],
+            output_dir: dir.path().to_owned(),
+            track_events: false,
+            agent_catalog: Some(Arc::new(catalog)),
+            agent_slug: None,
+        },
+        runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
+        false,
+        ["scoped-child".into()].into(),
+    )
+    .unwrap();
+    let direct = DirectJsonManifest::parse(&fs::read(&compiled.manifest_path).unwrap()).unwrap();
+    let inventory = compiled.invocation_manifest.unwrap();
+    assert_eq!(inventory.version, 4);
+    let source = serde_json::to_vec(&json!({"variables":{"_workflow_id":"contract-root","_durable_key_version":2,"_loop_path":[]}})).unwrap();
+    assert_eq!(inventory.checkpoint_contracts.len(), 2);
+    for site in &inventory.call_sites {
+        let contract = &inventory.checkpoint_contracts[&site.token];
+        let (activation, input) = match contract {
+            CheckpointContract::Child => (
+                0,
+                direct
+                    .agent_scope_input(site.agent_reference, b"{}", &source)
+                    .unwrap(),
+            ),
+            CheckpointContract::Tool { ai_step_id, labels } => {
+                assert_eq!(ai_step_id, "ai");
+                assert_eq!(labels, &["echo"]);
+                (
+                    3,
+                    DirectJsonManifest::agent_tool_scope_input(
+                        ai_step_id, &labels[0], 3, b"{}", &source,
+                    )
+                    .unwrap(),
+                )
+            }
+            CheckpointContract::None => panic!("workflow-agent cannot lose checkpoint authority"),
+        };
+        let token: String = format!("{:08x}", site.token)
+            .chars()
+            .map(|c| char::from(b'a' + c.to_digit(16).unwrap() as u8))
+            .collect();
+        let base = String::from_utf8(
+            direct
+                .agent_cache_key(site.agent_reference, &source)
+                .unwrap(),
+        )
+        .unwrap()
+        .replacen("runtara:v2:", "runtara:v3:", 1);
+        let path = format!("{base}:{token}:aaaaaaa{}", char::from(b'a' + activation));
+        let invocation = inventory
+            .resolve_scoped_agent_invocation("agent:scoped-child", "run", &path, 1, &[])
+            .unwrap();
+        assert_eq!(invocation, AgentInvocationPath::decode(&path).unwrap());
+        let grant = contract.grant(&invocation, &input).unwrap().unwrap();
+        let input: Value = serde_json::from_slice(&input).unwrap();
+        assert_eq!(
+            grant.encoded_prefix(),
+            input["variables"]["_cache_key_prefix"]
+        );
+    }
+}
+
+#[test]
+fn compiler_detects_workflow_agent_checkpoint_aliases_across_on_wait_graphs() {
+    use serde_json::json;
+    let info = super::certified_workflow_agent_info(
+        "scoped-child",
+        "Child",
+        "",
+        &HashMap::new(),
+        &HashMap::new(),
+    );
+    let catalog = Arc::new(runtara_dsl::agent_meta::AgentCatalog::from_agents(vec![
+        info,
+    ]));
+    let call = json!({"id":"call","stepType":"Agent","agentId":"scoped-child","capabilityId":"run","inputMapping":{}});
+    for duplicate in [true, false] {
+        let nested_id = if duplicate { "call" } else { "nested-call" };
+        let mut nested = call.clone();
+        nested["id"] = nested_id.into();
+        let graph = json!({"durable":true,"entryPoint":"call","steps":{
+            "call":call,"wait":{"id":"wait","stepType":"WaitForSignal","onWait":{"durable":false,"entryPoint":nested_id,"steps":{nested_id:nested,"finish":{"id":"finish","stepType":"Finish"}},"executionPlan":[{"fromStep":nested_id,"toStep":"finish"}]}},
+            "finish":{"id":"finish","stepType":"Finish"}},"executionPlan":[{"fromStep":"call","toStep":"wait"},{"fromStep":"wait","toStep":"finish"}]});
+        let dir = tempfile::tempdir().unwrap();
+        let compiled = runtara_workflows::direct_wasm::compile_direct_workflow_with_scoped_agents(
+            DirectCompilationInput {
+                workflow_id: "alias-root".into(),
+                version: 1,
+                source_checksum: None,
+                execution_graph: serde_json::from_value(graph).unwrap(),
+                child_workflows: vec![],
+                output_dir: dir.path().to_owned(),
+                track_events: false,
+                agent_catalog: Some(catalog.clone()),
+                agent_slug: None,
+            },
+            runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
+            false,
+            ["scoped-child".into()].into(),
+        )
+        .unwrap();
+        let inventory = compiled.invocation_manifest.unwrap();
+        assert_eq!(
+            inventory.checkpoint_conflicts().len(),
+            if duplicate { 2 } else { 0 }
+        );
+        assert_eq!(inventory.call_sites.len(), 2);
+        assert_ne!(inventory.call_sites[0].token, inventory.call_sites[1].token);
+    }
+}

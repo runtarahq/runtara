@@ -63,6 +63,7 @@ fn rewritten_from(original: Vec<u8>, mutate: impl FnOnce(&mut Manifest)) -> Vec<
 
 fn invocations() -> InvocationManifest {
     InvocationManifest {
+        checkpoint_contracts: Default::default(),
         scope_paths: Default::default(),
         call_sites: Vec::new(),
         version: 1,
@@ -125,7 +126,7 @@ fn invocation_authority_versions_references_domains_and_duplicate_identities_are
             _ => {
                 let inv = m.invocations.as_mut().unwrap();
                 match mode {
-                    "version" => inv.version = 4,
+                    "version" => inv.version = 5,
                     "binding" => inv.agent_calls[0].binding = "agent:missing".into(),
                     "agent" => inv.agent_calls[0].agent_id = "missing".into(),
                     "duplicate" => inv.agent_calls.push(inv.agent_calls[0].clone()),
@@ -601,4 +602,126 @@ fn scope_resolution_checks_each_loop_and_child_frame_and_exact_inherited_namespa
             .resolve_scoped_agent_invocation("agent:utils", "random-double", &encode(&key), 2, &[])
             .is_err()
     );
+}
+
+#[test]
+fn checkpoint_contracts_require_versioned_complete_and_role_appropriate_authority() {
+    let valid = rewritten_from(package_v2(), |m| {
+        let mut inventory = scoped_invocations();
+        inventory.version = 4;
+        inventory.checkpoint_contracts = inventory
+            .call_sites
+            .iter()
+            .map(|site| {
+                (
+                    site.token,
+                    if site.domain == 0 {
+                        CheckpointContract::Child
+                    } else {
+                        CheckpointContract::Tool {
+                            ai_step_id: "ai".into(),
+                            labels: vec!["one".into(), "two".into()],
+                        }
+                    },
+                )
+            })
+            .collect();
+        m.invocations = Some(inventory);
+    });
+    assert!(parse(&valid, limits()).is_ok());
+    for mode in [
+        "old",
+        "missing",
+        "extra",
+        "child-role",
+        "tool-role",
+        "empty-labels",
+        "duplicate-labels",
+        "unsorted-labels",
+    ] {
+        let bytes = rewritten_from(valid.clone(), |m| {
+            let inventory = m.invocations.as_mut().unwrap();
+            match mode {
+                "old" => inventory.version = 3,
+                "missing" => {
+                    inventory.checkpoint_contracts.remove(&7);
+                }
+                "extra" => {
+                    inventory
+                        .checkpoint_contracts
+                        .insert(0, CheckpointContract::None);
+                }
+                "child-role" => {
+                    inventory
+                        .checkpoint_contracts
+                        .insert(9, CheckpointContract::Child);
+                }
+                "tool-role" => {
+                    let contract = inventory.checkpoint_contracts[&9].clone();
+                    inventory.checkpoint_contracts.insert(7, contract);
+                }
+                mode => {
+                    let labels = match mode {
+                        "empty-labels" => vec![],
+                        "duplicate-labels" => vec!["x".into(), "x".into()],
+                        _ => vec!["z".into(), "a".into()],
+                    };
+                    inventory.checkpoint_contracts.insert(
+                        9,
+                        CheckpointContract::Tool {
+                            ai_step_id: "ai".into(),
+                            labels,
+                        },
+                    );
+                }
+            }
+        });
+        assert!(parse(&bytes, limits()).is_err(), "accepted {mode}");
+    }
+}
+
+#[test]
+fn checkpoint_overlap_detection_catches_equal_and_ancestor_grants_without_rekeying() {
+    let mut inventory = scoped_invocations();
+    inventory.version = 4;
+    inventory.checkpoint_contracts = inventory
+        .call_sites
+        .iter()
+        .map(|site| {
+            (
+                site.token,
+                if site.domain == 0 {
+                    CheckpointContract::Child
+                } else {
+                    CheckpointContract::None
+                },
+            )
+        })
+        .collect();
+    assert_eq!(inventory.checkpoint_conflicts(), [7, 19].into());
+    inventory
+        .checkpoint_contracts
+        .insert(19, CheckpointContract::None);
+    assert!(inventory.checkpoint_conflicts().is_empty());
+    let mut nested = inventory.agent_calls[0].clone();
+    nested.step_id = "z".into();
+    nested.domains = vec![0];
+    inventory.agent_calls.push(nested);
+    inventory.call_sites.last_mut().unwrap().identity = 1;
+    inventory
+        .checkpoint_contracts
+        .insert(19, CheckpointContract::Child);
+    let mut pattern = inventory.scope_paths[&7][0].clone();
+    pattern.namespace.push(ChildScopePattern {
+        step_id: inventory.agent_calls[0].step_id.clone(),
+        loops: std::mem::take(&mut pattern.loops),
+    });
+    inventory.scope_paths.insert(19, vec![pattern]);
+    assert_eq!(inventory.checkpoint_conflicts(), [7, 19].into());
+    inventory.scope_paths.get_mut(&19).unwrap()[0]
+        .namespace
+        .last_mut()
+        .unwrap()
+        .step_id = "disjoint".into();
+    assert!(inventory.checkpoint_conflicts().is_empty());
 }

@@ -202,6 +202,7 @@ async fn prepared_catalog_survives_queue_and_enabled_cache() {
     .unwrap();
     let child = std::fs::read(component_path("utils")).unwrap();
     let invocations = InvocationManifest {
+        checkpoint_contracts: Default::default(),
         scope_paths: Default::default(),
         call_sites: Vec::new(),
         version: 1,

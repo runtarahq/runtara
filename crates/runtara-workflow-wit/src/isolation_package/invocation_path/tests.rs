@@ -4,6 +4,7 @@ use serde_json::json;
 
 fn manifest() -> InvocationManifest {
     InvocationManifest {
+        checkpoint_contracts: Default::default(),
         scope_paths: Default::default(),
         call_sites: Vec::new(),
         version: 1,

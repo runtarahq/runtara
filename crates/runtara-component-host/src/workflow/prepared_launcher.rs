@@ -111,7 +111,7 @@ impl InvocationLauncher for PreparedInvocationLauncher {
             };
             // Compiler namespace membership is checked before scope allocation.
             // Checkpoint grants and durable attempt fencing remain mandatory.
-            let resolved = if invocations.version == 3 {
+            let resolved = if matches!(invocations.version, 3 | 4) {
                 invocations.resolve_scoped_agent_invocation(
                     &request.binding,
                     capability,

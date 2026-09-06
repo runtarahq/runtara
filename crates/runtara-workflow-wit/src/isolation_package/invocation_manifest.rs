@@ -1,6 +1,6 @@
 //! Compiler-owned call-site inventory; contains no inputs, credentials or graph
 //! scheduling rules. Package v2 and the native worker envelope bind it to code.
-use super::{Binding, InvocationScopePattern, PackageError};
+use super::{Binding, CheckpointContract, InvocationScopePattern, PackageError};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -33,6 +33,8 @@ pub struct InvocationManifest {
     /// omit this field and retain their original external scope policy.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub scope_paths: BTreeMap<u32, Vec<InvocationScopePattern>>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub checkpoint_contracts: BTreeMap<u32, CheckpointContract>,
 }
 
 /// A compiler definition and caller, independent of authored step IDs. `token`
@@ -51,7 +53,7 @@ impl InvocationManifest {
     /// Validate references and deterministic, unambiguous encoding before
     /// admission. Byte/allocation bounds come from the enclosing package limit.
     pub fn validate(&self, bindings: &BTreeMap<String, Binding>) -> Result<(), PackageError> {
-        if !matches!(self.version, 1..=3) {
+        if !matches!(self.version, 1..=4) {
             return Err(PackageError::UnsupportedVersion);
         }
         let mut used = BTreeSet::new();
@@ -130,6 +132,30 @@ impl InvocationManifest {
                 .any(|patterns| patterns.windows(2).any(|pair| pair[0] >= pair[1]))
         {
             return Err(PackageError::InvalidManifest);
+        }
+        if self.version < 4 {
+            if !self.checkpoint_contracts.is_empty() {
+                return Err(PackageError::InvalidManifest);
+            }
+        } else {
+            if self.checkpoint_contracts.len() != self.call_sites.len() {
+                return Err(PackageError::InvalidManifest);
+            }
+            for site in &self.call_sites {
+                let contract = self
+                    .checkpoint_contracts
+                    .get(&site.token)
+                    .ok_or(PackageError::InvalidManifest)?;
+                match contract {
+                    CheckpointContract::None => {}
+                    CheckpointContract::Child if site.domain == 0 => {}
+                    CheckpointContract::Tool { labels, .. }
+                        if site.domain == 3
+                            && !labels.is_empty()
+                            && !labels.windows(2).any(|pair| pair[0] >= pair[1]) => {}
+                    _ => return Err(PackageError::InvalidManifest),
+                }
+            }
         }
         Ok(())
     }

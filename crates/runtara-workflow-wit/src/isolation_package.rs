@@ -11,6 +11,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+mod checkpoint_namespace;
+pub use checkpoint_namespace::{CheckpointContract, CheckpointNamespace};
 mod invocation_manifest;
 mod invocation_path;
 mod invocation_scope;

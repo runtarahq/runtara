@@ -837,6 +837,40 @@ and full legacy integration suites were not rerun for this metadata check.
 Fresh size and timing measurements must include these additional inventory bytes
 and per-invocation membership checks.
 
+### Compiler checkpoint contracts
+
+Inner invocation inventory version 4 adds one explicit checkpoint contract per
+call-site token: no checkpoint IO for native capabilities, the existing child
+namespace for normal workflow-agent calls, or approved AI caller/tool labels for
+workflow-agent tools. The contract comes from the same normalized workflow-agent
+flag that controls the guest's input envelope. Versions 1–3 keep their original
+format and interpretation; the invocation ABI, raw/native envelope and durable
+key bytes remain unchanged.
+
+A shared `CheckpointNamespace` derives a non-root subtree from an authorized
+invocation. Workflow-agent input must carry exactly that compiler-derived prefix;
+tool calls must also match an approved label and the current activation counter.
+Native input stays opaque and grants no checkpoint IO. Key checks decode the
+canonical v2 tuple, compare structured namespace frames, and accept the existing
+canonical retry/attempt suffixes. They do not prepend a prefix or interpret graph
+operations. Descendant namespaces remain within the owned subtree.
+
+Existing durable keys can overlap between different workflow-agent definitions,
+even though their qualified invocation tokens differ. The inventory now reports
+identical and ancestor/descendant grant conflicts. This is an eligibility input:
+the production selector must retain the legacy backend for affected packages,
+rather than silently changing checkpoint keys or permitting overlapping isolated
+grants. That automatic fallback is still pending.
+
+Verification: **30 shared contract/package tests** and **132 component-host tests**
+passed. The **16 emitted-isolation checks** include agreement with the existing
+stdlib input-scoping helpers and a compiler regression for matching Agent IDs in
+root/onWait graphs: invocation tokens remain distinct while the conflicting
+checkpoint grants are detected. Renaming the nested step removes the conflict.
+Native transport tests roundtrip all four inventory versions. All 27 Agent and
+two shared workflow components rebuilt successfully. Fresh size and latency
+measurements must include the additional contract metadata and grant validation.
+
 ## Remaining required work
 
 - P0: extend explicit differential selection and invocation-count evidence to all
