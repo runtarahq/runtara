@@ -1591,47 +1591,16 @@ fn direct_control_successors(graph: &DirectGraphManifest, step_id: &str) -> Vec<
     }
 }
 
-/// Steps reachable from `start` via control-flow successors, in BFS order.
-fn direct_collect_reachable(graph: &DirectGraphManifest, start: &str) -> Vec<String> {
-    let mut reachable = Vec::new();
-    let mut visited = std::collections::BTreeSet::new();
-    let mut queue = std::collections::VecDeque::new();
-    queue.push_back(start.to_string());
-    while let Some(current) = queue.pop_front() {
-        if !visited.insert(current.clone()) {
-            continue;
-        }
-        reachable.push(current.clone());
-        for next in direct_control_successors(graph, &current) {
-            if !visited.contains(&next) {
-                queue.push_back(next);
-            }
-        }
-    }
-    reachable
-}
-
-/// The first step reachable from ALL branch starts — the diamond merge point —
-/// or `None` if fewer than two valid branches exist or they never re-converge.
-/// Mirrors the generated `branching::find_merge_point_n` so the direct emitter
-/// structures conditional/switch diamonds the same way (the merge is a shared
-/// continuation emitted once, not duplicated in each branch).
+/// Only factor out a continuation when every branch path reaches it. Otherwise
+/// keep it inside the applicable branch, preserving early Finish/implicit exits
+/// without returning out of an enclosing loop or embedded workflow.
 fn direct_find_merge_point(
     graph: &DirectGraphManifest,
     branch_starts: &[Option<String>],
 ) -> Option<String> {
-    let starts: Vec<&String> = branch_starts.iter().filter_map(|s| s.as_ref()).collect();
-    if starts.len() < 2 {
-        return None;
-    }
-    let reachable_sets: Vec<Vec<String>> = starts
-        .iter()
-        .map(|start| direct_collect_reachable(graph, start))
-        .collect();
-    reachable_sets[0]
-        .iter()
-        .find(|step_id| reachable_sets[1..].iter().all(|set| set.contains(step_id)))
-        .cloned()
+    super::graph_order::common_post_dominator(branch_starts, |id| {
+        direct_control_successors(graph, id)
+    })
 }
 
 /// Try to lower an unconditional fan-out at `from_step` as concurrent

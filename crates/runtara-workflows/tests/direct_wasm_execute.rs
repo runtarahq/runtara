@@ -12724,3 +12724,7 @@ fn direct_wasm_execute_xlsx_parses_in_guest() {
         })
     );
 }
+
+// Reproductions and controls for docs/wasm-emitter-audit.md.
+#[path = "wasm_emitter_audit/execution.rs"]
+mod wasm_emitter_audit;
