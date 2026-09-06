@@ -136,6 +136,23 @@ pub struct WorkflowRunSpec {
     pub runtime: Option<Arc<dyn crate::runtime_host::RuntimeHost>>,
 }
 
+/// One isolated Agent invocation. Connection identity and materialized input
+/// belong to the caller's scope and must already be encoded in `input`.
+pub struct CapabilityInvocation<'a> {
+    pub interface: &'a str,
+    pub capability: &'a str,
+    pub input: Vec<u8>,
+}
+
+enum InvocationEntry<'a> {
+    Lifecycle,
+    Capability {
+        interface: &'a str,
+        capability: &'a str,
+        cancellation: crate::isolated_tasks::TaskCancellation,
+    },
+}
+
 /// One final durable handoff confirmation immediately before guest
 /// instantiation.
 ///
@@ -750,6 +767,50 @@ impl WorkflowExecutor {
         input: Vec<u8>,
         start_confirmation: Option<Arc<dyn WorkflowStartConfirmation>>,
     ) -> InvokeRunResult {
+        self.execute_entry(
+            pre,
+            spec,
+            input,
+            start_confirmation,
+            InvocationEntry::Lifecycle,
+        )
+        .await
+    }
+
+    /// Run a capability in a fresh guarded Store owned by an isolated task.
+    /// Both the task token and the root's `spec.cancel` interrupt execution;
+    /// neither disables the other. The caller must supply a scoped runtime
+    /// adapter and explicitly join/reap its task registry before root teardown.
+    /// This method does not choose graph successors, retries or error handlers.
+    pub async fn execute_isolated_capability(
+        &self,
+        pre: &wasmtime::component::InstancePre<WorkflowState>,
+        spec: WorkflowRunSpec,
+        call: CapabilityInvocation<'_>,
+        cancellation: crate::isolated_tasks::TaskCancellation,
+    ) -> InvokeRunResult {
+        self.execute_entry(
+            pre,
+            spec,
+            call.input,
+            None,
+            InvocationEntry::Capability {
+                interface: call.interface,
+                capability: call.capability,
+                cancellation,
+            },
+        )
+        .await
+    }
+
+    async fn execute_entry(
+        &self,
+        pre: &wasmtime::component::InstancePre<WorkflowState>,
+        spec: WorkflowRunSpec,
+        input: Vec<u8>,
+        start_confirmation: Option<Arc<dyn WorkflowStartConfirmation>>,
+        entry: InvocationEntry<'_>,
+    ) -> InvokeRunResult {
         // Keep the externally reported duration, but do not begin the active
         // guest timeout until the runner has durably crossed its start gate.
         let overall_started = Instant::now();
@@ -794,10 +855,19 @@ impl WorkflowExecutor {
         store.limiter(|s| &mut s.limiter);
 
         let timeout = spec.timeout;
+        let task_cancel = match &entry {
+            InvocationEntry::Lifecycle => None,
+            InvocationEntry::Capability { cancellation, .. } => Some(cancellation.clone()),
+        };
+        let epoch_task_cancel = task_cancel.clone();
         let cancel = spec.cancel.clone();
         store.epoch_deadline_callback(move |mut ctx| {
-            if let Some(flag) = &cancel
-                && flag.load(Ordering::Relaxed)
+            if cancel
+                .as_ref()
+                .is_some_and(|flag| flag.load(Ordering::Relaxed))
+                || epoch_task_cancel
+                    .as_ref()
+                    .is_some_and(|token| token.is_requested())
             {
                 ctx.data_mut().termination = Some(Termination::Cancelled);
                 return Ok(UpdateDeadline::Interrupt);
@@ -830,7 +900,47 @@ impl WorkflowExecutor {
                 let active_started = Instant::now();
                 let run =
                     async {
+                        // Check before entering any guest initializer, including
+                        // short initializers that would not hit an epoch check.
+                        if spec
+                            .cancel
+                            .as_ref()
+                            .is_some_and(|flag| flag.load(Ordering::Relaxed))
+                            || task_cancel
+                                .as_ref()
+                                .is_some_and(|token| token.is_requested())
+                        {
+                            store.data_mut().termination = Some(Termination::Cancelled);
+                            anyhow::bail!("execution cancelled before instantiation");
+                        }
                         let instance = pre.instantiate_async(&mut store).await?;
+                        if let InvocationEntry::Capability {
+                            interface,
+                            capability,
+                            ..
+                        } = &entry
+                        {
+                            let interface_index = instance
+                                .get_export_index(&mut store, None, interface)
+                                .ok_or_else(|| {
+                                    anyhow::anyhow!("missing capability interface `{interface}`")
+                                })?;
+                            let invoke_index = instance
+                                .get_export_index(&mut store, Some(&interface_index), "invoke")
+                                .ok_or_else(|| {
+                                    anyhow::anyhow!("capability interface has no `invoke` export")
+                                })?;
+                            type CapabilityFunc = wasmtime::component::TypedFunc<
+                                (String, Vec<u8>),
+                                (Result<Vec<u8>, crate::lifecycle::WorkflowErrorInfo>,),
+                            >;
+                            let invoke: CapabilityFunc =
+                                instance.get_typed_func(&mut store, invoke_index)?;
+                            let (result,) = invoke
+                                .call_async(&mut store, ((*capability).to_owned(), input))
+                                .await?;
+                            return Ok(result.map(crate::lifecycle::WorkflowOutcome::Completed));
+                        }
                         // v2 (0.2.0, async-typed invoke) is the current compile shape;
                         // 0.1.0 (sync-typed) artifacts from before ABI v2 keep working.
                         let iface_idx = instance
@@ -874,8 +984,12 @@ impl WorkflowExecutor {
                 let watchdog = async {
                     loop {
                         tokio::time::sleep(EPOCH_TICK).await;
-                        if let Some(flag) = &watchdog_cancel
-                            && flag.load(Ordering::Relaxed)
+                        if watchdog_cancel
+                            .as_ref()
+                            .is_some_and(|flag| flag.load(Ordering::Relaxed))
+                            || task_cancel
+                                .as_ref()
+                                .is_some_and(|token| token.is_requested())
                         {
                             return Termination::Cancelled;
                         }
@@ -1212,3 +1326,7 @@ mod tests {
         assert!(result.duration < Duration::from_secs(5), "cancel ignored");
     }
 }
+
+#[cfg(test)]
+#[path = "workflow/isolated_capability_tests.rs"]
+mod isolated_capability_tests;

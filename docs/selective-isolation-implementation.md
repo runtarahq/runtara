@@ -82,6 +82,29 @@ with one manual benchmark ignored; focused all-target Clippy passed.
 The environment's package-aware prepared cache and child execution imports remain
 to be connected. Native compilation stays in the worker, never in `start`.
 
+### Guarded capability Store execution
+
+`WorkflowExecutor::execute_isolated_capability` now shares the lifecycle runner's
+Store setup, WASI sandbox, resource limiter, HTTP deadline, epoch callback and
+pending-host-call watchdog. The task token and root cancellation flag remain
+independent inputs: either can interrupt the child. Guards are installed before
+instantiation, and a root already cancelled at entry never runs an initializer.
+The Agent boundary returns existing structured errors and bytes; graph retry and
+recovery policy are still the caller's responsibility.
+
+Seven new fixture tests exercise fresh Store state and large byte roundtrips,
+structured retry metadata, cancellation during execution/initialization, sibling
+survival, pending host-call destruction, pre-start cancellation, deadlines, memory
+limits and traps. A real-component integration test invokes `random-double` while
+an actual HTTP Agent is blocked against a local endpoint, then cancels the HTTP
+child while preserving the random result. These focused tests passed. The complete component-host suite with both
+integration/PoC features passed **84 tests**, with one manual benchmark ignored;
+focused all-target Clippy passed.
+
+This runner is not yet wired to generated workflow imports. The compiler backend,
+child runtime authority adapter, aggregate resource accounting and durable attempt
+fencing remain required; the execution method alone does not provide them.
+
 ## Remaining required work
 
 - P0: add explicit legacy/isolated differential selection and coverage counters.
