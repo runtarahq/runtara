@@ -611,6 +611,48 @@ against the implementation branch. A comparison is complete only when both
 backends have run under the recorded matching conditions and correctness checks
 pass; pending measurements must never appear as zero overhead.
 
+### Qualification run checklist and deliverables
+
+Use this sequence for the baseline/candidate comparison; retain exploratory
+results separately from the qualification report:
+
+1. Freeze the workload JSON, child definitions, inputs and build/runtime settings.
+   Build both backend artifacts from the same revision. Record complete artifact
+   hashes and sizes before timing, including each unique packaged child. Run
+   correctness checks and verify actual isolated invocation counts first.
+2. Run at least three independent paired sessions, alternating which backend runs
+   first. For prepared execution, perform at least five untimed warmups and 1,000
+   measured executions per backend and condition. Use fresh workflow state for
+   first executions and a separate, explicitly primed state for checkpoint replay.
+   Declare sample counts for expensive cold compilation and server/load cases
+   separately; do not publish their p99 unless the tail-sampling requirement is met.
+3. Capture uninstrumented full-run timings, then collect Agent and parent-step spans
+   in a separate instrumented run. Use monotonic clocks for elapsed time. Report
+   the instrumentation delta and retain timestamps sufficient to distinguish
+   admission, child creation, invocation, transfer and cleanup where instrumented.
+4. Repeat the server comparison with real isolated persistence and controlled local
+   services. Capture both client-observed latency and accepted-request-to-persisted-
+   result latency. Record startup, queueing and external service waits separately.
+5. Run a repeated execution/cancellation soak under fixed concurrency and resource
+   limits. Record its duration and iteration count, memory before/after quiescence,
+   peak aggregate memory, retained handles and remaining tasks. Distinguish bounded
+   cache retention from execution resources that should have been released.
+
+Keep per-run distributions; do not average percentiles and label the result a
+pooled percentile. Report independent-run spread alongside each run's p50/p95/p99,
+and disclose any exclusions. Failed, rejected and timed-out requests need counts
+and time-to-outcome distributions; their absence from successful-run latency must
+be explicit. Percentiles of phase timings need not add up to total-run percentiles.
+
+Publish `docs/research/workflow-performance-comparison.md` with a machine-readable
+companion and retained raw sample artifacts. Include the configuration manifest,
+baseline/candidate absolute values and deltas, correctness/isolation evidence,
+sample counts, uncertainty, and a pass/fail/pending row for each agreed budget.
+The existing report script currently compares only a subset of these metrics;
+extend its schema and comparison checks before treating its output as the full
+qualification report. Missing step spans, server measurements or candidate runs
+keep the corresponding rows pending and cannot satisfy the P6 enablement gate.
+
 ### Reproduction
 
 Build the real components with `scripts/build-agent-components.sh` if they are
