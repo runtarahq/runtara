@@ -31,6 +31,87 @@ use sqlx::PgPool;
 
 use crate::error::{Error, Result};
 
+/// Everything the server reports about one instance.
+///
+/// Was `handlers::InstanceStatusResponse`, which carried a `found` flag and a
+/// `not_found()` constructor filling every other field with `None` — a shape
+/// the HTTP layer needed so absence could be a 200. In-process the answer to
+/// "is there such an instance" is `Option`, and the one caller was already
+/// turning `found: false` back into an error.
+#[derive(Debug)]
+pub struct InstanceDetail {
+    /// Instance id.
+    pub instance_id: String,
+    /// Lifecycle status.
+    pub status: InstanceStatus,
+    /// Owning tenant.
+    pub tenant_id: String,
+    /// Image the instance was launched from.
+    pub image_id: Option<String>,
+    /// Image name, resolved at read time.
+    pub image_name: Option<String>,
+    /// Most recent checkpoint.
+    pub checkpoint_id: Option<String>,
+    /// Creation time.
+    pub created_at: DateTime<Utc>,
+    /// First-run start time.
+    pub started_at: Option<DateTime<Utc>>,
+    /// Terminal time.
+    pub finished_at: Option<DateTime<Utc>>,
+    /// Output bytes exactly as the guest wrote them.
+    pub output: Option<Vec<u8>>,
+    /// Input bytes exactly as they were stored.
+    pub input: Option<Vec<u8>>,
+    /// Failure message, when the instance failed.
+    pub error: Option<String>,
+    /// Captured guest stderr.
+    pub stderr: Option<String>,
+    /// Attempts used so far.
+    pub retry_count: u32,
+    /// Attempt ceiling.
+    pub max_retries: u32,
+    /// Peak guest linear memory.
+    pub memory_peak_bytes: Option<u64>,
+    /// CPU time consumed.
+    pub cpu_usage_usec: Option<u64>,
+    /// Why the instance stopped.
+    pub termination_reason: Option<String>,
+    /// Guest exit code.
+    pub exit_code: Option<i32>,
+}
+
+/// One instance as a list reports it.
+#[derive(Debug)]
+pub struct InstanceListItem {
+    /// Instance id.
+    pub instance_id: String,
+    /// Owning tenant.
+    pub tenant_id: String,
+    /// Image the instance was launched from.
+    pub image_id: Option<String>,
+    /// Human-readable name of the image the instance was launched from.
+    pub image_name: Option<String>,
+    /// Lifecycle status.
+    pub status: InstanceStatus,
+    /// Creation time.
+    pub created_at: DateTime<Utc>,
+    /// First-run start time.
+    pub started_at: Option<DateTime<Utc>>,
+    /// Terminal time.
+    pub finished_at: Option<DateTime<Utc>>,
+    /// Whether a failure message is recorded.
+    pub has_error: bool,
+}
+
+/// A page of instances plus the unpaged total.
+#[derive(Debug)]
+pub struct InstancePage {
+    /// The page.
+    pub instances: Vec<InstanceListItem>,
+    /// Total matching the filter, ignoring limit/offset.
+    pub total_count: i64,
+}
+
 /// Reads and writes the instance columns Environment owns.
 #[derive(Debug, Clone)]
 pub struct InstanceRepository {
@@ -41,6 +122,87 @@ impl InstanceRepository {
     /// Bind the repository to a pool.
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
+    }
+
+    /// Everything the server reports about one instance. `None` if there is no
+    /// such row.
+    pub async fn detail(&self, instance_id: &str) -> Result<Option<InstanceDetail>> {
+        let Some(inst) = crate::db::get_instance_full(&self.pool, instance_id).await? else {
+            return Ok(None);
+        };
+
+        Ok(Some(InstanceDetail {
+            status: runtara_store_postgres::encoding::status_from_str(&inst.status)?,
+            instance_id: inst.instance_id,
+            tenant_id: inst.tenant_id,
+            image_id: inst.image_id,
+            image_name: inst.image_name,
+            checkpoint_id: inst.checkpoint_id,
+            created_at: inst.created_at,
+            started_at: inst.started_at,
+            finished_at: inst.finished_at,
+            output: inst.output,
+            input: inst.input,
+            error: inst.error,
+            stderr: inst.stderr,
+            retry_count: inst.attempt as u32,
+            max_retries: inst.max_attempts as u32,
+            memory_peak_bytes: inst.memory_peak_bytes.map(|v| v as u64),
+            cpu_usage_usec: inst.cpu_usage_usec.map(|v| v as u64),
+            termination_reason: inst.termination_reason,
+            exit_code: inst.exit_code,
+        }))
+    }
+
+    /// List instances matching `options`.
+    ///
+    /// A failing count degrades to `0` rather than failing the call: the page is
+    /// the answer the caller asked for, and losing it because a second query
+    /// stumbled would be the worse outcome.
+    pub async fn list(&self, options: &crate::db::ListInstancesOptions) -> Result<InstancePage> {
+        let instances = crate::db::list_instances(&self.pool, options).await?;
+
+        let total_count = match crate::db::count_instances(&self.pool, options).await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!("Count instances error: {}", e);
+                0
+            }
+        };
+
+        Ok(InstancePage {
+            instances: instances
+                .into_iter()
+                .map(|inst| {
+                    Ok(InstanceListItem {
+                        status: runtara_store_postgres::encoding::status_from_str(&inst.status)?,
+                        instance_id: inst.instance_id,
+                        tenant_id: inst.tenant_id,
+                        image_id: inst.image_id,
+                        image_name: inst.image_name,
+                        created_at: inst.created_at,
+                        started_at: inst.started_at,
+                        finished_at: inst.finished_at,
+                        has_error: inst.error.is_some(),
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?,
+            total_count,
+        })
+    }
+
+    /// Count a tenant's instances in the given statuses.
+    ///
+    /// The admission gate needs a number, not rows. Routing it through the list
+    /// ran the paginated query too and then discarded its rows, and that query
+    /// was by far the more expensive of the two.
+    pub async fn count_by_status(
+        &self,
+        tenant_id: Option<&str>,
+        statuses: &[String],
+        ceiling: i64,
+    ) -> Result<i64> {
+        Ok(crate::db::count_instances_by_status(&self.pool, tenant_id, statuses, ceiling).await?)
     }
 
     /// Record what the process used, and read back the status the guest

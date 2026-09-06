@@ -24,6 +24,7 @@ use runtara_environment::handlers::{
     SendSignalOutcome, StartInstanceRequest, StartRejection, StopInstanceRequest,
 };
 use runtara_environment::image_registry::{Image, ImageFilter, ImageRegistry};
+use runtara_environment::instance_repository::InstanceRepository;
 use thiserror::Error;
 use tracing::{debug, info, instrument, warn};
 
@@ -101,6 +102,11 @@ impl EnvironmentClient {
         ImageRegistry::new(self.state.pool.clone())
     }
 
+    /// The repository that owns the `instances` row.
+    fn instances(&self) -> InstanceRepository {
+        InstanceRepository::new(self.state.pool.clone())
+    }
+
     // =========================================================================
     // Instance operations
     // =========================================================================
@@ -110,40 +116,32 @@ impl EnvironmentClient {
     pub async fn get_instance_status(&self, instance_id: &str) -> Result<InstanceInfo> {
         debug!("Getting instance status");
 
-        let json = handlers::handle_get_instance_status(&self.state, instance_id).await?;
-
-        if !json.found {
+        let Some(inst) = self.instances().detail(instance_id).await? else {
             return Err(EnvironmentError::InstanceNotFound(instance_id.to_string()));
-        }
+        };
 
         Ok(InstanceInfo {
-            instance_id: json.instance_id,
-            image_id: json.image_id.unwrap_or_default(),
-            image_name: json.image_name.unwrap_or_default(),
-            tenant_id: json.tenant_id.unwrap_or_default(),
-            status: json
-                .status
-                .map(instance_status_from_core)
-                .unwrap_or(InstanceStatus::Unknown),
-            checkpoint_id: json.checkpoint_id,
-            // `created_at` is NOT NULL and the handler fills it whenever the
-            // instance exists, which the `found` check above has already
-            // established — the fallback is unreachable, not a real default.
-            created_at: json.created_at.unwrap_or_else(Utc::now),
-            started_at: json.started_at,
-            finished_at: json.finished_at,
-            input: decode_json_body(json.input.as_deref(), instance_id, "input"),
-            output: decode_json_body(json.output.as_deref(), instance_id, "output"),
-            error: json.error,
-            stderr: json.stderr,
-            retry_count: json.retry_count.unwrap_or(0),
-            max_retries: json.max_retries.unwrap_or(0),
-            memory_peak_bytes: json.memory_peak_bytes,
-            cpu_usage_usec: json.cpu_usage_usec,
-            termination_reason: json
+            instance_id: inst.instance_id,
+            image_id: inst.image_id.unwrap_or_default(),
+            image_name: inst.image_name.unwrap_or_default(),
+            tenant_id: inst.tenant_id,
+            status: instance_status_from_core(inst.status),
+            checkpoint_id: inst.checkpoint_id,
+            created_at: inst.created_at,
+            started_at: inst.started_at,
+            finished_at: inst.finished_at,
+            input: decode_json_body(inst.input.as_deref(), instance_id, "input"),
+            output: decode_json_body(inst.output.as_deref(), instance_id, "output"),
+            error: inst.error,
+            stderr: inst.stderr,
+            retry_count: inst.retry_count,
+            max_retries: inst.max_retries,
+            memory_peak_bytes: inst.memory_peak_bytes,
+            cpu_usage_usec: inst.cpu_usage_usec,
+            termination_reason: inst
                 .termination_reason
                 .and_then(|s| TerminationReason::from_str(&s)),
-            exit_code: json.exit_code,
+            exit_code: inst.exit_code,
         })
     }
 
@@ -155,10 +153,10 @@ impl EnvironmentClient {
         statuses: &[String],
         ceiling: i64,
     ) -> Result<i64> {
-        Ok(
-            handlers::handle_count_instances_by_status(&self.state, tenant_id, statuses, ceiling)
-                .await?,
-        )
+        Ok(self
+            .instances()
+            .count_by_status(tenant_id, statuses, ceiling)
+            .await?)
     }
 
     /// List instances with optional filtering.
@@ -169,8 +167,10 @@ impl EnvironmentClient {
     ) -> Result<ListInstancesResult> {
         debug!("Listing instances");
 
-        let result =
-            handlers::handle_list_instances(&self.state, &list_instances_options(&options)).await?;
+        let result = self
+            .instances()
+            .list(&list_instances_options(&options))
+            .await?;
 
         Ok(ListInstancesResult {
             instances: result

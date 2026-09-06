@@ -12,10 +12,10 @@ use runtara_environment::container_registry::{ContainerInfo, ContainerRegistry};
 use runtara_environment::db;
 use runtara_environment::handlers::{
     DrainController, EnvironmentHandlerState, MAX_METRIC_BUCKETS, ResumeInstanceRequest,
-    StartInstanceRequest, StartRejection, StopInstanceRequest, handle_get_instance_status,
-    handle_get_tenant_metrics, handle_list_instances, handle_resume_instance,
-    handle_start_instance, handle_stop_instance, spawn_container_monitor,
+    StartInstanceRequest, StartRejection, StopInstanceRequest, handle_get_tenant_metrics,
+    handle_resume_instance, handle_start_instance, handle_stop_instance, spawn_container_monitor,
 };
+use runtara_environment::instance_repository::InstanceRepository;
 use runtara_environment::launch_dispatcher::LaunchLifecycleObservers;
 use runtara_environment::launch_queue::{LaunchKind, LaunchRepository, LaunchState};
 use runtara_environment::runner::MockRunner;
@@ -2298,27 +2298,25 @@ async fn every_stored_status_reads_back_as_itself() {
     }
 
     for (instance_id, expected) in &created {
-        let one = handle_get_instance_status(&state, instance_id)
+        let one = InstanceRepository::new(pool.clone())
+            .detail(instance_id)
             .await
-            .expect("status read must succeed");
-        assert!(one.found, "{instance_id} must exist");
+            .expect("status read must succeed")
+            .unwrap_or_else(|| panic!("{instance_id} must exist"));
         assert_eq!(
-            one.status,
-            Some(*expected),
-            "get_instance_status must report the stored status for {instance_id}"
+            one.status, *expected,
+            "detail must report the stored status for {instance_id}"
         );
     }
 
-    let page = handle_list_instances(
-        &state,
-        &db::ListInstancesOptions {
+    let page = InstanceRepository::new(pool.clone())
+        .list(&db::ListInstancesOptions {
             tenant_id: Some(tenant_id.clone()),
             limit: 100,
             ..Default::default()
-        },
-    )
-    .await
-    .expect("list must succeed");
+        })
+        .await
+        .expect("list must succeed");
 
     assert_eq!(
         page.instances.len(),
@@ -2333,7 +2331,7 @@ async fn every_stored_status_reads_back_as_itself() {
             .expect("every created instance must be listed");
         assert_eq!(
             listed.status, *expected,
-            "list_instances must report the stored status for {instance_id}"
+            "list must report the stored status for {instance_id}"
         );
     }
 
