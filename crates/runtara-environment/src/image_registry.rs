@@ -64,7 +64,7 @@ impl Image {
 }
 
 /// Reject a compiled workflow image that does not export the current lifecycle
-/// entrypoint. This is called before `launch_detached`, so an old direct
+/// entrypoint. This is called before the launch, so an old direct
 /// `wasi:cli/run` workflow cannot take a runner permit or receive a container
 /// registry entry. Images not identified as compiled workflows are intentionally
 /// left alone for generic component compatibility.

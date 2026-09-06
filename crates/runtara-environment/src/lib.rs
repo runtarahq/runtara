@@ -8,80 +8,60 @@
 //!
 //! # A library, not a service
 //!
-//! Environment is transport-free. Its protocol is a set of async functions in
-//! [`handlers`] over a shared [`handlers::EnvironmentHandlerState`], and
-//! [`runtime::EnvironmentRuntime`] owns the background workers — the wake
-//! scheduler, heartbeat monitor and the cleanup trio — and nothing else.
+//! Environment is transport-free: no listener, no binary, no wire format.
+//! Its protocol is a set of async functions in [`handlers`] over a shared
+//! [`handlers::EnvironmentHandlerState`], and [`runtime::EnvironmentRuntime`]
+//! owns the background workers — the wake scheduler, the launch dispatcher,
+//! the heartbeat monitor and the cleanup trio — and nothing else.
 //!
-//! The management API is served over HTTP by `runtara-server`
-//! (`runtara_server::environment_api`), which owns that listener and its
-//! lifecycle. A host that wants the protocol without a socket calls the
-//! [`handlers`] functions directly.
+//! `runtara-server` is the only consumer. It embeds `EnvironmentRuntime` in
+//! the same process, on the same tokio runtime and the same connection pool,
+//! and calls the [`handlers`] functions directly.
 //!
 //! # Architecture
 //!
 //! ```text
-//! ┌─────────────────────────────────────────────────────────────────────────┐
-//! │                         External Clients                                 │
-//! │                    (runtara-management-sdk, CLI)                         │
-//! └─────────────────────────────────────────────────────────────────────────┘
+//!                        runtara-server (the only host)
+//!                                    │
+//!                    calls handlers:: functions in-process
 //!                                    │
 //!                                    ▼
 //! ┌─────────────────────────────────────────────────────────────────────────┐
-//! │                   runtara-environment (This Crate)                       │
-//! │                         Port 8002                                        │
-//! │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐     │
-//! │  │   Image     │  │  Instance   │  │    Wake     │  │  Workflow   │     │
-//! │  │  Registry   │  │  Lifecycle  │  │  Scheduler  │  │    Runner   │     │
-//! │  └─────────────┘  └─────────────┘  └─────────────┘  └─────────────┘     │
+//! │                   runtara-environment (this crate)                      │
+//! │                                                                         │
+//! │   ┌───────────┐  ┌───────────┐  ┌────────────┐  ┌──────────────────┐    │
+//! │   │   Image   │  │ Instance  │  │   Launch   │  │ Wake scheduler + │    │
+//! │   │ registry  │  │ lifecycle │  │   queue    │  │ cleanup workers  │    │
+//! │   └───────────┘  └───────────┘  └─────┬──────┘  └──────────────────┘    │
+//! └───────────────────────────────────────┼─────────────────────────────────┘
+//!            │                            │ hands one generation to
+//!            │ Arc<dyn Persistence>       ▼ the runner
+//!            │                  ┌──────────────────────────┐
+//!            │                  │  EmbeddedWasmRunner      │
+//!            │                  │  (in-process wasmtime)   │
+//!            │                  └────────────┬─────────────┘
+//!            │                               │ host imports, satisfied by
+//!            │                               ▼ runtime_host (no HTTP)
+//!            │                  ┌──────────────────────────┐
+//!            ├─────────────────►│      runtara-core        │
+//!            │                  └────────────┬─────────────┘
+//!            ▼                               ▼
+//! ┌─────────────────────────────────────────────────────────────────────────┐
+//! │                              PostgreSQL                                 │
+//! │        images · instances · instance_launches · container_registry      │
 //! └─────────────────────────────────────────────────────────────────────────┘
-//!           │                 │                              │
-//!           │                 │ Proxy signals                │ Spawn
-//!           │                 ▼                              ▼
-//!           │       ┌───────────────────┐        ┌─────────────────────────┐
-//!           │       │   runtara-core    │◄───────│   Workflow Instances    │
-//!           │       │   Port 8001/8003  │        │  (in-process wasmtime)  │
-//!           │       └───────────────────┘        └─────────────────────────┘
-//!           │                 │
-//!           ▼                 ▼
-//! ┌───────────────────────────────────────────────────────────────────────┐
-//! │                           PostgreSQL                                   │
-//! │              (Images, Instances, Wake Queue)                          │
-//! └───────────────────────────────────────────────────────────────────────┘
 //! ```
 //!
-//! # HTTP Server (Environment Protocol - Port 8002)
+//! # Operations
 //!
-//! Environment exposes an HTTP server for all management operations.
-//! External clients (via runtara-management-sdk) connect here.
+//! Images: register (single-frame or streamed), list, get, delete.
 //!
-//! ## Image Operations
+//! Instances: start, stop with a grace period, resume, query status, list,
+//! count by status. Cancel/pause/resume signals are written to Core, which
+//! stores them for the running instance to consume at its next checkpoint.
 //!
-//! | Operation | Description |
-//! |-----------|-------------|
-//! | `RegisterImage` | Register a new image (single-frame upload < 16MB) |
-//! | `RegisterImageStream` | Register a large image via streaming upload |
-//! | `ListImages` | List images with optional tenant filter and pagination |
-//! | `GetImage` | Get image details by ID |
-//! | `DeleteImage` | Delete an image |
-//!
-//! ## Instance Operations
-//!
-//! | Operation | Description |
-//! |-----------|-------------|
-//! | `StartInstance` | Start a new instance from an image |
-//! | `StopInstance` | Stop a running instance with grace period |
-//! | `ResumeInstance` | Resume a suspended instance |
-//! | `GetInstanceStatus` | Query instance status |
-//! | `ListInstances` | List instances with filtering and pagination |
-//!
-//! ## Signal Operations
-//!
-//! | Operation | Description |
-//! |-----------|-------------|
-//! | `SendSignal` | Send cancel/pause/resume signal to instance |
-//!
-//! Signals are proxied to runtara-core which stores them for the instance.
+//! Reads served on Core's behalf: checkpoints, events, step summaries, scope
+//! ancestors and per-tenant metrics.
 //!
 //! # Runner
 //!
@@ -126,23 +106,45 @@
 //!
 //! # Configuration
 //!
-//! Environment reads nothing from the environment on its own: a host supplies
-//! the pool, the runner, the data directory and the rest through
-//! [`runtime::EnvironmentRuntimeBuilder`]. Two variables are still consulted
-//! deeper in the crate — `RUNTARA_SKIP_CERT_VERIFICATION`, forwarded to guests,
-//! and the `*_CLEANUP_ENABLED` opt-outs read by the background workers.
+//! A host supplies the pool, the runner, the persistence layer, the data
+//! directory and the execution-timeout policy through
+//! [`runtime::EnvironmentRuntimeBuilder`]. Everything the builder does not
+//! name is read from the process environment, and the two do not overlap: a
+//! builder setter always wins over an environment variable for the same
+//! setting, because the variables below are only consulted while constructing
+//! the default the setter replaces.
+//!
+//! Wake scheduler (read at `EnvironmentRuntimeBuilder::default()`, each
+//! overridable by the matching setter): `RUNTARA_WAKE_POLL_INTERVAL_MS`,
+//! `RUNTARA_WAKE_BATCH_SIZE`, `RUNTARA_WAKE_CONCURRENCY`,
+//! `RUNTARA_WAKE_CLAIM_LEASE_SECS`.
+//!
+//! Runner (read inside [`runner::build_runner`], with no builder path):
+//! `DATA_DIR`, `EXECUTION_TIMEOUT_SECS`, `RUNTARA_SKIP_CERT_VERIFICATION`,
+//! `RUNTARA_CONNECTION_SERVICE_URL` (falling back to
+//! `CONNECTION_SERVICE_URL`), `RUNTARA_SDK_BACKEND`,
+//! `RUNTARA_INSTANCE_MEMORY_MAX_BYTES`, `RUNTARA_MAX_CONCURRENT_RUNS`,
+//! `RUNTARA_PREPARATION_CONCURRENCY`, `RUNTARA_PRECOMPILE_CHILD_CONCURRENCY`.
+//! `RUNTARA_RUNNER` is accepted and ignored with a warning.
+//!
+//! Background workers: the `RUNTARA_{RUN_DIR,DB,IMAGE}_CLEANUP_*` families,
+//! `RUNTARA_EVENT_DEBUG_RETENTION_HOURS`, `RUNTARA_AUTO_RECOVER` and
+//! `RUNTARA_MAX_AUTO_RESTARTS`. Every `*_ENABLED` switch and
+//! `RUNTARA_AUTO_RECOVER` share `runtara_core::config::parse_enabled_env`, so
+//! all of them answer to `false`/`0`/`no`/`off`/`disabled` and default to on.
 //!
 //! # Modules
 //!
-//! - [`config`]: Shared configuration parsing helpers
-//! - [`db`]: PostgreSQL persistence for images, instances, and wake queue
-//! - [`error`]: Error types for Environment operations
-//! - [`handlers`]: Environment protocol request handlers
-//! - [`image_registry`]: Image storage and retrieval
-//! - [`container_registry`]: Running container tracking
-//! - [`instance_output`]: Instance output types (legacy, used by SDK)
-//! - [`runner`]: Container/process execution backends
-//! - [`wake_scheduler`]: Durable sleep wake scheduling
+//! - [`handlers`]: the protocol — lifecycle operations and Core-backed reads
+//! - [`launch_queue`] / [`launch_dispatcher`]: the durable launch generation
+//!   state machine, and the only worker that hands one to a runner
+//! - [`runner`]: the in-process wasmtime execution backend and its trait
+//! - [`runtime_host`]: guest host imports, served straight from persistence
+//! - [`db`] / [`image_registry`] / [`container_registry`]: PostgreSQL access
+//! - [`wake_scheduler`] / [`heartbeat_monitor`] / [`recovery`]: reconcilers
+//! - [`cleanup_worker`] / [`db_cleanup_worker`] / [`image_cleanup_worker`]:
+//!   retention
+//! - [`runtime`]: the builder that starts and drains all of the above
 
 #![deny(missing_docs)]
 
@@ -158,9 +160,6 @@
 /// migrations::run(&pool).await?;
 /// ```
 pub mod migrations;
-
-/// Server configuration loaded from environment variables.
-pub mod config;
 
 /// Typed, bounded active-execution timeout policy.
 pub mod execution_timeout;
@@ -185,9 +184,6 @@ pub mod image_registry;
 
 /// Running container tracking and management.
 pub mod container_registry;
-
-/// Instance output types (legacy, used by SDK).
-pub mod instance_output;
 
 /// In-process WASM execution backend.
 pub mod runner;

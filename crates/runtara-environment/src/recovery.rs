@@ -40,15 +40,16 @@ pub fn max_auto_restarts() -> i32 {
 }
 
 /// Operator-level kill switch for automatic restart recovery. Set
-/// `RUNTARA_AUTO_RECOVER=false` (or `0`) to disable auto-recovery for the whole
-/// Environment — instances killed by a restart then fail terminally with the
-/// `environment_restart` reason instead of being relaunched. Defaults to on,
-/// matching the always-on graceful-drain recovery.
+/// `RUNTARA_AUTO_RECOVER` to any of `false`/`0`/`no`/`off`/`disabled` to turn
+/// auto-recovery off for the whole Environment — instances killed by a restart
+/// then fail terminally with the `environment_restart` reason instead of being
+/// relaunched. Defaults to on, matching the always-on graceful-drain recovery.
+///
+/// Shares [`parse_enabled_env`](runtara_core::config::parse_enabled_env) with
+/// the `*_CLEANUP_ENABLED` opt-outs so every switch in the crate answers to the
+/// same spellings; a hand-rolled parser here used to ignore `off`.
 pub fn auto_recover_enabled() -> bool {
-    match std::env::var("RUNTARA_AUTO_RECOVER") {
-        Ok(v) => !matches!(v.trim().to_ascii_lowercase().as_str(), "false" | "0" | "no"),
-        Err(_) => true,
-    }
+    runtara_core::config::parse_enabled_env("RUNTARA_AUTO_RECOVER")
 }
 
 /// Outcome of a recovery decision.

@@ -186,10 +186,47 @@ pub struct DenialAuditFields<'a> {
     pub maximum: Option<u64>,
 }
 
+impl EntitlementDenial {
+    /// Whether this refusal is transient capacity rather than a standing
+    /// entitlement decision.
+    ///
+    /// The distinction is the whole difference between "your plan does not
+    /// allow this, stop" and "we are full, come back shortly". A concurrency
+    /// ceiling is the latter: the identical request succeeds once running work
+    /// drains, so answering it with the same 403 as a tier limit tells a
+    /// well-behaved client to give up on work it should have retried.
+    fn is_transient_capacity(&self) -> bool {
+        matches!(
+            self,
+            Self::LimitExceeded {
+                limit: "maxConcurrentExecutions",
+                ..
+            }
+        )
+    }
+}
+
 impl IntoResponse for EntitlementDenial {
     fn into_response(self) -> Response {
         self.audit_log(crate::config::try_tenant_id().unwrap_or("<unset>"));
-        (StatusCode::FORBIDDEN, Json(self.json_body())).into_response()
+        let transient = self.is_transient_capacity();
+        let body = Json(self.json_body());
+        if transient {
+            // `Retry-After` is the point: a 429 without one invites the client
+            // to hammer a server that is already at its ceiling. Shares the
+            // delay every other "come back later" on this server sends.
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                [(
+                    "Retry-After",
+                    crate::core_runtime::http_server::RETRY_AFTER_SECONDS,
+                )],
+                body,
+            )
+                .into_response()
+        } else {
+            (StatusCode::FORBIDDEN, body).into_response()
+        }
     }
 }
 
@@ -293,6 +330,51 @@ mod tests {
     }
 
     // ── HTTP variant ────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn concurrency_refusal_is_429_with_retry_after() {
+        // A concurrency ceiling clears on its own, so the identical request
+        // succeeds shortly. Answering it with the 403 used for tier limits
+        // tells a well-behaved client the work is forbidden and to drop it.
+        let denial = EntitlementDenial::LimitExceeded {
+            limit: "maxConcurrentExecutions",
+            maximum: 128,
+        };
+        let expected = denial.json_body();
+        let response = denial.into_response();
+
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(
+            response.headers().get("Retry-After").is_some(),
+            "a 429 without Retry-After invites the client to hammer a server \
+             already at its ceiling"
+        );
+
+        // The body is unchanged, so anything switching on `code` still works.
+        let bytes = to_bytes(response.into_body(), 4096).await.unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(parsed, serde_json::to_value(expected).unwrap());
+    }
+
+    #[tokio::test]
+    async fn standing_entitlement_limits_stay_403() {
+        // These are decisions about the tenant's plan, not capacity: retrying
+        // changes nothing, so they must not invite a retry.
+        for denial in [
+            EntitlementDenial::LimitExceeded {
+                limit: "maxWorkflows",
+                maximum: 10,
+            },
+            EntitlementDenial::LimitExceeded {
+                limit: "maxApiKeys",
+                maximum: 5,
+            },
+        ] {
+            let response = denial.into_response();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+            assert!(response.headers().get("Retry-After").is_none());
+        }
+    }
 
     #[tokio::test]
     async fn http_response_returns_403_with_json_body() {

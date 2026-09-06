@@ -109,17 +109,14 @@ impl EmbeddedRuntara {
             "Workflow runner initialized"
         );
 
-        // Start Environment (management protocol)
-        // Note: core_client_addr is what workflow guests use to reach runtara-core.
-        // Guests run in-process, so this is always the host's own loopback.
-        // Start Environment (management protocol via HTTP)
+        // Start Environment. It owns the image registry, the instance
+        // lifecycle and the durable launch queue; guests reach core through the
+        // runner's host imports, so it needs no core address of its own.
         info!("Starting runtara-environment...");
-        info!(core_client_addr = %config.core_client_addr, "Containers will connect to runtara-core at this address");
         let environment = EnvironmentRuntime::builder()
             .pool(config.pool)
             .runner(runner)
             .core_persistence(persistence.clone())
-            .core_addr(config.core_client_addr.to_string())
             .data_dir(config.data_dir)
             .execution_timeout_policy(config.execution_timeout_policy)
             .build()?

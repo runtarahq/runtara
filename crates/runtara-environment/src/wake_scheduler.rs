@@ -28,7 +28,6 @@ use crate::launch_dispatcher::{DEFAULT_LAUNCH_QUEUE_TIMEOUT, LaunchLifecycleObse
 use crate::launch_queue::{
     EnqueueOutcome, EnqueueRequest, LaunchKind, LaunchQueueError, LaunchRepository,
 };
-use crate::runner::Runner;
 
 /// Wake scheduler configuration.
 #[derive(Debug, Clone)]
@@ -54,10 +53,6 @@ pub struct WakeSchedulerConfig {
     /// up by someone else. It has to comfortably exceed how long a launch
     /// takes, or a slow launch would be claimed twice.
     pub claim_lease: Duration,
-    /// Core address to pass to instances
-    pub core_addr: String,
-    /// Data directory
-    pub data_dir: std::path::PathBuf,
 }
 
 impl Default for WakeSchedulerConfig {
@@ -68,8 +63,6 @@ impl Default for WakeSchedulerConfig {
             concurrency: default_wake_concurrency(),
             claim_lease: Duration::from_secs(300),
             failed_wake_retry_delay: Duration::from_secs(5),
-            core_addr: "127.0.0.1:8001".to_string(),
-            data_dir: std::path::PathBuf::from(".data"),
         }
     }
 }
@@ -120,9 +113,6 @@ pub struct WakeScheduler {
     pool: PgPool,
     /// Core persistence layer for querying sleeping instances.
     persistence: Arc<dyn Persistence>,
-    /// Retained in the constructor until all embedding callers have migrated
-    /// to the dispatcher-only wake contract. Wakes never call it directly.
-    _runner: Arc<dyn Runner>,
     config: WakeSchedulerConfig,
     shutdown: Arc<Notify>,
     drain: DrainController,
@@ -138,7 +128,6 @@ impl WakeScheduler {
     pub fn new(
         pool: PgPool,
         persistence: Arc<dyn Persistence>,
-        runner: Arc<dyn Runner>,
         config: WakeSchedulerConfig,
     ) -> Self {
         let pool_max = pool.options().get_max_connections() as usize;
@@ -156,7 +145,6 @@ impl WakeScheduler {
         Self {
             pool,
             persistence,
-            _runner: runner,
             config,
             shutdown: Arc::new(Notify::new()),
             drain: DrainController::new(),

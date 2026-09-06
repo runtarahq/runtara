@@ -1022,13 +1022,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn concurrent_executions_decision_denial_renders_as_403_with_stable_code() {
-        // Same IntoResponse path as the other limit denials.
+    async fn concurrent_executions_decision_denial_renders_as_429_with_stable_code() {
+        // A concurrency ceiling is transient capacity, not a standing
+        // entitlement: the same request succeeds once running work drains, so
+        // it must invite a retry rather than read as forbidden. The body stays
+        // identical to the other limit denials.
         let snap = snapshot_with(None, Some(r#"{"limits":{"maxConcurrentExecutions":2}}"#));
         let denial =
             concurrent_executions_decision(&snap, 2, TEST_INFRA_CAP).expect_err("at cap must deny");
         let response = denial.into_response();
-        assert_eq!(response.status(), axum::http::StatusCode::FORBIDDEN);
+        assert_eq!(response.status(), axum::http::StatusCode::TOO_MANY_REQUESTS);
+        assert!(response.headers().get("Retry-After").is_some());
         let bytes = axum::body::to_bytes(response.into_body(), 4096)
             .await
             .expect("body bytes");

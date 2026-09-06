@@ -1632,7 +1632,8 @@ export function Workflow() {
       });
       setExecuteDialogOpen(false);
     } catch (error: any) {
-      // Entitlement-shaped 403s (e.g. maxConcurrentExecutions) are already
+      // Entitlement-shaped denials (403, or 429 for maxConcurrentExecutions)
+      // are already
       // surfaced by the shared useCustomMutation handler with a proper
       // message — bail so we don't show the raw summary a second time
       // (SYN-433: entitlement double-popup).

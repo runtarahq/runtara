@@ -22,14 +22,6 @@ pub enum RunnerError {
     #[error("Binary not found: {0}")]
     BinaryNotFound(String),
 
-    /// Execution timed out.
-    #[error("Execution timeout")]
-    Timeout,
-
-    /// Execution was cancelled.
-    #[error("Execution cancelled")]
-    Cancelled,
-
     /// The workflow guest failed to start.
     #[error("Start failed: {0}")]
     StartFailed(String),
@@ -56,27 +48,6 @@ pub enum RunnerError {
     /// execution failure.
     #[error("Preparation timed out: {0}")]
     PreparationTimedOut(String),
-
-    /// Process exited with non-zero code.
-    #[error("Exit code {exit_code}: {stderr}")]
-    ExitCode {
-        /// Exit code from the process.
-        exit_code: i32,
-        /// Standard error output.
-        stderr: String,
-    },
-
-    /// Output file was not found.
-    #[error("Output not found for instance: {0}")]
-    OutputNotFound(String),
-
-    /// I/O operation failed.
-    #[error("IO error: {0}")]
-    Io(#[from] std::io::Error),
-
-    /// JSON serialization/deserialization failed.
-    #[error("JSON error: {0}")]
-    Json(#[from] serde_json::Error),
 
     /// Other error.
     #[error("Other: {0}")]
@@ -514,28 +485,6 @@ pub struct ContainerMetrics {
     pub cpu_usage_usec: Option<u64>,
 }
 
-/// Result of a synchronous instance execution.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LaunchResult {
-    /// Instance ID.
-    pub instance_id: String,
-    /// Whether execution succeeded.
-    pub success: bool,
-    /// Output data from successful execution.
-    pub output: Option<Value>,
-    /// Error message from failed execution (user-facing).
-    pub error: Option<String>,
-    /// Raw stderr output from the container (for debugging/logging).
-    /// This is separate from `error` to allow product to decide whether to show it to users.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stderr: Option<String>,
-    /// Execution duration in milliseconds.
-    pub duration_ms: u64,
-    /// Resource metrics from execution.
-    #[serde(default)]
-    pub metrics: ContainerMetrics,
-}
-
 /// Cancellation token for stopping execution.
 pub type CancelToken = Arc<AtomicBool>;
 
@@ -613,34 +562,30 @@ pub struct PreparationOccupancy {
 /// `EmbeddedWasmRunner` is the only production implementation; `MockRunner`
 /// backs the tests.
 ///
-/// Runners read instance output from persistence (runtara-core) after process exit.
-/// Database writes (registration, status updates) are handled by the caller.
+/// A launch is two phases: [`Runner::try_prepare_launch`] does the bounded,
+/// permit-free work (artifact validation, compilation, reading the persisted
+/// input), and [`Runner::try_launch_prepared_detached`] takes a run permit and
+/// starts the guest. Database writes (registration, status updates) and reading
+/// what the guest reported are the caller's, not the runner's.
 #[async_trait]
 pub trait Runner: Send + Sync {
     /// Runner type identifier (e.g., "wasm-embedded", "mock")
     fn runner_type(&self) -> &'static str;
 
-    /// Run an instance synchronously, waiting for completion.
+    /// Launch an instance without waiting for completion, but only when
+    /// runner capacity is immediately available.
     ///
-    /// This method blocks until the instance completes, times out, or is cancelled.
-    async fn run(
-        &self,
-        options: &LaunchOptions,
-        cancel_token: Option<CancelToken>,
-    ) -> Result<LaunchResult>;
-
-    /// Launch an instance without waiting for completion (fire-and-forget).
+    /// Returns a handle the caller uses to check status or stop the instance;
+    /// registering the instance in the database is the caller's job. A full
+    /// runner returns [`RunnerError::CapacityUnavailable`] rather than parking
+    /// the caller on an in-memory permit waiter, because the callers that
+    /// matter own a durable queue and must return the launch to it.
     ///
-    /// Returns a handle that can be used to check status or stop the instance.
-    /// The caller is responsible for registering the instance in the database.
-    async fn launch_detached(&self, options: &LaunchOptions) -> Result<RunnerHandle>;
-
-    /// Launch an instance only when runner capacity is immediately available.
-    ///
-    /// A full runner returns [`RunnerError::CapacityUnavailable`] without
-    /// parking the caller on an in-memory permit waiter. Durable dispatchers
-    /// use this method; [`Self::launch_detached`] remains for legacy callers
-    /// that intentionally await capacity.
+    /// An implementation that satisfies this by calling
+    /// [`Self::try_prepare_launch`] then [`Self::try_launch_prepared_detached`]
+    /// MUST also override the latter, whose default delegates back here. A
+    /// runner that overrides one and inherits the other recurses forever.
+    /// Runners with no preparation phase inherit both defaults and are fine.
     async fn try_launch_detached(&self, options: &LaunchOptions) -> Result<RunnerHandle>;
 
     /// Prepare an artifact without acquiring a live guest permit.
@@ -659,9 +604,13 @@ pub trait Runner: Send + Sync {
     /// Acquire a run permit and start a previously prepared launch.
     ///
     /// Implementations must consume `prepared`; dropping it releases any
-    /// preparation reservation on every stale/cancel/error path. The default
-    /// deliberately delegates to the existing nonblocking launch path for
-    /// runners whose preparation token is a no-op.
+    /// preparation reservation on every stale/cancel/error path.
+    ///
+    /// The default discards the token and delegates to
+    /// [`Self::try_launch_detached`], which is correct only for a runner whose
+    /// preparation is a no-op — the passthrough token costs nothing to drop.
+    /// A runner that does real preparation and inherits this default throws
+    /// that work away and re-does it; see the note on `try_launch_detached`.
     async fn try_launch_prepared_detached(
         &self,
         options: &LaunchOptions,
