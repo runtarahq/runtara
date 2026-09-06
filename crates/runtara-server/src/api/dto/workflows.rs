@@ -54,6 +54,12 @@ impl ValidationErrorDto {
         use runtara_workflows::validation::ValidationError;
 
         let (message, step_id, field_name, related_step_ids) = match error {
+            ValidationError::StepIdMismatch { step_key, .. } => (
+                error.to_string(),
+                Some(step_key.clone()),
+                Some("id".into()),
+                None,
+            ),
             ValidationError::EntryPointNotFound { entry_point, .. } => (
                 format!("Entry point '{}' not found in steps", entry_point),
                 Some(entry_point.clone()),
@@ -1429,6 +1435,21 @@ mod tests {
     use super::*;
     use runtara_workflows::validation::ValidationError;
     use serde_json::json;
+
+    #[test]
+    fn step_id_mismatch_maps_to_the_authored_key_and_id_field() {
+        let dto = ValidationErrorDto::from_runtara_error(&ValidationError::StepIdMismatch {
+            graph_path: "/steps/loop/subgraph".into(),
+            step_key: "finish".into(),
+            step_id: "wrong".into(),
+        });
+        assert_eq!(dto.code, "E130");
+        assert_eq!(dto.step_id.as_deref(), Some("finish"));
+        assert_eq!(dto.field_name.as_deref(), Some("id"));
+        assert!(dto.message.contains("/steps/loop/subgraph"));
+        assert!(dto.message.contains("wrong"));
+        assert!(dto.message.contains("finish"));
+    }
 
     #[test]
     fn retry_count_overflow_maps_to_a_stable_save_error() {

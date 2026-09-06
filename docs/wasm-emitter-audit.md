@@ -6,28 +6,28 @@ and durable suspend/resume through the production invoke ABI.
 
 **Update 2026-09-06:** AUDIT-01 is committed as `2b6bf542` and AUDIT-02 as
 `d787556e`, AUDIT-03 as `a0629d99`, AUDIT-04 as `70a21db8`, and AUDIT-05 as
-`2c0a3df9`. AUDIT-06 is fixed in the audit worktree. AUDIT-07 remains open. See the verification record for checks and limitations.
+`2c0a3df9`. AUDIT-06 is committed as `53ecca2c`. AUDIT-07 is fixed in the audit
+worktree. All seven findings now have passing regressions. See the verification
+record for checks and limitations.
 
 [Open the interactive pattern guide](wasm-emitter-patterns.html) to compare tested
 controls, recorded failures, and proposed fixes with step-through diagrams and
 exportable example DSL. The guide is a standalone, offline HTML/CSS/JS page;
 its traces illustrate the audit evidence and do not run WASM.
 
-Seven findings are documented below. The accompanying **67 audit tests** now
-include **64 passing tests** and **3 known-defect regressions**. There are also
-**39 passing unit tests**: 8 graph-analysis tests for AUDIT-01, 6 arena tests for
-AUDIT-02, 7 identity tests and 1 compiler-version test for AUDIT-03, and 6 scoped
-configuration tests and 1 compiler-version test for AUDIT-04, plus 2 timer identity
-tests for AUDIT-05; AUDIT-06 adds 5 compiler tests, 2 stdlib backoff tests and
-1 server save-error mapping test. All three remaining regressions exercise
-validation natively. The original AUDIT-01 through AUDIT-06 regressions now run
-normally; their ignores were removed after the fixes.
+Seven findings are documented below. All **77 audit tests pass**, with **none
+ignored**. There are also **42 passing unit tests**: 8 graph-analysis tests for
+AUDIT-01, 6 arena tests for AUDIT-02, 7 identity tests and 1 compiler-version test
+for AUDIT-03, 6 configuration tests and 1 compiler-version test for AUDIT-04,
+2 timer-identity tests for AUDIT-05, 5 compiler tests, 2 backoff tests and 1 server
+mapping test for AUDIT-06, plus 2 browser-validator tests and 1 server mapping test
+for AUDIT-07.
 
-The known-defect tests assert the **desired correct behavior** and currently fail.
-They carry explicit `#[ignore = "AUDIT-XX: ..."]` reasons so normal CI stays green
-while these fixes remain outstanding. They are not passing tests that enshrine
-broken behavior. Remove each ignore when its fix lands. A fix should also run
-that finding's controls, not just the previously failing case.
+The original known-defect tests assert the **desired correct behavior**. They
+carried explicit ignore reasons while the defects remained open; all those ignores
+have now been removed. Historical failure descriptions and verification records
+below preserve the evidence from before each fix. This is a bounded audit, not a
+complete proof of DSL correctness.
 
 P1 denotes silent wrong execution or data loss; P2 denotes broken configuration,
 deadline, or compiler/validation contracts. These findings do not establish Rust
@@ -53,12 +53,12 @@ sccache process; it is optional where the configured wrapper works.
 # Only needed when shared components are missing or stale:
 RUSTC_WRAPPER= RUNTARA_ONLY_WORKFLOW_COMPONENTS=1 RUNTARA_NO_INSTALL_TOOLS=1 scripts/build-agent-components.sh
 
-# Passing controls; known defects are reported as ignored:
+# All audit controls and regressions:
 RUSTC_WRAPPER= cargo test -p runtara-workflows --test wasm_emitter_audit
 RUSTC_WRAPPER= cargo test -p runtara-workflows --features direct-wasm-integration-tests --test direct_wasm_execute wasm_emitter_audit
 
-# Explicit remaining defect reproductions; exits nonzero:
-RUSTC_WRAPPER= cargo test -p runtara-workflows --test wasm_emitter_audit -- --ignored --nocapture
+# Focused identity validation, manifest and compiler tests:
+RUSTC_WRAPPER= cargo test -p runtara-workflows --test wasm_emitter_audit audit_07
 
 # One fixed finding, including controls and enabled regressions:
 RUSTC_WRAPPER= cargo test -p runtara-workflows --features direct-wasm-integration-tests --test direct_wasm_execute wasm_emitter_audit::audit_05 -- --include-ignored --nocapture
@@ -565,31 +565,85 @@ backoff policy, the separate rate-limit budget, or existing artifact behavior.
 
 ## AUDIT-07 · P2 — step map keys and inner IDs can disagree
 
+**Fixed on 2026-09-06.** Every declaration must satisfy `steps[key].id == key`.
+The comparison is exact: case, whitespace and Unicode are not normalized. Because
+map keys are unique, this rule also guarantees unique inner IDs within a graph.
+Independent nested and child graphs may still reuse the same local IDs.
+
+The original root example
 `entryPoint:"finish", steps:{finish:{id:"different",stepType:"Finish",...}}`
-passes validation and the support gate, then compilation fails with
-`missing direct entry step 'finish'`.
+passed validation and the support gate, then compilation failed with
+`missing direct entry step 'finish'`. A While-body mismatch and two map entries
+sharing an inner ID also passed validation. The baseline run reproduced all three
+failures at the intended rejection assertions; the matching control passed.
 
-The validation reproductions cover a root mismatch, a nested mismatch, and two
-map entries with the same inner ID. All three currently pass validation. A
-matching-key control validates and compiles.
+The fix adds a shared check used by validation, support analysis and manifest
+construction:
 
-Validation resolves graph identity using map keys. Manifest construction discards
-those keys and uses each step's inner id. Collisions between inner IDs can therefore
-also create inconsistent graph identity.
+- Validation returns **E130 / StepIdMismatch** for every mismatch, with
+  `graph_path`, `step_key` and the conflicting `step_id`. It checks all 14 Step
+  variants, including AI tool declarations, unreachable declarations and nested
+  graphs beneath a missing parent entry point.
+- Split and While bodies and WaitForSignal.onWait handlers are checked recursively.
+  Paths are JSON pointers: the root is `""`, a While body might be
+  `/steps/loop/subgraph`, and `/` and `~` in map keys are escaped as `~1` and `~0`.
+  Diagnostic order is deterministic within each graph tree.
+- Closure validation checks each preloaded child and attributes errors to its
+  workflow ID/version. The support and manifest APIs also check every supplied
+  child, even if the root does not call it; manifest construction includes those
+  graphs. Their paths start with `/childWorkflows/{input_index}/executionGraph`.
+- The support gate returns **step-id-mismatch** before running routing analysis,
+  avoiding misleading routing errors. The public manifest builders independently
+  return **DirectManifestError::StepIdMismatch**. Direct compilation propagates
+  that structured error before creating an executable artifact, even when callers
+  bypass save validation.
+- The server DTO targets the authored map key and the `id` field. The browser
+  validator receives the same E130 message and graph path. Valid graphs preserve
+  their IDs and existing compilation behavior; no input is silently rewritten.
 
-Source: [graph validation](../crates/runtara-workflows/src/validation.rs) (`validate_graph_structure`), [manifest construction](../crates/runtara-workflows/src/direct_wasm/manifest.rs) (`graph_manifest`).
+Correct an inconsistent declaration by making its inner `id` match the authored
+map key. If renaming a step intentionally, keep its key, ID and references
+consistent. This change validates the parsed DSL; it does not add identifier-format
+restrictions or rewrite existing source definitions or compiled artifacts.
 
-Fix direction: validate key==id recursively and enforce uniqueness within each
-graph, or establish one canonical representation before graph analysis.
+Source: [shared graph identity check](../crates/runtara-workflows/src/graph_identity.rs),
+[validation](../crates/runtara-workflows/src/validation.rs),
+[support gate](../crates/runtara-workflows/src/direct_wasm/support.rs),
+[manifest construction](../crates/runtara-workflows/src/direct_wasm/manifest.rs),
+[server error mapping](../crates/runtara-server/src/api/dto/workflows.rs),
+[browser validation wrapper](../crates/runtara-validation-wasm/src/lib.rs).
 
-Tests:
+The [14 native audit tests](../crates/runtara-workflows/tests/wasm_emitter_audit.rs)
+are all enabled. Rejection helpers assert the exact structured fields, support
+feature, manifest/compile errors and absence of an emitted executable:
 
-| Test | Status on audited code |
+| Test | Confirmed behavior |
 | --- | --- |
-| [`audit_07_matching_step_keys_validate_and_compile`](../crates/runtara-workflows/tests/wasm_emitter_audit.rs) | Passing control |
-| [`audit_07_root_key_id_mismatch_is_rejected`](../crates/runtara-workflows/tests/wasm_emitter_audit.rs) | Known defect; ignored by default, fails when selected |
-| [`audit_07_nested_key_id_mismatch_is_rejected`](../crates/runtara-workflows/tests/wasm_emitter_audit.rs) | Known defect; ignored by default, fails when selected |
-| [`audit_07_duplicate_inner_ids_are_rejected`](../crates/runtara-workflows/tests/wasm_emitter_audit.rs) | Known defect; ignored by default, fails when selected |
+| `audit_07_matching_step_keys_validate_and_compile` | Matching ASCII, punctuation and Unicode IDs validate and compile to valid WASM |
+| `audit_07_root_key_id_mismatch_is_rejected` | Original root mismatch returns E130 and a structured compile error |
+| `audit_07_nested_key_id_mismatch_is_rejected` | Original While-body mismatch reports its graph path |
+| `audit_07_duplicate_inner_ids_are_rejected` | Original duplicate inner ID is rejected at the inconsistent map entry |
+| `audit_07_split_and_on_wait_key_id_mismatches_are_rejected` | Both additional nested-graph forms are checked |
+| `audit_07_nested_paths_escape_json_pointer_segments` | Deep mixed nesting preserves escaped `/` and `~` keys in the path |
+| `audit_07_unreachable_and_invalid_entry_graphs_still_report_id_mismatches` | Unreachable steps and missing parent entry points cannot hide bad IDs |
+| `audit_07_all_step_variants_check_their_declared_id` | All 14 current Step variants receive the same identity check |
+| `audit_07_ai_tool_declarations_are_checked` | AI tool-edge targets are checked even outside normal flow |
+| `audit_07_multiple_identity_errors_have_stable_order` | All mismatches are returned in stable path/key order |
+| `audit_07_visually_similar_ids_are_not_silently_normalized` | Case, whitespace and composed/decomposed Unicode differences are rejected |
+| `audit_07_local_ids_can_repeat_in_separate_nested_graphs` | Parent, While and Split graphs may each define their own `finish` |
+| `audit_07_preloaded_child_identity_is_validated_before_manifest_construction` | Direct and nested child mismatches are rejected for referenced and unused supplied children |
+| `audit_07_local_ids_can_repeat_in_separate_children` | Two child workflows may reuse the same local ID as the parent |
+
+Two browser-wrapper tests confirm matching scoped IDs remain valid and root/onWait
+mismatches expose E130. The server unit test
+`step_id_mismatch_maps_to_the_authored_key_and_id_field` checks the UI anchor,
+field name and diagnostic path.
+
+```sh
+RUSTC_WRAPPER= cargo test -p runtara-workflows --test wasm_emitter_audit audit_07
+RUSTC_WRAPPER= cargo test -p runtara-validation-wasm audit_07
+SQLX_OFFLINE=true RUSTC_WRAPPER= cargo test -p runtara-server --lib step_id_mismatch_maps_to_the_authored_key_and_id_field
+```
 
 ## Verification record and remaining coverage
 
@@ -618,7 +672,7 @@ Source review suggests broader exposure worth covering during fixes:
 - AUDIT-03: production rollout with real persisted instances across artifact versions remains an operational integration check; local coverage now includes cached Agent/Split outputs, nested paths, version selection, and exact legacy addresses.
 - AUDIT-04: local coverage now includes repeated IDs with different types, wait actions and response schemas; the existing global child-preload call-site uniqueness gate remains in force.
 - AUDIT-05: wake clamping, final-body overrun and completed replay are now tested. Mid-call preemption and changing Split timeout error-routing policy remain outside this fix.
-- AUDIT-06: release-profile behavior and other arithmetic limits in timeout/backoff lowering.
+- AUDIT-06: debug/release retry counts and saturated backoff are now covered. Broader numeric-domain and operational stress testing remains outside this audit.
 
 ### AUDIT-01 verification update · 2026-09-06
 
@@ -784,7 +838,7 @@ Split timeout error-routing policy described above.
 ### AUDIT-06 verification update · 2026-09-06
 
 - Committed AUDIT-05 as `2c0a3df9`; its pre-commit formatting and workspace
-  Clippy checks passed. AUDIT-06 is left uncommitted for review.
+  Clippy checks passed. AUDIT-06 was subsequently committed as `53ecca2c` before starting AUDIT-07.
 - Baseline retry-count run: **2 controls passed, 2 regressions failed** at the
   intended panic assertions. The original ignores are now removed.
 - Debug and release AUDIT-06 runs: **12 native tests and 5 compiler unit tests
@@ -819,3 +873,37 @@ and the audit worktree's own host cache and guest components. No database/server
 E2E, deployment, production artifact migration, or billions-of-retries stress run
 was performed. The new compiler contract applies to newly built artifacts; the
 backoff change requires rebuilding the shared stdlib and recomposing workflows.
+
+### AUDIT-07 verification update · 2026-09-06
+
+- Committed AUDIT-06 as `53ecca2c`; its pre-commit formatting and workspace
+  Clippy checks passed. AUDIT-07 is left uncommitted for review.
+- Baseline: **1 control passed and 3 regressions failed** at their intended
+  identity-rejection assertions. All three ignores have now been removed.
+- AUDIT-07 native tests: **14 passed**, covering all 14 step variants, every
+  nested graph form, referenced/unused children with direct/nested mismatches,
+  exact Unicode/case/whitespace equality, escaped diagnostic paths, deterministic
+  error ordering and legitimate local-ID reuse. Successful controls also validate
+  the emitted WASM; failure cases assert that no executable was emitted.
+- Full `cargo test -p runtara-workflows --features direct-wasm-integration-tests`:
+  **565 library tests, 220 composed execution tests and 54 native integration
+  tests passed**. All **77 audit cases** pass; none are ignored. One existing
+  documentation example remains ignored.
+- `cargo test -p runtara-validation-wasm`: **22 passed**, including both new E130
+  wrapper tests. These execute the wrapper's Rust implementation natively.
+  `cargo check -p runtara-validation-wasm --target wasm32-unknown-unknown` passed
+  with the compiler feature disabled.
+- Server error-mapping test: **1 passed**, asserting E130, the authored step key,
+  the `id` field and the nested graph path.
+- Clippy for workflows, server and browser validation, all targets with
+  `runtara-workflows/direct-wasm-integration-tests` and `-D warnings`: passed.
+  Formatting and `git diff --check`: passed.
+- Interactive guide: **66 DOM scenarios passed**. Identity cases check exported
+  graphs and child bundles, AI tool edges, exact mismatch counts, graph paths,
+  fixed/historical labels, expected outcomes, test links and trace navigation.
+  Browser inspection confirmed the child diagnostic and diagram layout.
+
+Checks used Rust 1.97.0, `RUSTC_WRAPPER=`, `SQLX_OFFLINE=true` for server checks,
+and the audit worktree's own host build cache and staged guest components from
+AUDIT-06. No WIT or guest source changed, so components were reused. No database
+E2E, deployment, or migration of existing definitions/artifacts was performed.

@@ -616,6 +616,44 @@ mod tests {
     }"#;
 
     #[test]
+    fn audit_07_browser_validator_reports_root_and_on_wait_identity_errors() {
+        for nested in [false, true] {
+            let bad = json!({"entryPoint":"finish", "steps":{"finish":{"id":"wrong","stepType":"Finish"}}});
+            let graph = if nested {
+                json!({"entryPoint":"wait", "steps":{"wait":{"id":"wait","stepType":"WaitForSignal","onWait":bad}}})
+            } else {
+                bad
+            };
+            let response = validate_execution_graph_json_impl(&graph.to_string());
+            assert!(response.success);
+            assert!(!response.valid);
+            let message = response
+                .errors
+                .iter()
+                .find(|error| error.contains("[E130]"))
+                .expect("identity validation must reach the browser");
+            assert!(message.contains("finish"));
+            assert!(message.contains("wrong"));
+            assert!(message.contains(if nested {
+                "/steps/wait/onWait"
+            } else {
+                "<root>"
+            }));
+        }
+    }
+
+    #[test]
+    fn audit_07_browser_validator_accepts_matching_scoped_ids() {
+        let finish = json!({"id":"finish","stepType":"Finish"});
+        let response = validate_execution_graph_json_impl(&json!({"entryPoint":"wait", "steps":{
+            "wait":{"id":"wait","stepType":"WaitForSignal","onWait":{"entryPoint":"finish","steps":{"finish":finish.clone()}}},
+            "finish":finish
+        },"executionPlan":[{"fromStep":"wait","toStep":"finish"}]}).to_string());
+        assert!(response.success);
+        assert!(response.valid, "{:?}", response.errors);
+    }
+
+    #[test]
     fn validates_empty_graph_with_backend_validator() {
         let response = validate_execution_graph_json_impl("{}");
 

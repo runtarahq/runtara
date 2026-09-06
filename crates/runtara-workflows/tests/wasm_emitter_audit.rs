@@ -189,7 +189,7 @@ fn retry_children(kind: &str) -> Vec<ChildWorkflowInput> {
     }
 }
 
-fn compile_retry_input(
+fn compile_audit_graph(
     root: ExecutionGraph,
     children: Vec<ChildWorkflowInput>,
 ) -> Result<(), runtara_workflows::direct_wasm::DirectCompileError> {
@@ -245,7 +245,7 @@ fn assert_retry_boundaries(kind: &str) {
             "{kind} {retries:?}: {:?}",
             validation.errors
         );
-        compile_retry_input(root, retry_children(kind))
+        compile_audit_graph(root, retry_children(kind))
             .expect("representable retry count compiles");
     }
 }
@@ -273,7 +273,7 @@ fn assert_overflow_is_rejected(kind: &str) {
     let error = validation.errors.iter().find(|error| matches!(error, runtara_workflows::validation::ValidationError::RetryCountOverflow { step_id, max_retries } if step_id == "call" && *max_retries == u32::MAX)).expect("structured validation error");
     assert_eq!(error.code(), "E129");
     assert!(error.to_string().contains("4294967294"));
-    let result = std::panic::catch_unwind(|| compile_retry_input(root, retry_children(kind)))
+    let result = std::panic::catch_unwind(|| compile_audit_graph(root, retry_children(kind)))
         .expect("invalid retry count must return an error, never panic");
     assert_retry_error(result.expect_err("must not wrap in release builds"));
 }
@@ -343,7 +343,7 @@ fn audit_06_nested_retry_overflow_is_rejected() {
             .any(|error| error.code() == "E129"),
             "{wrapper}"
         );
-        assert_retry_error(compile_retry_input(root, vec![]).unwrap_err());
+        assert_retry_error(compile_audit_graph(root, vec![]).unwrap_err());
     }
 }
 
@@ -369,61 +369,353 @@ fn audit_06_child_retry_overflow_is_rejected() {
     );
     let mut children = retry_children("embed");
     children[0].execution_graph = child;
-    assert_retry_error(compile_retry_input(root, children).unwrap_err());
+    assert_retry_error(compile_audit_graph(root, children).unwrap_err());
+}
+
+fn assert_manifest_identity_error(
+    error: runtara_workflows::direct_wasm::DirectManifestError,
+    expected: (&str, &str, &str),
+) {
+    use runtara_workflows::direct_wasm::DirectManifestError;
+    let DirectManifestError::StepIdMismatch {
+        graph_path,
+        step_key,
+        step_id,
+    } = error
+    else {
+        panic!("expected a structured identity error, got {error:?}");
+    };
+    assert_eq!(
+        (graph_path.as_str(), step_key.as_str(), step_id.as_str()),
+        expected
+    );
+}
+
+fn assert_bad_identity_rejected(root: Value, expected: &[(&str, &str, &str)]) {
+    use runtara_workflows::{direct_wasm::DirectCompileError, validation::ValidationError};
+    let root = graph(root);
+    let validation = validate_workflow(&root, &AgentCatalog::default());
+    let errors = validation
+        .errors
+        .iter()
+        .filter_map(|error| match error {
+            ValidationError::StepIdMismatch {
+                graph_path,
+                step_key,
+                step_id,
+            } => {
+                assert_eq!(error.code(), "E130");
+                assert!(error.to_string().contains("set step.id to the map key"));
+                Some((graph_path.as_str(), step_key.as_str(), step_id.as_str()))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        errors, expected,
+        "each malformed declaration needs its own diagnostic"
+    );
+    let support = analyze_direct_wasm_support(&root);
+    assert!(!support.supported);
+    assert_eq!(
+        support.unsupported.len(),
+        expected.len(),
+        "identity errors must not cause a routing cascade"
+    );
+    for (issue, &(path, key, id)) in support.unsupported.iter().zip(expected) {
+        assert_eq!(issue.feature, "step-id-mismatch");
+        assert_eq!(issue.step_id.as_deref(), Some(key));
+        assert!(
+            issue
+                .reason
+                .contains(if path.is_empty() { "<root>" } else { path })
+        );
+        assert!(issue.reason.contains(&format!("{key:?}")));
+        assert!(issue.reason.contains(&format!("{id:?}")));
+    }
+    assert_manifest_identity_error(
+        build_direct_workflow_manifest(&root).unwrap_err(),
+        expected[0],
+    );
+    let DirectCompileError::Manifest(error) = compile_audit_graph(root, vec![]).unwrap_err() else {
+        panic!("compilation must reject malformed IDs during manifest preflight");
+    };
+    assert_manifest_identity_error(error, expected[0]);
 }
 
 #[test]
 fn audit_07_matching_step_keys_validate_and_compile() {
-    let root = graph(leaf("finish"));
+    // Equality is exact; punctuation and Unicode are not normalized or renamed.
+    for id in ["finish", "a/b~c", "user.name", "读入", "é", "e\u{301}"] {
+        let root = graph(leaf(id));
+        assert!(
+            validate_workflow(&root, &AgentCatalog::default())
+                .errors
+                .is_empty()
+        );
+        assert!(analyze_direct_wasm_support(&root).supported);
+        compile_audit_graph(root, vec![]).expect("consistent graph compiles");
+    }
+}
+
+#[test]
+fn audit_07_root_key_id_mismatch_is_rejected() {
+    assert_bad_identity_rejected(
+        json!({"entryPoint": "finish", "steps": {"finish": finish("different")}}),
+        &[("", "finish", "different")],
+    );
+}
+
+#[test]
+fn audit_07_nested_key_id_mismatch_is_rejected() {
+    let body = json!({"entryPoint": "finish", "steps": {"finish": finish("different")}});
+    assert_bad_identity_rejected(
+        json!({"entryPoint": "loop", "steps": {
+        "loop": loop_step("loop", body), "finish": finish("finish")
+    }, "executionPlan": [{"fromStep": "loop", "toStep": "finish"}]}),
+        &[("/steps/loop/subgraph", "finish", "different")],
+    );
+}
+
+#[test]
+fn audit_07_duplicate_inner_ids_are_rejected() {
+    assert_bad_identity_rejected(
+        json!({"entryPoint": "log", "steps": {
+        "log": {"id": "finish", "stepType": "Log", "message": "audit"}, "finish": finish("finish")
+    }, "executionPlan": [{"fromStep": "log", "toStep": "finish"}]}),
+        &[("", "log", "finish")],
+    );
+}
+
+#[test]
+fn audit_07_split_and_on_wait_key_id_mismatches_are_rejected() {
+    for role in ["subgraph", "onWait"] {
+        let body = json!({"entryPoint":"finish", "steps":{"finish":finish("wrong")}});
+        let step = if role == "subgraph" {
+            json!({"id":"outer", "stepType":"Split", "config":{"value":immediate(json!([1]))}, "subgraph":body})
+        } else {
+            json!({"id":"outer", "stepType":"WaitForSignal", "onWait":body})
+        };
+        assert_bad_identity_rejected(
+            json!({"entryPoint":"outer", "steps":{"outer":step}}),
+            &[(&format!("/steps/outer/{role}"), "finish", "wrong")],
+        );
+    }
+}
+
+#[test]
+fn audit_07_nested_paths_escape_json_pointer_segments() {
+    let body = json!({"entryPoint":"w~/", "steps":{"w~/":{"id":"w~/", "stepType":"WaitForSignal", "onWait":{
+        "entryPoint":"finish", "steps":{"finish":finish("wrong")}
+    }}}});
+    assert_bad_identity_rejected(
+        json!({"entryPoint":"a/~", "steps":{"a/~":loop_step("a/~", body)}}),
+        &[(
+            "/steps/a~1~0/subgraph/steps/w~0~1/onWait",
+            "finish",
+            "wrong",
+        )],
+    );
+}
+
+#[test]
+fn audit_07_unreachable_and_invalid_entry_graphs_still_report_id_mismatches() {
+    for entry in ["finish", "missing"] {
+        assert_bad_identity_rejected(
+            json!({"entryPoint":entry, "steps":{
+                "finish":finish("finish"), "orphan":{"id":"wrong", "stepType":"Log", "message":"unreachable"}
+            }}),
+            &[("", "orphan", "wrong")],
+        );
+    }
+    assert_bad_identity_rejected(
+        json!({"entryPoint":"missing", "steps":{"outer":loop_step("outer", json!({"entryPoint":"finish", "steps":{"finish":finish("wrong")}}))}}),
+        &[("/steps/outer/subgraph", "finish", "wrong")],
+    );
+}
+
+#[test]
+fn audit_07_all_step_variants_check_their_declared_id() {
+    let from_fixture = |source: &str| {
+        let value: Value = serde_json::from_str(source).unwrap();
+        value["steps"][value["entryPoint"].as_str().unwrap()].clone()
+    };
+    let mut cases = vec![
+        finish("declared"),
+        serde_json::to_value(retry_graph(None, "agent")).unwrap()["steps"]["call"].clone(),
+        serde_json::to_value(retry_graph(None, "embed")).unwrap()["steps"]["call"].clone(),
+        serde_json::to_value(retry_graph(None, "split")).unwrap()["steps"]["call"].clone(),
+        serde_json::to_value(retry_graph(None, "ai")).unwrap()["steps"]["call"].clone(),
+        loop_step("declared", leaf("done")),
+        json!({"id":"declared", "stepType":"Log", "message":"audit"}),
+        json!({"id":"declared", "stepType":"Error", "message":"audit", "code":"AUDIT", "category":"permanent"}),
+        json!({"id":"declared", "stepType":"WaitForSignal"}),
+        json!({"id":"declared", "stepType":"Delay", "durationMs":immediate(json!(1))}),
+        from_fixture(include_str!("fixtures/conditional_workflow.json")),
+        from_fixture(include_str!("fixtures/filter_simple.json")),
+        from_fixture(include_str!("fixtures/switch_value_simple.json")),
+        from_fixture(include_str!("fixtures/group_by_simple.json")),
+    ];
+    let types = cases
+        .iter()
+        .map(|step| step["stepType"].as_str().unwrap())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        types.len(),
+        14,
+        "one fixture for every current Step variant"
+    );
+    for step in &mut cases {
+        step["id"] = json!("declared");
+        assert_bad_identity_rejected(
+            json!({"entryPoint":"key", "steps":{"key":step}}),
+            &[("", "key", "declared")],
+        );
+    }
+}
+
+#[test]
+fn audit_07_ai_tool_declarations_are_checked() {
+    let mut root = serde_json::to_value(retry_graph(None, "ai-tools")).unwrap();
+    root["steps"]["echo"]["id"] = json!("wrong");
+    assert_bad_identity_rejected(root, &[("", "echo", "wrong")]);
+}
+
+#[test]
+fn audit_07_multiple_identity_errors_have_stable_order() {
+    for _ in 0..8 {
+        assert_bad_identity_rejected(
+            json!({"entryPoint":"a", "steps":{
+                "z":finish("same"), "a":finish("same"), "outer":loop_step("outer", json!({"entryPoint":"leaf", "steps":{"leaf":finish("wrong")}}))
+            }}),
+            &[
+                ("", "a", "same"),
+                ("", "z", "same"),
+                ("/steps/outer/subgraph", "leaf", "wrong"),
+            ],
+        );
+    }
+}
+
+#[test]
+fn audit_07_visually_similar_ids_are_not_silently_normalized() {
+    for (key, id) in [("step", " step"), ("é", "e\u{301}"), ("Step", "step")] {
+        assert_bad_identity_rejected(
+            json!({"entryPoint":key, "steps":{key:finish(id)}}),
+            &[("", key, id)],
+        );
+    }
+}
+
+#[test]
+fn audit_07_local_ids_can_repeat_in_separate_nested_graphs() {
+    let a = loop_step("a", leaf("finish"));
+    let b = json!({"id":"b", "stepType":"Split", "config":{"value":immediate(json!([1]))}, "subgraph":leaf("finish")});
+    let root = graph(
+        json!({"entryPoint":"a", "steps":{"a":a,"b":b,"finish":finish("finish")}, "executionPlan":[{"fromStep":"a","toStep":"b"},{"fromStep":"b","toStep":"finish"}]}),
+    );
     assert!(
         validate_workflow(&root, &AgentCatalog::default())
             .errors
             .is_empty()
     );
-    let temp = tempfile::tempdir().unwrap();
-    compile_direct_workflow(DirectCompilationInput {
-        workflow_id: "audit-ids".into(),
-        version: 1,
-        source_checksum: None,
-        execution_graph: root,
-        child_workflows: vec![],
-        output_dir: temp.path().into(),
-        track_events: false,
-        agent_catalog: None,
-        agent_slug: None,
-    })
-    .expect("consistent graph compiles");
+    assert!(analyze_direct_wasm_support(&root).supported);
+    compile_audit_graph(root, vec![]).unwrap();
 }
 
-fn assert_bad_identity_rejected(root: Value) {
-    let errors = validate_workflow(&graph(root), &AgentCatalog::default()).errors;
+#[test]
+fn audit_07_preloaded_child_identity_is_validated_before_manifest_construction() {
+    use runtara_workflows::{
+        direct_wasm::{DirectCompileError, analyze_direct_wasm_support_with_child_workflows},
+        validation::{ClosureChildGraph, ValidationError, validate_workflow_closure},
+    };
+    for referenced in [false, true] {
+        for nested in [false, true] {
+            let root = if referenced {
+                retry_graph(None, "embed")
+            } else {
+                graph(leaf("finish"))
+            };
+            let bad = json!({"entryPoint":"finish", "steps":{"finish":finish("wrong")}});
+            let child = graph(if nested {
+                json!({"entryPoint":"outer", "steps":{"outer":loop_step("outer", bad)}})
+            } else {
+                bad
+            });
+            let relative_path = if nested { "/steps/outer/subgraph" } else { "" };
+            let manifest_path = format!("/childWorkflows/0/executionGraph{relative_path}");
+            let mut children = retry_children("embed");
+            children[0].execution_graph = child.clone();
+            let validation = validate_workflow_closure(
+                "audit-identity",
+                &root,
+                &AgentCatalog::default(),
+                &[ClosureChildGraph {
+                    workflow_id: "child".into(),
+                    version: 1,
+                    execution_graph: child.clone(),
+                }],
+            );
+            assert!(validation.errors().any(|(origin,error)| origin == Some(("child",1)) && matches!(error, ValidationError::StepIdMismatch { graph_path, step_key, step_id } if graph_path == relative_path && step_key == "finish" && step_id == "wrong")));
+            let support = analyze_direct_wasm_support_with_child_workflows(&root, &children);
+            assert!(!support.supported);
+            assert_eq!(support.unsupported.len(), 1);
+            assert_eq!(support.unsupported[0].feature, "step-id-mismatch");
+            assert!(support.unsupported[0].reason.contains(&manifest_path));
+            let inputs = [DirectManifestChildWorkflowInput {
+                step_id: "call",
+                workflow_id: "child",
+                version_requested: "latest",
+                version_resolved: 1,
+                execution_graph: &child,
+            }];
+            assert_manifest_identity_error(
+                build_direct_workflow_manifest_with_child_workflows_and_agent_catalog(
+                    &root, &inputs, None,
+                )
+                .unwrap_err(),
+                (manifest_path.as_str(), "finish", "wrong"),
+            );
+            let DirectCompileError::Manifest(error) =
+                compile_audit_graph(root, children).unwrap_err()
+            else {
+                panic!("manifest identity rejection required")
+            };
+            assert_manifest_identity_error(error, (manifest_path.as_str(), "finish", "wrong"));
+        }
+    }
+}
+
+#[test]
+fn audit_07_local_ids_can_repeat_in_separate_children() {
+    use runtara_workflows::validation::{ClosureChildGraph, validate_workflow_closure};
+    let call = |id| json!({"id":id,"stepType":"EmbedWorkflow","childWorkflowId":id,"childVersion":"latest"});
+    let root = graph(
+        json!({"entryPoint":"a","steps":{"a":call("a"),"b":call("b"),"finish":finish("finish")},"executionPlan":[{"fromStep":"a","toStep":"b"},{"fromStep":"b","toStep":"finish"}]}),
+    );
+    let children = ["a", "b"]
+        .into_iter()
+        .map(|id| ChildWorkflowInput {
+            step_id: id.into(),
+            workflow_id: id.into(),
+            version_requested: "latest".into(),
+            version_resolved: 1,
+            execution_graph: graph(leaf("finish")),
+        })
+        .collect::<Vec<_>>();
+    let closure = children
+        .iter()
+        .map(|child| ClosureChildGraph {
+            workflow_id: child.workflow_id.clone(),
+            version: 1,
+            execution_graph: child.execution_graph.clone(),
+        })
+        .collect::<Vec<_>>();
     assert!(
-        !errors.is_empty(),
-        "AUDIT-07: inconsistent map key / inner ID must fail validation"
+        validate_workflow_closure("audit-identity", &root, &AgentCatalog::default(), &closure)
+            .errors()
+            .next()
+            .is_none()
     );
-}
-
-#[test]
-#[ignore = "AUDIT-07: validation checks map keys but does not compare inner IDs"]
-fn audit_07_root_key_id_mismatch_is_rejected() {
-    assert_bad_identity_rejected(
-        json!({"entryPoint": "finish", "steps": {"finish": finish("different")}}),
-    );
-}
-
-#[test]
-#[ignore = "AUDIT-07: nested graph identities are not checked either"]
-fn audit_07_nested_key_id_mismatch_is_rejected() {
-    let body = json!({"entryPoint": "finish", "steps": {"finish": finish("different")}});
-    assert_bad_identity_rejected(json!({"entryPoint": "loop", "steps": {
-        "loop": loop_step("loop", body), "finish": finish("finish")
-    }, "executionPlan": [{"fromStep": "loop", "toStep": "finish"}]}));
-}
-
-#[test]
-#[ignore = "AUDIT-07: different map keys can carry identical inner IDs"]
-fn audit_07_duplicate_inner_ids_are_rejected() {
-    assert_bad_identity_rejected(json!({"entryPoint": "log", "steps": {
-        "log": {"id": "finish", "stepType": "Log", "message": "audit"}, "finish": finish("finish")
-    }, "executionPlan": [{"fromStep": "log", "toStep": "finish"}]}));
+    compile_audit_graph(root, children).unwrap();
 }

@@ -24,6 +24,7 @@ use runtara_dsl::{ExecutionGraph, ExecutionPlanEdge, MappingValue, Step};
 use sha2::{Digest, Sha256};
 
 use crate::compile::TEMPLATE_MAJOR_VERSION;
+use crate::graph_identity::{identity_message, identity_mismatches, step_id};
 use crate::workflow_features::{
     WorkflowFeature, WorkflowFeatureSummary, analyze_workflow_features,
 };
@@ -479,6 +480,15 @@ pub struct DirectEdgeManifest {
 /// Errors returned while building or serializing a direct workflow manifest.
 #[derive(Debug)]
 pub enum DirectManifestError {
+    /// A DSL map key and the step's declared ID disagree.
+    StepIdMismatch {
+        /// JSON pointer to the graph containing this step; empty for the root.
+        graph_path: String,
+        /// Key in the graph's step map.
+        step_key: String,
+        /// Conflicting ID declared inside the step.
+        step_id: String,
+    },
     /// A DSL value failed to serialize into the manifest.
     Serialize(serde_json::Error),
 }
@@ -486,6 +496,13 @@ pub enum DirectManifestError {
 impl fmt::Display for DirectManifestError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            DirectManifestError::StepIdMismatch {
+                graph_path,
+                step_key,
+                step_id,
+            } => {
+                write!(f, "{}", identity_message(graph_path, step_key, step_id))
+            }
             DirectManifestError::Serialize(err) => {
                 write!(f, "failed to serialize direct workflow manifest: {err}")
             }
@@ -517,6 +534,20 @@ pub fn build_direct_workflow_manifest_with_child_workflows_and_agent_catalog(
     child_workflows: &[DirectManifestChildWorkflowInput<'_>],
     agent_catalog: Option<&AgentCatalog>,
 ) -> Result<DirectWorkflowManifest, DirectManifestError> {
+    let mut mismatches = identity_mismatches(graph, "");
+    for (index, child) in child_workflows.iter().enumerate() {
+        mismatches.extend(identity_mismatches(
+            child.execution_graph,
+            &format!("/childWorkflows/{index}/executionGraph"),
+        ));
+    }
+    if let Some(error) = mismatches.into_iter().next() {
+        return Err(DirectManifestError::StepIdMismatch {
+            graph_path: error.graph_path,
+            step_key: error.step_key,
+            step_id: error.step_id,
+        });
+    }
     let mut feature_summary = analyze_workflow_features(graph);
     // An AiAgent step lowers as an invoke of the `ai-tools` `chat-completion`
     // capability, so the workflow must import the ai-tools agent component even
@@ -1555,25 +1586,6 @@ fn sha256_hex(bytes: &[u8]) -> String {
         out.push(HEX[(byte & 0x0f) as usize] as char);
     }
     out
-}
-
-fn step_id(step: &Step) -> &str {
-    match step {
-        Step::Finish(step) => &step.id,
-        Step::Agent(step) => &step.id,
-        Step::Conditional(step) => &step.id,
-        Step::Split(step) => &step.id,
-        Step::Switch(step) => &step.id,
-        Step::EmbedWorkflow(step) => &step.id,
-        Step::While(step) => &step.id,
-        Step::Log(step) => &step.id,
-        Step::Error(step) => &step.id,
-        Step::Filter(step) => &step.id,
-        Step::GroupBy(step) => &step.id,
-        Step::Delay(step) => &step.id,
-        Step::WaitForSignal(step) => &step.id,
-        Step::AiAgent(step) => &step.id,
-    }
 }
 
 fn step_name(step: &Step) -> Option<&str> {

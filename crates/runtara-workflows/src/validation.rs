@@ -59,6 +59,7 @@
 //! | E060 | StepNotYetExecuted | Reference to step that hasn't executed |
 //! | E128 | UnsupportedStepTimeout | A per-step timeout has no enforcement path |
 //! | E129 | RetryCountOverflow | Retries plus the initial attempt exceed u32 |
+//! | E130 | StepIdMismatch | A step map key differs from its declared ID |
 //! | E126 | UnknownReferenceRoot | Reference root is not one of the runtime's supported roots |
 //! | E127 | ReferenceRootOutOfScope | `iteration`/`loop`/`item` root used where the runtime never populates it |
 //! | E070 | UnknownVariable | Variable doesn't exist |
@@ -128,6 +129,13 @@ impl ValidationResult {
 #[allow(missing_docs)] // Fields are self-documenting from variant docs
 pub enum ValidationError {
     // === Graph Structure Errors ===
+    /// A map key disagrees with the step's inner ID. Enforcing equality also
+    /// guarantees unique IDs within each graph, since map keys are unique.
+    StepIdMismatch {
+        graph_path: String,
+        step_key: String,
+        step_id: String,
+    },
     /// Entry point step does not exist in the workflow.
     EntryPointNotFound {
         entry_point: String,
@@ -505,6 +513,7 @@ impl ValidationError {
             Self::QueryOnlyConditionOperator { .. } => "E027",
             Self::UnsupportedStepTimeout { .. } => "E128",
             Self::RetryCountOverflow { .. } => "E129",
+            Self::StepIdMismatch { .. } => "E130",
             Self::DuplicateStepName { .. } => "E060",
             Self::DuplicateEdgePriority { .. } => "E070",
             Self::MultipleDefaultEdges { .. } => "E071",
@@ -528,6 +537,15 @@ impl ValidationError {
 impl std::fmt::Display for ValidationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            ValidationError::StepIdMismatch {
+                graph_path,
+                step_key,
+                step_id,
+            } => write!(
+                f,
+                "[E130] {}",
+                crate::graph_identity::identity_message(graph_path, step_key, step_id)
+            ),
             // Graph Structure Errors
             ValidationError::EntryPointNotFound {
                 entry_point,
@@ -1487,6 +1505,18 @@ pub fn validate_workflow(
     catalog: &runtara_dsl::agent_meta::AgentCatalog,
 ) -> ValidationResult {
     let mut result = ValidationResult::default();
+
+    // Validate every declaration before graph analysis, including onWait graphs
+    // and nested graphs beneath an invalid or missing parent entry point.
+    result.errors.extend(
+        crate::graph_identity::identity_mismatches(graph, "")
+            .into_iter()
+            .map(|error| ValidationError::StepIdMismatch {
+                graph_path: error.graph_path,
+                step_key: error.step_key,
+                step_id: error.step_id,
+            }),
+    );
 
     // Phase 1: Graph structure validation
     validate_graph_structure(graph, &mut result);
