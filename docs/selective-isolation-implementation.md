@@ -626,9 +626,9 @@ all-target Clippy for environment and component host passed with `-D warnings`.
 
 This supplies the root coordinator used by the scoped execution API. The
 environment runner still needs to select and construct it from the approved
-artifact/authority policy. Bounded shared signal polling, durable root/attempt
-fences, aggregate reservations, extracted child graphs and final local-server
-qualification remain required; the production default is unchanged.
+artifact/authority policy. Durable root/attempt fences, aggregate reservations,
+extracted child graphs and final local-server qualification remain required.
+Shared polling is implemented below; the production default is unchanged.
 
 ### Compiler invocation inventory through prepared execution
 
@@ -666,6 +666,41 @@ namespace/loop validation, checkpoint authority and durable attempt fencing.
 No production runner or backend default has changed. Current v2 package size,
 validation cost and execution timings require fresh paired measurements; the
 existing v1 performance report is historical evidence for that backend only.
+
+### Shared lifecycle polling for scoped execution
+
+The scoped root and all children now use one lifecycle poll cache and one
+in-flight read per root owner. Ordinary `check-signals`/`is-cancelled` calls share
+positive, empty and error results for the root host's existing interval (one
+second by default). Every sibling sees a cached pending command; a child cannot
+consume the only observation. The cache retains command identity/type only.
+Explicit checkpoint receipts still request a fresh read to reject superseded
+commands; checkpoint IO and these validations are outside the tight-loop polling
+budget. Custom-signal and heartbeat behavior is unchanged.
+
+A checkpoint or interrupted sleep that reports a pending command invalidates the
+cache immediately. Invalidation does not wait behind a slow poll, and a read
+started before invalidation cannot populate a valid cache entry afterward. A
+cancelled reader drops its request and releases the shared lock, allowing a
+sibling to retry without spawning an unowned worker. Closure checks before and
+after polling prevent a result from re-opening runtime authority after teardown.
+The actual task cancellation token still wins immediately for its child.
+
+Verification: **47 runtime tests passed** with isolated PostgreSQL, including
+six deterministic poller tests and the existing real-WASM lifecycle tests. New
+coverage verifies 64 concurrent waiters share one read, all callers retain a
+positive observation, empty/error cache expiry, explicit receipt revalidation,
+zero-interval operation, cancelled reads, and invalidation during a blocked read.
+Database tests cover 48 parent/child polls, checkpoint invalidation from either
+scope, replacement Cancel receipts, and Cancel/Shutdown sleep interruption in
+both scopes without early acknowledgement or legacy escalation. The initial
+sleep test incorrectly expected Pause to interrupt; it was corrected to retain
+Core's existing cooperative Pause semantics. Feature-enabled all-target Clippy
+passed with `-D warnings`. The test PostgreSQL container was stopped afterward.
+
+This bounds ordinary lifecycle polling across the scoped execution tree. It does
+not add targeted command routing, durable fencing, production runner selection,
+or change Pause into a sleep interrupt. Those remain separate plan requirements.
 
 ## Remaining required work
 

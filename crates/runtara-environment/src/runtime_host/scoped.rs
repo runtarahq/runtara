@@ -9,6 +9,7 @@ use std::sync::Mutex;
 
 mod invocation;
 mod root;
+mod signal_poll;
 pub use invocation::{
     AuthorizedChild, InvocationAuthority, ScopedInvocationFactory, ScopedRunSettings,
 };
@@ -38,6 +39,7 @@ pub struct ScopedRuntimeOwner {
     root: Arc<PersistenceRuntimeHost>,
     observed: Mutex<Observed>,
     applying: tokio::sync::Mutex<()>,
+    signals: signal_poll::SignalPoll,
 }
 
 /// Root lifecycle effects accepted after child teardown.
@@ -58,6 +60,7 @@ impl ScopedRuntimeOwner {
     /// Bind child runtime authority to this root host.
     pub fn new(root: Arc<PersistenceRuntimeHost>) -> Self {
         Self {
+            signals: signal_poll::SignalPoll::new(root.signal_poll_interval),
             root,
             observed: Mutex::new(Observed::default()),
             applying: tokio::sync::Mutex::new(()),
@@ -116,22 +119,35 @@ impl ScopedRuntimeOwner {
         cancel_only: bool,
     ) -> Result<bool, String> {
         self.ensure_open()?;
-        let response = handle_poll_signals(
-            &self.root.state,
-            PollSignalsRequest {
-                instance_id: self.root.instance_id.clone(),
-                checkpoint_id: None,
-            },
-        )
-        .await
-        .map_err(PersistenceRuntimeHost::err)?;
-        let Some(signal) = response.signal else {
+        let signal = self
+            .signals
+            .poll(receipt.is_some(), || async {
+                // A caller may have waited behind another read while cleanup closed
+                // the owner. Do not start new persistence IO after that fence.
+                self.ensure_open()?;
+                let response = handle_poll_signals(
+                    &self.root.state,
+                    PollSignalsRequest {
+                        instance_id: self.root.instance_id.clone(),
+                        checkpoint_id: None,
+                    },
+                )
+                .await
+                .map_err(PersistenceRuntimeHost::err)?;
+                Ok(response.signal.map(|signal| signal_poll::Receipt {
+                    command_id: signal.command_id,
+                    kind: signal.signal_type,
+                }))
+            })
+            .await?;
+        self.ensure_open()?;
+        let Some(signal) = signal else {
             return Ok(false);
         };
-        let Some(kind) = PersistenceRuntimeHost::signal_type_of(signal.signal_type) else {
+        let Some(kind) = PersistenceRuntimeHost::signal_type_of(signal.kind) else {
             return Ok(false);
         };
-        let name = PersistenceRuntimeHost::signal_type_name(signal.signal_type);
+        let name = PersistenceRuntimeHost::signal_type_name(signal.kind);
         if cancel_only && kind != SignalType::SignalCancel {
             return Ok(false);
         }
@@ -412,6 +428,9 @@ impl RuntimeHost for ScopedRuntimeHost {
         )
         .await
         .map_err(PersistenceRuntimeHost::err)?;
+        if result.pending_signal.is_some() {
+            self.owner.signals.invalidate();
+        }
         Ok(RuntimeCheckpointResult {
             found: result.found,
             state: result.state,
@@ -463,7 +482,7 @@ impl RuntimeHost for ScopedRuntimeHost {
         ms: u64,
     ) -> Result<(), String> {
         self.key(&checkpoint_id)?;
-        handle_sleep(
+        let response = handle_sleep(
             &self.owner.root.state,
             SleepRequest {
                 instance_id: self.owner.root.instance_id.clone(),
@@ -474,6 +493,9 @@ impl RuntimeHost for ScopedRuntimeHost {
         )
         .await
         .map_err(PersistenceRuntimeHost::err)?;
+        if response.pending_signal.is_some() {
+            self.owner.signals.invalidate();
+        }
         // The guest's next signal poll reports the receipt to the root owner;
         // sleeping never arms the legacy root-host cancellation escalation.
         Ok(())

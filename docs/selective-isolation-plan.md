@@ -249,6 +249,14 @@ compiler namespace authorization, persistent attempt fencing and parking/wake
 qualification are still pending; see the
 [implementation record](selective-isolation-implementation.md#supervised-root-lifecycle-coordination).
 
+Scoped parent and child lifecycle checks now share the root's existing poll
+interval and a single in-flight read. Cached positive results remain visible to
+all siblings; explicit checkpoint receipt validation remains fresh. Trusted
+checkpoint/sleep responses invalidate cached absence without blocking on another
+poll. Cancellation of a polling child releases the read for its peers. These
+limits cover ordinary lifecycle polls, not checkpoint IO, custom-signal reads or
+heartbeat coalescing; production capacity qualification must measure all of them.
+
 Suspending a child returns the lifecycle **wake set**, including absolute timed
 wakes, signal addresses/deadlines and on-resume. Parent WASM follows the existing
 sibling settle/checkpoint rules, then propagates the required wake set to its

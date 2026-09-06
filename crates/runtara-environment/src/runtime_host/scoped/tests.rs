@@ -7,6 +7,8 @@ use runtara_core::persistence::ListEventsFilter;
 mod invocation_tests;
 #[path = "root_tests.rs"]
 mod root_tests;
+#[path = "signal_poll_tests.rs"]
+mod signal_poll_tests;
 
 struct Keys(&'static str);
 impl CheckpointAuthority for Keys {
@@ -29,13 +31,17 @@ struct Fixture {
 }
 impl Fixture {
     async fn new() -> Self {
+        Self::with_poll_interval(DEFAULT_SIGNAL_POLL_INTERVAL).await
+    }
+    async fn with_poll_interval(interval: Duration) -> Self {
         let (persistence, id) = crate::test_support::running_instance("scoped-runtime").await;
         persistence
             .store_instance_input(&id, b"root input")
             .await
             .unwrap();
         let owner = Arc::new(ScopedRuntimeOwner::new(Arc::new(
-            PersistenceRuntimeHost::from_persistence(persistence.clone(), id.clone(), true),
+            PersistenceRuntimeHost::from_persistence(persistence.clone(), id.clone(), true)
+                .with_signal_poll_interval(interval),
         )));
         let engine = runtara_component_host::build_engine(&runtara_component_host::EngineConfig {
             cache_dir: None,
