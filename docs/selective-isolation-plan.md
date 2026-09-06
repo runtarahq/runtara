@@ -487,6 +487,88 @@ Comparison conclusions limited to this baseline:
   must not stand in for deployed persistence latency, and larger payloads need
   separate tests for materialization/copying costs.
 
+### Measurement contract for baseline versus candidate
+
+Keep the existing 11 cases as the minimum comparison suite. Run each unchanged
+through the legacy and isolated backends on the same machine and revision, using
+an explicit backend selector once available. Record actual isolated invocation
+counts and fallback reasons alongside every sample group. A case that falls back
+to legacy execution measures compatibility, not isolation overhead.
+
+The single-step reference is one `utils/random-double` Agent followed by Finish,
+with the generated value returned and checked. Keep separate cases for DSL
+defaults, `durable: false`, durable execution and event tracking. Use the exact
+same input and configuration for each backend; random output bytes need not match
+across fresh runs, but type, range, count and replay behavior must match.
+
+| Metric | Start → end / accounting boundary | Comparison purpose |
+|---|---|---|
+| Complete raw `.wasm` bytes | Entire distributable artifact, including the child catalog and embedded component bodies | Deployment/storage cost; a smaller root alone is not a size improvement. |
+| Compressed package bytes | Compress the complete artifact with the same tool, version and flags | Transfer cost; do not sum separately compressed children as if that were the shipped package. |
+| Root, logic and child bytes | Report root logic, root runtime/dependencies, catalog metadata, unique child bytes, unique child count and binding count separately | Explain fixed costs and verify that 100 calls do not embed 100 identical children. Identify overlapping size categories rather than summing them. |
+| Prepared native bytes | Serialized root plus all unique prepared children and their index | Native cache/disk footprint, separately from portable WASM. |
+| DSL compilation | Parse/validate/emit, compose/package, then total DSL → artifact | Compiler overhead, independent of Rust/Cargo dependency builds. |
+| Native preparation | Artifact verification, native compile, deserialize/link and total preparation, with cache state labeled | First-use cost and prepared-cache benefit. |
+| Single-step service time | Immediately before invoking the Agent boundary → result available to the parent | Invocation cost, including child admission, instantiation, input/output transfer and reaping when those occur inside this boundary. Report internal phases separately where available. |
+| Parent step time | Before input mapping → output mapping/checkpoint/event handling complete | User-visible step cost, including orchestration inside WASM. |
+| Prepared full execution | Fresh Store setup → graph completion, result collection and teardown | Existing cached full-run metric; includes Agent + Finish, runtime calls and all owned child cleanup. |
+| First result from DSL | DSL input → first completed result, engine already created | Existing compilation + preparation + execution metric; explicitly excludes process startup and API queueing. |
+| Server end-to-end time | Accepted execution request → persisted terminal result | Production overhead, with queue/admission, preparation, active execution and persistence spans. Measure client-observed request/response latency separately. |
+| Cancellation and recovery | Cancel accepted → child stopped/reaped → parent recovery output | Responsiveness and preservation of the rest of the workflow; record all three timestamps. |
+| Resource cost | Peak aggregate guest memory, process RSS, retained results/cache bytes, CPU time, active children and released resources | Capacity consequences that elapsed time and largest-single-memory telemetry miss. |
+
+The current harness measures prepared full execution and first result from DSL;
+it does **not** yet measure the two step spans or all preparation subphases above.
+Add those spans to both backends before making claims about step-only overhead.
+Use separate instrumented runs to attribute phases, and uninstrumented runs for
+headline latency; quantify instrumentation overhead. Do not subtract Finish-only
+latency from a full run and call the difference an exact Agent measurement.
+
+### Workload and statistical comparison requirements
+
+- Keep one, ten and 100 random calls, sequential and parallel Split, an embedded
+  child, Finish-only and the large-output case. Report both total run latency and
+  completed calls/second; dividing parallel elapsed time by calls is not individual
+  step latency.
+- Add child-boundary payload sweeps at 1 KiB, 16 KiB, 64 KiB and 1 MiB, including
+  values immediately below/at/above the configured materialization threshold.
+  The existing Finish-only 1 MiB case does not exercise a cross-Store transfer.
+- Add controlled CPU work and delayed local HTTP, with success, retry, suspension,
+  cancellation and sibling-continuation cases. Label unsupported baseline operations
+  as unavailable rather than assigning zero time or simulating successful support.
+- Measure durable first execution and checkpoint replay separately. For server runs,
+  use isolated persistence and deterministic local services; record database and
+  service configuration and distinguish service waiting from active CPU time.
+- Run release builds with identical dependency hashes, engine settings, memory
+  limits, event/durability options and inputs. Record OS/architecture, CPU/RAM,
+  toolchain, revisions, artifact hashes, concurrency and warmup/sample counts.
+  Label fresh process, cold native cache, warm prepared cache and replay explicitly;
+  an uncached native compile does not imply a cold filesystem cache.
+- Alternate backend order across repeated paired runs, run them serially without
+  competing builds, and retain raw samples for the candidate qualification suite.
+  Report median/p95 and absolute plus percentage differences; use enough samples
+  for tail estimates. The existing 30/100-sample groups are exploratory evidence,
+  not a reliable p99 gate. Use at least 1,000 completed samples per condition for
+  production tail analysis and report uncertainty across independent runs.
+- Report throughput and tails at concurrency 1/4/16/64 with the same offered load
+  and resource limits. Include failures, admission rejections and cancellation
+  counts; do not improve reported latency by silently excluding failed requests.
+
+Publish one comparison row per workload, cache mode and metric:
+
+| Workload / mode | Metric and unit | Baseline | Isolated | Absolute delta | Delta % | Samples / uncertainty | Correctness / isolation coverage |
+|---|---|---|---|---|---|---|---|
+| `random_1_defaults` / prepared | Full execution p50, µs | Same-session measurement | Pending backend | Pending | Pending | Per-backend counts and repeated-run spread | Output valid; actual child count verified |
+
+Calculate percentage delta as `100 × (isolated − baseline) / baseline`; use N/A
+when the baseline is zero or unavailable. Lower is better for bytes, latency and
+resource usage; higher is better for throughput. Establish and record acceptance
+budgets for package growth, latency, memory, throughput and cancellation before
+candidate qualification, based on deployment requirements and the paired Linux
+baseline. The local macOS medians are not those budgets. Any proposed default
+rollout must include the completed comparison and explanations of regressions,
+as well as passing compatibility gates.
+
 ### Reproduction
 
 Build the real components with `scripts/build-agent-components.sh` if they are
