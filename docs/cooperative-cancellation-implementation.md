@@ -977,3 +977,39 @@ This first comparison will be interim: only 15 of 27 Agent bindings are migrated
 Parent-step instrumentation/cost, full DSL validation timing, real HTTP waits,
 public-server terminal timing, cancellation/abort latency, Linux capacity and
 resource-soak measurements remain required before final qualification.
+
+## First fresh no-cancellation comparison
+
+[The interim report](research/workflow-cooperative-cancellation-comparison.md)
+and its [raw samples/manifest](research/workflow-cooperative-cancellation-comparison.json)
+compare upstream `4eff9cdf83342ad45ef89f73181934c5485085a0` with candidate
+`103c32cee4fccc1f52ac960c21a86294e8c48d77`. Both used independently built release
+artifacts and the identical shared harness. All six processes completed the
+14-workload corpus with five warmups, 1,000 prepared samples per condition,
+three cold samples, replay validation and a separate random-double Agent timer.
+Preserved `.wasm`, graph and input artifacts were checked against their hashes.
+Sources and relevant component/metadata inputs remained fixed throughout each
+run. No custom task-service import participates in the measured artifacts.
+
+The first driver attempt completed its baseline process but failed to parse a
+libtest-prefixed report. A parser fix and two regression tests were committed;
+all three pairs were then restarted in a fresh output directory. The failed
+attempt remains separate and none of its samples are used in the report. The
+completed cohort's logs and preserved artifacts remain under
+`/private/tmp/cooperative-measurements-20260907-r2`.
+
+The single non-durable random workflow's `.wasm` grows by 0.15%; the 100-step
+chain grows by 8.0% raw, 0.50% gzip and 8.5% serialized native bytes. The chain's
+native compilation is materially slower in all three pairs, and its first-result
+medians are 2.26–3.64 times baseline. Generated chain logic approximately doubles
+in size while the utils Agent and JSON stdlib binaries are identical. Repeated
+inline wait/poll/cleanup emission is a concrete optimization target, subject to
+preserving caller-local state and the cancellation/cleanup/acknowledgement tests.
+Prepared runtime results and their per-process variation are in the report; do
+not attribute all timing differences to a single code change.
+
+This closes the first fresh paired measurement task, not the full performance
+gate. Remaining Agent/nested-workflow integration, parent-step instrumentation,
+full validation timing, real HTTP and public-server timing, cancellation/abort
+latency, signal-poll/DB cost, Linux capacity/soak and deployment budgets remain
+open. Re-qualify after the remaining implementation and superseded-path cleanup.

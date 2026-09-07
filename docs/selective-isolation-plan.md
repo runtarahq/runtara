@@ -249,6 +249,16 @@ relabelling their results. Publish fresh results as
 `docs/research/workflow-cooperative-cancellation-comparison.md` and `.json`, with
 raw samples and a machine-readable configuration manifest.
 
+The [first interim comparison](research/workflow-cooperative-cancellation-comparison.md)
+now covers 14 workloads in three paired release sessions, with 1,000 prepared
+samples per condition. It does not close the full qualification gate. The
+100-step chain has 8.0% more raw `.wasm` bytes and 2.26–3.64 times the
+compile-through-first-result median; prepared execution changes by +1.5–4.1%.
+Investigate shared emitted wait/poll/cleanup helpers before closing P2 performance
+work, preserving caller-local state, early returns and cleanup-before-ack tests.
+Re-run paired measurements after optimization and after the remaining migration;
+missing server, cancellation, instrumentation and capacity metrics remain pending.
+
 | Metric | Required boundary |
 |---|---|
 | `.wasm` bytes | Entire normally composed distributable artifact; raw and gzip with identical compression settings; report workflow logic/dependencies without double counting |
