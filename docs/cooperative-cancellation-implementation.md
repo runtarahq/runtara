@@ -1013,3 +1013,32 @@ gate. Remaining Agent/nested-workflow integration, parent-step instrumentation,
 full validation timing, real HTTP and public-server timing, cancellation/abort
 latency, signal-poll/DB cost, Linux capacity/soak and deployment budgets remain
 open. Re-qualify after the remaining implementation and superseded-path cleanup.
+
+## Shared guest wait functions
+
+The emitter now places polling, retained-signal handling, checkpoint-signal
+handling, sequential waits and parallel-window waits in shared core-WASM
+functions inside the workflow artifact. Fifteen explicit i32 parameters/results
+carry invocation-local handles, window boundaries and retained signal identity;
+there is no heap frame or global cancellation state. Scratch cursors remain
+local to each function. An extra result tells the entry to continue, propagate
+an error or return suspended using its existing ABI. Cleanup still resolves all
+owned subtasks before acknowledgement or terminal error reporting. Eagerly
+returned Agent calls skip the wait helper entirely.
+
+This updates the existing emitter path. Runtime-omitted workflows emit only
+runtime-free wait helpers; workflows without Agents retain their existing
+lowering. A cache identity revision replaces previously emitted inline waits
+when workflows are recompiled. No new component imports or product flags are
+introduced.
+
+A structural regression test validates 1- and 100-Agent core modules across CLI,
+lifecycle and capability entry ABIs (including the runtime-omitted capability
+shape), bounding additional code to less than 3,300 bytes per site. Existing
+checkpoint-order tests now follow calls into defined helpers while distinguishing
+helper returns from workflow returns. Cancellation integration coverage continues
+to check no launch after pre-call Cancel, pending headers/body cleanup, every
+parallel scheduling form, poll failures, cleanup-before-acknowledgement, and
+retained Pause/Shutdown receipts. Fresh paired release measurements are required
+before declaring the size/compilation regression resolved; the first report
+remains an immutable pre-optimization snapshot.

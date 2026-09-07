@@ -33,6 +33,133 @@ const START_CANCELLED: i32 = 3;
 const CANCELLED: i32 = 4;
 const POLL_INTERVAL_MS: i64 = 1_000;
 
+// Shared core functions receive and return invocation-local state as Wasm
+// values. No globals, heap frame, new imports, or host-owned tasks are needed.
+// Scratch cursors/handles are deliberately excluded. STATUS is the packed
+// input to Await; the final extra result describes entry control flow.
+const STATE: [u32; 15] = [
+    TARGET,
+    SET,
+    TIMER,
+    STATUS,
+    WINDOW_END,
+    WINDOW_TIMER,
+    WINDOW_ACTIVE,
+    DEFER_BOUNDARY,
+    SIGNAL_PTR,
+    SIGNAL_LEN,
+    COMMAND_PTR,
+    COMMAND_LEN,
+    SIGNAL_PENDING,
+    WINDOW_BEGIN,
+    super::DIRECT_PSPLIT_WS_LOCAL,
+];
+pub(super) const HELPER_PARAMS: usize = STATE.len();
+pub(super) const HELPER_COUNT: usize = 5;
+
+#[derive(Clone, Copy)]
+pub(super) enum Helper {
+    Poll,
+    Boundary,
+    Checkpoint,
+    Await,
+    WindowWait,
+}
+
+impl Helper {
+    pub(super) const ALL: [Self; HELPER_COUNT] = [
+        Self::Poll,
+        Self::Boundary,
+        Self::Checkpoint,
+        Self::Await,
+        Self::WindowWait,
+    ];
+
+    pub(super) fn needs_runtime(self) -> bool {
+        matches!(self, Self::Poll | Self::Boundary | Self::Checkpoint)
+    }
+}
+
+fn helper_return(body: &mut Function, outcome: i32) {
+    for local in STATE {
+        body.instruction(&Instruction::LocalGet(local));
+    }
+    body.instruction(&Instruction::I32Const(outcome));
+    body.instruction(&Instruction::Return);
+}
+
+/// Outcomes: 0 resumes the graph, 1 propagates the error at zero, 2 suspends.
+/// Entry-ABI-specific terminal reporting remains in the entry function.
+fn call_helper(body: &mut Function, indices: &DirectCoreFunctionIndices, helper: Helper) -> bool {
+    let Some(index) = indices.cooperative_helpers[helper as usize] else {
+        return false;
+    };
+    for local in STATE {
+        body.instruction(&Instruction::LocalGet(local));
+    }
+    body.instruction(&Instruction::Call(index));
+    body.instruction(&Instruction::LocalSet(CURSOR));
+    for local in STATE.into_iter().rev() {
+        body.instruction(&Instruction::LocalSet(local));
+    }
+    body.instruction(&Instruction::LocalGet(CURSOR));
+    body.instruction(&Instruction::I32Const(1));
+    body.instruction(&Instruction::I32Eq);
+    body.instruction(&Instruction::If(BlockType::Empty));
+    emit_fail_if_retptr_error_inplace(body, indices);
+    // An error outcome must never continue the workflow, even if a malformed
+    // runtime response somehow omitted its error tag.
+    body.instruction(&Instruction::Unreachable);
+    body.instruction(&Instruction::End);
+    body.instruction(&Instruction::LocalGet(CURSOR));
+    body.instruction(&Instruction::I32Const(2));
+    body.instruction(&Instruction::I32Eq);
+    body.instruction(&Instruction::If(BlockType::Empty));
+    emit_entry_suspend_return(body, indices);
+    body.instruction(&Instruction::End);
+    true
+}
+
+pub(super) fn helper_body(helper: Helper, indices: &DirectCoreFunctionIndices) -> Function {
+    // Keep the emitter's canonical absolute local indices. Parameters occupy
+    // its first 15 i32 slots and are copied to the state locals before use.
+    let mut body = Function::new(super::core_module::drop_leading_locals(
+        super::core_module::CANONICAL_LOCAL_GROUPS,
+        HELPER_PARAMS as u32,
+    ));
+    for (param, local) in STATE.into_iter().enumerate() {
+        body.instruction(&Instruction::LocalGet(param as u32));
+        body.instruction(&Instruction::LocalSet(local));
+    }
+    let mut inline = indices.clone();
+    inline.cooperative_helpers = [None; HELPER_COUNT];
+    inline.cooperative_helper_body = true;
+    match helper {
+        Helper::Poll => emit_poll_before_call(&mut body, &inline),
+        Helper::Boundary => emit_retained_boundary(&mut body, &inline),
+        Helper::Checkpoint => emit_checkpoint_signal(&mut body, &inline),
+        Helper::Await => {
+            body.instruction(&Instruction::LocalGet(STATUS));
+            emit_await_call(&mut body, &inline);
+        }
+        Helper::WindowWait => emit_window_wait(&mut body, &inline),
+    }
+    helper_return(&mut body, 0);
+    body.instruction(&Instruction::End);
+    body
+}
+
+fn fail_if_error(body: &mut Function, indices: &DirectCoreFunctionIndices) {
+    if indices.cooperative_helper_body {
+        load_tag(body, 0, 0);
+        body.instruction(&Instruction::If(BlockType::Empty));
+        helper_return(body, 1);
+        body.instruction(&Instruction::End);
+    } else {
+        emit_fail_if_retptr_error_inplace(body, indices);
+    }
+}
+
 fn mem(offset: u64) -> MemArg {
     MemArg {
         offset,
@@ -160,7 +287,7 @@ fn poll_error(body: &mut Function, indices: &DirectCoreFunctionIndices) {
         load(body, POLL, offset);
         body.instruction(&Instruction::I32Store(mem(offset)));
     }
-    emit_fail_if_retptr_error_inplace(body, indices);
+    fail_if_error(body, indices);
     body.instruction(&Instruction::End);
 }
 
@@ -182,11 +309,15 @@ fn acknowledge(body: &mut Function, indices: &DirectCoreFunctionIndices, cancel:
     }
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.runtime_handle_checkpoint_signal));
-    emit_fail_if_retptr_error_inplace(body, indices);
+    fail_if_error(body, indices);
     set_zero(body, SIGNAL_PENDING);
     load_tag(body, 0, 4);
     body.instruction(&Instruction::If(BlockType::Empty));
-    emit_entry_suspend_return(body, indices);
+    if indices.cooperative_helper_body {
+        helper_return(body, 2);
+    } else {
+        emit_entry_suspend_return(body, indices);
+    }
     if cancel {
         // A rejected Cancel receipt cannot resume a graph whose calls were cancelled.
         body.instruction(&Instruction::Else);
@@ -241,6 +372,9 @@ fn poll(body: &mut Function, indices: &DirectCoreFunctionIndices, heartbeat: boo
 /// overwrite its signal record. Pause/shutdown wait for the window's durable
 /// assembly boundary; Cancel cleans all active handles before acknowledgement.
 pub(super) fn emit_checkpoint_signal(body: &mut Function, indices: &DirectCoreFunctionIndices) {
+    if call_helper(body, indices, Helper::Checkpoint) {
+        return;
+    }
     load_tag(body, 0, 0);
     body.instruction(&Instruction::I32Eqz);
     body.instruction(&Instruction::If(BlockType::Empty));
@@ -253,6 +387,9 @@ pub(super) fn emit_checkpoint_signal(body: &mut Function, indices: &DirectCoreFu
 }
 
 pub(super) fn emit_retained_boundary(body: &mut Function, indices: &DirectCoreFunctionIndices) {
+    if call_helper(body, indices, Helper::Boundary) {
+        return;
+    }
     act_on_cancel(body, indices);
     body.instruction(&Instruction::LocalGet(DEFER_BOUNDARY));
     body.instruction(&Instruction::I32Eqz);
@@ -301,6 +438,9 @@ pub(super) fn emit_window_boundary(body: &mut Function, indices: &DirectCoreFunc
 /// Wait for one event. A polling timer is internal to this wait and never
 /// decrements the window's call count or advances a branch cursor.
 pub(super) fn emit_window_wait(body: &mut Function, indices: &DirectCoreFunctionIndices) {
+    if call_helper(body, indices, Helper::WindowWait) {
+        return;
+    }
     if !indices.omit_runtime {
         body.instruction(&Instruction::LocalGet(WINDOW_TIMER));
         body.instruction(&Instruction::I32Eqz);
@@ -372,6 +512,9 @@ pub(super) fn emit_forget_returned(body: &mut Function) {
 }
 
 pub(super) fn emit_poll_before_call(body: &mut Function, indices: &DirectCoreFunctionIndices) {
+    if call_helper(body, indices, Helper::Poll) {
+        return;
+    }
     if !indices.omit_runtime {
         poll(body, indices, false);
     }
@@ -386,6 +529,11 @@ pub(super) fn emit_await_call(body: &mut Function, indices: &DirectCoreFunctionI
     body.instruction(&Instruction::I32Const(RETURNED));
     body.instruction(&Instruction::I32Ne);
     body.instruction(&Instruction::If(BlockType::Empty));
+    // Eagerly completed calls need neither a wait nor a state transfer.
+    if call_helper(body, indices, Helper::Await) {
+        body.instruction(&Instruction::End);
+        return;
+    }
     body.instruction(&Instruction::LocalGet(STATUS));
     body.instruction(&Instruction::I32Const(4));
     body.instruction(&Instruction::I32ShrU);

@@ -1132,7 +1132,7 @@ pub fn direct_lowering_tag() -> String {
     // their run permits until the execution timeout, and recompiling reported
     // success without rebuilding anything.
     format!(
-        "abi={}-v{},durable-delay-parking=v1,omit_runtime={}",
+        "abi={}-v{},durable-delay-parking=v1,cooperative-waits=shared-v1,omit_runtime={}",
         workflow_abi_tag(super::component::WorkflowAbi::InvokeHostImports),
         DIRECT_WORKFLOW_INVOKE_ABI_VERSION,
         omit_runtime_from_env()

@@ -9,7 +9,7 @@
 //! the Canonical-ABI-mandated realloc/initialize/post-return intrinsics, one linear
 //! memory sized to the static-data layout, the seeded heap-base global, and the
 //! data segments. The shape must match exactly what `wac compose` expects, while
-//! all real logic stays in the one `run` body.
+//! workflow logic and shared cooperative waits stay in the same core module.
 
 use wasm_encoder::{
     BlockType, CodeSection, ConstExpr, DataSection, ExportKind, ExportSection,
@@ -426,6 +426,33 @@ pub(super) fn emit_direct_core_module(
         }
     }
 
+    // Reserve forward references so the entry and its post-return retain their
+    // existing positions. Each WIT function adds an export and a post-return;
+    // realloc (unless already emitted) and initialize follow them.
+    if has_agents {
+        let export_count: u32 = world
+            .exports
+            .values()
+            .map(|item| match item {
+                WorldItem::Function(_) => 1,
+                WorldItem::Interface { id, .. } => resolve.interfaces[*id].functions.len() as u32,
+                WorldItem::Type { .. } => 0,
+            })
+            .sum();
+        let mut next_helper = imported_function_count
+            + next_defined_function
+            + 2 * export_count
+            + u32::from(!early_realloc)
+            + 1;
+        for helper in super::cooperative_wait::Helper::ALL {
+            if config.omit_runtime && helper.needs_runtime() {
+                continue;
+            }
+            import_indices.cooperative_helpers[helper as usize] = Some(next_helper);
+            next_helper += 1;
+        }
+    }
+
     for (name, export) in &world.exports {
         match export {
             WorldItem::Function(function) => {
@@ -513,6 +540,24 @@ pub(super) fn emit_direct_core_module(
         imported_function_count,
         &mut next_defined_function,
     );
+
+    if has_agents {
+        use super::cooperative_wait::{HELPER_PARAMS, Helper, helper_body};
+        let helper_type = type_count;
+        types.ty().function(
+            vec![ValType::I32; HELPER_PARAMS],
+            vec![ValType::I32; HELPER_PARAMS + 1],
+        );
+        for helper in Helper::ALL {
+            let Some(index) = import_indices.cooperative_helpers[helper as usize] else {
+                continue;
+            };
+            assert_eq!(index, imported_function_count + next_defined_function);
+            next_defined_function += 1;
+            functions.function(helper_type);
+            code.function(&helper_body(helper, &import_indices));
+        }
+    }
 
     let mut data = DataSection::new();
     for segment in config.static_data.data_segments() {
@@ -742,7 +787,7 @@ pub(super) const CANONICAL_LOCAL_GROUPS: &[(u32, ValType)] = &[
 /// Drop `n` leading local slots from `groups`, splitting (never merging) the
 /// group the drop lands in so every surviving slot keeps its absolute index and
 /// type. Used to fold export params onto the front of [`CANONICAL_LOCAL_GROUPS`].
-fn drop_leading_locals(groups: &[(u32, ValType)], n: u32) -> Vec<(u32, ValType)> {
+pub(super) fn drop_leading_locals(groups: &[(u32, ValType)], n: u32) -> Vec<(u32, ValType)> {
     let mut remaining = n;
     let mut out = Vec::new();
     for &(count, ty) in groups {

@@ -712,6 +712,55 @@ fn direct_core_imports_and_run_calls(core: &[u8]) -> (HashMap<String, u32>, Vec<
     (imports, run_calls)
 }
 
+/// Expand calls to defined core helpers for structural ordering assertions.
+/// Only entry returns are retained: a helper return does not end the workflow.
+fn entry_operators_with_helpers(core: &[u8]) -> Vec<Operator<'_>> {
+    let mut imported = 0;
+    let mut bodies = Vec::new();
+    for payload in Parser::new(0).parse_all(core) {
+        match payload.expect("core payload") {
+            Payload::ImportSection(reader) => {
+                imported += reader
+                    .into_imports()
+                    .filter(|import| {
+                        matches!(import.as_ref().expect("import").ty, TypeRef::Func(_))
+                    })
+                    .count();
+            }
+            Payload::CodeSectionEntry(body) => bodies.push(
+                body.get_operators_reader()
+                    .expect("operators")
+                    .into_iter()
+                    .map(|op| op.expect("operator"))
+                    .collect::<Vec<_>>(),
+            ),
+            _ => {}
+        }
+    }
+    fn expand<'a>(
+        body: usize,
+        imported: usize,
+        bodies: &[Vec<Operator<'a>>],
+        depth: usize,
+        out: &mut Vec<Operator<'a>>,
+    ) {
+        assert!(depth < 16, "unexpected recursive core helper");
+        for op in &bodies[body] {
+            if depth == 0 || !matches!(op, Operator::Return) {
+                out.push(op.clone());
+            }
+            if let Operator::Call { function_index } = op
+                && let Some(index) = (*function_index as usize).checked_sub(imported)
+            {
+                expand(index, imported, bodies, depth + 1, out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    expand(0, imported, &bodies, 0, &mut out);
+    out
+}
+
 fn direct_core_import(imports: &HashMap<String, u32>, module: &str, name: &str) -> u32 {
     *imports
         .get(&format!("{module}::{name}"))
@@ -5956,7 +6005,7 @@ fn direct_core_lowers_durable_agent_no_retry_checkpoint_path() {
                     }
                 }
             }
-            Payload::CodeSectionEntry(body) => {
+            Payload::CodeSectionEntry(_body) => {
                 if code_body_index == 0 {
                     let mut saw_cache_key_call = false;
                     let mut saw_lookup_call = false;
@@ -5964,8 +6013,8 @@ fn direct_core_lowers_durable_agent_no_retry_checkpoint_path() {
                     let mut saw_checkpoint_call = false;
                     let mut saw_handle_checkpoint_signal_call = false;
                     let mut last_i32_const_after_signal_handler = None;
-                    for operator in body.get_operators_reader().expect("operators") {
-                        match operator.expect("operator") {
+                    for operator in entry_operators_with_helpers(&core) {
+                        match operator {
                             Operator::Call { function_index }
                                 if Some(function_index) == agent_cache_key_index =>
                             {
@@ -6420,7 +6469,7 @@ fn direct_core_lowers_durable_agent_retry_loop() {
                     }
                 }
             }
-            Payload::CodeSectionEntry(body) => {
+            Payload::CodeSectionEntry(_body) => {
                 if code_body_index == 0 {
                     let mut saw_lookup_call = false;
                     let mut saw_invoke_call = false;
@@ -6430,8 +6479,8 @@ fn direct_core_lowers_durable_agent_retry_loop() {
                     let mut saw_durable_sleep_call = false;
                     let mut saw_generic_sleep_call = false;
                     let mut saw_checkpoint_call = false;
-                    for operator in body.get_operators_reader().expect("operators") {
-                        match operator.expect("operator") {
+                    for operator in entry_operators_with_helpers(&core) {
+                        match operator {
                             Operator::Call { function_index }
                                 if Some(function_index) == get_checkpoint_index =>
                             {
@@ -11028,6 +11077,10 @@ fn abi_is_part_of_the_lowering_tag() {
         "the tag must name the ABI, or changing it cannot invalidate a cached image: {tag}"
     );
     assert!(
+        tag.contains("cooperative-waits=shared-v1"),
+        "recompilation must replace artifacts with duplicated wait code: {tag}"
+    );
+    assert!(
         tag.contains("durable-delay-parking=v1"),
         "the tag must retire cached artifacts whose short durable delays could block: {tag}"
     );
@@ -11042,4 +11095,73 @@ fn runtime_omit_stays_opt_in() {
     assert!(!super::omit_runtime_from_raw(Some("on")));
     assert!(super::omit_runtime_from_raw(Some("1")));
     assert!(super::omit_runtime_from_raw(Some("true")));
+}
+
+/// Bound emitted code growth independently of compression, native JIT choices,
+/// or machine timing. A hundred Agent sites must share cooperative machinery.
+#[test]
+fn cooperative_helpers_bound_per_step_code_growth() {
+    use super::super::component::WorkflowAbi;
+    fn emit(count: usize, abi: WorkflowAbi, omit_runtime: bool) -> Vec<u8> {
+        let mut steps = serde_json::Map::new();
+        let mut edges = Vec::new();
+        for i in 0..count {
+            let id = format!("r{i}");
+            steps.insert(
+                id.clone(),
+                serde_json::json!({
+                    "stepType":"Agent", "id":id, "agentId":"utils",
+                    "capabilityId":"random-double", "inputMapping":{}, "maxRetries":0
+                }),
+            );
+            edges.push(serde_json::json!({"fromStep":id,
+                "toStep":if i + 1 == count {"finish".into()} else {format!("r{}", i + 1)}}));
+        }
+        steps.insert(
+            "finish".into(),
+            serde_json::json!({
+                "stepType":"Finish", "id":"finish", "inputMapping":{}
+            }),
+        );
+        let graph: ExecutionGraph = serde_json::from_value(serde_json::json!({
+            "name":"Shared waits", "durable":false, "steps":steps,
+            "entryPoint":"r0", "executionPlan":edges, "variables":{}
+        }))
+        .unwrap();
+        let manifest = build_direct_workflow_manifest(&graph).unwrap();
+        let config =
+            DirectCoreConfig::new(&manifest, &manifest.to_canonical_json().unwrap(), false)
+                .unwrap()
+                .with_abi(abi)
+                .with_omit_runtime(omit_runtime);
+        let (resolve, world) =
+            build_direct_component_resolve_with_agents(&manifest.feature_summary.agent_ids)
+                .unwrap();
+        let core = emit_direct_core_module(&resolve, world, &config).unwrap();
+        Validator::new_with_features(wasmparser::WasmFeatures::all())
+            .validate_all(&core)
+            .unwrap();
+        core
+    }
+    std::thread::Builder::new()
+        .stack_size(32 * 1024 * 1024)
+        .spawn(|| {
+    for (abi, omit_runtime) in [
+        (WorkflowAbi::CliRunHttp, false),
+        (WorkflowAbi::InvokeHostImports, false),
+        (WorkflowAbi::AgentCapabilities, false),
+        (WorkflowAbi::AgentCapabilities, true),
+    ] {
+        let one = emit(1, abi, omit_runtime);
+        let hundred = emit(100, abi, omit_runtime);
+        let growth = hundred.len() - one.len();
+        assert!(
+            growth < 3300 * 99,
+            "cooperative code grew {growth} bytes for 99 extra sites ({abi:?}, omit={omit_runtime})"
+        );
+    }
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }

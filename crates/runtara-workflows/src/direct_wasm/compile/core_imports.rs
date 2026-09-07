@@ -172,6 +172,8 @@ impl DirectCoreImportIndices {
         let _stdlib_agent_error_info =
             require_import(self.stdlib_agent_error_info, "stdlib.agent-error-info")?;
         Ok(DirectCoreFunctionIndices {
+            cooperative_helpers: [None; super::cooperative_wait::HELPER_COUNT],
+            cooperative_helper_body: false,
             abi,
             omit_runtime,
             connection_resolver_describe: require_connection_resolver(
@@ -647,6 +649,10 @@ impl DirectCoreImportIndices {
 
 #[derive(Debug, Clone)]
 pub(super) struct DirectCoreFunctionIndices {
+    /// Internal core-Wasm functions, not additional component imports.
+    pub(super) cooperative_helpers: [Option<u32>; super::cooperative_wait::HELPER_COUNT],
+    /// Shared helper bodies return a control outcome instead of an entry ABI result.
+    pub(super) cooperative_helper_body: bool,
     /// The top-level export shape the module is emitted against. Threaded
     /// through the indices because every lowerer already receives them, and
     /// the return convention at fail sites depends on it (tag under

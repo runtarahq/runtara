@@ -254,8 +254,9 @@ now covers 14 workloads in three paired release sessions, with 1,000 prepared
 samples per condition. It does not close the full qualification gate. The
 100-step chain has 8.0% more raw `.wasm` bytes and 2.26–3.64 times the
 compile-through-first-result median; prepared execution changes by +1.5–4.1%.
-Investigate shared emitted wait/poll/cleanup helpers before closing P2 performance
-work, preserving caller-local state, early returns and cleanup-before-ack tests.
+Shared emitted wait/poll/cleanup helpers now preserve caller-local state,
+entry-ABI returns and cleanup-before-ack tests. Their code-size and runtime
+effects must be measured before closing P2 performance work.
 Re-run paired measurements after optimization and after the remaining migration;
 missing server, cancellation, instrumentation and capacity metrics remain pending.
 
