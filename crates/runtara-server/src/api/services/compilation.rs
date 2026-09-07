@@ -434,6 +434,25 @@ pub struct CompilationService {
 }
 
 impl CompilationService {
+    /// Whether an image's artifact is on disk, for the reuse decision.
+    ///
+    /// A lookup failure answers `false`: the cost of re-registering an artifact
+    /// that was actually present is one wasted write, and the cost of reusing
+    /// one that was not is a workflow that never starts.
+    async fn artifact_present_for_reuse(&self, client: &RuntimeClient, image_id: &str) -> bool {
+        match client.image_artifact_present(image_id).await {
+            Ok(present) => present,
+            Err(error) => {
+                warn!(
+                    image_id = %image_id,
+                    error = %error,
+                    "Could not confirm the registered artifact is on disk; re-registering"
+                );
+                false
+            }
+        }
+    }
+
     pub fn new(
         repository: Arc<WorkflowRepository>,
         connection_service_url: Option<String>,
@@ -896,6 +915,29 @@ impl CompilationService {
             .find_image_by_name_summary(tenant_id, &image_name)
             .await
         {
+            // Reuse needs the row AND the file. The row is immutable and the
+            // checksums prove provenance, but a matching row whose artifact has
+            // gone from disk is precisely what a forced recompile is here to
+            // repair — and reusing it re-registers nothing, so the file stays
+            // missing and the caller retries into the same failure until its
+            // budget runs out.
+            Ok(Some(existing_image))
+                if image_matches_compiled_artifact(
+                    &existing_image,
+                    &source_checksum,
+                    result.compiler_mode,
+                    track_events,
+                    &result.binary_checksum,
+                ) && self
+                    .artifact_present_for_reuse(client, &existing_image.image_id)
+                    .await =>
+            {
+                info!(
+                    image_id = %existing_image.image_id,
+                    "Reusing already registered immutable workflow artifact"
+                );
+                existing_image.image_id
+            }
             Ok(Some(existing_image))
                 if image_matches_compiled_artifact(
                     &existing_image,
@@ -905,11 +947,13 @@ impl CompilationService {
                     &result.binary_checksum,
                 ) =>
             {
-                info!(
+                warn!(
                     image_id = %existing_image.image_id,
-                    "Reusing already registered immutable workflow artifact"
+                    image_name = %image_name,
+                    "Registered artifact is missing from disk; re-registering the compiled binary"
                 );
-                existing_image.image_id
+                self.register_image(client, &result, registration, &image_name)
+                    .await?
             }
             Ok(Some(existing_image)) => {
                 warn!(

@@ -724,6 +724,14 @@ impl RuntimeClient {
             .map(|image| image.image_id))
     }
 
+    /// Whether an image's registered artifact is still on disk.
+    pub async fn image_artifact_present(&self, image_id: &str) -> Result<bool, RuntimeError> {
+        self.client
+            .image_artifact_present(image_id)
+            .await
+            .map_err(|e| RuntimeError::SdkError(e.to_string()))
+    }
+
     /// Find an image by name for a tenant and return the full summary.
     pub async fn find_image_by_name_summary(
         &self,

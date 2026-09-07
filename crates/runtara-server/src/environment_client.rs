@@ -387,6 +387,15 @@ impl EnvironmentClient {
             .map(image_summary))
     }
 
+    /// Whether an image's registered artifact is still on disk.
+    ///
+    /// The compile path reuses an immutable artifact on the strength of its
+    /// row; this is how it checks the file is actually there before doing so.
+    #[instrument(skip(self), fields(image_id = %image_id), level = "debug")]
+    pub async fn image_artifact_present(&self, image_id: &str) -> Result<bool> {
+        Ok(self.image_registry().artifact_present(image_id).await?)
+    }
+
     /// Get one image, scoped to a tenant.
     #[instrument(skip(self), fields(image_id = %image_id, tenant_id = %tenant_id), level = "debug")]
     pub async fn get_image(&self, image_id: &str, tenant_id: &str) -> Result<Option<ImageSummary>> {
