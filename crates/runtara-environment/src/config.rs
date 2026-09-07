@@ -5,11 +5,11 @@
 //! Two things live here. The parsers, so that a setting spelled the same way in
 //! two families of variable is read the same way in both — the crate used to
 //! have three `*_CLEANUP_POLL_INTERVAL_SECS` variables whose zero values meant
-//! three different things. And [`Vars`], the seam that lets a `from_env`
+//! three different things. And `Vars`, the seam that lets a `from_env`
 //! constructor be tested against values a test supplies rather than against
 //! process-global state every other test in the binary shares.
 //!
-//! Nothing here reads the environment on its own; [`ProcessEnv`] is the only
+//! Nothing here reads the environment on its own; `ProcessEnv` is the only
 //! thing that does, and it is one line.
 
 use std::time::Duration;
@@ -188,11 +188,25 @@ mod tests {
     /// They did not. All three take a poll interval in seconds and a maximum
     /// age in days under parallel names, but only the database worker ran them
     /// through the positive-only rule; the image and run-directory workers took
-    /// whatever parsed. So `…_POLL_INTERVAL_SECS=0` fell back to the documented
-    /// default for one worker and spun the other two, and `…_MAX_AGE_DAYS=0`
-    /// was ignored by one and told the other two that everything on disk was
-    /// old enough to delete. Nothing announced the difference — each worker
-    /// simply started and reported the interval it had settled on.
+    /// whatever parsed.
+    ///
+    /// What that cost in a running system was the image worker:
+    /// `RUNTARA_IMAGE_CLEANUP_POLL_INTERVAL_SECS=0` spun its loop and
+    /// `RUNTARA_IMAGE_CLEANUP_MAX_AGE_DAYS=0` told it every image on disk was
+    /// old enough to delete, while the identically-shaped `RUNTARA_DB_CLEANUP_*`
+    /// pair fell back to the documented defaults. Nothing announced the
+    /// difference — each worker simply started and reported the interval it had
+    /// settled on.
+    ///
+    /// The run-directory worker parses the same zero but never runs on it, and
+    /// that is worth knowing before reading too much into this test:
+    /// `EnvironmentRuntimeConfig::start` overwrites `poll_interval` and
+    /// `max_age` on the config `from_env` returned, with builder fields no
+    /// caller anywhere sets. So both `RUNTARA_RUN_DIR_CLEANUP_*` numbers are
+    /// inert in the assembled runtime — before this change and after it. Its
+    /// `enabled` flag is not overwritten and does still take effect. What this
+    /// test pins for that worker is `from_vars` itself, which is what a caller
+    /// constructing the config directly gets.
     #[test]
     fn the_three_cleanup_workers_agree_on_a_zero() {
         let run_dir = crate::cleanup_worker::CleanupWorkerConfig::from_vars(&FixedVars::new([
