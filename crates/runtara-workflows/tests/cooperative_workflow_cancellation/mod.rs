@@ -172,6 +172,9 @@ enum Scenario {
     StorageDownload(&'static str, bool),
     StoragePresign(&'static str),
     Sftp,
+    QuickbooksRead,
+    QuickbooksReadBody,
+    QuickbooksUpdateAfterRead,
     StripeCreate,
     StripeCreateBody,
     StripeFinalizeAfterCreate,
@@ -191,6 +194,12 @@ enum Scenario {
 }
 
 impl Scenario {
+    fn is_quickbooks(self) -> bool {
+        matches!(
+            self,
+            Self::QuickbooksRead | Self::QuickbooksReadBody | Self::QuickbooksUpdateAfterRead
+        )
+    }
     fn is_stripe(self) -> bool {
         matches!(
             self,
@@ -232,6 +241,7 @@ impl Scenario {
             || matches!(self, Self::StorageDownload(..))
             || self.is_sqs()
             || self.is_stripe()
+            || self.is_quickbooks()
     }
     fn drains_normally(self) -> bool {
         matches!(self, Self::PauseBranches | Self::ShutdownBranches)
@@ -258,7 +268,10 @@ async fn run(scenario: Scenario) -> anyhow::Result<()> {
     let pre_cancel = scenario == Scenario::BeforeLaunch;
     let partial_body = matches!(
         scenario,
-        Scenario::PartialBody | Scenario::SqsReceiveBody | Scenario::StripeCreateBody
+        Scenario::PartialBody
+            | Scenario::SqsReceiveBody
+            | Scenario::StripeCreateBody
+            | Scenario::QuickbooksReadBody
     );
     let fail_signal_read = matches!(
         scenario,
@@ -288,6 +301,7 @@ async fn run(scenario: Scenario) -> anyhow::Result<()> {
                 | Scenario::StorageDownload(_, true)
                 | Scenario::SqsDeleteAfterReceive
                 | Scenario::StripeFinalizeAfterCreate
+                | Scenario::QuickbooksUpdateAfterRead
         )
     {
         2
@@ -355,6 +369,20 @@ async fn run(scenario: Scenario) -> anyhow::Result<()> {
             .map(|(key, value)| (key.clone(), immediate(value.clone())))
             .collect::<serde_json::Map<String, Value>>()
             .into();
+    }
+    if scenario.is_quickbooks() {
+        let connection = immediate(
+            serde_json::json!({"connection_id":"fixture-connection","integration_id":"quickbooks_online","parameters":{}}),
+        );
+        graph["steps"]["fetch"]["agentId"] = "quickbooks".into();
+        graph["steps"]["fetch"]["capabilityId"] = "read".into();
+        graph["steps"]["fetch"]["inputMapping"] = serde_json::json!({"entity":immediate("Customer".into()),"id":immediate("42".into()),"_connection":connection});
+        graph["steps"]["update"] = serde_json::json!({"id":"update","stepType":"Agent","agentId":"quickbooks","capabilityId":"update","maxRetries":3,"retryDelay":0,
+            "inputMapping":{"_connection":connection,"entity":immediate("Customer".into()),"body":immediate(serde_json::json!({"DisplayName":"updated fixture"})),"id":{"valueType":"reference","value":"steps.fetch.outputs.id"},"sync_token":{"valueType":"reference","value":"steps.fetch.outputs.sync_token"}}});
+        graph["executionPlan"] = serde_json::json!([
+            {"fromStep":"fetch","toStep":"update"}, {"fromStep":"fetch","toStep":"handled","label":"onError"},
+            {"fromStep":"update","toStep":"finish"}, {"fromStep":"update","toStep":"handled","label":"onError"}
+        ]);
     }
     if scenario.is_stripe() {
         let connection = immediate(
@@ -612,6 +640,18 @@ async fn run(scenario: Scenario) -> anyhow::Result<()> {
                             } else {
                                 assert_eq!(body["connection_id"], "fixture-connection");
                                 match scenario {
+                                    Scenario::QuickbooksRead | Scenario::QuickbooksReadBody | Scenario::QuickbooksUpdateAfterRead => {
+                                        assert_eq!(body["timeout_ms"], 30_000);
+                                        if server_host.requests.load(Ordering::SeqCst) == 0 {
+                                            assert_eq!(body["method"], "GET");
+                                            assert_eq!(body["url"], "/customer/42?minorversion=75");
+                                        } else {
+                                            assert_eq!(body["method"], "POST");
+                                            assert_eq!(body["url"], "/customer?minorversion=75");
+                                            let payload = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, body["body_raw"].as_str().unwrap())?;
+                                            assert_eq!(serde_json::from_slice::<Value>(&payload)?, serde_json::json!({"Id":"42","SyncToken":"3","sparse":true,"DisplayName":"updated fixture"}));
+                                        }
+                                    },
                                     Scenario::StripeCreate | Scenario::StripeCreateBody | Scenario::StripeFinalizeAfterCreate => {
                                         assert_eq!(body["method"], "POST");
                                         assert_eq!(body["timeout_ms"], 30_000);
@@ -663,6 +703,14 @@ async fn run(scenario: Scenario) -> anyhow::Result<()> {
                             stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\nx").await?;
                         }
                         let started = server_host.requests.fetch_add(1, Ordering::SeqCst) + 1;
+                        if scenario == Scenario::QuickbooksUpdateAfterRead && started == 1 {
+                            let bytes = serde_json::to_vec(&serde_json::json!({"status":200,"headers":{},"body":{"Customer":{"Id":"42","SyncToken":"3","DisplayName":"fixture"}}}))?;
+                            stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", bytes.len()).as_bytes()).await?;
+                            stream.write_all(&bytes).await?;
+                            server_host.closed_count.fetch_add(1, Ordering::SeqCst);
+                            server_host.closed.notify_one();
+                            return anyhow::Ok(());
+                        }
                         if scenario == Scenario::StripeFinalizeAfterCreate && started == 1 {
                             let bytes = serde_json::to_vec(&serde_json::json!({"status":200,"headers":{},"body":{"id":"in_fixture","status":"draft"}}))?;
                             stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", bytes.len()).as_bytes()).await?;
@@ -962,4 +1010,21 @@ async fn emitted_stripe_cancel_stops_partial_invoice_without_finalize_or_retry()
 async fn emitted_stripe_cancel_stops_finalize_after_create_without_recovery() -> anyhow::Result<()>
 {
     run(Scenario::StripeFinalizeAfterCreate).await
+}
+
+#[tokio::test]
+async fn emitted_quickbooks_cancel_stops_read_without_update_or_retry() -> anyhow::Result<()> {
+    run(Scenario::QuickbooksRead).await
+}
+
+#[tokio::test]
+async fn emitted_quickbooks_cancel_stops_partial_read_without_update_or_retry() -> anyhow::Result<()>
+{
+    run(Scenario::QuickbooksReadBody).await
+}
+
+#[tokio::test]
+async fn emitted_quickbooks_cancel_stops_update_after_read_without_recovery() -> anyhow::Result<()>
+{
+    run(Scenario::QuickbooksUpdateAfterRead).await
 }

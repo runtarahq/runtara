@@ -873,3 +873,57 @@ remained ignored. Affected-crate all-target Clippy with the existing integration
 test features, formatting and diff whitespace checks passed. No live-provider
 or database/server E2E, Linux qualification or fresh performance/capacity
 measurements were run for this stage.
+
+## QuickBooks read and write cancellation
+
+All seven QuickBooks capabilities now await their existing GET/POST helper under
+the standard callback export. The normal build emits the updated component;
+there is no new product flag, alternate runner or host task registry. Proxy-owned
+credentials and company/realm routing, opaque connection references, minor-version
+selection, the 30-second HTTP timeout and response/error mapping are unchanged.
+The generated capability metadata is byte-for-byte identical to the prior build.
+
+Five built-component test functions cover all capabilities and both sparse/full
+update forms. Eight request cases are cancelled during pending headers and a
+partial body, for 16 cancellation cases. They require local I/O closure, sibling
+completion and a successful fresh read in the same Agent instance. The fixture
+rejects an automatic retry, token refresh, delete or compensating request between
+cancellation and that explicit fresh read.
+
+Successful response checks preserve entity IDs and SyncTokens, query rows and
+pagination envelopes, report objects, deleted status and CDC changed/deleted
+records. Wire checks cover percent-encoded query/ID/timestamps, sorted report
+parameters, API versions, sparse versus full bodies and authoritative Id/SyncToken
+injection. HTTP 400/401/403/429/503 retain the existing retry classification for
+GET and POST. Malformed transport, invalid provider JSON, missing connections
+and empty CDC entity lists retain distinct errors; empty successful bodies retain
+their existing output shape. All fixtures use local synthetic data, with no real
+Intuit account or accounting records.
+
+Three emitted read-then-update workflows cancel during read headers, during its
+body, or during update after a successful read. The last case checks that output
+references supply the returned Id and SyncToken to the update. Cancellation must
+close pending I/O before lifecycle acknowledgement, and must bypass retries,
+`onError`, downstream work and normal completion. No local assertion promises
+that a provider undoes an accepted write.
+
+Fifteen of 27 Agent bindings are migrated. HubSpot, SharePoint, Shopify and the
+nine CPU-oriented Agents remain, together with nested workflow cooperation,
+public Stop/grace, timeout and terminal-race semantics, superseded API cleanup,
+E2E and performance/capacity qualification.
+
+```sh
+scripts/build-agent-components.sh
+cargo test -p runtara-agent-quickbooks
+cargo test -p runtara-component-host --features component-integration-tests --test cooperative_cancellation -- --test-threads=4
+cargo test -p runtara-workflows --features direct-wasm-integration-tests --test direct_wasm_execute -- --test-threads=4
+```
+
+Use the isolated output directories recorded above. The normal bundle build
+regenerated all 27 Agents and both shared workflow components with metadata.
+All 12 native QuickBooks tests and 59 component cancellation tests passed. The
+full emitted-workflow suite passed 286 tests with four test threads, including
+all 36 cooperative lifecycle test functions; two manual benchmarks remained
+ignored. Affected-crate all-target Clippy with the existing integration-test features,
+formatting and diff whitespace checks passed. No live-provider or database/server
+E2E, Linux qualification or fresh performance/capacity measurement was run.

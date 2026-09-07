@@ -289,3 +289,7 @@ mod real_sqs;
 #[cfg(feature = "component-integration-tests")]
 #[path = "cooperative_cancellation/real_stripe.rs"]
 mod real_stripe;
+
+#[cfg(feature = "component-integration-tests")]
+#[path = "cooperative_cancellation/real_quickbooks.rs"]
+mod real_quickbooks;
