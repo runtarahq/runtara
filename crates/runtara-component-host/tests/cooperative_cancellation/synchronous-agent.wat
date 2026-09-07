@@ -1,4 +1,4 @@
-;; The existing Rust agents' ABI shape: async-typed export, synchronous lift,
+;; The original Rust agents' ABI shape (before the shared callback macro): async-typed export, synchronous lift,
 ;; synchronous lowering of the async-typed I/O import. No cancellation callback.
 (component $agent
   (import "request" (func $request async (result u32)))

@@ -314,9 +314,9 @@ pub fn direct_compilation_settings_from_config() -> DirectCompilationSettings {
     }
 }
 
-/// The workflow-agent capability ABI is synchronous. Refuse every graph whose
-/// complete static closure could wait, sleep, retry, or pause before any
-/// artifact or sidecar is staged.
+/// Refuse graphs requiring durable suspension or unsupported runtime ownership
+/// before any artifact or sidecar is staged. Non-durable Agent backoff can stay
+/// inside a callable workflow using cancellable guest waits.
 fn require_non_suspending_workflow_agent(
     execution_graph: &runtara_dsl::ExecutionGraph,
     child_workflows: &[ChildWorkflowInput],
@@ -1125,8 +1125,8 @@ impl CompilationService {
             let mut result = runtara_workflows::direct_wasm::compile_direct_workflow_with_abi(
                 direct_input,
                 runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
-                // The static preflight above has proved this graph has no
-                // suspension path, so its capability invoke is synchronous.
+                // Static preflight excludes durable suspension. Callable Agent
+                // waits retain their guest stack and cooperate with parent cancellation.
                 true,
             )?;
             runtara_workflows::direct_wasm::compose_direct_workflow_with_extra_dirs(
@@ -1419,6 +1419,23 @@ mod tests {
             error.to_string().contains("root/steps/delay (Delay/delay)"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn workflow_agent_publish_preflight_accepts_cancellable_agent_waits() {
+        let mut graph = parse_execution_graph(&serde_json::json!({
+            "durable": false, "entryPoint": "call", "steps": {
+                "call": {"id":"call", "stepType":"Agent", "agentId":"http",
+                    "capabilityId":"http-request", "maxRetries":3, "retryDelay":1000},
+                "finish":{"id":"finish", "stepType":"Finish"}
+            }, "executionPlan":[{"fromStep":"call", "toStep":"finish"}]
+        }))
+        .expect("graph parses");
+        require_non_suspending_workflow_agent(&graph, &[])
+            .expect("guest-local Agent waits do not suspend the parent workflow");
+        graph.durable = Some(true);
+        require_non_suspending_workflow_agent(&graph, &[])
+            .expect_err("durable Agent suspension is still not a callable contract");
     }
 
     #[test]

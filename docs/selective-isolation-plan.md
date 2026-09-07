@@ -67,8 +67,9 @@ online docs or enable experimental ABI extensions silently.
   shared expansion across every built-in Agent and preserve metadata, coercion,
   input conventions and provider errors. No per-Agent cancellation backend or
   opt-in annotation is needed.
-- Verify the cancellation-capable callback ABI end to end. A synchronous lift
-  or an async-typed export with no cancellation handler is not sufficient proof.
+- Verify standard cancellation delivery end to end: callback bindings for
+  built-in agents, or cancellable waitable-set waits for emitted workflow-agents.
+  A synchronous lift or async export type alone is not sufficient proof.
 - Verify whether cancellation itself can block the waiting guest, which async
   cancellation forms the pinned runtime supports, and how the emergency host
   grace timer remains effective during that wait. Do not depend on optional
@@ -336,3 +337,16 @@ Complete the gates before merging/releasing the updated implementation. Small te
 should separate standard ABI/binding changes, emitter behavior, lifecycle changes
 and cleanup of the superseded experiment. No independent hard-cancel mechanism,
 custom host task manager or new invocation ledger is part of this plan.
+
+
+### Nested callable progress (2026-09-07)
+
+Non-durable workflow-agents now receive parent cancellation at standard
+cancellable waits, clean their nested sequential/parallel calls and return to
+the composing caller without owning root lifecycle signals. Local Agent backoff
+uses the existing awaitable timer and the same guest cleanup. Production safety
+analysis admits qualified non-durable Agent graphs; durable suspension and
+unsupported runtime-dependent closures remain rejected. See the implementation
+record for proofs and regression results. G2/G6 have additional coverage, not
+blanket completion: durable/nested Embed/While, targeted cancellation/deadlines,
+blocking cooperation, resource soak and new paired measurements remain open.

@@ -6,7 +6,10 @@
 //! interface. Nonempty runtime results still use canonical ABI allocation.
 use wasm_encoder::{BlockType, Function, Instruction, MemArg};
 
-use super::abi::{emit_entry_suspend_return, emit_fail_if_retptr_error_inplace, push_retptr_arg};
+use super::abi::{
+    emit_entry_cancel_return, emit_entry_suspend_return, emit_fail_if_retptr_error_inplace,
+    push_retptr_arg,
+};
 use super::{DIRECT_PSPLIT_EVENT_OFFSET, DirectCoreFunctionIndices};
 
 const TARGET: u32 = 142;
@@ -88,7 +91,8 @@ fn helper_return(body: &mut Function, outcome: i32) {
     body.instruction(&Instruction::Return);
 }
 
-/// Outcomes: 0 resumes the graph, 1 propagates the error at zero, 2 suspends.
+/// Outcomes: 0 resumes, 1 propagates the error at zero, 2 suspends, 3 returns
+/// from an invocation cancelled by its composing parent (without a root ack).
 /// Entry-ABI-specific terminal reporting remains in the entry function.
 fn call_helper(body: &mut Function, indices: &DirectCoreFunctionIndices, helper: Helper) -> bool {
     let Some(index) = indices.cooperative_helpers[helper as usize] else {
@@ -117,7 +121,40 @@ fn call_helper(body: &mut Function, indices: &DirectCoreFunctionIndices, helper:
     body.instruction(&Instruction::If(BlockType::Empty));
     emit_entry_suspend_return(body, indices);
     body.instruction(&Instruction::End);
+    if matches!(
+        indices.abi,
+        crate::direct_wasm::component::WorkflowAbi::AgentCapabilities
+    ) {
+        body.instruction(&Instruction::LocalGet(CURSOR));
+        body.instruction(&Instruction::I32Const(3));
+        body.instruction(&Instruction::I32Eq);
+        body.instruction(&Instruction::If(BlockType::Empty));
+        emit_entry_cancel_return(body);
+        body.instruction(&Instruction::End);
+    }
     true
+}
+
+/// Consume the standard wait event. A composed workflow-agent owns only its
+/// nested handles; the parent retains the root signal and chooses what follows.
+fn handle_wait_event(body: &mut Function, indices: &DirectCoreFunctionIndices) {
+    if matches!(
+        indices.abi,
+        crate::direct_wasm::component::WorkflowAbi::AgentCapabilities
+    ) {
+        body.instruction(&Instruction::I32Const(6));
+        body.instruction(&Instruction::I32Eq);
+        body.instruction(&Instruction::If(BlockType::Empty));
+        close_all(body, indices);
+        if indices.cooperative_helper_body {
+            helper_return(body, 3);
+        } else {
+            emit_entry_cancel_return(body);
+        }
+        body.instruction(&Instruction::End);
+    } else {
+        body.instruction(&Instruction::Drop);
+    }
 }
 
 pub(super) fn helper_body(helper: Helper, indices: &DirectCoreFunctionIndices) -> Function {
@@ -469,7 +506,7 @@ pub(super) fn emit_window_wait(body: &mut Function, indices: &DirectCoreFunction
     body.instruction(&Instruction::LocalGet(super::DIRECT_PSPLIT_WS_LOCAL));
     body.instruction(&Instruction::I32Const(DIRECT_PSPLIT_EVENT_OFFSET));
     body.instruction(&Instruction::Call(indices.waitable_set_wait.unwrap()));
-    body.instruction(&Instruction::Drop);
+    handle_wait_event(body, indices);
     if !indices.omit_runtime {
         // Consume only a RETURNED timer; STARTED still owns its handle.
         load(body, DIRECT_PSPLIT_EVENT_OFFSET, 0);
@@ -575,7 +612,7 @@ pub(super) fn emit_await_call(body: &mut Function, indices: &DirectCoreFunctionI
     body.instruction(&Instruction::LocalGet(SET));
     body.instruction(&Instruction::I32Const(DIRECT_PSPLIT_EVENT_OFFSET));
     body.instruction(&Instruction::Call(indices.waitable_set_wait.unwrap()));
-    body.instruction(&Instruction::Drop);
+    handle_wait_event(body, indices);
     load(body, DIRECT_PSPLIT_EVENT_OFFSET, 4);
     body.instruction(&Instruction::I32Const(RETURNED));
     body.instruction(&Instruction::I32Eq);

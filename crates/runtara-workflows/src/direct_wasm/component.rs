@@ -82,8 +82,9 @@ pub enum WorkflowAbi {
     /// never an out-of-band argument: it rides inside `input` (under
     /// `_connection`, or as an ordinary connection-typed input field).
     /// Production publication proves the full graph closure is
-    /// non-suspending before selecting this ABI, so staged workflow-agents
-    /// omit the runtime import. The lower-level compiler retains the historic
+    /// free of durable suspension before selecting this ABI. Non-durable
+    /// Agent waits use cancellable waitable sets without a root runtime import.
+    /// The lower-level compiler retains the historic
     /// runtime-importing shape only for differential tests and migration
     /// tooling; it is never authorized by the production publisher.
     AgentCapabilities,
@@ -353,7 +354,7 @@ fn emit_world_wit(
     if has_connections {
         out.push_str("    import runtara:connection-resolver/resolver@0.1.0;\n");
     }
-    if !parallel_pools.is_empty() || (!omit_runtime && !agents.is_empty()) {
+    if !parallel_pools.is_empty() || !agents.is_empty() {
         out.push_str("    import runtara:host-io/timers@0.1.0;\n");
     }
     for agent in agents {

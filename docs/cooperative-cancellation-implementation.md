@@ -5,8 +5,10 @@ Status: sequential/parallel root cancellation and Agent binding migration, 2026-
 implementation directly; no new product feature flags or alternate backend.
 All 27 built-in Agent exports now use a shared callback-binding macro. Eighteen
 I/O-capable Agents await cancellable operations; the nine CPU-oriented Agents
-still require cooperation-point qualification. Nested workflow-agent cancellation,
-timeouts and the remaining plan gates are still incomplete.
+still require cooperation-point qualification. Non-durable workflow-agents now
+propagate parent cancellation through sequential/parallel calls and local retry
+waits. Durable nested suspension, timeouts and the remaining plan gates are still
+incomplete.
 
 The server's Stop/cancel methods now use the environment Stop handler to deliver
 lifecycle Cancel and arm an independent whole-run abort grace. Normally composed
@@ -67,7 +69,7 @@ boundaries are deliberate and remain outstanding for full P1 completion.
 | `callee_can_return_a_value_instead_of_acknowledging_cancellation` | Callee cleans up but returns normally; parent receives the standard returned state and checks the result instead of assuming a cancellation outcome. |
 | `standard_cancellation_closes_pending_http_headers` | Controlled loopback endpoint withholds headers; standard cancellation drops the pending request and the endpoint observes connection closure. |
 | `standard_cancellation_closes_pending_http_body` | Endpoint sends headers and an incomplete body; cancellation closes the connection before the response finishes. |
-| `async_typing_with_synchronous_bindings_does_not_acknowledge_cancellation` | Same parent/control path with the existing agent ABI shape remains unresolved until the test watchdog. A trap or invalid fixture does not count as the expected result. |
+| `synchronous_io_lowering_without_cooperation_does_not_acknowledge_cancellation` | Same parent/control path with the existing agent ABI shape remains unresolved until the test watchdog. A trap or invalid fixture does not count as the expected result. |
 
 The positive tests also require reusing the original agent instance successfully;
 throwing away that instance would fail the global-state assertion. Trace assertions
@@ -1402,3 +1404,80 @@ arbitrary blocking native function returns or that remote server work is undone.
 Full native-call/resource qualification, nested workflow-agent ownership,
 cooperative step deadlines, authenticated-server E2E and controlled performance
 remain open.
+
+## Nested workflow-agent waits and parent cancellation (2026-09-07)
+
+A workflow-agent can retain its ordinary generated call stack and still accept
+standard cancellation. Its capability function is async-typed with a synchronous
+lift, and its `waitable-set.wait` import is **cancellable**. Standard event 6
+unwinds the guest's active sequential call and parallel window, resolves/drops
+all nested handles and wait sets, then returns a typed `CANCELLED` error directly
+from the capability. This bypasses the child's retry and onError control flow.
+The composing caller receives the standard **RETURNED** resolution (2), which
+its cancellation cleanup already accepts. It owns the cancellation decision;
+the return is neither a root signal acknowledgement nor a completed workflow.
+
+The dedicated Component Model fixture verifies nested cleanup, sibling survival
+and reuse of the cancelled callee instance. It uses the unchanged production
+Wasmtime 46.0.1 engine builder. It does not enable stackful async lifts, async
+`subtask.cancel`, custom task imports or a host task registry. Built-in agents
+continue using the shared callback-binding macro. A generated workflow-agent
+uses its cancellable wait instead; both compose in the existing single artifact.
+
+Non-durable Agent retries inside `AgentCapabilities` now await the existing
+host-I/O timer through the same shared guest wait helper. Retry state and the
+choice of another attempt remain in WASM. The compiler omits the root runtime
+for statically qualified callable graphs, including ordinary Agent calls,
+connections, control flow and parallel Split/branches. It still rejects Agent
+closures requiring durability, logging/error runtime operations, debug
+breakpoints, Wait/Delay, AiAgent, timeouts or unsupported Split/Embed backoff.
+The complete static gate remains required; import analysis alone is not a
+publication certificate. The server publishes with tracing disabled as before.
+Top-level and retained legacy durable retry/suspend behavior is unchanged.
+
+Coverage added:
+
+- A standard synchronous-lift/cancellable-wait proof, including a subsequent call
+  to the same callee and an unaffected sibling.
+- Normally composed nested DSL calls: pending headers, partial body, two nested
+  published levels, two parallel branches and two parallel Split items. Each
+  child passes the production safety analysis and omits the root runtime;
+  socket cleanup precedes the sole root acknowledgement. No retry, recovery or
+  normal terminal publication follows cancellation.
+- Long ordinary and recognized rate-limit backoff cancellation through two
+  published levels. Normal retry runs preserve delays, attempt counts and nested
+  success output; recognized rate limits outlive the ordinary retry count.
+- Publication analysis and server preflight accept guest-local Agent waits while
+  still rejecting durable runtime ownership. The emitter cache tag includes
+  `parent-cancel=v1` so compiled artifacts are regenerated.
+- Two compatibility cases pin existing retry gaps: `maxRetries: 0` bypasses even
+  recognized rate-limit retries; `HTTP_429` uses ordinary retries rather than the
+  separate rate-limit budget. See AUDIT-08 in the emitter audit. Neither semantic
+  change is folded into cancellation support.
+
+The retry cancellation fixture sends its signal after a complete error response
+and a short handoff delay. It verifies bounded termination and no further retry,
+not an instrumented timestamp for the native timer's entry/drop. Exact timer
+resource accounting remains part of G10. Bounded CPU cooperation, blocking
+native/resolver calls, durable workflow-agent suspension, Embed/While closure
+qualification and targeted timeout behavior remain open. No new per-agent
+binary, Store or host execution service is introduced. Retaining a guest stack
+through a wait consumes instance resources until it returns or the whole run
+aborts; this stage adds no durable parking contract for callable workflows.
+
+Validation with Rust 1.97 and the isolated native/component directories:
+
+- Normal build script: all 27 Agents and two shared workflow components built.
+- Workflow library: 575 tests passed. Native emitter audit: 30 tests passed.
+- Full direct-workflow execution suite: 305 passed, three manual benchmarks
+  ignored. The final six nested retry cases also passed, including the two
+  compatibility cases added after the full suite started.
+- Full component cancellation suite: 76 passed. After clarifying the negative
+  fixture's name, all three synchronous-binding/capability cases passed again.
+- Server publication preflight: three tests passed.
+- Feature-gated Clippy for workflows, component host and server, formatting,
+  and `git diff --check` passed.
+
+No database/full-server E2E was run for this stage. New size/timing and controlled
+capacity comparisons remain pending; earlier measurement reports must not be
+read as measuring this emitter revision.

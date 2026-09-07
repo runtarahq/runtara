@@ -208,7 +208,7 @@ async fn standard_cancellation_closes_pending_http_body() -> anyhow::Result<()> 
 }
 
 #[tokio::test]
-async fn async_typing_with_synchronous_bindings_does_not_acknowledge_cancellation()
+async fn synchronous_io_lowering_without_cooperation_does_not_acknowledge_cancellation()
 -> anyhow::Result<()> {
     let start = COMPOSED.find("  (component $agent").unwrap();
     let end = COMPOSED.find("  (instance $target").unwrap();
@@ -222,7 +222,7 @@ async fn async_typing_with_synchronous_bindings_does_not_acknowledge_cancellatio
     // Dropping the whole Store after the deadline is the test's final cleanup.
     let error = run_proof(&source, None, Arc::new(Notify::new()))
         .await
-        .expect_err("sync bindings cannot acknowledge cancellation while blocked in I/O");
+        .expect_err("a synchronous I/O lowering cannot receive cancellation while blocked");
     assert!(
         error
             .downcast_ref::<tokio::time::error::Elapsed>()
@@ -235,6 +235,25 @@ async fn async_typing_with_synchronous_bindings_does_not_acknowledge_cancellatio
 #[cfg(feature = "component-integration-tests")]
 #[path = "cooperative_cancellation/real_agent.rs"]
 mod real_agent;
+
+#[tokio::test]
+async fn synchronous_lift_with_cancellable_wait_cleans_up_and_returns_to_parent()
+-> anyhow::Result<()> {
+    let start = COMPOSED.find("  (component $agent").unwrap();
+    let end = COMPOSED.find("  (instance $target").unwrap();
+    let mut source = COMPOSED.to_owned();
+    source.replace_range(
+        start..end,
+        include_str!("cooperative_cancellation/cancellable-wait-agent.wat"),
+    );
+    // Cancellation may resolve by returning normally after cleanup. The
+    // parent must read RETURNED, not assume the callee used task.cancel.
+    source = source.replace(
+        "(if (i32.ne (call $cancel (local.get $target)) (i32.const 4)) (then unreachable))",
+        "(if (i32.ne (call $cancel (local.get $target)) (i32.const 2)) (then unreachable))\n      (if (i32.ne (i32.load (i32.const 0)) (i32.const 123)) (then unreachable))",
+    );
+    run_proof(&source, None, Arc::new(Notify::new())).await
+}
 
 #[tokio::test]
 async fn cancelling_a_queued_call_resolves_before_entry_and_can_be_dropped() -> anyhow::Result<()> {

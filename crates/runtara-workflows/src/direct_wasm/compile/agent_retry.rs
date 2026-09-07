@@ -133,6 +133,16 @@ pub(super) fn emit_agent_retry_sleep(
     sleep_key_ptr_local: u32,
     sleep_key_len_local: u32,
 ) {
+    if !durable_checkpoint
+        && indices.abi == crate::direct_wasm::component::WorkflowAbi::AgentCapabilities
+    {
+        // Keep the invocation's stack alive while waiting; parent cancellation
+        // uses the same standard wait/cleanup as an outbound Agent call.
+        body.instruction(&Instruction::LocalGet(DIRECT_AGENT_RETRY_SLEEP_MS_LOCAL));
+        body.instruction(&Instruction::Call(indices.timer_sleep_async.unwrap()));
+        super::cooperative_wait::emit_await_call(body, indices);
+        return;
+    }
     body.instruction(&Instruction::LocalGet(DIRECT_AGENT_RETRY_SLEEP_TAG_LOCAL));
     body.instruction(&Instruction::If(BlockType::Empty));
     if durable_checkpoint {

@@ -945,3 +945,30 @@ Checks used pinned Rust 1.97.0, the worktree's own component/build caches,
 service matrix, database E2E, deployment and production artifact migration were
 not run locally. Earlier verification records above describe their original
 bases; this section records the combined result after integrating upstream.
+
+
+### AUDIT-08 · Retry budget inconsistencies found during nested cancellation
+
+**Observed existing behavior; not changed by the cancellation implementation.**
+
+| Case | Current behavior | Test |
+| --- | --- | --- |
+| Recognized `SLACK_RATE_LIMITED` with `maxRetries: 0` | The emitter bypasses the entire retry loop, so the first error follows onError even with unused rate-limit budget | `nested_retry_zero_retries_routes_rate_limit_error_to_recovery` |
+| HTTP agent returns `HTTP_429` with `maxRetries: 1` | Two errors exhaust ordinary retries and follow onError; the classifier recognizes `RATE_LIMITED`, not `HTTP_429` | `nested_retry_http_429_uses_ordinary_retry_count` |
+| Recognized rate-limit error with `maxRetries: 1` | Separate rate-limit budget permits two waits and a successful third call | `nested_retry_preserves_rate_limit_budget_beyond_ordinary_retry_count` |
+
+The tests run actual built HTTP/Slack agents inside two composed workflow-agent
+levels, check request counts and the final success/recovery output, and preserve
+the current behavior. Source: `compile/agent.rs` gates the retry loop on
+`max_retries > 0`; `runtara-workflow-stdlib/src/direct_json.rs` classifies codes
+containing `RATE_LIMITED`. The HTTP agent emits `HTTP_429`.
+
+A possible correction is to define rate-limit classification consistently and
+explicitly decide whether setting zero ordinary retries should leave the
+separate rate-limit budget active. That would change accepted execution behavior
+and needs matching sequential/parallel, replay and provider tests. Merely
+removing the loop guard is insufficient: parallel eligibility and attempt
+checkpoint identity depend on the retry path too.
+
+Tests live in
+[`nested_retry.rs`](../crates/runtara-workflows/tests/cooperative_workflow_cancellation/nested_retry.rs).

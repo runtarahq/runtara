@@ -136,6 +136,31 @@ impl WorkflowFeatureSummary {
         })
     }
 
+    /// Runtime ownership for a callable workflow. Non-durable Agent retries use
+    /// cancellable host-I/O timers and connections use the separate resolver.
+    /// This is only an import analysis: callers must also apply the complete
+    /// workflow-agent safety gate (including Split/Embed retry paths).
+    pub(crate) fn needs_agent_runtime(&self, track_events: bool) -> bool {
+        if track_events || self.root_durable {
+            return true;
+        }
+        self.features.iter().any(|feature| {
+            matches!(
+                feature,
+                WorkflowFeature::AiAgent
+                    | WorkflowFeature::ChildWorkflow
+                    | WorkflowFeature::LogEvent
+                    | WorkflowFeature::ExplicitError
+                    | WorkflowFeature::Delay
+                    | WorkflowFeature::WaitForSignal
+                    | WorkflowFeature::SuspendResume
+                    | WorkflowFeature::Durability
+                    | WorkflowFeature::Timeout
+                    | WorkflowFeature::Breakpoint
+            )
+        })
+    }
+
     /// Whether the emitted component must import `runtara:workflow-runtime/runtime`
     /// — i.e. any lowered step would call a `runtime.*` host function beyond the
     /// terminal `complete`/`fail` (which the omit path suppresses in favor of the

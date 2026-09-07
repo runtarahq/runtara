@@ -311,60 +311,7 @@ pub(super) fn emit_entry_suspend_return(
             function.instruction(&Instruction::Return);
         }
         crate::direct_wasm::component::WorkflowAbi::AgentCapabilities => {
-            let (lo, hi) = suspend_sentinel_halves();
-            // Zero the result area — every unset error-info field lifts as
-            // an empty string / false / none (the same shape the invoke-err
-            // fallback path relies on).
-            function.instruction(&Instruction::I32Const(0));
-            function.instruction(&Instruction::I32Const(0));
-            function.instruction(&Instruction::I32Const(120));
-            function.instruction(&Instruction::MemoryFill(0));
-            // Sentinel code bytes at @96, past the error-info record fields.
-            function.instruction(&Instruction::I32Const(0));
-            function.instruction(&Instruction::I64Const(lo));
-            function.instruction(&Instruction::I64Store(MemArg {
-                offset: 96,
-                align: 0,
-                memory_index: 0,
-            }));
-            function.instruction(&Instruction::I32Const(0));
-            function.instruction(&Instruction::I64Const(hi));
-            function.instruction(&Instruction::I64Store(MemArg {
-                offset: 104,
-                align: 0,
-                memory_index: 0,
-            }));
-            // error-info.code = the sentinel; message mirrors it so a caller
-            // that does NOT understand the sentinel still surfaces something
-            // legible instead of empty bytes.
-            for field_ptr_offset in [8u64, 16] {
-                function.instruction(&Instruction::I32Const(0));
-                function.instruction(&Instruction::I32Const(96));
-                function.instruction(&Instruction::I32Store(MemArg {
-                    offset: field_ptr_offset,
-                    align: 2,
-                    memory_index: 0,
-                }));
-                function.instruction(&Instruction::I32Const(0));
-                function.instruction(&Instruction::I32Const(
-                    AGENT_SUSPEND_SENTINEL_CODE.len() as i32
-                ));
-                function.instruction(&Instruction::I32Store(MemArg {
-                    offset: field_ptr_offset + 4,
-                    align: 2,
-                    memory_index: 0,
-                }));
-            }
-            // result disc = 1 (err).
-            function.instruction(&Instruction::I32Const(0));
-            function.instruction(&Instruction::I32Const(1));
-            function.instruction(&Instruction::I32Store8(MemArg {
-                offset: 0,
-                align: 0,
-                memory_index: 0,
-            }));
-            function.instruction(&Instruction::I32Const(0));
-            function.instruction(&Instruction::Return);
+            emit_agent_control_return(function, AGENT_SUSPEND_SENTINEL_CODE, b"", b"");
         }
         crate::direct_wasm::component::WorkflowAbi::InvokeHostImports => {
             // Zero result area + wake element (0..120).
@@ -407,6 +354,72 @@ pub(super) fn emit_entry_suspend_return(
             function.instruction(&Instruction::Return);
         }
     }
+}
+
+/// Return from a cancelled component invocation after all nested handles have
+/// resolved. The composing caller owns the cancellation decision and lifecycle
+/// receipt. Returning an error is a standard RETURNED resolution, not a signal
+/// acknowledgement or an error that this workflow may retry/catch.
+pub(super) fn emit_entry_cancel_return(function: &mut WasmFunction) {
+    emit_agent_control_return(function, b"CANCELLED", b"cancellation", b"error");
+}
+
+/// Shared canonical error layout for non-local control returns. Low scratch is
+/// safe to overwrite only after every asynchronous writer has been resolved.
+fn emit_agent_control_return(
+    function: &mut WasmFunction,
+    code: &[u8],
+    category: &[u8],
+    severity: &[u8],
+) {
+    assert!(code.len() <= 24 && category.len() <= 24 && severity.len() <= 16);
+    function.instruction(&Instruction::I32Const(0));
+    function.instruction(&Instruction::I32Const(0));
+    function.instruction(&Instruction::I32Const(160));
+    function.instruction(&Instruction::MemoryFill(0));
+    for (address, bytes) in [(96, code), (120, category), (144, severity)] {
+        for (index, chunk) in bytes.chunks(8).enumerate() {
+            let mut value = [0; 8];
+            value[..chunk.len()].copy_from_slice(chunk);
+            function.instruction(&Instruction::I32Const(address + index as i32 * 8));
+            function.instruction(&Instruction::I64Const(i64::from_le_bytes(value)));
+            function.instruction(&Instruction::I64Store(MemArg {
+                offset: 0,
+                align: 0,
+                memory_index: 0,
+            }));
+        }
+    }
+    for (field, address, bytes) in [
+        (8, 96, code),
+        (16, 96, code),
+        (24, 120, category),
+        (32, 144, severity),
+    ] {
+        function.instruction(&Instruction::I32Const(field));
+        function.instruction(&Instruction::I32Const(address));
+        function.instruction(&Instruction::I32Store(MemArg {
+            offset: 0,
+            align: 2,
+            memory_index: 0,
+        }));
+        function.instruction(&Instruction::I32Const(field + 4));
+        function.instruction(&Instruction::I32Const(bytes.len() as i32));
+        function.instruction(&Instruction::I32Store(MemArg {
+            offset: 0,
+            align: 2,
+            memory_index: 0,
+        }));
+    }
+    function.instruction(&Instruction::I32Const(0));
+    function.instruction(&Instruction::I32Const(1));
+    function.instruction(&Instruction::I32Store8(MemArg {
+        offset: 0,
+        align: 0,
+        memory_index: 0,
+    }));
+    function.instruction(&Instruction::I32Const(0));
+    function.instruction(&Instruction::Return);
 }
 
 /// Re-raise a composed workflow-agent child's suspend. Emitted immediately

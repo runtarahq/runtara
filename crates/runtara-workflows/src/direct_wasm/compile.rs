@@ -1132,7 +1132,7 @@ pub fn direct_lowering_tag() -> String {
     // their run permits until the execution timeout, and recompiling reported
     // success without rebuilding anything.
     format!(
-        "abi={}-v{},durable-delay-parking=v1,cooperative-waits=shared-v1,omit_runtime={}",
+        "abi={}-v{},durable-delay-parking=v1,cooperative-waits=shared-v1,parent-cancel=v1,omit_runtime={}",
         workflow_abi_tag(super::component::WorkflowAbi::InvokeHostImports),
         DIRECT_WORKFLOW_INVOKE_ABI_VERSION,
         omit_runtime_from_env()
@@ -1290,22 +1290,19 @@ fn compile_direct_workflow_inner(
     let child_workflow_metadata =
         resolve_direct_child_workflow_metadata(&manifest, &input.child_workflows)?;
 
-    // Agent-shaped compile: a PURE workflow (no runtime.* call beyond the
-    // terminal complete/fail, which the omit path suppresses) can drop the
-    // `runtara:workflow-runtime/runtime` import entirely and compile like an
-    // agent — the foundation for invoking a workflow AS an agent (composed as a
-    // dependency, it then cannot touch the parent's runtime). Opt-in per
-    // `RUNTARA_DIRECT_OMIT_RUNTIME`; the `needs_runtime` guard keeps it SOUND —
-    // a workflow that would call runtime keeps the import.
+    // Callable workflows use cancellable guest-local waits for non-durable
+    // Agent I/O/backoff. They must not import the parent's lifecycle runtime.
+    // Keep the lower-level legacy compile path for differential/replay tooling;
+    // production publishing additionally requires the static safety report.
     let needs_runtime = manifest.feature_summary.needs_runtime(input.track_events);
     let omit_runtime = match abi {
-        // A production publish runs the static workflow-agent safety gate
-        // before it reaches this lower-level compiler. It accepts only graphs
-        // with no wait/sleep/retry/pause path, so the resulting capability is
-        // synchronous and omits the runtime. This branch remains permissive
-        // for compiler differential tests and migration tooling; callers must
-        // not treat that as a production workflow-agent authorization.
-        super::component::WorkflowAbi::AgentCapabilities => !needs_runtime,
+        super::component::WorkflowAbi::AgentCapabilities => {
+            !needs_runtime
+                || (!workflow_agent_safety.may_suspend_or_sleep
+                    && !manifest
+                        .feature_summary
+                        .needs_agent_runtime(input.track_events))
+        }
         super::component::WorkflowAbi::InvokeHostImports => {
             omit_runtime_requested && !needs_runtime
         }
@@ -1684,7 +1681,7 @@ fn build_direct_component_resolve_scoped(
                 .map_err(component_error)?;
         }
     }
-    if !parallel_pools.is_empty() || (!omit_runtime && !agents.is_empty()) {
+    if !parallel_pools.is_empty() || !agents.is_empty() {
         resolve
             .push_str("runtara-host-io-timers.wit", HOST_IO_TIMERS_WIT)
             .map_err(component_error)?;
@@ -1732,7 +1729,7 @@ fn build_direct_component_resolve_scoped(
     if has_connections {
         workflow_wit.push_str("    import runtara:connection-resolver/resolver@0.1.0;\n");
     }
-    if !parallel_pools.is_empty() || (!omit_runtime && !agents.is_empty()) {
+    if !parallel_pools.is_empty() || !agents.is_empty() {
         workflow_wit.push_str("    import runtara:host-io/timers@0.1.0;\n");
     }
     for agent in agents {

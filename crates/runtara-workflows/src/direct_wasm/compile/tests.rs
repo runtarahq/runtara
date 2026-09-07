@@ -11080,6 +11080,7 @@ fn abi_is_part_of_the_lowering_tag() {
         tag.contains("cooperative-waits=shared-v1"),
         "recompilation must replace artifacts with duplicated wait code: {tag}"
     );
+    assert!(tag.contains("parent-cancel=v1"));
     assert!(
         tag.contains("durable-delay-parking=v1"),
         "the tag must retire cached artifacts whose short durable delays could block: {tag}"

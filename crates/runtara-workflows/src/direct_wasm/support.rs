@@ -54,16 +54,15 @@ pub struct DirectWorkflowSupportReport {
     pub feature_summary: WorkflowFeatureSummary,
 }
 
-/// Static proof that a workflow is safe to publish through the synchronous
-/// workflow-as-agent capability ABI.
-///
-/// That ABI has no way to return a durable suspension to its parent. A report
-/// therefore treats every path that can wait, sleep, retry, or pause as
-/// unsafe, even when it is not the graph's happy path.
+/// Static proof that a workflow is safe to publish through the workflow-agent
+/// capability ABI. Guest-local cancellable I/O and non-durable Agent backoff
+/// can remain inside the invocation. Durable suspension and lifecycle ownership
+/// still cannot be delegated to a child through this result type.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkflowAgentSafetyReport {
-    /// Whether any statically reachable path can suspend or sleep.
+    /// Whether a path requires durable suspension or unsupported runtime
+    /// ownership. Guest-local cancellable I/O/backoff does not set this flag.
     pub may_suspend_or_sleep: bool,
     /// Deterministic reasons that the graph cannot be published as an agent.
     pub violations: Vec<WorkflowAgentSafetyViolation>,
@@ -100,7 +99,15 @@ pub fn analyze_workflow_agent_safety(
     let children = DirectSupportChildWorkflows::from_child_workflows(child_workflows);
     let mut violations = Vec::new();
     let mut child_stack = Vec::new();
-    collect_workflow_agent_safety(graph, "root", &children, &mut child_stack, &mut violations);
+    let agent_waits_supported = !analyze_workflow_features(graph).needs_agent_runtime(false);
+    collect_workflow_agent_safety(
+        graph,
+        "root",
+        &children,
+        &mut child_stack,
+        &mut violations,
+        agent_waits_supported,
+    );
     violations.sort_by(|left, right| {
         (
             left.path.as_str(),
@@ -126,6 +133,7 @@ fn collect_workflow_agent_safety(
     child_workflows: &DirectSupportChildWorkflows<'_>,
     child_stack: &mut Vec<String>,
     violations: &mut Vec<WorkflowAgentSafetyViolation>,
+    agent_waits_supported: bool,
 ) {
     // ExecutionGraph.steps is a HashMap. Sorting on its authored key makes
     // diagnostics stable across process hash seeds and therefore suitable for
@@ -141,6 +149,7 @@ fn collect_workflow_agent_safety(
             child_workflows,
             child_stack,
             violations,
+            agent_waits_supported,
         );
     }
 }
@@ -151,6 +160,7 @@ fn collect_workflow_agent_step_safety(
     child_workflows: &DirectSupportChildWorkflows<'_>,
     child_stack: &mut Vec<String>,
     violations: &mut Vec<WorkflowAgentSafetyViolation>,
+    agent_waits_supported: bool,
 ) {
     if step_has_breakpoint(step) {
         push_workflow_agent_safety_violation(
@@ -185,18 +195,19 @@ fn collect_workflow_agent_step_safety(
                     child_workflows,
                     child_stack,
                     violations,
+                    agent_waits_supported,
                 );
             }
         }
-        // Agent retry handling also sleeps for a rate-limit response, even if
-        // maxRetries is set to zero. The current capability ABI cannot bubble
-        // that wait to a parent, so every Agent is conservatively unsafe.
+        // Only workflows with no root runtime ownership can keep non-durable
+        // retry/rate-limit waits local and unwind them on parent cancellation.
+        Step::Agent(_) if agent_waits_supported => {}
         Step::Agent(_) => push_workflow_agent_safety_violation(
             violations,
             path,
             step,
             "retry-or-rate-limit-backoff",
-            "Agent calls can retry or wait for rate limiting; run this workflow as a top-level workflow before publishing it as an agent",
+            "Agent backoff is callable only in a non-durable workflow without root runtime operations; remove durable, logging, suspension, timeout and breakpoint paths before publishing",
         ),
         // AiAgent uses the same outbound retry/rate-limit machinery as Agent
         // for its model call and may dispatch any declared tool path.
@@ -229,6 +240,7 @@ fn collect_workflow_agent_step_safety(
                 child_workflows,
                 child_stack,
                 violations,
+                agent_waits_supported,
             );
         }
         Step::While(while_step) => collect_workflow_agent_safety(
@@ -237,6 +249,7 @@ fn collect_workflow_agent_step_safety(
             child_workflows,
             child_stack,
             violations,
+            agent_waits_supported,
         ),
         Step::EmbedWorkflow(embed) => {
             if embed.max_retries.unwrap_or(3) > 0 {
@@ -288,6 +301,7 @@ fn collect_workflow_agent_step_safety(
                 child_workflows,
                 child_stack,
                 violations,
+                agent_waits_supported,
             );
             child_stack.pop();
         }
@@ -2098,6 +2112,47 @@ mod tests {
 
         assert!(!report.may_suspend_or_sleep, "{report:?}");
         assert!(report.violations.is_empty());
+    }
+
+    #[test]
+    fn workflow_agent_safety_accepts_local_agent_backoff_but_not_root_runtime_ownership() {
+        for retries in [0, 3] {
+            let mut graph: ExecutionGraph = serde_json::from_value(serde_json::json!({
+                "durable": false, "entryPoint": "call", "steps": {
+                    "call": {"id": "call", "stepType": "Agent", "agentId": "http",
+                        "capabilityId": "http-request", "maxRetries": retries,
+                        "connectionId": "fixture", "retryDelay": 1000},
+                    "finish": {"id": "finish", "stepType": "Finish"}
+                }, "executionPlan": [{"fromStep": "call", "toStep": "finish"}]
+            }))
+            .unwrap();
+            let report = analyze_workflow_agent_safety(&graph, &[]);
+            assert!(!report.may_suspend_or_sleep, "{report:?}");
+            let features = analyze_workflow_features(&graph);
+            assert!(
+                features.needs_runtime(false),
+                "top-level owns its lifecycle"
+            );
+            assert!(!features.needs_agent_runtime(false));
+            assert!(
+                features.needs_agent_runtime(true),
+                "debug events require runtime"
+            );
+
+            graph.durable = Some(true);
+            assert!(analyze_workflow_agent_safety(&graph, &[]).may_suspend_or_sleep);
+            graph.durable = Some(false);
+            // An error path requiring root runtime ownership must be considered
+            // even when the HTTP call itself is non-durable.
+            graph.steps.insert(
+                "log".into(),
+                serde_json::from_value(serde_json::json!({
+                    "id": "log", "stepType": "Log", "message": "fixture"
+                }))
+                .unwrap(),
+            );
+            assert!(analyze_workflow_agent_safety(&graph, &[]).may_suspend_or_sleep);
+        }
     }
 
     #[test]

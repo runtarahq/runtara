@@ -191,6 +191,11 @@ enum Scenario {
     SqsReceiveBody,
     SqsDeleteAfterReceive,
     PartialBody,
+    NestedAgent,
+    NestedAgentBody,
+    DeepNestedAgent,
+    NestedParallelBranches,
+    NestedParallelSplit,
     SignalReadFailure,
     ParallelSplit,
     ParallelBranches,
@@ -203,6 +208,16 @@ enum Scenario {
 }
 
 impl Scenario {
+    fn nested_depth(self) -> usize {
+        match self {
+            Self::NestedAgent
+            | Self::NestedAgentBody
+            | Self::NestedParallelBranches
+            | Self::NestedParallelSplit => 1,
+            Self::DeepNestedAgent => 2,
+            _ => 0,
+        }
+    }
     fn is_sharepoint(self) -> bool {
         matches!(
             self,
@@ -297,11 +312,110 @@ fn signal(kind: &str) -> RuntimeSignalInfo {
     }
 }
 
+fn compile_nested_agents(
+    mut graph: ExecutionGraph,
+    depth: usize,
+    dir: &std::path::Path,
+) -> anyhow::Result<runtara_workflows::direct_wasm::DirectCompilationResult> {
+    use runtara_workflows::direct_wasm::{
+        compile_direct_workflow_with_abi, compose_direct_workflow_with_extra_dirs,
+    };
+    let components = direct_e2e_components_dir();
+    let staging = dir.join("published");
+    fs::create_dir(&staging)?;
+    let mut agents = Vec::new();
+    for level in 0..depth {
+        let safety =
+            runtara_workflows::direct_wasm::support::analyze_workflow_agent_safety(&graph, &[]);
+        anyhow::ensure!(
+            !safety.may_suspend_or_sleep,
+            "fixture violates publish contract: {safety:?}"
+        );
+        let slug = format!("nested-http-{}", char::from(b'a' + u8::try_from(level)?));
+        let mut child = compile_direct_workflow_with_abi(
+            DirectCompilationInput {
+                workflow_id: slug.clone(),
+                version: 1,
+                source_checksum: None,
+                execution_graph: graph.clone(),
+                child_workflows: vec![],
+                output_dir: dir.join(&slug),
+                track_events: false,
+                agent_catalog: (!agents.is_empty()).then(|| {
+                    Arc::new(runtara_dsl::agent_meta::AgentCatalog::from_agents(
+                        agents.clone(),
+                    ))
+                }),
+                agent_slug: Some(slug.clone()),
+            },
+            WorkflowAbi::AgentCapabilities,
+            false,
+        )?;
+        anyhow::ensure!(
+            child.omit_runtime,
+            "published child must not observe or acknowledge the root signal"
+        );
+        compose_direct_workflow_with_extra_dirs(
+            &mut child,
+            &components,
+            std::slice::from_ref(&staging),
+        )?;
+        anyhow::ensure!(child.scoped_agents.is_empty() && child.invocation_manifest.is_none());
+        let info = certified_workflow_agent_info(
+            &slug,
+            &slug,
+            "",
+            &graph.input_schema,
+            &graph.output_schema,
+        );
+        fs::copy(
+            child.wasm_path,
+            staging.join(format!("runtara_agent_{}.wasm", slug.replace('-', "_"))),
+        )?;
+        fs::write(
+            staging.join(format!(
+                "runtara_agent_{}.meta.json",
+                slug.replace('-', "_")
+            )),
+            serde_json::to_vec(&info)?,
+        )?;
+        agents.push(info);
+        graph = serde_json::from_value(serde_json::json!({
+            "durable":false, "entryPoint":"call", "steps":{
+                "call":{"id":"call","stepType":"Agent","agentId":slug,"capabilityId":"run", "maxRetries":3,"retryDelay":0,
+                    "inputMapping":{"items":{"valueType":"reference","value":"data.items"}}},
+                "finish":{"id":"finish","stepType":"Finish","inputMapping":{"result":{"valueType":"reference","value":"steps.call.outputs"}}},
+                "handled":{"id":"handled","stepType":"Finish"}
+            }, "executionPlan":[{"fromStep":"call","toStep":"finish"},{"fromStep":"call","toStep":"handled","label":"onError"}]
+        }))?;
+    }
+    let mut parent = compile_direct_workflow_with_abi(
+        DirectCompilationInput {
+            workflow_id: "parent-of-nested-http".into(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: graph,
+            child_workflows: vec![],
+            output_dir: dir.join("parent"),
+            track_events: false,
+            agent_catalog: Some(Arc::new(
+                runtara_dsl::agent_meta::AgentCatalog::from_agents(agents),
+            )),
+            agent_slug: None,
+        },
+        WorkflowAbi::InvokeHostImports,
+        false,
+    )?;
+    compose_direct_workflow_with_extra_dirs(&mut parent, &components, &[staging])?;
+    Ok(parent)
+}
+
 async fn run(scenario: Scenario) -> anyhow::Result<()> {
     let pre_cancel = scenario == Scenario::BeforeLaunch;
     let partial_body = matches!(
         scenario,
         Scenario::PartialBody
+            | Scenario::NestedAgentBody
             | Scenario::SqsReceiveBody
             | Scenario::StripeCreateBody
             | Scenario::QuickbooksReadBody
@@ -316,6 +430,8 @@ async fn run(scenario: Scenario) -> anyhow::Result<()> {
     let parallel = matches!(
         scenario,
         Scenario::ParallelSplit
+            | Scenario::NestedParallelBranches
+            | Scenario::NestedParallelSplit
             | Scenario::ParallelBranches
             | Scenario::WavefrontBranches
             | Scenario::ParallelSignalReadFailure
@@ -551,7 +667,9 @@ async fn run(scenario: Scenario) -> anyhow::Result<()> {
     if parallel {
         graph = if matches!(
             scenario,
-            Scenario::ParallelSplit | Scenario::ParallelSignalReadFailure
+            Scenario::ParallelSplit
+                | Scenario::ParallelSignalReadFailure
+                | Scenario::NestedParallelSplit
         ) {
             serde_json::from_str(&parallel_http_split_graph(&url, 2))?
         } else {
@@ -572,24 +690,33 @@ async fn run(scenario: Scenario) -> anyhow::Result<()> {
             }
         }
     }
+    if scenario.nested_depth() > 0 {
+        // Match the production publish contract: no durable suspension or
+        // shared root runtime import inside a published workflow-agent.
+        graph["durable"] = false.into();
+    }
     let graph = serde_json::from_value(graph)?;
-    let compiled = compile_direct_workflow_composed_configured(
-        DirectCompilationInput {
-            workflow_id: "cooperative-http".into(),
-            version: 1,
-            source_checksum: None,
-            execution_graph: graph,
-            child_workflows: vec![],
-            output_dir: dir.path().into(),
-            track_events: false,
-            agent_catalog: None,
-            agent_slug: None,
-        },
-        direct_e2e_components_dir(),
-        RuntimeBinding::HostImport,
-        WorkflowAbi::InvokeHostImports,
-        false,
-    )?;
+    let compiled = if scenario.nested_depth() > 0 {
+        compile_nested_agents(graph, scenario.nested_depth(), dir.path())?
+    } else {
+        compile_direct_workflow_composed_configured(
+            DirectCompilationInput {
+                workflow_id: "cooperative-http".into(),
+                version: 1,
+                source_checksum: None,
+                execution_graph: graph,
+                child_workflows: vec![],
+                output_dir: dir.path().into(),
+                track_events: false,
+                agent_catalog: None,
+                agent_slug: None,
+            },
+            direct_e2e_components_dir(),
+            RuntimeBinding::HostImport,
+            WorkflowAbi::InvokeHostImports,
+            false,
+        )?
+    };
     anyhow::ensure!(
         compiled.scoped_agents.is_empty(),
         "fixture selected isolated Agent adapters"
@@ -1200,3 +1327,31 @@ async fn emitted_workflow_cancel_shopify_media_body() -> anyhow::Result<()> {
 async fn emitted_workflow_cancel_shopify_delete_after_read() -> anyhow::Result<()> {
     run(Scenario::ShopifyDeleteAfterRead).await
 }
+
+#[tokio::test]
+async fn emitted_nested_agent_cancel_cleans_http_before_root_ack() -> anyhow::Result<()> {
+    run(Scenario::NestedAgent).await
+}
+
+#[tokio::test]
+async fn emitted_nested_agent_cancel_cleans_partial_body_before_root_ack() -> anyhow::Result<()> {
+    run(Scenario::NestedAgentBody).await
+}
+
+#[tokio::test]
+async fn emitted_nested_agent_cancel_unwinds_two_published_levels() -> anyhow::Result<()> {
+    run(Scenario::DeepNestedAgent).await
+}
+
+#[tokio::test]
+async fn emitted_nested_agent_cancel_drains_parallel_branches() -> anyhow::Result<()> {
+    run(Scenario::NestedParallelBranches).await
+}
+
+#[tokio::test]
+async fn emitted_nested_agent_cancel_drains_parallel_split() -> anyhow::Result<()> {
+    run(Scenario::NestedParallelSplit).await
+}
+
+#[path = "nested_retry.rs"]
+mod nested_retry;

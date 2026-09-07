@@ -221,7 +221,14 @@ pub(super) fn emit_direct_core_module(
             &mut imported_function_count,
         ));
         import_indices.waitable_set_wait = Some(builtin(
-            "[waitable-set-wait]",
+            if matches!(
+                config.abi,
+                crate::direct_wasm::component::WorkflowAbi::AgentCapabilities
+            ) {
+                "[cancellable][waitable-set-wait]"
+            } else {
+                "[waitable-set-wait]"
+            },
             &[ValType::I32, ValType::I32],
             &[ValType::I32],
             &mut types,
