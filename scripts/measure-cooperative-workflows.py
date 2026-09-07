@@ -104,9 +104,27 @@ def build(root, target, label, output):
     return binaries[0]
 
 
-def run(binary, root, target, label, pair, output, expected_source):
+def component_inputs(target):
+    directory = target / "wasm32-wasip2/release"
+    names = [f"{name}.{suffix}" for name in ("runtara_agent_utils", "runtara_workflow_stdlib", "runtara_workflow_runtime") for suffix in ("wasm", "meta.json")]
+    return {name: digest((directory / name).read_bytes()) for name in names}
+
+
+def hardware(root):
+    result = {"logical_cpus": os.cpu_count(), "cpu_model": platform.processor(), "physical_cpus": None, "memory_bytes": None}
+    if platform.system() == "Darwin":
+        values = command(["sysctl", "-n", "machdep.cpu.brand_string", "hw.memsize", "hw.physicalcpu"], root).splitlines()
+        result.update(cpu_model=values[0], memory_bytes=int(values[1]), physical_cpus=int(values[2]))
+    elif platform.system() == "Linux":
+        result["memory_bytes"] = os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
+    return result
+
+
+def run(binary, root, target, label, pair, output, expected_source, expected_inputs):
     if source_manifest(root) != expected_source:
         raise RuntimeError(f"{label} source changed after building")
+    if component_inputs(target) != expected_inputs:
+        raise RuntimeError(f"{label} component inputs changed after building")
     log_path = output / f"pair-{pair}-{label}.log"
     print(f"Measuring pair {pair}: {label}", flush=True)
     started = time.time()
@@ -134,6 +152,8 @@ def run(binary, root, target, label, pair, output, expected_source):
         assert case["cached_full_run"]["samples"] == 1000
         assert len(case["cached_full_run"]["raw_us"]) == 1000
         assert not case["sizes"]["omit_runtime"]
+    if source_manifest(root) != expected_source or component_inputs(target) != expected_inputs:
+        raise RuntimeError(f"{label} inputs changed during measurement")
     outcome["measurement"] = report
     (output / f"pair-{pair}-{label}.json").write_text(json.dumps(outcome, indent=2) + "\n")
     return outcome
@@ -177,10 +197,10 @@ def main():
     manifest = {"format_version": 1, "status": "building", "sources": sources,
                 "targets": {k: str(v) for k, v in targets.items()}, "driver_sha256": digest(Path(__file__).read_bytes()),
                 "fixture_host_diff": diff, "platform": platform.platform(), "machine": platform.machine(),
-                "logical_cpus": os.cpu_count(), "rustc": command(["rustc", "-Vv"], roots["candidate"]),
+                "hardware": hardware(roots["candidate"]), "gzip": command(["gzip", "--version"], roots["candidate"]), "gzip_arguments": ["-n", "-c"], "rustc": command(["rustc", "-Vv"], roots["candidate"]),
                 "cargo": command(["cargo", "-V"], roots["candidate"]),
                 "orders": [["baseline", "candidate"], ["candidate", "baseline"], ["baseline", "candidate"]],
-                "scope": "interim no-cancellation guest/compiler comparison; final plan gates remain pending"}
+                "scope": "interim no-cancellation whole-revision normal-path comparison, including runtime changes; final plan gates remain pending"}
     manifest_path = output / "manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
     try:
@@ -188,12 +208,13 @@ def main():
             futures = {label: pool.submit(build, roots[label], targets[label], label, output) for label in roots}
             binaries = {label: future.result() for label, future in futures.items()}
         manifest["executables"] = {label: {"path": str(path), "sha256": digest(path.read_bytes())} for label, path in binaries.items()}
+        manifest["component_inputs"] = {label: component_inputs(target) for label, target in targets.items()}
         manifest["status"] = "measuring"
         manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
         runs = []
         for pair, order in enumerate(manifest["orders"], 1):
             for label in order:
-                runs.append(run(binaries[label], roots[label], targets[label], label, pair, output, sources[label]))
+                runs.append(run(binaries[label], roots[label], targets[label], label, pair, output, sources[label], manifest["component_inputs"][label]))
         validate_pairs(runs)
         manifest["status"] = "complete"
         manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
