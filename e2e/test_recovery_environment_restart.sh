@@ -97,6 +97,13 @@ trap cleanup EXIT
 start_server() {
     # Start (or restart) runtara-server with identical env so the wake scheduler
     # and orphan recovery see the same DBs / data dir / Valkey across restarts.
+    #
+    # The two connection URLs are pinned rather than left to be derived from
+    # INTERNAL_PORT. `runtara-server` calls `dotenvy::dotenv()` at startup, which
+    # fills any variable this script does not set — so a developer `.env` that
+    # names CONNECTION_SERVICE_URL silently wins over the derivation, and the
+    # guest resolves credentials against whatever server that points at. Every
+    # other port here is pinned for the same reason; these two were the gap.
     RUNTARA_SERVER_DATABASE_URL="${SERVER_DB_URL}" \
     OBJECT_MODEL_DATABASE_URL="${SERVER_DB_URL}" \
     RUNTARA_DATABASE_URL="${RUNTIME_DB_URL}" \
@@ -104,6 +111,8 @@ start_server() {
     SERVER_HOST=127.0.0.1 \
     SERVER_PORT="${TEST_PORT_PUBLIC}" \
     INTERNAL_PORT="${TEST_PORT_INTERNAL}" \
+    CONNECTION_SERVICE_URL="http://127.0.0.1:${TEST_PORT_INTERNAL}/api/connections" \
+    RUNTARA_CONNECTION_SERVICE_URL="http://127.0.0.1:${TEST_PORT_INTERNAL}/api/connections" \
     RUNTARA_CORE_PORT="${TEST_CORE_PORT}" \
     RUNTARA_ENVIRONMENT_PORT="${TEST_ENV_PORT}" \
     RUNTARA_CORE_HTTP_PORT="${TEST_CORE_HTTP_PORT}" \
