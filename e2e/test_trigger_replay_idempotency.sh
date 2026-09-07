@@ -90,6 +90,24 @@ wait_for_group_read() {
     return 1
 }
 
+# Delivery and acknowledgement are two separate Valkey calls, so an entry is
+# briefly pending between the read that increments `entries-read` and the XACK
+# that clears it. Asserting on a single XPENDING right after the read is a race
+# the assertion loses whenever it samples inside that window: the worker
+# acknowledged a deduplicated replay six milliseconds after delivery and the
+# check ran two milliseconds in. Poll instead — the assertion is still "this
+# entry gets acknowledged", it just no longer requires that to be instantaneous.
+wait_for_ack() {
+    local entry_id="$1"
+    for _ in {1..30}; do
+        if [ -z "$(redis XPENDING "${STREAM}" "${GROUP}" "${entry_id}" "${entry_id}" 1)" ]; then
+            return 0
+        fi
+        sleep 1
+    done
+    return 1
+}
+
 cleanup() {
     set +e
 
@@ -227,7 +245,7 @@ done
 [ "${INSTANCE_COUNT:-0}" = "1" ] || { echo "repaired execution never registered"; exit 1; }
 [ -f "${ARTIFACT}" ] || { echo "forced recompilation did not restore ${ARTIFACT}"; exit 1; }
 wait_for_group_read "${READS_BEFORE}" || { echo "trigger group did not consume first event"; exit 1; }
-[ -z "$(redis XPENDING "${STREAM}" "${GROUP}" "${FIRST_ENTRY_ID}" "${FIRST_ENTRY_ID}" 1)" ] || {
+wait_for_ack "${FIRST_ENTRY_ID}" || {
     echo "first event was not acknowledged after repair"
     exit 1
 }
@@ -249,7 +267,7 @@ REPLAY_ENTRY_ID=$(redis XADD "${STREAM}" '*' \
     event_type trigger trigger_type http_api instance_id "${INSTANCE_ID}" \
     workflow_id "${WORKFLOW_ID}" data "${EVENT}")
 wait_for_group_read "${READS_BEFORE}" || { echo "trigger group did not consume replay"; exit 1; }
-[ -z "$(redis XPENDING "${STREAM}" "${GROUP}" "${REPLAY_ENTRY_ID}" "${REPLAY_ENTRY_ID}" 1)" ] || {
+wait_for_ack "${REPLAY_ENTRY_ID}" || {
     echo "deduplicated replay was not acknowledged"
     exit 1
 }
