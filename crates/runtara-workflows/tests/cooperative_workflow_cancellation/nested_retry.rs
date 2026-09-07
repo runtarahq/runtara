@@ -9,6 +9,16 @@ async fn run_retry(
     retries: u32,
     http_error: u16,
 ) -> anyhow::Result<()> {
+    run_retry_at_depth(cancel, rate_limited, retries, http_error, 2).await
+}
+
+async fn run_retry_at_depth(
+    cancel: bool,
+    rate_limited: bool,
+    retries: u32,
+    http_error: u16,
+    depth: usize,
+) -> anyhow::Result<()> {
     let host = Arc::new(Host {
         inner: PersistingRuntimeHost::new(b"{}"),
         requested: AtomicBool::new(false),
@@ -54,7 +64,27 @@ async fn run_retry(
     }
     let graph = serde_json::from_value(graph)?;
     let dir = tempfile::tempdir()?;
-    let compiled = compile_nested_agents(graph, 2, dir.path())?;
+    let compiled = if depth == 0 {
+        compile_direct_workflow_composed_configured(
+            DirectCompilationInput {
+                workflow_id: "root-retry-cancel".into(),
+                version: 1,
+                source_checksum: None,
+                execution_graph: graph,
+                child_workflows: vec![],
+                output_dir: dir.path().into(),
+                track_events: false,
+                agent_catalog: None,
+                agent_slug: None,
+            },
+            direct_e2e_components_dir(),
+            RuntimeBinding::HostImport,
+            WorkflowAbi::InvokeHostImports,
+            false,
+        )?
+    } else {
+        compile_nested_agents(graph, depth, dir.path())?
+    };
     let server_host = host.clone();
     let server = tokio::spawn(async move {
         loop {
@@ -182,14 +212,17 @@ async fn run_retry(
             };
             let succeeds = retries > 0 && (rate_limited || retries >= 2);
             let attempts = if succeeds { 3 } else { retries + 1 };
+            let mut expected = if succeeds {
+                serde_json::json!({"ok":true})
+            } else {
+                serde_json::json!({"unexpected_recovery":true})
+            };
+            for _ in 0..depth {
+                expected = serde_json::json!({"result":expected});
+            }
             anyhow::ensure!(
-                serde_json::from_slice::<Value>(&output)?
-                    == if !succeeds {
-                        serde_json::json!({"result":{"result":{"unexpected_recovery":true}}})
-                    } else {
-                        serde_json::json!({"result":{"result":{"ok":true}}})
-                    },
-                "nested success output changed or recovery ran"
+                serde_json::from_slice::<Value>(&output)? == expected,
+                "retry success output changed or recovery ran"
             );
             anyhow::ensure!(!host.acknowledged.load(Ordering::SeqCst));
             anyhow::ensure!(
@@ -247,4 +280,35 @@ async fn nested_retry_http_429_uses_ordinary_retry_count() -> anyhow::Result<()>
     // Unlike Slack's recognized rate-limit error, two HTTP_429 responses
     // exhaust one retry even though the separate wait budget remains available.
     run_retry(false, false, 1, 429).await
+}
+
+#[tokio::test]
+async fn root_retry_cancel_interrupts_long_backoff() -> anyhow::Result<()> {
+    run_retry_at_depth(true, false, 2, 503, 0).await
+}
+
+#[tokio::test]
+async fn root_retry_cancel_interrupts_rate_limit_backoff() -> anyhow::Result<()> {
+    run_retry_at_depth(true, true, 1, 429, 0).await
+}
+
+#[tokio::test]
+async fn root_retry_preserves_success_and_backoff_after_transient_errors() -> anyhow::Result<()> {
+    run_retry_at_depth(false, false, 2, 503, 0).await
+}
+
+#[tokio::test]
+async fn root_retry_preserves_rate_limit_budget_beyond_ordinary_retry_count() -> anyhow::Result<()>
+{
+    run_retry_at_depth(false, true, 1, 429, 0).await
+}
+
+#[tokio::test]
+async fn root_retry_zero_retries_routes_rate_limit_error_to_recovery() -> anyhow::Result<()> {
+    run_retry_at_depth(false, true, 0, 429, 0).await
+}
+
+#[tokio::test]
+async fn root_retry_http_429_uses_ordinary_retry_count() -> anyhow::Result<()> {
+    run_retry_at_depth(false, false, 1, 429, 0).await
 }

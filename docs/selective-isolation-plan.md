@@ -365,3 +365,20 @@ bounded cooperation inside Agent/stdlib/native calls, all construct combinations
 targeted timeouts, durable callable suspension and fresh size/time/polling-cost
 measurements remain required. A per-iteration cooperation bound is not a fixed
 latency guarantee for a large or blocking iteration.
+
+
+### Root retry progress (2026-09-07)
+
+Root non-durable Agent backoff now shares the published-agent async timer wait.
+Cancellation during ordinary and recognized rate-limit waits is covered with
+real HTTP/Slack agents, alongside no-cancel delay and retry-count compatibility.
+Durable retries keep their checkpoint-and-park behavior. Remaining blocking wait
+sites include Embed/Split retry helpers and legacy/capability WaitForSignal
+polling. Production root WaitForSignal already parks on a signal after a miss
+and must retain that behavior. The lower-level non-durable Delay emitter blocks,
+but production rejects that graph to avoid holding a runner; retain this
+acceptance boundary during cancellation work. Agent-free wait graphs need
+shared-wait import/helper provisioning where an accepted construct requires it. Root
+backoff retains a Store and uses the existing one-second lifecycle poll, which
+must be included in the capacity and signal-service cost qualification. This
+expands G4/G7 evidence; it does not retire E128 or complete timeout gate G5.

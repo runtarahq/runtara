@@ -5626,6 +5626,8 @@ fn direct_core_lowers_non_durable_agent_retry_loop() {
     let mut durable_sleep_index = None;
     let mut durable_sleep_checkpoint_index = None;
     let mut blocking_sleep_index = None;
+    let mut timer_sleep_index = None;
+    let mut saw_blocking_sleep_call = false;
     let mut agent_retry_sleep_key_index = None;
     let mut agent_retry_delay_index = None;
     let mut agent_retry_error_info_index = None;
@@ -5650,7 +5652,7 @@ fn direct_core_lowers_non_durable_agent_retry_loop() {
     let mut saw_invoke = false;
     let mut saw_retry_info_after_invoke = false;
     let mut saw_retry_delay_after_retry_info = false;
-    let mut saw_blocking_sleep_after_retry_delay = false;
+    let mut saw_timer_sleep_after_retry_delay = false;
     let mut saw_error_from_info_after_retry_info = false;
     let mut saw_get_checkpoint_call = false;
     let mut saw_checkpoint_call = false;
@@ -5686,6 +5688,9 @@ fn direct_core_lowers_non_durable_agent_retry_loop() {
                                 if module.contains("runtara:workflow-runtime/runtime") =>
                             {
                                 durable_sleep_checkpoint_index = Some(next_function_index);
+                            }
+                            ("runtara:host-io/timers@0.1.0", "[async-lower]sleep") => {
+                                timer_sleep_index = Some(next_function_index);
                             }
                             (module, "blocking-sleep")
                                 if module.contains("runtara:workflow-runtime/runtime") =>
@@ -5790,7 +5795,12 @@ fn direct_core_lowers_non_durable_agent_retry_loop() {
                             Operator::Call { function_index }
                                 if Some(function_index) == blocking_sleep_index =>
                             {
-                                saw_blocking_sleep_after_retry_delay = saw_retry_delay_call;
+                                saw_blocking_sleep_call = true;
+                            }
+                            Operator::Call { function_index }
+                                if Some(function_index) == timer_sleep_index =>
+                            {
+                                saw_timer_sleep_after_retry_delay = saw_retry_delay_call;
                             }
                             Operator::Call { function_index }
                                 if Some(function_index) == agent_error_from_info_index =>
@@ -5893,8 +5903,12 @@ fn direct_core_lowers_non_durable_agent_retry_loop() {
         "retry delay should be computed from preserved retry payload"
     );
     assert!(
-        saw_blocking_sleep_after_retry_delay,
-        "non-durable retries should use runtime.blocking-sleep after delay calculation"
+        !saw_blocking_sleep_call,
+        "non-durable retry must remain cooperative"
+    );
+    assert!(
+        saw_timer_sleep_after_retry_delay,
+        "non-durable retries should await the host I/O timer after delay calculation"
     );
     assert!(
         saw_error_from_info_after_retry_info,
@@ -11082,6 +11096,7 @@ fn abi_is_part_of_the_lowering_tag() {
     );
     assert!(tag.contains("parent-cancel=v1"));
     assert!(tag.contains("loop-cooperation=v1"));
+    assert!(tag.contains("retry-cooperation=v1"));
     assert!(
         tag.contains("durable-delay-parking=v1"),
         "the tag must retire cached artifacts whose short durable delays could block: {tag}"

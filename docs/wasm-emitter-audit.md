@@ -999,3 +999,26 @@ and the existing
 [`cooperative workflow suite`](../crates/runtara-workflows/tests/cooperative_workflow_cancellation/mod.rs).
 The standard yield proof is in
 [`cooperative_cancellation.rs`](../crates/runtara-component-host/tests/cooperative_cancellation.rs).
+
+
+### AUDIT-10 · Root cancellation during non-durable Agent retry backoff
+
+**Fixed in the cooperative cancellation worktree, 2026-09-07.**
+
+| Case | Before | Current behavior / regression test |
+| --- | --- | --- |
+| Cancel during ordinary root Agent backoff | Blocking runtime sleep prevented guest polling until the delay ended; the five-second watchdog expired for a 60-second delay | `root_retry_cancel_interrupts_long_backoff` requires cooperative suspension and acknowledgement after exactly one request, with no retry/recovery |
+| Cancel during recognized rate-limit backoff | Same uninterruptible guest wait despite a pending lifecycle command | `root_retry_cancel_interrupts_rate_limit_backoff` checks the same cancellation outcome through a real Slack error envelope |
+| Ordinary backoff with no cancellation | Wait, retry and recover/succeed according to existing policy | `root_retry_preserves_success_and_backoff_after_transient_errors` checks three requests, exact output and elapsed delay |
+| Rate-limit budget beyond ordinary retries | Separate recognized rate-limit budget may permit additional attempts | `root_retry_preserves_rate_limit_budget_beyond_ordinary_retry_count` checks the third request succeeds |
+| Zero ordinary retries and HTTP_429 | Existing AUDIT-08 policy discrepancies | `root_retry_zero_retries_routes_rate_limit_error_to_recovery` and `root_retry_http_429_uses_ordinary_retry_count` retain the existing request counts and recovery result |
+
+The fix routes non-durable Agent backoff through the existing async timer and
+shared guest wait/cleanup. Durable lifecycle retries still park. Tests share
+[`nested_retry.rs`](../crates/runtara-workflows/tests/cooperative_workflow_cancellation/nested_retry.rs)
+with the published workflow-agent cases. Legacy/capability WaitForSignal polling
+and Embed/Split blocking backoff remain separate gaps; production root
+WaitForSignal already parks on a signal. The lower-level non-durable Delay
+emitter blocks, but production rejects that graph to avoid holding a runner.
+This finding does not change that acceptance boundary, establish those paths'
+cancellation behavior or implement per-step timeout support.

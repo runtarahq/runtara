@@ -1558,3 +1558,63 @@ Validation with Rust 1.97 and the isolated native/component directories:
 
 No database/full-server E2E or new size/timing measurements were run for this
 stage. The paired loop-cost and controlled capacity measurements remain open.
+
+
+## Root Agent retry backoff (2026-09-07)
+
+Non-durable Agent retries now use the same async-lowered host-I/O timer and
+`cooperative_wait::emit_await_call` for every workflow ABI. Previously only
+published workflow-agents selected that path; a root workflow synchronously
+called `runtime.blocking-sleep`, which prevented guest lifecycle polling for
+its entire backoff. The host still supplies an ordinary timer. The generated
+WASM owns the wait handle, observes the root signal, resolves pending calls and
+acknowledges cancellation through the existing cleanup boundary.
+
+Two new root tests failed before this change: cancellation during ordinary and
+recognized rate-limit backoff both reached the five-second execution watchdog
+while waiting for a 60-second retry delay. Both now suspend cooperatively after
+one HTTP request, acknowledge the command and bypass retry, recovery and success.
+The fixture delivers cancellation after the error response is complete, with a
+250 ms handoff delay; it does not instrument the exact timer-entry timestamp.
+
+Six root cases reuse the same real HTTP/Slack fixture as the six published
+workflow-agent cases. They cover cancellation in both backoff types, successful
+ordinary retries, the independent rate-limit budget, zero ordinary retries and
+HTTP_429 classification. No-cancel cases assert output, exact request counts and
+a minimum elapsed delay. The compiler test also checks an async timer call after
+delay calculation and the absence of a blocking-sleep call in the retry body.
+The existing AUDIT-08 budget/classification discrepancies remain unchanged.
+
+Durable lifecycle retries still checkpoint an absolute deadline and park, freeing
+the Store; retained legacy durable paths keep their existing sleep semantics.
+The artifact tag adds `retry-cooperation=v1`. No WIT interface, host task manager,
+agent implementation or feature flag is added. Root waits reuse the existing
+one-second lifecycle polling interval and retain their Store during non-durable
+backoff. Responsiveness depends on scheduler and signal-service latency; this
+is not a hard real-time bound.
+
+Embed/Split retry helpers still contain blocking sleep paths. Non-durable Delay
+also has a lower-level blocking emitter, but production support analysis rejects
+it with `non-durable-delay` to avoid holding a runner. That rejection remains in
+place. WaitForSignal's blocking polling loops are confined to legacy/capability
+ABIs: the production root invoke parks on a signal after a miss, including AI
+human-input waits. Migration must preserve that parking behavior, application-
+signal consumption, safe pause/shutdown boundaries and error routing.
+The timer import and shared-wait helpers are currently provisioned for graphs
+with Agent calls; Agent-free wait graphs need explicit compiler provisioning
+without adding host imports to pure runtime-free workflows.
+
+Validation with Rust 1.97 and isolated native/component directories:
+
+- Normal component build: 27 Agents and two shared workflow components built.
+- Focused root/published retry suite: 12 passed (two new root cancellation
+  failures reproduced before the change, then passed after it).
+- Workflow library: 575 passed. Native emitter audit: 30 passed.
+- Full direct-workflow execution suite: 329 passed, three manual benchmarks
+  ignored. This includes durable Agent/Embed/Split retry parking and replay.
+- Feature-gated all-target Clippy for workflows and component host, formatting,
+  and `git diff --check` passed.
+
+No database/full-server E2E or new performance/capacity measurements were run for
+this stage. The component-host cancellation suite was last run for the preceding
+loop stage (77 passed); this stage changes only workflow emission and its tests.
