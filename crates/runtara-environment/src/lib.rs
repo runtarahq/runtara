@@ -129,9 +129,37 @@
 //!
 //! Background workers: the `RUNTARA_{RUN_DIR,DB,IMAGE}_CLEANUP_*` families,
 //! `RUNTARA_EVENT_DEBUG_RETENTION_HOURS`, `RUNTARA_AUTO_RECOVER` and
-//! `RUNTARA_MAX_AUTO_RESTARTS`. Every `*_ENABLED` switch and
-//! `RUNTARA_AUTO_RECOVER` share `crate::config::parse_enabled`, so
-//! all of them answer to `false`/`0`/`no`/`off`/`disabled` and default to on.
+//! `RUNTARA_MAX_AUTO_RESTARTS`.
+//!
+//! Two rules cover all of the above, and both live in [`config`]. Every
+//! `*_ENABLED` switch and `RUNTARA_AUTO_RECOVER` go through
+//! [`config::parse_enabled`], so all of them answer to
+//! `false`/`0`/`no`/`off`/`disabled` and default to on. Every interval, batch
+//! size, age, timeout and concurrency goes through the positive-only rule, so a
+//! value that is zero, negative or unparseable leaves the documented default in
+//! place instead of being obeyed — see `config::positive_or_default` for why
+//! obeying a zero is the worse of the two.
+//!
+//! `RUNTARA_EVENT_DEBUG_RETENTION_HOURS` is the deliberate exception: zero
+//! means "do not sweep" there, and it says so.
+//!
+//! Three of the variables above are read and then have no effect, which is
+//! worth knowing before setting one and expecting something to change.
+//! `EXECUTION_TIMEOUT_SECS` lands in `WorkflowRunnerConfig::default_timeout`,
+//! which nothing reads — an execution is bounded by
+//! [`execution_timeout::ExecutionTimeoutPolicy`], built by the server from its
+//! own configuration. `RUNTARA_RUN_DIR_CLEANUP_POLL_INTERVAL_SECS` and
+//! `RUNTARA_RUN_DIR_CLEANUP_MAX_AGE_DAYS` are parsed and then overwritten:
+//! `runtime::EnvironmentRuntimeConfig::start` replaces both fields with builder
+//! values that no caller sets, so the run-directory worker always runs on the
+//! builder's hour and three days. That worker's `_ENABLED` flag is not
+//! overwritten and does take effect. All three are long-standing and none is
+//! settled here; each is a question about the contract it belongs to rather
+//! than about how settings are parsed.
+//!
+//! Nothing outside `config::ProcessEnv` reads the process environment. That is
+//! what lets a `from_env` constructor be tested against supplied values rather
+//! than against global state every other test in the binary shares.
 //!
 //! # Modules
 //!

@@ -49,6 +49,8 @@ use runtara_core::instance_handlers::{
 };
 use runtara_core::persistence::Persistence;
 
+use crate::config::{ProcessEnv, Vars, positive};
+
 use super::common::{self, WorkflowRunnerConfig};
 use super::traits::{
     CancelToken, ContainerMetrics, LaunchOptions, PreparationOccupancy, PreparedLaunch, Result,
@@ -1032,16 +1034,15 @@ impl EmbeddedWasmRunner {
 /// more than this cannot raise throughput, because the surplus can only
 /// queue while holding an admission reservation.
 pub fn max_concurrent_runs() -> usize {
-    std::env::var("RUNTARA_MAX_CONCURRENT_RUNS")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .filter(|n| *n > 0)
-        .unwrap_or_else(|| {
-            std::thread::available_parallelism()
-                .map(|n| n.get().saturating_mul(4))
-                .unwrap_or(4)
-        })
-        .clamp(1, 1024)
+    max_concurrent_runs_from(&ProcessEnv)
+}
+
+/// [`max_concurrent_runs`] against a supplied set of values.
+fn max_concurrent_runs_from(vars: &dyn Vars) -> usize {
+    let per_core = std::thread::available_parallelism()
+        .map(|n| n.get().saturating_mul(4))
+        .unwrap_or(4);
+    positive(vars, "RUNTARA_MAX_CONCURRENT_RUNS", per_core).clamp(1, 1024)
 }
 
 /// How many artifact preparations may execute concurrently in this process.
@@ -1052,16 +1053,15 @@ pub fn max_concurrent_runs() -> usize {
 /// available core is the conservative default; an explicit setting is capped
 /// to keep a typo from turning a preparation burst into a compiler stampede.
 fn max_concurrent_preparations() -> usize {
-    std::env::var("RUNTARA_PREPARATION_CONCURRENCY")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|count| *count > 0)
-        .unwrap_or_else(|| {
-            std::thread::available_parallelism()
-                .map(|count| count.get())
-                .unwrap_or(1)
-        })
-        .clamp(1, 64)
+    max_concurrent_preparations_from(&ProcessEnv)
+}
+
+/// [`max_concurrent_preparations`] against a supplied set of values.
+fn max_concurrent_preparations_from(vars: &dyn Vars) -> usize {
+    let per_core = std::thread::available_parallelism()
+        .map(|count| count.get())
+        .unwrap_or(1);
+    positive(vars, "RUNTARA_PREPARATION_CONCURRENCY", per_core).clamp(1, 64)
 }
 
 /// Maximum live or still-reaping precompile children.
@@ -1086,11 +1086,11 @@ fn max_concurrent_precompile_children(preparation_limit: usize) -> usize {
                 .max(1)
         })
         .unwrap_or(1);
-    let requested = std::env::var("RUNTARA_PRECOMPILE_CHILD_CONCURRENCY")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|count| *count > 0)
-        .unwrap_or_else(|| preparation_limit.saturating_add(1));
+    let requested = positive(
+        &ProcessEnv,
+        "RUNTARA_PRECOMPILE_CHILD_CONCURRENCY",
+        preparation_limit.saturating_add(1),
+    );
     requested.min(host_cap).clamp(1, 4)
 }
 
@@ -1194,13 +1194,21 @@ fn warn_if_run_bound_exceeds_memory(permits: usize) {
 }
 
 fn limits_from_env() -> WorkflowLimits {
+    limits_from(&ProcessEnv)
+}
+
+/// [`limits_from_env`] against a supplied set of values.
+///
+/// A zero or unparseable cap keeps the default rather than being honoured: a
+/// guest allowed zero linear memory cannot start at all, so the setting would
+/// read as "every workflow is broken" rather than as a configured limit.
+fn limits_from(vars: &dyn Vars) -> WorkflowLimits {
     let mut limits = WorkflowLimits::default();
-    if let Some(max) = std::env::var("RUNTARA_INSTANCE_MEMORY_MAX_BYTES")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-    {
-        limits.max_memory_bytes = max;
-    }
+    limits.max_memory_bytes = positive(
+        vars,
+        "RUNTARA_INSTANCE_MEMORY_MAX_BYTES",
+        limits.max_memory_bytes,
+    );
     limits
 }
 
