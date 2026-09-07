@@ -229,7 +229,9 @@ impl SmoMcpServer {
 
     // ===== Execution Monitoring Tools =====
 
-    #[tool(description = "List execution instances with filtering by workflow, status, and date.")]
+    #[tool(
+        description = "List execution instances with workflow/status filters, case-insensitive literal substring search, and an exact case-sensitive run_label filter. Search and filters apply before pagination and total counting; duplicate labels are allowed. Results include optional runLabel metadata assigned by Finish. Display runLabel when present, otherwise workflowName; use the execution ID to identify a unique run."
+    )]
     async fn list_executions(
         &self,
         params: Parameters<tools::executions::ListExecutionsParams>,
@@ -237,7 +239,9 @@ impl SmoMcpServer {
         tools::executions::list_executions(self, params.0).await
     }
 
-    #[tool(description = "Get execution result including status, outputs, timing, and errors.")]
+    #[tool(
+        description = "Get execution result including status, outputs, timing, errors, and optional runLabel metadata. Finish assigns runLabel separately from outputs on successful completion. Display runLabel when present, otherwise workflowName. Valid long labels are truncated to 250 characters; invalid resolved labels are absent and do not fail Finish. Labels are not unique; identify executions by instance_id."
+    )]
     async fn get_execution(
         &self,
         params: Parameters<tools::executions::GetExecutionParams>,
@@ -1226,6 +1230,7 @@ impl ServerHandler for SmoMcpServer {
                 **References**: Use `steps.<stepId>.outputs.<field>` to reference step outputs (PLURAL `outputs`, not `output`). Use `data.<field>` for workflow inputs. Use `variables.<name>` for variables. A mistyped tail into a known-shape output (e.g. indexing an array output by a name) now fails at preflight_compile and at runtime — it no longer silently resolves to null — so bad references surface instead of producing a green-but-wrong run.\n\
                 **Step output shapes** (each step type's `outputShape` is in get_step_type_schema / list_step_types): Split `outputs` is the collected ARRAY of per-item results (index it as `steps.s.outputs.0`, NOT `.result`; with `dontStopOnFailed` also `steps.s.data.{success,error,...}`, `.stats.*`, `.hasFailures`); Filter `outputs` is `{items, count}` (NOT a bare array — the filtered array is `steps.f.outputs.items`); While `outputs` is `{iterations, outputs}`; Conditional `outputs` is `{result}`; Agent/AiAgent/GroupBy/Switch/EmbedWorkflow outputs are shaped by the capability/data (see get_capability).\n\
                 **inputMapping** (SINGULAR, not inputMappings): Use it only on step types whose schema declares it: `{\"fieldName\": {\"valueType\": \"reference\", \"value\": \"steps.myStep.outputs.items\"}}` or `{\"fieldName\": {\"valueType\": \"immediate\", \"value\": \"literal\"}}`. Call get_step_type_schema for built-in step fields.\n\
+                **Execution labels**: Top-level Finish supports optional `runLabel` as an immediate, reference, or template MappingValue, separate from `inputMapping`. Valid long labels are truncated to 250 characters; invalid dynamic values or label evaluation errors are ignored without failing Finish or changing output. Labels must contain a letter or digit and use only ASCII letters/digits, ordinary spaces, . - / ( ) [ ]; invalid literals fail authoring validation. Labels need not be unique. `list_executions` and `get_execution` return `runLabel`; display it when present, otherwise `workflowName`. Search with `list_executions(search=...)` or exact case-sensitive `run_label=...`; filters apply before pagination and total counting. See `get_workflow_authoring_schema` for normalization rules and examples.\n\
                 **Condition expressions**: `{\"type\": \"operation\", \"op\": \"LT\", \"arguments\": [{\"valueType\": \"reference\", \"value\": \"steps.rng.outputs.value\"}, {\"valueType\": \"immediate\", \"value\": 0.5}]}`.\n\
                 **Edge fields**: Use `fromStep` and `toStep` (not `fromStepId`/`toStepId`) in executionPlan edges.\n\
                 **Conditional routing**: Put the predicate in the Conditional step's `condition` field, then connect outgoing edges with labels `\"true\"` and `\"false\"`. Do not put `condition` on edges from a Conditional step, and do not route those edges via `steps.<conditionalId>.outputs.result`; that boolean is for inspection/later mappings only.\n\

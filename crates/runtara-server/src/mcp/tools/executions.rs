@@ -26,9 +26,13 @@ fn push_query_param(query: &mut Vec<String>, key: &str, value: &str) {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ListExecutionsParams {
-    /// Literal substring search across labels and execution metadata.
+    /// Case-insensitive literal substring search across run labels, workflow names/IDs,
+    /// execution IDs, and statuses. Applied before pagination and total counting;
+    /// punctuation is literal, not a wildcard pattern.
     pub search: Option<String>,
-    /// Exact execution label filter.
+    /// Exact, case-sensitive match on the stored runLabel. Labels are not unique;
+    /// all matches contribute to the filtered total before pagination. Use the
+    /// normalized, possibly truncated label returned by list_executions/get_execution.
     pub run_label: Option<String>,
     #[schemars(description = "Filter by workflow ID")]
     pub workflow_id: Option<String>,

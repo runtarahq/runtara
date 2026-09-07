@@ -485,6 +485,29 @@ pub(crate) fn workflow_authoring_schema(agent_id: &str, capability_id: &str) -> 
                 },
                 "discovery": "Call get_step_type_schema for the exact fields accepted by a built-in step type."
             },
+            "Finish": {
+                "optionalFields": ["inputMapping", "runLabel"],
+                "runLabel": {
+                    "purpose": "Optional execution label metadata, separate from inputMapping/output. Use a MappingValue with valueType immediate, reference, or template; do not put runLabel inside inputMapping.",
+                    "scope": "Only top-level Finish may label its execution. Not supported inside Split, While, or onWait subgraphs. Inline child workflows and workflow agent capabilities cannot rename their parent execution.",
+                    "allowedCharacters": "ASCII letters A-Z/a-z, digits 0-9, ordinary spaces, dots, dashes, forward slashes, parentheses, and square brackets.",
+                    "maxStoredLength": runtara_dsl::run_label::MAX_RUN_LABEL_LENGTH,
+                    "normalization": "Trim surrounding ordinary spaces. Truncate valid long labels to 250 characters, then remove trailing spaces. The retained label must contain at least one letter or digit; whitespace-only, punctuation-only, and invisible-character values are invalid.",
+                    "invalidValues": "Invalid literals fail authoring validation. Invalid dynamic values, non-string results, and label evaluation errors are ignored: Finish still completes with its original output and no label. Omitted, null, and empty strings also mean no label.",
+                    "display": "Saved on successful completion as runLabel in list_executions/get_execution responses. Use runLabel as the display title when present, otherwise workflowName. Labels are not unique; identify runs by execution ID.",
+                    "searchAndPagination": "list_executions search is a case-insensitive literal substring search across labels and execution metadata. The MCP run_label parameter is an exact case-sensitive filter on the stored label. Both apply before pagination and total counting, and duplicate labels remain separate results. Use the normalized/truncated stored value for exact matching.",
+                    "listExamples": [
+                        {"search": "order/1042", "page": 0, "size": 10},
+                        {"run_label": "Order/1042 [done]", "page": 0, "size": 10}
+                    ]
+                },
+                "example": {
+                    "id": "finish",
+                    "stepType": "Finish",
+                    "runLabel": {"valueType": "template", "value": "Order/{{ data.orderId }} [done]"},
+                    "inputMapping": {"success": {"valueType": "immediate", "value": true}}
+                }
+            },
             "Error": {
                 "required": ["id", "stepType", "code", "message"],
                 "doesNotAccept": ["inputMapping"],
