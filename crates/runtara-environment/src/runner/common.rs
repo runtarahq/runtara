@@ -64,9 +64,15 @@ impl WorkflowRunnerConfig {
     /// - `RUNTARA_SKIP_CERT_VERIFICATION`: skip TLS cert verification (default: false).
     /// - `RUNTARA_CONNECTION_SERVICE_URL`: connection service URL (optional).
     ///
-    /// The timeout follows the crate's positive-only rule: a value that is
-    /// zero, negative or unparseable leaves the default in place, because a zero
-    /// would time out every execution the moment it started.
+    /// The timeout follows the crate's positive-only rule, like every other
+    /// interval in the crate — but be aware that it currently decides nothing.
+    /// `default_timeout` is written here and read nowhere: what actually bounds
+    /// an execution is [`crate::execution_timeout::ExecutionTimeoutPolicy`],
+    /// which the server builds from its own configuration. So
+    /// `EXECUTION_TIMEOUT_SECS` has no effect on a running system today. The
+    /// field is left in place rather than removed because deciding between
+    /// "wire it up" and "delete it and the variable" is a question about the
+    /// timeout contract, not about how settings are parsed.
     pub fn from_env() -> Self {
         Self::from_vars(&ProcessEnv)
     }
@@ -312,8 +318,9 @@ mod tests {
         assert!(neither.connection_service_url.is_none());
     }
 
-    /// A zero timeout would expire every execution at the instant it started,
-    /// which is indistinguishable from the runner being broken.
+    /// The timeout still refuses a zero, so that if the field is ever wired up
+    /// it starts from a sane value rather than from whatever was set while
+    /// nothing was reading it.
     #[test]
     fn the_execution_timeout_refuses_a_zero() {
         use crate::config::FixedVars;
