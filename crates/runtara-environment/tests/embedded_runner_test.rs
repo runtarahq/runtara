@@ -59,8 +59,9 @@ const RUN_SPIN_WAT: &str = r#"
 "#;
 
 struct Harness {
-    runner: EmbeddedWasmRunner,
+    runner: Arc<EmbeddedWasmRunner>,
     persistence: Arc<dyn Persistence>,
+    pool: sqlx::PgPool,
     dir: tempfile::TempDir,
 }
 
@@ -78,7 +79,7 @@ async fn harness() -> Harness {
     runtara_environment::migrations::run(&pool)
         .await
         .expect("required combined core/environment migrations must succeed");
-    let persistence: Arc<dyn Persistence> = Arc::new(PostgresPersistence::new(pool));
+    let persistence: Arc<dyn Persistence> = Arc::new(PostgresPersistence::new(pool.clone()));
     let config = WorkflowRunnerConfig {
         data_dir: dir.path().join("data"),
         default_timeout: Duration::from_secs(30),
@@ -92,10 +93,176 @@ async fn harness() -> Harness {
         // to the protocol-compatible test helper instead.
         .with_in_process_precompiler_for_tests();
     Harness {
-        runner,
+        runner: Arc::new(runner),
         persistence,
+        pool,
         dir,
     }
+}
+
+/// Unlike a looping `run`, this never reaches an exported function. Emergency
+/// grace must cover instantiation as well as a non-cooperative invocation.
+const INITIALIZER_SPIN_WAT: &str = r#"
+    (component
+        (core module $m
+            (func $init (loop $spin (br $spin)))
+            (start $init)
+            (func (export "run") (result i32) (i32.const 0))
+        )
+        (core instance $i (instantiate $m))
+        (func $run (result (result)) (canon lift (core func $i "run")))
+        (instance $run_iface (export "run" (func $run)))
+        (export "wasi:cli/run@0.2.3" (instance $run_iface))
+    )
+"#;
+
+async fn public_stop_aborts_non_cooperative_guest(wat: &str, grace: u64) {
+    use runtara_core::domain::InstanceStatus;
+    use runtara_environment::container_registry::{ContainerInfo, ContainerRegistry};
+    use runtara_environment::handlers::{
+        EnvironmentHandlerState, StopInstanceRequest, handle_stop_instance,
+    };
+
+    let h = harness().await;
+    let inst_id = unique("public-stop-spin");
+    let wasm = write_component(h.dir.path(), "spin.wasm", wat);
+    seed_detached_instance(&h, &inst_id).await;
+    let handle = h
+        .runner
+        .try_launch_detached(&options(&inst_id, &wasm))
+        .await
+        .unwrap();
+    let registry = ContainerRegistry::new(h.pool.clone());
+    registry
+        .register(&ContainerInfo {
+            container_id: handle.handle_id.clone(),
+            launch_id: handle.launch_id.clone(),
+            instance_id: inst_id.clone(),
+            tenant_id: handle.tenant_id.clone(),
+            binary_path: wasm.to_string_lossy().into_owned(),
+            started_at: handle.started_at,
+            timeout_seconds: Some(30),
+        })
+        .await
+        .unwrap();
+    let state = EnvironmentHandlerState::new(
+        h.pool.clone(),
+        h.persistence.clone(),
+        h.runner.clone(),
+        h.dir.path().into(),
+    );
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(h.runner.is_running(&handle).await);
+    assert_eq!(
+        h.persistence
+            .get_instance_meta(&inst_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        InstanceStatus::Running
+    );
+    let before = tokio::time::Instant::now();
+    let response = handle_stop_instance(
+        &state,
+        StopInstanceRequest {
+            instance_id: inst_id.clone(),
+            reason: "clicked Cancel".into(),
+            grace_period_seconds: grace,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(response.success, "{:?}", response.error);
+    if grace > 0 {
+        assert!(
+            h.runner.is_running(&handle).await,
+            "Stop must return before grace expires"
+        );
+        assert_eq!(
+            h.persistence
+                .get_instance_meta(&inst_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            InstanceStatus::Running
+        );
+        assert!(registry.get(&inst_id).await.unwrap().is_some());
+        // A repeated request cannot keep an uncooperative run alive by
+        // extending an already accepted cancellation grace period.
+        let response = handle_stop_instance(
+            &state,
+            StopInstanceRequest {
+                instance_id: inst_id.clone(),
+                reason: "Cancel again".into(),
+                grace_period_seconds: 60,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(response.success, "{:?}", response.error);
+    }
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        h.runner.wait_for_exit(&handle, Duration::from_millis(10)),
+    )
+    .await
+    .expect("grace must abort before the 30-second execution timeout");
+    assert!(before.elapsed() >= Duration::from_secs(grace));
+    assert!(!h.runner.is_running(&handle).await);
+    let instance = h.persistence.get_instance(&inst_id).await.unwrap().unwrap();
+    assert_eq!(instance.status, InstanceStatus::Cancelled);
+    assert_eq!(instance.termination_reason.as_deref(), Some("aborted"));
+    let command = h
+        .persistence
+        .get_pending_signal(&inst_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        command.acknowledged_at.is_none(),
+        "emergency abort must not claim guest cleanup"
+    );
+    assert_eq!(h.runner.occupancy().unwrap().held, 0);
+    assert!(
+        !h.runner
+            .schedule_abort(&handle, tokio::time::Instant::now())
+            .await
+            .unwrap()
+    );
+
+    // A fresh invocation in this runner remains healthy after forced teardown.
+    let next_id = unique("after-public-stop");
+    let next_wasm = write_component(h.dir.path(), "next.wasm", RUN_OK_WAT);
+    seed_detached_instance(&h, &next_id).await;
+    let next = h
+        .runner
+        .try_launch_detached(&options(&next_id, &next_wasm))
+        .await
+        .unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        h.runner.wait_for_exit(&next, Duration::from_millis(10)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(h.runner.occupancy().unwrap().held, 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn public_stop_grace_aborts_spinning_invocation() {
+    public_stop_aborts_non_cooperative_guest(RUN_SPIN_WAT, 1).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn public_stop_grace_aborts_infinite_initializer() {
+    public_stop_aborts_non_cooperative_guest(INITIALIZER_SPIN_WAT, 1).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn public_stop_zero_grace_aborts_spinning_invocation() {
+    public_stop_aborts_non_cooperative_guest(RUN_SPIN_WAT, 0).await;
 }
 
 fn write_component(dir: &Path, name: &str, wat: &str) -> PathBuf {

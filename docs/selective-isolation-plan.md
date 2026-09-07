@@ -116,6 +116,12 @@ Reuse lifecycle `Cancel`; do not consume application `WaitForSignal` payloads or
 reserve an arbitrary business signal name. Existing root Stop still targets the
 whole workflow. Pause and shutdown retain their distinct lifecycle semantics.
 
+Implementation evidence now joins the environment Stop handler to composed HTTP
+cleanup and real persistence, plus independent grace abort of infinite WASM
+invocations/initializers. The server's Stop/cancel methods share that handler.
+Full authenticated-server E2E, remote-owner routing, deliberately stalled cleanup
+and the remaining timeout gates are still required; see the implementation record.
+
 The first end-to-end user control targets the root. Cancelling a particular step
 requires a later, explicit extension of the same control mechanism: an opaque
 logical invocation address distinguishing loop iterations, nested calls and retry

@@ -238,6 +238,34 @@ impl Runner for MockRunner {
         Ok(())
     }
 
+    async fn schedule_abort(
+        &self,
+        handle: &RunnerHandle,
+        deadline: tokio::time::Instant,
+    ) -> Result<bool> {
+        let instances = Arc::clone(&self.instances);
+        let Some(instance) = instances.lock().await.get(&handle.launch_id).cloned() else {
+            return Ok(false);
+        };
+        if !instance.running.load(Ordering::SeqCst) {
+            return Ok(false);
+        }
+        let launch_id = handle.launch_id.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep_until(deadline).await;
+            let mut instances = instances.lock().await;
+            if let Some(current) = instances.get_mut(&launch_id)
+                && Arc::ptr_eq(&current.stopped, &instance.stopped)
+                && current.running.load(Ordering::SeqCst)
+            {
+                current.running.store(false, Ordering::SeqCst);
+                current.stopped.store(true, Ordering::SeqCst);
+                current.error = Some("Aborted after cancellation grace".into());
+            }
+        });
+        Ok(true)
+    }
+
     async fn collect_result(
         &self,
         handle: &RunnerHandle,

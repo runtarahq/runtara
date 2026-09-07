@@ -648,8 +648,22 @@ pub trait Runner: Send + Sync {
     /// Check if an instance is still running.
     async fn is_running(&self, handle: &RunnerHandle) -> bool;
 
-    /// Stop a running instance.
+    /// Immediately abort the whole running execution.
     async fn stop(&self, handle: &RunnerHandle) -> Result<()>;
+
+    /// Arm whole-execution abort at an absolute monotonic deadline. This does
+    /// not deliver cooperative cancellation; the caller uses lifecycle signals.
+    /// Repeated requests may shorten but never extend grace. False means this
+    /// runner no longer owns the execution. Implementations must not wait here.
+    async fn schedule_abort(
+        &self,
+        _handle: &RunnerHandle,
+        _deadline: tokio::time::Instant,
+    ) -> Result<bool> {
+        Err(RunnerError::Other(
+            "runner does not support a cancellation grace deadline".into(),
+        ))
+    }
 
     /// Collect metrics and cleanup after instance has finished.
     ///

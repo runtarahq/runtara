@@ -497,7 +497,7 @@ impl RuntimeClient {
         }
     }
 
-    /// Stop a running workflow instance
+    /// Request cooperative cancellation with the default whole-run abort grace.
     pub async fn stop_instance(&self, instance_id: &str) -> Result<(), RuntimeError> {
         let sdk = &self.client;
 
@@ -509,7 +509,7 @@ impl RuntimeClient {
             .await
             .map_err(|e| RuntimeError::SdkError(e.to_string()))?;
 
-        info!(instance_id = %instance_id, "Stopped workflow instance");
+        info!(instance_id = %instance_id, "Requested workflow cancellation with abort grace");
         Ok(())
     }
 
@@ -588,16 +588,9 @@ impl RuntimeClient {
             .map_err(|e| RuntimeError::SdkError(e.to_string()))
     }
 
-    /// Cancel a running workflow instance
+    /// Cancel using the same signal and bounded grace as public Stop.
     pub async fn cancel_instance(&self, instance_id: &str) -> Result<(), RuntimeError> {
-        let sdk = &self.client;
-
-        sdk.send_signal(instance_id, crate::runtime_types::SignalType::Cancel, None)
-            .await
-            .map_err(|e| RuntimeError::SdkError(e.to_string()))?;
-
-        debug!(instance_id = %instance_id, "Sent cancel signal to workflow instance");
-        Ok(())
+        self.stop_instance(instance_id).await
     }
 
     /// Write a `Shutdown` signal for an in-flight execution. Unlike

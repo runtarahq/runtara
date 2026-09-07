@@ -76,8 +76,56 @@ async fn mark_running(persistence: &dyn Persistence, instance_id: &str) {
 /// Per-launch bookkeeping for detached runs.
 struct InstanceTask {
     cancel: CancelToken,
+    abort_deadline: tokio::sync::watch::Sender<Option<tokio::time::Instant>>,
     finished: AtomicBool,
     done: tokio::sync::Notify,
+}
+
+impl InstanceTask {
+    fn schedule_abort(&self, deadline: tokio::time::Instant) -> bool {
+        if self.finished.load(Ordering::SeqCst) {
+            return false;
+        }
+        self.abort_deadline.send_if_modified(|current| {
+            if current.is_none_or(|earlier| deadline < earlier) {
+                *current = Some(deadline);
+                true
+            } else {
+                false
+            }
+        });
+        true
+    }
+
+    fn spawn_abort_timer(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
+        let deadline = self.abort_deadline.subscribe();
+        let task = Arc::downgrade(self);
+        tokio::spawn(async move {
+            if wait_for_abort_deadline(deadline).await
+                && let Some(task) = task.upgrade()
+                && !task.finished.load(Ordering::SeqCst)
+            {
+                task.cancel.store(true, Ordering::SeqCst);
+            }
+        })
+    }
+}
+
+/// Wait independently of guest polling. Sender updates only shorten deadlines.
+async fn wait_for_abort_deadline(
+    mut deadline: tokio::sync::watch::Receiver<Option<tokio::time::Instant>>,
+) -> bool {
+    loop {
+        let current = *deadline.borrow_and_update();
+        if let Some(current) = current {
+            tokio::select! {
+                _ = tokio::time::sleep_until(current) => return true,
+                changed = deadline.changed() => if changed.is_err() { return false; },
+            }
+        } else if deadline.changed().await.is_err() {
+            return false;
+        }
+    }
 }
 
 /// Environment's bridge from the runner-owned in-memory gate to the
@@ -142,6 +190,7 @@ fn remove_task_if_current(registry: &TaskRegistry, launch_id: &str, task: &Arc<I
 struct TaskCompletionGuard {
     // Take/drop this before publishing completion, including an unpolled task.
     run_slot: Option<RunSlot>,
+    abort_timer: Option<tokio::task::AbortHandle>,
     task: Arc<InstanceTask>,
     registry: TaskRegistry,
     launch_id: String,
@@ -149,6 +198,9 @@ struct TaskCompletionGuard {
 
 impl Drop for TaskCompletionGuard {
     fn drop(&mut self) {
+        if let Some(timer) = self.abort_timer.take() {
+            timer.abort();
+        }
         drop(self.run_slot.take());
         self.task.finished.store(true, Ordering::SeqCst);
         remove_task_if_current(&self.registry, &self.launch_id, &self.task);
@@ -1559,6 +1611,7 @@ impl Runner for EmbeddedWasmRunner {
         let cancel: CancelToken = Arc::new(AtomicBool::new(false));
         let task = Arc::new(InstanceTask {
             cancel: Arc::clone(&cancel),
+            abort_deadline: tokio::sync::watch::channel(None).0,
             finished: AtomicBool::new(false),
             done: tokio::sync::Notify::new(),
         });
@@ -1566,12 +1619,17 @@ impl Runner for EmbeddedWasmRunner {
             .lock()
             .expect("embedded runner task registry poisoned")
             .insert(options.launch_id.clone(), Arc::clone(&task));
+        // One emergency timer per existing run, on a separate task so a
+        // guest stuck in cancellation cannot prevent the deadline from firing.
+        // The existing completion guard owns and aborts this timer on every exit.
+        let abort_timer = task.spawn_abort_timer();
         // Construct this before `tokio::spawn`, not inside the task body. A
         // runtime shutdown can drop an unpolled future immediately after the
         // map insertion; moving the guard into that future still retires the
         // exact map entry in its Drop implementation.
         let completion = TaskCompletionGuard {
             run_slot: Some(run_slot),
+            abort_timer: Some(abort_timer.abort_handle()),
             task: Arc::clone(&task),
             registry: Arc::clone(&self.tasks),
             launch_id: options.launch_id.clone(),
@@ -1811,6 +1869,17 @@ impl Runner for EmbeddedWasmRunner {
         Ok(())
     }
 
+    async fn schedule_abort(
+        &self,
+        handle: &RunnerHandle,
+        deadline: tokio::time::Instant,
+    ) -> Result<bool> {
+        let Some(task) = self.task_of(&handle.launch_id) else {
+            return Ok(false);
+        };
+        Ok(task.schedule_abort(deadline))
+    }
+
     async fn collect_result(
         &self,
         handle: &RunnerHandle,
@@ -1845,6 +1914,107 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
+
+    fn abort_test_task() -> Arc<InstanceTask> {
+        Arc::new(InstanceTask {
+            cancel: Arc::new(AtomicBool::new(false)),
+            abort_deadline: tokio::sync::watch::channel(None).0,
+            finished: AtomicBool::new(false),
+            done: tokio::sync::Notify::new(),
+        })
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn abort_timer_waits_for_request_and_never_extends_grace() {
+        let task = abort_test_task();
+        let timer = task.spawn_abort_timer();
+        tokio::time::advance(Duration::from_secs(600)).await;
+        assert!(!task.cancel.load(Ordering::SeqCst));
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        assert!(task.schedule_abort(deadline));
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(59)).await;
+        assert!(!task.cancel.load(Ordering::SeqCst));
+        assert!(task.schedule_abort(deadline + Duration::from_secs(600)));
+        assert!(!task.cancel.load(Ordering::SeqCst));
+        tokio::time::advance(Duration::from_secs(1)).await;
+        timer.await.unwrap();
+        assert!(task.cancel.load(Ordering::SeqCst));
+        assert_eq!(tokio::time::Instant::now(), deadline);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn abort_timer_accepts_shorter_zero_and_elapsed_deadlines() {
+        for grace in [Duration::from_secs(10), Duration::ZERO] {
+            let task = abort_test_task();
+            let timer = task.spawn_abort_timer();
+            let now = tokio::time::Instant::now();
+            assert!(task.schedule_abort(now + Duration::from_secs(600)));
+            tokio::task::yield_now().await;
+            assert!(task.schedule_abort(now + grace));
+            timer.await.unwrap();
+            assert_eq!(tokio::time::Instant::now(), now + grace);
+            assert!(task.cancel.load(Ordering::SeqCst));
+        }
+        let task = abort_test_task();
+        let elapsed = tokio::time::Instant::now();
+        tokio::time::advance(Duration::from_secs(1)).await;
+        // Also covers a deadline stored before the timer's first poll.
+        assert!(task.schedule_abort(elapsed));
+        task.spawn_abort_timer().await.unwrap();
+        assert!(task.cancel.load(Ordering::SeqCst));
+        assert_eq!(
+            tokio::time::Instant::now(),
+            elapsed + Duration::from_secs(1)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn completed_run_retires_timer_and_cannot_abort_replacement() {
+        let task = abort_test_task();
+        let timer = task.spawn_abort_timer();
+        task.schedule_abort(tokio::time::Instant::now() + Duration::from_secs(60));
+        tokio::task::yield_now().await;
+        let registry: TaskRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let replacement = abort_test_task();
+        registry
+            .lock()
+            .unwrap()
+            .insert("same-launch".into(), replacement.clone());
+        let (slot, permits) = completion_test_slot("same-launch");
+        let completion = TaskCompletionGuard {
+            run_slot: Some(slot),
+            abort_timer: Some(timer.abort_handle()),
+            task: task.clone(),
+            registry: registry.clone(),
+            launch_id: "same-launch".into(),
+        };
+        drop(completion);
+        assert!(timer.await.unwrap_err().is_cancelled());
+        tokio::time::advance(Duration::from_secs(600)).await;
+        assert!(!task.schedule_abort(tokio::time::Instant::now()));
+        assert!(!task.cancel.load(Ordering::SeqCst));
+        assert!(!replacement.cancel.load(Ordering::SeqCst));
+        assert!(Arc::ptr_eq(
+            registry.lock().unwrap().get("same-launch").unwrap(),
+            &replacement
+        ));
+        assert_eq!(permits.available_permits(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn abort_timer_does_not_keep_a_disappeared_run_alive() {
+        let task = abort_test_task();
+        let weak = Arc::downgrade(&task);
+        let timer = task.spawn_abort_timer();
+        task.schedule_abort(tokio::time::Instant::now() + Duration::from_secs(600));
+        tokio::task::yield_now().await;
+        let before = tokio::time::Instant::now();
+        drop(task);
+        timer.await.unwrap();
+        assert!(weak.upgrade().is_none());
+        assert_eq!(tokio::time::Instant::now(), before);
+    }
 
     /// Nothing running must be reported as "nothing running", not as "unknown".
     ///
@@ -2041,11 +2211,13 @@ mod tests {
         let registry: TaskRegistry = Arc::new(Mutex::new(HashMap::new()));
         let old = Arc::new(InstanceTask {
             cancel: Arc::new(AtomicBool::new(false)),
+            abort_deadline: tokio::sync::watch::channel(None).0,
             finished: AtomicBool::new(false),
             done: tokio::sync::Notify::new(),
         });
         let replacement = Arc::new(InstanceTask {
             cancel: Arc::new(AtomicBool::new(false)),
+            abort_deadline: tokio::sync::watch::channel(None).0,
             finished: AtomicBool::new(false),
             done: tokio::sync::Notify::new(),
         });
@@ -2094,6 +2266,7 @@ mod tests {
         let registry: TaskRegistry = Arc::new(Mutex::new(HashMap::new()));
         let task = Arc::new(InstanceTask {
             cancel: Arc::new(AtomicBool::new(false)),
+            abort_deadline: tokio::sync::watch::channel(None).0,
             finished: AtomicBool::new(false),
             done: tokio::sync::Notify::new(),
         });
@@ -2103,6 +2276,7 @@ mod tests {
             .insert("ordered".into(), task.clone());
         let (run_slot, permits) = completion_test_slot("ordered");
         let completion = TaskCompletionGuard {
+            abort_timer: None,
             run_slot: Some(run_slot),
             task: task.clone(),
             registry: registry.clone(),
@@ -2135,6 +2309,7 @@ mod tests {
         let registry: TaskRegistry = Arc::new(Mutex::new(HashMap::new()));
         let task = Arc::new(InstanceTask {
             cancel: Arc::new(AtomicBool::new(false)),
+            abort_deadline: tokio::sync::watch::channel(None).0,
             finished: AtomicBool::new(false),
             done: tokio::sync::Notify::new(),
         });
@@ -2144,6 +2319,7 @@ mod tests {
             .insert("launch-doomed".to_string(), Arc::clone(&task));
         let (run_slot, permits) = completion_test_slot("launch-doomed");
         let guard = TaskCompletionGuard {
+            abort_timer: None,
             run_slot: Some(run_slot),
             task: Arc::clone(&task),
             registry: Arc::clone(&registry),
@@ -2168,6 +2344,7 @@ mod tests {
         let registry: TaskRegistry = Arc::new(Mutex::new(HashMap::new()));
         let task = Arc::new(InstanceTask {
             cancel: Arc::new(AtomicBool::new(false)),
+            abort_deadline: tokio::sync::watch::channel(None).0,
             finished: AtomicBool::new(false),
             done: tokio::sync::Notify::new(),
         });
@@ -2180,6 +2357,7 @@ mod tests {
         // poll is what runtime shutdown does for a just-spawned task.
         let (run_slot, permits) = completion_test_slot("launch-never-polled");
         let completion = TaskCompletionGuard {
+            abort_timer: None,
             run_slot: Some(run_slot),
             task: Arc::clone(&task),
             registry: Arc::clone(&registry),

@@ -957,67 +957,502 @@ async fn test_stop_instance_not_found() {
     assert!(response.error.as_ref().unwrap().contains("not found"));
 }
 
-#[tokio::test]
-async fn test_stop_instance_with_registered_container() {
-    skip_if_no_db!();
-    let pool = get_test_pool().await;
-
-    let temp_dir = tempfile::TempDir::new().unwrap();
-    let state = create_test_state(pool.clone(), temp_dir.path().to_path_buf());
-
+/// A live runner and persisted handle, without an image/dispatcher fixture: this
+/// isolates Stop's signal, grace, and publication contract.
+async fn running_stop_fixture(
+    pool: &PgPool,
+    data_dir: PathBuf,
+) -> (EnvironmentHandlerState, Arc<MockRunner>, RunnerHandle) {
+    let runner = Arc::new(MockRunner::never_completing());
+    let persistence = Arc::new(PostgresPersistence::new(pool.clone()));
     let instance_id = Uuid::new_v4().to_string();
-
-    // Create an image and instance
-    let image_id = Uuid::new_v4().to_string();
-    let image_name = format!("test-image-{}", image_id);
-    sqlx::query(
-        r#"
-        INSERT INTO images (image_id, tenant_id, name, description, binary_path)
-        VALUES ($1, 'test-tenant', $2, 'desc', $3)
-        "#,
+    persistence
+        .register_instance(&instance_id, "test-tenant")
+        .await
+        .unwrap();
+    persistence
+        .update_instance_status(&instance_id, CoreInstanceStatus::Running, Some(Utc::now()))
+        .await
+        .unwrap();
+    let handle = runner
+        .try_launch_detached(&LaunchOptions {
+            launch_id: format!("launch-{instance_id}"),
+            instance_id: instance_id.clone(),
+            tenant_id: "test-tenant".into(),
+            wasm_path: PathBuf::from(test_artifact_path()),
+            requires_lifecycle_invoke: false,
+            expected_workflow_checksum: None,
+            preparation_attempt: None,
+            preparation_deadline: None,
+            input: serde_json::json!({}),
+            timeout: Duration::from_secs(300),
+            checkpoint_id: None,
+            env: Default::default(),
+            prepersisted_input: None,
+            start_gate: None,
+        })
+        .await
+        .unwrap();
+    ContainerRegistry::new(pool.clone())
+        .register(&ContainerInfo {
+            container_id: handle.handle_id.clone(),
+            launch_id: handle.launch_id.clone(),
+            instance_id,
+            tenant_id: handle.tenant_id.clone(),
+            binary_path: test_artifact_path(),
+            started_at: handle.started_at,
+            timeout_seconds: Some(300),
+        })
+        .await
+        .unwrap();
+    (
+        EnvironmentHandlerState::new(pool.clone(), persistence, runner.clone(), data_dir),
+        runner,
+        handle,
     )
-    .bind(&image_id)
-    .bind(&image_name)
-    .bind(test_artifact_path())
-    .execute(&pool)
+}
+
+fn stop_request(handle: &RunnerHandle, grace_period_seconds: u64) -> StopInstanceRequest {
+    StopInstanceRequest {
+        instance_id: handle.instance_id.clone(),
+        reason: "user clicked Cancel".into(),
+        grace_period_seconds,
+    }
+}
+
+/// Retire the run exactly after Stop has observed it running and looked up its
+/// handle. This exercises the race without relying on database/scheduler timing.
+struct RetiresDuringAbort {
+    inner: Arc<MockRunner>,
+    persistence: Arc<dyn Persistence>,
+    status: CoreInstanceStatus,
+}
+
+#[async_trait::async_trait]
+impl Runner for RetiresDuringAbort {
+    fn runner_type(&self) -> &'static str {
+        "retiring-test"
+    }
+    async fn try_launch_detached(
+        &self,
+        options: &LaunchOptions,
+    ) -> runtara_environment::runner::Result<RunnerHandle> {
+        self.inner.try_launch_detached(options).await
+    }
+    async fn is_running(&self, handle: &RunnerHandle) -> bool {
+        self.inner.is_running(handle).await
+    }
+    async fn stop(&self, handle: &RunnerHandle) -> runtara_environment::runner::Result<()> {
+        self.inner.stop(handle).await
+    }
+    async fn schedule_abort(
+        &self,
+        handle: &RunnerHandle,
+        _: tokio::time::Instant,
+    ) -> runtara_environment::runner::Result<bool> {
+        self.persistence
+            .complete_instance(
+                CompleteInstanceParams::new(&handle.instance_id, self.status).if_running(),
+            )
+            .await
+            .unwrap();
+        self.inner.stop(handle).await?;
+        Ok(false)
+    }
+    async fn collect_result(
+        &self,
+        handle: &RunnerHandle,
+    ) -> (
+        Option<serde_json::Value>,
+        Option<String>,
+        runtara_environment::runner::ContainerMetrics,
+    ) {
+        self.inner.collect_result(handle).await
+    }
+}
+
+#[tokio::test]
+async fn test_stop_instance_resolves_completion_and_parking_during_grace_arming() {
+    let pool = get_test_pool().await;
+    let dir = tempfile::tempdir().unwrap();
+    for status in [
+        CoreInstanceStatus::Completed,
+        CoreInstanceStatus::Failed,
+        CoreInstanceStatus::Suspended,
+    ] {
+        let (mut state, runner, handle) = running_stop_fixture(&pool, dir.path().into()).await;
+        state.runner = Arc::new(RetiresDuringAbort {
+            inner: runner,
+            persistence: state.persistence.clone(),
+            status,
+        });
+        let response = handle_stop_instance(&state, stop_request(&handle, 60))
+            .await
+            .unwrap();
+        assert!(response.success, "{:?}", response.error);
+        let expected = if status == CoreInstanceStatus::Suspended {
+            CoreInstanceStatus::Cancelled
+        } else {
+            status
+        };
+        assert_eq!(
+            state
+                .persistence
+                .get_instance_meta(&handle.instance_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            expected
+        );
+        cleanup(&pool, Some(&handle.instance_id), None).await;
+    }
+}
+
+#[tokio::test]
+async fn test_stop_instance_cancels_queued_launch_without_starting_a_guest() {
+    let pool = get_test_pool().await;
+    let dir = tempfile::tempdir().unwrap();
+    let runner = Arc::new(MockRunner::never_completing());
+    let persistence = Arc::new(PostgresPersistence::new(pool.clone()));
+    let state =
+        EnvironmentHandlerState::new(pool.clone(), persistence, runner.clone(), dir.path().into());
+    let image = Uuid::new_v4().to_string();
+    sqlx::query("INSERT INTO images (image_id, tenant_id, name, binary_path) VALUES ($1, 'test-tenant', $1, $2)")
+        .bind(&image).bind(test_artifact_path()).execute(&pool).await.unwrap();
+    let started = handle_start_instance(
+        &state,
+        StartInstanceRequest {
+            image_id: image.clone(),
+            tenant_id: "test-tenant".into(),
+            instance_id: None,
+            input: Some(serde_json::json!({})),
+            timeout_seconds: Some(30),
+            env: Default::default(),
+        },
+    )
     .await
     .unwrap();
+    assert!(started.is_accepted(), "{:?}", started.rejection);
+    assert_eq!(
+        active_launch(&pool, &started.instance_id).await.state,
+        LaunchState::Queued
+    );
+    let response = handle_stop_instance(
+        &state,
+        StopInstanceRequest {
+            instance_id: started.instance_id.clone(),
+            reason: "cancel before launch".into(),
+            grace_period_seconds: 60,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(response.success, "{:?}", response.error);
+    assert_eq!(runner.launch_count(), 0);
+    assert_eq!(
+        state
+            .persistence
+            .get_instance_meta(&started.instance_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        CoreInstanceStatus::Cancelled
+    );
+    assert!(
+        LaunchRepository::new(pool.clone())
+            .get_active_for_instance(&started.instance_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    cleanup(&pool, Some(&started.instance_id), Some(&image)).await;
+}
 
-    create_test_instance(&pool, &instance_id, "test-tenant", &image_id).await;
-
-    // Register in container registry
-    let container_registry =
-        runtara_environment::container_registry::ContainerRegistry::new(pool.clone());
-    let container_info = runtara_environment::container_registry::ContainerInfo {
-        container_id: format!("container-{}", instance_id),
-        launch_id: format!("launch-{instance_id}"),
-        instance_id: instance_id.clone(),
-        tenant_id: "test-tenant".to_string(),
-        binary_path: "/bin/true".to_string(),
-        started_at: Utc::now(),
-        timeout_seconds: Some(300),
-    };
-    container_registry.register(&container_info).await.unwrap();
-
-    let request = StopInstanceRequest {
-        instance_id: instance_id.clone(),
-        reason: "Testing stop".to_string(),
-        grace_period_seconds: 5,
-    };
-
-    let response = handle_stop_instance(&state, request).await.unwrap();
-
-    assert!(response.success, "Error: {:?}", response.error);
-
-    // Verify instance status was updated
-    let instance = InstanceRepository::new(pool.clone())
-        .detail(&instance_id)
+#[tokio::test]
+async fn test_stop_instance_signals_without_publishing_terminal_or_releasing_handle() {
+    let pool = get_test_pool().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (state, runner, handle) = running_stop_fixture(&pool, dir.path().into()).await;
+    let response = tokio::time::timeout(
+        Duration::from_secs(3),
+        handle_stop_instance(&state, stop_request(&handle, 60)),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(response.success, "{:?}", response.error);
+    assert!(runner.is_running(&handle).await);
+    let meta = state
+        .persistence
+        .get_instance(&handle.instance_id)
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(instance.status, CoreInstanceStatus::Cancelled);
+    assert_eq!(meta.status, CoreInstanceStatus::Running);
+    assert!(meta.finished_at.is_none());
+    let command = state
+        .persistence
+        .get_pending_signal(&handle.instance_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        command.signal_type,
+        runtara_core::domain::SignalType::Cancel
+    );
+    assert!(command.acknowledged_at.is_none());
+    assert!(
+        ContainerRegistry::new(pool.clone())
+            .get(&handle.instance_id)
+            .await
+            .unwrap()
+            .is_some()
+    );
 
-    cleanup(&pool, Some(&instance_id), Some(&image_id)).await;
+    // A guest cleanup acknowledgement, not acceptance of the Stop request,
+    // transitions Core. The live registry remains until actual execution exit.
+    assert!(
+        state
+            .persistence
+            .acknowledge_signal(
+                &handle.instance_id,
+                &command.command_id,
+                command.signal_type
+            )
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        state
+            .persistence
+            .get_instance_meta(&handle.instance_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        CoreInstanceStatus::Cancelled
+    );
+    assert!(runner.is_running(&handle).await);
+    runner
+        .complete_instance(&handle.instance_id, serde_json::json!({}))
+        .await;
+    cleanup(&pool, Some(&handle.instance_id), None).await;
+}
+
+#[tokio::test]
+async fn test_stop_instance_zero_grace_aborts_without_faking_guest_acknowledgement() {
+    let pool = get_test_pool().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (state, runner, handle) = running_stop_fixture(&pool, dir.path().into()).await;
+    let response = handle_stop_instance(&state, stop_request(&handle, 0))
+        .await
+        .unwrap();
+    assert!(response.success, "{:?}", response.error);
+    tokio::time::timeout(
+        Duration::from_secs(3),
+        runner.wait_for_exit(&handle, Duration::from_millis(10)),
+    )
+    .await
+    .unwrap();
+    assert!(!runner.is_running(&handle).await);
+    let command = state
+        .persistence
+        .get_pending_signal(&handle.instance_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(command.acknowledged_at.is_none());
+    // MockRunner deliberately does not perform the real runner's post-exit
+    // persistence. Stop must not invent that terminal publication itself.
+    assert_eq!(
+        state
+            .persistence
+            .get_instance_meta(&handle.instance_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        CoreInstanceStatus::Running
+    );
+    assert!(
+        ContainerRegistry::new(pool.clone())
+            .get(&handle.instance_id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    cleanup(&pool, Some(&handle.instance_id), None).await;
+}
+
+#[tokio::test]
+async fn test_stop_instance_stale_or_missing_handle_does_not_claim_grace_enforcement() {
+    let pool = get_test_pool().await;
+    let dir = tempfile::tempdir().unwrap();
+    for registered in [true, false] {
+        let (state, runner, handle) = running_stop_fixture(&pool, dir.path().into()).await;
+        runner.stop(&handle).await.unwrap();
+        if !registered {
+            ContainerRegistry::new(pool.clone())
+                .cleanup_handle(&handle.instance_id, &handle.launch_id, &handle.handle_id)
+                .await
+                .unwrap();
+        }
+        let response = handle_stop_instance(&state, stop_request(&handle, 60))
+            .await
+            .unwrap();
+        assert!(!response.success);
+        assert!(
+            response
+                .error
+                .unwrap()
+                .contains("does not own an active handle")
+        );
+        assert_eq!(
+            state
+                .persistence
+                .get_instance_meta(&handle.instance_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            CoreInstanceStatus::Running
+        );
+        assert!(
+            state
+                .persistence
+                .get_pending_signal(&handle.instance_id)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            ContainerRegistry::new(pool.clone())
+                .get(&handle.instance_id)
+                .await
+                .unwrap()
+                .is_some(),
+            registered
+        );
+        cleanup(&pool, Some(&handle.instance_id), None).await;
+    }
+}
+
+#[tokio::test]
+async fn test_stop_instance_preserves_terminal_outcomes() {
+    let pool = get_test_pool().await;
+    let dir = tempfile::tempdir().unwrap();
+    for status in [
+        CoreInstanceStatus::Completed,
+        CoreInstanceStatus::Failed,
+        CoreInstanceStatus::Cancelled,
+    ] {
+        let (state, runner, handle) = running_stop_fixture(&pool, dir.path().into()).await;
+        state
+            .persistence
+            .complete_instance(
+                CompleteInstanceParams::new(&handle.instance_id, status)
+                    .with_output(br#"{"preserved":true}"#)
+                    .with_error("original"),
+            )
+            .await
+            .unwrap();
+        let before = state
+            .persistence
+            .get_instance(&handle.instance_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let response = handle_stop_instance(&state, stop_request(&handle, 0))
+            .await
+            .unwrap();
+        assert!(response.success);
+        let after = state
+            .persistence
+            .get_instance(&handle.instance_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.status, status);
+        assert_eq!(after.finished_at, before.finished_at);
+        assert_eq!(after.output, before.output);
+        assert_eq!(after.error, before.error);
+        assert!(
+            state
+                .persistence
+                .get_pending_signal(&handle.instance_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(runner.is_running(&handle).await);
+        runner.stop(&handle).await.unwrap();
+        cleanup(&pool, Some(&handle.instance_id), None).await;
+    }
+}
+
+#[tokio::test]
+async fn test_stop_instance_overflow_is_rejected_before_signalling() {
+    let pool = get_test_pool().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (state, runner, handle) = running_stop_fixture(&pool, dir.path().into()).await;
+    let response = handle_stop_instance(&state, stop_request(&handle, u64::MAX))
+        .await
+        .unwrap();
+    assert!(!response.success);
+    assert!(response.error.unwrap().contains("monotonic clock range"));
+    assert!(
+        state
+            .persistence
+            .get_pending_signal(&handle.instance_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(runner.is_running(&handle).await);
+    runner.stop(&handle).await.unwrap();
+    cleanup(&pool, Some(&handle.instance_id), None).await;
+}
+
+#[tokio::test]
+async fn test_stop_instance_cancels_parked_execution_without_runner_handle() {
+    let pool = get_test_pool().await;
+    let dir = tempfile::tempdir().unwrap();
+    let state = create_test_state(pool.clone(), dir.path().into());
+    let id = Uuid::new_v4().to_string();
+    state
+        .persistence
+        .register_instance(&id, "test-tenant")
+        .await
+        .unwrap();
+    state
+        .persistence
+        .update_instance_status(&id, CoreInstanceStatus::Suspended, None)
+        .await
+        .unwrap();
+    let response = handle_stop_instance(
+        &state,
+        StopInstanceRequest {
+            instance_id: id.clone(),
+            reason: "user".into(),
+            grace_period_seconds: 60,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(response.success, "{:?}", response.error);
+    assert_eq!(
+        state
+            .persistence
+            .get_instance_meta(&id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        CoreInstanceStatus::Cancelled
+    );
+    cleanup(&pool, Some(&id), None).await;
 }
 
 // ============================================================================

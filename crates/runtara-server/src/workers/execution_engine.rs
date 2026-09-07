@@ -2087,7 +2087,7 @@ impl ExecutionEngine {
         info!(
             instance_id = %instance_id,
             previous_status = %status_str,
-            "Cancelled instance via runtara-environment"
+            "Requested instance cancellation via runtara-environment"
         );
 
         Ok(StopOutcome::Stopped {

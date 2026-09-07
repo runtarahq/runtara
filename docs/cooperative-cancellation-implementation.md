@@ -8,12 +8,14 @@ I/O-capable Agents await cancellable operations; the nine CPU-oriented Agents
 still require cooperation-point qualification. Nested workflow-agent cancellation,
 timeouts and the remaining plan gates are still incomplete.
 
-The public Stop path still calls `Runner::stop` immediately and ignores its
-accepted grace-period field. The emitted-wait proofs below exercise a delivered
-lifecycle Cancel signal; they do not yet qualify cooperative Stop through the
-public API. Lifecycle acknowledgements and the post-run cancellation fallback now preserve
-accepted terminal outcomes. Public Stop/grace integration and remaining
-completion-race qualification are still P3 work.
+The server's Stop/cancel methods now use the environment Stop handler to deliver
+lifecycle Cancel and arm an independent whole-run abort grace. Normally composed
+HTTP workflows complete guest cancellation through that handler and real
+PostgreSQL; CPU loops and infinite initializers escalate without fabricated
+cleanup receipts. Full authenticated HTTP-server E2E, multi-owner routing,
+stalled-cleanup qualification and remaining P3 timeout/race work are still open.
+Lifecycle acknowledgements and post-run fallback preserve accepted terminal
+outcomes.
 
 ## P0: initial ABI inventory
 
@@ -1271,3 +1273,89 @@ to the isolated databases; no existing migration was edited.
 No public HTTP Stop E2E or performance/capacity run is claimed. Public Stop/grace,
 CPU cooperation, nested workflow cancellation, deadlines/E128 and the remaining
 plan gates stay open.
+
+
+## Stop signals, cleanup grace and whole-run abort (2026-09-07)
+
+The environment Stop handler now delivers the existing lifecycle `Cancel` and
+arms an absolute monotonic deadline for the currently owned execution. Acceptance
+means cancellation was requested; it does not immediately publish `cancelled` or
+release the persisted runner handle. Guest acknowledgement owns cooperative
+terminal publication. For an unacknowledged cancellation, actual runner exit owns
+the existing `cancelled`/`aborted` fallback, and the monitor releases registry and
+launch ownership after exit. Already accepted terminal outcomes are preserved.
+
+The server's `ExecutionEngine::stop` previously called a signal-only
+`RuntimeClient::cancel_instance`, bypassing `handle_stop_instance`. That method now
+reuses `stop_instance`, so both public Stop and the server's cancellation caller
+use the existing five-second default grace. Low-level signal delivery remains a
+signal operation; it does not acquire a new orchestration responsibility.
+
+Grace uses Tokio's timer and watch channel on the existing whole-run task record.
+One timer task per detached execution waits independently of guest future polling;
+it sets the runner's existing abort flag, consumed by the existing Wasmtime epoch
+and host-wait watchdogs. There is no per-Agent task table, graph interpretation,
+child Store, or new guest import. Completion owns timer disposal through the
+existing RAII guard; the timer holds a weak reference to its exact execution and
+cannot cancel a replacement. Its memory/scheduling cost remains to be measured
+in the controlled capacity run. This stage changes no emitted WASM or component
+binary.
+
+The deadline starts when the Stop handler receives the request, including time
+spent delivering the signal. Repeated requests may shorten it but cannot extend
+it. Zero arms immediate full abort; a deadline already elapsed during delivery
+fires immediately when armed. An unrepresentable duration fails before any signal
+or state mutation. Other execution/resource limits can still terminate a run
+sooner. This is whole-execution grace, not a cooperative step timeout; E128 stays
+in place.
+
+Queued/unconfirmed launches retain their existing atomic pre-start cancellation.
+Parked executions retain the existing signal/scheduler cancellation path. A run
+that completes or parks during handle lookup/arming is rechecked; terminal
+completion/failure is not overwritten. If Core still says active but the local
+runner cannot own/arm the handle, Stop reports failure **after** persisting the
+signal. It does not claim a remote grace deadline was enforced. Routing a Stop to
+another live server's owner and distributed grace durability remain unqualified.
+A host restart loses in-memory timers along with that host's guest executions;
+existing durable recovery still owns their persisted records.
+
+Verification added:
+
+| Cases | Evidence |
+|---|---|
+| No request; 60-second grace; later request; shortened, zero and elapsed deadlines | Paused-time runner tests check the exact firing instant and that grace never extends |
+| Early completion, replacement generation, disappeared owner | Runner tests prove timer disposal, weak ownership, capacity return and no stale abort |
+| Request acceptance, zero grace, overflow, missing/stale handle | Handler tests use real PostgreSQL and a controllable runner; acceptance does not fabricate acknowledgement, terminal state or registry cleanup |
+| Queued/parked, completed/failed/cancelled, completion/parking during arming | Handler tests cover pre-start cancellation, preserved terminal outcomes, and deterministic retirement between lookup and arming |
+| Infinite invocation and infinite initializer | Real embedded WASM through the Stop handler exits after grace, retains an unacknowledged command and `aborted` outcome, returns capacity, and permits a fresh run |
+| Normally composed HTTP with pending headers or a partial body | DSL -> composed artifact -> embedded runner -> Stop handler -> real persistence; socket closes, guest acknowledges, retry/onError/Finish do not run, and the monitor releases the handle before the ten-second grace is needed |
+
+The composed tests use the existing artifact-dependent integration-test feature
+and CI job (currently named `scoped-workflow-integration-tests`). They explicitly
+assert there is no isolation manifest or scoped Agent in their compiled artifact;
+the test gate selects prerequisites, not production behavior. The partial-body
+test supplies an unfinished response but does not independently instrument the
+host's exact body-read phase. Cleanup-before-ack ordering at that phase continues
+to rely on the existing component/emitter proofs; the new test joins those paths
+to production persistence and Stop.
+
+Validation commands use the pinned toolchain, isolated native/component targets,
+and an owned ephemeral PostgreSQL fixture:
+
+```sh
+cargo test -p runtara-environment --features db-integration-tests --lib
+cargo test -p runtara-environment --features db-integration-tests --test embedded_runner_test --test handlers_test
+cargo test -p runtara-environment --features scoped-workflow-integration-tests --test cooperative_stop_test --test scoped_runner_test
+cargo clippy -p runtara-environment -p runtara-server --features runtara-environment/scoped-workflow-integration-tests,runtara-server/db-integration-tests --all-targets -- -D warnings
+```
+
+Results: all 238 environment library tests, 45 handler tests, eight embedded-runner
+tests, two composed HTTP Stop tests and seven existing packaged-runner tests
+passed. Feature-gated environment/server Clippy, workspace formatting and
+`git diff --check` passed. No full HTTP-server process, credentials, external
+provider endpoints, new WASM build, or performance acceptance run was used.
+
+Full authenticated-server E2E, a deliberately stalled standard cancellation
+acknowledgement, blocking native calls, nested workflow-agent ownership,
+cooperative deadlines/E128, distributed owner routing, controlled performance and
+capacity measurements, and removal of the superseded experiment remain open.

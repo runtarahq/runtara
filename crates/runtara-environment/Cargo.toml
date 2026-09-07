@@ -124,3 +124,7 @@ required-features = ["db-integration-tests"]
 [[test]]
 name = "scoped_runner_test"
 required-features = ["scoped-workflow-integration-tests"]
+
+[[test]]
+name = "cooperative_stop_test"
+required-features = ["scoped-workflow-integration-tests"]
