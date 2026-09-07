@@ -172,6 +172,9 @@ enum Scenario {
     StorageDownload(&'static str, bool),
     StoragePresign(&'static str),
     Sftp,
+    HubspotRead,
+    HubspotReadBody,
+    HubspotUpdateAfterRead,
     QuickbooksRead,
     QuickbooksReadBody,
     QuickbooksUpdateAfterRead,
@@ -194,6 +197,13 @@ enum Scenario {
 }
 
 impl Scenario {
+    fn is_hubspot(self) -> bool {
+        matches!(
+            self,
+            Self::HubspotRead | Self::HubspotReadBody | Self::HubspotUpdateAfterRead
+        )
+    }
+
     fn is_quickbooks(self) -> bool {
         matches!(
             self,
@@ -242,6 +252,7 @@ impl Scenario {
             || self.is_sqs()
             || self.is_stripe()
             || self.is_quickbooks()
+            || self.is_hubspot()
     }
     fn drains_normally(self) -> bool {
         matches!(self, Self::PauseBranches | Self::ShutdownBranches)
@@ -272,6 +283,7 @@ async fn run(scenario: Scenario) -> anyhow::Result<()> {
             | Scenario::SqsReceiveBody
             | Scenario::StripeCreateBody
             | Scenario::QuickbooksReadBody
+            | Scenario::HubspotReadBody
     );
     let fail_signal_read = matches!(
         scenario,
@@ -302,6 +314,7 @@ async fn run(scenario: Scenario) -> anyhow::Result<()> {
                 | Scenario::SqsDeleteAfterReceive
                 | Scenario::StripeFinalizeAfterCreate
                 | Scenario::QuickbooksUpdateAfterRead
+                | Scenario::HubspotUpdateAfterRead
         )
     {
         2
@@ -369,6 +382,21 @@ async fn run(scenario: Scenario) -> anyhow::Result<()> {
             .map(|(key, value)| (key.clone(), immediate(value.clone())))
             .collect::<serde_json::Map<String, Value>>()
             .into();
+    }
+    if scenario.is_hubspot() {
+        let connection = immediate(
+            serde_json::json!({"connection_id":"fixture-connection","integration_id":"hubspot_private_app","parameters":{}}),
+        );
+        graph["steps"]["fetch"]["agentId"] = "hubspot".into();
+        graph["steps"]["fetch"]["capabilityId"] = "get-contact".into();
+        graph["steps"]["fetch"]["inputMapping"] =
+            serde_json::json!({"contact_id":immediate("42".into()),"_connection":connection});
+        graph["steps"]["update"] = serde_json::json!({"id":"update","stepType":"Agent","agentId":"hubspot","capabilityId":"update-contact","maxRetries":3,"retryDelay":0,
+            "inputMapping":{"_connection":connection,"properties":immediate(serde_json::json!({"name":"updated fixture"})),"contact_id":{"valueType":"reference","value":"steps.fetch.outputs.contact.id"}}});
+        graph["executionPlan"] = serde_json::json!([
+            {"fromStep":"fetch","toStep":"update"}, {"fromStep":"fetch","toStep":"handled","label":"onError"},
+            {"fromStep":"update","toStep":"finish"}, {"fromStep":"update","toStep":"handled","label":"onError"}
+        ]);
     }
     if scenario.is_quickbooks() {
         let connection = immediate(
@@ -640,6 +668,17 @@ async fn run(scenario: Scenario) -> anyhow::Result<()> {
                             } else {
                                 assert_eq!(body["connection_id"], "fixture-connection");
                                 match scenario {
+                                    Scenario::HubspotRead | Scenario::HubspotReadBody | Scenario::HubspotUpdateAfterRead => {
+                                        assert_eq!(body["timeout_ms"],30_000);
+                                        assert_eq!(body["url"],"https://api.hubapi.com/crm/v3/objects/contacts/42");
+                                        if server_host.requests.load(Ordering::SeqCst) == 0 {
+                                            assert_eq!(body["method"],"GET");
+                                        } else {
+                                            assert_eq!(body["method"],"PATCH");
+                                            let payload = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, body["body_raw"].as_str().unwrap())?;
+                                            assert_eq!(serde_json::from_slice::<Value>(&payload)?,serde_json::json!({"properties":{"name":"updated fixture"}}));
+                                        }
+                                    },
                                     Scenario::QuickbooksRead | Scenario::QuickbooksReadBody | Scenario::QuickbooksUpdateAfterRead => {
                                         assert_eq!(body["timeout_ms"], 30_000);
                                         if server_host.requests.load(Ordering::SeqCst) == 0 {
@@ -703,6 +742,14 @@ async fn run(scenario: Scenario) -> anyhow::Result<()> {
                             stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\nx").await?;
                         }
                         let started = server_host.requests.fetch_add(1, Ordering::SeqCst) + 1;
+                        if scenario == Scenario::HubspotUpdateAfterRead && started == 1 {
+                            let bytes = serde_json::to_vec(&serde_json::json!({"status":200,"headers":{},"body":{"id":"42","properties":{"name":"fixture"}}}))?;
+                            stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", bytes.len()).as_bytes()).await?;
+                            stream.write_all(&bytes).await?;
+                            server_host.closed_count.fetch_add(1, Ordering::SeqCst);
+                            server_host.closed.notify_one();
+                            return anyhow::Ok(());
+                        }
                         if scenario == Scenario::QuickbooksUpdateAfterRead && started == 1 {
                             let bytes = serde_json::to_vec(&serde_json::json!({"status":200,"headers":{},"body":{"Customer":{"Id":"42","SyncToken":"3","DisplayName":"fixture"}}}))?;
                             stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", bytes.len()).as_bytes()).await?;
@@ -1027,4 +1074,17 @@ async fn emitted_quickbooks_cancel_stops_partial_read_without_update_or_retry() 
 async fn emitted_quickbooks_cancel_stops_update_after_read_without_recovery() -> anyhow::Result<()>
 {
     run(Scenario::QuickbooksUpdateAfterRead).await
+}
+
+#[tokio::test]
+async fn emitted_hubspot_cancel_stops_read_without_update_or_retry() -> anyhow::Result<()> {
+    run(Scenario::HubspotRead).await
+}
+#[tokio::test]
+async fn emitted_hubspot_cancel_stops_partial_read_without_update_or_retry() -> anyhow::Result<()> {
+    run(Scenario::HubspotReadBody).await
+}
+#[tokio::test]
+async fn emitted_hubspot_cancel_stops_update_after_read_without_recovery() -> anyhow::Result<()> {
+    run(Scenario::HubspotUpdateAfterRead).await
 }

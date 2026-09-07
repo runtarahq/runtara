@@ -29,9 +29,8 @@ mod bindings {
     wit_bindgen::generate!({
         path: ["../../runtara-agent-wit/wit", "wit"],
         world: "runtara:agent-hubspot/agent",
-        // Sync impls of the async-TYPED invoke (sync lift; see
-        // spikes/wit-bindgen-async-typed).
-        async: false,
+        // Standard callback bindings let cancellation drop pending I/O.
+        async: ["export:runtara:agent-hubspot/capabilities@0.4.0#invoke"],
         generate_all,
     });
 }
@@ -141,7 +140,7 @@ fn require_connection(connection: &Option<RawConnection>) -> Result<&RawConnecti
 }
 
 /// GET `https://api.hubapi.com{path}` with optional query parameters.
-fn hubspot_get(
+async fn hubspot_get(
     connection: &RawConnection,
     path: &str,
     query: HashMap<String, String>,
@@ -161,7 +160,8 @@ fn hubspot_get(
         .request("GET", &url)
         .header("Accept", "application/json")
         .header("X-Runtara-Connection-Id", &connection.connection_id)
-        .call_agent()
+        .call_agent_async()
+        .await
         .map_err(|e| {
             AgentError::transient(
                 "HUBSPOT_NETWORK_ERROR",
@@ -174,7 +174,11 @@ fn hubspot_get(
 }
 
 /// POST `body` to `https://api.hubapi.com{path}` as JSON.
-fn hubspot_post(connection: &RawConnection, path: &str, body: Value) -> Result<Value, AgentError> {
+async fn hubspot_post(
+    connection: &RawConnection,
+    path: &str,
+    body: Value,
+) -> Result<Value, AgentError> {
     let url = format!("{HUBSPOT_BASE}{path}");
     let body_bytes = serde_json::to_vec(&body).map_err(|e| {
         AgentError::permanent("HUBSPOT_SERIALIZATION_ERROR", e.to_string())
@@ -188,7 +192,8 @@ fn hubspot_post(connection: &RawConnection, path: &str, body: Value) -> Result<V
         .header("Accept", "application/json")
         .header("X-Runtara-Connection-Id", &connection.connection_id)
         .body_bytes(&body_bytes)
-        .call_agent()
+        .call_agent_async()
+        .await
         .map_err(|e| {
             AgentError::transient(
                 "HUBSPOT_NETWORK_ERROR",
@@ -201,7 +206,11 @@ fn hubspot_post(connection: &RawConnection, path: &str, body: Value) -> Result<V
 }
 
 /// PATCH `body` to `https://api.hubapi.com{path}` as JSON.
-fn hubspot_patch(connection: &RawConnection, path: &str, body: Value) -> Result<Value, AgentError> {
+async fn hubspot_patch(
+    connection: &RawConnection,
+    path: &str,
+    body: Value,
+) -> Result<Value, AgentError> {
     let url = format!("{HUBSPOT_BASE}{path}");
     let body_bytes = serde_json::to_vec(&body).map_err(|e| {
         AgentError::permanent("HUBSPOT_SERIALIZATION_ERROR", e.to_string())
@@ -215,7 +224,8 @@ fn hubspot_patch(connection: &RawConnection, path: &str, body: Value) -> Result<
         .header("Accept", "application/json")
         .header("X-Runtara-Connection-Id", &connection.connection_id)
         .body_bytes(&body_bytes)
-        .call_agent()
+        .call_agent_async()
+        .await
         .map_err(|e| {
             AgentError::transient(
                 "HUBSPOT_NETWORK_ERROR",
@@ -228,7 +238,11 @@ fn hubspot_patch(connection: &RawConnection, path: &str, body: Value) -> Result<
 }
 
 /// PUT `body` to `https://api.hubapi.com{path}` as JSON.
-fn hubspot_put(connection: &RawConnection, path: &str, body: Value) -> Result<Value, AgentError> {
+async fn hubspot_put(
+    connection: &RawConnection,
+    path: &str,
+    body: Value,
+) -> Result<Value, AgentError> {
     let url = format!("{HUBSPOT_BASE}{path}");
     let body_bytes = serde_json::to_vec(&body).map_err(|e| {
         AgentError::permanent("HUBSPOT_SERIALIZATION_ERROR", e.to_string())
@@ -242,7 +256,8 @@ fn hubspot_put(connection: &RawConnection, path: &str, body: Value) -> Result<Va
         .header("Accept", "application/json")
         .header("X-Runtara-Connection-Id", &connection.connection_id)
         .body_bytes(&body_bytes)
-        .call_agent()
+        .call_agent_async()
+        .await
         .map_err(|e| {
             AgentError::transient(
                 "HUBSPOT_NETWORK_ERROR",
@@ -255,7 +270,7 @@ fn hubspot_put(connection: &RawConnection, path: &str, body: Value) -> Result<Va
 }
 
 /// DELETE `https://api.hubapi.com{path}`.
-fn hubspot_delete(connection: &RawConnection, path: &str) -> Result<(), AgentError> {
+async fn hubspot_delete(connection: &RawConnection, path: &str) -> Result<(), AgentError> {
     let url = format!("{HUBSPOT_BASE}{path}");
 
     let client = runtara_http::HttpClient::with_timeout(Duration::from_millis(TIMEOUT_MS));
@@ -263,7 +278,8 @@ fn hubspot_delete(connection: &RawConnection, path: &str) -> Result<(), AgentErr
         .request("DELETE", &url)
         .header("Accept", "application/json")
         .header("X-Runtara-Connection-Id", &connection.connection_id)
-        .call_agent()
+        .call_agent_async()
+        .await
         .map_err(|e| {
             AgentError::transient(
                 "HUBSPOT_NETWORK_ERROR",
@@ -361,7 +377,7 @@ fn http_status_error(
                     .iter()
                     .find(|(k, _)| k.eq_ignore_ascii_case("retry-after"))
                     .and_then(|(_, v)| v.parse::<u64>().ok())
-                    .map(|s| s * 1000)
+                    .and_then(|seconds| seconds.checked_mul(1000))
             });
         if let Some(ms) = retry_after_ms {
             err = err.with_retry_after_ms(ms);
@@ -393,7 +409,7 @@ fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
     } else {
-        let mut t = s[..max].to_string();
+        let mut t = s[..s.floor_char_boundary(max)].to_string();
         t.push('…');
         t
     }
@@ -491,7 +507,7 @@ pub struct ListBusinessUnitsOutput {
     module_integration_ids = "hubspot_private_app,hubspot_access_token",
     module_secure = true
 )]
-pub fn list_business_units(
+pub async fn list_business_units(
     input: ListBusinessUnitsInput,
 ) -> Result<ListBusinessUnitsOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
@@ -499,7 +515,8 @@ pub fn list_business_units(
         connection,
         &format!("/business-units/v3/business-units/user/{}", input.user_id),
         HashMap::new(),
-    )?;
+    )
+    .await?;
     Ok(ListBusinessUnitsOutput {
         results: result["results"].clone(),
     })
@@ -552,7 +569,7 @@ pub struct ListObjectPropertiesOutput {
     display_name = "List Object Properties",
     description = "Read all property definitions for a HubSpot CRM object type"
 )]
-pub fn list_object_properties(
+pub async fn list_object_properties(
     input: ListObjectPropertiesInput,
 ) -> Result<ListObjectPropertiesOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
@@ -569,7 +586,8 @@ pub fn list_object_properties(
         connection,
         &format!("/crm/v3/properties/{}", input.object_type),
         query,
-    )?;
+    )
+    .await?;
     Ok(ListObjectPropertiesOutput {
         results: result["results"].clone(),
     })
@@ -622,7 +640,7 @@ pub struct GetObjectPropertyOutput {
     display_name = "Get Object Property",
     description = "Read one property definition for a HubSpot CRM object type"
 )]
-pub fn get_object_property(
+pub async fn get_object_property(
     input: GetObjectPropertyInput,
 ) -> Result<GetObjectPropertyOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
@@ -642,7 +660,8 @@ pub fn get_object_property(
             input.object_type, input.property_name
         ),
         query,
-    )?;
+    )
+    .await?;
     Ok(GetObjectPropertyOutput { property: result })
 }
 
@@ -697,7 +716,7 @@ pub struct ListContactsOutput {
     display_name = "List Contacts",
     description = "List contacts from your HubSpot CRM with optional property selection"
 )]
-pub fn list_contacts(input: ListContactsInput) -> Result<ListContactsOutput, AgentError> {
+pub async fn list_contacts(input: ListContactsInput) -> Result<ListContactsOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     let mut query = HashMap::new();
     if let Some(limit) = input.limit {
@@ -709,7 +728,7 @@ pub fn list_contacts(input: ListContactsInput) -> Result<ListContactsOutput, Age
         query.insert("after".to_string(), after);
     }
     add_properties(&mut query, &input.properties);
-    let result = hubspot_get(connection, "/crm/v3/objects/contacts", query)?;
+    let result = hubspot_get(connection, "/crm/v3/objects/contacts", query).await?;
     Ok(ListContactsOutput {
         results: result["results"].clone(),
         paging: result.get("paging").cloned().unwrap_or(Value::Null),
@@ -757,7 +776,7 @@ pub struct GetContactOutput {
     display_name = "Get Contact",
     description = "Retrieve a single contact by ID or email"
 )]
-pub fn get_contact(input: GetContactInput) -> Result<GetContactOutput, AgentError> {
+pub async fn get_contact(input: GetContactInput) -> Result<GetContactOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     let mut query = HashMap::new();
     add_properties(&mut query, &input.properties);
@@ -770,7 +789,8 @@ pub fn get_contact(input: GetContactInput) -> Result<GetContactOutput, AgentErro
         connection,
         &format!("/crm/v3/objects/contacts/{}", input.contact_id),
         query,
-    )?;
+    )
+    .await?;
     Ok(GetContactOutput { contact: result })
 }
 
@@ -801,13 +821,14 @@ pub struct CreateContactOutput {
     description = "Create a new contact in HubSpot CRM",
     side_effects = true
 )]
-pub fn create_contact(input: CreateContactInput) -> Result<CreateContactOutput, AgentError> {
+pub async fn create_contact(input: CreateContactInput) -> Result<CreateContactOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     let result = hubspot_post(
         connection,
         "/crm/v3/objects/contacts",
         crm_object_body(&input.properties),
-    )?;
+    )
+    .await?;
     Ok(CreateContactOutput { contact: result })
 }
 
@@ -844,13 +865,14 @@ pub struct UpdateContactOutput {
     description = "Update an existing contact's properties",
     side_effects = true
 )]
-pub fn update_contact(input: UpdateContactInput) -> Result<UpdateContactOutput, AgentError> {
+pub async fn update_contact(input: UpdateContactInput) -> Result<UpdateContactOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     let result = hubspot_patch(
         connection,
         &format!("/crm/v3/objects/contacts/{}", input.contact_id),
         crm_object_body(&input.properties),
-    )?;
+    )
+    .await?;
     Ok(UpdateContactOutput { contact: result })
 }
 
@@ -881,12 +903,13 @@ pub struct DeleteContactOutput {
     description = "Archive (soft-delete) a contact by ID",
     side_effects = true
 )]
-pub fn delete_contact(input: DeleteContactInput) -> Result<DeleteContactOutput, AgentError> {
+pub async fn delete_contact(input: DeleteContactInput) -> Result<DeleteContactOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     hubspot_delete(
         connection,
         &format!("/crm/v3/objects/contacts/{}", input.contact_id),
-    )?;
+    )
+    .await?;
     Ok(DeleteContactOutput { success: true })
 }
 
@@ -957,7 +980,9 @@ pub struct SearchContactsOutput {
     display_name = "Search Contacts",
     description = "Search contacts using filters, full-text query, or both"
 )]
-pub fn search_contacts(input: SearchContactsInput) -> Result<SearchContactsOutput, AgentError> {
+pub async fn search_contacts(
+    input: SearchContactsInput,
+) -> Result<SearchContactsOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     let body = crm_search_body(
         input.filter_groups,
@@ -967,7 +992,7 @@ pub fn search_contacts(input: SearchContactsInput) -> Result<SearchContactsOutpu
         input.after,
         input.sorts,
     );
-    let result = hubspot_post(connection, "/crm/v3/objects/contacts/search", body)?;
+    let result = hubspot_post(connection, "/crm/v3/objects/contacts/search", body).await?;
     Ok(SearchContactsOutput {
         total: result["total"].as_i64().unwrap_or(0),
         results: result["results"].clone(),
@@ -1020,7 +1045,7 @@ pub struct ListCompaniesOutput {
     display_name = "List Companies",
     description = "List companies from your HubSpot CRM"
 )]
-pub fn list_companies(input: ListCompaniesInput) -> Result<ListCompaniesOutput, AgentError> {
+pub async fn list_companies(input: ListCompaniesInput) -> Result<ListCompaniesOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     let mut query = HashMap::new();
     if let Some(limit) = input.limit {
@@ -1032,7 +1057,7 @@ pub fn list_companies(input: ListCompaniesInput) -> Result<ListCompaniesOutput, 
         query.insert("after".to_string(), after);
     }
     add_properties(&mut query, &input.properties);
-    let result = hubspot_get(connection, "/crm/v3/objects/companies", query)?;
+    let result = hubspot_get(connection, "/crm/v3/objects/companies", query).await?;
     Ok(ListCompaniesOutput {
         results: result["results"].clone(),
         paging: result.get("paging").cloned().unwrap_or(Value::Null),
@@ -1073,7 +1098,7 @@ pub struct GetCompanyOutput {
     display_name = "Get Company",
     description = "Retrieve a single company by ID"
 )]
-pub fn get_company(input: GetCompanyInput) -> Result<GetCompanyOutput, AgentError> {
+pub async fn get_company(input: GetCompanyInput) -> Result<GetCompanyOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     let mut query = HashMap::new();
     add_properties(&mut query, &input.properties);
@@ -1081,7 +1106,8 @@ pub fn get_company(input: GetCompanyInput) -> Result<GetCompanyOutput, AgentErro
         connection,
         &format!("/crm/v3/objects/companies/{}", input.company_id),
         query,
-    )?;
+    )
+    .await?;
     Ok(GetCompanyOutput { company: result })
 }
 
@@ -1112,13 +1138,14 @@ pub struct CreateCompanyOutput {
     description = "Create a new company in HubSpot CRM",
     side_effects = true
 )]
-pub fn create_company(input: CreateCompanyInput) -> Result<CreateCompanyOutput, AgentError> {
+pub async fn create_company(input: CreateCompanyInput) -> Result<CreateCompanyOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     let result = hubspot_post(
         connection,
         "/crm/v3/objects/companies",
         crm_object_body(&input.properties),
-    )?;
+    )
+    .await?;
     Ok(CreateCompanyOutput { company: result })
 }
 
@@ -1155,13 +1182,14 @@ pub struct UpdateCompanyOutput {
     description = "Update an existing company's properties",
     side_effects = true
 )]
-pub fn update_company(input: UpdateCompanyInput) -> Result<UpdateCompanyOutput, AgentError> {
+pub async fn update_company(input: UpdateCompanyInput) -> Result<UpdateCompanyOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     let result = hubspot_patch(
         connection,
         &format!("/crm/v3/objects/companies/{}", input.company_id),
         crm_object_body(&input.properties),
-    )?;
+    )
+    .await?;
     Ok(UpdateCompanyOutput { company: result })
 }
 
@@ -1192,12 +1220,13 @@ pub struct DeleteCompanyOutput {
     description = "Archive (soft-delete) a company by ID",
     side_effects = true
 )]
-pub fn delete_company(input: DeleteCompanyInput) -> Result<DeleteCompanyOutput, AgentError> {
+pub async fn delete_company(input: DeleteCompanyInput) -> Result<DeleteCompanyOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     hubspot_delete(
         connection,
         &format!("/crm/v3/objects/companies/{}", input.company_id),
-    )?;
+    )
+    .await?;
     Ok(DeleteCompanyOutput { success: true })
 }
 
@@ -1262,7 +1291,9 @@ pub struct SearchCompaniesOutput {
     display_name = "Search Companies",
     description = "Search companies using filters, full-text query, or both"
 )]
-pub fn search_companies(input: SearchCompaniesInput) -> Result<SearchCompaniesOutput, AgentError> {
+pub async fn search_companies(
+    input: SearchCompaniesInput,
+) -> Result<SearchCompaniesOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     let body = crm_search_body(
         input.filter_groups,
@@ -1272,7 +1303,7 @@ pub fn search_companies(input: SearchCompaniesInput) -> Result<SearchCompaniesOu
         input.after,
         input.sorts,
     );
-    let result = hubspot_post(connection, "/crm/v3/objects/companies/search", body)?;
+    let result = hubspot_post(connection, "/crm/v3/objects/companies/search", body).await?;
     Ok(SearchCompaniesOutput {
         total: result["total"].as_i64().unwrap_or(0),
         results: result["results"].clone(),
@@ -1325,7 +1356,7 @@ pub struct ListDealsOutput {
     display_name = "List Deals",
     description = "List deals from your HubSpot CRM"
 )]
-pub fn list_deals(input: ListDealsInput) -> Result<ListDealsOutput, AgentError> {
+pub async fn list_deals(input: ListDealsInput) -> Result<ListDealsOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     let mut query = HashMap::new();
     if let Some(limit) = input.limit {
@@ -1337,7 +1368,7 @@ pub fn list_deals(input: ListDealsInput) -> Result<ListDealsOutput, AgentError> 
         query.insert("after".to_string(), after);
     }
     add_properties(&mut query, &input.properties);
-    let result = hubspot_get(connection, "/crm/v3/objects/deals", query)?;
+    let result = hubspot_get(connection, "/crm/v3/objects/deals", query).await?;
     Ok(ListDealsOutput {
         results: result["results"].clone(),
         paging: result.get("paging").cloned().unwrap_or(Value::Null),
@@ -1378,7 +1409,7 @@ pub struct GetDealOutput {
     display_name = "Get Deal",
     description = "Retrieve a single deal by ID"
 )]
-pub fn get_deal(input: GetDealInput) -> Result<GetDealOutput, AgentError> {
+pub async fn get_deal(input: GetDealInput) -> Result<GetDealOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     let mut query = HashMap::new();
     add_properties(&mut query, &input.properties);
@@ -1386,7 +1417,8 @@ pub fn get_deal(input: GetDealInput) -> Result<GetDealOutput, AgentError> {
         connection,
         &format!("/crm/v3/objects/deals/{}", input.deal_id),
         query,
-    )?;
+    )
+    .await?;
     Ok(GetDealOutput { deal: result })
 }
 
@@ -1417,13 +1449,14 @@ pub struct CreateDealOutput {
     description = "Create a new deal in HubSpot CRM",
     side_effects = true
 )]
-pub fn create_deal(input: CreateDealInput) -> Result<CreateDealOutput, AgentError> {
+pub async fn create_deal(input: CreateDealInput) -> Result<CreateDealOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     let result = hubspot_post(
         connection,
         "/crm/v3/objects/deals",
         crm_object_body(&input.properties),
-    )?;
+    )
+    .await?;
     Ok(CreateDealOutput { deal: result })
 }
 
@@ -1457,13 +1490,14 @@ pub struct UpdateDealOutput {
     description = "Update a deal's properties — use dealstage property to move through pipeline stages",
     side_effects = true
 )]
-pub fn update_deal(input: UpdateDealInput) -> Result<UpdateDealOutput, AgentError> {
+pub async fn update_deal(input: UpdateDealInput) -> Result<UpdateDealOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     let result = hubspot_patch(
         connection,
         &format!("/crm/v3/objects/deals/{}", input.deal_id),
         crm_object_body(&input.properties),
-    )?;
+    )
+    .await?;
     Ok(UpdateDealOutput { deal: result })
 }
 
@@ -1491,12 +1525,13 @@ pub struct DeleteDealOutput {
     description = "Archive (soft-delete) a deal by ID",
     side_effects = true
 )]
-pub fn delete_deal(input: DeleteDealInput) -> Result<DeleteDealOutput, AgentError> {
+pub async fn delete_deal(input: DeleteDealInput) -> Result<DeleteDealOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     hubspot_delete(
         connection,
         &format!("/crm/v3/objects/deals/{}", input.deal_id),
-    )?;
+    )
+    .await?;
     Ok(DeleteDealOutput { success: true })
 }
 
@@ -1561,7 +1596,7 @@ pub struct SearchDealsOutput {
     display_name = "Search Deals",
     description = "Search deals using filters, full-text query, or both"
 )]
-pub fn search_deals(input: SearchDealsInput) -> Result<SearchDealsOutput, AgentError> {
+pub async fn search_deals(input: SearchDealsInput) -> Result<SearchDealsOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     let body = crm_search_body(
         input.filter_groups,
@@ -1571,7 +1606,7 @@ pub fn search_deals(input: SearchDealsInput) -> Result<SearchDealsOutput, AgentE
         input.after,
         input.sorts,
     );
-    let result = hubspot_post(connection, "/crm/v3/objects/deals/search", body)?;
+    let result = hubspot_post(connection, "/crm/v3/objects/deals/search", body).await?;
     Ok(SearchDealsOutput {
         total: result["total"].as_i64().unwrap_or(0),
         results: result["results"].clone(),
@@ -1624,7 +1659,7 @@ pub struct ListQuotesOutput {
     display_name = "List Quotes",
     description = "List quotes from your HubSpot CRM"
 )]
-pub fn list_quotes(input: ListQuotesInput) -> Result<ListQuotesOutput, AgentError> {
+pub async fn list_quotes(input: ListQuotesInput) -> Result<ListQuotesOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     let mut query = HashMap::new();
     if let Some(limit) = input.limit {
@@ -1636,7 +1671,7 @@ pub fn list_quotes(input: ListQuotesInput) -> Result<ListQuotesOutput, AgentErro
         query.insert("after".to_string(), after);
     }
     add_properties(&mut query, &input.properties);
-    let result = hubspot_get(connection, "/crm/v3/objects/quotes", query)?;
+    let result = hubspot_get(connection, "/crm/v3/objects/quotes", query).await?;
     Ok(ListQuotesOutput {
         results: result["results"].clone(),
         paging: result.get("paging").cloned().unwrap_or(Value::Null),
@@ -1677,7 +1712,7 @@ pub struct GetQuoteOutput {
     display_name = "Get Quote",
     description = "Retrieve a single quote by ID"
 )]
-pub fn get_quote(input: GetQuoteInput) -> Result<GetQuoteOutput, AgentError> {
+pub async fn get_quote(input: GetQuoteInput) -> Result<GetQuoteOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     let mut query = HashMap::new();
     add_properties(&mut query, &input.properties);
@@ -1685,7 +1720,8 @@ pub fn get_quote(input: GetQuoteInput) -> Result<GetQuoteOutput, AgentError> {
         connection,
         &format!("/crm/v3/objects/quotes/{}", input.quote_id),
         query,
-    )?;
+    )
+    .await?;
     Ok(GetQuoteOutput { quote: result })
 }
 
@@ -1716,13 +1752,14 @@ pub struct CreateQuoteOutput {
     description = "Create a new quote in HubSpot CRM",
     side_effects = true
 )]
-pub fn create_quote(input: CreateQuoteInput) -> Result<CreateQuoteOutput, AgentError> {
+pub async fn create_quote(input: CreateQuoteInput) -> Result<CreateQuoteOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     let result = hubspot_post(
         connection,
         "/crm/v3/objects/quotes",
         crm_object_body(&input.properties),
-    )?;
+    )
+    .await?;
     Ok(CreateQuoteOutput { quote: result })
 }
 
@@ -1756,13 +1793,14 @@ pub struct UpdateQuoteOutput {
     description = "Update a quote's properties — use hs_status to change quote status",
     side_effects = true
 )]
-pub fn update_quote(input: UpdateQuoteInput) -> Result<UpdateQuoteOutput, AgentError> {
+pub async fn update_quote(input: UpdateQuoteInput) -> Result<UpdateQuoteOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     let result = hubspot_patch(
         connection,
         &format!("/crm/v3/objects/quotes/{}", input.quote_id),
         crm_object_body(&input.properties),
-    )?;
+    )
+    .await?;
     Ok(UpdateQuoteOutput { quote: result })
 }
 
@@ -1790,12 +1828,13 @@ pub struct DeleteQuoteOutput {
     description = "Archive (soft-delete) a quote by ID",
     side_effects = true
 )]
-pub fn delete_quote(input: DeleteQuoteInput) -> Result<DeleteQuoteOutput, AgentError> {
+pub async fn delete_quote(input: DeleteQuoteInput) -> Result<DeleteQuoteOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     hubspot_delete(
         connection,
         &format!("/crm/v3/objects/quotes/{}", input.quote_id),
-    )?;
+    )
+    .await?;
     Ok(DeleteQuoteOutput { success: true })
 }
 
@@ -1860,7 +1899,7 @@ pub struct SearchQuotesOutput {
     display_name = "Search Quotes",
     description = "Search quotes using filters, full-text query, or both"
 )]
-pub fn search_quotes(input: SearchQuotesInput) -> Result<SearchQuotesOutput, AgentError> {
+pub async fn search_quotes(input: SearchQuotesInput) -> Result<SearchQuotesOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     let body = crm_search_body(
         input.filter_groups,
@@ -1870,7 +1909,7 @@ pub fn search_quotes(input: SearchQuotesInput) -> Result<SearchQuotesOutput, Age
         input.after,
         input.sorts,
     );
-    let result = hubspot_post(connection, "/crm/v3/objects/quotes/search", body)?;
+    let result = hubspot_post(connection, "/crm/v3/objects/quotes/search", body).await?;
     Ok(SearchQuotesOutput {
         total: result["total"].as_i64().unwrap_or(0),
         results: result["results"].clone(),
@@ -1923,7 +1962,7 @@ pub struct ListLineItemsOutput {
     display_name = "List Line Items",
     description = "List line items from your HubSpot CRM"
 )]
-pub fn list_line_items(input: ListLineItemsInput) -> Result<ListLineItemsOutput, AgentError> {
+pub async fn list_line_items(input: ListLineItemsInput) -> Result<ListLineItemsOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     let mut query = HashMap::new();
     if let Some(limit) = input.limit {
@@ -1935,7 +1974,7 @@ pub fn list_line_items(input: ListLineItemsInput) -> Result<ListLineItemsOutput,
         query.insert("after".to_string(), after);
     }
     add_properties(&mut query, &input.properties);
-    let result = hubspot_get(connection, "/crm/v3/objects/line_items", query)?;
+    let result = hubspot_get(connection, "/crm/v3/objects/line_items", query).await?;
     Ok(ListLineItemsOutput {
         results: result["results"].clone(),
         paging: result.get("paging").cloned().unwrap_or(Value::Null),
@@ -1990,7 +2029,7 @@ pub struct GetLineItemOutput {
     display_name = "Get Line Item",
     description = "Retrieve a single line item by ID"
 )]
-pub fn get_line_item(input: GetLineItemInput) -> Result<GetLineItemOutput, AgentError> {
+pub async fn get_line_item(input: GetLineItemInput) -> Result<GetLineItemOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     let mut query = HashMap::new();
     add_properties(&mut query, &input.properties);
@@ -2008,7 +2047,8 @@ pub fn get_line_item(input: GetLineItemInput) -> Result<GetLineItemOutput, Agent
         connection,
         &format!("/crm/v3/objects/line_items/{}", input.line_item_id),
         query,
-    )?;
+    )
+    .await?;
     Ok(GetLineItemOutput { line_item: result })
 }
 
@@ -2039,13 +2079,16 @@ pub struct CreateLineItemOutput {
     description = "Create a new line item in HubSpot CRM",
     side_effects = true
 )]
-pub fn create_line_item(input: CreateLineItemInput) -> Result<CreateLineItemOutput, AgentError> {
+pub async fn create_line_item(
+    input: CreateLineItemInput,
+) -> Result<CreateLineItemOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     let result = hubspot_post(
         connection,
         "/crm/v3/objects/line_items",
         crm_object_body(&input.properties),
-    )?;
+    )
+    .await?;
     Ok(CreateLineItemOutput { line_item: result })
 }
 
@@ -2082,13 +2125,16 @@ pub struct UpdateLineItemOutput {
     description = "Update an existing line item's properties",
     side_effects = true
 )]
-pub fn update_line_item(input: UpdateLineItemInput) -> Result<UpdateLineItemOutput, AgentError> {
+pub async fn update_line_item(
+    input: UpdateLineItemInput,
+) -> Result<UpdateLineItemOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     let result = hubspot_patch(
         connection,
         &format!("/crm/v3/objects/line_items/{}", input.line_item_id),
         crm_object_body(&input.properties),
-    )?;
+    )
+    .await?;
     Ok(UpdateLineItemOutput { line_item: result })
 }
 
@@ -2119,12 +2165,15 @@ pub struct DeleteLineItemOutput {
     description = "Archive (soft-delete) a line item by ID",
     side_effects = true
 )]
-pub fn delete_line_item(input: DeleteLineItemInput) -> Result<DeleteLineItemOutput, AgentError> {
+pub async fn delete_line_item(
+    input: DeleteLineItemInput,
+) -> Result<DeleteLineItemOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     hubspot_delete(
         connection,
         &format!("/crm/v3/objects/line_items/{}", input.line_item_id),
-    )?;
+    )
+    .await?;
     Ok(DeleteLineItemOutput { success: true })
 }
 
@@ -2189,7 +2238,9 @@ pub struct SearchLineItemsOutput {
     display_name = "Search Line Items",
     description = "Search line items using filters, full-text query, or both"
 )]
-pub fn search_line_items(input: SearchLineItemsInput) -> Result<SearchLineItemsOutput, AgentError> {
+pub async fn search_line_items(
+    input: SearchLineItemsInput,
+) -> Result<SearchLineItemsOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     let body = crm_search_body(
         input.filter_groups,
@@ -2199,7 +2250,7 @@ pub fn search_line_items(input: SearchLineItemsInput) -> Result<SearchLineItemsO
         input.after,
         input.sorts,
     );
-    let result = hubspot_post(connection, "/crm/v3/objects/line_items/search", body)?;
+    let result = hubspot_post(connection, "/crm/v3/objects/line_items/search", body).await?;
     Ok(SearchLineItemsOutput {
         total: result["total"].as_i64().unwrap_or(0),
         results: result["results"].clone(),
@@ -2249,7 +2300,7 @@ pub struct ListOwnersOutput {
     display_name = "List Owners",
     description = "List owners (users) in your HubSpot account"
 )]
-pub fn list_owners(input: ListOwnersInput) -> Result<ListOwnersOutput, AgentError> {
+pub async fn list_owners(input: ListOwnersInput) -> Result<ListOwnersOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     let mut query = HashMap::new();
     if let Some(limit) = input.limit {
@@ -2265,7 +2316,7 @@ pub fn list_owners(input: ListOwnersInput) -> Result<ListOwnersOutput, AgentErro
     {
         query.insert("email".to_string(), email);
     }
-    let result = hubspot_get(connection, "/crm/v3/owners/", query)?;
+    let result = hubspot_get(connection, "/crm/v3/owners/", query).await?;
     Ok(ListOwnersOutput {
         results: result["results"].clone(),
         paging: result.get("paging").cloned().unwrap_or(Value::Null),
@@ -2299,13 +2350,14 @@ pub struct GetOwnerOutput {
     display_name = "Get Owner",
     description = "Retrieve a single owner by ID"
 )]
-pub fn get_owner(input: GetOwnerInput) -> Result<GetOwnerOutput, AgentError> {
+pub async fn get_owner(input: GetOwnerInput) -> Result<GetOwnerOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     let result = hubspot_get(
         connection,
         &format!("/crm/v3/owners/{}", input.owner_id),
         HashMap::new(),
-    )?;
+    )
+    .await?;
     Ok(GetOwnerOutput { owner: result })
 }
 
@@ -2344,13 +2396,14 @@ pub struct ListPipelinesOutput {
     display_name = "List Pipelines",
     description = "List pipelines and their stages for deals or tickets — useful for discovering stage IDs"
 )]
-pub fn list_pipelines(input: ListPipelinesInput) -> Result<ListPipelinesOutput, AgentError> {
+pub async fn list_pipelines(input: ListPipelinesInput) -> Result<ListPipelinesOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     let result = hubspot_get(
         connection,
         &format!("/crm/v3/pipelines/{}", input.object_type),
         HashMap::new(),
-    )?;
+    )
+    .await?;
     Ok(ListPipelinesOutput {
         results: result["results"].clone(),
     })
@@ -2394,7 +2447,7 @@ pub struct GetPipelineOutput {
     display_name = "Get Pipeline",
     description = "Retrieve a specific pipeline with all its stages"
 )]
-pub fn get_pipeline(input: GetPipelineInput) -> Result<GetPipelineOutput, AgentError> {
+pub async fn get_pipeline(input: GetPipelineInput) -> Result<GetPipelineOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     let result = hubspot_get(
         connection,
@@ -2403,7 +2456,8 @@ pub fn get_pipeline(input: GetPipelineInput) -> Result<GetPipelineOutput, AgentE
             input.object_type, input.pipeline_id
         ),
         HashMap::new(),
-    )?;
+    )
+    .await?;
     Ok(GetPipelineOutput { pipeline: result })
 }
 
@@ -2456,7 +2510,7 @@ pub struct CreateAssociationOutput {
     description = "Associate two CRM objects (e.g. link a contact to a company or a deal to a contact)",
     side_effects = true
 )]
-pub fn create_association(
+pub async fn create_association(
     input: CreateAssociationInput,
 ) -> Result<CreateAssociationOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
@@ -2470,7 +2524,7 @@ pub fn create_association(
         input.from_object_type, input.from_object_id, input.to_object_type, input.to_object_id
     );
 
-    let result = hubspot_put(connection, &path, body)?;
+    let result = hubspot_put(connection, &path, body).await?;
     Ok(CreateAssociationOutput { result })
 }
 
@@ -2514,7 +2568,7 @@ pub struct ListAssociationsOutput {
     display_name = "List Associations",
     description = "List all associations from one object to another type (e.g. all companies for a contact)"
 )]
-pub fn list_associations(
+pub async fn list_associations(
     input: ListAssociationsInput,
 ) -> Result<ListAssociationsOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
@@ -2522,7 +2576,7 @@ pub fn list_associations(
         "/crm/v4/objects/{}/{}/associations/{}",
         input.from_object_type, input.from_object_id, input.to_object_type
     );
-    let result = hubspot_get(connection, &path, HashMap::new())?;
+    let result = hubspot_get(connection, &path, HashMap::new()).await?;
     Ok(ListAssociationsOutput {
         results: result["results"].clone(),
         paging: result.get("paging").cloned().unwrap_or(Value::Null),
@@ -2562,7 +2616,7 @@ pub struct ListWebhookSubscriptionsOutput {
     display_name = "List Webhook Subscriptions",
     description = "List webhook event subscriptions for a HubSpot app"
 )]
-pub fn list_webhook_subscriptions(
+pub async fn list_webhook_subscriptions(
     input: ListWebhookSubscriptionsInput,
 ) -> Result<ListWebhookSubscriptionsOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
@@ -2570,7 +2624,8 @@ pub fn list_webhook_subscriptions(
         connection,
         &format!("/webhooks/2026-03/{}/subscriptions", input.app_id),
         HashMap::new(),
-    )?;
+    )
+    .await?;
     Ok(ListWebhookSubscriptionsOutput {
         subscriptions: result,
     })
@@ -2641,7 +2696,7 @@ pub struct CreateWebhookSubscriptionOutput {
     description = "Create a webhook event subscription for a HubSpot app",
     side_effects = true
 )]
-pub fn create_webhook_subscription(
+pub async fn create_webhook_subscription(
     input: CreateWebhookSubscriptionInput,
 ) -> Result<CreateWebhookSubscriptionOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
@@ -2669,7 +2724,8 @@ pub fn create_webhook_subscription(
         connection,
         &format!("/webhooks/2026-03/{}/subscriptions", input.app_id),
         body,
-    )?;
+    )
+    .await?;
     Ok(CreateWebhookSubscriptionOutput {
         subscription: result,
     })
@@ -2717,7 +2773,7 @@ pub struct UpdateWebhookSubscriptionOutput {
     description = "Activate or pause a webhook event subscription for a HubSpot app",
     side_effects = true
 )]
-pub fn update_webhook_subscription(
+pub async fn update_webhook_subscription(
     input: UpdateWebhookSubscriptionInput,
 ) -> Result<UpdateWebhookSubscriptionOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
@@ -2728,7 +2784,8 @@ pub fn update_webhook_subscription(
             input.app_id, input.subscription_id
         ),
         json!({ "active": input.active }),
-    )?;
+    )
+    .await?;
     Ok(UpdateWebhookSubscriptionOutput {
         subscription: result,
     })
@@ -2767,7 +2824,7 @@ pub struct DeleteWebhookSubscriptionOutput {
     description = "Delete a webhook event subscription for a HubSpot app",
     side_effects = true
 )]
-pub fn delete_webhook_subscription(
+pub async fn delete_webhook_subscription(
     input: DeleteWebhookSubscriptionInput,
 ) -> Result<DeleteWebhookSubscriptionOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
@@ -2777,7 +2834,8 @@ pub fn delete_webhook_subscription(
             "/webhooks/2026-03/{}/subscriptions/{}",
             input.app_id, input.subscription_id
         ),
-    )?;
+    )
+    .await?;
     Ok(DeleteWebhookSubscriptionOutput { success: true })
 }
 
@@ -3244,64 +3302,64 @@ struct Component;
 
 #[cfg(target_arch = "wasm32")]
 impl Guest for Component {
-    fn invoke(capability_id: String, input: Vec<u8>) -> Result<Vec<u8>, ErrorInfo> {
+    async fn invoke(capability_id: String, input: Vec<u8>) -> Result<Vec<u8>, ErrorInfo> {
         let value: serde_json::Value = serde_json::from_slice(&input).map_err(bad_json)?;
 
         let executor_result = match capability_id.as_str() {
             // Brands / Business Units
-            "list-business-units" => __executor_list_business_units(value),
+            "list-business-units" => __executor_list_business_units(value).await,
             // Properties / Schemas
-            "list-object-properties" => __executor_list_object_properties(value),
-            "get-object-property" => __executor_get_object_property(value),
+            "list-object-properties" => __executor_list_object_properties(value).await,
+            "get-object-property" => __executor_get_object_property(value).await,
             // Contacts
-            "list-contacts" => __executor_list_contacts(value),
-            "get-contact" => __executor_get_contact(value),
-            "create-contact" => __executor_create_contact(value),
-            "update-contact" => __executor_update_contact(value),
-            "delete-contact" => __executor_delete_contact(value),
-            "search-contacts" => __executor_search_contacts(value),
+            "list-contacts" => __executor_list_contacts(value).await,
+            "get-contact" => __executor_get_contact(value).await,
+            "create-contact" => __executor_create_contact(value).await,
+            "update-contact" => __executor_update_contact(value).await,
+            "delete-contact" => __executor_delete_contact(value).await,
+            "search-contacts" => __executor_search_contacts(value).await,
             // Companies
-            "list-companies" => __executor_list_companies(value),
-            "get-company" => __executor_get_company(value),
-            "create-company" => __executor_create_company(value),
-            "update-company" => __executor_update_company(value),
-            "delete-company" => __executor_delete_company(value),
-            "search-companies" => __executor_search_companies(value),
+            "list-companies" => __executor_list_companies(value).await,
+            "get-company" => __executor_get_company(value).await,
+            "create-company" => __executor_create_company(value).await,
+            "update-company" => __executor_update_company(value).await,
+            "delete-company" => __executor_delete_company(value).await,
+            "search-companies" => __executor_search_companies(value).await,
             // Deals
-            "list-deals" => __executor_list_deals(value),
-            "get-deal" => __executor_get_deal(value),
-            "create-deal" => __executor_create_deal(value),
-            "update-deal" => __executor_update_deal(value),
-            "delete-deal" => __executor_delete_deal(value),
-            "search-deals" => __executor_search_deals(value),
+            "list-deals" => __executor_list_deals(value).await,
+            "get-deal" => __executor_get_deal(value).await,
+            "create-deal" => __executor_create_deal(value).await,
+            "update-deal" => __executor_update_deal(value).await,
+            "delete-deal" => __executor_delete_deal(value).await,
+            "search-deals" => __executor_search_deals(value).await,
             // Quotes
-            "list-quotes" => __executor_list_quotes(value),
-            "get-quote" => __executor_get_quote(value),
-            "create-quote" => __executor_create_quote(value),
-            "update-quote" => __executor_update_quote(value),
-            "delete-quote" => __executor_delete_quote(value),
-            "search-quotes" => __executor_search_quotes(value),
+            "list-quotes" => __executor_list_quotes(value).await,
+            "get-quote" => __executor_get_quote(value).await,
+            "create-quote" => __executor_create_quote(value).await,
+            "update-quote" => __executor_update_quote(value).await,
+            "delete-quote" => __executor_delete_quote(value).await,
+            "search-quotes" => __executor_search_quotes(value).await,
             // Line Items
-            "list-line-items" => __executor_list_line_items(value),
-            "get-line-item" => __executor_get_line_item(value),
-            "create-line-item" => __executor_create_line_item(value),
-            "update-line-item" => __executor_update_line_item(value),
-            "delete-line-item" => __executor_delete_line_item(value),
-            "search-line-items" => __executor_search_line_items(value),
+            "list-line-items" => __executor_list_line_items(value).await,
+            "get-line-item" => __executor_get_line_item(value).await,
+            "create-line-item" => __executor_create_line_item(value).await,
+            "update-line-item" => __executor_update_line_item(value).await,
+            "delete-line-item" => __executor_delete_line_item(value).await,
+            "search-line-items" => __executor_search_line_items(value).await,
             // Owners
-            "list-owners" => __executor_list_owners(value),
-            "get-owner" => __executor_get_owner(value),
+            "list-owners" => __executor_list_owners(value).await,
+            "get-owner" => __executor_get_owner(value).await,
             // Pipelines
-            "list-pipelines" => __executor_list_pipelines(value),
-            "get-pipeline" => __executor_get_pipeline(value),
+            "list-pipelines" => __executor_list_pipelines(value).await,
+            "get-pipeline" => __executor_get_pipeline(value).await,
             // Associations
-            "create-association" => __executor_create_association(value),
-            "list-associations" => __executor_list_associations(value),
+            "create-association" => __executor_create_association(value).await,
+            "list-associations" => __executor_list_associations(value).await,
             // Webhook Subscriptions
-            "list-webhook-subscriptions" => __executor_list_webhook_subscriptions(value),
-            "create-webhook-subscription" => __executor_create_webhook_subscription(value),
-            "update-webhook-subscription" => __executor_update_webhook_subscription(value),
-            "delete-webhook-subscription" => __executor_delete_webhook_subscription(value),
+            "list-webhook-subscriptions" => __executor_list_webhook_subscriptions(value).await,
+            "create-webhook-subscription" => __executor_create_webhook_subscription(value).await,
+            "update-webhook-subscription" => __executor_update_webhook_subscription(value).await,
+            "delete-webhook-subscription" => __executor_delete_webhook_subscription(value).await,
             other => {
                 return Err(ErrorInfo {
                     code: "UNKNOWN_CAPABILITY".into(),
@@ -3384,3 +3442,46 @@ fn error_string_to_error_info(s: String) -> ErrorInfo {
 
 #[cfg(target_arch = "wasm32")]
 bindings::export!(Component with_types_in bindings);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn error_excerpt_truncates_only_at_utf8_boundaries() {
+        assert_eq!(
+            truncate(&"€".repeat(200), 512),
+            format!("{}…", "€".repeat(170))
+        );
+        assert_eq!(truncate("short", 512), "short");
+    }
+
+    #[test]
+    fn retry_after_conversion_rejects_overflow_and_keeps_millisecond_priority() {
+        for (headers, expected) in [
+            (
+                HashMap::from([("Retry-After".into(), "3".into())]),
+                Some(3000),
+            ),
+            (
+                HashMap::from([("Retry-After".into(), u64::MAX.to_string())]),
+                None,
+            ),
+            (
+                HashMap::from([("Retry-After".into(), (u64::MAX / 1000).to_string())]),
+                Some((u64::MAX / 1000) * 1000),
+            ),
+            (
+                HashMap::from([
+                    ("Retry-After".into(), "3".into()),
+                    ("RETRY-AFTER-MS".into(), "7".into()),
+                ]),
+                Some(7),
+            ),
+        ] {
+            let error = http_status_error(429, "/fixture", "rate limited", &headers);
+            assert_eq!(error.retry_after_ms, expected);
+            assert_eq!(error.category, "transient");
+        }
+    }
+}

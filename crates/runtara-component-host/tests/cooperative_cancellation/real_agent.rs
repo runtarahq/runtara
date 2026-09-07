@@ -6,7 +6,7 @@ use serde_json::Value;
 use std::path::PathBuf;
 use wac_graph::{CompositionGraph, EncodeOptions, types::Package};
 
-fn agent_path(agent_id: &str) -> anyhow::Result<PathBuf> {
+pub(super) fn agent_path(agent_id: &str) -> anyhow::Result<PathBuf> {
     let directory = std::env::var_os("RUNTARA_AGENT_COMPONENTS_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| {

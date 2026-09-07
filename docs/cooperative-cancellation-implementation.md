@@ -3,8 +3,9 @@
 Status: sequential/parallel root cancellation and Agent binding migration, 2026-09-07. Governing contract:
 [cooperative cancellation plan](selective-isolation-plan.md). Update the existing
 implementation directly; no new product feature flags or alternate backend.
-Nested workflow-agent cancellation, timeouts and the remaining plan gates are
-still incomplete.
+Sixteen of 27 Agent bindings now use cooperative callback delivery. Nested
+workflow-agent cancellation, timeouts and the remaining plan gates are still
+incomplete.
 
 The public Stop path still calls `Runner::stop` immediately and ignores its
 accepted grace-period field. The emitted-wait proofs below exercise a delivered
@@ -1075,3 +1076,58 @@ prepared median changes range from −0.3% to +9.6%. These timing observations d
 not establish helper overhead or a causal speedup: the recorded host load
 varied from 29.05 to 116.42 on 16 logical CPUs. A controlled timing run, further
 small-graph size work and remaining qualification metrics are still required.
+
+
+## HubSpot CRM cancellation
+
+All 43 HubSpot capabilities now use standard callback bindings and await the
+existing five HTTP helpers (GET, POST, PATCH, PUT and DELETE). Cancelling a
+pending request drops its guest future and resolves its standard I/O subtask.
+The existing proxy policy, opaque connection ID, URLs, bodies, timeouts and
+metadata remain in place. No native workflow orchestration or custom task API is
+added. Native metadata/test builds retain the blocking transport used by the
+other migrated Agents; they do not prove native I/O cancellation.
+
+The built-component fixtures cover all published capability IDs, including
+business units, object properties, contacts, companies, deals, quotes, line
+items, owners, pipelines, associations and webhook subscriptions. A metadata
+coverage assertion fails on a missing or duplicate fixture capability. Every
+capability is cancelled while awaiting headers and while reading a partial
+response body: 86 blocked-I/O cases. Each requires connection closure before the
+sibling resumes and then invokes the same component instance successfully.
+
+Normal-response cases cover all 43 capabilities, query escaping without assuming
+HashMap order, CRM/search payloads, pagination, association PUT and webhook
+updates, plus empty-body success for associations and deletion. Error cases
+cover all five HTTP methods, provider status/retry classification, millisecond
+retry-hint precedence, transport-envelope decoding, malformed JSON, missing
+connections and unknown capabilities. All traffic uses local synthetic proxy
+fixtures; no HubSpot account or customer data is involved.
+
+Two existing error-handling edge cases were fixed and tested in native and WASM
+execution. An overflowing `Retry-After` seconds value is ignored using checked
+conversion; rate limiting remains retryable with ordinary workflow retry policy.
+Truncating a provider's error body now respects UTF-8 character boundaries,
+avoiding a panic on multibyte text at the 512-byte cutoff. These changes preserve
+ordinary error envelopes and keep such failures distinguishable from cancellation.
+
+Three emitted DSL tests execute a contact read followed by a contact update.
+They cancel pending read headers, a partial read body, and the update after a
+successful read. Each checks cleanup before the lifecycle receipt and prevents
+retries, `onError` recovery, following writes and normal terminal completion.
+
+The normal build script rebuilt all 27 Agent and two shared workflow components
+in the worktree-specific target directory. HubSpot's metadata is byte-identical
+to its pre-migration version. The two native boundary tests, six focused
+component test functions and three emitted HubSpot workflow tests passed;
+integration-feature Clippy passed for HubSpot, component host and workflows.
+All 65 component cancellation tests and the full direct workflow suite
+(290 passed, three manual benchmarks ignored) passed. No database/server E2E
+or controlled performance/capacity runs were performed for this Agent stage.
+
+The remaining Agent bindings are SharePoint, Shopify, compression, crypto, CSV,
+datetime, text, transform, utils, XLSX and XML. CPU-bound operations still need
+bounded cooperation points or an explicit emergency-abort limitation. Nested
+workflow-agent ownership, cooperative deadlines/E128 retirement, public Stop and
+independent grace escalation, terminal races, controlled performance/capacity
+qualification and superseded-path cleanup remain open.

@@ -293,3 +293,7 @@ mod real_stripe;
 #[cfg(feature = "component-integration-tests")]
 #[path = "cooperative_cancellation/real_quickbooks.rs"]
 mod real_quickbooks;
+
+#[cfg(feature = "component-integration-tests")]
+#[path = "cooperative_cancellation/real_hubspot.rs"]
+mod real_hubspot;
