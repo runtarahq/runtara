@@ -30,9 +30,8 @@ mod bindings {
     wit_bindgen::generate!({
         path: ["../../runtara-agent-wit/wit", "wit"],
         world: "runtara:agent-stripe/agent",
-        // Sync impls of the async-TYPED invoke (sync lift; see
-        // spikes/wit-bindgen-async-typed).
-        async: false,
+        // Standard callback bindings let cancellation drop a pending I/O future.
+        async: ["export:runtara:agent-stripe/capabilities@0.4.0#invoke"],
         generate_all,
     });
 }
@@ -137,7 +136,7 @@ pub struct RawConnection {
 const STRIPE_BASE_PATH: &str = "/v1";
 const TIMEOUT_MS: u64 = 30_000;
 
-fn stripe_get(
+async fn stripe_get(
     connection: &RawConnection,
     path: &str,
     query: HashMap<String, String>,
@@ -157,7 +156,8 @@ fn stripe_get(
         .request("GET", &url)
         .header("Accept", "application/json")
         .header("X-Runtara-Connection-Id", &connection.connection_id)
-        .call_agent()
+        .call_agent_async()
+        .await
         .map_err(|e| {
             AgentError::transient(
                 "STRIPE_NETWORK_ERROR",
@@ -169,7 +169,7 @@ fn stripe_get(
     parse_stripe_response(response, path)
 }
 
-fn stripe_post(
+async fn stripe_post(
     connection: &RawConnection,
     path: &str,
     form_parts: Vec<(String, String)>,
@@ -188,7 +188,8 @@ fn stripe_post(
         .header("Accept", "application/json")
         .header("X-Runtara-Connection-Id", &connection.connection_id)
         .body_bytes(body.as_bytes())
-        .call_agent()
+        .call_agent_async()
+        .await
         .map_err(|e| {
             AgentError::transient(
                 "STRIPE_NETWORK_ERROR",
@@ -200,7 +201,7 @@ fn stripe_post(
     parse_stripe_response(response, path)
 }
 
-fn stripe_delete(connection: &RawConnection, path: &str) -> Result<Value, AgentError> {
+async fn stripe_delete(connection: &RawConnection, path: &str) -> Result<Value, AgentError> {
     let url = format!("{STRIPE_BASE_PATH}{path}");
 
     let client = runtara_http::HttpClient::with_timeout(Duration::from_millis(TIMEOUT_MS));
@@ -208,7 +209,8 @@ fn stripe_delete(connection: &RawConnection, path: &str) -> Result<Value, AgentE
         .request("DELETE", &url)
         .header("Accept", "application/json")
         .header("X-Runtara-Connection-Id", &connection.connection_id)
-        .call_agent()
+        .call_agent_async()
+        .await
         .map_err(|e| {
             AgentError::transient(
                 "STRIPE_NETWORK_ERROR",
@@ -434,11 +436,11 @@ pub struct ListCustomersOutput {
     module_integration_ids = "stripe_api_key",
     module_secure = true
 )]
-pub fn list_customers(input: ListCustomersInput) -> Result<ListCustomersOutput, AgentError> {
+pub async fn list_customers(input: ListCustomersInput) -> Result<ListCustomersOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     let mut query = pagination_params(input.limit, input.starting_after);
     push_opt_map(&mut query, "email", &input.email);
-    let result = stripe_get(connection, "/customers", query)?;
+    let result = stripe_get(connection, "/customers", query).await?;
     Ok(ListCustomersOutput {
         data: result["data"].clone(),
         has_more: result["has_more"].as_bool().unwrap_or(false),
@@ -474,13 +476,14 @@ pub struct GetCustomerOutput {
     display_name = "Get Customer",
     description = "Retrieve a single customer by ID"
 )]
-pub fn get_customer(input: GetCustomerInput) -> Result<GetCustomerOutput, AgentError> {
+pub async fn get_customer(input: GetCustomerInput) -> Result<GetCustomerOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     let result = stripe_get(
         connection,
         &format!("/customers/{}", input.customer_id),
         HashMap::new(),
-    )?;
+    )
+    .await?;
     Ok(GetCustomerOutput { customer: result })
 }
 
@@ -533,7 +536,9 @@ pub struct CreateCustomerOutput {
     description = "Create a new customer in Stripe",
     side_effects = true
 )]
-pub fn create_customer(input: CreateCustomerInput) -> Result<CreateCustomerOutput, AgentError> {
+pub async fn create_customer(
+    input: CreateCustomerInput,
+) -> Result<CreateCustomerOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     let mut parts = Vec::new();
     push_opt(&mut parts, "email", &input.email);
@@ -541,7 +546,7 @@ pub fn create_customer(input: CreateCustomerInput) -> Result<CreateCustomerOutpu
     push_opt(&mut parts, "phone", &input.phone);
     push_opt(&mut parts, "description", &input.description);
     push_metadata(&mut parts, &input.metadata);
-    let result = stripe_post(connection, "/customers", parts)?;
+    let result = stripe_post(connection, "/customers", parts).await?;
     Ok(CreateCustomerOutput { customer: result })
 }
 
@@ -597,7 +602,9 @@ pub struct UpdateCustomerOutput {
     description = "Update an existing Stripe customer",
     side_effects = true
 )]
-pub fn update_customer(input: UpdateCustomerInput) -> Result<UpdateCustomerOutput, AgentError> {
+pub async fn update_customer(
+    input: UpdateCustomerInput,
+) -> Result<UpdateCustomerOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     let mut parts = Vec::new();
     push_opt(&mut parts, "email", &input.email);
@@ -609,7 +616,8 @@ pub fn update_customer(input: UpdateCustomerInput) -> Result<UpdateCustomerOutpu
         connection,
         &format!("/customers/{}", input.customer_id),
         parts,
-    )?;
+    )
+    .await?;
     Ok(UpdateCustomerOutput { customer: result })
 }
 
@@ -661,11 +669,11 @@ pub struct ListProductsOutput {
     display_name = "List Products",
     description = "List products from your Stripe catalog"
 )]
-pub fn list_products(input: ListProductsInput) -> Result<ListProductsOutput, AgentError> {
+pub async fn list_products(input: ListProductsInput) -> Result<ListProductsOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     let mut query = pagination_params(input.limit, input.starting_after);
     push_opt_map(&mut query, "active", &input.active);
-    let result = stripe_get(connection, "/products", query)?;
+    let result = stripe_get(connection, "/products", query).await?;
     Ok(ListProductsOutput {
         data: result["data"].clone(),
         has_more: result["has_more"].as_bool().unwrap_or(false),
@@ -701,13 +709,14 @@ pub struct GetProductOutput {
     display_name = "Get Product",
     description = "Retrieve a single product by ID"
 )]
-pub fn get_product(input: GetProductInput) -> Result<GetProductOutput, AgentError> {
+pub async fn get_product(input: GetProductInput) -> Result<GetProductOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     let result = stripe_get(
         connection,
         &format!("/products/{}", input.product_id),
         HashMap::new(),
-    )?;
+    )
+    .await?;
     Ok(GetProductOutput { product: result })
 }
 
@@ -760,13 +769,13 @@ pub struct CreateProductOutput {
     description = "Create a new product in Stripe",
     side_effects = true
 )]
-pub fn create_product(input: CreateProductInput) -> Result<CreateProductOutput, AgentError> {
+pub async fn create_product(input: CreateProductInput) -> Result<CreateProductOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     let mut parts = vec![("name".to_string(), input.name)];
     push_opt(&mut parts, "description", &input.description);
     push_opt(&mut parts, "active", &input.active);
     push_metadata(&mut parts, &input.metadata);
-    let result = stripe_post(connection, "/products", parts)?;
+    let result = stripe_post(connection, "/products", parts).await?;
     Ok(CreateProductOutput { product: result })
 }
 
@@ -822,12 +831,12 @@ pub struct ListPricesOutput {
     display_name = "List Prices",
     description = "List prices with optional product filtering"
 )]
-pub fn list_prices(input: ListPricesInput) -> Result<ListPricesOutput, AgentError> {
+pub async fn list_prices(input: ListPricesInput) -> Result<ListPricesOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     let mut query = pagination_params(input.limit, input.starting_after);
     push_opt_map(&mut query, "product", &input.product);
     push_opt_map(&mut query, "active", &input.active);
-    let result = stripe_get(connection, "/prices", query)?;
+    let result = stripe_get(connection, "/prices", query).await?;
     Ok(ListPricesOutput {
         data: result["data"].clone(),
         has_more: result["has_more"].as_bool().unwrap_or(false),
@@ -899,7 +908,7 @@ pub struct CreatePriceOutput {
     description = "Create a new price for a product",
     side_effects = true
 )]
-pub fn create_price(input: CreatePriceInput) -> Result<CreatePriceOutput, AgentError> {
+pub async fn create_price(input: CreatePriceInput) -> Result<CreatePriceOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     let mut parts = vec![
         ("product".to_string(), input.product),
@@ -913,7 +922,7 @@ pub fn create_price(input: CreatePriceInput) -> Result<CreatePriceOutput, AgentE
     }
     push_opt(&mut parts, "nickname", &input.nickname);
     push_metadata(&mut parts, &input.metadata);
-    let result = stripe_post(connection, "/prices", parts)?;
+    let result = stripe_post(connection, "/prices", parts).await?;
     Ok(CreatePriceOutput { price: result })
 }
 
@@ -995,7 +1004,7 @@ pub struct CreatePaymentIntentOutput {
     description = "Create a payment intent for collecting a payment",
     side_effects = true
 )]
-pub fn create_payment_intent(
+pub async fn create_payment_intent(
     input: CreatePaymentIntentInput,
 ) -> Result<CreatePaymentIntentOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
@@ -1015,7 +1024,7 @@ pub fn create_payment_intent(
         }
     }
     push_metadata(&mut parts, &input.metadata);
-    let result = stripe_post(connection, "/payment_intents", parts)?;
+    let result = stripe_post(connection, "/payment_intents", parts).await?;
     Ok(CreatePaymentIntentOutput {
         payment_intent: result,
     })
@@ -1050,7 +1059,7 @@ pub struct GetPaymentIntentOutput {
     display_name = "Get Payment Intent",
     description = "Retrieve a payment intent by ID"
 )]
-pub fn get_payment_intent(
+pub async fn get_payment_intent(
     input: GetPaymentIntentInput,
 ) -> Result<GetPaymentIntentOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
@@ -1058,7 +1067,8 @@ pub fn get_payment_intent(
         connection,
         &format!("/payment_intents/{}", input.payment_intent_id),
         HashMap::new(),
-    )?;
+    )
+    .await?;
     Ok(GetPaymentIntentOutput {
         payment_intent: result,
     })
@@ -1110,13 +1120,13 @@ pub struct ListPaymentIntentsOutput {
     display_name = "List Payment Intents",
     description = "List payment intents with optional customer filtering"
 )]
-pub fn list_payment_intents(
+pub async fn list_payment_intents(
     input: ListPaymentIntentsInput,
 ) -> Result<ListPaymentIntentsOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     let mut query = pagination_params(input.limit, input.starting_after);
     push_opt_map(&mut query, "customer", &input.customer);
-    let result = stripe_get(connection, "/payment_intents", query)?;
+    let result = stripe_get(connection, "/payment_intents", query).await?;
     Ok(ListPaymentIntentsOutput {
         data: result["data"].clone(),
         has_more: result["has_more"].as_bool().unwrap_or(false),
@@ -1181,7 +1191,7 @@ pub struct CreateInvoiceOutput {
     description = "Create a new invoice for a customer",
     side_effects = true
 )]
-pub fn create_invoice(input: CreateInvoiceInput) -> Result<CreateInvoiceOutput, AgentError> {
+pub async fn create_invoice(input: CreateInvoiceInput) -> Result<CreateInvoiceOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     let mut parts = vec![("customer".to_string(), input.customer)];
     push_opt(&mut parts, "description", &input.description);
@@ -1190,7 +1200,7 @@ pub fn create_invoice(input: CreateInvoiceInput) -> Result<CreateInvoiceOutput, 
         parts.push(("days_until_due".to_string(), days.to_string()));
     }
     push_metadata(&mut parts, &input.metadata);
-    let result = stripe_post(connection, "/invoices", parts)?;
+    let result = stripe_post(connection, "/invoices", parts).await?;
     Ok(CreateInvoiceOutput { invoice: result })
 }
 
@@ -1223,13 +1233,14 @@ pub struct GetInvoiceOutput {
     display_name = "Get Invoice",
     description = "Retrieve an invoice by ID"
 )]
-pub fn get_invoice(input: GetInvoiceInput) -> Result<GetInvoiceOutput, AgentError> {
+pub async fn get_invoice(input: GetInvoiceInput) -> Result<GetInvoiceOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     let result = stripe_get(
         connection,
         &format!("/invoices/{}", input.invoice_id),
         HashMap::new(),
-    )?;
+    )
+    .await?;
     Ok(GetInvoiceOutput { invoice: result })
 }
 
@@ -1283,12 +1294,12 @@ pub struct ListInvoicesOutput {
     display_name = "List Invoices",
     description = "List invoices with optional customer and status filtering"
 )]
-pub fn list_invoices(input: ListInvoicesInput) -> Result<ListInvoicesOutput, AgentError> {
+pub async fn list_invoices(input: ListInvoicesInput) -> Result<ListInvoicesOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     let mut query = pagination_params(input.limit, input.starting_after);
     push_opt_map(&mut query, "customer", &input.customer);
     push_opt_map(&mut query, "status", &input.status);
-    let result = stripe_get(connection, "/invoices", query)?;
+    let result = stripe_get(connection, "/invoices", query).await?;
     Ok(ListInvoicesOutput {
         data: result["data"].clone(),
         has_more: result["has_more"].as_bool().unwrap_or(false),
@@ -1324,13 +1335,16 @@ pub struct FinalizeInvoiceOutput {
     description = "Finalize a draft invoice so it can be paid",
     side_effects = true
 )]
-pub fn finalize_invoice(input: FinalizeInvoiceInput) -> Result<FinalizeInvoiceOutput, AgentError> {
+pub async fn finalize_invoice(
+    input: FinalizeInvoiceInput,
+) -> Result<FinalizeInvoiceOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     let result = stripe_post(
         connection,
         &format!("/invoices/{}/finalize", input.invoice_id),
         Vec::new(),
-    )?;
+    )
+    .await?;
     Ok(FinalizeInvoiceOutput { invoice: result })
 }
 
@@ -1363,13 +1377,14 @@ pub struct SendInvoiceOutput {
     description = "Send a finalized invoice to the customer via email",
     side_effects = true
 )]
-pub fn send_invoice(input: SendInvoiceInput) -> Result<SendInvoiceOutput, AgentError> {
+pub async fn send_invoice(input: SendInvoiceInput) -> Result<SendInvoiceOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     let result = stripe_post(
         connection,
         &format!("/invoices/{}/send", input.invoice_id),
         Vec::new(),
-    )?;
+    )
+    .await?;
     Ok(SendInvoiceOutput { invoice: result })
 }
 
@@ -1437,7 +1452,7 @@ pub struct CreateSubscriptionOutput {
     description = "Create a new subscription for a customer",
     side_effects = true
 )]
-pub fn create_subscription(
+pub async fn create_subscription(
     input: CreateSubscriptionInput,
 ) -> Result<CreateSubscriptionOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
@@ -1452,7 +1467,7 @@ pub fn create_subscription(
         parts.push(("trial_period_days".to_string(), trial.to_string()));
     }
     push_metadata(&mut parts, &input.metadata);
-    let result = stripe_post(connection, "/subscriptions", parts)?;
+    let result = stripe_post(connection, "/subscriptions", parts).await?;
     Ok(CreateSubscriptionOutput {
         subscription: result,
     })
@@ -1487,13 +1502,16 @@ pub struct GetSubscriptionOutput {
     display_name = "Get Subscription",
     description = "Retrieve a subscription by ID"
 )]
-pub fn get_subscription(input: GetSubscriptionInput) -> Result<GetSubscriptionOutput, AgentError> {
+pub async fn get_subscription(
+    input: GetSubscriptionInput,
+) -> Result<GetSubscriptionOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     let result = stripe_get(
         connection,
         &format!("/subscriptions/{}", input.subscription_id),
         HashMap::new(),
-    )?;
+    )
+    .await?;
     Ok(GetSubscriptionOutput {
         subscription: result,
     })
@@ -1552,14 +1570,14 @@ pub struct ListSubscriptionsOutput {
     display_name = "List Subscriptions",
     description = "List subscriptions with optional customer and status filtering"
 )]
-pub fn list_subscriptions(
+pub async fn list_subscriptions(
     input: ListSubscriptionsInput,
 ) -> Result<ListSubscriptionsOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     let mut query = pagination_params(input.limit, input.starting_after);
     push_opt_map(&mut query, "customer", &input.customer);
     push_opt_map(&mut query, "status", &input.status);
-    let result = stripe_get(connection, "/subscriptions", query)?;
+    let result = stripe_get(connection, "/subscriptions", query).await?;
     Ok(ListSubscriptionsOutput {
         data: result["data"].clone(),
         has_more: result["has_more"].as_bool().unwrap_or(false),
@@ -1606,7 +1624,7 @@ pub struct CancelSubscriptionOutput {
     description = "Cancel an active subscription immediately or at period end",
     side_effects = true
 )]
-pub fn cancel_subscription(
+pub async fn cancel_subscription(
     input: CancelSubscriptionInput,
 ) -> Result<CancelSubscriptionOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
@@ -1616,12 +1634,14 @@ pub fn cancel_subscription(
             connection,
             &format!("/subscriptions/{}", input.subscription_id),
             vec![("cancel_at_period_end".to_string(), "true".to_string())],
-        )?
+        )
+        .await?
     } else {
         stripe_delete(
             connection,
             &format!("/subscriptions/{}", input.subscription_id),
-        )?
+        )
+        .await?
     };
     Ok(CancelSubscriptionOutput {
         subscription: result,
@@ -1681,7 +1701,7 @@ pub struct CreateRefundOutput {
     description = "Create a refund for a payment intent (full or partial)",
     side_effects = true
 )]
-pub fn create_refund(input: CreateRefundInput) -> Result<CreateRefundOutput, AgentError> {
+pub async fn create_refund(input: CreateRefundInput) -> Result<CreateRefundOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     let mut parts = vec![("payment_intent".to_string(), input.payment_intent)];
     if let Some(amount) = input.amount {
@@ -1689,7 +1709,7 @@ pub fn create_refund(input: CreateRefundInput) -> Result<CreateRefundOutput, Age
     }
     push_opt(&mut parts, "reason", &input.reason);
     push_metadata(&mut parts, &input.metadata);
-    let result = stripe_post(connection, "/refunds", parts)?;
+    let result = stripe_post(connection, "/refunds", parts).await?;
     Ok(CreateRefundOutput { refund: result })
 }
 
@@ -1722,13 +1742,14 @@ pub struct GetRefundOutput {
     display_name = "Get Refund",
     description = "Retrieve a refund by ID"
 )]
-pub fn get_refund(input: GetRefundInput) -> Result<GetRefundOutput, AgentError> {
+pub async fn get_refund(input: GetRefundInput) -> Result<GetRefundOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     let result = stripe_get(
         connection,
         &format!("/refunds/{}", input.refund_id),
         HashMap::new(),
-    )?;
+    )
+    .await?;
     Ok(GetRefundOutput { refund: result })
 }
 
@@ -1759,9 +1780,9 @@ pub struct GetBalanceOutput {
     display_name = "Get Balance",
     description = "Retrieve the current account balance"
 )]
-pub fn get_balance(input: GetBalanceInput) -> Result<GetBalanceOutput, AgentError> {
+pub async fn get_balance(input: GetBalanceInput) -> Result<GetBalanceOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
-    let result = stripe_get(connection, "/balance", HashMap::new())?;
+    let result = stripe_get(connection, "/balance", HashMap::new()).await?;
     Ok(GetBalanceOutput { balance: result })
 }
 
@@ -1817,12 +1838,12 @@ pub struct ListChargesOutput {
     display_name = "List Charges",
     description = "List charges with optional customer and payment intent filtering"
 )]
-pub fn list_charges(input: ListChargesInput) -> Result<ListChargesOutput, AgentError> {
+pub async fn list_charges(input: ListChargesInput) -> Result<ListChargesOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     let mut query = pagination_params(input.limit, input.starting_after);
     push_opt_map(&mut query, "customer", &input.customer);
     push_opt_map(&mut query, "payment_intent", &input.payment_intent);
-    let result = stripe_get(connection, "/charges", query)?;
+    let result = stripe_get(connection, "/charges", query).await?;
     Ok(ListChargesOutput {
         data: result["data"].clone(),
         has_more: result["has_more"].as_bool().unwrap_or(false),
@@ -1858,13 +1879,14 @@ pub struct GetChargeOutput {
     display_name = "Get Charge",
     description = "Retrieve a charge by ID"
 )]
-pub fn get_charge(input: GetChargeInput) -> Result<GetChargeOutput, AgentError> {
+pub async fn get_charge(input: GetChargeInput) -> Result<GetChargeOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
     let result = stripe_get(
         connection,
         &format!("/charges/{}", input.charge_id),
         HashMap::new(),
-    )?;
+    )
+    .await?;
     Ok(GetChargeOutput { charge: result })
 }
 
@@ -2066,45 +2088,45 @@ struct Component;
 
 #[cfg(target_arch = "wasm32")]
 impl Guest for Component {
-    fn invoke(capability_id: String, input: Vec<u8>) -> Result<Vec<u8>, ErrorInfo> {
+    async fn invoke(capability_id: String, input: Vec<u8>) -> Result<Vec<u8>, ErrorInfo> {
         let value: serde_json::Value = serde_json::from_slice(&input).map_err(bad_json)?;
 
         let executor_result = match capability_id.as_str() {
             // Customers
-            "list-customers" => __executor_list_customers(value),
-            "get-customer" => __executor_get_customer(value),
-            "create-customer" => __executor_create_customer(value),
-            "update-customer" => __executor_update_customer(value),
+            "list-customers" => __executor_list_customers(value).await,
+            "get-customer" => __executor_get_customer(value).await,
+            "create-customer" => __executor_create_customer(value).await,
+            "update-customer" => __executor_update_customer(value).await,
             // Products
-            "list-products" => __executor_list_products(value),
-            "get-product" => __executor_get_product(value),
-            "create-product" => __executor_create_product(value),
+            "list-products" => __executor_list_products(value).await,
+            "get-product" => __executor_get_product(value).await,
+            "create-product" => __executor_create_product(value).await,
             // Prices
-            "list-prices" => __executor_list_prices(value),
-            "create-price" => __executor_create_price(value),
+            "list-prices" => __executor_list_prices(value).await,
+            "create-price" => __executor_create_price(value).await,
             // Payment Intents
-            "create-payment-intent" => __executor_create_payment_intent(value),
-            "get-payment-intent" => __executor_get_payment_intent(value),
-            "list-payment-intents" => __executor_list_payment_intents(value),
+            "create-payment-intent" => __executor_create_payment_intent(value).await,
+            "get-payment-intent" => __executor_get_payment_intent(value).await,
+            "list-payment-intents" => __executor_list_payment_intents(value).await,
             // Invoices
-            "create-invoice" => __executor_create_invoice(value),
-            "get-invoice" => __executor_get_invoice(value),
-            "list-invoices" => __executor_list_invoices(value),
-            "finalize-invoice" => __executor_finalize_invoice(value),
-            "send-invoice" => __executor_send_invoice(value),
+            "create-invoice" => __executor_create_invoice(value).await,
+            "get-invoice" => __executor_get_invoice(value).await,
+            "list-invoices" => __executor_list_invoices(value).await,
+            "finalize-invoice" => __executor_finalize_invoice(value).await,
+            "send-invoice" => __executor_send_invoice(value).await,
             // Subscriptions
-            "create-subscription" => __executor_create_subscription(value),
-            "get-subscription" => __executor_get_subscription(value),
-            "list-subscriptions" => __executor_list_subscriptions(value),
-            "cancel-subscription" => __executor_cancel_subscription(value),
+            "create-subscription" => __executor_create_subscription(value).await,
+            "get-subscription" => __executor_get_subscription(value).await,
+            "list-subscriptions" => __executor_list_subscriptions(value).await,
+            "cancel-subscription" => __executor_cancel_subscription(value).await,
             // Refunds
-            "create-refund" => __executor_create_refund(value),
-            "get-refund" => __executor_get_refund(value),
+            "create-refund" => __executor_create_refund(value).await,
+            "get-refund" => __executor_get_refund(value).await,
             // Balance
-            "get-balance" => __executor_get_balance(value),
+            "get-balance" => __executor_get_balance(value).await,
             // Charges
-            "list-charges" => __executor_list_charges(value),
-            "get-charge" => __executor_get_charge(value),
+            "list-charges" => __executor_list_charges(value).await,
+            "get-charge" => __executor_get_charge(value).await,
             other => {
                 return Err(ErrorInfo {
                     code: "UNKNOWN_CAPABILITY".into(),

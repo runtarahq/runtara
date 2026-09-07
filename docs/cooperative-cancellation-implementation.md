@@ -818,3 +818,58 @@ passed with the existing environment,
 server, component-host and workflows integration-test features enabled. No
 live-database/server E2E, fresh performance measurements or Linux qualification
 was performed during this integration check.
+
+## Stripe request cancellation
+
+The existing Stripe component now uses its standard callback export and awaits
+GET, form-encoded POST and DELETE through the shared HTTP client. All 26
+capabilities use that path. The proxy still owns authorization and credential
+injection; the guest retains the same connection reference, relative paths,
+30-second request timeout, request encoding and provider error mapping. Generated
+capability metadata is byte-for-byte identical before and after the change.
+
+The built-component fixture covers all 26 capabilities plus both immediate and
+period-end subscription cancellation: 27 request cases, each interrupted while
+headers or a response body are pending. These 54 cancellation cases require I/O
+closure, an independent sibling's completion and a fresh balance request in the
+same Agent instance. The next request must be that explicit fresh invocation;
+no automatic retry, refund, subscription change or compensating API call is
+allowed as cancellation cleanup. Stripe's `cancel-subscription` capability is a
+provider operation, distinct from cancelling the running component call.
+
+Successful cases preserve returned objects, list pagination, metadata, nested
+form fields and both subscription-cancellation modes. Separate checks cover
+GET/POST/DELETE errors at 400, 401, 403, 429 and 503, retry-after seconds and
+millisecond precedence, malformed proxy transport, invalid provider JSON and
+missing connection configuration before I/O. The fixture checks proxy routing,
+tenant and connection identity, absence of an authorization header in the guest
+request, timeout, query parameters and percent-encoded form fields. Fixtures use
+local synthetic responses only; no Stripe account, payment or invoice is touched.
+
+Three normal emitted workflows exercise create-invoice followed by finalize.
+They cancel during creation headers, during its response body, or during
+finalization after a successful create and output-reference mapping. Cleanup
+must precede lifecycle acknowledgement; retry, `onError`, downstream work and
+normal completion must not occur after root cancellation. These assertions do
+not imply that a remote provider reverses an already accepted request.
+
+Fourteen of 27 Agent bindings are migrated. QuickBooks, HubSpot, SharePoint and
+Shopify, the nine CPU-oriented Agents, nested workflows, timeout/grace and
+terminal races, superseded API cleanup, E2E and performance/capacity gates remain
+open. Native HTTP execution remains blocking.
+
+```sh
+scripts/build-agent-components.sh
+cargo test -p runtara-component-host --features component-integration-tests --test cooperative_cancellation -- --test-threads=4
+cargo test -p runtara-workflows --features direct-wasm-integration-tests --test direct_wasm_execute -- --test-threads=4
+```
+
+Use the isolated build/output directories from the preceding section. The normal
+bundle build regenerated all 27 Agents and both shared workflow components with
+metadata. All 54 component cancellation tests passed, including the five Stripe
+test functions. The full emitted-workflow suite passed 283 tests with four test
+threads, including all 33 cooperative lifecycle cases; two manual benchmarks
+remained ignored. Affected-crate all-target Clippy with the existing integration
+test features, formatting and diff whitespace checks passed. No live-provider
+or database/server E2E, Linux qualification or fresh performance/capacity
+measurements were run for this stage.

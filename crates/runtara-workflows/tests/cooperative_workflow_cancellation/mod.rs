@@ -172,6 +172,9 @@ enum Scenario {
     StorageDownload(&'static str, bool),
     StoragePresign(&'static str),
     Sftp,
+    StripeCreate,
+    StripeCreateBody,
+    StripeFinalizeAfterCreate,
     SqsReceive,
     SqsReceiveBody,
     SqsDeleteAfterReceive,
@@ -188,6 +191,12 @@ enum Scenario {
 }
 
 impl Scenario {
+    fn is_stripe(self) -> bool {
+        matches!(
+            self,
+            Self::StripeCreate | Self::StripeCreateBody | Self::StripeFinalizeAfterCreate
+        )
+    }
     fn is_sqs(self) -> bool {
         matches!(
             self,
@@ -222,6 +231,7 @@ impl Scenario {
             || self.is_mcp()
             || matches!(self, Self::StorageDownload(..))
             || self.is_sqs()
+            || self.is_stripe()
     }
     fn drains_normally(self) -> bool {
         matches!(self, Self::PauseBranches | Self::ShutdownBranches)
@@ -246,7 +256,10 @@ fn signal(kind: &str) -> RuntimeSignalInfo {
 
 async fn run(scenario: Scenario) -> anyhow::Result<()> {
     let pre_cancel = scenario == Scenario::BeforeLaunch;
-    let partial_body = matches!(scenario, Scenario::PartialBody | Scenario::SqsReceiveBody);
+    let partial_body = matches!(
+        scenario,
+        Scenario::PartialBody | Scenario::SqsReceiveBody | Scenario::StripeCreateBody
+    );
     let fail_signal_read = matches!(
         scenario,
         Scenario::SignalReadFailure | Scenario::ParallelSignalReadFailure
@@ -274,6 +287,7 @@ async fn run(scenario: Scenario) -> anyhow::Result<()> {
                 | Scenario::TeamsChunks
                 | Scenario::StorageDownload(_, true)
                 | Scenario::SqsDeleteAfterReceive
+                | Scenario::StripeFinalizeAfterCreate
         )
     {
         2
@@ -341,6 +355,20 @@ async fn run(scenario: Scenario) -> anyhow::Result<()> {
             .map(|(key, value)| (key.clone(), immediate(value.clone())))
             .collect::<serde_json::Map<String, Value>>()
             .into();
+    }
+    if scenario.is_stripe() {
+        let connection = immediate(
+            serde_json::json!({"connection_id":"fixture-connection","integration_id":"stripe_api_key","parameters":{}}),
+        );
+        graph["steps"]["fetch"]["agentId"] = "stripe".into();
+        graph["steps"]["fetch"]["capabilityId"] = "create-invoice".into();
+        graph["steps"]["fetch"]["inputMapping"] = serde_json::json!({"customer":immediate("cus_fixture".into()),"_connection":connection});
+        graph["steps"]["finalize"] = serde_json::json!({"id":"finalize","stepType":"Agent","agentId":"stripe","capabilityId":"finalize-invoice","maxRetries":3,"retryDelay":0,
+            "inputMapping":{"_connection":connection,"invoice_id":{"valueType":"reference","value":"steps.fetch.outputs.invoice.id"}}});
+        graph["executionPlan"] = serde_json::json!([
+            {"fromStep":"fetch","toStep":"finalize"}, {"fromStep":"fetch","toStep":"handled","label":"onError"},
+            {"fromStep":"finalize","toStep":"finish"}, {"fromStep":"finalize","toStep":"handled","label":"onError"}
+        ]);
     }
     if scenario.is_sqs() {
         let queue = immediate("https://sqs.invalid/fixture/queue".into());
@@ -584,6 +612,19 @@ async fn run(scenario: Scenario) -> anyhow::Result<()> {
                             } else {
                                 assert_eq!(body["connection_id"], "fixture-connection");
                                 match scenario {
+                                    Scenario::StripeCreate | Scenario::StripeCreateBody | Scenario::StripeFinalizeAfterCreate => {
+                                        assert_eq!(body["method"], "POST");
+                                        assert_eq!(body["timeout_ms"], 30_000);
+                                        assert_eq!(body["headers"]["Content-Type"], "application/x-www-form-urlencoded");
+                                        let payload = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, body["body_raw"].as_str().unwrap())?;
+                                        if server_host.requests.load(Ordering::SeqCst) == 0 {
+                                            assert_eq!(body["url"], "/v1/invoices");
+                                            assert_eq!(payload, b"customer=cus_fixture");
+                                        } else {
+                                            assert_eq!(body["url"], "/v1/invoices/in_fixture/finalize");
+                                            assert!(payload.is_empty());
+                                        }
+                                    },
                                     Scenario::SqsReceive | Scenario::SqsReceiveBody | Scenario::SqsDeleteAfterReceive => {
                                         assert_eq!(body["aws_service"], "sqs");
                                         assert_eq!(body["url"], "/");
@@ -622,6 +663,14 @@ async fn run(scenario: Scenario) -> anyhow::Result<()> {
                             stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\nx").await?;
                         }
                         let started = server_host.requests.fetch_add(1, Ordering::SeqCst) + 1;
+                        if scenario == Scenario::StripeFinalizeAfterCreate && started == 1 {
+                            let bytes = serde_json::to_vec(&serde_json::json!({"status":200,"headers":{},"body":{"id":"in_fixture","status":"draft"}}))?;
+                            stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", bytes.len()).as_bytes()).await?;
+                            stream.write_all(&bytes).await?;
+                            server_host.closed_count.fetch_add(1, Ordering::SeqCst);
+                            server_host.closed.notify_one();
+                            return anyhow::Ok(());
+                        }
                         if scenario == Scenario::SqsDeleteAfterReceive && started == 1 {
                             let bytes = serde_json::to_vec(&serde_json::json!({"status":200,"headers":{},"body":{"Messages":[{"MessageId":"one","ReceiptHandle":"fixture-receipt","Body":"hello"}]}}))?;
                             stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", bytes.len()).as_bytes()).await?;
@@ -895,4 +944,22 @@ async fn emitted_sqs_cancel_stops_partial_receive_without_deleting_or_retrying()
 async fn emitted_sqs_cancel_stops_delete_after_received_message_without_recovery()
 -> anyhow::Result<()> {
     run(Scenario::SqsDeleteAfterReceive).await
+}
+
+#[tokio::test]
+async fn emitted_stripe_cancel_stops_pending_invoice_without_finalize_or_retry()
+-> anyhow::Result<()> {
+    run(Scenario::StripeCreate).await
+}
+
+#[tokio::test]
+async fn emitted_stripe_cancel_stops_partial_invoice_without_finalize_or_retry()
+-> anyhow::Result<()> {
+    run(Scenario::StripeCreateBody).await
+}
+
+#[tokio::test]
+async fn emitted_stripe_cancel_stops_finalize_after_create_without_recovery() -> anyhow::Result<()>
+{
+    run(Scenario::StripeFinalizeAfterCreate).await
 }
