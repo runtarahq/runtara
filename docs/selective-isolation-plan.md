@@ -260,6 +260,15 @@ effects must be measured before closing P2 performance work.
 Re-run paired measurements after optimization and after the remaining migration;
 missing server, cancellation, instrumentation and capacity metrics remain pending.
 
+The [shared-helper follow-up](research/workflow-cooperative-shared-waits-comparison.md)
+reduces the 100-step raw artifact overhead from 8.0% to 1.75% above upstream,
+while adding 4,019 bytes to the prior single-step cooperative artifact. Its three
+paired timing sessions are exploratory: host load varied substantially and the
+cold compilation regression remains unresolved. Repeat timing on a controlled
+machine before performance acceptance. Evaluate unused-helper elimination and
+narrower helper state transfers without adding an alternate execution path.
+
+
 | Metric | Required boundary |
 |---|---|
 | `.wasm` bytes | Entire normally composed distributable artifact; raw and gzip with identical compression settings; report workflow logic/dependencies without double counting |

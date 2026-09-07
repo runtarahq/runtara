@@ -38,7 +38,8 @@ The following records the starting state before the HTTP binding update below
   plan requires. No new signal transport or acknowledgement changes are made yet.
 
 No feasibility result below is a production performance baseline. The historical
-measurements remain linked from the plan; fresh paired measurements are pending.
+measurements remain linked from the plan; fresh interim pairs are recorded later
+in this document and do not close the performance qualification gate.
 
 ## P1: standard composed-component proof
 
@@ -1042,3 +1043,35 @@ parallel scheduling form, poll failures, cleanup-before-acknowledgement, and
 retained Pause/Shutdown receipts. Fresh paired release measurements are required
 before declaring the size/compilation regression resolved; the first report
 remains an immutable pre-optimization snapshot.
+
+
+### Shared-helper verification and measured follow-up
+
+Commit `e8785f37637799bcee04a7e6face54af4fc200f4` implements the factoring.
+The structural suite passes 134 tests across the existing compiler cases and
+new growth guard. The full direct execution suite passed 287 tests with three
+manual benchmarks ignored before the final eager-return fast path; after that
+adjustment, all 36 cancellation tests plus the 14-workload measurement smoke
+passed (37 test functions, one manual benchmark ignored), and the 134 structural
+tests passed again. The component integration feature enabled all 59 component
+cancellation tests, which passed. Integration-feature Clippy, workspace formatting
+and the workspace Clippy commit hook passed. Components were built through the
+normal script for each separately targeted release revision before measuring.
+No database/server E2E or Linux capacity tests were run for this optimization.
+
+The [follow-up report](research/workflow-cooperative-shared-waits-comparison.md)
+and [raw samples/manifest](research/workflow-cooperative-shared-waits-comparison.json)
+record three complete new pairs against the same upstream `4eff9cdf` baseline.
+The driver source/fixture hashes are retained, each run completed successfully,
+and all preserved artifact/graph/input hashes were independently checked. Logs,
+outcomes and artifacts remain in `/private/tmp/cooperative-shared-waits-20260907`.
+The earlier cooperative report remains unchanged.
+
+The 100-Agent artifact drops 220,217 raw bytes versus the inline cooperative
+revision, leaving 1.75% raw overhead over upstream. The single-Agent artifact
+grows 4,019 bytes versus that revision, reaching 0.27% overhead over upstream.
+The measured cold ratio for the long chain remains 1.49–2.15× upstream and its
+prepared median changes range from −0.3% to +9.6%. These timing observations do
+not establish helper overhead or a causal speedup: the recorded host load
+varied from 29.05 to 116.42 on 16 logical CPUs. A controlled timing run, further
+small-graph size work and remaining qualification metrics are still required.
