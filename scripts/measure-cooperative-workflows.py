@@ -27,7 +27,7 @@ def digest(data):
 
 
 def command(args, cwd, env=None):
-    return subprocess.check_output(args, cwd=cwd, env=env, text=True).strip()
+    return subprocess.check_output(args, cwd=cwd, env=env, text=True, stderr=subprocess.STDOUT).strip()
 
 
 def source_manifest(root):
@@ -120,6 +120,14 @@ def hardware(root):
     return result
 
 
+def parse_measurement(text):
+    # libtest can print its test-name prefix on the same line as println!.
+    reports = [line.split(PREFIX, 1)[1] for line in text.splitlines() if PREFIX in line]
+    if len(reports) != 1:
+        raise RuntimeError("expected exactly one measurement report")
+    return json.loads(reports[0])
+
+
 def run(binary, root, target, label, pair, output, expected_source, expected_inputs):
     if source_manifest(root) != expected_source:
         raise RuntimeError(f"{label} source changed after building")
@@ -142,10 +150,7 @@ def run(binary, root, target, label, pair, output, expected_source, expected_inp
     (output / f"pair-{pair}-{label}-outcome.json").write_text(json.dumps(outcome, indent=2) + "\n")
     if result.returncode:
         raise RuntimeError(f"{label} measurement failed; see {log_path}")
-    matches = [line[len(PREFIX):] for line in log_path.read_text().splitlines() if line.startswith(PREFIX)]
-    if len(matches) != 1:
-        raise RuntimeError(f"expected one report in {log_path}")
-    report = json.loads(matches[0])
+    report = parse_measurement(log_path.read_text())
     assert report["prepared_samples"] == 1000 and report["warmup_runs"] >= 5
     assert len(report["reports"]) == 14
     for case in report["reports"]:
