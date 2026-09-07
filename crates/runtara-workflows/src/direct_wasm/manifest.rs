@@ -480,6 +480,8 @@ pub struct DirectEdgeManifest {
 /// Errors returned while building or serializing a direct workflow manifest.
 #[derive(Debug)]
 pub enum DirectManifestError {
+    /// A label declaration has invalid value or scope.
+    InvalidRunLabel(String),
     /// A DSL map key and the step's declared ID disagree.
     StepIdMismatch {
         /// JSON pointer to the graph containing this step; empty for the root.
@@ -503,6 +505,7 @@ impl fmt::Display for DirectManifestError {
             } => {
                 write!(f, "{}", identity_message(graph_path, step_key, step_id))
             }
+            DirectManifestError::InvalidRunLabel(message) => write!(f, "{message}"),
             DirectManifestError::Serialize(err) => {
                 write!(f, "failed to serialize direct workflow manifest: {err}")
             }
@@ -534,6 +537,12 @@ pub fn build_direct_workflow_manifest_with_child_workflows_and_agent_catalog(
     child_workflows: &[DirectManifestChildWorkflowInput<'_>],
     agent_catalog: Option<&AgentCatalog>,
 ) -> Result<DirectWorkflowManifest, DirectManifestError> {
+    for candidate in std::iter::once(graph).chain(child_workflows.iter().map(|c| c.execution_graph))
+    {
+        if let Some(error) = crate::validation::run_label_errors(candidate).first() {
+            return Err(DirectManifestError::InvalidRunLabel(error.to_string()));
+        }
+    }
     let mut mismatches = identity_mismatches(graph, "");
     for (index, child) in child_workflows.iter().enumerate() {
         mismatches.extend(identity_mismatches(
@@ -582,12 +591,17 @@ pub fn build_direct_workflow_manifest_with_child_workflows_and_agent_catalog(
         .into_iter()
         .map(|child| {
             let child_durable = child.execution_graph.durable.unwrap_or(true);
-            let graph = graph_manifest(
+            let mut graph = graph_manifest(
                 child.execution_graph,
                 child_durable,
                 &mut state,
                 agent_catalog,
             )?;
+            // Inline children share the parent's instance; their standalone label
+            // declaration must never assign metadata to that parent execution.
+            graph
+                .mappings
+                .retain(|mapping| mapping.purpose != "finish.runLabel");
             Ok(DirectChildWorkflowGraphManifest {
                 step_id: child.step_id.to_string(),
                 workflow_id: child.workflow_id.to_string(),
@@ -805,6 +819,15 @@ fn step_manifest(
     let mut nested_graphs = Vec::new();
     match step {
         Step::Finish(step) => {
+            if let Some(label) = &step.run_label {
+                collections.mappings.push(DirectMappingManifest {
+                    id: state.allocate_mapping_id(),
+                    step_id: step.id.clone(),
+                    step_type: "Finish".into(),
+                    purpose: "finish.runLabel".into(),
+                    value: serde_json::json!({"runLabel": label}),
+                });
+            }
             let value = step
                 .input_mapping
                 .as_ref()

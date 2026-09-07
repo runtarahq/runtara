@@ -2492,6 +2492,11 @@ export interface FinishStep {
   inputMapping?: null | HashMap;
   /** Human-readable step name */
   name?: string | null;
+  /**
+   * Optional execution label, resolved when the top-level Finish completes.
+   * Supports literal strings, references, and templates; at most 250 characters.
+   */
+  runLabel?: null | MappingValue;
 }
 
 /** Workflows held directly at one folder path */
@@ -6145,6 +6150,8 @@ export interface WorkflowInstanceDto {
   processingOverheadSeconds?: number | null;
   /** @format double */
   queueDurationSeconds?: number | null;
+  /** Optional label assigned at successful workflow completion. */
+  runLabel?: string | null;
   /** Current execution status */
   status: ExecutionStatus;
   steps?: WorkflowStepDto[];
@@ -7254,6 +7261,10 @@ export class Api<
      */
     listAllExecutionsHandler: (
       query?: {
+        /** Case-insensitive literal substring search across execution labels and metadata. */
+        search?: string;
+        /** Exact execution label (duplicates are returned). */
+        runLabel?: string;
         /**
          * Page number (0-based, default: 0)
          * @format int32

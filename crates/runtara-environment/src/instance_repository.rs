@@ -42,6 +42,8 @@ use crate::error::{Error, Result};
 /// turning `found: false` back into an error.
 #[derive(Debug)]
 pub struct InstanceDetail {
+    /// Optional label assigned at successful workflow completion.
+    pub run_label: Option<String>,
     /// Instance id.
     pub instance_id: String,
     /// Lifecycle status.
@@ -85,6 +87,8 @@ pub struct InstanceDetail {
 /// One instance as a list reports it.
 #[derive(Debug)]
 pub struct InstanceListItem {
+    /// Optional label assigned at successful workflow completion.
+    pub run_label: Option<String>,
     /// Instance id.
     pub instance_id: String,
     /// Owning tenant.
@@ -125,6 +129,12 @@ pub struct InstanceImageBinding {
 /// Options for listing instances.
 #[derive(Debug, Clone, Default)]
 pub struct ListInstancesOptions {
+    /// Case-insensitive literal substring search across run metadata.
+    pub search: Option<String>,
+    /// Exact normalized execution label filter.
+    pub run_label: Option<String>,
+    /// Workflow IDs whose names match search, resolved in the server database.
+    pub search_workflow_ids: Vec<String>,
     /// Filter by tenant ID.
     pub tenant_id: Option<String>,
     /// Filter by status — a row matches if it holds any one of these. `None`
@@ -207,6 +217,7 @@ impl InstanceRepository {
         Ok(Some(InstanceDetail {
             status: runtara_store_postgres::encoding::status_from_str(&inst.status)?,
             instance_id: inst.instance_id,
+            run_label: inst.run_label,
             tenant_id: inst.tenant_id,
             image_id: inst.image_id,
             image_name: inst.image_name,
@@ -229,19 +240,10 @@ impl InstanceRepository {
 
     /// List instances matching `options`.
     ///
-    /// A failing count degrades to `0` rather than failing the call: the page is
-    /// the answer the caller asked for, and losing it because a second query
-    /// stumbled would be the worse outcome.
+    /// Count failures propagate: a successful page must have truthful totals.
     pub async fn list(&self, options: &ListInstancesOptions) -> Result<InstancePage> {
         let instances = crate::db::list_instances(&self.pool, options).await?;
-
-        let total_count = match crate::db::count_instances(&self.pool, options).await {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::warn!("Count instances error: {}", e);
-                0
-            }
-        };
+        let total_count = crate::db::count_instances(&self.pool, options).await?;
 
         Ok(InstancePage {
             instances: instances
@@ -250,6 +252,7 @@ impl InstanceRepository {
                     Ok(InstanceListItem {
                         status: runtara_store_postgres::encoding::status_from_str(&inst.status)?,
                         instance_id: inst.instance_id,
+                        run_label: inst.run_label,
                         tenant_id: inst.tenant_id,
                         image_id: inst.image_id,
                         image_name: inst.image_name,

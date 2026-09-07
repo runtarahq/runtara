@@ -242,6 +242,7 @@ impl MockPersistence {
         started_at: DateTime<Utc>,
     ) -> Self {
         let record = InstanceRecord {
+            run_label: None,
             instance_id: instance_id.to_string(),
             tenant_id: tenant_id.to_string(),
             definition_version: 1,
@@ -1116,6 +1117,7 @@ async fn test_completed_instance_in_core_not_flagged() {
     let persistence = Arc::new(MockPersistence::new());
     {
         let record = InstanceRecord {
+            run_label: None,
             instance_id: instance_id.clone(),
             tenant_id: tenant_id.clone(),
             definition_version: 1,

@@ -24,6 +24,7 @@ use super::abi::push_core_type;
 pub(super) struct DirectCoreImportIndices {
     runtime_load_input: Option<u32>,
     runtime_complete: Option<u32>,
+    runtime_complete_with_label: Option<u32>,
     runtime_fail: Option<u32>,
     runtime_custom_event: Option<u32>,
     runtime_debug_mode_enabled: Option<u32>,
@@ -166,12 +167,14 @@ impl DirectCoreImportIndices {
         abi: crate::direct_wasm::component::WorkflowAbi,
         omit_runtime: bool,
         has_connections: bool,
+        has_run_label: bool,
     ) -> Result<DirectCoreFunctionIndices, DirectCompileError> {
         let _stdlib_agent_error_info =
             require_import(self.stdlib_agent_error_info, "stdlib.agent-error-info")?;
         Ok(DirectCoreFunctionIndices {
             abi,
             omit_runtime,
+            has_run_label,
             connection_resolver_describe: require_connection_resolver(
                 self.connection_resolver_describe,
                 has_connections,
@@ -179,6 +182,11 @@ impl DirectCoreImportIndices {
             runtime_load_input: require_runtime(
                 self.runtime_load_input,
                 "runtime.load-input",
+                omit_runtime,
+            )?,
+            runtime_complete_with_label: require_runtime(
+                self.runtime_complete_with_label,
+                "runtime.complete-with-label",
                 omit_runtime,
             )?,
             runtime_complete: require_runtime(
@@ -649,10 +657,12 @@ pub(super) struct DirectCoreFunctionIndices {
     /// return value. Runtime index fields hold a poison sentinel and must never
     /// be called (see [`RUNTIME_OMITTED_POISON`]).
     pub(super) omit_runtime: bool,
+    pub(super) has_run_label: bool,
     pub(super) connection_resolver_describe: u32,
     pub(super) runtime_load_input: u32,
     // (see `report_terminal_status` below for when complete/fail lower)
     pub(super) runtime_complete: u32,
+    pub(super) runtime_complete_with_label: u32,
     pub(super) runtime_fail: u32,
     pub(super) runtime_custom_event: u32,
     pub(super) runtime_debug_mode_enabled: u32,
@@ -964,6 +974,8 @@ pub(super) fn import_core_function(
         import_indices.connection_resolver_describe = Some(function_index);
     } else if is_runtime_import(resolve, interface, function, "load-input") {
         import_indices.runtime_load_input = Some(function_index);
+    } else if is_runtime_import(resolve, interface, function, "complete-with-label") {
+        import_indices.runtime_complete_with_label = Some(function_index);
     } else if is_runtime_import(resolve, interface, function, "complete") {
         import_indices.runtime_complete = Some(function_index);
     } else if is_runtime_import(resolve, interface, function, "fail") {

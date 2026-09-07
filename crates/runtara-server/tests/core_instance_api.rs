@@ -89,6 +89,81 @@ async fn register(addr: SocketAddr, instance_id: &str, tenant_id: &str) -> u16 {
         .as_u16()
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn run_label_completion_http_validates_and_preserves_output() {
+    use base64::Engine;
+    use runtara_core::domain::InstanceStatus;
+    let persistence: Arc<dyn Persistence> = Arc::new(PostgresPersistence::new(test_pool().await));
+    let (runtime, addr) = start(persistence.clone(), 100).await;
+    let tenant = format!("run-label-{}", Uuid::new_v4());
+    let id = format!("{tenant}-1");
+    assert_eq!(register(addr, &id, &tenant).await, 200);
+    let client = reqwest::Client::new();
+    let url = format!("http://{addr}/api/v1/instances/{id}/completed");
+    let output = base64::engine::general_purpose::STANDARD.encode(b"{\"result\":42}");
+    for (index, label) in [
+        json!(123),
+        json!({"x":1}),
+        json!("bad_label"),
+        json!("x".repeat(300)),
+        json!("--- ./()[]"),
+        json!("   "),
+        json!("\u{200b}"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let case_id = format!("{tenant}-case-{index}");
+        assert_eq!(register(addr, &case_id, &tenant).await, 200);
+        assert!(
+            client
+                .post(format!(
+                    "http://{addr}/api/v1/instances/{case_id}/completed"
+                ))
+                .json(&json!({"output":output,"runLabel":label}))
+                .send()
+                .await
+                .unwrap()
+                .status()
+                .is_success()
+        );
+        let record = persistence.get_instance(&case_id).await.unwrap().unwrap();
+        assert_eq!(record.status, InstanceStatus::Completed);
+        assert_eq!(
+            record.run_label,
+            if index == 3 {
+                Some("x".repeat(250))
+            } else {
+                None
+            }
+        );
+        assert_eq!(
+            record.output.as_deref(),
+            Some(b"{\"result\":42}".as_slice())
+        );
+    }
+    for label in [" Order/12 [done] ", "replacement"] {
+        assert!(
+            client
+                .post(&url)
+                .json(&json!({"output":output,"runLabel":label}))
+                .send()
+                .await
+                .unwrap()
+                .status()
+                .is_success()
+        );
+    }
+    let record = persistence.get_instance(&id).await.unwrap().unwrap();
+    assert_eq!(record.status, InstanceStatus::Completed);
+    assert_eq!(record.run_label.as_deref(), Some("Order/12 [done]"));
+    assert_eq!(
+        record.output.as_deref(),
+        Some(b"{\"result\":42}".as_slice())
+    );
+    runtime.shutdown().await.unwrap();
+}
+
 /// The cap is enforced by the handlers, not merely accepted by the builder —
 /// and it counts running work only, so parking an instance frees its slot.
 ///

@@ -26,6 +26,10 @@ fn push_query_param(query: &mut Vec<String>, key: &str, value: &str) {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ListExecutionsParams {
+    /// Literal substring search across labels and execution metadata.
+    pub search: Option<String>,
+    /// Exact execution label filter.
+    pub run_label: Option<String>,
     #[schemars(description = "Filter by workflow ID")]
     pub workflow_id: Option<String>,
     #[schemars(
@@ -139,6 +143,12 @@ pub async fn list_executions(
 
 fn list_executions_query_string(params: &ListExecutionsParams) -> String {
     let mut query = Vec::new();
+    if let Some(search) = &params.search {
+        push_query_param(&mut query, "search", search);
+    }
+    if let Some(label) = &params.run_label {
+        push_query_param(&mut query, "runLabel", label);
+    }
     if let Some(sid) = &params.workflow_id {
         push_query_param(&mut query, "workflowId", sid);
     }
@@ -2202,6 +2212,8 @@ mod tests {
     #[test]
     fn list_executions_query_uses_api_parameter_names() {
         let query = list_executions_query_string(&ListExecutionsParams {
+            search: None,
+            run_label: None,
             workflow_id: Some("workflow/needs encoding".to_string()),
             status: Some("running,queued".to_string()),
             page: Some(2),

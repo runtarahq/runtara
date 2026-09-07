@@ -299,6 +299,11 @@ impl RuntaraSdk {
         self.backend.completed(output)
     }
 
+    /// Complete with an optional label, preserving the output payload.
+    pub fn completed_with_label(&self, output: &[u8], run_label: Option<&str>) -> Result<()> {
+        self.backend.completed_with_label(output, run_label)
+    }
+
     /// Send a failed event with error message.
     #[cfg_attr(feature = "tracing", tracing::instrument(skip(self), fields(instance_id = %self.backend.instance_id())))]
     pub fn failed(&self, error: &str) -> Result<()> {

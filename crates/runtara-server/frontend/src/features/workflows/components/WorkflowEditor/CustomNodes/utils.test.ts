@@ -54,6 +54,22 @@ function roundTripStep(graph: ExecutionGraphDto & { entryPoint: string }) {
   return (round!.steps as Record<string, any>)[stepId];
 }
 
+describe('Finish runLabel round trip', () => {
+  it.each([
+    undefined,
+    { valueType: 'immediate', value: 'Order/12 [done]' },
+    { valueType: 'reference', value: 'data.order_id', default: 'Unknown' },
+    { valueType: 'template', value: 'Order/{{ data.order_id }}' },
+  ])('preserves label metadata separately from outputs: %j', (runLabel) => {
+    const inputMapping = { result: { valueType: 'immediate', value: 'ok' } };
+    const result = roundTripStep(
+      makeGraph({ id: 'finish', stepType: 'Finish', runLabel, inputMapping })
+    );
+    expect(result.runLabel).toEqual(runLabel);
+    expect(result.inputMapping).toEqual(inputMapping);
+  });
+});
+
 function makeLayoutNode(
   id: string,
   type: NodeTypeId = NODE_TYPES.BasicNode,

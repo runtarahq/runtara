@@ -387,6 +387,28 @@ impl RuntimeHost for PersistenceRuntimeHost {
             .await
     }
 
+    async fn complete_with_label(&self, output: Vec<u8>, run_label: Vec<u8>) -> Result<(), String> {
+        self.escalate_if_cancel_ignored().await;
+        let label = serde_json::from_slice::<Option<String>>(&run_label)
+            .ok()
+            .flatten();
+        runtara_core::instance_handlers::handle_instance_event_with_run_label(
+            &self.state,
+            InstanceEvent {
+                instance_id: self.instance_id.clone(),
+                event_type: InstanceEventType::EventCompleted as i32,
+                checkpoint_id: None,
+                payload: output,
+                timestamp_ms: chrono::Utc::now().timestamp_millis(),
+                subtype: None,
+            },
+            label.as_deref(),
+        )
+        .await
+        .map_err(Self::err)?;
+        Ok(())
+    }
+
     async fn fail(&self, error: Vec<u8>) -> Result<(), String> {
         self.escalate_if_cancel_ignored().await;
         self.event(InstanceEventType::EventFailed, None, error, None)
@@ -698,6 +720,71 @@ mod tests {
         let inst = p.get_instance(inst_id.as_str()).await.unwrap().unwrap();
         assert_eq!(inst.status, CoreInstanceStatus::Completed);
         assert_eq!(inst.output.as_deref(), Some(b"{\"result\":1}".as_slice()));
+    }
+
+    #[tokio::test]
+    async fn run_label_completion_is_validated_atomic_and_replay_safe() {
+        let (p, host, id) = setup().await;
+        for invalid in [
+            serde_json::json!(42),
+            serde_json::json!("x_y"),
+            serde_json::json!("--- ./()[]"),
+            serde_json::json!("   "),
+            serde_json::json!("\u{200b}"),
+            serde_json::json!({"x":1}),
+        ] {
+            let (p, host, id) = setup().await;
+            host.complete_with_label(b"{}".to_vec(), serde_json::to_vec(&invalid).unwrap())
+                .await
+                .unwrap();
+            let instance = p.get_instance(&id).await.unwrap().unwrap();
+            assert_eq!(instance.status, CoreInstanceStatus::Completed);
+            assert!(instance.run_label.is_none());
+            assert_eq!(instance.output.as_deref(), Some(b"{}".as_slice()));
+        }
+        {
+            let (p, host, id) = setup().await;
+            host.complete_with_label(
+                b"{}".to_vec(),
+                serde_json::to_vec(&"x".repeat(300)).unwrap(),
+            )
+            .await
+            .unwrap();
+            let instance = p.get_instance(&id).await.unwrap().unwrap();
+            assert_eq!(instance.run_label, Some("x".repeat(250)));
+            assert_eq!(instance.status, CoreInstanceStatus::Completed);
+        }
+        host.complete_with_label(
+            b"{\"result\":1}".to_vec(),
+            br#"" Order/12 [done] ""#.to_vec(),
+        )
+        .await
+        .unwrap();
+        host.complete_with_label(b"{\"result\":2}".to_vec(), br#""replacement""#.to_vec())
+            .await
+            .unwrap();
+        let instance = p.get_instance(&id).await.unwrap().unwrap();
+        assert_eq!(instance.status, CoreInstanceStatus::Completed);
+        assert_eq!(instance.run_label.as_deref(), Some("Order/12 [done]"));
+        assert_eq!(
+            instance.output.as_deref(),
+            Some(b"{\"result\":1}".as_slice())
+        );
+
+        let (p, host, id) = setup().await;
+        p.complete_instance(runtara_core::persistence::CompleteInstanceParams::new(
+            &id,
+            CoreInstanceStatus::Cancelled,
+        ))
+        .await
+        .unwrap();
+        host.complete_with_label(b"{}".to_vec(), br#""too late""#.to_vec())
+            .await
+            .unwrap();
+        let instance = p.get_instance(&id).await.unwrap().unwrap();
+        assert_eq!(instance.status, CoreInstanceStatus::Cancelled);
+        assert!(instance.run_label.is_none());
+        assert!(instance.output.is_none());
     }
 
     #[tokio::test]

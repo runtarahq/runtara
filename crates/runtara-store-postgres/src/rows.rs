@@ -38,6 +38,7 @@ impl<'r> FromRow<'r, PgRow> for InstanceRow {
             finished_at: row.try_get("finished_at")?,
             input: row.try_get("input").unwrap_or_default(),
             output: row.try_get("output")?,
+            run_label: row.try_get("run_label")?,
             error: row.try_get("error")?,
             sleep_until: row.try_get("sleep_until")?,
             wake_reason: row

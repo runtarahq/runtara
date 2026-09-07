@@ -4778,6 +4778,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "runtara-dsl",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -5022,6 +5023,7 @@ name = "runtara-workflow-runtime"
 version = "8.9.10"
 dependencies = [
  "runtara-sdk",
+ "serde_json",
  "wit-bindgen 0.58.0",
 ]
 
@@ -5030,6 +5032,7 @@ name = "runtara-workflow-stdlib"
 version = "8.9.10"
 dependencies = [
  "minijinja",
+ "runtara-dsl",
  "serde",
  "serde_json",
  "wit-bindgen 0.58.0",

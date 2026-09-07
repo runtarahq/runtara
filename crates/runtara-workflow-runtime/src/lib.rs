@@ -307,6 +307,16 @@ mod component {
             super::complete(&output)
         }
 
+        fn complete_with_label(output: Vec<u8>, run_label: Vec<u8>) -> Result<(), String> {
+            let label = serde_json::from_slice::<Option<String>>(&run_label)
+                .ok()
+                .flatten();
+            super::with_sdk(|sdk| {
+                sdk.completed_with_label(&output, label.as_deref())
+                    .map_err(super::sdk_error)
+            })
+        }
+
         fn fail(error: Vec<u8>) -> Result<(), String> {
             super::fail(&error)
         }

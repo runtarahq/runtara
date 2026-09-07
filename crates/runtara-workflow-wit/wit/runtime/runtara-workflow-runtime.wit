@@ -33,6 +33,10 @@ interface runtime {
 
     complete: func(output: list<u8>) -> result<_, string>;
 
+    /// Additive completion API. run-label is a JSON string or null, separate
+    /// from the unchanged output bytes. Hosts validate it before persistence.
+    complete-with-label: func(output: list<u8>, run-label: list<u8>) -> result<_, string>;
+
     fail: func(error: list<u8>) -> result<_, string>;
 
     custom-event: func(

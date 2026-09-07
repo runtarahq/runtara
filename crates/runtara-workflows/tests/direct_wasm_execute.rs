@@ -7394,6 +7394,7 @@ struct CheckpointingRuntimeHost {
     advance_clock_on_step_end: Mutex<Option<(String, u64)>>,
     checkpoints: Mutex<HashMap<String, Vec<u8>>>,
     completed: Mutex<Option<Vec<u8>>>,
+    run_label: Mutex<Option<String>>,
     sleeps: Mutex<Vec<String>>,
     /// Externally-delivered custom signals keyed by checkpoint (signal) id —
     /// the wake-scheduler-side signal store. `poll_custom_signal` reads it
@@ -7434,6 +7435,7 @@ impl CheckpointingRuntimeHost {
             advance_clock_on_step_end: Mutex::new(None),
             checkpoints: Mutex::new(HashMap::new()),
             completed: Mutex::new(None),
+            run_label: Mutex::new(None),
             sleeps: Mutex::new(Vec::new()),
             custom_signals: Mutex::new(HashMap::new()),
             clock_offset_ms: Mutex::new(0),
@@ -7515,6 +7517,11 @@ impl runtara_component_host::runtime_host::RuntimeHost for CheckpointingRuntimeH
     async fn complete(&self, output: Vec<u8>) -> Result<(), String> {
         *self.completed.lock().unwrap() = Some(output);
         Ok(())
+    }
+    async fn complete_with_label(&self, output: Vec<u8>, run_label: Vec<u8>) -> Result<(), String> {
+        *self.run_label.lock().unwrap() =
+            serde_json::from_slice(&run_label).map_err(|e| e.to_string())?;
+        self.complete(output).await
     }
     async fn fail(&self, error: Vec<u8>) -> Result<(), String> {
         *self.failed.lock().unwrap() = Some(error);

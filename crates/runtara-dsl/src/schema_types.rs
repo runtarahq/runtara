@@ -417,6 +417,11 @@ pub struct FinishStep {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub input_mapping: Option<InputMapping>,
 
+    /// Optional execution label, resolved when the top-level Finish completes.
+    /// Supports literal strings, references, and templates; at most 250 characters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_label: Option<MappingValue>,
+
     /// When true, execution pauses before this step in debug mode
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub breakpoint: Option<bool>,
