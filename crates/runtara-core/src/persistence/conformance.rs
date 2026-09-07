@@ -932,6 +932,7 @@ pub async fn run_conformance_sequence<P: Persistence>(backend: &P) {
 /// Receipt identity, cancellation precedence, and idempotent lifecycle transitions.
 /// Run unchanged against each persistence implementation.
 pub async fn run_lifecycle_command_sequence<P: Persistence>(backend: &P) {
+    terminal_cancel_races(backend).await;
     use crate::domain::{InstanceStatus as Status, SignalType as Kind};
     let id = Uuid::new_v4().to_string();
     backend
@@ -1223,8 +1224,7 @@ pub async fn run_lifecycle_policy_matrix<P: Persistence>(backend: &P) {
                 .apply_lifecycle_command(&id, &command.command_id, kind)
                 .await
                 .unwrap();
-            let rejects =
-                matches!(status, S::Completed | S::Failed | S::Cancelled) && kind != K::Cancel;
+            let rejects = matches!(status, S::Completed | S::Failed | S::Cancelled);
             if rejects {
                 assert_eq!(decision, Decision::Rejected);
             } else {
@@ -1434,3 +1434,157 @@ pub async fn run_wake_reason_sequence<P: Persistence>(backend: &P) {
 
 /// Atomic isolated-invocation contract cases shared by all capable backends.
 pub mod invocations;
+
+// Exercise both orderings and real concurrent writers against each backend.
+// Expected outcomes are independent of the lifecycle policy implementation.
+async fn terminal_cancel_races<P: Persistence>(backend: &P) {
+    use crate::domain::{InstanceStatus as S, SignalType as K};
+    for terminal in [S::Completed, S::Failed, S::Cancelled] {
+        for cancel_before_completion in [false, true] {
+            let id = Uuid::new_v4().to_string();
+            backend
+                .register_instance(&id, "terminal-cancel")
+                .await
+                .unwrap();
+            backend
+                .update_instance_status(&id, S::Running, None)
+                .await
+                .unwrap();
+            if cancel_before_completion {
+                backend
+                    .insert_signal(&id, K::Cancel, b"request")
+                    .await
+                    .unwrap();
+            }
+            backend
+                .complete_instance(
+                    CompleteInstanceParams::new(&id, terminal)
+                        .if_running()
+                        .with_output(b"accepted output")
+                        .with_error("accepted error")
+                        .with_termination("crashed", Some(7)),
+                )
+                .await
+                .unwrap();
+            let before = backend.get_instance(&id).await.unwrap().unwrap();
+            if !cancel_before_completion {
+                backend
+                    .insert_signal(&id, K::Cancel, b"request")
+                    .await
+                    .unwrap();
+            }
+            let command = backend.get_pending_signal(&id).await.unwrap().unwrap();
+            for _ in 0..2 {
+                assert!(
+                    !backend
+                        .acknowledge_signal(&id, &command.command_id, K::Cancel)
+                        .await
+                        .unwrap()
+                );
+            }
+            let after = backend.get_instance(&id).await.unwrap().unwrap();
+            assert_eq!(after.status, terminal);
+            assert_eq!(after.output, before.output);
+            assert_eq!(after.error, before.error);
+            assert_eq!(after.finished_at, before.finished_at);
+            assert_eq!(after.termination_reason, before.termination_reason);
+            assert_eq!(after.exit_code, before.exit_code);
+            let pending = backend.get_pending_signal(&id).await.unwrap().unwrap();
+            assert_eq!(pending.command_id, command.command_id);
+            assert!(pending.acknowledged_at.is_none());
+        }
+    }
+    // Pin cancellation-first as well as completion-first, rather than relying
+    // on the scheduler to produce both winners in the concurrent exercise.
+    let id = Uuid::new_v4().to_string();
+    backend
+        .register_instance(&id, "cancel-first")
+        .await
+        .unwrap();
+    backend
+        .update_instance_status(&id, S::Running, None)
+        .await
+        .unwrap();
+    backend
+        .insert_signal(&id, K::Cancel, b"request")
+        .await
+        .unwrap();
+    let command = backend.get_pending_signal(&id).await.unwrap().unwrap();
+    assert!(
+        backend
+            .acknowledge_signal(&id, &command.command_id, K::Cancel)
+            .await
+            .unwrap()
+    );
+    let before = backend.get_instance(&id).await.unwrap().unwrap();
+    assert!(
+        !backend
+            .complete_instance(
+                CompleteInstanceParams::new(&id, S::Completed)
+                    .if_running()
+                    .with_output(b"late output")
+            )
+            .await
+            .unwrap()
+    );
+    let after = backend.get_instance(&id).await.unwrap().unwrap();
+    assert_eq!(after.status, S::Cancelled);
+    assert_eq!(after.output, None);
+    assert_eq!(after.finished_at, before.finished_at);
+    assert!(
+        backend
+            .acknowledge_signal(&id, &command.command_id, K::Cancel)
+            .await
+            .unwrap()
+    );
+    for _ in 0..16 {
+        let id = Uuid::new_v4().to_string();
+        backend
+            .register_instance(&id, "concurrent-terminal-cancel")
+            .await
+            .unwrap();
+        backend
+            .update_instance_status(&id, S::Running, None)
+            .await
+            .unwrap();
+        backend
+            .insert_signal(&id, K::Cancel, b"request")
+            .await
+            .unwrap();
+        let command = backend.get_pending_signal(&id).await.unwrap().unwrap();
+        let params = CompleteInstanceParams::new(&id, S::Completed)
+            .if_running()
+            .with_output(b"result");
+        let (completed, cancelled) = tokio::join!(
+            backend.complete_instance(params),
+            backend.acknowledge_signal(&id, &command.command_id, K::Cancel)
+        );
+        let completed = completed.unwrap();
+        let cancelled = cancelled.unwrap();
+        assert_ne!(completed, cancelled, "exactly one terminal transition wins");
+        let result = backend.get_instance(&id).await.unwrap().unwrap();
+        assert_eq!(
+            result.status,
+            if completed {
+                S::Completed
+            } else {
+                S::Cancelled
+            }
+        );
+        assert_eq!(
+            result.output.as_deref(),
+            if completed {
+                Some(b"result".as_slice())
+            } else {
+                None
+            }
+        );
+        assert_eq!(
+            backend
+                .acknowledge_signal(&id, &command.command_id, K::Cancel)
+                .await
+                .unwrap(),
+            cancelled
+        );
+    }
+}

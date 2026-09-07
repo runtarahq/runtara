@@ -118,6 +118,8 @@ pub enum TerminationReason {
     HeartbeatTimeout,
     /// User requested cancellation.
     Cancelled,
+    /// Execution ended without a cooperative cancellation cleanup receipt.
+    Aborted,
     /// Paused by pause signal.
     Paused,
     /// Suspended for durable sleep.
@@ -140,6 +142,7 @@ impl TerminationReason {
             "timeout" => Some(Self::Timeout),
             "heartbeat_timeout" => Some(Self::HeartbeatTimeout),
             "cancelled" => Some(Self::Cancelled),
+            "aborted" => Some(Self::Aborted),
             "paused" => Some(Self::Paused),
             "sleeping" => Some(Self::Sleeping),
             "orphaned" => Some(Self::Orphaned),
@@ -156,6 +159,7 @@ impl TerminationReason {
             Self::Timeout => "timeout",
             Self::HeartbeatTimeout => "heartbeat_timeout",
             Self::Cancelled => "cancelled",
+            Self::Aborted => "aborted",
             Self::Paused => "paused",
             Self::Sleeping => "sleeping",
             Self::Orphaned => "orphaned",
@@ -1518,6 +1522,19 @@ mod tests {
     }
 
     #[test]
+    fn test_termination_reason_aborted_roundtrip() {
+        let reason = TerminationReason::from_str("aborted").unwrap();
+        assert_eq!(reason, TerminationReason::Aborted);
+        assert_eq!(reason.as_str(), "aborted");
+        let json = serde_json::to_string(&reason).unwrap();
+        assert_eq!(json, "\"aborted\"");
+        assert_eq!(
+            serde_json::from_str::<TerminationReason>(&json).unwrap(),
+            reason
+        );
+    }
+
+    #[test]
     fn test_termination_reason_as_str() {
         assert_eq!(TerminationReason::Completed.as_str(), "completed");
         assert_eq!(
@@ -1555,6 +1572,7 @@ mod tests {
             TerminationReason::Timeout,
             TerminationReason::HeartbeatTimeout,
             TerminationReason::Cancelled,
+            TerminationReason::Aborted,
             TerminationReason::Paused,
             TerminationReason::Sleeping,
         ] {

@@ -181,7 +181,7 @@ async fn try_launch_detached_completes_and_clears_registry() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn stop_cancels_spinning_instance() {
+async fn stop_cancels_spinning_instance_without_faking_cleanup() {
     let h = harness().await;
     let inst_id = unique("inst-spin");
     let wasm = write_component(h.dir.path(), "spin.wasm", RUN_SPIN_WAT);
@@ -200,6 +200,22 @@ async fn stop_cancels_spinning_instance() {
         "guest should be spinning"
     );
 
+    // The lifecycle request remains pending while the uncooperative guest is
+    // aborted via the runner's existing whole-execution stop mechanism.
+    h.persistence
+        .insert_signal(
+            &inst_id,
+            runtara_core::domain::SignalType::Cancel,
+            b"request",
+        )
+        .await
+        .unwrap();
+    let command = h
+        .persistence
+        .get_pending_signal(&inst_id)
+        .await
+        .unwrap()
+        .unwrap();
     h.runner.stop(&handle).await.expect("stop");
     tokio::time::timeout(
         Duration::from_secs(10),
@@ -208,6 +224,20 @@ async fn stop_cancels_spinning_instance() {
     .await
     .expect("cancel did not end the spinning guest");
     assert!(!h.runner.is_running(&handle).await);
+    let instance = h.persistence.get_instance(&inst_id).await.unwrap().unwrap();
+    assert_eq!(
+        instance.status,
+        runtara_core::domain::InstanceStatus::Cancelled
+    );
+    assert_eq!(instance.termination_reason.as_deref(), Some("aborted"));
+    let pending = h
+        .persistence
+        .get_pending_signal(&inst_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(pending.command_id, command.command_id);
+    assert!(pending.acknowledged_at.is_none());
 }
 
 #[tokio::test(flavor = "multi_thread")]

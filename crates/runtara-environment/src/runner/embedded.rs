@@ -18,7 +18,6 @@
 //! - Memory metrics come from the store's resource limiter (exact guest
 //!   linear-memory peak); CPU metrics are absent.
 
-#[cfg(all(test, feature = "db-integration-tests"))]
 use runtara_core::domain::InstanceStatus as CoreInstanceStatus;
 
 use async_trait::async_trait;
@@ -44,10 +43,7 @@ use runtara_component_host::{
     EngineConfig, PreparedWorkflow, WorkflowExecutor, WorkflowExit, WorkflowLimits,
     WorkflowRunSpec, WorkflowStartConfirmation, build_engine, spawn_epoch_ticker,
 };
-use runtara_core::instance_handlers::{
-    InstanceHandlerState, SignalAck, SignalType, handle_signal_ack,
-};
-use runtara_core::persistence::Persistence;
+use runtara_core::persistence::{CompleteInstanceParams, Persistence};
 
 use super::common::{self, WorkflowRunnerConfig};
 use super::traits::{
@@ -1326,6 +1322,43 @@ async fn wake_if_signal_already_arrived(
     false
 }
 
+/// Record an unacknowledged cancellation after the guest has exited. Preserve
+/// accepted terminal outcomes. The host cannot provide a guest cleanup receipt:
+/// leave the command pending and mark an unclean exit only if still running.
+async fn record_unacknowledged_cancel_exit(persistence: &Arc<dyn Persistence>, instance_id: &str) {
+    match persistence.get_pending_signal(instance_id).await {
+        Ok(Some(signal))
+            if signal.signal_type == runtara_core::domain::SignalType::Cancel
+                && signal.acknowledged_at.is_none() =>
+        {
+            let result = persistence
+                .complete_instance(
+                    CompleteInstanceParams::new(instance_id, CoreInstanceStatus::Cancelled)
+                        .if_running()
+                        .with_termination("aborted", None),
+                )
+                .await;
+            match result {
+                Ok(true) => warn!(
+                    instance_id,
+                    "Run exited without a cancellation receipt; recording an unclean cancellation"
+                ),
+                Ok(false) => debug!(
+                    instance_id,
+                    "Preserving the already accepted outcome after an unacknowledged cancellation"
+                ),
+                Err(error) => {
+                    error!(instance_id, %error, "Failed to record unacknowledged cancellation exit")
+                }
+            }
+        }
+        Ok(_) => {}
+        Err(error) => {
+            warn!(instance_id, %error, "Could not check pending cancellation after the run")
+        }
+    }
+}
+
 /// Park an invoke-shaped instance that returned `outcome::suspended` (the
 /// store-freeing durable-sleep / wait-for-signal paths). Stamps
 /// `status='suspended'`, plus `sleep_until=deadline` when there is a TIMED wake
@@ -1348,63 +1381,6 @@ async fn wake_if_signal_already_arrived(
 /// pause/breakpoint suspend has no marker and must never be signal-woken) or
 /// `sleeping` for pure timed parks. Relaunch clears the marker with the
 /// running transition.
-/// Terminal backstop for a cancel the guest never acknowledged.
-///
-/// Status `cancelled` is otherwise written only when the guest observes the
-/// signal and acks it. A workflow artifact compiled before the Delay poll site
-/// existed has no way to observe one, so without this a cancelled run reports
-/// whatever it reached on its own — usually `completed`, a silent success for a
-/// run the user stopped.
-///
-/// Runs after the guest is gone, so nothing inside the workflow can intercept
-/// it, and it makes no assumptions about call ordering — which is what makes it
-/// the floor under the host-side escalation in `PersistenceRuntimeHost`. That
-/// escalation is the fast path; this one is the guarantee.
-///
-/// A cancel landing in the instant a run legitimately finishes is recorded
-/// `cancelled` (the ack overwrites the terminal status). Deliberate: a cancel
-/// was requested and demonstrably not honoured, and reporting clean success for
-/// it is the failure mode this exists to prevent.
-async fn enforce_unacked_cancel(persistence: &Arc<dyn Persistence>, instance_id: &str) {
-    // `acknowledged_at` is re-checked even though `get_pending_signal` already
-    // filters on `acknowledged_at IS NULL`: defence in depth. This backstop
-    // overwrites a terminal status, so a regression in that predicate must not
-    // re-cancel a run whose guest handled its signal properly. The check is free.
-    match persistence.get_pending_signal(instance_id).await {
-        Ok(Some(signal))
-            if signal.signal_type == runtara_core::domain::SignalType::Cancel
-                && signal.acknowledged_at.is_none() =>
-        {
-            warn!(
-                instance_id = %instance_id,
-                "Run ended with an unacknowledged cancel; recording cancelled"
-            );
-            let state = InstanceHandlerState::new(Arc::clone(persistence));
-            if let Err(e) = handle_signal_ack(
-                &state,
-                SignalAck {
-                    command_id: signal.command_id,
-                    instance_id: instance_id.to_string(),
-                    signal_type: SignalType::SignalCancel as i32,
-                    acknowledged: true,
-                },
-            )
-            .await
-            {
-                error!(instance_id = %instance_id, error = %e, "Failed to record cancelled");
-            }
-        }
-        Ok(_) => {}
-        Err(e) => {
-            warn!(
-                instance_id = %instance_id,
-                error = %e,
-                "Could not check for an unacknowledged cancel after the run"
-            );
-        }
-    }
-}
-
 async fn park_invoke_suspend(
     persistence: &dyn Persistence,
     instance_id: &str,
@@ -1745,7 +1721,7 @@ impl Runner for EmbeddedWasmRunner {
                         warn!(instance_id, %error, "Parked cancellation deferred to scheduler recovery");
                     }
                 } else {
-                    enforce_unacked_cancel(&persistence, &instance_id).await;
+                    record_unacknowledged_cancel_exit(&persistence, &instance_id).await;
                 }
             } else if let Some(pre) = workflow.command() {
                 // Generic non-workflow components retain their established
@@ -1778,7 +1754,7 @@ impl Runner for EmbeddedWasmRunner {
                         warn!(instance_id = %instance_id, "Embedded workflow run cancelled");
                     }
                 }
-                enforce_unacked_cancel(&persistence, &instance_id).await;
+                record_unacknowledged_cancel_exit(&persistence, &instance_id).await;
             } else {
                 error!(
                     instance_id = %instance_id,
@@ -2540,41 +2516,75 @@ mod tests {
         test_support::running_instance("backstop").await
     }
 
-    /// The floor under the host-side escalation: a guest that reported success
-    /// while a cancel sat unacknowledged must still land on `cancelled`. This is
-    /// what a workflow artifact with no poll site does, and it is the silent
-    /// success the backstop exists to prevent.
     #[cfg(feature = "db-integration-tests")]
     #[tokio::test]
-    async fn unacked_cancel_overrides_a_reported_completion() {
-        let (persistence, instance_id) = backstop_fixture().await;
+    async fn unacknowledged_cancel_preserves_accepted_terminal_outcomes() {
+        for status in [
+            CoreInstanceStatus::Completed,
+            CoreInstanceStatus::Failed,
+            CoreInstanceStatus::Cancelled,
+        ] {
+            let (persistence, id) = backstop_fixture().await;
+            persistence
+                .insert_signal(&id, runtara_core::domain::SignalType::Cancel, b"")
+                .await
+                .unwrap();
+            persistence
+                .complete_instance(
+                    CompleteInstanceParams::new(&id, status)
+                        .with_output(b"result")
+                        .with_error("error")
+                        .with_termination("crashed", Some(9)),
+                )
+                .await
+                .unwrap();
+            let before = persistence.get_instance(&id).await.unwrap().unwrap();
+            record_unacknowledged_cancel_exit(&persistence, &id).await;
+            let after = persistence.get_instance(&id).await.unwrap().unwrap();
+            assert_eq!(after.status, status);
+            assert_eq!(after.output, before.output);
+            assert_eq!(after.error, before.error);
+            assert_eq!(after.finished_at, before.finished_at);
+            assert_eq!(after.termination_reason, before.termination_reason);
+            assert_eq!(after.exit_code, before.exit_code);
+            assert!(
+                persistence
+                    .get_pending_signal(&id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .acknowledged_at
+                    .is_none()
+            );
+        }
+    }
+
+    #[cfg(feature = "db-integration-tests")]
+    #[tokio::test]
+    async fn unacknowledged_cancel_exit_does_not_fabricate_a_guest_receipt() {
+        let (persistence, id) = backstop_fixture().await;
         persistence
-            .insert_signal(
-                instance_id.as_str(),
-                runtara_core::domain::SignalType::Cancel,
-                b"",
-            )
+            .insert_signal(&id, runtara_core::domain::SignalType::Cancel, b"")
             .await
             .unwrap();
-        persistence
-            .complete_instance(runtara_core::persistence::CompleteInstanceParams::new(
-                instance_id.as_str(),
-                CoreInstanceStatus::Completed,
-            ))
-            .await
-            .unwrap();
-
-        enforce_unacked_cancel(&persistence, instance_id.as_str()).await;
-
+        let command = persistence.get_pending_signal(&id).await.unwrap().unwrap();
+        record_unacknowledged_cancel_exit(&persistence, &id).await;
+        let after = persistence.get_instance(&id).await.unwrap().unwrap();
+        assert_eq!(after.status, CoreInstanceStatus::Cancelled);
+        assert_eq!(after.termination_reason.as_deref(), Some("aborted"));
+        assert!(after.finished_at.is_some());
+        let pending = persistence.get_pending_signal(&id).await.unwrap().unwrap();
+        assert_eq!(pending.command_id, command.command_id);
+        assert!(pending.acknowledged_at.is_none());
+        record_unacknowledged_cancel_exit(&persistence, &id).await;
         assert_eq!(
             persistence
-                .get_instance(instance_id.as_str())
+                .get_instance(&id)
                 .await
                 .unwrap()
                 .unwrap()
-                .status,
-            CoreInstanceStatus::Cancelled,
-            "cancel wins the exit race: a stop was requested and not honoured"
+                .finished_at,
+            after.finished_at
         );
     }
 
@@ -2615,7 +2625,7 @@ mod tests {
             .await
             .unwrap();
 
-        enforce_unacked_cancel(&persistence, instance_id.as_str()).await;
+        record_unacknowledged_cancel_exit(&persistence, instance_id.as_str()).await;
 
         assert_eq!(
             persistence
@@ -2642,7 +2652,7 @@ mod tests {
             .await
             .unwrap();
 
-        enforce_unacked_cancel(&persistence, instance_id.as_str()).await;
+        record_unacknowledged_cancel_exit(&persistence, instance_id.as_str()).await;
 
         assert_eq!(
             persistence

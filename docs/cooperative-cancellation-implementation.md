@@ -11,8 +11,9 @@ timeouts and the remaining plan gates are still incomplete.
 The public Stop path still calls `Runner::stop` immediately and ignores its
 accepted grace-period field. The emitted-wait proofs below exercise a delivered
 lifecycle Cancel signal; they do not yet qualify cooperative Stop through the
-public API. The existing post-run cancellation backstop can also overwrite a
-completed outcome. Grace/escalation and completion-race semantics remain P3 work.
+public API. Lifecycle acknowledgements and the post-run cancellation fallback now preserve
+accepted terminal outcomes. Public Stop/grace integration and remaining
+completion-race qualification are still P3 work.
 
 ## P0: initial ABI inventory
 
@@ -1214,3 +1215,59 @@ No database/server E2E, controlled performance or capacity qualification was run
 for this refactor. This stage does not close the public Stop/grace, nested
 workflow, CPU cooperation, deadline/E128, terminal-race, compatibility, controlled
 performance, capacity or superseded-path-removal gates in the governing plan.
+
+
+## Terminal cancellation races and aborted outcomes (2026-09-07)
+
+Before wiring the public Stop grace period, the shared lifecycle policy now
+rejects a new cancellation receipt once a terminal outcome has been accepted.
+The receipt identity and idempotency checks still run first: retrying an already
+accepted receipt returns its existing disposition without applying the transition
+again. A queued cancellation request alone does not undo completion. The existing
+atomic backend guards decide between a completion write and a cancellation
+acknowledgement; both cannot win.
+
+The runner's post-exit fallback no longer calls the guest acknowledgement handler.
+If a cancellation remains pending after the guest exits and the instance is still
+running, it records status `cancelled` with termination reason `aborted`. It leaves
+the command unacknowledged, so this cannot be mistaken for completed guest cleanup.
+A completed, failed, cancelled or parked outcome is preserved, including its
+output, error, completion timestamp and termination details.
+
+The older interrupted-Delay escalation path likewise sets the existing whole-run
+abort flag and advances the guest's epoch deadline without manufacturing a guest
+receipt. Once abort is selected, runtime-host completion/failure/suspension events
+are suppressed while the interrupt takes effect; normal terminal publication
+waits for the post-exit path. Ordinary cooperative signal handling remains in the
+guest, using the existing signal receipt. No workflow graph routing, child tasks,
+new cancellation transport or custom task registry is introduced.
+
+Forward migration `026_aborted_termination.sql` adds the `aborted` termination
+reason. The server's typed runtime parser and JSON representation recognize it.
+This changes no HTTP OpenAPI schema: the modified runtime type is not an OpenAPI
+response schema, and the existing generated HTTP client has no termination-reason
+field. The public Stop handler still needs to send the lifecycle cancellation,
+honor grace independently of guest cooperation, and stop writing an unconditional
+terminal cancellation. This change does not qualify that endpoint yet.
+
+Tests cover completed/failed/cancelled outcomes, requests arriving before and
+after completion, preserved result fields, repeated receipts, deterministic
+cancellation-first ordering and sixteen concurrent completion/acknowledgement
+races on both persistence backends. Database-backed runtime tests cover legacy
+escalation, suppression of terminal events after abort selection, accepted
+completion before abort, and post-exit classification without a receipt. An
+embedded-runner test stops a spinning WASM instance and checks the final `aborted`
+reason and still-unacknowledged command after the runner exits.
+
+Verification: all 79 Core tests passed, including the in-memory conformance
+sequence. The PostgreSQL conformance entry passed against a dedicated local test
+container, exercising the same sequence and lifecycle matrix. All 234
+database-backed Environment unit tests and five embedded-runner integration tests
+passed. The five server termination-reason tests passed, including the new JSON
+roundtrip. Feature-gated Clippy for Core, PostgreSQL, Environment and Server,
+workspace formatting and diff checks passed. The forward migration was applied
+to the isolated databases; no existing migration was edited.
+
+No public HTTP Stop E2E or performance/capacity run is claimed. Public Stop/grace,
+CPU cooperation, nested workflow cancellation, deadlines/E128 and the remaining
+plan gates stay open.

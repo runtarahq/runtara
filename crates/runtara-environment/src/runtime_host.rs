@@ -225,33 +225,25 @@ impl PersistenceRuntimeHost {
             "Guest resumed from an interrupted sleep without polling signals; \
              cancelling host-side (workflow artifact predates the Delay poll site)"
         );
-        // The ack is what writes terminal status `cancelled`, exactly as it
-        // would had the guest observed the signal itself. It runs BEFORE the
-        // guest is stopped, so the terminal status is durable even if the trap
-        // lands immediately.
-        let accepted = async {
-            let Some(signal) = self
-                .state
-                .persistence
-                .get_pending_signal(&self.instance_id)
-                .await
-                .map_err(Self::err)?
-            else {
-                return Ok(false);
-            };
-            if signal.signal_type != runtara_core::domain::SignalType::Cancel {
-                return Ok(false);
+        // This is emergency escalation, not a guest cleanup acknowledgement.
+        // Keep the receipt pending; the runner records an aborted outcome only
+        // after the guest exits. Recheck in case the command was already handled.
+        let pending = self
+            .state
+            .persistence
+            .get_pending_signal(&self.instance_id)
+            .await;
+        match pending {
+            Ok(Some(signal))
+                if signal.signal_type == runtara_core::domain::SignalType::Cancel
+                    && signal.acknowledged_at.is_none() =>
+            {
+                self.cancelled.store(true, Ordering::SeqCst)
             }
-            self.ack_signal(SignalType::SignalCancel, &signal.command_id)
-                .await
-        }
-        .await;
-        match accepted {
-            Ok(true) => self.cancelled.store(true, Ordering::SeqCst),
-            Ok(false) => return,
+            Ok(_) => return,
             Err(error) => {
                 self.sleep_interrupted.store(true, Ordering::SeqCst);
-                tracing::warn!(%error, "Failed to acknowledge interrupted sleep cancellation; will retry");
+                tracing::warn!(%error,"Failed to recheck interrupted sleep cancellation; will retry");
                 return;
             }
         }
@@ -310,6 +302,22 @@ impl PersistenceRuntimeHost {
         payload: Vec<u8>,
         subtype: Option<String>,
     ) -> Result<(), String> {
+        // An execution selected for full abort cannot publish a normal terminal
+        // result or park itself while its epoch interrupt is taking effect.
+        // Already accepted outcomes are also protected by Core's atomic guards.
+        if matches!(
+            event_type,
+            InstanceEventType::EventCompleted
+                | InstanceEventType::EventFailed
+                | InstanceEventType::EventSuspended
+        ) && (self.cancelled.load(Ordering::SeqCst)
+            || self
+                .cancel_token
+                .as_ref()
+                .is_some_and(|token| token.load(Ordering::SeqCst)))
+        {
+            return Ok(());
+        }
         handle_instance_event(
             &self.state,
             InstanceEvent {
@@ -1159,7 +1167,16 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .status,
-            CoreInstanceStatus::Cancelled
+            CoreInstanceStatus::Running
+        );
+        assert!(
+            p.get_pending_signal(&inst_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .acknowledged_at
+                .is_none(),
+            "host escalation cannot acknowledge guest cleanup"
         );
         assert!(
             cancel.load(Ordering::SeqCst),
@@ -1222,8 +1239,8 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .status,
-            CoreInstanceStatus::Cancelled,
-            "the terminal status must be durable before the guest is stopped"
+            CoreInstanceStatus::Running,
+            "terminal publication must wait until the guest has stopped"
         );
     }
 
@@ -1258,7 +1275,7 @@ mod tests {
     /// would never fire. The next call is `complete` — and it must not be
     /// allowed to report success for a cancelled run.
     #[tokio::test]
-    async fn single_delay_into_finish_is_cancelled_not_completed() {
+    async fn single_delay_into_finish_cannot_publish_completion_after_abort_selection() {
         let (p, _host, inst_id) = setup().await;
         let cancel: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
         let host = PersistenceRuntimeHost::from_persistence(Arc::clone(&p), inst_id.clone(), false)
@@ -1276,11 +1293,66 @@ mod tests {
         let inst = p.get_instance(inst_id.as_str()).await.unwrap().unwrap();
         assert_eq!(
             inst.status,
-            CoreInstanceStatus::Cancelled,
-            "a stopped run must not report success; got {:?}",
+            CoreInstanceStatus::Running,
+            "terminal publication waits until the guest exits; got {:?}",
             inst.status
         );
         assert!(cancel.load(Ordering::SeqCst));
+        assert!(inst.output.is_none());
+        assert!(
+            p.get_pending_signal(&inst_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .acknowledged_at
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn full_abort_selection_suppresses_terminal_and_park_events_until_exit() {
+        let (p, _, id) = setup().await;
+        let cancel = Arc::new(AtomicBool::new(true));
+        let host = PersistenceRuntimeHost::from_persistence(Arc::clone(&p), id.clone(), false)
+            .with_cancel_token(cancel);
+        host.complete(b"late output".to_vec()).await.unwrap();
+        host.fail(b"late error".to_vec()).await.unwrap();
+        host.breakpoint_pause().await.unwrap();
+        let instance = p.get_instance(&id).await.unwrap().unwrap();
+        assert_eq!(instance.status, CoreInstanceStatus::Running);
+        assert!(instance.output.is_none());
+        assert!(instance.error.is_none());
+        assert!(instance.finished_at.is_none());
+        let events = p
+            .list_events(
+                &id,
+                &runtara_core::persistence::ListEventsFilter::default(),
+                100,
+                0,
+            )
+            .await
+            .unwrap();
+        assert!(
+            events.is_empty(),
+            "an aborted guest cannot publish a misleading terminal timeline event"
+        );
+    }
+
+    #[tokio::test]
+    async fn completion_accepted_before_abort_selection_is_preserved() {
+        let (p, _, id) = setup().await;
+        let cancel = Arc::new(AtomicBool::new(false));
+        let host = PersistenceRuntimeHost::from_persistence(Arc::clone(&p), id.clone(), false)
+            .with_cancel_token(Arc::clone(&cancel));
+        host.complete(b"accepted output".to_vec()).await.unwrap();
+        let before = p.get_instance(&id).await.unwrap().unwrap();
+        cancel.store(true, Ordering::SeqCst);
+        host.fail(b"late error".to_vec()).await.unwrap();
+        let after = p.get_instance(&id).await.unwrap().unwrap();
+        assert_eq!(after.status, CoreInstanceStatus::Completed);
+        assert_eq!(after.output, before.output);
+        assert_eq!(after.error, before.error);
+        assert_eq!(after.finished_at, before.finished_at);
     }
 
     /// Coexistence: a freshly compiled artifact DOES poll after its sleep. The

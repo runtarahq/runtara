@@ -103,9 +103,9 @@ pub fn may_replace_command(stored: Option<Command<'_>>) -> bool {
     !stored.is_some_and(|command| command.kind == SignalType::Cancel && !command.acknowledged)
 }
 
-/// Validate a receipt and decide its durable effects. For compatibility a
-/// matching cancellation can override completed/failed status, including when
-/// the runner discovers an unhandled cancel after execution exits.
+/// Validate a receipt and decide its durable effects. An accepted terminal
+/// outcome wins over a later receipt, including cancellation. Retrying an
+/// already-applied receipt remains idempotent without changing that outcome.
 pub fn acknowledge(
     status: InstanceStatus,
     stored: Option<Command<'_>>,
@@ -120,7 +120,7 @@ pub fn acknowledge(
     if command.acknowledged {
         return Decision::AlreadyApplied;
     }
-    if status.is_terminal() && command.kind != SignalType::Cancel {
+    if status.is_terminal() {
         return Decision::Rejected;
     }
     let mut effects = Transition {
@@ -287,7 +287,7 @@ mod tests {
                     status,
                     InstanceStatus::Completed | InstanceStatus::Failed | InstanceStatus::Cancelled
                 );
-                if terminal && kind != SignalType::Cancel {
+                if terminal {
                     assert_eq!(decision, Decision::Rejected);
                     continue;
                 }
