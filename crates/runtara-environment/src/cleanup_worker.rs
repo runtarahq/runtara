@@ -54,8 +54,8 @@ impl CleanupWorkerConfig {
     /// - `RUNTARA_RUN_DIR_CLEANUP_POLL_INTERVAL_SECS`: seconds between scans (default: 3600)
     /// - `RUNTARA_RUN_DIR_CLEANUP_MAX_AGE_DAYS`: days before run dirs are removed (default: 3)
     ///
-    /// The two numbers follow [`positive`](crate::config::positive): zero and
-    /// below fall back to the default rather than being honoured.
+    /// The two numbers follow the crate's positive-only rule: zero and below
+    /// fall back to the default rather than being honoured.
     pub fn from_env() -> Self {
         Self::from_vars(&ProcessEnv)
     }

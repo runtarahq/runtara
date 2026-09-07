@@ -129,9 +129,23 @@
 //!
 //! Background workers: the `RUNTARA_{RUN_DIR,DB,IMAGE}_CLEANUP_*` families,
 //! `RUNTARA_EVENT_DEBUG_RETENTION_HOURS`, `RUNTARA_AUTO_RECOVER` and
-//! `RUNTARA_MAX_AUTO_RESTARTS`. Every `*_ENABLED` switch and
-//! `RUNTARA_AUTO_RECOVER` share `crate::config::parse_enabled`, so
-//! all of them answer to `false`/`0`/`no`/`off`/`disabled` and default to on.
+//! `RUNTARA_MAX_AUTO_RESTARTS`.
+//!
+//! Two rules cover all of the above, and both live in [`config`]. Every
+//! `*_ENABLED` switch and `RUNTARA_AUTO_RECOVER` go through
+//! [`config::parse_enabled`], so all of them answer to
+//! `false`/`0`/`no`/`off`/`disabled` and default to on. Every interval, batch
+//! size, age, timeout and concurrency goes through the positive-only rule, so a
+//! value that is zero, negative or unparseable leaves the documented default in
+//! place instead of being obeyed — see `config::positive_or_default` for why
+//! obeying a zero is the worse of the two.
+//!
+//! `RUNTARA_EVENT_DEBUG_RETENTION_HOURS` is the deliberate exception: zero
+//! means "do not sweep" there, and it says so.
+//!
+//! Nothing outside `config::ProcessEnv` reads the process environment. That is
+//! what lets a `from_env` constructor be tested against supplied values rather
+//! than against global state every other test in the binary shares.
 //!
 //! # Modules
 //!

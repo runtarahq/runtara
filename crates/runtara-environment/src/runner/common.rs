@@ -12,6 +12,8 @@ use std::time::Duration;
 
 use tokio::fs;
 
+use crate::config::{ProcessEnv, Vars, positive};
+
 /// How much of a stderr preview is kept for diagnostics.
 const STDERR_PREVIEW_CHARS: usize = 2000;
 
@@ -61,9 +63,22 @@ impl WorkflowRunnerConfig {
     /// - `EXECUTION_TIMEOUT_SECS`: default execution timeout in seconds (default: 300).
     /// - `RUNTARA_SKIP_CERT_VERIFICATION`: skip TLS cert verification (default: false).
     /// - `RUNTARA_CONNECTION_SERVICE_URL`: connection service URL (optional).
+    ///
+    /// The timeout follows the crate's positive-only rule: a value that is
+    /// zero, negative or unparseable leaves the default in place, because a zero
+    /// would time out every execution the moment it started.
     pub fn from_env() -> Self {
+        Self::from_vars(&ProcessEnv)
+    }
+
+    /// [`Self::from_env`] against a supplied set of values.
+    ///
+    /// The working directory is not one of them. A relative `DATA_DIR` is
+    /// resolved against the real process cwd here, because that is what the
+    /// guests this config launches will themselves see.
+    pub(crate) fn from_vars(vars: &dyn Vars) -> Self {
         let data_dir_raw =
-            PathBuf::from(std::env::var("DATA_DIR").unwrap_or_else(|_| ".data".to_string()));
+            PathBuf::from(vars.get("DATA_DIR").unwrap_or_else(|| ".data".to_string()));
         let data_dir = if data_dir_raw.is_absolute() {
             data_dir_raw
         } else {
@@ -74,23 +89,18 @@ impl WorkflowRunnerConfig {
 
         Self {
             data_dir,
-            default_timeout: Duration::from_secs(
-                std::env::var("EXECUTION_TIMEOUT_SECS")
-                    .ok()
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(300),
-            ),
-            skip_cert_verification: std::env::var("RUNTARA_SKIP_CERT_VERIFICATION")
-                .ok()
+            default_timeout: Duration::from_secs(positive(vars, "EXECUTION_TIMEOUT_SECS", 300)),
+            skip_cert_verification: vars
+                .get("RUNTARA_SKIP_CERT_VERIFICATION")
                 .map(|v| parse_bool_lenient(&v))
                 .unwrap_or(false),
             // `RUNTARA_CONNECTION_SERVICE_URL` is the runner's own setting and
             // wins; `CONNECTION_SERVICE_URL` is the general name the rest of the
             // stack uses, accepted as a fallback so a deployment that sets only
             // that one still points guests at the right host.
-            connection_service_url: std::env::var("RUNTARA_CONNECTION_SERVICE_URL")
-                .or_else(|_| std::env::var("CONNECTION_SERVICE_URL"))
-                .ok(),
+            connection_service_url: vars
+                .get("RUNTARA_CONNECTION_SERVICE_URL")
+                .or_else(|| vars.get("CONNECTION_SERVICE_URL")),
         }
     }
 }
@@ -131,7 +141,7 @@ pub(crate) fn build_env(
     }
 
     // Forward SDK backend selection if set in the host environment.
-    if let Ok(backend) = std::env::var("RUNTARA_SDK_BACKEND") {
+    if let Some(backend) = ProcessEnv.get("RUNTARA_SDK_BACKEND") {
         env.insert("RUNTARA_SDK_BACKEND".to_string(), backend);
     }
 
@@ -272,5 +282,71 @@ mod tests {
 
         let env_without_core = build_env(&config(), "instance-1", "tenant-1", None, None);
         assert!(!env_without_core.contains_key("RUNTARA_HTTP_URL"));
+    }
+
+    /// The runner-specific connection URL wins, and the general one is the
+    /// fallback — documented behaviour that nothing exercised.
+    #[test]
+    fn the_runner_specific_connection_url_wins() {
+        use crate::config::FixedVars;
+
+        let both = WorkflowRunnerConfig::from_vars(&FixedVars::new([
+            ("RUNTARA_CONNECTION_SERVICE_URL", "http://runner"),
+            ("CONNECTION_SERVICE_URL", "http://general"),
+        ]));
+        assert_eq!(
+            both.connection_service_url.as_deref(),
+            Some("http://runner")
+        );
+
+        let general = WorkflowRunnerConfig::from_vars(&FixedVars::new([(
+            "CONNECTION_SERVICE_URL",
+            "http://general",
+        )]));
+        assert_eq!(
+            general.connection_service_url.as_deref(),
+            Some("http://general")
+        );
+
+        let neither = WorkflowRunnerConfig::from_vars(&FixedVars::empty());
+        assert!(neither.connection_service_url.is_none());
+    }
+
+    /// A zero timeout would expire every execution at the instant it started,
+    /// which is indistinguishable from the runner being broken.
+    #[test]
+    fn the_execution_timeout_refuses_a_zero() {
+        use crate::config::FixedVars;
+
+        for value in ["0", "-1", "", "soon"] {
+            let config = WorkflowRunnerConfig::from_vars(&FixedVars::new([(
+                "EXECUTION_TIMEOUT_SECS",
+                value,
+            )]));
+            assert_eq!(
+                config.default_timeout,
+                Duration::from_secs(300),
+                "{value:?}"
+            );
+        }
+
+        let set =
+            WorkflowRunnerConfig::from_vars(&FixedVars::new([("EXECUTION_TIMEOUT_SECS", "45")]));
+        assert_eq!(set.default_timeout, Duration::from_secs(45));
+    }
+
+    /// An absolute DATA_DIR is taken as given; a relative one is resolved
+    /// against the process working directory the guests will also see.
+    #[test]
+    fn an_absolute_data_dir_is_left_alone() {
+        use crate::config::FixedVars;
+
+        let absolute =
+            WorkflowRunnerConfig::from_vars(&FixedVars::new([("DATA_DIR", "/srv/runtara-data")]));
+        assert_eq!(absolute.data_dir, PathBuf::from("/srv/runtara-data"));
+
+        let relative = WorkflowRunnerConfig::from_vars(&FixedVars::new([("DATA_DIR", "state")]));
+        assert!(relative.data_dir.is_absolute());
+        assert!(relative.data_dir.ends_with("state"));
     }
 }

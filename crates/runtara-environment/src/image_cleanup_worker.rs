@@ -71,8 +71,8 @@ impl ImageCleanupWorkerConfig {
     /// - `RUNTARA_IMAGE_CLEANUP_MAX_AGE_DAYS`: days before stale images are deleted (default: 3)
     /// - `RUNTARA_IMAGE_CLEANUP_BATCH_SIZE`: max images per cycle (default: 50)
     ///
-    /// The three numbers follow [`positive`](crate::config::positive): zero and
-    /// below fall back to the default rather than being honoured.
+    /// The three numbers follow the crate's positive-only rule: zero and below
+    /// fall back to the default rather than being honoured.
     pub fn from_env() -> Self {
         Self::from_vars(&ProcessEnv)
     }
