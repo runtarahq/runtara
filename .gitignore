@@ -70,6 +70,14 @@ api-tests/.venv/
 .data/
 **/.data/
 
+# The same directory under a suffix. An isolated second server needs its own
+# DATA_DIR to avoid colliding with the running one, and the recipe for that
+# names it after whatever is being tested (.data-e2e, .data-perf). Those hold
+# compiled workflow artifacts and a wasmtime cache — megabytes of build output
+# that a `git add -A` would otherwise sweep straight into a commit.
+.data-*/
+**/.data-*/
+
 # Generated changelog (created during CI builds)
 debian/changelog
 
