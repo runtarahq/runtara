@@ -11096,7 +11096,7 @@ fn abi_is_part_of_the_lowering_tag() {
     );
     assert!(tag.contains("parent-cancel=v1"));
     assert!(tag.contains("loop-cooperation=v1"));
-    assert!(tag.contains("retry-cooperation=v2"));
+    assert!(tag.contains("retry-cooperation=v3"));
     assert!(
         tag.contains("durable-delay-parking=v1"),
         "the tag must retire cached artifacts whose short durable delays could block: {tag}"
@@ -11181,4 +11181,55 @@ fn cooperative_helpers_bound_per_step_code_growth() {
         .unwrap()
         .join()
         .unwrap();
+}
+
+#[test]
+fn split_timeout_keeps_required_runtime_import_in_both_invoke_abis() {
+    use super::super::component::WorkflowAbi;
+    for abi in [
+        WorkflowAbi::InvokeHostImports,
+        WorkflowAbi::AgentCapabilities,
+    ] {
+        for timeout in [0, 1_000] {
+            let dir = tempfile::tempdir().unwrap();
+            let graph = serde_json::from_value(serde_json::json!({
+                "durable": false, "entryPoint": "scope", "steps": {
+                    "scope": {"id": "scope", "stepType": "Split", "config": {
+                        "value": {"valueType": "immediate", "value": [1]}, "timeout": timeout
+                    }, "subgraph": {"entryPoint": "finish", "steps": {
+                        "finish": {"id": "finish", "stepType": "Finish"}}, "executionPlan": []}},
+                    "finish": {"id": "finish", "stepType": "Finish"}
+                }, "executionPlan": [{"fromStep": "scope", "toStep": "finish"}]
+            }))
+            .unwrap();
+            // The lower-level callable compiler retains legacy runtime-using
+            // exports; the publication safety report is a separate boundary.
+            let compiled = compile_direct_workflow_with_abi(
+                DirectCompilationInput {
+                    workflow_id: "split-timeout-runtime".into(),
+                    version: 1,
+                    source_checksum: None,
+                    execution_graph: graph,
+                    child_workflows: vec![],
+                    output_dir: dir.path().into(),
+                    track_events: false,
+                    agent_catalog: None,
+                    agent_slug: None,
+                },
+                abi,
+                true,
+            )
+            .unwrap();
+            assert!(!compiled.omit_runtime, "{abi:?}, timeout={timeout}");
+            assert!(
+                compiled
+                    .component_artifacts
+                    .world_wit
+                    .contains("workflow-runtime/runtime")
+            );
+            Validator::new_with_features(wasmparser::WasmFeatures::all())
+                .validate_all(&fs::read(compiled.wasm_path).unwrap())
+                .unwrap();
+        }
+    }
 }

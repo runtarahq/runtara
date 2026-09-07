@@ -55,7 +55,7 @@ pub struct DirectWorkflowSupportReport {
 }
 
 /// Static proof that a workflow is safe to publish through the workflow-agent
-/// capability ABI. Guest-local cancellable I/O and non-durable Agent backoff
+/// capability ABI. Guest-local cancellable I/O and non-durable Agent/Split backoff
 /// can remain inside the invocation. Durable suspension and lifecycle ownership
 /// still cannot be delegated to a child through this result type.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -99,14 +99,14 @@ pub fn analyze_workflow_agent_safety(
     let children = DirectSupportChildWorkflows::from_child_workflows(child_workflows);
     let mut violations = Vec::new();
     let mut child_stack = Vec::new();
-    let agent_waits_supported = !analyze_workflow_features(graph).needs_agent_runtime(false);
+    let cooperative_waits_supported = !analyze_workflow_features(graph).needs_agent_runtime(false);
     collect_workflow_agent_safety(
         graph,
         "root",
         &children,
         &mut child_stack,
         &mut violations,
-        agent_waits_supported,
+        cooperative_waits_supported,
     );
     violations.sort_by(|left, right| {
         (
@@ -133,7 +133,7 @@ fn collect_workflow_agent_safety(
     child_workflows: &DirectSupportChildWorkflows<'_>,
     child_stack: &mut Vec<String>,
     violations: &mut Vec<WorkflowAgentSafetyViolation>,
-    agent_waits_supported: bool,
+    cooperative_waits_supported: bool,
 ) {
     // ExecutionGraph.steps is a HashMap. Sorting on its authored key makes
     // diagnostics stable across process hash seeds and therefore suitable for
@@ -149,7 +149,7 @@ fn collect_workflow_agent_safety(
             child_workflows,
             child_stack,
             violations,
-            agent_waits_supported,
+            cooperative_waits_supported,
         );
     }
 }
@@ -160,7 +160,7 @@ fn collect_workflow_agent_step_safety(
     child_workflows: &DirectSupportChildWorkflows<'_>,
     child_stack: &mut Vec<String>,
     violations: &mut Vec<WorkflowAgentSafetyViolation>,
-    agent_waits_supported: bool,
+    cooperative_waits_supported: bool,
 ) {
     if step_has_breakpoint(step) {
         push_workflow_agent_safety_violation(
@@ -195,13 +195,13 @@ fn collect_workflow_agent_step_safety(
                     child_workflows,
                     child_stack,
                     violations,
-                    agent_waits_supported,
+                    cooperative_waits_supported,
                 );
             }
         }
         // Only workflows with no root runtime ownership can keep non-durable
         // retry/rate-limit waits local and unwind them on parent cancellation.
-        Step::Agent(_) if agent_waits_supported => {}
+        Step::Agent(_) if cooperative_waits_supported => {}
         Step::Agent(_) => push_workflow_agent_safety_violation(
             violations,
             path,
@@ -225,13 +225,14 @@ fn collect_workflow_agent_step_safety(
                 .and_then(|config| config.max_retries)
                 .unwrap_or(0)
                 > 0
+                && !cooperative_waits_supported
             {
                 push_workflow_agent_safety_violation(
                     violations,
                     path,
                     step,
                     "retry-backoff",
-                    "Split retries can sleep between attempts; run this workflow as a top-level workflow or remove the retry policy before publishing it as an agent",
+                    "Split backoff is callable only in a non-durable workflow without root runtime operations; remove durable, logging, suspension, timeout and breakpoint paths before publishing",
                 );
             }
             collect_workflow_agent_safety(
@@ -240,7 +241,7 @@ fn collect_workflow_agent_step_safety(
                 child_workflows,
                 child_stack,
                 violations,
-                agent_waits_supported,
+                cooperative_waits_supported,
             );
         }
         Step::While(while_step) => collect_workflow_agent_safety(
@@ -249,7 +250,7 @@ fn collect_workflow_agent_step_safety(
             child_workflows,
             child_stack,
             violations,
-            agent_waits_supported,
+            cooperative_waits_supported,
         ),
         Step::EmbedWorkflow(embed) => {
             if embed.max_retries.unwrap_or(3) > 0 {
@@ -301,7 +302,7 @@ fn collect_workflow_agent_step_safety(
                 child_workflows,
                 child_stack,
                 violations,
-                agent_waits_supported,
+                cooperative_waits_supported,
             );
             child_stack.pop();
         }
@@ -2152,6 +2153,91 @@ mod tests {
                 .unwrap(),
             );
             assert!(analyze_workflow_agent_safety(&graph, &[]).may_suspend_or_sleep);
+        }
+    }
+
+    #[test]
+    fn workflow_agent_safety_accepts_split_backoff_only_without_root_runtime_ownership() {
+        let base = serde_json::json!({
+            "durable": false, "entryPoint": "scope", "steps": {
+                "scope": {"id": "scope", "stepType": "Split", "config": {
+                    "value": {"valueType": "immediate", "value": [1, 2]},
+                    "maxRetries": 2, "retryDelay": 1000, "parallelism": 2
+                }, "subgraph": {"entryPoint": "call", "steps": {
+                    "call": {"id": "call", "stepType": "Agent", "agentId": "http",
+                        "capabilityId": "http-request", "maxRetries": 0},
+                    "finish": {"id": "finish", "stepType": "Finish"}
+                }, "executionPlan": [{"fromStep": "call", "toStep": "finish"}]}},
+                "finish": {"id": "finish", "stepType": "Finish"}
+            }, "executionPlan": [{"fromStep": "scope", "toStep": "finish"}]
+        });
+        for sequential in [false, true] {
+            let mut value = base.clone();
+            value["steps"]["scope"]["config"]["sequential"] = sequential.into();
+            let graph: ExecutionGraph = serde_json::from_value(value).unwrap();
+            assert!(!analyze_workflow_agent_safety(&graph, &[]).may_suspend_or_sleep);
+            assert!(!analyze_workflow_features(&graph).needs_agent_runtime(false));
+        }
+        // The full declared closure matters, including otherwise unreachable
+        // recovery steps. A wait must not acquire the parent's lifecycle runtime.
+        for case in [
+            "durable-root",
+            "durable-child",
+            "root-log",
+            "child-log",
+            "child-error",
+            "child-wait",
+            "split-timeout",
+            "nested-split-timeout",
+            "breakpoint",
+        ] {
+            let mut value = base.clone();
+            match case {
+                "durable-root" => value["durable"] = true.into(),
+                "durable-child" => value["steps"]["scope"]["subgraph"]["durable"] = true.into(),
+                "root-log" => {
+                    value["steps"]["extra"] = serde_json::json!({
+                    "id": "extra", "stepType": "Log", "message": "fixture"})
+                }
+                "child-log" => {
+                    value["steps"]["scope"]["subgraph"]["steps"]["extra"] = serde_json::json!({
+                    "id": "extra", "stepType": "Log", "message": "fixture"})
+                }
+                "child-error" => {
+                    value["steps"]["scope"]["subgraph"]["steps"]["extra"] = serde_json::json!({
+                    "id": "extra", "stepType": "Error", "code": "FIXTURE",
+                    "category": "transient", "severity": "error", "message": "fixture"})
+                }
+                "child-wait" => {
+                    value["steps"]["scope"]["subgraph"]["steps"]["extra"] = serde_json::json!({
+                    "id": "extra", "stepType": "WaitForSignal"})
+                }
+                "split-timeout" => value["steps"]["scope"]["config"]["timeout"] = 1000.into(),
+                "nested-split-timeout" => {
+                    value["steps"]["scope"]["subgraph"]["steps"]["extra"] = serde_json::json!({
+                    "id": "extra", "stepType": "Split", "config": {
+                        "timeout": 1000, "value": {"valueType": "immediate", "value": []}},
+                    "subgraph": {"entryPoint": "finish", "steps": {
+                        "finish": {"id": "finish", "stepType": "Finish"}}, "executionPlan": []}})
+                }
+                "breakpoint" => {
+                    value["steps"]["scope"]["subgraph"]["steps"]["finish"]["breakpoint"] =
+                        true.into()
+                }
+                _ => unreachable!(),
+            }
+            let graph: ExecutionGraph = serde_json::from_value(value).unwrap();
+            let features = analyze_workflow_features(&graph);
+            assert!(features.needs_agent_runtime(false), "{case}: {features:?}");
+            let report = analyze_workflow_agent_safety(&graph, &[]);
+            assert!(
+                report
+                    .violations
+                    .iter()
+                    .any(|violation| violation.path == "root/steps/scope"
+                        && violation.feature == "retry-backoff"),
+                "{case}: {report:?}"
+            );
         }
     }
 

@@ -204,16 +204,16 @@ families.push(...[
   "category": "Timer-only workflow",
   "risk": "Fixed",
   "summary": "Non-durable composite retries share the Agent timer wait, including graphs without any Agent imports.",
-  "boundary": "Structured child errors can enter cooperative Embed/Split backoff. Nested While and preloaded children are covered. Zero retries adds no timer import; durable retries still park.",
+  "boundary": "Structured child errors can enter cooperative Embed/Split backoff. Non-durable Split retries can also be published in a closure without root runtime requirements. Requested parallelism retains sequential fallback for Split retries; Embed retry publication remains gated. Zero retries adds no timer import; durable retries still park.",
   "why": "Composite backoff blocked, and canonical wait helpers were provisioned only for Agent graphs. Timer requirements could also disappear when composition regenerated world.wit.",
   "fixTitle": "Derive imports from the graph",
   "fixSteps": [
    "Read retry requirements from the manifest, including nested and preloaded child graphs.",
    "Provision canonical wait helpers for timer-only graphs and reuse the single timer-wait helper.",
-   "Preserve timer requirements in returned and on-disk WIT. Keep publication gates and durable parking until their own qualification completes."
+   "Preserve timer requirements in returned and on-disk WIT. Permit published Split retries only after checking the whole closure for runtime requirements, including nested timeouts. Keep Embed publication gates and durable parking."
   ],
   "pseudo": "needs_timer = Agent call OR non_durable_composite_retry\nmanifest closure → imports + shared wait helpers\nAgent / Embed / Split → same timer wait\nzero retries → no extra timer import",
-  "evidence": "Twelve Agent-free cases cover cancellation, exhaustion/recovery, zero delay/retries and nested placement. These fixes do not repair the formatted Agent errors described in AUDIT-12.",
+  "evidence": "Twelve Agent-free cases cover cancellation, exhaustion/recovery, zero delay/retries and nested placement. Nine additional published Split cases cover parent cancellation, success, recovery and sequential fallback through two workflow agents; see the implementation record. These fixes do not repair the formatted Agent errors described in AUDIT-12.",
   "tests": [
    "+agent_free_embed_backoff_cancels_without_recovery",
    "+agent_free_split_backoff_cancels_without_recovery",

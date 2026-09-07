@@ -1,5 +1,12 @@
 use super::*;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RetryScope {
+    Embed,
+    Split,
+    SplitWithParallelism,
+}
+
 /// Exercise real HTTP errors and guest-local backoff through two published
 /// workflow agents. No child runtime import can service the wait or consume the
 /// root signal. Ordinary and rate-limited retries use different budgets.
@@ -28,7 +35,7 @@ async fn run_retry_in_scope(
     retries: u32,
     http_error: u16,
     depth: usize,
-    composite_split: Option<bool>,
+    composite_scope: Option<RetryScope>,
 ) -> anyhow::Result<()> {
     let host = Arc::new(Host {
         inner: PersistingRuntimeHost::new(b"{}"),
@@ -45,6 +52,11 @@ async fn run_retry_in_scope(
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let url = format!("http://{}", listener.local_addr()?);
     let delay = if cancel { 60_000 } else { 50 };
+    let items = if composite_scope == Some(RetryScope::SplitWithParallelism) {
+        2
+    } else {
+        1
+    };
     let mut graph = serde_json::json!({
         "durable": false, "entryPoint": "fetch", "steps": {
             "fetch": {"id":"fetch", "stepType":"Agent", "agentId":"http",
@@ -75,8 +87,12 @@ async fn run_retry_in_scope(
         });
     }
     let mut children = vec![];
-    if let Some(split) = composite_split {
-        assert_eq!(depth, 0);
+    if let Some(scope) = composite_scope {
+        let split = scope != RetryScope::Embed;
+        assert!(
+            split || depth == 0,
+            "published Embed closure is not qualified"
+        );
         // The HTTP/Slack capability itself never retries. Its error reaches
         // the enclosing scope, which owns the wait and whole-child retry.
         graph["steps"]["fetch"]["maxRetries"] = 0.into();
@@ -87,7 +103,8 @@ async fn run_retry_in_scope(
         graph["steps"].as_object_mut().unwrap().remove("handled");
         let step = if split {
             serde_json::json!({"id":"scope","stepType":"Split","config":{
-                "value":{"valueType":"immediate","value":[1]},"sequential":true,
+                "value":{"valueType":"immediate","value":(0..items).collect::<Vec<_>>()},
+                "sequential":items == 1,"parallelism":2,"dontStopOnFailed":false,
                 "maxRetries":retries,"retryDelay":delay},"subgraph":graph})
         } else {
             children.push(runtara_workflows::ChildWorkflowInput {
@@ -230,7 +247,7 @@ async fn run_retry_in_scope(
                 b"{}".to_vec(),
             )
             .await;
-        if composite_split == Some(false) {
+        if composite_scope == Some(RetryScope::Embed) {
             // Existing error-contract gap, also reproduced with the original
             // blocking backoff: Agent errors are formatted text, but Embed
             // expects JSON. It fails before entering its retry wait.
@@ -279,7 +296,7 @@ async fn run_retry_in_scope(
             };
             // Split sees the formatted Agent error as an unclassified string;
             // unlike direct Agent retries it loses rate-limit classification.
-            let recognized_rate_limit = rate_limited && composite_split.is_none();
+            let recognized_rate_limit = rate_limited && composite_scope.is_none();
             let succeeds = retries > 0 && (recognized_rate_limit || retries >= 2);
             let attempts = if succeeds { 3 } else { retries + 1 };
             let mut expected = if succeeds {
@@ -292,12 +309,23 @@ async fn run_retry_in_scope(
             }
             anyhow::ensure!(
                 serde_json::from_slice::<Value>(&output)? == expected,
-                "retry success output changed or recovery ran"
+                "retry success output changed: {:?}; expected {expected}",
+                String::from_utf8_lossy(&output)
             );
             anyhow::ensure!(!host.acknowledged.load(Ordering::SeqCst));
+            // Split-level retries preserve the existing sequential fallback,
+            // even when parallelism is requested: each failed attempt stops at
+            // its first item; the successful attempt visits all remaining items.
+            let expected_requests = if succeeds {
+                2 + items
+            } else {
+                attempts as usize
+            };
             anyhow::ensure!(
-                host.requests.load(Ordering::SeqCst) == attempts as usize,
-                "retry/rate-limit attempt count changed"
+                host.requests.load(Ordering::SeqCst) == expected_requests,
+                "retry/rate-limit attempt count changed: {}; expected {}",
+                host.requests.load(Ordering::SeqCst),
+                expected_requests
             );
             if retries > 0 {
                 anyhow::ensure!(
@@ -307,6 +335,14 @@ async fn run_retry_in_scope(
             }
         }
         anyhow::ensure!(host.inner.failed.lock().unwrap().is_none());
+        anyhow::ensure!(
+            host.inner.checkpoint_writes.lock().unwrap().is_empty(),
+            "non-durable retry wrote a checkpoint"
+        );
+        anyhow::ensure!(
+            host.inner.sleep_ids.lock().unwrap().is_empty(),
+            "callable backoff used durable runtime sleep"
+        );
         anyhow::Ok(())
     }
     .await;
@@ -385,33 +421,105 @@ async fn root_retry_http_429_uses_ordinary_retry_count() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn embed_agent_http_error_fails_before_cancellation_backoff() -> anyhow::Result<()> {
-    run_retry_in_scope(true, false, 2, 503, 0, Some(false)).await
+    run_retry_in_scope(true, false, 2, 503, 0, Some(RetryScope::Embed)).await
 }
 #[tokio::test]
 async fn split_retry_after_http_error_cancels() -> anyhow::Result<()> {
-    run_retry_in_scope(true, false, 2, 503, 0, Some(true)).await
+    run_retry_in_scope(true, false, 2, 503, 0, Some(RetryScope::Split)).await
 }
 #[tokio::test]
 async fn embed_agent_http_error_preserves_existing_parse_failure() -> anyhow::Result<()> {
-    run_retry_in_scope(false, false, 2, 503, 0, Some(false)).await
+    run_retry_in_scope(false, false, 2, 503, 0, Some(RetryScope::Embed)).await
 }
 #[tokio::test]
 async fn split_retry_after_http_errors_preserves_success() -> anyhow::Result<()> {
-    run_retry_in_scope(false, false, 2, 503, 0, Some(true)).await
+    run_retry_in_scope(false, false, 2, 503, 0, Some(RetryScope::Split)).await
 }
 #[tokio::test]
 async fn embed_agent_rate_limit_error_fails_before_cancellation_backoff() -> anyhow::Result<()> {
-    run_retry_in_scope(true, true, 1, 429, 0, Some(false)).await
+    run_retry_in_scope(true, true, 1, 429, 0, Some(RetryScope::Embed)).await
 }
 #[tokio::test]
 async fn split_retry_after_rate_limit_error_cancels() -> anyhow::Result<()> {
-    run_retry_in_scope(true, true, 1, 429, 0, Some(true)).await
+    run_retry_in_scope(true, true, 1, 429, 0, Some(RetryScope::Split)).await
 }
 #[tokio::test]
 async fn embed_agent_rate_limit_error_preserves_existing_parse_failure() -> anyhow::Result<()> {
-    run_retry_in_scope(false, true, 1, 429, 0, Some(false)).await
+    run_retry_in_scope(false, true, 1, 429, 0, Some(RetryScope::Embed)).await
 }
 #[tokio::test]
 async fn split_agent_rate_limit_error_uses_ordinary_retry_budget() -> anyhow::Result<()> {
-    run_retry_in_scope(false, true, 1, 429, 0, Some(true)).await
+    run_retry_in_scope(false, true, 1, 429, 0, Some(RetryScope::Split)).await
+}
+
+#[tokio::test]
+async fn published_split_retry_after_http_error_cancels() -> anyhow::Result<()> {
+    run_retry_in_scope(true, false, 2, 503, 2, Some(RetryScope::Split)).await
+}
+
+#[tokio::test]
+async fn published_split_retry_after_rate_limit_error_cancels() -> anyhow::Result<()> {
+    run_retry_in_scope(true, true, 1, 429, 2, Some(RetryScope::Split)).await
+}
+
+#[tokio::test]
+async fn published_split_retry_after_http_errors_preserves_success() -> anyhow::Result<()> {
+    run_retry_in_scope(false, false, 2, 503, 2, Some(RetryScope::Split)).await
+}
+
+#[tokio::test]
+async fn published_split_retry_preserves_rate_limit_classification_gap() -> anyhow::Result<()> {
+    run_retry_in_scope(false, true, 1, 429, 2, Some(RetryScope::Split)).await
+}
+
+#[tokio::test]
+async fn published_split_retry_zero_retries_recovers_immediately() -> anyhow::Result<()> {
+    run_retry_in_scope(false, false, 0, 503, 2, Some(RetryScope::Split)).await
+}
+
+#[tokio::test]
+async fn published_split_retry_http_429_preserves_ordinary_budget() -> anyhow::Result<()> {
+    run_retry_in_scope(false, false, 1, 429, 2, Some(RetryScope::Split)).await
+}
+
+#[tokio::test]
+async fn published_split_retry_requested_parallelism_cancels_during_fallback_backoff()
+-> anyhow::Result<()> {
+    run_retry_in_scope(
+        true,
+        false,
+        2,
+        503,
+        2,
+        Some(RetryScope::SplitWithParallelism),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn published_split_retry_requested_parallelism_preserves_sequential_fallback_success()
+-> anyhow::Result<()> {
+    run_retry_in_scope(
+        false,
+        false,
+        2,
+        503,
+        2,
+        Some(RetryScope::SplitWithParallelism),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn published_split_retry_requested_parallelism_preserves_sequential_fallback_recovery()
+-> anyhow::Result<()> {
+    run_retry_in_scope(
+        false,
+        false,
+        1,
+        503,
+        2,
+        Some(RetryScope::SplitWithParallelism),
+    )
+    .await
 }

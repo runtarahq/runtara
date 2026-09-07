@@ -1705,3 +1705,65 @@ test names. A headless Chromium pass exercised every route and next/reset
 controls without script errors; desktop and 390-pixel mobile renders were
 inspected, with no page-level horizontal overflow. These are illustrative traces,
 not an in-browser WASM runtime or new performance measurements.
+
+## Published Split retry cooperation (2026-09-07)
+
+The workflow-agent publication check now permits non-durable Split retry waits
+when the complete declared graph has no root runtime requirements. It uses the
+same feature analysis and safety walk as callable Agent backoff. This deliberately
+extends the previous publication acceptance boundary; it adds no authored flag,
+annotation, host task registry or alternate execution backend. Embed retry
+publication remains gated.
+
+The existing shared canonical timer wait already handles parent cancellation.
+Tests compose a retrying Split inside two published workflow agents and a root
+workflow. Each published component must omit the lifecycle runtime import and
+have no isolated invocation manifest or scoped-agent catalog. Cancellation after
+the first HTTP/Slack error interrupts the 60-second backoff within the five-second
+execution watchdog, acknowledges at the root and starts no further request or
+recovery. The fixture schedules cancellation 250 ms after the response; it does
+not instrument the timer-entry instant or establish a latency distribution.
+
+Nine new emitted execution cases cover cancellation, successful ordinary retries,
+exhaustion/recovery, zero retries, HTTP 429 and the existing loss of Slack
+rate-limit classification across a Split boundary. Three also request parallelism
+with two items. Split-level retries have an existing sequential fallback: each
+failed attempt stops at its first failing item, and a successful attempt visits
+both items. The tests assert that no parallel Agent pool is composed and preserve
+these request counts. They do **not** demonstrate concurrent Split retries. A
+barrier fixture requiring simultaneous requests could not complete, consistently
+with the documented eligibility rule in `compile/split_parallel.rs`; it is not
+kept as a purported cancellation test.
+
+Qualifying the gate exposed a missing feature-analysis case: Split timeout
+configuration was not recorded as `WorkflowFeature::Timeout`. It is now included,
+including nested Splits, so callable retry checks cannot mistake those graphs for
+runtime-free closures. The lowering tag advances to `retry-cooperation=v3` to
+invalidate future compilation cache entries using the old import analysis;
+existing parked artifacts retain their original execution contract. Boundary
+coverage rejects retry publication for root/child durability, root/child logging,
+explicit errors, signal waits, breakpoints and root/nested Split timeouts.
+
+The emitted-component regression
+`split_timeout_keeps_required_runtime_import_in_both_invoke_abis` additionally
+checks zero and nonzero Split timeout configuration through both invocation ABIs,
+validating actual component bytes and retained runtime imports. This preserves
+the lower-level legacy callable compiler separately from the publication gate.
+
+Validation with Rust 1.97 and isolated component/native directories:
+
+- Normal component build: all 27 Agents and two shared workflow components.
+- All nine new emitted execution cases passed. Full execution regression:
+  358 passed, three manual benchmarks ignored.
+- Workflow library: 577 passed. Native emitter audit: 30 passed.
+- The complete root/published/composite retry module was rerun with the final
+  persistence assertions: 29 passed, with no non-durable checkpoint writes or
+  durable sleep calls on the checked paths.
+- Feature-gated all-target Clippy for workflows/component host, formatting and
+  `git diff --check` passed. The pattern lab generated all 98 scenarios after its
+  explanatory text update.
+
+No provider credentials, database/server E2E or fresh performance/capacity
+measurements were used. This expands G2/G6 coverage; timer-only callable retry
+failures, the complete construct matrix, timeout cancellation and the remaining
+release gates still require their own qualification.

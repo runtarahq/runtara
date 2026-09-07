@@ -402,3 +402,16 @@ count those negative cases as successful cancellation coverage. Publication gate
 for callable Split/Embed retries remain until their full closure is qualified.
 P3 timeout integration, P4 lifecycle/resource/capacity checks, updated interactive
 audit coverage and fresh performance comparisons remain required.
+
+### Published Split retry progress (2026-09-07)
+
+The callable publication gate now permits non-durable Split retries in a complete
+closure without root runtime requirements. Two nested workflow agents propagate
+parent cancellation to the shared canonical timer wait without consuming root
+signals. Nine execution tests cover cancellation, success, recovery, zero retries
+and existing provider classification. Requested parallelism retains the documented
+sequential fallback for Split-level retries; no new concurrency claim is made.
+Split timeout features now participate in runtime ownership analysis, including
+nested scopes, and negative publication cases cover the listed runtime requirements.
+Embed retries, durable callable suspension, targeted/time-based cancellation,
+full lifecycle/resource qualification and current paired measurements remain open.

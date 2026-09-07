@@ -136,7 +136,7 @@ impl WorkflowFeatureSummary {
         })
     }
 
-    /// Runtime ownership for a callable workflow. Non-durable Agent retries use
+    /// Runtime ownership for a callable workflow. Non-durable Agent/Split retries use
     /// cancellable host-I/O timers and connections use the separate resolver.
     /// This is only an import analysis: callers must also apply the complete
     /// workflow-agent safety gate (including Split/Embed retry paths).
@@ -345,6 +345,14 @@ impl FeatureAnalyzer {
             }
             Step::Split(step) => {
                 self.summary.features.insert(WorkflowFeature::SplitSubgraph);
+                if step
+                    .config
+                    .as_ref()
+                    .and_then(|config| config.timeout)
+                    .is_some()
+                {
+                    self.summary.features.insert(WorkflowFeature::Timeout);
+                }
                 if graph_durable && step.durable.unwrap_or(true) {
                     self.summary.features.insert(WorkflowFeature::Durability);
                 }

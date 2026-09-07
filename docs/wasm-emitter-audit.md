@@ -1083,3 +1083,22 @@ onError payloads and durable attempt replay before changing this contract. Parsi
 an arbitrary substring of a formatted message would be ambiguous and fragile.
 These tests live in
 [`nested_retry.rs`](../crates/runtara-workflows/tests/cooperative_workflow_cancellation/nested_retry.rs).
+
+### AUDIT-11 publication update · 2026-09-07
+
+Non-durable Split retry waits can now be published inside workflow agents when
+the complete closure has no root runtime requirement. The shared standard timer
+wait propagates parent cancellation through two composed workflow agents. Nine
+new `published_split_retry_*` tests in
+`tests/cooperative_workflow_cancellation/nested_retry.rs` cover cancellation,
+normal retries, recovery, zero retries and existing error classification. They
+also verify the established sequential fallback when Split-level retries are
+combined with requested parallelism. These cases do not certify concurrent retries
+or repair AUDIT-08/AUDIT-12. Embed retry publication remains gated.
+
+The safety check also exposed missing Split timeout feature metadata; the feature
+walk now records it at every nesting level. The publication regression test
+`workflow_agent_safety_accepts_split_backoff_only_without_root_runtime_ownership`
+checks durability, event/logging/error paths, signals, breakpoints and nested
+Split timeout rejection. This is import/safety analysis, not Agent/Embed timeout
+implementation; E128 remains in force.

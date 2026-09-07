@@ -383,6 +383,16 @@ fn compile_nested_agents(
             child.omit_runtime,
             "published child must not observe or acknowledge the root signal"
         );
+        if graph.steps.values().any(|step| {
+            matches!(step,
+            runtara_dsl::Step::Split(split) if split.config.as_ref()
+                .and_then(|config| config.max_retries).unwrap_or(0) > 0)
+        }) {
+            anyhow::ensure!(
+                child.parallel_pools.is_empty(),
+                "Split-level retries must retain their existing sequential fallback"
+            );
+        }
         compose_direct_workflow_with_extra_dirs(
             &mut child,
             &components,
