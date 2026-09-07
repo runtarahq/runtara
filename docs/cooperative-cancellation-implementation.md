@@ -12,8 +12,9 @@ The server's Stop/cancel methods now use the environment Stop handler to deliver
 lifecycle Cancel and arm an independent whole-run abort grace. Normally composed
 HTTP workflows complete guest cancellation through that handler and real
 PostgreSQL; CPU loops and infinite initializers escalate without fabricated
-cleanup receipts. Full authenticated HTTP-server E2E, multi-owner routing,
-stalled-cleanup qualification and remaining P3 timeout/race work are still open.
+cleanup receipts. A standard cancellation callback that deliberately stalls cleanup also escalates
+through grace without a false acknowledgement. Full authenticated HTTP-server
+E2E, multi-owner routing and remaining P3 timeout/race work are still open.
 Lifecycle acknowledgements and post-run fallback preserve accepted terminal
 outcomes.
 
@@ -1359,3 +1360,45 @@ Full authenticated-server E2E, a deliberately stalled standard cancellation
 acknowledgement, blocking native calls, nested workflow-agent ownership,
 cooperative deadlines/E128, distributed owner routing, controlled performance and
 capacity measurements, and removal of the superseded experiment remain open.
+
+
+## Grace while standard cancellation is stalled (2026-09-07)
+
+The `cooperative_stop_test` now includes an adversarial callback Agent fixture
+that exposes the normal HTTP capability interface. It starts real host-mediated
+HTTP I/O and waits. When the normally emitted parent requests standard
+`subtask.cancel`, callback event 6 starts a separate `/cleanup-entered` request
+and then waits forever without `task.cancel` or `task.return`. The test endpoint
+observes that distinct request, proving execution reached the cancellation
+callback; a timeout before cancellation delivery would fail this precondition.
+
+The parent is now blocked waiting for standard cancellation resolution. Before
+grace expires, the test requires Core to remain running, the lifecycle command to
+remain pending, the registry handle to remain present, and the runner permit to
+remain held. At the five-second grace deadline the existing independent timer
+raises the whole-run abort flag. Teardown closes both the original request and
+the stalled cleanup request, publishes `cancelled` with reason `aborted`, leaves
+the command unacknowledged, and returns runner/monitor capacity. No recovery,
+retry or Finish output is allowed. The active execution timeout is thirty seconds,
+so it cannot stand in for the grace deadline.
+
+Two cases cover original I/O waiting for headers and holding an incomplete body.
+The ordinary built-HTTP-Agent cases run beside them and must still acknowledge
+cooperative cleanup before their grace deadline. The adversarial WAT lives in
+`tests/cooperative_stop/stalled-cleanup-agent.wat`; its binary is generated only
+in a temporary fixture directory, with private copies of production shared
+components and unchanged capability metadata. Production staged artifacts are
+never modified. Both paths use normal static composition, the production Stop
+handler, production HTTP I/O and real PostgreSQL; neither carries an isolation
+manifest nor uses a custom task catalog.
+
+All four composed Stop tests passed on the pinned stack, together with
+artifact-feature environment Clippy, workspace formatting and `git diff --check`.
+This establishes that
+standard synchronous `subtask.cancel` may remain unresolved while the independent
+host grace still ends the whole execution. No async-cancel extension, alternate
+backend or production code change was necessary. It does not prove that an
+arbitrary blocking native function returns or that remote server work is undone.
+Full native-call/resource qualification, nested workflow-agent ownership,
+cooperative step deadlines, authenticated-server E2E and controlled performance
+remain open.
