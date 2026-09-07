@@ -7,6 +7,11 @@ use utoipa::{IntoParams, ToSchema};
 #[derive(Debug, Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]
 pub struct ListAllExecutionsQuery {
+    /// Case-insensitive literal substring search across execution labels and metadata.
+    pub search: Option<String>,
+    /// Exact execution label (duplicates are returned).
+    #[serde(rename = "runLabel")]
+    pub run_label: Option<String>,
     /// Page number (0-based, default: 0)
     #[serde(default)]
     pub page: Option<i32>,
@@ -59,6 +64,8 @@ pub struct ListAllExecutionsResponse {
 /// Filter parameters passed to repository
 #[derive(Debug, Clone)]
 pub struct ExecutionFilters {
+    pub search: Option<String>,
+    pub run_label: Option<String>,
     pub workflow_id: Option<String>,
     pub statuses: Option<Vec<String>>,
     pub created_from: Option<DateTime<Utc>>,
@@ -72,6 +79,8 @@ pub struct ExecutionFilters {
 impl Default for ExecutionFilters {
     fn default() -> Self {
         Self {
+            search: None,
+            run_label: None,
             workflow_id: None,
             statuses: None,
             created_from: None,

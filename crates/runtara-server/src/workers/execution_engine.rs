@@ -1874,6 +1874,16 @@ impl ExecutionEngine {
             .with_limit(size as u32)
             .with_offset((page * size) as u32);
 
+        options.search = filters.search.clone();
+        options.run_label = filters.run_label.clone();
+        if let Some(search) = filters.search.as_deref() {
+            options.search_workflow_ids = self
+                .workflow_repo
+                .workflow_ids_matching_execution_search(tenant_id, search)
+                .await
+                .map_err(|e| ExecutionError::DatabaseError(e.to_string()))?;
+        }
+
         if let Some(ref workflow_id) = filters.workflow_id {
             let image_name_prefix = format!("{}:", workflow_id);
             options = options.with_image_name_prefix(&image_name_prefix);

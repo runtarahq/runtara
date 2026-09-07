@@ -43,6 +43,8 @@ pub struct InstanceRecord {
     pub finished_at: Option<DateTime<Utc>>,
     /// Input data provided at launch time.
     pub input: Option<Vec<u8>>,
+    /// Optional user-defined execution label.
+    pub run_label: Option<String>,
     /// Output data from successful completion.
     pub output: Option<Vec<u8>>,
     /// Error message from failure.
@@ -371,6 +373,8 @@ pub struct CompleteInstanceParams<'a> {
     pub guard: CompleteInstanceGuard,
     /// Output blob from successful completion.
     pub output: Option<&'a [u8]>,
+    /// Execution label persisted with successful completion.
+    pub run_label: Option<&'a str>,
     /// Error message from failure.
     pub error: Option<&'a str>,
     /// Container stderr captured at termination time.
@@ -391,6 +395,7 @@ impl<'a> CompleteInstanceParams<'a> {
             instance_id,
             status,
             guard: CompleteInstanceGuard::Any,
+            run_label: None,
             output: None,
             error: None,
             stderr: None,
@@ -412,6 +417,25 @@ impl<'a> CompleteInstanceParams<'a> {
     #[must_use]
     pub fn with_output(mut self, output: &'a [u8]) -> Self {
         self.output = Some(output);
+        self
+    }
+
+    /// Normalize optional metadata without letting invalid labels prevent completion.
+    pub fn normalized_run_label(&self) -> Result<Option<String>, CoreError> {
+        let label = runtara_dsl::run_label::adopt_run_label(self.run_label);
+        if label.is_some() && self.status != InstanceStatus::Completed {
+            return Err(CoreError::ValidationError {
+                field: "runLabel".into(),
+                message: "Run labels require successful completion".into(),
+            });
+        }
+        Ok(label)
+    }
+
+    /// Attach an execution label; persistence normalizes or ignores it before writing.
+    #[must_use]
+    pub fn with_run_label(mut self, run_label: &'a str) -> Self {
+        self.run_label = Some(run_label);
         self
     }
 

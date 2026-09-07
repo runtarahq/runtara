@@ -121,6 +121,7 @@ impl EnvironmentClient {
 
         Ok(InstanceInfo {
             instance_id: inst.instance_id,
+            run_label: inst.run_label,
             image_id: inst.image_id.unwrap_or_default(),
             image_name: inst.image_name.unwrap_or_default(),
             tenant_id: inst.tenant_id,
@@ -177,6 +178,7 @@ impl EnvironmentClient {
                 .into_iter()
                 .map(|inst| InstanceSummary {
                     instance_id: inst.instance_id,
+                    run_label: inst.run_label,
                     tenant_id: inst.tenant_id,
                     image_id: inst.image_id.unwrap_or_default(),
                     image_name: inst.image_name.unwrap_or_default(),
@@ -796,6 +798,9 @@ fn list_instances_options(
     options: &ListInstancesOptions,
 ) -> instance_repository::ListInstancesOptions {
     instance_repository::ListInstancesOptions {
+        search: options.search.clone(),
+        run_label: options.run_label.clone(),
+        search_workflow_ids: options.search_workflow_ids.clone(),
         tenant_id: options.tenant_id.clone(),
         statuses: (!options.statuses.is_empty()).then(|| {
             options

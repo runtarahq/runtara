@@ -130,7 +130,19 @@ fn parse_filters(query: &ListAllExecutionsQuery) -> Result<ExecutionFilters, Str
         }
     };
 
+    let search = query
+        .search
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
+    if search.as_ref().is_some_and(|s| s.chars().count() > 250) {
+        return Err("Search must be at most 250 characters".into());
+    }
+    let run_label = runtara_dsl::run_label::normalize_run_label(query.run_label.as_deref())?;
     Ok(ExecutionFilters {
+        search,
+        run_label,
         workflow_id: query.workflow_id.clone(),
         statuses,
         created_from: query.created_from,
@@ -148,6 +160,8 @@ mod tests {
 
     fn query_with_status(status: Option<&str>) -> ListAllExecutionsQuery {
         ListAllExecutionsQuery {
+            search: None,
+            run_label: None,
             page: None,
             size: None,
             workflow_id: None,
@@ -166,6 +180,26 @@ mod tests {
         let filters = parse_filters(&query_with_status(None)).expect("valid query");
 
         assert!(filters.statuses.is_none());
+    }
+
+    #[test]
+    fn run_label_and_search_filters_are_optional_normalized_and_bounded() {
+        let mut query = query_with_status(None);
+        query.search = Some(" Order/12 [done] ".into());
+        query.run_label = Some(" Order/12 [done] ".into());
+        let filters = parse_filters(&query).unwrap();
+        assert_eq!(filters.search.as_deref(), Some("Order/12 [done]"));
+        assert_eq!(filters.run_label.as_deref(), Some("Order/12 [done]"));
+        query.run_label = Some("bad_label".into());
+        assert!(parse_filters(&query).is_err());
+        query.run_label = None;
+        query.search = Some("x".repeat(251));
+        assert!(parse_filters(&query).is_err());
+        query.search = Some("%_\\".into());
+        assert!(
+            parse_filters(&query).is_ok(),
+            "Search punctuation is literal, not label validation"
+        );
     }
 
     #[test]

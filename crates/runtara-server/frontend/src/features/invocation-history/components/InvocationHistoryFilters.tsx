@@ -26,6 +26,7 @@ export function countActiveInvocationFilters(
   filters: ExecutionHistoryFilters
 ): number {
   return [
+    filters.runLabel,
     filters.workflowId,
     filters.status,
     filters.createdFrom,
@@ -105,6 +106,26 @@ export function InvocationHistoryFilters({ filters, onFiltersChange }: Props) {
 
   return (
     <div className="space-y-3">
+      <div className="space-y-1.5">
+        <Label
+          htmlFor="run-label-filter"
+          className="text-xs text-muted-foreground"
+        >
+          Run label (exact)
+        </Label>
+        <Input
+          id="run-label-filter"
+          value={filters.runLabel ?? ''}
+          maxLength={250}
+          placeholder="All labels"
+          onChange={(e) =>
+            onFiltersChange({
+              ...filters,
+              runLabel: e.target.value || undefined,
+            })
+          }
+        />
+      </div>
       <div className="space-y-1.5">
         <Label className="text-xs text-muted-foreground">Workflow</Label>
         <Select

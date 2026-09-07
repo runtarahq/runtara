@@ -475,9 +475,19 @@ impl DirectJsonManifest {
             .mappings
             .get(&mapping_id)
             .ok_or_else(|| format!("unknown direct mapping id {mapping_id}"))?;
-        let mut output = self
+        let resolved = self
             .compiled_mapping(mapping_id, &mapping.value)
-            .eval(&source)?;
+            .eval(&source);
+        if mapping.purpose == "finish.runLabel" {
+            // A label is optional metadata; even an evaluation failure must not
+            // change the workflow's output or prevent successful completion.
+            let output = resolved.unwrap_or(Value::Null);
+            let label = runtara_dsl::run_label::adopt_run_label(
+                output.get("runLabel").and_then(Value::as_str),
+            );
+            return serde_json::to_vec(&label).map_err(|err| err.to_string());
+        }
+        let mut output = resolved?;
         if mapping.purpose == "finish.inputMapping" {
             output = unwrap_finish_outputs(output);
         }

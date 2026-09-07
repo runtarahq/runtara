@@ -128,7 +128,7 @@ macro_rules! impl_sleep_ops {
                 let sql = format!(
                     "SELECT instance_id, tenant_id, definition_version, \
                             {status_col}, {termination_col}, checkpoint_id, attempt, max_attempts, \
-                            created_at, started_at, finished_at, output, error, sleep_until, wake_reason \
+                            created_at, started_at, finished_at, output, run_label, error, sleep_until, wake_reason \
                      FROM instances \
                      WHERE sleep_until IS NOT NULL \
                        AND {lhs} <= {rhs} \
@@ -196,7 +196,7 @@ macro_rules! impl_sleep_ops {
                      ) \
                      RETURNING instance_id, tenant_id, definition_version, \
                                {status_col}, {termination_col}, checkpoint_id, attempt, max_attempts, \
-                               created_at, started_at, finished_at, output, error, sleep_until, wake_reason"
+                               created_at, started_at, finished_at, output, run_label, error, sleep_until, wake_reason"
                 );
                 let records = ::sqlx::query_as::<_, crate::rows::InstanceRow>(&sql)
                     .bind(limit)

@@ -899,6 +899,7 @@ mod classify_observed_status_tests {
     fn info(status: InstanceStatus) -> InstanceInfo {
         let created = Utc::now();
         InstanceInfo {
+            run_label: None,
             instance_id: "inst-1".to_string(),
             image_id: "img-1".to_string(),
             image_name: "wf:1".to_string(),

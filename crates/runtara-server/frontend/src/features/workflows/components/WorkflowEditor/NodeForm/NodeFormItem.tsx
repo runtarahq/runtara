@@ -1,3 +1,4 @@
+import { runLabelSchema } from '@/features/workflows/utils/run-label';
 /* eslint-disable react-refresh/only-export-components */
 // This file exports both components and configuration because the field configs
 // contain JSX (renderFormField, renderComponent) which tightly couples them to components.
@@ -604,6 +605,7 @@ export const schema = () =>
       agentId: z.string().optional(),
       capabilityId: z.string().optional(),
       connectionId: z.string().optional(),
+      runLabel: runLabelSchema.nullable().optional(),
       breakpoint: z.boolean().nullable().optional(),
       durable: z.boolean().nullable().optional(),
       timeout: z.any().optional(),

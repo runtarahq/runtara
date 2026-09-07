@@ -17,6 +17,123 @@ use uuid::Uuid;
 
 use super::*;
 
+#[tokio::test]
+async fn run_label_search_filters_before_pagination_and_counts_duplicates() {
+    use runtara_core::{domain::InstanceStatus, persistence::CompleteInstanceParams};
+    let pool = crate::test_support::pool().await;
+    let persistence = PostgresPersistence::new(pool.clone());
+    let tenant = format!("run-label-{}", Uuid::new_v4());
+    let other_tenant = format!("run-label-other-{}", Uuid::new_v4());
+    for index in 0..28 {
+        let id = format!("{tenant}-{index:02}");
+        persistence
+            .register_instance(&id, if index == 27 { &other_tenant } else { &tenant })
+            .await
+            .unwrap();
+        let params = CompleteInstanceParams::new(&id, InstanceStatus::Completed).with_output(b"{}");
+        persistence
+            .complete_instance(if index % 3 == 0 {
+                params.with_run_label("Order/12 [done] (v1.2)")
+            } else {
+                params
+            })
+            .await
+            .unwrap();
+        // Identical timestamps exercise the ordering tie-breaker.
+        sqlx::query(
+            "UPDATE instances SET created_at = $2, finished_at = $2 WHERE instance_id = $1",
+        )
+        .bind(&id)
+        .bind(epoch(1_000))
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    let mut options = ListInstancesOptions {
+        tenant_id: Some(tenant.clone()),
+        search: Some("ORDER/12 [done]".into()),
+        limit: 4,
+        ..Default::default()
+    };
+    let mut ids = Vec::new();
+    for page in 0..3 {
+        options.offset = page * 4;
+        assert_eq!(count_instances(&pool, &options).await.unwrap(), 9);
+        ids.extend(
+            list_instances(&pool, &options)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|i| i.instance_id),
+        );
+    }
+    assert_eq!(ids.len(), 9);
+    assert_eq!(
+        ids.iter().collect::<std::collections::HashSet<_>>().len(),
+        9
+    );
+    options.offset = 100;
+    assert!(list_instances(&pool, &options).await.unwrap().is_empty());
+    assert_eq!(count_instances(&pool, &options).await.unwrap(), 9);
+    options.offset = 0;
+    options.search = None;
+    options.run_label = Some("Order/12 [done] (v1.2)".into());
+    assert_eq!(count_instances(&pool, &options).await.unwrap(), 9);
+    options.statuses = Some(vec!["failed".into()]);
+    assert_eq!(count_instances(&pool, &options).await.unwrap(), 0);
+    options.statuses = None;
+    options.created_after = Some(epoch(1_001));
+    assert_eq!(count_instances(&pool, &options).await.unwrap(), 0);
+    options.created_after = None;
+    options.run_label = None;
+    for term in ["%", "_", "\\"] {
+        options.search = Some(term.into());
+        assert_eq!(count_instances(&pool, &options).await.unwrap(), 0);
+    }
+    // A workflow filter must intersect the label predicate before pagination.
+    let image_id = format!("{tenant}-image");
+    sqlx::query("INSERT INTO images (image_id, tenant_id, name, binary_path) VALUES ($1, $2, 'invoice:1', '/test-only')")
+        .bind(&image_id).bind(&tenant).execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO instance_images (instance_id, image_id, tenant_id) VALUES ($1, $2, $3)",
+    )
+    .bind(format!("{tenant}-00"))
+    .bind(&image_id)
+    .bind(&tenant)
+    .execute(&pool)
+    .await
+    .unwrap();
+    options.search = Some("Order/12".into());
+    options.image_name_prefix = Some("invoice:".into());
+    assert_eq!(count_instances(&pool, &options).await.unwrap(), 1);
+    assert_eq!(list_instances(&pool, &options).await.unwrap().len(), 1);
+    options.search = Some("search by workflow name".into());
+    options.search_workflow_ids = vec!["invoice".into()];
+    assert_eq!(count_instances(&pool, &options).await.unwrap(), 1);
+    assert_eq!(list_instances(&pool, &options).await.unwrap().len(), 1);
+    // The database enforces the same constraints even outside application code.
+    let id = format!("{tenant}-00");
+    for invalid in [
+        "bad_label".to_owned(),
+        "--- ./()[]".to_owned(),
+        "   ".to_owned(),
+        "\u{200b}".to_owned(),
+        "x\u{a0}y".to_owned(),
+        "x".repeat(251),
+        " padded ".to_owned(),
+        "".into(),
+    ] {
+        assert!(
+            sqlx::query("UPDATE instances SET run_label = $2 WHERE instance_id = $1")
+                .bind(&id)
+                .bind(invalid)
+                .execute(&pool)
+                .await
+                .is_err()
+        );
+    }
+}
+
 // ============================================================================
 // Tenant metrics aggregation
 //

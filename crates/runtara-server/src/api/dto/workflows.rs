@@ -54,6 +54,12 @@ impl ValidationErrorDto {
         use runtara_workflows::validation::ValidationError;
 
         let (message, step_id, field_name, related_step_ids) = match error {
+            ValidationError::InvalidRunLabel { step_id, message } => (
+                message.clone(),
+                Some(step_id.clone()),
+                Some("runLabel".into()),
+                None,
+            ),
             ValidationError::StepIdMismatch { step_key, .. } => (
                 error.to_string(),
                 Some(step_key.clone()),
@@ -898,6 +904,9 @@ pub struct WorkflowVersionInfoDto {
 #[allow(dead_code)]
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct WorkflowInstanceDto {
+    /// Optional label assigned at successful workflow completion.
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "runLabel")]
+    pub run_label: Option<String>,
     pub id: String,
     pub created: String,
     pub updated: String,

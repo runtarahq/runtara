@@ -125,7 +125,7 @@ macro_rules! impl_instance_ops {
                     "SELECT instance_id, tenant_id, definition_version, \
                             {status_col}, {termination_col}, exit_code, checkpoint_id, \
                             attempt, max_attempts, \
-                            created_at, started_at, finished_at, output, error, sleep_until, wake_reason, \
+                            created_at, started_at, finished_at, output, run_label, error, sleep_until, wake_reason, \
                             recovery_attempts, recovery_marker \
                      FROM instances \
                      WHERE instance_id = {p1}"
@@ -153,7 +153,7 @@ macro_rules! impl_instance_ops {
                     "SELECT instance_id, tenant_id, definition_version, \
                             {status_col}, {termination_col}, exit_code, checkpoint_id, \
                             attempt, max_attempts, \
-                            created_at, started_at, finished_at, input, output, error, sleep_until, wake_reason, \
+                            created_at, started_at, finished_at, input, output, run_label, error, sleep_until, wake_reason, \
                             recovery_attempts, recovery_marker \
                      FROM instances \
                      WHERE instance_id = {p1}"
@@ -331,7 +331,7 @@ macro_rules! impl_instance_ops {
             }
 
             /// The one `complete_instance` op: every status transition
-            /// that carries output, error, or termination detail goes
+            /// that carries output, run_label, error, or termination detail goes
             /// through it, shaped by [`CompleteInstanceParams`].
             ///
             /// Semantics:
@@ -355,6 +355,7 @@ macro_rules! impl_instance_ops {
                 pool: &$Pool,
                 params: ::runtara_core::persistence::CompleteInstanceParams<'_>,
             ) -> ::core::result::Result<bool, ::runtara_core::error::CoreError> {
+                let run_label = params.normalized_run_label()?;
                 use ::runtara_core::persistence::CompleteInstanceGuard;
                 use crate::ops_common::error::{RowsAffected, not_found_if_empty};
                 use crate::dialect::{Dialect, EnumKind};
@@ -366,6 +367,7 @@ macro_rules! impl_instance_ops {
                 let p6 = <$Dialect>::placeholder(6);
                 let p7 = <$Dialect>::placeholder(7);
                 let p8 = <$Dialect>::placeholder(8);
+                let p9 = <$Dialect>::placeholder(9);
                 let status_cast = <$Dialect>::enum_cast(EnumKind::InstanceStatus);
                 let term_cast = <$Dialect>::enum_cast(EnumKind::TerminationReason);
                 let now = <$Dialect>::NOW;
@@ -378,7 +380,7 @@ macro_rules! impl_instance_ops {
                      SET status = {p2}{status_cast}, \
                          termination_reason = COALESCE({p3}{term_cast}, termination_reason), \
                          exit_code = COALESCE({p4}, exit_code), \
-                         output = {p5}, \
+                         output = {p5}, run_label = {p9}, \
                          error = {p6}, \
                          stderr = COALESCE({p7}, stderr), \
                          checkpoint_id = COALESCE({p8}, checkpoint_id), \
@@ -397,6 +399,7 @@ macro_rules! impl_instance_ops {
                     .bind(params.error)
                     .bind(params.stderr)
                     .bind(params.checkpoint_id)
+                    .bind(run_label.as_deref())
                     .execute(pool)
                     .await
                     .map_err(|e| ::runtara_core::error::CoreError::PersistenceError {
@@ -464,7 +467,7 @@ macro_rules! impl_instance_ops {
                     "SELECT instance_id, tenant_id, definition_version, \
                             {status_col}, {termination_col}, exit_code, checkpoint_id, \
                             attempt, max_attempts, \
-                            created_at, started_at, finished_at, output, error, sleep_until, wake_reason \
+                            created_at, started_at, finished_at, output, run_label, error, sleep_until, wake_reason \
                      FROM instances \
                      WHERE ({p1} IS NULL OR tenant_id = {p1}) \
                        AND ({p2} IS NULL OR status = {p2}{status_cast}) \

@@ -2492,6 +2492,21 @@ export interface FinishStep {
   inputMapping?: null | HashMap;
   /** Human-readable step name */
   name?: string | null;
+  /**
+   * Optional execution label, resolved when the top-level Finish completes.
+   * Use a MappingValue with valueType immediate, reference, or template.
+   * Separate from inputMapping/output; duplicate labels are allowed.
+   * Allowed characters: ASCII letters, digits, ordinary spaces, . - / ( ) [ ].
+   * Surrounding spaces are trimmed; valid long labels are truncated to 250
+   * characters and trailing spaces removed. The retained label must contain
+   * a letter or digit. Invalid literals fail authoring validation; invalid
+   * dynamic values (including non-strings and evaluation errors) are ignored
+   * without failing Finish or changing its output. Omitted, null, and empty
+   * strings mean no label. Execution lists display runLabel when present,
+   * otherwise the workflow name. Not supported inside Split, While, or onWait
+   * subgraphs; inline child workflows cannot rename their parent execution.
+   */
+  runLabel?: null | MappingValue;
 }
 
 /** Workflows held directly at one folder path */
@@ -6145,6 +6160,8 @@ export interface WorkflowInstanceDto {
   processingOverheadSeconds?: number | null;
   /** @format double */
   queueDurationSeconds?: number | null;
+  /** Optional label assigned at successful workflow completion. */
+  runLabel?: string | null;
   /** Current execution status */
   status: ExecutionStatus;
   steps?: WorkflowStepDto[];
@@ -7254,6 +7271,10 @@ export class Api<
      */
     listAllExecutionsHandler: (
       query?: {
+        /** Case-insensitive literal substring search across execution labels and metadata. */
+        search?: string;
+        /** Exact execution label (duplicates are returned). */
+        runLabel?: string;
         /**
          * Page number (0-based, default: 0)
          * @format int32

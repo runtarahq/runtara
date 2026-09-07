@@ -37,6 +37,7 @@ pub(super) enum DirectRunPlan {
     Finish {
         step_id: String,
         mapping_id: u32,
+        run_label_mapping_id: Option<u32>,
         breakpoint: bool,
     },
     Filter {
@@ -543,6 +544,11 @@ fn step_run_plan_inner(
         "Finish" => Ok(DirectRunPlan::Finish {
             step_id: step_id.to_string(),
             mapping_id: finish_mapping_id(graph, step_id)?,
+            run_label_mapping_id: graph
+                .mappings
+                .iter()
+                .find(|m| m.step_id == step_id && m.purpose == "finish.runLabel")
+                .map(|m| m.id),
             breakpoint: step_breakpoint_enabled(graph, step),
         }),
         "Filter" => {
