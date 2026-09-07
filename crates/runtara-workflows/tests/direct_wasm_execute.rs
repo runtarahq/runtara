@@ -27,6 +27,7 @@ use runtara_workflows::{
 };
 use serde_json::Value;
 
+mod cooperative_measurement;
 mod cooperative_workflow_cancellation;
 mod isolated_agent_execution;
 mod wasm_performance_baseline;

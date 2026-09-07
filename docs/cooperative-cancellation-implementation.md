@@ -927,3 +927,53 @@ all 36 cooperative lifecycle test functions; two manual benchmarks remained
 ignored. Affected-crate all-target Clippy with the existing integration-test features,
 formatting and diff whitespace checks passed. No live-provider or database/server
 E2E, Linux qualification or fresh performance/capacity measurement was run.
+
+## Fresh paired measurement harness
+
+The historical baseline/isolation reports remain unchanged. The new shared
+`tests/cooperative_measurement/mod.rs` module measures the normal compiler and
+runtime at each source revision. Its corpus covers the original 11 workloads
+plus Finish payloads of 16,383, 16,384 and 16,385 bytes. Manual release runs use
+five warmups and 1,000 prepared samples per workload, with three separately
+counted cold builds. Raw samples are retained; cold runs do not publish tail
+percentiles from three observations.
+
+The harness records graph/input/dependency hashes, complete `.wasm` and gzip
+sizes, workflow logic and serialized native sizes, canonical ABI counts and
+component imports. It rejects the superseded custom task-service import.
+Emission, composition, native compilation, prepared linking, first completed
+execution, prepared full runs and durable replay are measured separately.
+Successful runs validate output ranges/counts and exact replay identity. The
+separate random-double Agent measurement excludes instantiation, export lookup
+and host teardown; it does not stand in for a parent-step phase measurement.
+
+`scripts/measure-cooperative-workflows.py` copies this identical test module into
+an upstream worktree and adds its module registration. It does not patch baseline
+production sources or Cargo configuration, and rejects unrelated baseline edits
+and a dirty candidate. The manifest records both revisions, lockfiles, test-host
+differences, compiler versions, executable hashes, build paths and host load.
+Normal component/release builds complete before three fresh-process measurement
+pairs run in baseline/candidate, candidate/baseline, baseline/candidate order.
+Per-run JSON, outcomes, logs and generated `.wasm`/graph/input artifacts are kept.
+An error stops the run and records failure instead of publishing a successful
+comparison; source changes after building also fail the run.
+
+The 14-workload smoke test passed, including artifact export and standalone Agent
+invocation. Existing-feature all-target Clippy, formatting and whitespace checks
+passed; the Python driver passed syntax and CLI checks. Release numbers are not
+yet available at this commit. The separately built upstream component bundle at
+`4eff9cdf83342ad45ef89f73181934c5485085a0` is ready in its own target directory.
+
+```sh
+python3 scripts/measure-cooperative-workflows.py \
+  --baseline /Users/volodymyrrudyi/work/runtara/.claude/worktrees/cooperative-baseline-4eff9cdf \
+  --candidate /Users/volodymyrrudyi/work/runtara/.claude/worktrees/wasm-emitter-audit \
+  --baseline-target /Users/volodymyrrudyi/work/runtara/target/cooperative-baseline-4eff9cdf-components \
+  --candidate-target /Users/volodymyrrudyi/work/runtara/target/wasm-emitter-audit-components \
+  --output /private/tmp/cooperative-measurements-20260907
+```
+
+This first comparison will be interim: only 15 of 27 Agent bindings are migrated.
+Parent-step instrumentation/cost, full DSL validation timing, real HTTP waits,
+public-server terminal timing, cancellation/abort latency, Linux capacity and
+resource-soak measurements remain required before final qualification.
