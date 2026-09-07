@@ -2391,7 +2391,7 @@ async fn the_unbounded_status_count_ignores_the_ceiling_the_capped_one_obeys() {
     );
 
     let unbounded = instances
-        .count_by_status_unbounded(&tenant_id, &statuses)
+        .count_parked(&tenant_id)
         .await
         .expect("unbounded count");
     assert_eq!(
@@ -2402,7 +2402,7 @@ async fn the_unbounded_status_count_ignores_the_ceiling_the_capped_one_obeys() {
     // Both must agree on WHICH rows match, so a tenant with none reads zero
     // rather than picking up another tenant's parked instances.
     let other = instances
-        .count_by_status_unbounded(&format!("count-tenant-{}", Uuid::new_v4()), &statuses)
+        .count_parked(&format!("count-tenant-{}", Uuid::new_v4()))
         .await
         .expect("unbounded count for an empty tenant");
     assert_eq!(other, 0);

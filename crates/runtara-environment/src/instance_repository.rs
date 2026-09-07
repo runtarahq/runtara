@@ -281,20 +281,6 @@ impl InstanceRepository {
         Ok(crate::db::count_instances_by_status(&self.pool, tenant_id, statuses, ceiling).await?)
     }
 
-    /// Count a tenant's instances in the given statuses, with no ceiling.
-    ///
-    /// [`Self::count_by_status`] bounds its scan because the admission gate
-    /// only needs to know whether the cap is reached. A viewer reporting how
-    /// many instances are parked needs the actual number, and this is the read
-    /// that costs what that answer costs — O(matching rows), for a slow tick.
-    pub async fn count_by_status_unbounded(
-        &self,
-        tenant_id: &str,
-        statuses: &[String],
-    ) -> Result<i64> {
-        Ok(crate::db::count_instances_by_status_unbounded(&self.pool, tenant_id, statuses).await?)
-    }
-
     /// How many of a tenant's instances are parked.
     ///
     /// Which statuses count as parked is this crate's knowledge, so it is
@@ -303,14 +289,20 @@ impl InstanceRepository {
     /// server crate holding that literal is a second spelling of a vocabulary
     /// it does not own.
     ///
-    /// Unbounded, and deliberately so — see [`Self::count_by_status_unbounded`]
-    /// for what that costs.
+    /// Unbounded, unlike [`Self::count_by_status`], because a viewer wants the
+    /// real figure rather than "at least the cap". That used to make it the
+    /// expensive half of the pair — a sequential scan of a table whose dominant
+    /// value is exactly the one being counted. Migration 025 indexes that value
+    /// per tenant, so the answer is an index-only scan and the missing ceiling
+    /// costs a viewer nothing. The query has to spell the status as a literal
+    /// to reach that index; [`crate::db::count_parked_instances`] says why.
     pub async fn count_parked(&self, tenant_id: &str) -> Result<i64> {
-        self.count_by_status_unbounded(
+        Ok(crate::db::count_parked_instances(
+            &self.pool,
             tenant_id,
-            &[crate::core_types::status_name(InstanceStatus::Suspended).to_string()],
+            crate::core_types::status_name(InstanceStatus::Suspended),
         )
-        .await
+        .await?)
     }
 
     /// Record what the process used, and read back the status the guest
