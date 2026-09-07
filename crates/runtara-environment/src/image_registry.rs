@@ -295,6 +295,27 @@ impl ImageRegistry {
         Ok(image)
     }
 
+    /// Whether an image's registered artifact is still on disk.
+    ///
+    /// The row and the file can disagree. The row is immutable once written;
+    /// the file can go missing — a wiped data dir, a half-restored backup, an
+    /// operator clearing space. A caller about to reuse an artifact on the
+    /// strength of its row is exactly the caller that needs to know which it
+    /// has, because reusing a row whose file is gone produces an image that
+    /// registers fine and refuses to start.
+    ///
+    /// `false` for an image that does not exist at all: a caller asking whether
+    /// it can reuse this artifact gets the same answer either way.
+    pub async fn artifact_present(&self, image_id: &str) -> Result<bool> {
+        let Some(image) = self.get(image_id).await? else {
+            return Ok(false);
+        };
+        let path = std::path::PathBuf::from(&image.binary_path);
+        Ok(tokio::task::spawn_blocking(move || path.is_file())
+            .await
+            .unwrap_or(false))
+    }
+
     /// Get an image by ID, refusing one that belongs to another tenant.
     ///
     /// A hit owned by a different tenant reads as `None`, not as a rejection:

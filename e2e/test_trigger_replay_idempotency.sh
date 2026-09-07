@@ -12,20 +12,13 @@
 # a forced recompilation restores the artifact. Replaying the same event must be
 # deduplicated and ACKed without a second instance row.
 #
-# KNOWN FAILING, and the failure looks real rather than stale. The repair fires
-# — "Image or image artifact missing in Environment; forcing recompilation" —
-# and the compile reports success in ~0.1s, but the artifact is never written
-# back, so the next retry hits the same "registered artifact is missing from
-# disk" and the event burns its retry budget. One observed run: 13 repair
-# attempts, 14 compiles reported successful, and exactly ONE
-# `register_image_stream` call. The early "already registered, skipping
-# compilation" check at compilation.rs:662 does honour force_recompile, so the
-# skipping happens further in — a compilation cache keyed on source, most
-# likely, which a forced rebuild after artifact loss should miss.
-#
-# Raising TRIGGER_MAX_RETRIES does not help: the loop never converges. Do not
-# weaken this test to make it pass — it is detecting that artifact loss is
-# currently unrecoverable by recompilation.
+# This test earned its keep: it caught artifact loss being unrecoverable by
+# recompilation. The repair fired and the compile reported success, but the
+# post-compile reuse branch matched the existing image row on checksums and
+# skipped registration, so the deleted file was never rewritten and the event
+# retried into the same failure until its budget ran out (13 repair attempts,
+# 14 compiles reported successful, one register_image_stream call). Reuse now
+# requires the artifact to be on disk as well as the row to match.
 
 set -euo pipefail
 
